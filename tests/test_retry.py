@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import UTC, datetime
@@ -16,8 +17,11 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
+from services.orchestrator import retry as retry_module
+from services.orchestrator import scheduler_state_types
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import (
+    MANUAL_RETRY_DURABLE_SUCCESS_STATUSES,
     NON_TRANSIENT_ERROR_CODES,
     TRANSIENT_ERROR_CODES,
     RetryConfig,
@@ -29,14 +33,48 @@ from services.orchestrator.retry import (
     _resolve_runtime_root_candidate,
     _retry_submission_manifest,
     _RetrySubmissionJob,
+    auto_retry_skipped_details,
+    classify_failure,
     compute_backoff_seconds,
+    failure_classifier,
+    is_retryable_failure,
     is_transient_error,
 )
-from services.orchestrator.scheduler_state_types import TRANSIENT_RETRY_REASON_CODES
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES, TRANSIENT_RETRY_REASON_CODES
 
 _JOB_RETRY_SPEC_PATH = Path(__file__).resolve().parents[1] / "openspec" / "specs" / "job-retry-mechanism" / "spec.md"
+_SERVICES_ROOT = Path(__file__).resolve().parents[1] / "services"
 _NON_TRANSIENT_SCENARIO_HEADER = "#### Scenario: Non-transient error codes block auto-retry"
 _SPEC_BULLET_CODE_PATTERN = re.compile(r"^\s+-\s+`([^`]+)`")
+# A code on neither classification list, so the guard must default it non-transient.
+_UNKNOWN_ERROR_CODE = "MYSTERY_SUBSYSTEM_FAILURE"
+_RETRY_MODULE_LOGGER = "services.orchestrator.retry"
+# Codes the orchestrator classifies non-transient that the spec's scenario list does
+# not enumerate.  They are named here (rather than parsed) precisely because no
+# independent source carries them: without this literal, dropping one from
+# NON_TRANSIENT_ERROR_CODES would silently shrink every set-parameterized test's
+# case list instead of failing it.
+_CODE_ONLY_NON_TRANSIENT_ERROR_CODES = frozenset(
+    {"MALFORMED_INPUT", "POLICY_BLOCKED", "WARM_START_CHECKPOINT_RETRY"}
+)
+# Production catch-all codes that sit on NEITHER classification list, so the guard
+# defaults them non-transient and warns.  See the pinning test below.  `SHUD_FAILED`
+# left this tuple when openspec change retry-stage-failure-classification (#1462) moved
+# the SHUD runtime family onto the classified list, so the tuple now guards the
+# `SLURM_JOB_FAILED` ruling alone.
+_UNLISTED_PRODUCTION_ERROR_CODES = ("SLURM_JOB_FAILED",)
+
+
+def _unknown_error_code_warning(error_code: str) -> str:
+    return f"unknown error_code '{error_code}' defaulted to non-transient — add to classification list"
+
+
+def _auto_retry_skipped_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _RETRY_MODULE_LOGGER and record.levelno == logging.WARNING
+    ]
 
 
 def _spec_non_transient_error_codes() -> list[str]:
@@ -68,6 +106,111 @@ def test_spec_and_code_classify_out_of_memory_as_non_transient() -> None:
     assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_RETRY_REASON_CODES
+
+
+def test_non_transient_classification_set_is_a_documented_superset_of_the_spec_list() -> None:
+    """The spec list is a SUBSET of the code set on purpose, and the gap is enumerated.
+
+    Equality would be wrong: `job-retry-mechanism` names the nineteen codes whose
+    non-transient handling it governs (six original + the thirteen classified by
+    openspec change retry-stage-failure-classification, #1462), while the orchestrator
+    additionally blocks three codes of its own — that code-only remainder is unchanged
+    by #1462.  Pinning `spec ⊆ code` plus the exact extras keeps both
+    drift directions loud — a spec code dropped from the set, and a set member
+    quietly removed (which would otherwise just shrink the parameterized cases).
+    """
+
+    spec_codes = set(_spec_non_transient_error_codes())
+
+    assert spec_codes <= NON_TRANSIENT_ERROR_CODES
+    assert NON_TRANSIENT_ERROR_CODES - spec_codes == set(_CODE_ONLY_NON_TRANSIENT_ERROR_CODES)
+    assert NON_TRANSIENT_ERROR_CODES & TRANSIENT_ERROR_CODES == set()
+
+
+def test_stage_failure_codes_track_the_canonical_downstream_stage_domain() -> None:
+    """A stage added to the canonical domain must not mint an unclassified code.
+
+    The claim is deliberately narrow (openspec change
+    retry-stage-failure-classification): a runtime assertion cannot tell a derived
+    comprehension from a hand-copied literal, so this pins set INCLUSION of the whole
+    minted family plus the import edge from `retry` back to the domain constant.  The
+    substance rides on the inclusion assertion — appending a stage to
+    `DOWNSTREAM_RESTART_STAGES` reds this test unless its `{STAGE}_FAILED` code is
+    classified too.
+    """
+
+    stage_family = {f"{stage.upper()}_FAILED" for stage in DOWNSTREAM_RESTART_STAGES}
+
+    assert stage_family <= NON_TRANSIENT_ERROR_CODES
+    assert retry_module.DOWNSTREAM_RESTART_STAGES is scheduler_state_types.DOWNSTREAM_RESTART_STAGES
+
+
+def test_transient_classification_surfaces_carry_the_same_codes() -> None:
+    """Transient membership lives on two surfaces and they must not diverge.
+
+    `retry.TRANSIENT_ERROR_CODES` drives auto-retry and downstream resume;
+    `scheduler_state_types.TRANSIENT_RETRY_REASON_CODES` drives the exhausted-budget
+    reason and the recompute channel.  A code on only one is a half-transient code,
+    so the sets are pinned equal — a future divergence has to be a deliberate edit.
+    """
+
+    assert TRANSIENT_ERROR_CODES == TRANSIENT_RETRY_REASON_CODES
+    assert TRANSIENT_ERROR_CODES & NON_TRANSIENT_ERROR_CODES == set()
+
+
+def test_durable_success_sets_stay_split_by_exactly_complete() -> None:
+    """Two durable-success sets, two questions, one deliberate membership gap.
+
+    `retry.MANUAL_RETRY_DURABLE_SUCCESS_STATUSES` refuses a manual retry;
+    `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` rules the pipeline durably
+    done and additionally holds `"complete"`.  They carried the same name until
+    openspec change durable-status-name-split.  The judging power sits in the first two
+    assertions, which pin each side against drift — pinning the scheduler side separately
+    reds the one merge direction that would actually change behavior (collapsing it to
+    three members).  The third is logically implied by them and is kept as executable
+    documentation of the relationship: the gap is exactly `"complete"`.  The last one
+    guards the other escape hatch, a re-added alias under the old name on `retry`; a plain
+    rename-back needs no guard, the module-level from-import fails on its own.
+    """
+
+    assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}
+    assert scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES == {"succeeded", "parsed", "published", "complete"}
+    assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES - {"complete"}
+    assert not hasattr(retry_module, "DURABLE_HYDRO_SUCCESS_STATUSES")
+
+
+def test_slurm_deadline_is_transient_on_every_classification_surface() -> None:
+    assert "SLURM_DEADLINE" in TRANSIENT_ERROR_CODES
+    assert "SLURM_DEADLINE" in TRANSIENT_RETRY_REASON_CODES
+    assert is_transient_error("SLURM_DEADLINE") is True
+    assert is_retryable_failure("SLURM_DEADLINE") is True
+    assert failure_classifier("SLURM_DEADLINE") == "transient_slurm_runtime"
+
+    failure = classify_failure("SLURM_DEADLINE", attempt=1, retry_limit=3)
+
+    assert failure["permanent"] is False
+    assert failure["retryable"] is True
+
+
+def test_slurm_job_failed_stays_deliberately_unregistered() -> None:
+    """The gateway catch-all is a true unknown, not a classification gap.
+
+    Registering it anywhere would either spin auto-retry on deterministic
+    application failures or replace the `unknown_error_code_defaulted_non_transient`
+    audit reason with `non_transient_error`, losing the "needs operator adjudication"
+    signal.  See openspec change slurm-error-code-transient-coverage.
+    """
+
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
+    assert "SLURM_JOB_FAILED" not in TRANSIENT_RETRY_REASON_CODES
+    assert failure_classifier("SLURM_JOB_FAILED") == "unknown_failure"
+    assert classify_failure("SLURM_JOB_FAILED", attempt=0, retry_limit=3)["permanent"] is True
+    assert auto_retry_skipped_details("SLURM_JOB_FAILED") == {
+        "auto_retry_skipped": True,
+        "reason": "unknown_error_code_defaulted_non_transient",
+        "error_code": "SLURM_JOB_FAILED",
+    }
 
 
 def test_transient_error_classification() -> None:
@@ -202,6 +345,190 @@ def test_out_of_memory_becomes_permanent_on_the_first_attempt() -> None:
         assert event.details["failure"]["retryable"] is False
         assert event.details["failure"]["permanent"] is True
         assert event.details["failure"]["limit_exhausted"] is False
+
+
+def test_auto_retry_skipped_details_flags_non_transient_codes() -> None:
+    for error_code in _spec_non_transient_error_codes():
+        assert auto_retry_skipped_details(error_code) == {
+            "auto_retry_skipped": True,
+            "reason": "non_transient_error",
+            "error_code": error_code,
+        }
+
+
+@pytest.mark.parametrize("error_code", sorted(NON_TRANSIENT_ERROR_CODES))
+def test_auto_retry_skipped_details_covers_every_non_transient_set_member(
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Full-set coverage, including the three members the spec list does not name.
+
+    The set-closure test above is what makes a removed member fail rather than
+    silently drop its case from this parameterization.
+    """
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = auto_retry_skipped_details(error_code)
+
+    assert details == {
+        "auto_retry_skipped": True,
+        "reason": "non_transient_error",
+        "error_code": error_code,
+    }
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_auto_retry_skipped_details_defaults_unlisted_codes_to_non_transient() -> None:
+    assert _UNKNOWN_ERROR_CODE not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
+    assert auto_retry_skipped_details(_UNKNOWN_ERROR_CODE) == {
+        "auto_retry_skipped": True,
+        "reason": "unknown_error_code_defaulted_non_transient",
+        "error_code": _UNKNOWN_ERROR_CODE,
+    }
+
+
+@pytest.mark.parametrize("error_code", sorted(TRANSIENT_ERROR_CODES) + [None, ""])
+def test_auto_retry_skipped_details_is_none_without_a_classification_block(error_code: str | None) -> None:
+    assert auto_retry_skipped_details(error_code) is None
+
+
+def test_auto_retry_skipped_reason_literals_have_a_single_source() -> None:
+    literals = (
+        "non_transient_error",
+        "unknown_error_code_defaulted_non_transient",
+        "defaulted to non-transient",
+    )
+    counts = dict.fromkeys(literals, 0)
+    for path in sorted(_SERVICES_ROOT.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for literal in literals:
+            counts[literal] += text.count(literal)
+    assert counts == dict.fromkeys(literals, 1)
+
+
+@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
+def test_permanently_failed_event_carries_auto_retry_skipped_for_non_transient_codes(
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _store() as store:
+        job = _create_job(store, error_code=error_code)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert details["auto_retry_skipped"] is True
+        assert details["reason"] == "non_transient_error"
+        assert details["error_code"] == error_code
+        assert details["failure"]["retryable"] is False
+        assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _store() as store:
+        job = _create_job(store, error_code=_UNKNOWN_ERROR_CODE)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert details["auto_retry_skipped"] is True
+        assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+        assert details["error_code"] == _UNKNOWN_ERROR_CODE
+        assert details["failure"]["retryable"] is False
+        assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+@pytest.mark.parametrize("error_code", _UNLISTED_PRODUCTION_ERROR_CODES)
+def test_unlisted_production_error_codes_default_to_the_unknown_reason_and_warn(
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Knowing acceptance: a real production code rides the unknown-default branch.
+
+    `SLURM_JOB_FAILED` is the gateway's catch-all for terminal Slurm states, pinned
+    onto neither classification list by tests/test_real_slurm_gateway.py, so it
+    produces reason `unknown_error_code_defaulted_non_transient` and the "add to
+    classification list" warning on every permanent failure — which is exactly what
+    spec.md's unknown-code scenario prescribes, so #1314 accepts it rather than
+    silencing it.  `SHUD_FAILED` shared this tuple until openspec change
+    retry-stage-failure-classification (#1462) classified the SHUD runtime family and
+    the canonical stage-failure family, so the tuple — and this test — now guard the
+    `SLURM_JOB_FAILED` ruling alone; that ruling stands and cannot be reversed by
+    accident.
+    """
+
+    assert error_code not in (TRANSIENT_ERROR_CODES | NON_TRANSIENT_ERROR_CODES)
+    with _store() as store:
+        job = _create_job(store, error_code=error_code)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert details["auto_retry_skipped"] is True
+        assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+        assert details["error_code"] == error_code
+        assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(error_code)]
+
+
+def test_permanently_failed_event_omits_auto_retry_skipped_when_the_budget_is_exhausted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert "auto_retry_skipped" not in details
+        assert details["failure"]["limit_exhausted"] is True
+        assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_permanently_failed_event_omits_auto_retry_skipped_without_a_recorded_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with _store() as store:
+        job = _create_job(store, error_code=None)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+            updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert "auto_retry_skipped" not in details
+        assert details["failure"]["reason_code"] == "UNKNOWN_FAILURE"
+        assert details["failure"]["limit_exhausted"] is False
+        assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_non_transient_code_carries_auto_retry_skipped_even_at_the_retry_limit() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="OUT_OF_MEMORY", retry_count=3)
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        updated = service.handle_failed_job(job)
+
+        assert updated.status == "permanently_failed"
+        details = _events(store)[0].details
+        assert details["auto_retry_skipped"] is True
+        assert details["reason"] == "non_transient_error"
+        assert details["failure"]["limit_exhausted"] is True
+        assert details["failure"]["retryable"] is False
 
 
 def test_schedule_auto_retry() -> None:
@@ -710,6 +1037,75 @@ def test_retry_db_free_runtime_rejects_file_selectors_outside_allowed_roots(
             and item["reason"] == "db_free_selector_path_outside_allowed_roots"
             for item in rejected
         )
+
+
+def test_retry_db_free_runtime_rejects_symlink_loop_file_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1400 AC-1, second clause: the loop value never reaches the manifest.
+
+    The adjudicator-level tests live in ``tests/test_production_scheduler.py``;
+    this one closes the loop end to end -- the rejected selector is replaced by
+    the environment value, the loop path is absent from the submitted manifest,
+    and the structured rejection survives instead of the whole submission
+    degrading into ``SBATCH_SUBMISSION_FAILED`` through a broad handler.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _set_db_free_retry_env(monkeypatch)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    contract_root = Path(os.path.realpath(tmp_path)) / "contract-root"
+    contract_root.mkdir()
+    loop = contract_root / "ring-a"
+    loop.symlink_to(contract_root / "ring-b")
+    (contract_root / "ring-b").symlink_to(loop)
+    with pytest.raises(OSError):
+        os.path.realpath(loop, strict=True)
+    with _store() as store:
+        failed = _create_job(
+            store,
+            job_id="job_fcst_gfs_2026062912_model_a_forecast",
+            run_id="fcst_gfs_2026062912_model_a",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="gfs_2026062912",
+            job_type="run_shud_forecast_array",
+            stage="forecast",
+        )
+        loop_contract = {
+            **_db_free_retry_contract(),
+            "scheduler_allowed_roots": str(contract_root),
+            "scheduler_registry_manifest": str(loop / "manifest-last.json"),
+            "scheduler_canonical_readiness_index": str(loop / "index-last.json"),
+            "scheduler_state_index": str(loop),
+        }
+        _insert_submission_event(store, failed, loop_contract)
+        gateway = _RecordingGateway(job_id="slurm_retry_env_contract")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry(failed.run_id, gateway=gateway, trusted_internal=True)
+
+        manifest = gateway.submissions[0].manifest
+        assert retry.status == "submitted"
+        assert manifest["scheduler_registry_manifest"] == "/env/nhms/object-store/scheduler/registry/manifest-last.json"
+        assert manifest["scheduler_canonical_readiness_index"] == (
+            "/env/nhms/object-store/scheduler/canonical-readiness/index-last.json"
+        )
+        assert manifest["scheduler_state_index"] == "/env/nhms/object-store/scheduler/state-index/index-last.json"
+        assert "ring-a" not in json.dumps(manifest)
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        rejected = evidence["rejected"]
+        for field in (
+            "scheduler_registry_manifest",
+            "scheduler_canonical_readiness_index",
+            "scheduler_state_index",
+        ):
+            assert any(
+                item["field"] == field and item["reason"] == "db_free_selector_path_unresolvable"
+                for item in rejected
+            ), field
+            assert evidence["db_free_runtime"]["resolved"][field]["source"] == "runtime_config:environment"
 
 
 def test_retry_source_cycle_identity_keeps_uppercase_canonical_sources() -> None:

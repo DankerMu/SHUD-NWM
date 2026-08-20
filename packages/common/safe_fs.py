@@ -29,6 +29,27 @@ def verify_directory_no_follow(path: Path) -> Path:
     return target
 
 
+def directory_identity_no_follow(path: Path) -> tuple[int, int]:
+    """Return ``(st_dev, st_ino)`` for an existing directory, opened without following symlinks.
+
+    Only **already-resolved** paths may be passed.  The per-component walk
+    rejects every symlink component *including the final one* (ENOTDIR on
+    macOS, ELOOP on Linux), so a raw path whose last component is a symlink
+    raises instead of reporting the link target's identity.
+
+    The pair is deliberately a bare tuple rather than an ``os.stat_result`` so
+    callers cannot compare on any other field.  The identity it carries is
+    limited to aliases sharing a filesystem superblock.
+    """
+
+    fd = _open_directory_no_follow(path)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return info.st_dev, info.st_ino
+
+
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
     """Create a directory via no-follow directory descriptors and return its configured path."""
 
@@ -44,7 +65,32 @@ def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = No
                 next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 try:
-                    os.mkdir(part, dir_fd=fd)
+                    # Explicit base mode, never the implicit 0o777 (#1513).  Without
+                    # it the landed permission is `0o777 & ~umask`, decided by the
+                    # ambient environment rather than by this code: on a umask-0002
+                    # host that is 0o775, and `provider_atomic`'s fail-closed lock
+                    # gate refuses such a directory as a lock parent
+                    # (`0o775 & 0o022 != 0`).
+                    #
+                    # Deliberately NO follow-up `fchmod`, and never a chmod of an
+                    # already-existing component.  The kernel applies the umask to
+                    # an explicit mode exactly as it does to the implicit one, and
+                    # a umask can only CLEAR bits, so 0o755 alone already satisfies
+                    # the gate under every umask.  An `fchmod` would additionally
+                    # turn the umask-0077 case from 0o700 into 0o755 -- silently
+                    # widening private directories on the strictest hosts.  The
+                    # governing rule: the umask may further restrict a safe_fs
+                    # directory, it may never loosen it.
+                    #
+                    # ACL boundary.  When the parent carries a default POSIX ACL the
+                    # umask is ignored entirely and this mode argument clamps the
+                    # inherited ACL *mask* instead, degrading a `default:user:X:rwx`
+                    # grant to `#effective:r-x`.  No mode both clears the 0o022 bits
+                    # and preserves that mask -- the mask IS the group bits -- so
+                    # safe_fs must not be the creator of ACL-shared directories.  A
+                    # caller needing cross-uid write has to widen after creation,
+                    # the way `state_manager._ensure_copyback_state_parent` does.
+                    os.mkdir(part, 0o755, dir_fd=fd)
                 except FileExistsError:
                     pass
                 except OSError as error:
@@ -719,7 +765,35 @@ def _anchor_for(path: Path, *, containment_root: Path | None) -> tuple[Path, tup
 
 
 def _expand_path(path: Path) -> Path:
-    expanded = Path(path).expanduser()
+    """Expand a leading ``~`` and anchor the result at the current directory.
+
+    ``Path.expanduser()`` throws a bare, errno-less ``RuntimeError`` when no home
+    directory can be determined -- ``~<unknown user>``, or no passwd entry with
+    ``HOME`` unset.  This prelude is shared by every public entry point of this
+    module, so letting that throw out would defeat the module's advertised
+    contract on all of them at once; it is converted here into the module's own
+    structured error instead.
+
+    Mind the direction: ``SafeFilesystemError`` **is** a ``RuntimeError``
+    subclass, not the reverse.  Callers that already write
+    ``except SafeFilesystemError`` therefore catch this with no change of their
+    own, while the bare throw sailed past them -- and past every caller reading
+    ``error.kind``, which a bare ``RuntimeError`` does not carry.
+
+    The failure reuses the existing ``unsafe`` classification rather than adding
+    a new one, so callers branching on the existing values keep a total set of
+    branches.  Degrading to a permissive pass that keeps the literal ``~``
+    component is not an option: the write-side primitives would then create or
+    delete a path the operator never named.
+    """
+
+    try:
+        expanded = Path(path).expanduser()
+    except RuntimeError as error:
+        raise SafeFilesystemError(
+            f"Cannot determine the home directory for path: {path}",
+            kind="unsafe",
+        ) from error
     return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 

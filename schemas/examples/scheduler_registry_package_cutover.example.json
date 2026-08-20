@@ -9,6 +9,13 @@
       "new_checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "effective_cycle_utc": "2026-07-16T00:00:00Z",
       "transition_mode": "replace"
+    },
+    {
+      "model_id": "basin-102",
+      "old_checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "new_checksum": null,
+      "effective_cycle_utc": "2026-07-16T00:00:00Z",
+      "transition_mode": "retire"
     }
   ]
 }

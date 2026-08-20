@@ -35,9 +35,11 @@ from services.orchestrator.accepted_submit_identity import (
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
+    accepted_submit_candidate_immutable_evidence,
     accepted_submit_contract_is_current,
     accepted_submit_master_identity_is_structural,
     accepted_submit_master_immutable_identity,
@@ -48,6 +50,7 @@ from services.orchestrator.accepted_submit_identity import (
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
+    normalize_quarantine_rerun_model_ids,
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
@@ -68,7 +71,7 @@ from services.orchestrator.retry import (
     _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT,
     ACTIVE_RETRY_STATUSES,
     DOWNLOAD_SOURCE_CYCLE_JOB_TYPE,
-    DURABLE_HYDRO_SUCCESS_STATUSES,
+    MANUAL_RETRY_DURABLE_SUCCESS_STATUSES,
     MANUAL_RETRY_SOURCE_STATUSES,
     PARTIAL_OR_FAILED_HYDRO_STATUSES,
     RETRY_RUNTIME_ROOTS_SECRET_BEARING,
@@ -98,19 +101,28 @@ from services.orchestrator.retry import (
     _RuntimeRootCandidate,
     _RuntimeRootCandidateBatch,
     _safe_error_message,
+    auto_retry_skipped_details,
     classify_failure,
     compute_backoff_seconds,
+    warn_unknown_error_code,
 )
 from services.orchestrator.retry_identity import (
     RETRY_JOB_ID_MARKER,
     effective_retry_attempt,
     split_retry_job_identity,
 )
+from services.orchestrator.run_identity import (
+    CYCLE_COHORT_RUN_ID_RE as _CYCLE_COHORT_RUN_ID_RE,
+)
+from services.orchestrator.run_identity import (
+    FORECAST_RUN_ID_RE as _FORECAST_RUN_ID_RE,
+)
 from services.orchestrator.scheduler_file_providers import (
     _public_raw_manifest_evidence,
     _sanitize_file_provider_evidence_scalar,
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
+from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -166,9 +178,12 @@ _LATEST_REPLAY_ORDER_SENTINEL = MAX_FILE_JOURNAL_CYCLE_SEGMENTS * MAX_FILE_JOURN
 _UNSET = object()
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _JOURNAL_SEGMENT_INDEX_RE = re.compile(r"[1-9][0-9]*")
-_FORECAST_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.+)$")
+# The forecast and cohort shapes now live in run_identity (#1405) so retention
+# adjudicates deletions against the same canonical identities; they are
+# imported above under their historical private names. This strict cohort
+# variant stays here — its only consumer, the cohort branch of
+# `_model_id_from_run_identity`, needs an exact cohort id.
 _CYCLE_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})$")
-_CYCLE_COHORT_RUN_ID_RE = re.compile(r"^cycle_([^_]+)_(\d{10})(?:_.+)?$")
 _CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
 _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE = re.compile(r"^job_cycle_([^_]+)_(\d{10})_.+$")
 _REPLAY_SEQUENCE_FIELD = "_file_journal_replay_sequence"
@@ -202,6 +217,11 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     # frozen check compare persisted-against-persisted — a silent drop instead
     # of the required ``file_journal_evidence_invariant_invalid``.
     INIT_STATE_IDENTITY_FIELD,
+    # Merged for the same reason (#1157): a divergent incoming provenance list
+    # must REACH the frozen check and be rejected, never silently keep the
+    # persisted one — retroactively arming the breaker is the failure this
+    # guards against.
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     "restart_stage",
     "submission_attempt",
     "submission_attempt_started_at",
@@ -336,6 +356,31 @@ class FileOrchestrationJournalError(RuntimeError):
         self.reason = reason
         self.field = field
         self.evidence = dict(evidence or {})
+
+
+class _JournalProbeContainmentError(Exception):
+    """A containment fault raised by an existence probe, carried to a choke frame.
+
+    Deliberately NOT a ``FileOrchestrationJournalError`` subclass: the broad
+    ``except FileOrchestrationJournalError`` handlers sitting between the
+    probes and their choke frames would swallow it back into the silent empty
+    result this probe exists to eliminate.
+    """
+
+    def __init__(self, *, field: str, error_type: str) -> None:
+        super().__init__(field)
+        self.field = field
+        self.error_type = error_type
+
+
+def _probe_containment_failure(error: _JournalProbeContainmentError) -> FileOrchestrationJournalError:
+    """Convert a probe containment fault to the lane's reader-fault type."""
+
+    return FileOrchestrationJournalError(
+        "file_journal_unreadable",
+        field=error.field,
+        evidence={"error_type": error.error_type},
+    )
 
 
 def _submit_file_manual_retry_job(gateway: Any, request: SubmitJobRequest) -> Any:
@@ -497,6 +542,14 @@ class FileOrchestrationJournalRepository:
         self.max_json_depth = int(max_json_depth)
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
+        # The production scheduler shares one repository instance across a
+        # thread pool of per-cohort orchestrators, so every read-side cache
+        # access below (lookup, store, eviction, whole-table iteration) is a
+        # critical section guarded by `_cache_lock`. Lock order is one-way:
+        # a thread holding `_write_lock` may take `_cache_lock`, never the
+        # reverse — nothing under `_cache_lock` does IO, JSON work, or takes
+        # another lock. Helpers suffixed `_cache_locked` require it held.
+        self._cache_lock = threading.Lock()
         self._cycle_rows_cache: dict[
             tuple[str, str, str | None, tuple[str, ...]],
             tuple[tuple[Any, ...] | None, _CycleRows],
@@ -553,10 +606,21 @@ class FileOrchestrationJournalRepository:
         )
         if hydro_run is not None and not hydro_run_matches:
             return False
+        # This gate answers a CANDIDATE-scoped question ("has THIS candidate
+        # completed"), so another model's named cycle-run row is not completion
+        # evidence here even though the shared row predicate (which also feeds
+        # the deliberately wider duplicate-submission gates) accepts it.  The DB
+        # counterpart reads `hydro.hydro_run` under a source/cycle/model
+        # three-key restriction (`chain_repository.py:98-111`) and never sees
+        # another model's job rows; this conjunct aligns the journal verdict's
+        # direction with it (#1302).  Model-less cohort rows stay cycle-wide.
         has_terminal_completion = any(
             _job_is_terminal_success(job)
             and _job_is_current_terminal_completion(job)
             and _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+            and not _is_foreign_model_cycle_scope_job(
+                job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            )
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
         )
         if chain_repository_state._compute_state_save_qc_terminal_enabled():
@@ -613,6 +677,90 @@ class FileOrchestrationJournalRepository:
         if recorded in (None, ""):
             return None
         return str(recorded).strip() or None
+
+    def completed_pipeline_init_state_id_occurrences(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        init_state_id: str,
+    ) -> int:
+        """Count FAILED quarantine-convergence attempts that re-recorded ``init_state_id``.
+
+        The §8.7 quarantine breaker (#1157) asks "has a quarantine rerun of
+        this cycle+model already completed and come back with the same stale
+        token?".  The original defect run needs no counting — the caller's own
+        positive mismatch witnesses it — so only reruns are counted, and only
+        those the journal can PROVE were quarantine reruns:
+
+        - the row must be a terminal-success cohort MASTER row
+          (``accepted_submit_row_kind`` == ``"master"``); the per-model
+          terminal rows that reconcile COPIES the identity onto carry distinct
+          ``job_id`` values and would double-count one submission, so they are
+          excluded — a submission's master row plus its per-model terminal row
+          count as 1,
+        - its ``init_state_identities`` map must record the token under an
+          entry naming THIS ``model_id`` (a cohort master carries one entry per
+          member; another model's entry is not this candidate's lineage),
+        - and its ``journal_predecessor_quarantine_rerun_model_ids`` provenance
+          must list THIS ``model_id``.  Masters minted by unrelated
+          whitelisted replacements — ``retry_terminal_run_manifest_missing``,
+          ``retry_missing_forecast_output`` after a Slurm failure — re-record
+          the same token but carry no such provenance, and must not pre-arm
+          the breaker into fail-stopping the FIRST quarantine judgement.
+
+        Read from the memoized ``_cycle_rows`` view (``pipeline_jobs`` is keyed
+        by ``job_id`` and collapse-free), never from the bounded
+        ``candidate_state`` payload, so ``candidate_state_job_limit``
+        truncation cannot undercount.
+
+        Returns ``0`` — never raises — when the count cannot be read (no
+        journal rows, unreadable rows, empty/blank token) and for every journal
+        written before #1157, whose rows carry no provenance field at all.
+        Callers treat ``0`` as "breaker disengaged" (fail toward liveness: one
+        more rerun beats a wrong fail-stop, and a pre-#1157 deployment simply
+        keeps today's behavior until its first stamped rerun lands).
+
+        No journal mutation and no run-manifest reads: this reports what the
+        JOURNAL recorded.  Scheduler wiring consumes it via
+        ``getattr(repo, ..., None)`` (repo convention, cf.
+        ``scheduler_backfill_predecessor.py:226``), so it is intentionally
+        absent from the ``ActiveCandidateRepository`` Protocol.
+        """
+        token = str(init_state_id or "").strip()
+        if not token:
+            return 0
+        try:
+            canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
+            rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
+        except FileOrchestrationJournalError:
+            return 0
+        occurrences = 0
+        for job in _current_terminal_jobs(rows.pipeline_jobs.values()):
+            try:
+                if not _job_is_terminal_success(job):
+                    continue
+                if not _job_matches_candidate(
+                    job,
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                ):
+                    continue
+                if accepted_submit_row_kind(job) != "master":
+                    continue
+                if model_id not in normalize_quarantine_rerun_model_ids(
+                    job.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+                ):
+                    continue
+                if _master_row_records_init_state_id(job, model_id=model_id, init_state_id=token):
+                    occurrences += 1
+            except (AttributeError, TypeError, ValueError):
+                # One unreadable row must not blank the whole count; skipping it
+                # can only undercount, which leaves the breaker disengaged.
+                continue
+        return occurrences
 
     def active_slurm_jobs(
         self,
@@ -717,14 +865,30 @@ class FileOrchestrationJournalRepository:
         # (#1288).
         #
         # The exclusion is deliberately scoped to this projection instead of the
-        # shared row predicate `_job_matches_candidate`: that predicate also feeds
-        # the cycle-level duplicate-submission and completion gates
-        # (`has_active_pipeline`, `has_completed_pipeline`, `active_slurm_jobs`),
-        # and their DB counterparts match the cycle run id UNCONDITIONALLY
-        # (`chain_repository.py:74-79` and `:177-181`); `has_completed_pipeline`
-        # has no DB job-row counterpart at all (`chain_repository.py:97-109` reads
-        # `hydro.hydro_run` only).  Narrowing the shared predicate would therefore
-        # create a new journal/DB divergence and loosen those gates.
+        # shared row predicate `_job_matches_candidate`, and the completion gate
+        # carries a SECOND local application of it (`has_completed_pipeline`, #1302) for
+        # the same reason: that predicate also feeds the cycle-level
+        # duplicate-submission gates (`has_active_pipeline`,
+        # `active_slurm_jobs`), whose DB counterparts match the cycle run id
+        # UNCONDITIONALLY (`chain_repository.py:74-79` and `:177-181`), so those
+        # two gates keep answering wide.  That wide visibility is NOT uniformly
+        # permissive, and this paragraph is no warrant for leaving the active
+        # side alone: `has_active_pipeline` runs its own local
+        # `has_terminal_completion` over the same unnarrowed rows (`:534-536`),
+        # so on the composite shape — a foreign model's completion row beside
+        # this candidate's ACTIVE hydro run — the wide visibility INVERTS into a
+        # suppression of the hydro-active arm and the gate answers False, where
+        # the DB counterpart's plain UNION (`chain_repository.py:57-95`) has no
+        # such clause and answers True.  That divergence is issue #1472, pinned
+        # by `test_foreign_model_completion_row_suppresses_the_hydro_active_arm`.
+        # `has_completed_pipeline` has no DB
+        # job-row counterpart at all (`chain_repository.py:98-111` reads
+        # `hydro.hydro_run` only) — but that DB gate's source/cycle/model
+        # three-key restriction fixes the DIRECTION the journal side must answer
+        # in, which is why the exclusion belongs there too rather than being
+        # taken as licence for a wide answer.  Narrowing the shared predicate
+        # itself would still loosen the duplicate-submission gates and diverge
+        # from their DB counterparts.
         #
         # Rows and their `pipeline_job` events must leave in the SAME step: a
         # marker whose row is gone resolves to no job row and re-enters the attempt
@@ -1505,6 +1669,7 @@ class FileOrchestrationJournalRepository:
             existing = self._pipeline_job_for_id_unlocked(str(row["job_id"]))
             persisted_master_identity: dict[str, Any] | None = None
             persisted_master_state: dict[str, Any] | None = None
+            persisted_candidate_evidence: dict[str, Any] | None = None
             if existing is None:
                 _validate_accepted_submit_evidence(row)
                 if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) == "master":
@@ -1547,6 +1712,16 @@ class FileOrchestrationJournalRepository:
                                 "file_journal_evidence_invariant_invalid",
                                 field=field,
                             )
+                elif accepted_submit_contract_is_current(
+                    existing
+                ) and accepted_submit_row_kind(existing) == "candidate":
+                    # Derived per-model rows freeze their lineage evidence the
+                    # same way the master freezes its map (#1187). The contract
+                    # marker is required for the same reason it is on the master
+                    # arm: normalization only owns this field on contract-current
+                    # rows, so marker-free historical per-model rows must keep
+                    # their pre-change behaviour.
+                    persisted_candidate_evidence = _accepted_submit_candidate_evidence(existing)
                 row = dict(existing)
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
@@ -1554,6 +1729,21 @@ class FileOrchestrationJournalRepository:
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
+            if persisted_candidate_evidence is not None:
+                # Compared AFTER the merge on purpose: the merge loop copies
+                # only explicitly carried keys, so an upsert that omits the
+                # field compares the persisted value against itself and keeps
+                # it silently, exactly as before this gate existed. Comparing
+                # the incoming row instead would pit the closed constructor's
+                # unconditional default (an empty map) against a populated
+                # persisted one and fail every ordinary per-model upsert.
+                merged_candidate_evidence = _accepted_submit_candidate_evidence(row)
+                for field, persisted_value in persisted_candidate_evidence.items():
+                    if merged_candidate_evidence[field] != persisted_value:
+                        raise FileOrchestrationJournalError(
+                            "file_journal_evidence_invariant_invalid",
+                            field=field,
+                        )
             if persisted_master_state is not None:
                 merged_master_state = _accepted_submit_master_state(row)
                 for field, persisted_value in persisted_master_state.items():
@@ -1629,6 +1819,10 @@ class FileOrchestrationJournalRepository:
                 "started_at": None,
                 "finished_at": None,
                 "exit_code": None,
+                # A null ``error_code`` here is the auto-retry isolation contract:
+                # a released reservation inherits it, so ``classify_failure`` reads
+                # UNKNOWN_FAILURE and never re-submits (spec:
+                # candidate-projection-stage-attempt-retention).
                 "error_code": None,
                 "error_message": None,
                 "log_uri": None,
@@ -1737,6 +1931,12 @@ class FileOrchestrationJournalRepository:
                     )
                 ):
                     return None
+            # The new attempt's row is derived from the PERSISTED row, so the
+            # init-state identity mapping it carries is the one captured at the
+            # first reservation. That is the adjudicated semantics (#1188):
+            # "stable from reservation onward" means from the FIRST reservation,
+            # and a reclaim does not refresh the mapping even though it opens a
+            # new submission attempt.
             row = (
                 apply_accepted_submit_transition(
                     existing,
@@ -1754,6 +1954,10 @@ class FileOrchestrationJournalRepository:
                     "started_at": None,
                     "finished_at": None,
                     "exit_code": None,
+                    # Same auto-retry isolation contract as the reservation write
+                    # above: a reclaimed reservation that is later released must
+                    # still classify as non-retriable (spec:
+                    # candidate-projection-stage-attempt-retention).
                     "error_code": None,
                     "error_message": None,
                     "cancellation_receipt_recorded": False,
@@ -1770,6 +1974,17 @@ class FileOrchestrationJournalRepository:
             # lock-external reclaim request.
             row["submission_attempt_started_at"] = _format_utc(_utcnow())
             if not versioned_master:
+                # INIT_STATE_IDENTITY_FIELD is deliberately absent from this
+                # backfill set (#1188): keeping it out is what makes the reclaim
+                # keep-first, since a recomputed mapping on the lock-external
+                # request row would otherwise overwrite the first attempt's
+                # captured lineage. Same reason as the attempt anchor above —
+                # durable authority state never comes from outside the lock.
+                # Two halves, not one: for a versioned master the enclosing
+                # ``if not versioned_master:`` never runs, so keep-first there
+                # rests on the guard AND on this omission. Adding the field back
+                # to the tuple alone would not change versioned-master behaviour,
+                # and flipping the guard alone would not either; both must hold.
                 for key in (
                     "run_id",
                     "cycle_id",
@@ -2650,6 +2865,14 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
+            # This write produces ``absence_retry_permitted``, one of the reclaim doors
+            # the auto-retry isolation contract explicitly EXCLUDES: the row is meant to
+            # be retried (``_verified_accepted_submit_forecast_retry`` and
+            # ``reclaim_pipeline_job_reservation``'s precondition both key off this
+            # shape).  The null ``error_code`` here is only the fact that the transition
+            # introduces no new code; the isolation contract's subject is the
+            # ``identity_mismatch_released`` sub-shape below (spec:
+            # candidate-projection-stage-attempt-retention).
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
@@ -2800,6 +3023,10 @@ class FileOrchestrationJournalRepository:
                 return 0
             if existing.get("slurm_job_id") not in (None, ""):
                 return 0
+            # Released rows stay outside automatic retry BECAUSE this transition adds no
+            # ``error_code``: stamping a transient one here (SLURM_RESERVATION_LOST is on
+            # the transient list) would turn every release into an automatic duplicate
+            # submission (spec: candidate-projection-stage-attempt-retention).
             row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
@@ -3733,8 +3960,11 @@ class FileOrchestrationJournalRepository:
             if in_write_window
             else self._cycle_rows_source_fingerprint(source_segments=source_segments, cycle_segment=cycle_segment)
         )
-        cached = self._cycle_rows_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._cycle_rows_cache.get(cache_key)
         if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
+            # Cached rows are never mutated in place after being stored, so
+            # cloning a hit outside the mutex cannot observe a torn value.
             return _clone_cycle_rows(cached[1])
         # Model-scoped reads build from the model's own latest view plus
         # model-filtered journal records. They must not derive hydro_run /
@@ -3931,7 +4161,8 @@ class FileOrchestrationJournalRepository:
                 / format_cycle_time(cycle_time)
             ),
         )
-        cached = self._direct_jobs_cycle_cache.get(cache_key)
+        with self._cache_lock:
+            cached = self._direct_jobs_cycle_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return [dict(job) for job in cached[1]]
         jobs = [
@@ -3943,9 +4174,11 @@ class FileOrchestrationJournalRepository:
             )
         ]
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
-        if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
-            self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
-        self._direct_jobs_cycle_cache[cache_key] = (signature, [dict(job) for job in jobs])
+        entry = (signature, [dict(job) for job in jobs])
+        with self._cache_lock:
+            if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
+                self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
+            self._direct_jobs_cycle_cache[cache_key] = entry
         return jobs
 
     def _cycle_rows_source_fingerprint(
@@ -4022,9 +4255,11 @@ class FileOrchestrationJournalRepository:
         fingerprint: tuple[Any, ...] | None,
     ) -> None:
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
-        if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
-            self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
-        self._cycle_rows_cache[cache_key] = (fingerprint, _clone_cycle_rows(rows))
+        entry = (fingerprint, _clone_cycle_rows(rows))
+        with self._cache_lock:
+            if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
+                self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
+            self._cycle_rows_cache[cache_key] = entry
 
     def _latest_paths(self, source_segment: str, cycle_segment: str, *, model_id: str | None) -> list[Path]:
         directory = self.root / "latest" / source_segment / cycle_segment
@@ -4199,7 +4434,8 @@ class FileOrchestrationJournalRepository:
             self._read_bytes_cache_drop(key)
         if probe is not None and stat.S_ISREG(probe.st_mode):
             signature = (probe.st_mtime_ns, probe.st_size, probe.st_ino)
-            cached = self._read_bytes_cache.get(key)
+            with self._cache_lock:
+                cached = self._read_bytes_cache.get(key)
             if cached is not None and cached[0] == signature:
                 return cached[1], cached[2]
         content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
@@ -4210,24 +4446,30 @@ class FileOrchestrationJournalRepository:
     def _read_bytes_cache_store(self, key: str, signature: tuple[int, int, int], content: bytes) -> None:
         if len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES:
             return
-        self._read_bytes_cache_drop(key)
-        while self._read_bytes_cache and (
-            len(self._read_bytes_cache) >= MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
-            or self._read_bytes_cache_total + len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES
-        ):
-            self._read_bytes_cache_drop(next(iter(self._read_bytes_cache)))
-        self._read_bytes_cache[key] = (signature, content, False)
-        self._read_bytes_cache_total += len(content)
+        with self._cache_lock:
+            self._read_bytes_cache_drop_cache_locked(key)
+            while self._read_bytes_cache and (
+                len(self._read_bytes_cache) >= MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
+                or self._read_bytes_cache_total + len(content) > MAX_FILE_JOURNAL_READ_CACHE_BYTES
+            ):
+                self._read_bytes_cache_drop_cache_locked(next(iter(self._read_bytes_cache)))
+            self._read_bytes_cache[key] = (signature, content, False)
+            self._read_bytes_cache_total += len(content)
 
     def _read_bytes_cache_drop(self, key: str) -> None:
+        with self._cache_lock:
+            self._read_bytes_cache_drop_cache_locked(key)
+
+    def _read_bytes_cache_drop_cache_locked(self, key: str) -> None:
         entry = self._read_bytes_cache.pop(key, None)
         if entry is not None:
             self._read_bytes_cache_total -= len(entry[1])
 
     def _read_bytes_cache_mark_validated(self, key: str, content: bytes) -> None:
-        entry = self._read_bytes_cache.get(key)
-        if entry is not None and entry[1] is content:
-            self._read_bytes_cache[key] = (entry[0], entry[1], True)
+        with self._cache_lock:
+            entry = self._read_bytes_cache.get(key)
+            if entry is not None and entry[1] is content:
+                self._read_bytes_cache[key] = (entry[0], entry[1], True)
 
     def _read_optional_json(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -5848,6 +6090,13 @@ class FileOrchestrationJournalRepository:
             INIT_STATE_IDENTITY_FIELD: _bounded_init_state_identities(
                 record.get(INIT_STATE_IDENTITY_FIELD)
             ),
+            # Explicit member of the closed constructor for the same reason
+            # (#1157): absent here the reservation's provenance stamp would be
+            # dropped on write and the later frozen-value check would raise on
+            # the phantom change.
+            QUARANTINE_RERUN_PROVENANCE_FIELD: normalize_quarantine_rerun_model_ids(
+                record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
+            ),
             "restart_stage": record.get("restart_stage"),
             "submission_attempt": record.get("submission_attempt", 1),
             "submission_attempt_started_at": _optional_format_datetime(
@@ -5954,7 +6203,8 @@ class FileOrchestrationJournalRepository:
             direct_path = self.root / "pipeline-jobs" / f"{job_id}.json"
         self._atomic_write_json_unlocked(direct_path, record)
         self._sync_reconcile_inventory_for_row_unlocked(row)
-        self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
+        with self._cache_lock:
+            self._direct_jobs_cycle_cache.pop((source_id, format_cycle_time(cycle_time)), None)
 
     def _reconcile_inventory_anchor_exists_unlocked(self, path: Path) -> bool:
         try:
@@ -6182,23 +6432,29 @@ class FileOrchestrationJournalRepository:
         cycle_segment = format_cycle_time(cycle_time)
         source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
         sequences: list[int] = []
-        for source_segment in source_segments:
-            for surface in ("journal", "pipeline-events"):
-                # The floor must span ALL segments: a sequence reused across a
-                # rollover boundary is silent state corruption.
-                segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
-                for segment_index, path in enumerate(segment_paths):
-                    if not self._sequence_regular_file_exists(path):
-                        continue
-                    records = self._read_jsonl(path, segment_index=segment_index)
-                    sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
-        sequences.extend(
-            self._latest_replay_sequences_unlocked(
-                source_id=source_id,
-                cycle_time=cycle_time,
-                source_segments=source_segments,
+        # Public contract for the insert_pipeline_event lane, which computes the
+        # sequence floor before any precondition read; for the other write lanes
+        # this is defense in depth behind the read frame's conversion.
+        try:
+            for source_segment in source_segments:
+                for surface in ("journal", "pipeline-events"):
+                    # The floor must span ALL segments: a sequence reused across a
+                    # rollover boundary is silent state corruption.
+                    segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
+                    for segment_index, path in enumerate(segment_paths):
+                        if not self._sequence_regular_file_exists(path):
+                            continue
+                        records = self._read_jsonl(path, segment_index=segment_index)
+                        sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+            sequences.extend(
+                self._latest_replay_sequences_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    source_segments=source_segments,
+                )
             )
-        )
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
         return max(sequences, default=0) + 1
 
     def _latest_replay_sequences_unlocked(
@@ -6225,31 +6481,34 @@ class FileOrchestrationJournalRepository:
                 sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
 
-    def _sequence_regular_file_exists(self, path: Path) -> bool:
+    def _probe_stat_mode(self, path: Path) -> int | None:
+        """Stat one journal slot under the hardened readers' containment rules.
+
+        ``None`` means genuine absence — the entry itself or any parent
+        component missing under a chain of real directories, which includes a
+        wholly uninitialized journal tree.  A symlinked parent component, a
+        symlink occupying the slot, or any other stat fault leaves through the
+        carrier: bare ``os.stat(follow_symlinks=False)`` does not follow the
+        final component but does follow symlinked parents, which turned a
+        tampered tree into "absent".
+        """
         try:
-            mode = os.stat(path, follow_symlinks=False).st_mode
+            return stat_no_follow(path, containment_root=self.root).st_mode
         except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
+            return None
+        except (SafeFilesystemError, OSError) as error:
+            raise _JournalProbeContainmentError(
                 field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
+                error_type=type(error).__name__,
             ) from error
-        return stat.S_ISREG(mode)
+
+    def _sequence_regular_file_exists(self, path: Path) -> bool:
+        mode = self._probe_stat_mode(path)
+        return mode is not None and stat.S_ISREG(mode)
 
     def _sequence_directory_exists(self, path: Path) -> bool:
-        try:
-            mode = os.stat(path, follow_symlinks=False).st_mode
-        except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
-                field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
-            ) from error
-        return stat.S_ISDIR(mode)
+        mode = self._probe_stat_mode(path)
+        return mode is not None and stat.S_ISDIR(mode)
 
     def _next_event_id_unlocked(
         self,
@@ -6342,7 +6601,13 @@ class FileOrchestrationJournalRepository:
         """
         directory = self._journal_directory(source_id=source_id)
         cycle_segment = format_cycle_time(cycle_time)
-        segments = self._cycle_segment_paths(directory, cycle_segment)
+        # Defense in depth here, unlike _next_sequence_unlocked's public
+        # insert_pipeline_event lane: no public lane reaches this frame today
+        # (reaching the append means an earlier probe already succeeded).
+        try:
+            segments = self._cycle_segment_paths(directory, cycle_segment)
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
         path = segments[-1] if segments else directory / _journal_segment_name(cycle_segment, 0)
         try:
             existing = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
@@ -6391,24 +6656,31 @@ class FileOrchestrationJournalRepository:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)
         base_key = (source_id, cycle_segment, None, None)
-        stale_keys = [
-            key for key in self._cycle_rows_cache if key[0] == source_id and key[1] == cycle_segment and key != base_key
-        ]
-        for key in stale_keys:
-            self._cycle_rows_cache.pop(key, None)
-        cached = self._cycle_rows_cache.get(base_key)
-        if cached is None:
-            return
-        updated = _clone_cycle_rows(cached[1])
-        try:
-            self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
-            updated.pipeline_events = _dedupe_events(updated.pipeline_events)
-        except FileOrchestrationJournalError:
-            self._cycle_rows_cache.pop(base_key, None)
-            return
-        # In-window entries carry no fingerprint: hits are trusted while the
-        # cycle flock is held, and the window clears the cache on exit.
-        self._cycle_rows_cache[base_key] = (None, updated)
+        # The whole update runs under `_cache_lock`: the stale-key sweep is the
+        # only full-table iteration over `_cycle_rows_cache`, and the reducer
+        # below is pure in-memory work, so read/modify/write stays atomic
+        # against readers populating or evicting the same dict.
+        with self._cache_lock:
+            stale_keys = [
+                key
+                for key in self._cycle_rows_cache
+                if key[0] == source_id and key[1] == cycle_segment and key != base_key
+            ]
+            for key in stale_keys:
+                self._cycle_rows_cache.pop(key, None)
+            cached = self._cycle_rows_cache.get(base_key)
+            if cached is None:
+                return
+            updated = _clone_cycle_rows(cached[1])
+            try:
+                self._apply_journal_record(updated, record, source_id=source_id, cycle_time=cycle_time)
+                updated.pipeline_events = _dedupe_events(updated.pipeline_events)
+            except FileOrchestrationJournalError:
+                self._cycle_rows_cache.pop(base_key, None)
+                return
+            # In-window entries carry no fingerprint: hits are trusted while the
+            # cycle flock is held, and the window clears the cache on exit.
+            self._cycle_rows_cache[base_key] = (None, updated)
 
     def _materialize_latest_unlocked(
         self,
@@ -6519,13 +6791,15 @@ class FileOrchestrationJournalRepository:
     @contextmanager
     def _locked_cycle_write(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
         with self._write_lock:
-            self._cycle_rows_cache.clear()
+            with self._cache_lock:
+                self._cycle_rows_cache.clear()
             self._ensure_root_unlocked()
             try:
                 with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
                     yield
             finally:
-                self._cycle_rows_cache.clear()
+                with self._cache_lock:
+                    self._cycle_rows_cache.clear()
 
     @contextmanager
     def _cycle_file_lock_unlocked(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
@@ -6634,21 +6908,13 @@ class FileOrchestrationJournalRepository:
     def _journal_segment_exists(self, path: Path) -> bool:
         """Probe a segment slot without hiding a non-regular occupant.
 
-        A symlinked or otherwise unsafe segment counts as present so the
-        hardened reader stays the sole authority for that failure, exactly as
-        it is for an unsegmented cycle log today.
+        A safe but non-regular occupant (a directory, a FIFO) counts as
+        present so the hardened reader stays the sole authority for that
+        failure, exactly as it is for an unsegmented cycle log today.  A
+        symlink in the slot is a containment fault of the probe itself now,
+        which surfaces the same reason token the reader would have raised.
         """
-        try:
-            os.stat(path, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        except OSError as error:
-            raise FileOrchestrationJournalError(
-                "file_journal_unreadable",
-                field=str(_relative_evidence(path, self.root)),
-                evidence={"error_type": type(error).__name__},
-            ) from error
-        return True
+        return self._probe_stat_mode(path) is not None
 
     def _cycle_segment_signatures(self, directory: Path, cycle_segment: str) -> tuple[Any, ...]:
         """Stat identity of every segment slot a cycle log may occupy.
@@ -6665,7 +6931,14 @@ class FileOrchestrationJournalRepository:
         """Replay every segment of one cycle event log in segment order."""
 
         records: list[dict[str, Any]] = []
-        for segment_index, path in enumerate(self._cycle_segment_paths(directory, cycle_segment)):
+        # Every public lane — read, and write via its precondition read —
+        # routes through here, so this frame defines the public contract for
+        # a probe containment fault.
+        try:
+            segment_paths = self._cycle_segment_paths(directory, cycle_segment)
+        except _JournalProbeContainmentError as error:
+            raise _probe_containment_failure(error) from error
+        for segment_index, path in enumerate(segment_paths):
             records.extend(self._read_jsonl(path, segment_index=segment_index))
         return records
 
@@ -6914,6 +7187,7 @@ class FileJournalRetryService:
             return _file_retry_namespace(source)
         status_from = str(source.get("status") or "")
         last_error = source.get("error_code")
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         _previous_status, written = self.repository.update_pipeline_job_status(
             str(source["job_id"]),
             "permanently_failed",
@@ -6936,8 +7210,10 @@ class FileJournalRetryService:
                     retry_limit=self.config.max_retries,
                 ),
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        warn_unknown_error_code(auto_retry_skipped)
         return _file_retry_namespace(written)
 
     def _mark_master_permanently_failed(
@@ -6951,6 +7227,7 @@ class FileJournalRetryService:
         if last_error in (None, ""):
             last_error = current.get("error_code")
         retry_count = int(source.get("retry_count") or current.get("retry_count") or 0)
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         result = self.repository.mark_pipeline_job_permanently_failed(
             str(current["job_id"]),
             error_code=str(last_error) if last_error not in (None, "") else None,
@@ -6965,8 +7242,13 @@ class FileJournalRetryService:
                     retry_limit=self.config.max_retries,
                 ),
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        # ``missing``/``stale``/``idempotent`` outcomes append no event, so the
+        # unknown-code warning is gated on the write that actually landed.
+        if result.wrote:
+            warn_unknown_error_code(auto_retry_skipped)
         # ``stale``/``idempotent`` outcomes hand back the raw persisted row, so
         # the namespace is normalized to the same public shape callers already
         # get from ``get_pipeline_job``.
@@ -7041,6 +7323,30 @@ class FileJournalRetryService:
                     manual=True,
                 ),
             }
+            # The rest of the target row's write-time shape, on the same terms as
+            # ``failed_stage`` above and for the same reader: with the row gone from the
+            # candidate state the pin gate rebuilds the target from these keys and runs the
+            # resolved-row routing over the reconstruction, instead of guessing from id text.
+            # The key set and its closure invariant over the shared live-failure predicate live
+            # on ``MARKER_TARGET_ROW_DETAIL_FIELDS`` (the sanitizer whitelist and the gate read
+            # the same tuple, so the three surfaces cannot drift).  ``target_`` prefixes keep
+            # them clear of the three consumed key names: ``stage``/``job_type`` (the
+            # candidate-state record-stage reader) and ``model_id`` (the marker ATTRIBUTION
+            # reader -- the target row's model is a different semantic axis).  Absent values are
+            # not written, exactly as the sanitizer passes no empties; ``0`` and ``False`` are
+            # recorded values and ARE written.
+            #
+            # ``failed_job`` is a PERSISTED row, so two of the eight keys are structurally
+            # unreachable from here: ``repair_status``/``active_blocker`` are annotations the
+            # candidate-state projection applies to a row copy and ``_pipeline_job_row`` has no
+            # such fields, so ``target_repair_status``/``target_active_blocker`` are never
+            # emitted.  The gate honours them if a record ever carries them; recording the
+            # annotation at write time is issue #1482, and until it lands a target already
+            # annotated repaired is a disclosed pin (design D4).
+            for detail_key, row_field in MARKER_TARGET_ROW_DETAIL_FIELDS:
+                target_value = failed_job.get(row_field)
+                if target_value not in (None, ""):
+                    details[detail_key] = target_value
             if requested_by not in (None, ""):
                 details["requested_by"] = requested_by
             if request_id not in (None, ""):
@@ -7660,7 +7966,7 @@ class FileJournalRetryService:
         )
         durable_run = self.repository._hydro_run_for(run_id)
         durable_status = str(durable_run.get("status") or "") if durable_run is not None else None
-        if durable_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+        if durable_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
             return None, None
         active_job = next((job for job in safe_jobs if str(job.get("status") or "") in ACTIVE_RETRY_STATUSES), None)
         if active_job is not None:
@@ -8040,6 +8346,13 @@ def _accepted_submit_master_identity(row: Mapping[str, Any]) -> dict[str, Any]:
 def _accepted_submit_master_state(row: Mapping[str, Any]) -> dict[str, Any]:
     try:
         return accepted_submit_master_ordinary_upsert_state(row)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+
+
+def _accepted_submit_candidate_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return accepted_submit_candidate_immutable_evidence(row)
     except AcceptedSubmitEvidenceError as error:
         raise FileOrchestrationJournalError(error.reason, field=error.field) from error
 
@@ -8688,6 +9001,24 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+def _master_row_records_init_state_id(
+    job: Mapping[str, Any], *, model_id: str, init_state_id: str
+) -> bool:
+    """Whether a cohort master's identity map names this model with this token."""
+
+    identities = job.get(INIT_STATE_IDENTITY_FIELD)
+    if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
+        return False
+    for entry in identities:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("model_id") or "") != model_id:
+            continue
+        if str(entry.get("init_state_id") or "").strip() == init_state_id:
+            return True
+    return False
 
 
 def _job_is_current_terminal_completion(job: Mapping[str, Any]) -> bool:

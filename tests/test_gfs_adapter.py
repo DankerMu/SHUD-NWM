@@ -1508,3 +1508,12 @@ def test_breaker_open_skips_nomads_until_cooldown_expires(tmp_path: Path) -> Non
     # Advance past cooldown: NOMADS eligible again, idx now present so mirror succeeds.
     now["t"] = now["t"] + timedelta(minutes=61)
     assert adapter2._nomads_circuit_open() is False
+
+
+def test_default_backend_chain_still_carries_nomads() -> None:
+    # #1412: the e2e fixture (tests/test_e2e.py::_run_gfs_adapter) pins its
+    # chain to NOMADS only, so those tests can no longer notice a production
+    # default-chain change. This CI-run guard is the visible carrier: if
+    # NOMADS ever leaves the default chain, flip the e2e fixture's pin in the
+    # same change instead of letting it drift green against a retired lane.
+    assert gfs_module.GFS_NOMADS_BACKEND in gfs_module.GFS_DEFAULT_SOURCE_BACKENDS

@@ -221,6 +221,12 @@ def _prepare_sources(
             "Basins model is not importable from this inventory.",
             model_id=model_id,
             path=str(model.get("source_path") or ""),
+            details={
+                "status": model.get("status"),
+                "missing_required_files": model.get("missing_required_files") or [],
+                "invalid_required_files": model.get("invalid_required_files") or [],
+                "unreadable_required_files": model.get("unreadable_required_files") or [],
+            },
         )
     if manifest.get("basin_slug") not in (None, model.get("basin_slug")):
         raise BasinsRegistryImportError(

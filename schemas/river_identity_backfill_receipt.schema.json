@@ -250,7 +250,11 @@
           "type": "integer",
           "minimum": 0
         },
-        "pending_rows": {"type": "integer", "minimum": 0},
+        "pending_rows": {
+          "description": "Sums pending_rows over the chunks MEASURED in this invocation only. Skipped chunks contribute nothing (their per-chunk value is null, not 0), so 0 here does NOT mean the table has no NULL sentinels left. Cross-check chunks_skipped_compressed and chunks_skipped_active before reading it as done.",
+          "type": "integer",
+          "minimum": 0
+        },
         "batches_run": {"type": "integer", "minimum": 0},
         "batches_halved": {"type": "integer", "minimum": 0},
         "unmatched_rows": {"type": "integer", "minimum": 0},
@@ -271,7 +275,8 @@
             "shortfall",
             "duration_wall",
             "ingest_not_quiescent",
-            "compressed_chunk_guard"
+            "compressed_chunk_guard",
+            "lock_contention"
           ]
         },
         "reason": {"type": "string", "minLength": 1},

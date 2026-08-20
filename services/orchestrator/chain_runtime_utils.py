@@ -22,6 +22,10 @@ from services.orchestrator.chain_types import (
     StageDefinition,
     StageRunResult,
 )
+from services.orchestrator.retry_identity import (
+    has_active_manual_retry_decision,
+    log_ignored_manual_retry_attempt_claim,
+)
 from workers.canonical_converter.converter import expected_converter_version
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -150,6 +154,31 @@ def _candidate_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bo
 
 
 def _manual_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a single-basin marker widens execution scope to that candidate.
+
+    Deliberately NOT gated by the #1201 manual-retry claim judgement, even though it
+    reads the same marker.  It mints no attempt, and it has TWO consumers:
+
+    - ``_candidate_scoped_cycle_execution``, which helps choose the job set fed to
+      ``_next_retry_attempt_for_stage``.  Harmless: (a) job ids are run-id-namespaced,
+      so jobs from another run never change this stage's prefix max, and (b) a
+      production single-basin candidate always carries ``orchestration_run_id``, which
+      reaches the same answer there anyway.
+    - ``_replacement_retry_scoped_cycle_execution``, whose first line short-circuits on
+      this predicate and whose result feeds ``_active_orchestration_conflicts``.  Here
+      (b) does NOT hold — ``orchestration_run_id`` does not settle that arm — so a
+      marker-carrying candidate can clear a duplicate-orchestration conflict gate at
+      which its markerless twin is held.  Pre-existing and unchanged by #1201 (before
+      the minting gate the minted direct field opened this arm; after it, the evidence
+      arm does), which is why the markerless equivalence #1201 claims is scoped to the
+      resubmit-vs-resume decision, the derived attempt and whether anything submits.
+
+    Both arms are fail-open widenings with no wedge.  After the minting gate a
+    judged-inactive claim still reaches this predicate through
+    ``marker``/``requested``/``allowed``; that residual coupling is pinned by test,
+    not repaired here (#1201 design D3).
+    """
+
     if len(basins) != 1:
         return False
     basin = basins[0]
@@ -174,6 +203,11 @@ def _replacement_retry_scoped_cycle_execution(basins: Sequence[Mapping[str, Any]
         "retry_strict_warm_start_terminal_run_manifest_missing",
         "retry_strict_warm_start_retry_run_manifest_mismatch",
         "retry_terminal_run_manifest_missing",
+        # Sibling copy of ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``
+        # (``chain_forecast_orchestrator_cycle.py``) minus
+        # ``retry_repair_missing_forcing``; the §8.7 quarantine rerun (#1157)
+        # must be a real replacement submission on both copies.
+        "retry_journal_predecessor_identity_mismatch",
     }
     if basins and all(
         isinstance(basin.get("state_evidence"), Mapping)
@@ -320,7 +354,22 @@ def _retry_attempt_from_basins(basins: Sequence[Mapping[str, Any]]) -> int | Non
                     manual_retry.get("new_attempt") or manual_retry.get("attempt") or manual_retry.get("retry_count")
                 )
                 if attempt is not None:
-                    attempts.append(attempt)
+                    # Defence in depth behind the manifest minting gate (#1201).
+                    # The direct fields above are the invocation's own input
+                    # (operator/API) and stay unjudged; a claim read out of
+                    # scheduler-emitted evidence is only honoured under an active
+                    # manual-retry decision.
+                    if has_active_manual_retry_decision(state_evidence):
+                        attempts.append(attempt)
+                    else:
+                        log_ignored_manual_retry_attempt_claim(
+                            state_evidence,
+                            site="chain_retry_attempt_from_basins",
+                            claimed_attempt=attempt,
+                            candidate_id=basin.get("candidate_id"),
+                            basin_id=basin.get("basin_id"),
+                            cycle_id=basin.get("cycle_id"),
+                        )
     if not attempts:
         return None
     return max(attempts)

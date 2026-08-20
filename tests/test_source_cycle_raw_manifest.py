@@ -15,6 +15,7 @@ from services.orchestrator.source_cycle_raw_manifest import (
     stage_nfs_raw_manifest_from_env,
     stage_nfs_raw_manifest_to_object_store,
 )
+from tests.provider_mode_helpers import make_directory_with_explicit_mode
 
 
 def _write_manifest(
@@ -478,7 +479,11 @@ def test_stage_nfs_raw_manifest_to_compute_visible_object_store(tmp_path: Path) 
     target_root = tmp_path / "scratch-object-store"
     _write_manifest(source_root)
     stale_manifest = target_root / "raw/gfs/2026062612/manifest.json"
-    stale_manifest.parent.mkdir(parents=True, exist_ok=True)
+    # Explicit mode, not the ambient umask (#1513): this is the DIRECT parent of
+    # the raw-staging provider lock, and the gate is fail-closed on any 0o022
+    # bit. A bare mkdir lands 0o775 under umask 0002 and staging raises
+    # raw_stage_lock_failed:provider_lock_parent_unsafe.
+    make_directory_with_explicit_mode(stale_manifest.parent)
     stale_manifest.write_text("stale\n", encoding="utf-8")
 
     readiness = nfs_raw_manifest_readiness(

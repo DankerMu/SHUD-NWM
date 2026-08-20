@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -525,6 +526,84 @@ def test_match_declaration_entry_returns_matching_row(tmp_path: Path) -> None:
 def test_match_declaration_entry_returns_none_for_unknown_model(tmp_path: Path) -> None:
     declaration = generation.load_cutover_declaration(str(_write_declaration(tmp_path)), now=NOW)
     assert generation.match_declaration_entry(declaration, model_id="model_b") is None
+
+
+# ---------------------------------------------------------------------------
+# #1433: the shared declaration may now carry `retire` entries.  This consumer
+# derives nothing from them, but it MUST NOT be disabled by their presence.
+# ---------------------------------------------------------------------------
+
+
+def _retire_entry(model_id: str = "model_r") -> dict[str, Any]:
+    return {
+        "model_id": model_id,
+        "old_checksum": OLD_CHECKSUM,
+        "new_checksum": None,
+        "effective_cycle_utc": "2026-07-06T12:00:00Z",
+        "transition_mode": "retire",
+    }
+
+
+def test_consumer_transition_modes_match_the_shared_schema_enum() -> None:
+    """The consumer's copy of the constant is the schema enum, not a subset:
+    a mode the schema admits must not turn the whole shared file into a
+    ``_load_error`` here."""
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas/scheduler_registry_package_cutover.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    schema_enum = set(
+        schema["properties"]["entries"]["items"]["properties"]["transition_mode"]["enum"]
+    )
+
+    assert set(generation.CUTOVER_TRANSITION_MODES) == schema_enum
+
+
+def test_declaration_with_a_retire_entry_still_loads_and_matches_replace_entries(
+    tmp_path: Path,
+) -> None:
+    """#1433/I8: a retirement in the file must not cost the replace entry its
+    binding — before the tolerant skip, the consumer failed the WHOLE file with
+    ``declaration_entry_transition_mode_invalid`` and every candidate fell to
+    ``block_declaration_missing`` / ``block_declaration_stale``."""
+    path = _write_declaration(tmp_path, extra_entries=[_retire_entry()])
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert declaration is not None
+    assert "_load_error" not in declaration
+    entry = generation.match_declaration_entry(declaration, model_id="model_a")
+    assert entry is not None
+    assert entry["transition_mode"] == "replace"
+    assert entry["new_checksum"] == NEW_CHECKSUM
+
+
+def test_retire_entries_never_match_and_never_produce_none_strings(
+    tmp_path: Path,
+) -> None:
+    """The retirement is skipped before checksum normalization, so no candidate
+    can bind it and no ``"None"`` string reaches generation derivation."""
+    path = _write_declaration(tmp_path, extra_entries=[_retire_entry()])
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert generation.match_declaration_entry(declaration, model_id="model_r") is None
+    assert [entry["model_id"] for entry in declaration["entries"]] == ["model_a"]
+    assert "None" not in json.dumps(declaration, default=str)
+
+
+def test_a_retire_entry_does_not_hide_a_duplicate_model_id(tmp_path: Path) -> None:
+    """The skip sits AFTER the duplicate-id check, so a file that names one
+    model twice is still rejected even when the duplicate is a retirement."""
+    path = _write_declaration(
+        tmp_path, extra_entries=[_retire_entry(model_id="model_a")]
+    )
+
+    declaration = generation.load_cutover_declaration(str(path), now=NOW)
+
+    assert declaration["_load_error"] == "declaration_entry_model_id_invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -1295,15 +1374,540 @@ def test_env_override_does_not_admit_missing_predecessor(
         blocked[0].reason
         == "state_snapshot_index_prior_checkpoint_missing_after_history"
     )
+    state_evidence = blocked[0].state_evidence
     transition_decision = (
-        blocked[0].state_evidence.get("registry_cutover_transition", {}).get(
-            "decision"
-        )
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
     )
     assert (
         transition_decision
         == generation.TransitionDecision.BLOCK_PREDECESSOR_PENDING
     )
+    # #1152: this is the self-healing population — the emitted §8.6
+    # predecessor's OWN exact warm-start state exists (latest usable state sits
+    # exactly at ``required_prior_cycle_time`` = T − lead_hours = 00Z), so the
+    # single-level backfill closes the gap.  No operator action is named and no
+    # runbook pointer is attached.
+    assert state_evidence["state_history"]["history_exists"] is True
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == state_evidence["required_prior_cycle_time"]
+    )
+    assert state_evidence["self_heal_expected"] is True
+    assert state_evidence["operator_action_required"] is False
+    assert "operator_action" not in state_evidence
+    assert "runbook" not in state_evidence
+    # Round-2: the signal is the predecessor's OWN full warm-start probe, not
+    # a valid_time comparison — here it verifies clean and reports ready.
+    assert state_evidence["self_heal_probe"] == {"ready": True, "reason": None}
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
+
+
+def test_multi_cycle_gap_flags_operator_action_despite_earlier_history(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1152: ≥2-cycle gap → operator action even though history_exists=True.
+
+    Fixture = the T15(b) self-heal anchor above with ONE state-index change:
+    the single current-generation entry moves back one more cycle, to
+    ``valid_time`` 2026-05-20T12Z (= T − 2·lead_hours for the 12Z candidate).
+    The strictly-earlier probe still reports ``history_exists=True``, but the
+    latest usable state is NOT the emitted §8.6 predecessor's own warm-start
+    state (``required_prior_cycle_time`` = 2026-05-21T00Z).  §8.6 steps back a
+    single level per pass, so the emitted predecessor blocks on exactly this
+    shape again and the gap is a fixpoint: it must NOT be labeled self-healing.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    # Current-generation history TWO cycles before the candidate: the
+    # generation-scoped matrix signal still sees current-generation history
+    # (→ block_predecessor_pending) and the strictly-earlier probe still
+    # reports history_exists=True, but the predecessor's own state is absent.
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_two_cycle_gap",
+                valid_time="2026-05-20T12:00:00Z",
+                cycle_id="gfs_2026052000",
+                lead_hours=12,
+            )
+        ],
+    )
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # Round-2: the discriminator is NOT history_exists — it is True here — and
+    # NOT a valid_time comparison either; it is the emitted predecessor's OWN
+    # full warm-start probe (``strict_warm_start_evidence(
+    # valid_time=required_prior_cycle_time, …).ready``).  The valid_time values
+    # asserted below merely document this fixture's geometry (latest usable
+    # state one cycle short of the predecessor slot); they are not the rule.
+    assert state_evidence["state_history"]["history_exists"] is True
+    assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == "2026-05-20T12:00:00Z"
+    )
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    # Round-2: the predecessor's own probe finds nothing at 00Z at all.
+    assert state_evidence["self_heal_probe"] == {
+        "ready": False,
+        "reason": "state_snapshot_index_exact_checkpoint_missing",
+    }
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
+
+
+def test_wrong_generation_state_at_predecessor_slot_flags_operator_action(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1152 round-2: OLD-generation checkpoint at T − lead → operator action.
+
+    Fixture = the T15(b) self-heal anchor with the entry at the predecessor
+    slot (2026-05-21T00Z) swapped to an OLD-generation checksum, plus a
+    current-generation entry one cycle further back (2026-05-20T12Z) so the
+    transition matrix still reaches ``block_predecessor_pending``.
+
+    ``usable_state_history_evidence`` is generation-blind (it filters on
+    ``usable_flag`` only, ``state_manager.py`` :1297-1304), so the history
+    probe's ``latest_usable_state.valid_time`` DOES equal
+    ``required_prior_cycle_time`` here — a valid_time-only predicate would
+    label this self-healing.  It is not: the emitted §8.6 predecessor's own
+    gate verifies lineage and blocks permanently on the generation mismatch.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[
+            # OLD-generation checkpoint sitting exactly at the predecessor
+            # slot (T − lead_hours = 2026-05-21T00Z).
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum="a" * 64,
+                state_id="state_old_gen_at_predecessor_slot",
+                valid_time="2026-05-21T00:00:00Z",
+                cycle_id="gfs_2026052012",
+                lead_hours=12,
+            ),
+            # Current-generation history further back so the matrix takes the
+            # current-generation branch (block_predecessor_pending).
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=candidate_checksum,
+                state_id="state_current_gen_two_cycle_gap",
+                valid_time="2026-05-20T12:00:00Z",
+                cycle_id="gfs_2026052000",
+                lead_hours=12,
+            ),
+        ],
+    )
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    # Non-goal guard: the typed reason is unchanged by the round-2 predicate.
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # The generation-blind trap this test exists for: the history probe DOES
+    # report a usable state exactly at required_prior_cycle_time.
+    assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == "2026-05-21T00:00:00Z"
+    )
+    # …and the signal still says "operator", because the provider probe runs
+    # the predecessor's OWN lineage verification.
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    assert state_evidence["self_heal_probe"]["ready"] is False
+    assert (
+        state_evidence["self_heal_probe"]["reason"]
+        == "state_snapshot_index_model_package_checksum_mismatch"
+    )
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
+
+
+def test_missing_state_object_at_predecessor_slot_flags_operator_action(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1152 round-2: current-gen entry at T − lead whose object is GONE.
+
+    Fixture = the T15(b) self-heal anchor verbatim, then the predecessor
+    slot's state object is deleted from the object store after the index was
+    published.  ``usable_state_history_evidence`` never opens the object
+    (``state_manager.py`` :1297-1317), so the history probe still reports the
+    entry as the latest usable state; the emitted §8.6 predecessor's own gate
+    opens it and blocks on ``state_snapshot_index_object_missing``
+    (``state_manager.py`` :2546-2551).
+    """
+    from packages.common.object_store import LocalObjectStore
+    from services.orchestrator import scheduler as scheduler_module
+    from services.orchestrator.scheduler import ProductionSchedulerConfig
+    from tests.test_production_scheduler import (
+        FakeRegistry,
+        ProductionScheduler,
+        _gfs_default_forecast_hours,
+        _old_generation_state_entry,
+        _set_db_free_scheduler_env,
+        _write_db_free_file_provider_fixtures,
+        _write_db_free_state_index_fixture,
+    )
+    from tests.test_production_scheduler import (
+        _dt as _pdt,
+    )
+    from workers.data_adapters.base import CycleDiscovery
+
+    roots, paths = _set_db_free_scheduler_env(
+        monkeypatch, tmp_path / "db-free-local-root"
+    )
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    generated_at = _pdt("2026-05-21T18:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    candidate_checksum = (
+        fixture["package_checksum"]
+        if _looks_like_hex64(fixture["package_checksum"])
+        else "b" * 64
+    )
+    predecessor_entry = _old_generation_state_entry(
+        roots,
+        old_package_checksum=candidate_checksum,
+        state_id="state_current_gen_prior_history",
+        valid_time="2026-05-21T00:00:00Z",
+        cycle_id="gfs_2026052012",
+        lead_hours=12,
+    )
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=candidate_checksum,
+        generated_at=generated_at,
+        entries=[predecessor_entry],
+    )
+    # Delete the state object AFTER publishing so the index still advertises
+    # a usable current-generation entry at the predecessor slot.
+    LocalObjectStore(roots["object_store_root"], "s3://nhms").resolve_path(
+        predecessor_entry["state_uri"]
+    ).unlink()
+    declaration_path = tmp_path / "cutover-declaration.json"
+    declaration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": generation.CUTOVER_DECLARATION_SCHEMA_VERSION,
+                "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+                "generation": generation.derive_generation(candidate_checksum),
+                "entries": [
+                    {
+                        "model_id": "model_a",
+                        "old_checksum": "a" * 64,
+                        "new_checksum": candidate_checksum,
+                        "effective_cycle_utc": "2026-05-21T00:00:00Z",
+                        "transition_mode": "replace",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        generation.CUTOVER_DECLARATION_ENV, str(declaration_path)
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": candidate_checksum,
+        },
+    }
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            now=generated_at, allowed_cycle_hours_utc=(0, 12)
+        ),
+        registry=FakeRegistry([model]),
+        adapters={},
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "predecessor-pending cutover must not build orchestrator"
+        ),
+    )
+    candidates, blocked, _skipped, _dup, _slurm = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052112",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=12,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    assert candidates == []
+    assert len(blocked) == 1
+    assert (
+        blocked[0].reason
+        == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    )
+    state_evidence = blocked[0].state_evidence
+    assert (
+        state_evidence.get("registry_cutover_transition", {}).get("decision")
+        == "block_predecessor_pending"
+    )
+    # Object-blind history probe: still the latest usable state at T − lead.
+    assert state_evidence["required_prior_cycle_time"] == "2026-05-21T00:00:00Z"
+    assert (
+        state_evidence["state_history"]["latest_usable_state"]["valid_time"]
+        == "2026-05-21T00:00:00Z"
+    )
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    assert state_evidence["self_heal_probe"]["ready"] is False
+    assert (
+        state_evidence["self_heal_probe"]["reason"]
+        == "state_snapshot_index_object_missing"
+    )
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
 
 
 def test_env_override_blocks_predecessor_pending_without_earlier_history(
@@ -1463,6 +2067,24 @@ def test_env_override_blocks_predecessor_pending_without_earlier_history(
     # Pin the split predicate itself: the block fires even though the gate's
     # strictly-earlier history probe found nothing.
     assert state_evidence.get("state_history", {}).get("history_exists") is False
+    # #1152: this is the NON-self-healing population — with no strictly-earlier
+    # usable history the emitted predecessor reproduces the same block forever,
+    # so the evidence names the operator action and the runbook literal.
+    assert state_evidence["self_heal_expected"] is False
+    assert state_evidence["operator_action_required"] is True
+    assert state_evidence["operator_action"] == "backfill_predecessor_state"
+    assert (
+        state_evidence["runbook"]
+        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
+    )
+    # Round-2: the predecessor's own probe finds nothing at 00Z at all.
+    assert state_evidence["self_heal_probe"] == {
+        "ready": False,
+        "reason": "state_snapshot_index_exact_checkpoint_missing",
+    }
+    # Non-goal guard: the failure block is untouched by the additive signal.
+    assert state_evidence["failure"]["retryable"] is True
+    assert state_evidence["failure"]["permanent"] is False
 
 
 def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_history(
@@ -1601,6 +2223,14 @@ def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_histor
         state_evidence.get("registry_cutover_transition", {}).get("decision")
         == "block_predecessor_pending"
     )
+    # #1152 absence pin: the strict leg short-circuits BEFORE the operator-signal
+    # attachment site, so none of the signal fields may appear here.  The runbook
+    # documents the signal as an env=false (history-probe branch) artifact only;
+    # if strict mode ever grew them the runbook's routing advice would be wrong.
+    assert "operator_action_required" not in state_evidence
+    assert "self_heal_expected" not in state_evidence
+    assert "self_heal_probe" not in state_evidence
+    assert "operator_action" not in state_evidence
 
 
 def test_env_override_does_not_admit_stale_declaration(
@@ -2334,6 +2964,11 @@ def _terminal_state_save_qc_job(cycle_time: datetime) -> dict[str, Any]:
     }
 
 
+#: ``_run_wiring_a_build_candidates`` default: the run manifest mirrors whatever
+#: the journal recorded.  Pass an explicit value to drive them apart (E6).
+_MANIFEST_MIRRORS_JOURNAL = object()
+
+
 def _run_wiring_a_build_candidates(
     monkeypatch: Any,
     tmp_path: Path,
@@ -2341,6 +2976,9 @@ def _run_wiring_a_build_candidates(
     recorded_init_state_id: str | None,
     hydro_status: str | None = "complete",
     jobs: Sequence[Mapping[str, Any]] | None = None,
+    journal_identity_field: str = "init_state_id",
+    manifest_init_state_id: Any = _MANIFEST_MIRRORS_JOURNAL,
+    repository_factory: Any | None = None,
 ) -> tuple[list[Any], list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive ``_build_candidates`` over one journal-recognised completed cycle T.
 
@@ -2425,14 +3063,19 @@ def _run_wiring_a_build_candidates(
         jobs=[dict(job) for job in (jobs or [])],
     )
     if hydro_status is not None and recorded_init_state_id is not None:
-        latest["hydro_run"]["init_state_id"] = recorded_init_state_id
+        latest["hydro_run"][journal_identity_field] = recorded_init_state_id
     _write_json(journal_root / "latest" / "gfs" / cycle_segment / "model_a.json", latest)
     # The run manifest keeps the pre-existing ``terminal_run_manifest_missing``
     # leg from firing first, so the else-leg under test is reached.
+    manifest_state_id = (
+        recorded_init_state_id
+        if manifest_init_state_id is _MANIFEST_MIRRORS_JOURNAL
+        else manifest_init_state_id
+    )
     run_manifest = Path(roots["object_store_root"]) / "runs" / run_id / "input" / "manifest.json"
     run_manifest.parent.mkdir(parents=True, exist_ok=True)
     run_manifest.write_text(
-        json.dumps({"initial_state": {"quality": "fresh", "state_id": recorded_init_state_id}}),
+        json.dumps({"initial_state": {"quality": "fresh", "state_id": manifest_state_id}}),
         encoding="utf-8",
     )
 
@@ -2440,7 +3083,11 @@ def _run_wiring_a_build_candidates(
         ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 6, 12, 18)),
         registry=FakeRegistry([model]),
         adapters={},
-        active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
+        active_repository=(
+            repository_factory(journal_root)
+            if repository_factory is not None
+            else scheduler_module.FileOrchestrationJournalRepository(journal_root)
+        ),
         orchestrator_factory=lambda _source_id: pytest.fail(
             "this seam must not build an orchestrator"
         ),
@@ -2580,6 +3227,386 @@ def test_build_candidates_declines_judgement_on_superseded_hydro_placeholder(
     assert blocked == []
     assert len(skipped) == 1
     assert skipped[0]["reason"] == "terminal_pipeline_success"
+
+
+def _wiring_a_journal_identity(cycle_time: datetime, *, model_id: str = "model_a") -> str | None:
+    """Wiring B's verdict on the journal ``_run_wiring_a_build_candidates`` just wrote."""
+    import os
+
+    from services.orchestrator import scheduler as scheduler_module
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(
+        Path(os.environ["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    )
+    return repository.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id=model_id
+    )
+
+
+def test_build_candidates_declines_judgement_on_run_manifest_backfilled_identity(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E6 (#1157 D1): journal has no id, the run manifest has a stale one.
+
+    ``chain_repository_state`` backfills the manifest's ``state_id`` onto the
+    candidate-state ``hydro_run`` row, so reading that row made Wiring A judge
+    an identity the JOURNAL never recorded — while the discovery-side accessor
+    declined.  Both wirings must now agree on no judgement.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=None,
+        manifest_init_state_id=_wrong_suffix_init_state_id(),
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "terminal_hydro_success"
+    # Wiring B agrees: the journal recorded nothing to judge.
+    assert _wiring_a_journal_identity(_pdt("2026-05-21T12:00:00Z")) is None
+
+
+def test_build_candidates_declines_judgement_on_bare_state_id_alias(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E6 (#1157 D1): a wrong-suffix id recorded ONLY under the bare ``state_id``.
+
+    The shared alias table ``_INIT_STATE_FIELD_ALIASES`` still resolves that
+    key for strict warm-start comparison (unchanged by this issue), but the
+    journal accessor's alias set is ``init_state_id``/``initial_state_id``
+    only — so switching Wiring A onto the accessor makes both wirings decline.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=_wrong_suffix_init_state_id(),
+        journal_identity_field="state_id",
+        manifest_init_state_id=None,
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "terminal_hydro_success"
+    assert _wiring_a_journal_identity(_pdt("2026-05-21T12:00:00Z")) is None
+
+
+def test_shared_init_state_alias_table_is_unchanged() -> None:
+    """"Must preserve": alias convergence came from swapping the ACCESSOR.
+
+    Narrowing the shared table instead would silently change strict warm-start
+    matching for legacy bare-``state_id`` rows, which is out of scope here.
+    """
+    from services.orchestrator.scheduler_init_state_match import _INIT_STATE_FIELD_ALIASES
+
+    assert _INIT_STATE_FIELD_ALIASES["state_id"] == (
+        "init_state_id",
+        "initial_state_id",
+        "state_id",
+    )
+
+
+# ---------------------------------------------------------------------------
+# §8.7 breaker (#1157): the candidate-side demotion from retry to blocked.
+# ---------------------------------------------------------------------------
+
+
+def _cohort_master_recording(
+    cycle_time: datetime,
+    init_state_id: str,
+    *,
+    job_suffix: str = "",
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """A terminal-success forecast cohort master that recorded ``init_state_id``.
+
+    ``quarantine_rerun_model_ids=None`` omits the provenance field entirely —
+    the shape of an unrelated whitelisted replacement, and of every journal
+    written before #1157.
+    """
+    from workers.data_adapters.base import cycle_id_for, format_cycle_time
+
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    row = {
+        "job_id": f"job_{run_id}_forecast{job_suffix}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": run_id,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "succeeded",
+        "model_id": None,
+        "init_state_identities": [
+            {"array_task_id": 0, "model_id": "model_a", "init_state_id": init_state_id}
+        ],
+    }
+    if quarantine_rerun_model_ids is not None:
+        row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
+    return row
+
+
+def test_build_candidates_breaker_demotes_quarantine_after_a_stamped_rerun(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E3 (R1): a provenance-stamped rerun that re-recorded the token fail-stops.
+
+    The demoted decision must land the candidate in ``blocked`` — not in the
+    submission set — carrying both tokens, the occurrence count and a
+    manual-retry-required policy, so an operator can see why the loop stopped.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=[
+            # The original defect run: no provenance, and none needed — the
+            # current positive mismatch is its witness.
+            _cohort_master_recording(cycle_time, recorded_init_state_id),
+            # The quarantine rerun that came back with the same stale lineage.
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                job_suffix="_retry_1",
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ],
+    )
+
+    assert skipped == []
+    assert candidates == []
+    assert len(blocked) == 1
+    assert blocked[0].reason == "journal_predecessor_identity_quarantine_breaker_engaged"
+    evidence = blocked[0].state_evidence
+    assert evidence["decision"] == "blocked_journal_predecessor_identity_quarantine"
+    assert evidence["reason"] == "journal_predecessor_identity_quarantine_breaker_engaged"
+    identity = evidence["journal_predecessor_identity"]
+    assert identity["recorded_init_state_id"] == recorded_init_state_id
+    assert identity["expected_init_state_id"] == _expected_init_state_id()
+    assert identity["required_lead_hours"] == 6
+    assert identity["quarantined_skip_reason"] == "terminal_hydro_success"
+    assert identity["occurrences"] == 1
+    assert evidence["retry_policy"] == {
+        "automatic_retry_allowed": False,
+        "manual_retry_required": True,
+        "occurrences": 1,
+        "occurrence_threshold": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "leg",
+    ["no_masters", "unstamped_replacements", "legacy_rows", "other_models_stamp"],
+)
+def test_build_candidates_keeps_quarantine_retry_without_stamped_rerun(
+    monkeypatch: Any,
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """E3 (R1) pre-arming pins: only a PROVEN failed rerun may fail-stop.
+
+    ``unstamped_replacements`` is the Class-B defect itself: an unrelated
+    whitelisted resubmit (missing run manifest, or a missing-forecast-output
+    recompute after a Slurm failure) mints a second same-token master.  Under
+    a bare "two masters" count that pre-armed the breaker, so the very FIRST
+    quarantine judgement fail-stopped and the convergence layer never ran.
+    ``legacy_rows`` is the same shape as every journal written before #1157.
+    """
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+    if leg == "no_masters":
+        jobs: list[dict[str, Any]] = []
+    elif leg == "other_models_stamp":
+        jobs = [
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                quarantine_rerun_model_ids=["model_b"],
+            )
+        ]
+    else:
+        # Two same-token masters, neither stamped for this model.
+        jobs = [
+            _cohort_master_recording(cycle_time, recorded_init_state_id),
+            _cohort_master_recording(
+                cycle_time, recorded_init_state_id, job_suffix="_retry_1"
+            ),
+        ]
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=jobs,
+    )
+
+    assert skipped == []
+    assert blocked == []
+    assert len(candidates) == 1
+    assert candidates[0].state_evidence["decision"] == (
+        "retry_journal_predecessor_identity_mismatch"
+    )
+
+
+def test_build_candidates_keeps_quarantine_retry_without_occurrence_accessor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E3 fail-toward-liveness: no occurrence accessor -> breaker disengaged.
+
+    A repository that cannot answer "how many times" must never be read as
+    "zero times is fine to fail-stop on".  One more rerun costs a cycle; a
+    wrong fail-stop costs operator time on a cycle that was still converging.
+    """
+    from services.orchestrator import scheduler as scheduler_module
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+
+    class NoOccurrenceAccessorRepository(scheduler_module.FileOrchestrationJournalRepository):
+        completed_pipeline_init_state_id_occurrences = None
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = _run_wiring_a_build_candidates(
+        monkeypatch,
+        tmp_path,
+        recorded_init_state_id=recorded_init_state_id,
+        jobs=[
+            _cohort_master_recording(
+                cycle_time,
+                recorded_init_state_id,
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        repository_factory=NoOccurrenceAccessorRepository,
+    )
+
+    assert skipped == []
+    assert blocked == []
+    assert len(candidates) == 1
+    assert candidates[0].state_evidence["decision"] == (
+        "retry_journal_predecessor_identity_mismatch"
+    )
+
+
+def test_build_candidates_quarantines_terminal_completed_cycle_skip(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """E7: the ``terminal_completed_cycle`` skip reason reaches the filter.
+
+    It is the only completed-type skip reachable under
+    ``NHMS_REQUIRE_FORECAST_WARM_START=true`` that never had an identity gate,
+    so its shape is exercised directly at the decision seam: same evidence
+    contract as the ``terminal_hydro_success`` shape, only the quarantined
+    reason differs.
+    """
+    from types import SimpleNamespace
+
+    from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+    from services.orchestrator.scheduler_state import CandidateStateDecision
+    from tests.test_production_scheduler import _dt as _pdt
+
+    cycle_time = _pdt("2026-05-21T12:00:00Z")
+    recorded_init_state_id = _wrong_suffix_init_state_id()
+    candidate = SimpleNamespace(
+        source_id="gfs",
+        model_id="model_a",
+        cycle_time_utc=cycle_time,
+    )
+    repository = SimpleNamespace(
+        completed_pipeline_init_state_id=(
+            lambda *, source_id, cycle_time, model_id: recorded_init_state_id
+        ),
+        # No stamped quarantine rerun has completed yet, so the breaker is
+        # disengaged and this shape must still produce the retry.
+        completed_pipeline_init_state_id_occurrences=(
+            lambda *, source_id, cycle_time, model_id, init_state_id: 0
+        ),
+    )
+    context = SimpleNamespace(
+        active_repository=repository,
+        required_lead_hours_for_candidate=lambda _candidate, _cycle: 6,
+    )
+
+    decision = scheduler_candidates_module._journal_predecessor_identity_quarantine(
+        context,
+        candidate,
+        SimpleNamespace(),
+        CandidateStateDecision(
+            "skip",
+            "terminal_completed_cycle",
+            {"decision": "skip_terminal", "terminal_source": "forecast_cycle"},
+        ),
+    )
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "journal_predecessor_identity_mismatch"
+    assert decision.evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    identity = decision.evidence["journal_predecessor_identity"]
+    assert identity["recorded_init_state_id"] == recorded_init_state_id
+    assert identity["expected_init_state_id"] == _expected_init_state_id()
+    assert identity["required_lead_hours"] == 6
+    assert identity["quarantined_skip_reason"] == "terminal_completed_cycle"
+
+
+def test_journal_identity_quarantine_breaker_helper_is_total() -> None:
+    """The injected-accessor breaker predicate never raises and never over-counts."""
+    from types import SimpleNamespace
+
+    from tests.test_production_scheduler import _dt as _pdt
+
+    count = generation.journal_identity_quarantine_occurrence_count
+    engaged = generation.journal_identity_quarantine_breaker_engaged
+    kwargs = {
+        "source_id": "gfs",
+        "cycle_time": _pdt("2026-05-21T12:00:00Z"),
+        "model_id": "model_a",
+        "recorded_init_state_id": _wrong_suffix_init_state_id(),
+    }
+
+    def repository_returning(value: Any) -> Any:
+        return SimpleNamespace(
+            completed_pipeline_init_state_id_occurrences=(
+                lambda *, source_id, cycle_time, model_id, init_state_id: value
+            )
+        )
+
+    def raising(*, source_id: str, cycle_time: Any, model_id: str, init_state_id: str) -> int:
+        raise RuntimeError("journal read exploded")
+
+    assert count(None, **kwargs) == 0
+    assert count(SimpleNamespace(), **kwargs) == 0
+    assert count(
+        SimpleNamespace(completed_pipeline_init_state_id_occurrences=raising), **kwargs
+    ) == 0
+    assert count(repository_returning("not-a-number"), **kwargs) == 0
+    assert count(repository_returning(-3), **kwargs) == 0
+    assert count(repository_returning(2), **kwargs) == 2
+
+    # R1: the counted rows are provenance-stamped reruns, so ONE proven failed
+    # convergence attempt is the fail-stop trigger.
+    assert engaged(0) is False
+    assert engaged(1) is True
+    assert engaged(7) is True
+    assert engaged(None) is False
+    assert engaged("two") is False
 
 
 # ---------------------------------------------------------------------------
@@ -3767,3 +4794,115 @@ def test_first_cycle_qualified_package_admits_candidate_carrying_the_ic_digest(
     assert evidence["ready"] is True
     assert evidence["packaged_ic_checksum"] == PACKAGE_IC_SHA256
     assert evidence["cold_start_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1196: the NHMS_REQUIRE_FORECAST_WARM_START compat toggle is three-valued.
+#
+# ``forecast_warm_start_env_enabled`` used to fold every
+# ``OrchestratorConfig.from_env()`` failure into ``False`` with zero logging,
+# which is the value that ENABLES the D8.9 terminal-skip shortcut at
+# ``scheduler_core._strict_warm_start_for_candidate``.  "The check could not
+# be completed" must stay distinguishable from "the check answered no".
+# ---------------------------------------------------------------------------
+
+#: Logger the gate warns on — asserted by name so a module move cannot leave
+#: the operator-facing warning silently unrouted.
+_GATE_LOGGER = "services.orchestrator.scheduler_generation_gate"
+
+#: Token the unreadable-env warning carries.
+_UNREADABLE_TOKEN = "SCHEDULER_WARM_START_ENV_UNREADABLE"
+
+
+def test_warm_start_env_toggle_is_three_valued(monkeypatch: Any) -> None:
+    """#1196 verdict 1: true -> True, false -> False, unset -> False,
+    unreadable -> None.  The unreadable state has its own value; it never
+    borrows the "explicitly disabled" one."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is True
+
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is False
+
+    # Unset parses to the ``_env_flag(..., default=False)`` documented default
+    # (chain_config.py:154 + :168-171).  ``delenv`` keeps an inherited process
+    # env out of the verdict.
+    monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is False
+
+    # An UNRELATED broken variable makes the whole orchestrator config
+    # unreadable (``int("abc")`` at chain_config.py:150).
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+    assert gate.forecast_warm_start_env_enabled(SimpleNamespace()) is None
+
+
+@pytest.mark.parametrize(
+    ("broken_env", "broken_value", "expected_cause_text"),
+    [
+        # Unrelated variable: ``int()`` names the offending VALUE.
+        (
+            "FORECAST_HORIZON_HOURS",
+            "abc",
+            "invalid literal for int() with base 10: 'abc'",
+        ),
+        # The toggle itself: ``_env_flag`` names the offending VARIABLE
+        # (chain_config.py:176).
+        (
+            "NHMS_REQUIRE_FORECAST_WARM_START",
+            "maybe",
+            "NHMS_REQUIRE_FORECAST_WARM_START must be a boolean value.",
+        ),
+    ],
+)
+def test_unreadable_warm_start_env_warns_once_per_scheduler_with_root_cause(
+    monkeypatch: Any,
+    caplog: Any,
+    broken_env: str,
+    broken_value: str,
+    expected_cause_text: str,
+) -> None:
+    """#1196 verdict 3: the unreadable verdict carries an attributable
+    WARNING — token + ``repr(exc)`` — and repeats at most once per scheduler
+    instance so a ``run_continuous`` pass cannot spam identical lines."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+    monkeypatch.setenv(broken_env, broken_value)
+    scheduler = SimpleNamespace()
+
+    with caplog.at_level(logging.WARNING, logger=_GATE_LOGGER):
+        assert gate.forecast_warm_start_env_enabled(scheduler) is None
+        assert gate.forecast_warm_start_env_enabled(scheduler) is None
+        # A DIFFERENT scheduler instance gets its own warning budget.
+        other = SimpleNamespace()
+        assert gate.forecast_warm_start_env_enabled(other) is None
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == _GATE_LOGGER and _UNREADABLE_TOKEN in record.getMessage()
+    ]
+    assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
+    for record in records:
+        # ``repr(exc)`` — the operator reads the root cause straight from the log.
+        assert expected_cause_text in record.getMessage()
+
+
+def test_readable_warm_start_env_logs_no_unreadable_warning(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    """#1196 must-preserve: a readable env emits zero new logging."""
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    scheduler = SimpleNamespace()
+
+    with caplog.at_level(logging.WARNING, logger=_GATE_LOGGER):
+        for value, expected in (("true", True), ("false", False)):
+            monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", value)
+            assert gate.forecast_warm_start_env_enabled(scheduler) is expected
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _UNREADABLE_TOKEN in record.getMessage()
+    ] == []

@@ -1175,6 +1175,35 @@ def test_example_validates_against_schema() -> None:
     jsonschema.validate(example, _load_schema())
 
 
+# #1389: the four committed historical runner receipts are a Must-preserve of
+# openspec change compression-receipt-budget-audit — tightening the schema's
+# 1.0/2.0 branches must go red here, not silently invalidate the archive.
+# terminal-replay-*.json shares the directory and even schema_version "2.0"
+# but belongs to the live-evidence schema family, so selection is by filename
+# prefix, deliberately NOT by schema_version dispatch.
+_COMMITTED_RECEIPT_DIR = _ROOT / "docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-compression"
+_COMMITTED_RUNNER_RECEIPTS = sorted(
+    path
+    for path in _COMMITTED_RECEIPT_DIR.glob("*.json")
+    if path.name.startswith(("dry-run-", "enforce-"))
+)
+
+
+def test_committed_runner_receipt_glob_is_not_silently_empty() -> None:
+    # Guard the guard: a mistyped glob/prefix must not fake-green the family.
+    assert len(_COMMITTED_RUNNER_RECEIPTS) >= 4, _COMMITTED_RUNNER_RECEIPTS
+
+
+@pytest.mark.parametrize(
+    "receipt_path",
+    _COMMITTED_RUNNER_RECEIPTS,
+    ids=lambda path: path.name,
+)
+def test_committed_historical_receipts_stay_valid_against_schema(receipt_path: Path) -> None:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, _load_schema())
+
+
 def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
     receipt = _example_receipt()
     del receipt["head_sha"]

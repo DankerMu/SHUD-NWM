@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import ast
+import copy
 import errno
 import hashlib
+import inspect
 import json
+import logging
 import os
 import pwd
 import re
@@ -28,6 +31,7 @@ from services.orchestrator import cli
 from services.orchestrator import file_orchestration_journal as file_orchestration_journal_module
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_backfill_predecessor as scheduler_backfill_predecessor_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_config as scheduler_config_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
@@ -35,7 +39,10 @@ from services.orchestrator import scheduler_evidence as scheduler_evidence_modul
 from services.orchestrator import scheduler_evidence_payload as scheduler_evidence_payload_module
 from services.orchestrator import scheduler_execution as scheduler_execution_module
 from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
+from services.orchestrator import scheduler_generation as scheduler_generation_module
+from services.orchestrator import scheduler_generation_gate as scheduler_generation_gate_module
 from services.orchestrator import scheduler_lease as scheduler_lease_module
+from services.orchestrator import scheduler_no_progress as scheduler_no_progress_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
@@ -81,10 +88,12 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_preflight import _production_slurm_env
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 from workers.shud_runtime import runtime as shud_runtime_module
@@ -4656,6 +4665,7 @@ def test_candidate_state_decision_scheduler_monkeypatch_active_jobs_compat(monke
 
 def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_compat(
     monkeypatch: Any,
+    tmp_path: Path,
 ) -> None:
     candidate = _scheduler_candidate_fixture()
     manifest_uri = "s3://nhms/raw/gfs/2026052106/manifest.json"
@@ -4665,6 +4675,13 @@ def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_comp
         calls.append((patched_candidate.candidate_id, patched_manifest_uri))
         return True
 
+    # #1393 seam 8: the raw-manifest legs now reach the store helper THROUGH
+    # ``_artifact_uri_missing_status``, which short-circuits fail-closed before any
+    # probe runs when no root is configured.  A per-test real root (the shared
+    # ``_scheduler_candidate_fixture`` still carries none) restores the geometry in
+    # which the monkeypatched helper is actually consulted; every assertion below
+    # is unchanged.
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setattr(scheduler_module, "_object_manifest_is_missing", patched_manifest_missing)
 
     decision = scheduler_module._candidate_state_decision(
@@ -5682,13 +5699,14 @@ def _production_previous_attempt(state: Mapping[str, Any]) -> int:
     Mirrors ``scheduler_state_failure._manual_retry_state_evidence``
     (``services/orchestrator/scheduler_state_failure.py``): the caller derives the value it
     hands ``_manual_retry_new_attempt`` from ``_state_retry_attempt(state,
-    stage=_failed_stage(state))``.  Tests that pass a literal instead are structurally blind to
-    that composition -- which is where #1287's round-2 defect lived.
+    stage=_candidate_failed_stage(state))``.  Tests that pass a literal instead are
+    structurally blind to that composition -- which is where #1287's round-2 defect lived,
+    and the resolver is the CANDIDATE-scoped one since #1300.
     """
 
     return scheduler_state_failure_module._state_retry_attempt(
         state,
-        stage=scheduler_state_failure_module._failed_stage(state),
+        stage=scheduler_state_failure_module._candidate_failed_stage(state),
     )
 
 
@@ -6425,6 +6443,265 @@ def test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_th
     assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
 
 
+def test_cancelled_cycle_marker_target_still_pins_on_the_same_stage_arm() -> None:
+    """#1294 discriminating pair 1: a ``cancelled`` cycle-scope row is a live MARKER TARGET.
+
+    ``cancelled`` is a first-class manual-retry source (``retry.MANUAL_RETRY_SOURCE_STATUSES``)
+    and this module's blocker scan already treats it as a blocker, so an operator repairing a
+    cancelled cohort master row is repairing a live failure -- exactly as #1287 established on
+    the candidate side.  Reading the target as a STALE marker target (the bare
+    ``FAILED_PIPELINE_STATUSES`` test) refused both arms of the pin rule and silently dropped
+    the operator's counter back to ``previous_attempt + 1`` (0 -> 1), which re-mints an attempt
+    number the terminal cohort row already consumed -- the ``skipped_duplicate_submission``
+    silent failure #1201 already delivered once.
+
+    Arm 1 is the one under test: ``failed_stage`` names the marker job's own stage, so the
+    cycle download failure IS what this decision repairs and its counter (5) must survive.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            _decision_path_own_forecast_job(),
+            _decision_path_cycle_download_job(status="cancelled"),
+        ],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: both rows survive filtering, so the marker really resolves to its cycle-scope
+    # row and only the marker-target status domain can decide this state.  The status is the
+    # ONLY difference from the failed baseline this test's regression twin asserts.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_cycle_gfs_2026052106_download",
+    ]
+    assert decision_state["pipeline_jobs"][1]["status"] == "cancelled"
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+def test_cancelled_cycle_marker_target_still_pins_on_the_only_failure_left_arm() -> None:
+    """#1294 discriminating pair 2: the same widening on arm 2, the production cohort shape.
+
+    No explicit failed stage (the cohort projection's shape) and every model-scoped row
+    succeeded, so the cancelled cycle download failure is the only failure left and nothing
+    else could be the repair target.  A stale-target verdict here charges the operator's
+    cohort restart to ``previous_attempt + 1`` instead of the counter they pinned.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "succeeded", "error_code": None},
+            _decision_path_cycle_download_job(status="cancelled"),
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: no explicit failed stage, so only arm 2 can decide, and the cancelled target
+    # really is on the state the decision reads.
+    assert "failed_stage" not in decision_state
+    assert decision_state["pipeline_jobs"][1]["job_id"] == "job_cycle_gfs_2026052106_download"
+    assert decision_state["pipeline_jobs"][1]["status"] == "cancelled"
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+@pytest.mark.parametrize(
+    "target_status",
+    ["failed", "permanently_failed", "partially_failed", "submission_failed"],
+)
+def test_failed_cycle_marker_target_statuses_keep_pinning(target_status: str) -> None:
+    """Regression guard: widening the marker-target domain must not lose what it covered.
+
+    ``_manual_retry_blocking_pipeline_status`` minus ``ACTIVE_PIPELINE_STATUSES`` is exactly
+    ``FAILED_PIPELINE_STATUSES`` plus ``cancelled`` (the two constant sets are disjoint), so
+    the widening is strictly additive -- these four statuses must answer 5 as they always did.
+    ``submission_failed`` also proves the placeholder gate is not tripped by status alone: this
+    row's id carries no ``_retry_`` suffix, so it is a real submission failure, not an
+    unsubmitted auto-retry placeholder.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            _decision_path_own_forecast_job(),
+            _decision_path_cycle_download_job(status=target_status),
+        ],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+@pytest.mark.parametrize("target_status", ["cancelled", "failed"])
+def test_placeholder_shaped_cycle_marker_target_outside_the_gate_still_pins(target_status: str) -> None:
+    """Predicate-interaction guard: the placeholder gate is status-bound on the MARKER side too.
+
+    ``_job_is_unsubmitted_auto_retry_placeholder`` recognises a row only at ``pending`` /
+    ``submission_failed``; the retry-suffixed id and the absent Slurm ids are SHAPE, not verdict.
+    A cohort master row that reached ``cancelled`` or ``failed`` while carrying that shape is
+    therefore a live failure and a valid repair target -- exactly the reading the blocker scan and
+    the candidate-side twin give it
+    (``test_cancelled_placeholder_shaped_row_blocks_the_pin_exactly_as_it_blocks_the_blocker_scan``),
+    so refusing it here on shape alone would re-split the one row-level domain #1294 merged.
+
+    ``cancelled`` is the flip this change delivers; ``failed`` answers identically on master and is
+    kept beside it because a SHAPE-based (status-blind) placeholder exclusion bolted onto the
+    marker-target arm would take BOTH silently, and no other test covers the failed leg on a
+    placeholder-shaped id.  ``failed_stage`` names the target's own stage and the candidate's own
+    forecast row is a live failure, so arm 1 is the only arm open: the marker-target liveness test
+    is the only thing that can refuse this pin.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _decision_path_cycle_download_job(
+        job_id="job_cycle_gfs_2026052106_download_retry_1",
+        status=target_status,
+        retry_count=1,
+        slurm_job_id=None,
+        array_task_id=None,
+    )
+    marker = _decision_path_manual_retry_marker(
+        entity_id=str(target_job["job_id"]),
+        retry_count=5,
+        previous_job_id=str(target_job["job_id"]),
+        event_id=42,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), target_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise 1: the row really carries placeholder SHAPE -- it would trip the gate at an in-gate
+    # status -- so the test is not vacuously asserting the pin on an ordinary row id.
+    assert (
+        scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(
+            {**target_job, "status": "pending"}
+        )
+        is True
+    )
+    # Premise 2: at this status the gate does not fire, so the row is a LIVE failure.
+    assert scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(target_job) is False
+    assert scheduler_state_manual_retry_module._job_row_is_live_failure(target_job) is True
+    # Premise 3: the target row survives filtering, so the marker resolves to it and the verdict
+    # comes from the resolved-row rule -- not from the row-absent arm.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_model_a_forecast",
+        "job_cycle_gfs_2026052106_download_retry_1",
+    ]
+    assert decision_state["pipeline_jobs"][1]["status"] == target_status
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+@pytest.mark.parametrize(
+    ("target_overrides", "placeholder_gate"),
+    [
+        pytest.param({"repair_status": "repaired"}, False, id="repaired_stage_evidence"),
+        pytest.param(
+            {
+                "job_id": "job_cycle_gfs_2026052106_download_retry_1",
+                "status": "submission_failed",
+                "retry_count": 1,
+            },
+            True,
+            id="unsubmitted_auto_retry_placeholder",
+        ),
+        pytest.param(
+            {
+                "job_id": "job_cycle_gfs_2026052106_download_retry_1",
+                "status": "pending",
+                "error_code": None,
+                "retry_count": 1,
+            },
+            True,
+            id="unsubmitted_auto_retry_placeholder_pending",
+        ),
+        pytest.param({"status": "succeeded", "error_code": None}, False, id="succeeded"),
+        pytest.param({"status": "pending", "error_code": None}, False, id="active_pending"),
+        pytest.param({"status": "queued", "error_code": None}, False, id="active_queued"),
+        pytest.param({"status": "submitted", "error_code": None}, False, id="active_submitted"),
+        pytest.param({"status": "running", "error_code": None}, False, id="active_running"),
+    ],
+)
+def test_stale_cycle_marker_targets_still_refuse_the_pin(
+    target_overrides: dict[str, Any],
+    placeholder_gate: bool,
+) -> None:
+    """Regression guard: the exclusions the widened domain keeps, on the marker-target side.
+
+    A repaired stage-evidence row and an unsubmitted auto-retry placeholder keep a literal
+    failure status while carrying no blocking force anywhere else in this module, a succeeded
+    row is not a failure at all, and an ACTIVE row is work still in flight -- none is a repair
+    target, so the operator's counter (5) must stay out of the candidate's budget even though
+    ``failed_stage`` names the target's own stage (arm 1 is only reached once the target is a
+    live failure).
+
+    The four ACTIVE statuses are the marker-target leg's oracle for the
+    ``status not in ACTIVE_PIPELINE_STATUSES`` conjunct: ``_manual_retry_blocking_pipeline_status``
+    spans the ACTIVE half too, so dropping that conjunct here would read an in-flight cycle
+    download as a live repair target and charge its counter to this candidate.  None of the four
+    ids carries a ``_retry_`` suffix, so the unsubmitted-placeholder gate is not what refuses
+    them -- only the ACTIVE subtraction is.
+
+    ``placeholder_gate`` records WHY each param refuses, and is asserted as a premise so the
+    reason cannot silently change: only the two in-gate statuses of
+    ``_job_is_unsubmitted_auto_retry_placeholder`` trip it.  ``submission_failed`` is the
+    gate-only anchor (a non-ACTIVE status, so nothing else refuses it), while the ``pending``
+    placeholder is over-determined -- the ACTIVE subtraction refuses it too -- and is carried
+    because the delta enumerates the placeholder's own status pair, not because it discriminates
+    the gate on its own.  The pinning direction's placeholder-SHAPED counterpart (out-of-gate
+    ``cancelled``/``failed``) is
+    ``test_placeholder_shaped_cycle_marker_target_outside_the_gate_still_pins``.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _decision_path_cycle_download_job(**target_overrides)
+    assert (
+        scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder(target_job)
+        is placeholder_gate
+    )
+    marker = _decision_path_manual_retry_marker(
+        entity_id=str(target_job["job_id"]),
+        retry_count=5,
+        previous_job_id=str(target_job["job_id"]),
+        event_id=42,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), target_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the target row survives filtering, so the marker resolves to it and the verdict
+    # comes from the resolved-row rule -- not from the row-absent arm, which would pin here on
+    # the id's own stage token.
+    assert str(target_job["job_id"]) in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
 @pytest.mark.parametrize(
     ("own_status", "hydro_status", "decision_pins"),
     [
@@ -6511,6 +6788,1198 @@ def test_cohort_download_shape_still_pins_without_a_live_candidate_failure(
     assert decision is not None
     assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
     assert decision.evidence["retry_policy"]["attempt"] == 5
+
+
+_PROJECTED_CYCLE_RUN_ID = "cycle_gfs_2026052106"
+_PROJECTED_DOWNLOAD_JOB_ID = "job_cycle_gfs_2026052106_download"
+_PROJECTED_DOWNLOAD_RETRY_JOB_ID = "job_cycle_gfs_2026052106_download_retry_1"
+_PROJECTED_RAW_MANIFEST_URI = "raw/gfs/2026052106/manifest.json"
+
+
+def _projected_state_from_rows(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    jobs: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    forecast_cycle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """State built by the REAL repository projection, never by hand-stamped annotations.
+
+    ``chain_repository_state.candidate_state_from_rows`` is the production projection: it runs
+    ``chain_source_cycle._source_cycle_download_repair_state`` and
+    ``chain_repository_state._candidate_manual_stage_repair_state`` over the rows and events, so
+    ``repair_status`` / ``active_blocker`` / ``repaired_stage_evidence`` are PRODUCED here exactly
+    as production produces them.  A test that stamps those annotations onto a row by hand cannot
+    see the producer's own status gate at all -- which is precisely where this change's
+    round-3 defect lived: the consumers had been widened to
+    ``FAILED_PIPELINE_STATUSES | {"cancelled"}`` while every producer still filtered repair
+    targets on the bare failed set, so a repaired ``cancelled`` row could never carry the
+    annotation its consumers were newly reading.
+    """
+
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id=candidate.source_id,
+        cycle_time=candidate.cycle_time_utc,
+        model_id=candidate.model_id,
+        run_id=candidate.run_id,
+        forcing_version_id=candidate.forcing_version_id,
+        candidate_id=candidate.candidate_id,
+        hydro_run=None,
+        pipeline_jobs=jobs,
+        pipeline_events=events,
+        forcing_version=None,
+        forecast_cycle=forecast_cycle,
+        retry_limit=3,
+    )
+    assert state is not None
+    return state
+
+
+def _projected_cycle_download_job(**overrides: Any) -> dict[str, Any]:
+    job: dict[str, Any] = {
+        "job_id": _PROJECTED_DOWNLOAD_JOB_ID,
+        "run_id": _PROJECTED_CYCLE_RUN_ID,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "status": "cancelled",
+        "error_code": "NODE_FAILURE",
+        "slurm_job_id": "7100",
+        "retry_count": 4,
+        "submitted_at": "2026-05-21T06:00:00Z",
+        "finished_at": "2026-05-21T06:10:00Z",
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+def _projected_succeeded_own_forecast_job(**overrides: Any) -> dict[str, Any]:
+    job: dict[str, Any] = {
+        "job_id": "job_model_a_forecast",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "cycle_id": "gfs_2026052106",
+        "model_id": "model_a",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:05:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+def _projected_repair_event(
+    *,
+    entity_id: str,
+    previous_job_id: str,
+    retry_count: int,
+    event_id: int,
+    created_at: str,
+) -> dict[str, Any]:
+    """The ``record_manual_repair`` event that links a successful retry to what it repairs."""
+
+    return {
+        "event_id": event_id,
+        "entity_type": "pipeline_job",
+        "entity_id": entity_id,
+        "event_type": "retry",
+        "created_at": created_at,
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": retry_count,
+            "previous_job_id": previous_job_id,
+            "created_at": created_at,
+        },
+    }
+
+
+@pytest.mark.parametrize("target_status", ["cancelled", "failed"])
+def test_projected_repaired_cycle_download_target_refuses_the_pin(target_status: str) -> None:
+    """#1294 round-3 F1: the repaired-annotation PRODUCER must share the repair-target domain.
+
+    The consumer side (``_job_row_is_live_failure``) reads a repaired row as a stale marker
+    target, but the annotation that makes a row "repaired" is written by the projection, and its
+    producer gate filtered repair targets on the bare ``FAILED_PIPELINE_STATUSES`` set.  A
+    ``cancelled`` cycle-download row repaired by a succeeded ``_retry_1`` therefore never got
+    ``repair_status``/``active_blocker``/``repaired_stage_evidence`` at all, and the widened
+    marker arm read it as a LIVE target -- pinning the operator's stale counter (5) onto a
+    failure that no longer exists and re-minting an attempt the retry row already consumed
+    (the ``skipped_duplicate_submission`` silent failure of the #1201 family).
+
+    ``failed`` is the parity leg: master already annotates it, so both statuses must land on the
+    same verdict once the producer gate is the shared repair-target domain.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[
+            _projected_succeeded_own_forecast_job(),
+            _projected_cycle_download_job(status=target_status),
+            _projected_cycle_download_job(
+                job_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                status="succeeded",
+                error_code=None,
+                slurm_job_id="7101",
+                retry_count=4,
+                manual_retry_marker=True,
+                submitted_at="2026-05-21T06:12:00Z",
+                finished_at="2026-05-21T06:20:00Z",
+                updated_at="2026-05-21T06:20:00Z",
+            ),
+        ],
+        events=[
+            _projected_repair_event(
+                entity_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                previous_job_id=_PROJECTED_DOWNLOAD_JOB_ID,
+                retry_count=4,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            ),
+            _decision_path_cycle_download_marker(),
+        ],
+        forecast_cycle={
+            "cycle_id": "gfs_2026052106",
+            "source_id": "gfs",
+            "cycle_time": candidate.cycle_time_utc,
+            "status": "raw_complete",
+            "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+        },
+    )
+
+    # Premise 1: the PROJECTION produced the repaired annotations for this target -- both the
+    # row-level pair and the state-level evidence key.  Pre-fix this is where the cancelled leg
+    # died: no annotation was produced at all.
+    target_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    assert target_row["status"] == target_status
+    assert target_row["repair_status"] == "repaired"
+    assert target_row["active_blocker"] is False
+    assert target_row["repaired_by_job_id"] == _PROJECTED_DOWNLOAD_RETRY_JOB_ID
+    assert state["repaired_stage_evidence"]["original_failed_job_id"] == _PROJECTED_DOWNLOAD_JOB_ID
+    assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == _PROJECTED_DOWNLOAD_RETRY_JOB_ID
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise 2: the target row survives filtering carrying its annotation, so the verdict comes
+    # from the resolved-row rule reading a PRODUCED annotation -- not from the row-absent arm.
+    filtered_target = next(
+        job for job in decision_state["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID
+    )
+    assert filtered_target["repair_status"] == "repaired"
+    assert scheduler_state_manual_retry_module._job_row_is_live_failure(filtered_target) is False
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+def test_projected_unrepaired_cancelled_cycle_download_target_still_pins() -> None:
+    """The change's core behaviour, on the same real projection: no repair, no staleness.
+
+    Same rows as the repaired case minus the successful retry and its repair event.  The
+    projection produces no annotation (there is nothing to be repaired BY), so the cancelled
+    cohort master row is still a live repair target and the operator's counter (5) must survive.
+    This is the guard that the producer widening does not simply annotate every cancelled row.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[
+            _projected_succeeded_own_forecast_job(),
+            _projected_cycle_download_job(),
+        ],
+        events=[_decision_path_cycle_download_marker()],
+        forecast_cycle={
+            "cycle_id": "gfs_2026052106",
+            "source_id": "gfs",
+            "cycle_time": candidate.cycle_time_utc,
+            "status": "raw_complete",
+            "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+        },
+    )
+
+    # Premise: no repaired annotation anywhere -- neither on the row nor at state level.
+    target_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    assert target_row["status"] == "cancelled"
+    assert "repair_status" not in target_row
+    assert "active_blocker" not in target_row
+    assert "repaired_stage_evidence" not in state
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+@pytest.mark.parametrize(
+    ("lineage_status", "sibling_status"),
+    [
+        pytest.param("cancelled", None, id="lineage_member"),
+        pytest.param("failed", "cancelled", id="stage_sharing_sibling"),
+    ],
+)
+def test_projected_repaired_cancelled_candidate_row_reopens_the_only_failure_left_arm(
+    lineage_status: str,
+    sibling_status: str | None,
+) -> None:
+    """#1294 round-3 F1, candidate-side half: the SAME producer gate closed arm 2.
+
+    ``_candidate_manual_stage_repair_state`` writes the repaired annotations for a candidate's
+    own stage repairs, and it has two repair-target filters -- the retry lineage's members and
+    the stage-sharing siblings of the successful retry.  Both filtered on the bare
+    ``FAILED_PIPELINE_STATUSES`` set, so a ``cancelled`` candidate row repaired by a succeeded
+    ``_retry_1`` stayed a LIVE candidate-scope failure forever: arm 2 ("the cycle failure is the
+    only failure left") could never open again, and ``_restarted_stage_family`` kept charging
+    that stage's consumed counter to the fallback.  ``lineage_member`` and
+    ``stage_sharing_sibling`` put the cancelled row on one filter each, so neither can be
+    widened alone.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    jobs = [
+        _projected_succeeded_own_forecast_job(status=lineage_status, error_code="NODE_FAILURE"),
+        _projected_succeeded_own_forecast_job(
+            job_id="job_model_a_forecast_retry_1",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at="2026-05-21T06:15:00Z",
+        ),
+        _projected_cycle_download_job(status="failed"),
+    ]
+    if sibling_status is not None:
+        jobs.insert(
+            1,
+            _projected_succeeded_own_forecast_job(
+                job_id="job_model_a_forecast_sibling",
+                status=sibling_status,
+                error_code="NODE_FAILURE",
+                updated_at="2026-05-21T06:06:00Z",
+            ),
+        )
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=jobs,
+        events=[
+            _projected_repair_event(
+                entity_id="job_model_a_forecast_retry_1",
+                previous_job_id="job_model_a_forecast",
+                retry_count=1,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            ),
+            _decision_path_cycle_download_marker(),
+        ],
+    )
+
+    # Premise: the projection really repaired the CANCELLED candidate row -- that is the
+    # annotation the pre-fix producer gate could not write.
+    cancelled_job_id = "job_model_a_forecast" if sibling_status is None else "job_model_a_forecast_sibling"
+    cancelled_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == cancelled_job_id)
+    assert cancelled_row["status"] == "cancelled"
+    assert cancelled_row["repair_status"] == "repaired"
+    assert cancelled_row["active_blocker"] is False
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Consequence 1: the repaired cancelled row is no longer a live candidate-scope failure, so
+    # it contributes no stage to the restarted-stage family either.
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is False
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == set()
+    # Consequence 2: arm 2 opens again and the operator's cohort counter is pinned.
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_payload(decision_state)["new_attempt"] == 5
+
+
+_MULTI_REPAIR_FORCING_JOB_ID = "job_model_a_forcing"
+_MULTI_REPAIR_FORCING_RETRY_JOB_ID = "job_model_a_forcing_retry_1"
+_MULTI_REPAIR_FORECAST_JOB_ID = "job_model_a_forecast"
+_MULTI_REPAIR_FORECAST_RETRY_JOB_ID = "job_model_a_forecast_retry_1"
+_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID = "job_model_a_convert"
+
+
+def _multi_repair_candidate_job(
+    *,
+    job_id: str,
+    stage: str,
+    job_type: str,
+    status: str,
+    updated_at: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A candidate-scoped row of the model_a fixture at one stage."""
+
+    job: dict[str, Any] = {
+        "job_id": job_id,
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "cycle_id": "gfs_2026052106",
+        "model_id": "model_a",
+        "stage": stage,
+        "job_type": job_type,
+        "status": status,
+        "retry_count": 0,
+        "updated_at": updated_at,
+    }
+    job.update(overrides)
+    return job
+
+
+def _multi_repair_jobs(*, include_unrepaired_convert: bool) -> list[dict[str, Any]]:
+    """Two DISTINCT-stage failures on one candidate, each repaired by its own manual retry.
+
+    The operator repaired ``forcing`` first and ``forecast`` later, which is the whole #1460
+    trigger: the newer repair used to win a ``break`` and the older one lost its annotation.
+
+    ``include_unrepaired_convert`` adds a failed ``convert`` row that NO retry repairs.  It
+    shares neither ``stage`` nor ``job_type`` with either retry job, so ``_jobs_share_stage``
+    must never sweep it into the repaired set -- the over-claim guard for the widened
+    annotation face.
+    """
+
+    jobs = [
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORCING_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at="2026-05-21T06:01:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORCING_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at="2026-05-21T06:05:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORECAST_JOB_ID,
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at="2026-05-21T06:10:00Z",
+        ),
+        _multi_repair_candidate_job(
+            job_id=_MULTI_REPAIR_FORECAST_RETRY_JOB_ID,
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at="2026-05-21T06:15:00Z",
+        ),
+    ]
+    if include_unrepaired_convert:
+        jobs.insert(
+            0,
+            _multi_repair_candidate_job(
+                job_id=_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID,
+                stage="convert",
+                job_type="convert_canonical",
+                status="failed",
+                error_code="NODE_FAILURE",
+                updated_at="2026-05-21T06:02:00Z",
+            ),
+        )
+    return jobs
+
+
+def _multi_repair_events() -> list[dict[str, Any]]:
+    """One ``record_manual_repair`` event per repair, linking each retry to its target."""
+
+    return [
+        _projected_repair_event(
+            entity_id=_MULTI_REPAIR_FORCING_RETRY_JOB_ID,
+            previous_job_id=_MULTI_REPAIR_FORCING_JOB_ID,
+            retry_count=1,
+            event_id=41,
+            created_at="2026-05-21T06:05:00Z",
+        ),
+        _projected_repair_event(
+            entity_id=_MULTI_REPAIR_FORECAST_RETRY_JOB_ID,
+            previous_job_id=_MULTI_REPAIR_FORECAST_JOB_ID,
+            retry_count=1,
+            event_id=42,
+            created_at="2026-05-21T06:15:00Z",
+        ),
+    ]
+
+
+def test_projected_second_stage_repair_does_not_evict_the_first_repairs_annotation() -> None:
+    """#1460 E1: every repaired failure keeps its annotation, not just the newest one.
+
+    ``_candidate_manual_stage_repair_state`` walked the successful manual retries newest-first
+    and ``break``-ed on the first one that claimed anything, so an operator who repaired
+    ``forcing`` and then ``forecast`` lost the FORCING row's annotation entirely: no
+    ``repair_status``, no ``repaired_by_job_id``, ``active_blocker`` still in the truthy domain.
+    Every downstream consumer then resurrected it as a live blocker and pulled the restart stage
+    back to a stage that had already been repaired.
+
+    The convert row is the counter-guard: widening the annotation face to the UNION of each
+    retry job's claim set must not let ``_jobs_share_stage`` claim a failure nobody repaired.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=True),
+        events=_multi_repair_events(),
+    )
+
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+    for failed_job_id, retry_job_id in (
+        (_MULTI_REPAIR_FORCING_JOB_ID, _MULTI_REPAIR_FORCING_RETRY_JOB_ID),
+        (_MULTI_REPAIR_FORECAST_JOB_ID, _MULTI_REPAIR_FORECAST_RETRY_JOB_ID),
+    ):
+        row = rows[failed_job_id]
+        assert row["status"] == "failed"
+        assert row["repair_status"] == "repaired"
+        assert row["repaired_by_job_id"] == retry_job_id
+        assert row["superseded_by_job_id"] == retry_job_id
+        assert row["active_blocker"] is False
+
+    # Over-claim guard: only the repaired STAGES' rows carry annotations.
+    unrepaired = rows[_MULTI_REPAIR_UNREPAIRED_CONVERT_JOB_ID]
+    assert unrepaired["status"] == "failed"
+    assert "repair_status" not in unrepaired
+    assert "repaired_by_job_id" not in unrepaired
+    assert "superseded_by_job_id" not in unrepaired
+    assert "active_blocker" not in unrepaired
+
+
+def test_projected_multi_repair_evidence_still_names_the_newest_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1460 E2: widening the annotation face must not move the SINGLE evidence winner.
+
+    ``latest_repair`` is a ``max`` over the accumulated pairs keyed on (retry truth, failed
+    truth).  Every pair the older ``forcing`` retry contributes has a strictly lower retry truth,
+    and first-write-wins keeps the newest retry's own claims intact, so the winner is the same
+    ``forecast`` pair the ``break`` used to hand it -- and the restart stage derived from it must
+    not slide back to the already-repaired ``forcing``.
+
+    ``restart_stage`` is ``_stage_after("forecast")``, which the compute-terminal toggle moves to
+    ``state_save_qc``, so the toggle is pinned unset.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=True),
+        events=_multi_repair_events(),
+    )
+
+    evidence = state["repaired_stage_evidence"]
+    assert evidence["original_failed_job_id"] == _MULTI_REPAIR_FORECAST_JOB_ID
+    assert evidence["repairing_retry_job_id"] == _MULTI_REPAIR_FORECAST_RETRY_JOB_ID
+    assert evidence["manual_retry_event_id"] == 42
+    assert evidence["stage"] == "forecast"
+    assert evidence["restart_stage"] == "parse"
+    assert evidence["restart_from_stage"] == "parse"
+    # The evidence carries a restart stage, so it -- not a completed-stage scan -- supplies the
+    # projection, exactly as it did before the annotation face widened.
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+    assert state["completed_stage_evidence"] == evidence
+
+
+@pytest.mark.parametrize("include_unrepaired_convert", [False, True])
+def test_projected_multi_repair_leaves_neither_repaired_stage_live(include_unrepaired_convert: bool) -> None:
+    """#1460 E3: both repaired stages drop out of the live-failure domain downstream.
+
+    The annotation face is the only thing that tells the blocker scan a failure is historical, so
+    the evicted ``forcing`` annotation used to resurrect that row as a live candidate-scope
+    failure -- ``_restarted_stage_family`` then replayed a stage the operator had already
+    repaired.  With the unrepaired ``convert`` row present the family must be exactly
+    ``{"convert"}``: a strictly sharper statement than "empty", because it shows the two repaired
+    stages dropped out while the untouched failure stayed.
+
+    The same annotation face decides a DECISION channel, so it is pinned by absolute value here
+    (must-preserve 8): ``_completed_upstream_stage_retry_evidence`` refuses on any surviving
+    failure signal, so with both repairs annotated the fully-repaired leg yields a real
+    ``retry_after_completed_stage`` verdict, while the leg still carrying the live ``convert``
+    failure yields ``None``.  Before #1460 the evicted ``forcing`` annotation kept the failure
+    signal alive on BOTH legs and this channel was unreachable either way.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=_multi_repair_jobs(include_unrepaired_convert=include_unrepaired_convert),
+        events=_multi_repair_events(),
+    )
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    rows = {job["job_id"]: job for job in decision_state["pipeline_jobs"]}
+    for failed_job_id in (_MULTI_REPAIR_FORCING_JOB_ID, _MULTI_REPAIR_FORECAST_JOB_ID):
+        assert scheduler_state_manual_retry_module._job_row_is_live_failure(rows[failed_job_id]) is False
+
+    expected_family = {"convert"} if include_unrepaired_convert else set()
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == expected_family
+    assert (
+        scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state)
+        is include_unrepaired_convert
+    )
+
+    # The decision channel the annotation face opens, as absolutes on the real projection chain.
+    completed_retry = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(
+        candidate, decision_state, {}
+    )
+    if include_unrepaired_convert:
+        assert completed_retry is None
+    else:
+        assert completed_retry is not None
+        assert completed_retry["decision"] == "retry_after_completed_stage"
+        assert completed_retry["restart_stage"] == "parse"
+        assert completed_retry["restart_from_stage"] == "parse"
+        assert completed_retry["native_shud_resubmitted"] is False
+
+
+_SHARED_CLAIM_EARLY_FAILURE_JOB_ID = "job_model_a_forcing_early"
+_SHARED_CLAIM_EARLY_RETRY_JOB_ID = "job_model_a_forcing_early_retry_1"
+_SHARED_CLAIM_LATE_FAILURE_JOB_ID = "job_model_a_forcing_late"
+_SHARED_CLAIM_LATE_RETRY_JOB_ID = "job_model_a_forcing_late_retry_1"
+
+
+def _shared_claim_repair_rows(
+    *,
+    early_failure_at: str,
+    early_retry_at: str,
+    late_failure_at: str,
+    late_retry_at: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Two SAME-stage failures on one candidate, each with its own successful manual retry.
+
+    Same stage is the whole point: ``_jobs_share_stage`` lets the stage-widening sweep of ONE
+    retry claim the OTHER retry's failure too, so the two retries' claim sets overlap and the
+    tie-break at ``chain_repository_state.py:401`` decides who owns the shared row.  The four
+    timestamps are the geometry knob -- disjoint or interleaved claim windows.
+    """
+
+    jobs = [
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at=early_failure_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_EARLY_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at=early_retry_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            error_code="NODE_FAILURE",
+            updated_at=late_failure_at,
+        ),
+        _multi_repair_candidate_job(
+            job_id=_SHARED_CLAIM_LATE_RETRY_JOB_ID,
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="succeeded",
+            retry_count=1,
+            manual_retry_marker=True,
+            updated_at=late_retry_at,
+        ),
+    ]
+    events = [
+        _projected_repair_event(
+            entity_id=_SHARED_CLAIM_EARLY_RETRY_JOB_ID,
+            previous_job_id=_SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+            retry_count=1,
+            event_id=51,
+            created_at=early_retry_at,
+        ),
+        _projected_repair_event(
+            entity_id=_SHARED_CLAIM_LATE_RETRY_JOB_ID,
+            previous_job_id=_SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+            retry_count=1,
+            event_id=52,
+            created_at=late_retry_at,
+        ),
+    ]
+    return jobs, events
+
+
+def test_projected_shared_claim_row_is_owned_by_the_newest_retry() -> None:
+    """#1460 E14: the accumulation's tie-break is first-write-wins == NEWEST-wins.
+
+    Removing the ``break`` made every successful retry contribute a claim set, and the sets
+    overlap: the retries walk truth-descending, so the later ``late`` retry's stage-widening
+    sweep reaches back over the ``early`` failure (truth below its own) and claims it as well.
+    ``chain_repository_state.py:401`` then refuses to let the older ``early`` retry overwrite
+    that claim, which is what keeps the annotation naming the repair that actually left the
+    stage healthy.  Last-write-wins would hand the shared row to the older retry instead.
+
+    Claim windows are DISJOINT here -- ``late``'s failure is newer than ``early``'s retry, so the
+    ``:385`` upper bound keeps it out of the older retry's sweep.  That geometry moves the row
+    attribution only; the interleaved sibling leg is where the evidence winner moves too.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    jobs, events = _shared_claim_repair_rows(
+        early_failure_at="2026-05-21T06:01:00Z",
+        early_retry_at="2026-05-21T06:05:00Z",
+        late_failure_at="2026-05-21T06:07:00Z",
+        late_retry_at="2026-05-21T06:12:00Z",
+    )
+    state = _projected_state_from_rows(candidate, jobs=jobs, events=events)
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+
+    # The shared row: claimed by BOTH retries, owned by the newest one.
+    shared = rows[_SHARED_CLAIM_EARLY_FAILURE_JOB_ID]
+    assert shared["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert shared["superseded_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert shared["repair_status"] == "repaired"
+    assert shared["active_blocker"] is False
+    assert rows[_SHARED_CLAIM_LATE_FAILURE_JOB_ID]["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+
+    # The repairing halves mirror it: the newest retry carries BOTH failures, oldest failure
+    # first (``_annotated_manual_stage_repair_jobs`` sorts by failed truth), and the older retry
+    # carries no repair face at all.
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repairs_job_ids"] == [
+        _SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+        _SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+    ]
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repair_status"] == "repair_succeeded"
+    assert "repair_status" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+    assert "repairs_job_ids" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+
+
+def test_projected_interleaved_shared_claims_keep_the_newest_retry_naming_the_evidence() -> None:
+    """#1460 E15: with INTERLEAVED claim windows the tie-break also owns the evidence winner.
+
+    Both retries are newer than both failures, so each retry's sweep claims the other's target
+    and the two claim sets are IDENTICAL.  Under first-write-wins the newest retry writes both
+    entries and the older retry writes nothing.  Under last-write-wins the older retry overwrites
+    both, so the newest retry is left in no entry at all -- the ``max`` that picks
+    ``latest_repair`` can then only land on the older one, and ``repaired_stage_evidence`` names
+    the wrong retry and quotes the wrong ``record_manual_repair`` event.  That is the geometry in
+    which the comment at ``chain_repository_state.py:397-400`` -- first-write-wins is what keeps
+    ``latest_repair`` naming the pair it named before -- is falsifiable.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    jobs, events = _shared_claim_repair_rows(
+        early_failure_at="2026-05-21T06:01:00Z",
+        late_failure_at="2026-05-21T06:02:00Z",
+        early_retry_at="2026-05-21T06:03:00Z",
+        late_retry_at="2026-05-21T06:04:00Z",
+    )
+    state = _projected_state_from_rows(candidate, jobs=jobs, events=events)
+    rows = {job["job_id"]: job for job in state["pipeline_jobs"]}
+
+    for failed_job_id in (_SHARED_CLAIM_EARLY_FAILURE_JOB_ID, _SHARED_CLAIM_LATE_FAILURE_JOB_ID):
+        assert rows[failed_job_id]["repaired_by_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+        assert rows[failed_job_id]["active_blocker"] is False
+    assert rows[_SHARED_CLAIM_LATE_RETRY_JOB_ID]["repairs_job_ids"] == [
+        _SHARED_CLAIM_EARLY_FAILURE_JOB_ID,
+        _SHARED_CLAIM_LATE_FAILURE_JOB_ID,
+    ]
+    assert "repair_status" not in rows[_SHARED_CLAIM_EARLY_RETRY_JOB_ID]
+
+    # The evidence winner -- and the event id every downstream consumer quotes -- is the newest
+    # repair, not the retry that merely claimed the same rows last.
+    evidence = state["repaired_stage_evidence"]
+    assert evidence["repairing_retry_job_id"] == _SHARED_CLAIM_LATE_RETRY_JOB_ID
+    assert evidence["original_failed_job_id"] == _SHARED_CLAIM_LATE_FAILURE_JOB_ID
+    assert evidence["manual_retry_event_id"] == 52
+
+
+def _projected_forecast_cycle(candidate: scheduler_module.SchedulerCandidate) -> dict[str, Any]:
+    """The raw-manifest binding without which ``chain_source_cycle`` calls nothing repaired."""
+
+    return {
+        "cycle_id": "gfs_2026052106",
+        "source_id": "gfs",
+        "cycle_time": candidate.cycle_time_utc,
+        "status": "raw_complete",
+        "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+    }
+
+
+def _projected_source_cycle_repair_rows(target_status: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The repaired cycle-scope download pair, plus the event linking retry to target."""
+
+    return (
+        [
+            _projected_cycle_download_job(status=target_status, retry_count=1),
+            _projected_cycle_download_job(
+                job_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                status="succeeded",
+                error_code=None,
+                slurm_job_id="7101",
+                retry_count=1,
+                manual_retry_marker=True,
+                submitted_at="2026-05-21T06:12:00Z",
+                finished_at="2026-05-21T06:20:00Z",
+                updated_at="2026-05-21T06:20:00Z",
+            ),
+        ],
+        [
+            _projected_repair_event(
+                entity_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                previous_job_id=_PROJECTED_DOWNLOAD_JOB_ID,
+                retry_count=1,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            )
+        ],
+    )
+
+
+def _projected_gap_and_control_states(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    target_status: str = "failed",
+    own_jobs: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The gap shape and its control: identical candidate rows, source-cycle repair added or not."""
+
+    own = own_jobs if own_jobs is not None else [_projected_succeeded_own_forecast_job()]
+    repair_jobs, repair_events = _projected_source_cycle_repair_rows(target_status)
+    forecast_cycle = _projected_forecast_cycle(candidate)
+    gap = _projected_state_from_rows(
+        candidate,
+        jobs=[*own, *repair_jobs],
+        events=repair_events,
+        forecast_cycle=forecast_cycle,
+    )
+    control = _projected_state_from_rows(candidate, jobs=list(own), events=[], forecast_cycle=forecast_cycle)
+    # Premise: the gap shape really IS the gap shape -- repaired evidence present and carrying no
+    # restart stage of its own -- and the control really carries no repair at all.
+    assert "restart_stage" not in gap["repaired_stage_evidence"]
+    assert "repaired_stage_evidence" not in control
+    return gap, control
+
+
+@pytest.mark.parametrize("target_status", ["failed", "cancelled"])
+def test_projected_source_cycle_repair_gap_attempt_arithmetic_matches_the_control(
+    target_status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E6 (+ E7 parity): repairing an upstream download must not move this candidate's numbers.
+
+    The suppressed ``restart_stage`` collapsed ``_failed_stage`` to ``None``, which is what pushed
+    ``_manual_retry_new_attempt`` off the "canonical downstream stage" path and onto the
+    restarted-family floor -- re-minting attempt numbers the retries had already spent.  With the
+    completed-stage projection restored, every one of those derivations must read exactly as it
+    does for a candidate whose cycle never needed a download repair.
+
+    ``failed``/``cancelled`` are the ``REPAIRABLE_PIPELINE_STATUSES`` parity legs (#1449): both
+    reach this path and neither may develop behaviour of its own.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(candidate, target_status=target_status)
+
+    # Premise: the projection really annotated the repaired target on this leg.
+    target_row = next(job for job in gap["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    assert target_row["status"] == target_status
+    assert target_row["repair_status"] == "repaired"
+
+    # The two orthogonal facts coexist, and the completed half is the candidate's own.
+    assert gap["completed_stage_evidence"] == control["completed_stage_evidence"]
+    assert gap["completed_stage_evidence"]["job_id"] == "job_model_a_forecast"
+    assert gap["restart_stage"] == control["restart_stage"] == "parse"
+    assert gap["restart_from_stage"] == control["restart_from_stage"] == "parse"
+
+    # And the downstream derivations converge on the control's values.
+    failed_stage = scheduler_state_failure_module._failed_stage
+    candidate_failed_stage = scheduler_state_failure_module._candidate_failed_stage
+    fallback_previous_attempt = scheduler_state_manual_retry_module._fallback_previous_attempt
+    new_attempt = scheduler_module._manual_retry_new_attempt
+
+    assert failed_stage(gap) is not None
+    assert failed_stage(gap) == failed_stage(control)
+    assert candidate_failed_stage(gap) == candidate_failed_stage(control)
+    assert fallback_previous_attempt(gap, 0) == fallback_previous_attempt(control, 0)
+    assert new_attempt(gap, previous_attempt=0) == new_attempt(control, previous_attempt=0) == 1
+
+
+def test_projected_gap_shape_completed_evidence_names_job_matches_the_control() -> None:
+    """#1461 E11 (must-preserve 8): the #1308 pin gate's INPUT helper must not move.
+
+    The gap shape is the first geometry where ``repaired_stage_evidence`` coexists with a
+    completed-stage evidence that is a SCAN product -- i.e. one carrying a real ``job_id``.  The
+    gate's own docstring used to reason that the repaired-copy writer produces no ``job_id`` and
+    therefore no false hit; that reasoning is no longer exhaustive, so the helper's verdict is
+    pinned against the control directly.
+
+    The claim is deliberately helper-level: the gate itself
+    (``scheduler_state_manual_retry.py:416-437``) short-circuits on any entity id the repaired
+    evidence names (arm ``:426-427``), an asymmetry that predates this change.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(candidate)
+
+    names_job = scheduler_state_manual_retry_module._state_completed_stage_evidence_names_job
+    for entity_id in ("job_model_a_forecast", _PROJECTED_DOWNLOAD_JOB_ID, _PROJECTED_DOWNLOAD_RETRY_JOB_ID):
+        assert names_job(gap, entity_id) == names_job(control, entity_id)
+    # Non-vacuity: the helper does answer True for the row the scan actually named.
+    assert names_job(gap, "job_model_a_forecast") is True
+
+
+@pytest.mark.parametrize(
+    ("own_job", "expected_restart_stage", "expected_native_resubmit"),
+    [
+        pytest.param(
+            {"job_id": "job_model_a_forcing", "stage": "forcing", "job_type": "produce_forcing_array"},
+            "forecast",
+            True,
+            id="forcing_completed",
+        ),
+        pytest.param({}, "parse", False, id="forecast_completed"),
+    ],
+)
+def test_projected_gap_shape_completed_upstream_retry_decision_matches_the_control(
+    own_job: dict[str, Any],
+    expected_restart_stage: str,
+    expected_native_resubmit: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E12 (must-preserve 8): the newly reachable DECISION channel must match the control.
+
+    Restoring the completed-stage projection makes ``_completed_upstream_stage_retry_evidence``
+    reachable for a candidate whose upstream download was repaired -- a ``retry_after_completed_stage``
+    decision that can resubmit SHUD natively.  That is a decision channel, not bookkeeping, so both
+    the verdict and its ``native_shud_resubmitted`` face are pinned against the no-repair control.
+    Both restart stages are exercised because only ``forecast`` sets the native-resubmit flag.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    gap, control = _projected_gap_and_control_states(
+        candidate,
+        own_jobs=[_projected_succeeded_own_forecast_job(**own_job)],
+    )
+
+    gap_evidence = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(candidate, gap, {})
+    control_evidence = scheduler_state_failure_module._completed_upstream_stage_retry_evidence(candidate, control, {})
+
+    assert gap_evidence is not None
+    assert gap_evidence["decision"] == "retry_after_completed_stage"
+    assert gap_evidence["restart_stage"] == expected_restart_stage
+    assert gap_evidence["native_shud_resubmitted"] is expected_native_resubmit
+    assert gap_evidence == control_evidence
+
+
+def _projected_cohort_job(
+    stage: str,
+    *,
+    status: str = "succeeded",
+    retry_count: int = 3,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A cycle-scope cohort row at ``stage``, carrying the cohort's own retry counter."""
+
+    job: dict[str, Any] = {
+        "job_id": f"job_{_PROJECTED_CYCLE_RUN_ID}_{stage}",
+        "run_id": _PROJECTED_CYCLE_RUN_ID,
+        "cycle_id": "gfs_2026052106",
+        "model_id": None,
+        "stage": stage,
+        "job_type": _BATCH_S_COHORT_JOB_TYPES[stage],
+        "status": status,
+        "retry_count": retry_count,
+        "updated_at": "2026-05-21T06:25:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E13 (must-preserve 9): the geometry D2 newly opens, pinned by ABSOLUTE values.
+
+    ``chain_repository_state.py:825-830`` fires only when the candidate owns no rows and the sole
+    surviving fact is repaired evidence.  Combine that with the gap shape and a cycle whose
+    cohort already succeeded at ``forecast``, and this candidate gets a restart stage derived
+    from the COHORT for the first time.  ``_candidate_failed_stage``'s explicit-key leg is
+    scope-blind by design, so ``_state_retry_attempt(state, stage=...)`` reads the cohort's
+    counter -- the same direction a candidate with no repaired evidence already takes, but a
+    newly reachable geometry, so it is pinned rather than inferred.
+
+    The completed cohort row must succeed at ``convert``/``forcing``/``forecast``: a ``publish``
+    or ``state_save_qc`` success trips ``_has_terminal_completion_stage_success`` and suppresses
+    the scan, which would make this leg measure nothing.
+
+    The second cohort row -- ``parse``, FAILED, counter 7 -- is what gives the attempt assertions
+    a consumer: the derived stage is ``parse``, so that is the axis production reads on, and only
+    a row at that stage carries a counter distinguishable from the flat one.  It must be FAILED:
+    a SUCCEEDED ``parse`` row would win ``_best_completed_stage_success_evidence``'s stage-order
+    ``max`` and move the derived stage to ``state_save_qc``, whose cohort row does not exist --
+    the attempt would collapse back onto the flat value and the leg would measure nothing again.
+
+    NO control-group equality is asserted here, on purpose.  The flat top-level ``retry_count``
+    differs between the two groups for a reason that predates this change:
+    ``chain_repository_state.py:832-834`` backfills ``retry_count_jobs`` from the source-cycle
+    rows when the candidate owns none, so this shape reads 1 (the download pair's count) where a
+    no-repair control reads 0 (measured).  ``_state_retry_attempt`` takes the max of the flat and
+    the stage-matching values, so a control equality here would either be masked by that max or
+    fail for a reason D2 does not own.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    candidate = _scheduler_candidate_fixture()
+    repair_jobs, repair_events = _projected_source_cycle_repair_rows("failed")
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[
+            *repair_jobs,
+            _projected_cohort_job("forecast", retry_count=3),
+            _projected_cohort_job("parse", status="failed", retry_count=7, error_code="NODE_FAILURE"),
+        ],
+        events=repair_events,
+        forecast_cycle=_projected_forecast_cycle(candidate),
+    )
+
+    # Premise: the ``:825-830`` branch really fired -- no candidate rows, no exposed failure left.
+    assert [job for job in state["pipeline_jobs"] if job.get("model_id") == "model_a"] == []
+    assert state["pipeline_status"] is None
+    assert state["stage"] is None
+    assert state["failed_stage"] is None
+    assert "repaired_stage_evidence" in state
+
+    # (a) the candidate takes the cohort's completed stage as its restart point.
+    assert state["completed_stage_evidence"]["job_id"] == f"job_{_PROJECTED_CYCLE_RUN_ID}_forecast"
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+
+    # (b) the cohort-derived attempt values, as absolutes, read through the COMBINATION production
+    # uses (``scheduler_state_failure.py:2088`` in ``_cancelled_state_evidence`` and ``:2107`` in
+    # ``_manual_retry_state_evidence`` -- names given because line numbers go stale): the stage axis
+    # is the derived failed stage, never a literal, so the counter that reaches
+    # ``retry_policy.attempt`` / ``manual_retry.previous_attempt`` is the cohort ``parse`` row's,
+    # not the flat 1.
+    derived_stage = scheduler_state_failure_module._candidate_failed_stage(state)
+    assert derived_stage == "parse"
+    previous_attempt = scheduler_state_rows_module._state_retry_attempt(state, stage=derived_stage)
+    assert previous_attempt == 7
+    assert state["retry_count"] == 1
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=previous_attempt) == 8
+
+
+def _projected_repaired_cycle_download_facts(target_status: str) -> dict[str, Any]:
+    """Every observable of the repaired cycle-download shape, for one target status.
+
+    The rows are the round-3 F1 fixture: the candidate's own forecast succeeded, the cohort
+    download row is ``target_status``, a succeeded ``_retry_1`` carries the manual marker, the
+    ``record_manual_repair`` event links the two, and the forecast cycle carries a raw manifest
+    binding (without that binding ``chain_source_cycle`` refuses to call anything repaired).
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[
+            _projected_succeeded_own_forecast_job(),
+            _projected_cycle_download_job(status=target_status),
+            _projected_cycle_download_job(
+                job_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                status="succeeded",
+                error_code=None,
+                slurm_job_id="7101",
+                retry_count=4,
+                manual_retry_marker=True,
+                submitted_at="2026-05-21T06:12:00Z",
+                finished_at="2026-05-21T06:20:00Z",
+                updated_at="2026-05-21T06:20:00Z",
+            ),
+        ],
+        events=[
+            _projected_repair_event(
+                entity_id=_PROJECTED_DOWNLOAD_RETRY_JOB_ID,
+                previous_job_id=_PROJECTED_DOWNLOAD_JOB_ID,
+                retry_count=4,
+                event_id=41,
+                created_at="2026-05-21T06:12:00Z",
+            ),
+            _decision_path_cycle_download_marker(),
+        ],
+        forecast_cycle={
+            "cycle_id": "gfs_2026052106",
+            "source_id": "gfs",
+            "cycle_time": candidate.cycle_time_utc,
+            "status": "raw_complete",
+            "manifest_uri": _PROJECTED_RAW_MANIFEST_URI,
+        },
+    )
+
+    target_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == _PROJECTED_DOWNLOAD_JOB_ID)
+    # Sanity premise: the projection really RAN over this leg -- a degenerate shape that produced
+    # no annotation at all would make every parity assertion below vacuously true on both legs.
+    assert target_row["status"] == target_status
+    assert target_row["repair_status"] == "repaired"
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    return {
+        "repaired_stage_evidence": state.get("repaired_stage_evidence"),
+        "completed_stage_evidence": state.get("completed_stage_evidence", "<absent>"),
+        "restart_stage": state.get("restart_stage", "<absent>"),
+        "restart_from_stage": state.get("restart_from_stage", "<absent>"),
+        "failed_stage": state.get("failed_stage", "<absent>"),
+        "target_repair_status": target_row.get("repair_status"),
+        "target_active_blocker": target_row.get("active_blocker"),
+        "target_repaired_by_job_id": target_row.get("repaired_by_job_id"),
+        "new_attempt": scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0),
+        "payload_new_attempt": scheduler_module._manual_retry_payload(decision_state).get("new_attempt", "<absent>"),
+        "decision": (decision.action, decision.reason),
+        "decision_attempt": decision.evidence["retry_policy"]["attempt"],
+    }
+
+
+def test_projected_repaired_cancelled_cycle_download_is_bit_for_bit_the_failed_leg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1294 round-4 G3: the newly reachable evidence-selection path is PARITY, not new semantics.
+
+    Widening the repaired-annotation producer to ``REPAIRABLE_PIPELINE_STATUSES`` makes a repaired
+    ``cancelled`` cohort download reach the source-cycle evidence-selection path that until now
+    only ``failed`` rows could reach.  This anchor measures both legs through the real projection
+    and requires every observable to be identical: the repaired evidence itself (stage + both job
+    ids), the restored ``completed_stage_evidence`` / ``restart_stage`` / ``restart_from_stage``,
+    the nulled ``failed_stage``, the row-level annotations, the manual-retry attempt arithmetic and
+    the operator-visible decision.  Any future drift that gives ``cancelled`` its own behaviour on
+    this path reds here.
+
+    The suppressed half this anchor used to lock as a disclosed pre-existing defect is #1461, now
+    fixed: a source-cycle ``repaired_stage_evidence`` carries no ``restart_stage``, and the
+    completed-stage scan used to hang off that branch as an ``elif``, so the candidate's own
+    succeeded forecast produced no resume evidence at all.  The two facts are orthogonal and now
+    coexist -- on BOTH legs, which is what keeps this a parity anchor rather than a new asymmetry.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    cancelled_facts = _projected_repaired_cycle_download_facts("cancelled")
+    failed_facts = _projected_repaired_cycle_download_facts("failed")
+
+    # The evidence-selection path itself: same stage, same original/repairing job ids, same payload.
+    assert cancelled_facts["repaired_stage_evidence"] == failed_facts["repaired_stage_evidence"]
+    assert cancelled_facts["repaired_stage_evidence"]["stage"] == "download"
+    assert cancelled_facts["repaired_stage_evidence"]["original_failed_job_id"] == _PROJECTED_DOWNLOAD_JOB_ID
+    assert cancelled_facts["repaired_stage_evidence"]["repairing_retry_job_id"] == _PROJECTED_DOWNLOAD_RETRY_JOB_ID
+    # The restored half -- present on BOTH legs, derived from the candidate's own succeeded forecast.
+    assert cancelled_facts["completed_stage_evidence"]["job_id"] == "job_model_a_forecast"
+    assert cancelled_facts["completed_stage_evidence"]["stage"] == "forecast"
+    assert cancelled_facts["restart_stage"] == "parse"
+    assert cancelled_facts["restart_from_stage"] == "parse"
+    assert cancelled_facts["failed_stage"] is None
+    # And everything else the two legs expose, compared as one object so no observable is missed.
+    assert cancelled_facts == failed_facts
+
+
+def _projected_unrepaired_cycle_download_only_facts(target_status: str) -> dict[str, Any]:
+    """A cohort download row in ``target_status`` with no retry successor and no candidate rows."""
+
+    candidate = _scheduler_candidate_fixture()
+    state = _projected_state_from_rows(
+        candidate,
+        jobs=[_projected_cycle_download_job(status=target_status)],
+        events=[],
+    )
+    decision_state = _decision_path_filtered_state(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    return {
+        "state": state,
+        "decision_state": decision_state,
+        "decision": (decision.action, decision.reason),
+        "decision_attempt": decision.evidence["retry_policy"]["attempt"],
+        "exposure": {
+            "failed_stage": state.get("failed_stage", "<absent>"),
+            "stage": state.get("stage", "<absent>"),
+            "error_code": state.get("error_code", "<absent>"),
+            "error_message": state.get("error_message", "<absent>"),
+            "retry_count": state.get("retry_count", "<absent>"),
+            "pipeline_truth_timestamp": state.get("pipeline_truth_timestamp", "<absent>"),
+            "shared_cycle_ambiguous_failure": state.get("shared_cycle_ambiguous_failure", "<absent>"),
+        },
+    }
+
+
+def test_projected_unrepaired_cancelled_only_cycle_download_exposure_matches_the_failed_leg() -> None:
+    """#1294 round-4 G2 disclosure anchor: the widened producer newly EXPOSES a cancelled cohort.
+
+    ``_source_cycle_download_repair_state`` picks its ``active_failure_job`` out of the same
+    ``REPAIRABLE_PIPELINE_STATUSES`` set, so a cohort download that is ``cancelled`` with no retry
+    successor now reaches a candidate that owns no rows of its own: pre-change that candidate's
+    state carried ``failed_stage=None`` (the bare-failed producer gate found no failure to report),
+    post-change it carries ``failed_stage="download"`` plus the row's error code, attempt count and
+    truth timestamp.  That is a real new state-level exposure and this anchor states it out loud:
+    every ``active_failure_job``-derived field is identical to the ``failed`` leg's, i.e. cancelled
+    is now reported as the failure it always was rather than being silently dropped.
+
+    Two asymmetries survive on purpose and are locked here so a future "cleanup" cannot erase them
+    unnoticed:
+
+    * the decision-state projection strips the state-level ``failed_stage``/``stage``/``error_code``
+      keys on BOTH legs, and the residual ``scheduler_state_failure._failed_stage`` fallback scans
+      job rows against the bare ``FAILED_PIPELINE_STATUSES`` -- so the cancelled leg still resolves
+      to ``None`` where the failed leg resolves to ``"download"``.  The cancelled leg is therefore
+      strictly MORE conservative on the decision path, never more aggressive.
+    * the operator-visible decision differs by reason only because a cancelled pipeline has its own
+      pre-existing arm (``manual_retry_required_after_cancelled``); that arm never consulted
+      ``failed_stage``, so the widened producer moves this decision not at all -- reverting the
+      producer constant to bare ``FAILED_PIPELINE_STATUSES`` leaves the cancelled leg deciding
+      exactly this, at exactly this attempt.
+    """
+
+    cancelled = _projected_unrepaired_cycle_download_only_facts("cancelled")
+    failed = _projected_unrepaired_cycle_download_only_facts("failed")
+
+    # Premise: no repair anywhere, so this is the ``active_failure_job`` path and not the repaired one.
+    for leg in (cancelled, failed):
+        assert "repaired_stage_evidence" not in leg["state"]
+        assert "completed_stage_evidence" not in leg["state"]
+
+    # The disclosure itself: the cancelled cohort is now exposed exactly as the failed one is.
+    assert cancelled["exposure"]["failed_stage"] == "download"
+    assert cancelled["exposure"] == failed["exposure"]
+    assert cancelled["state"]["pipeline_status"] == "cancelled"
+    assert failed["state"]["pipeline_status"] == "failed"
+
+    # Asymmetry 1: the decision state strips the exposure identically on both legs ...
+    for leg in (cancelled, failed):
+        assert "failed_stage" not in leg["decision_state"]
+        assert "stage" not in leg["decision_state"]
+        assert "error_code" not in leg["decision_state"]
+    # ... and the bare-failed row fallback keeps the cancelled leg the more conservative one.
+    assert scheduler_state_failure_module._failed_stage(cancelled["decision_state"]) is None
+    assert scheduler_state_failure_module._failed_stage(failed["decision_state"]) == "download"
+
+    # Asymmetry 2: the decision reason is the pre-existing cancelled arm, at the same attempt.
+    assert cancelled["decision"] == ("blocked", "manual_retry_required_after_cancelled")
+    assert failed["decision"] == ("blocked", "retry_limit_exhausted")
+    assert cancelled["decision_attempt"] == failed["decision_attempt"] == 4
 
 
 def test_cancelled_own_row_also_closes_the_unresolvable_cohort_master_pin() -> None:
@@ -7190,8 +8659,102 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
     assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
 
 
+def _marker_target_row_details(job: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``target_*`` detail SCHEMA, filled from ``job`` the way the writer fills it.
+
+    The key names are written out as literals on purpose: the matrix's anti-drift assertion
+    compares this independently written set against the production tuple, which is the whole
+    point of asserting it.  The omission rule is the writer's own -- ``None``/``""`` are absences
+    and are not written, while ``0`` and ``False`` are recorded VALUES and are.
+
+    What this helper does NOT claim is that ``record_manual_repair`` can produce every value a
+    caller passes in.  Two of the eight keys are GATE CONTRACT keys rather than write-face keys:
+    ``repair_status`` and ``active_blocker`` are projection-time annotations, applied to a
+    ``dict(job)`` copy (``chain_repository_state.py:194-210``), and the journal's closed row
+    constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields -- so the
+    persisted row the writer reads never carries them and ``target_repair_status`` /
+    ``target_active_blocker`` are, on the current write face, always absent.  A fixture that
+    fills them anchors what the gate must do with such a record, not a marker production emits;
+    closing the write face is issue #1482, and the repaired-at-write-time population is a
+    disclosed permanent limitation (design D4) until it lands.
+    """
+
+    recorded = {
+        "target_status": job.get("status"),
+        "target_repair_status": job.get("repair_status"),
+        "target_active_blocker": job.get("active_blocker"),
+        "target_model_id": job.get("model_id"),
+        "target_slurm_job_id": job.get("slurm_job_id"),
+        "target_retry_count": job.get("retry_count"),
+        "target_manual_retry_marker": job.get("manual_retry_marker"),
+        "target_array_task_id": job.get("array_task_id"),
+    }
+    return {key: value for key, value in recorded.items() if value not in (None, "")}
+
+
+#: A target row carrying a non-empty value in every recorded field, so the helper above yields
+#: its FULL key set for the schema assertion.  It is a SCHEMA fixture, not a producible row: two
+#: of its fields are projection-time annotations the persisted row never carries (see the helper).
+_FULLY_RECORDED_TARGET_JOB = {
+    "status": "failed",
+    "repair_status": "repaired",
+    "active_blocker": True,
+    "model_id": "model_a",
+    "slurm_job_id": "880123",
+    "retry_count": 2,
+    "manual_retry_marker": True,
+    "array_task_id": 3,
+}
+#: Row fields the live-failure closure reads that the record does not carry under that name.
+_MARKER_TARGET_RECORD_FIELDS_COVERED_ELSEWHERE = {
+    # The marker's own ``entity_id`` IS the target's job id; the reconstruction takes it from
+    # there rather than recording it twice.
+    "job_id",
+    # The two alternate spellings in ``_job_status_text``'s field chain.  The record mirrors the
+    # canonical ``status`` and the reconstruction writes exactly that key, so the chain resolves.
+    "pipeline_status",
+    "job_status",
+}
+_ROW_FIELD_READ_RE = re.compile(r"""job\.get\(\s*["']([a-z_]+)["']""")
+
+
+def _live_failure_closure_row_field_reads() -> set[str]:
+    """Every row field the shared live-failure predicate's transitive closure reads."""
+
+    return {
+        field
+        for function in (
+            scheduler_state_manual_retry_module._job_row_is_live_failure,
+            scheduler_state_manual_retry_module._job_status_text,
+            scheduler_state_rows_module._pipeline_job_is_repaired_stage_evidence,
+            scheduler_state_rows_module._job_is_unsubmitted_auto_retry_placeholder,
+        )
+        for field in _ROW_FIELD_READ_RE.findall(inspect.getsource(function))
+    }
+
+
+def _recorded_marker_details(job: Mapping[str, Any]) -> dict[str, Any]:
+    """A complete target record for ``job``: stage evidence + the ``target_*`` schema.
+
+    "Complete" is the GATE's completeness gate (``failed_stage`` and ``target_status`` both
+    present), not a claim about the write face -- see ``_marker_target_row_details`` for the two
+    keys the current writer can never emit.
+    """
+
+    return {"failed_stage": job.get("stage"), **_marker_target_row_details(job)}
+
+
+@pytest.mark.parametrize("records_target_row", [False, True], ids=["legacy_marker", "record_borne_marker"])
 @pytest.mark.parametrize(
-    ("suffix", "target_overrides", "names_completed_stage_evidence", "expected_pins", "expected_attempts"),
+    (
+        "suffix",
+        "target_overrides",
+        "names_completed_stage_evidence",
+        "legacy_pins",
+        "legacy_attempts",
+        "record_pins",
+        "record_attempts",
+    ),
     [
         (
             "_retry_2",
@@ -7199,10 +8762,12 @@ def test_mapping_named_repaired_target_refuses_the_pin_with_and_without_its_row(
             False,
             (False, True),
             (1, 5),
+            (False, False),
+            (1, 1),
         ),
-        ("", {"repair_status": "repaired"}, False, (False, True), (1, 5)),
-        ("", {"status": "succeeded", "error_code": None}, True, (False, False), (1, 1)),
-        ("", {}, False, (True, True), (5, 5)),
+        ("", {"repair_status": "repaired"}, False, (False, True), (1, 5), (False, False), (1, 1)),
+        ("", {"status": "succeeded", "error_code": None}, True, (False, False), (1, 1), (False, False), (1, 1)),
+        ("", {}, False, (True, True), (5, 5), (True, True), (5, 5)),
     ],
     ids=[
         "unsubmitted_placeholder",
@@ -7215,8 +8780,11 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     suffix: str,
     target_overrides: dict[str, Any],
     names_completed_stage_evidence: bool,
-    expected_pins: tuple[bool, bool],
-    expected_attempts: tuple[int, int],
+    legacy_pins: tuple[bool, bool],
+    legacy_attempts: tuple[int, int],
+    record_pins: tuple[bool, bool],
+    record_attempts: tuple[int, int],
+    records_target_row: bool,
 ) -> None:
     """Executable ledger of WHICH twin refusals survive the row's deletion, and which do not.
 
@@ -7235,19 +8803,41 @@ def test_same_stage_marker_target_staleness_residue_matrix(
     the row is still there) against the unresolvable arm (reached after the identity filter
     deletes it).
 
-    * ``unsubmitted_placeholder`` -- (False, True): the placeholder shape is a submission-time
-      ROW fact with no state-level projection.  Residue 1, disclosed not delivered.
-    * ``repaired_flag_not_named_by_the_state`` -- (False, True): ``repair_status: repaired`` on
-      the row with no ``repaired_stage_evidence`` mapping naming it.  Residue 1.
-    * ``non_failed_named_by_completed_stage_evidence`` -- (False, False): DELIVERED.  A
-      succeeded target the state's ``completed_stage_evidence`` names by ``job_id`` is refused
-      on both arms; before that conjunct existed the row-absent half pinned 5 here.
-    * ``plain_failed_control`` -- (True, True): the equivalence case.  It is what proves the
-      three rows above are decided by their own shape and not by the geometry.
+    The second axis is what the MARKER recorded (#1308).  ``legacy_marker`` is the marker shape
+    written before the target record existed -- and every marker the SQL retry service writes --
+    which must keep its verdicts bit for bit; ``record_borne_marker`` carries the target's
+    write-time record in the ``target_*`` schema, which the gate rebuilds the row from and
+    decides with the resolved-row routing:
+
+    * ``unsubmitted_placeholder`` -- legacy (False, True), record (False, False): a REAL
+      convergence, write face included.  The placeholder shape is a submission-time ROW fact with
+      no state-level projection, every field of it is on the persisted row the writer reads, so
+      the record carries it across the row's deletion for markers production actually emits.
+    * ``repaired_flag_not_named_by_the_state`` -- legacy (False, True), record (False, False):
+      a DOMAIN-OUTSIDE contract anchor, labelled the same way the queue-stage success anchor is
+      (``test_record_borne_queue_stage_success_...``).  ``repair_status``/``active_blocker`` are
+      projection-time annotations that never reach the persisted rows ``record_manual_repair``
+      reads, so ``target_repair_status`` is always absent from a real marker and this cell states
+      what the gate owes such a record, NOT that the write face produces one.  The production
+      population -- a target already annotated repaired at write time, with the state's
+      ``repaired_stage_evidence`` naming some other winner -- still pins here where the twin
+      refuses, and is a disclosed permanent limitation (design D4); closing the write face is
+      issue #1482.
+    * ``non_failed_named_by_completed_stage_evidence`` -- (False, False) on both: a succeeded
+      target the state's ``completed_stage_evidence`` names by ``job_id`` is refused on both arms
+      already (#1292), and the record refuses it a second way (status outside the live-failure
+      domain).
+    * ``plain_failed_control`` -- (True, True) on both: the equivalence case.  It is what proves
+      the three rows above are decided by their own shape and not by the geometry, and on the
+      record axis it also proves a recorded ``retry_count`` of ``0`` is written rather than
+      dropped as an absence.
     """
 
     cohort_job = {**_unresolvable_cohort_master_job(stage="convert", suffix=suffix), **target_overrides}
     cohort_job_id = cohort_job["job_id"]
+    expected_pins = record_pins if records_target_row else legacy_pins
+    expected_attempts = record_attempts if records_target_row else legacy_attempts
+    marker_details = _recorded_marker_details(cohort_job) if records_target_row else {}
     candidate = _scheduler_candidate_fixture()
     state_overrides: dict[str, Any] = {}
     if names_completed_stage_evidence:
@@ -7267,16 +8857,16 @@ def test_same_stage_marker_target_staleness_residue_matrix(
             "restart_stage": "forcing",
             "restart_from_stage": "forcing",
         }
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(marker_details)
     state = _decision_path_state(
         candidate,
-        events=[
-            _decision_path_manual_retry_marker(
-                entity_id=cohort_job_id,
-                retry_count=5,
-                previous_job_id=cohort_job_id,
-                event_id=42,
-            )
-        ],
+        events=[marker],
         jobs=[_decision_path_own_forecast_job(), cohort_job],
         failed_stage="convert",
         **state_overrides,
@@ -7306,6 +8896,590 @@ def test_same_stage_marker_target_staleness_residue_matrix(
         scheduler_module._manual_retry_new_attempt(state, previous_attempt=0),
         scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0),
     ) == expected_attempts
+
+    # Everything below is asserted AFTER the verdict on purpose: a gate that stops honouring
+    # the record must fail on the verdict above, not on a premise about the record's plumbing.
+    # First, the record really did reach that gate through the real sanitizer -- or really is
+    # absent, on the legacy axis.
+    sanitized_details = decision_state["pipeline_events"][0]["details"]
+    assert {key: sanitized_details[key] for key in marker_details if key in sanitized_details} == marker_details
+    assert bool(set(sanitized_details) & set(scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS)) is (
+        records_target_row
+    )
+    # Then anti-drift, twice over.  Both halves are about the record's SCHEMA, and neither
+    # claims the write face can produce every value: two of these keys are gate-contract keys
+    # the persisted row never carries (see ``_marker_target_row_details``), and which cells are
+    # write-face convergences is stated cell by cell above.  First half: the fixture's
+    # hand-written key names ARE the production key names, so a renamed or dropped key cannot
+    # pass unnoticed as a cell that quietly tests nothing.  Second half: that key set closes over
+    # every row field the shared live-failure predicate's transitive closure reads -- the
+    # placeholder predicate's six included -- so a predicate that starts reading a new field
+    # breaks this test instead of silently making the reconstruction a different row than the
+    # one recorded.
+    assert set(_marker_target_row_details(_FULLY_RECORDED_TARGET_JOB)) == set(
+        scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_KEYS
+    )
+    recorded_row_fields = {
+        row_field for _detail_key, row_field in scheduler_state_manual_retry_module.MARKER_TARGET_ROW_DETAIL_FIELDS
+    }
+    assert _live_failure_closure_row_field_reads() <= (
+        recorded_row_fields | _MARKER_TARGET_RECORD_FIELDS_COVERED_ELSEWHERE
+    )
+
+
+@pytest.mark.parametrize("stage", ["download", "state_save_qc", "publish"])
+def test_record_borne_queue_stage_success_refuses_the_pin_with_no_state_mapping_to_read(stage: str) -> None:
+    """Defensive contract of the gate ON THE RECORD, for the stages no mapping can ever name.
+
+    ``chain_repository_state._completed_stage_success_evidence`` returns None unless
+    ``_stage_after`` resolves a successor, so a ``download`` / ``state_save_qc`` / ``publish``
+    target can never be named by the completed-stage mapping -- the state-level surface simply
+    does not exist for these three.  Before the record, that made them the disclosed over-pin
+    class; with the record the refusal comes from the recorded STATUS, no mapping needed.
+
+    Construction note, an explicit exception to this section's write-face discipline: a
+    ``succeeded`` target is OUTSIDE ``record_manual_repair``'s source domain (it only ever picks
+    a row in ``MANUAL_RETRY_SOURCE_STATUSES``), so this fixture is not a shape the writer
+    produces.  It anchors the gate's contract on a record it may be handed, not a claim about
+    the writer; the real population -- a target that succeeds AFTER the marker was written --
+    keeps pinning here and is pinned as a disclosed limitation by
+    ``test_post_write_fate_outside_the_state_mappings_still_pins_row_absent``.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage=stage),
+        "status": "succeeded",
+        "error_code": None,
+        "slurm_job_id": 880123,
+    }
+    cohort_job_id = cohort_job["job_id"]
+    legacy_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    recorded_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=43,
+    )
+    recorded_marker["details"].update(_recorded_marker_details(cohort_job))
+    state = _decision_path_state(
+        candidate,
+        events=[recorded_marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage=stage,
+    )
+    legacy_state = _decision_path_state(
+        candidate,
+        events=[legacy_marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage=stage,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    legacy_decision_state = _decision_path_filtered_state(candidate, legacy_state)
+
+    # Premise: this stage really is outside the completed-stage producer's domain, the state
+    # carries no such mapping, the row is gone from the decision state, and arm 2 is closed by
+    # the candidate's own live forecast failure -- so nothing but the record can refuse.
+    assert chain_repository_state_module._stage_after(stage) is None
+    assert "completed_stage_evidence" not in decision_state
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, False)
+    # The contrast that proves the record is what refuses: the same state and the same target,
+    # decided by a marker that recorded nothing, still pins on the id token.
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            legacy_decision_state, legacy_decision_state["pipeline_events"][0]
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize("suffix", _UNRESOLVABLE_SUFFIX_SHAPES)
+@pytest.mark.parametrize(
+    "target_overrides",
+    [
+        {"status": "submission_failed", "retry_count": 2, "slurm_job_id": None},
+        {"repair_status": "repaired"},
+    ],
+    ids=["unsubmitted_placeholder", "repaired_flag_not_named_by_the_state"],
+)
+def test_record_borne_staleness_converges_on_every_retry_suffix_geometry(
+    suffix: str,
+    target_overrides: dict[str, Any],
+) -> None:
+    """The record's verdict must not depend on how many retry layers the entity id stacks.
+
+    Production mints one ``_retry_1`` layer and, on the node-27 archive shape, three stacked
+    ones.  The placeholder predicate reads the id (its ``_retry_`` substring test) off the
+    reconstruction, so the geometry reaches the verdict and has to be pinned on both shapes.
+
+    Same split as the residue matrix these two shapes come from: the placeholder cell is a
+    write-face convergence, and the ``repair_status`` cell is a gate-contract anchor on a record
+    the current writer cannot emit (the flag is a projection-time annotation; issue #1482, and
+    the production population is disclosed under design D4).  The geometry claim holds for both
+    either way -- it is about the id, not about who wrote the record.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {**_unresolvable_cohort_master_job(stage="convert", suffix=suffix), **target_overrides}
+    cohort_job_id = cohort_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(cohort_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="convert",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert cohort_job_id.endswith(suffix)
+    assert cohort_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, False)
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+
+
+def _model_bearing_cycle_grammar_job(*, stage: str, model_id: str = "model_a", **overrides: Any) -> dict[str, Any]:
+    """A ``job_cycle_*`` row that NAMES a model: cycle grammar, candidate scope.
+
+    ``_job_is_cycle_scope_row`` requires an empty ``model_id``, so this row is not cycle scope
+    and the router short-circuits it to an unconditional pin with the row present
+    (``_marker_event_pins_attempt`` :608-609).  Its entity id still carries the cycle grammar,
+    so with the row gone the marker lands on the row-absent arm all the same -- which is the
+    whole asymmetry #1308 closes.
+    """
+
+    job = {
+        "job_id": f"job_cycle_gfs_2026052106_{stage}",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "model_id": model_id,
+        "stage": stage,
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:15:00Z",
+    }
+    job.update(overrides)
+    return job
+
+
+@pytest.mark.parametrize(
+    ("target_stage", "state_overrides"),
+    [
+        ("convert", {}),
+        (
+            "forecast",
+            {
+                "repaired_stage_evidence": {
+                    "original_failed_job_id": "job_cycle_gfs_2026052106_forecast",
+                    "repairing_retry_job_id": "job_cycle_gfs_2026052106_forecast_retry_1",
+                }
+            },
+        ),
+    ],
+    ids=["cross_stage", "same_stage_named_by_the_repaired_mapping"],
+)
+def test_model_bearing_record_pins_on_both_arms(
+    target_stage: str,
+    state_overrides: dict[str, Any],
+) -> None:
+    """A model-bearing target pins with the row present; the record must pin without it too.
+
+    With the row present the router never reaches the cycle-scope rule: a row naming a model is
+    candidate scope, so the marker pins unconditionally -- cross-stage, and even where a state
+    staleness mapping names the target.  With the row gone (row-window truncation drops rows
+    while the event window keeps the marker) the row-absent arm used to apply cycle-scope logic
+    to it and silently discard the operator's pinned attempt: under-pin in the twin's own
+    direction.  The record closes it by routing model-bearing records exactly as the router
+    routes model-bearing rows, ahead of the staleness mappings.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage=target_stage)
+    target_job_id = target_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    row_present_state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), target_job],
+        failed_stage="forecast",
+        **state_overrides,
+    )
+    row_absent_state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job()],
+        failed_stage="forecast",
+        **state_overrides,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, row_absent_state)
+
+    # Premise: the row-present half really routes through the ROUTER's unconditional arm (the
+    # target is present and is not a cycle-scope row), the row-absent half really lost it, and
+    # arm 2 is closed throughout by the candidate's own live forecast failure -- so a pin can
+    # only come from the model-bearing short-circuit.
+    assert scheduler_state_manual_retry_module._job_is_cycle_scope_row(target_job) is False
+    assert target_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert decision_state["run_id"] == "fcst_gfs_2026052106_model_a"
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        row_present_state, row_present_state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (True, True)
+    assert scheduler_module._manual_retry_new_attempt(row_present_state, previous_attempt=0) == 5
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+    # Asserted after the verdict, so a gate that ignores the record fails on the verdict: the
+    # record did survive sanitization, and it names the candidate's own model.
+    assert decision_state["pipeline_events"][0]["details"]["target_model_id"] == "model_a"
+
+
+def test_record_naming_a_foreign_model_never_pins_row_absent() -> None:
+    """The model-bearing short-circuit is a fail-CLOSED conjunction, not a truthiness test.
+
+    A record naming some other model is exactly the shape #1288/#1302 defend against -- the row
+    was excluded from this candidate's state and only its event survived.  Pinning on any
+    non-empty ``target_model_id`` would hand this candidate another model's attempt number
+    through the back door the row exclusion just closed.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage="forecast", model_id="model_b")
+    target_job_id = target_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job()],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: same geometry as the pinning twin above -- the marker's stage IS the state's
+    # failed stage, so on the delivered backstop this marker pins and only the model comparison
+    # can refuse it.
+    assert decision_state["failed_stage"] == target_job["stage"]
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            decision_state, decision_state["pipeline_events"][0]
+        )
+        is False
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert decision_state["pipeline_events"][0]["details"]["target_model_id"] == "model_b"
+
+
+def test_model_bearing_record_pins_when_no_model_scoped_row_survives_the_window() -> None:
+    """The candidate's own model comes off its RUN ID, never off the rows that survived.
+
+    Row-window truncation is one of the two mechanisms that produce the row-absent arm, and it
+    can leave a candidate state with no ``model_id``-bearing job row at all -- which makes the
+    row-derived model set (``_candidate_model_ids``) EMPTY.  Deriving the comparison from that
+    set would make the model-bearing conjunction permanently false on exactly the states this
+    arm exists for, resurrecting the under-pin.  The run id's tail is the source instead, and it
+    is read as the WHOLE tail: production model ids carry underscores (``model_a``), so a
+    ``[^_]+`` capture would truncate it to ``model`` and never match.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    target_job = _model_bearing_cycle_grammar_job(stage="convert")
+    target_job_id = target_job["job_id"]
+    # A model-LESS row on the candidate's own run id: candidate scope (so arm 2 stays closed)
+    # and contributing nothing to the row-derived model set.
+    own_job = {
+        "job_id": "job_model_a_forecast",
+        "run_id": candidate.run_id,
+        "model_id": None,
+        "stage": "forecast",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 0,
+        "updated_at": "2026-05-21T06:20:00Z",
+    }
+    marker = _decision_path_manual_retry_marker(
+        entity_id=target_job_id,
+        retry_count=5,
+        previous_job_id=target_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(target_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[own_job],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: no surviving row names any model, the marker's record names ``model_a``, the
+    # candidate's run id ends in ``model_a``, arm 2 is closed, and the marker's stage is NOT the
+    # state's failed stage -- so only the model-bearing short-circuit can pin.
+    assert scheduler_state_manual_retry_module._candidate_model_ids(decision_state) == set()
+    assert decision_state["run_id"].endswith("_model_a")
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+    assert decision_state["failed_stage"] != target_job["stage"]
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(
+            decision_state, decision_state["pipeline_events"][0]
+        )
+        is True
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+@pytest.mark.parametrize(
+    ("stage", "state_overrides"),
+    [
+        (
+            "convert",
+            {
+                "completed_stage_evidence": {
+                    "status": "succeeded",
+                    "stage": "forcing",
+                    "job_type": "produce_forcing_array",
+                    "job_id": "job_cycle_gfs_2026052106_forcing_cohort_ff00ff00ff00_forcing",
+                    "restart_stage": "forecast",
+                    "restart_from_stage": "forecast",
+                }
+            },
+        ),
+        ("download", {}),
+    ],
+    ids=["winner_eviction", "queue_stage_with_no_producer"],
+)
+def test_post_write_fate_outside_the_state_mappings_still_pins_row_absent(
+    stage: str,
+    state_overrides: dict[str, Any],
+) -> None:
+    """Disclosure anchor: the record is a WRITE-TIME snapshot, so post-write fate can diverge.
+
+    Both shapes are the same story -- the target succeeded after the marker was written, and
+    the state carries no mapping that names it: in ``winner_eviction`` a later stage's success
+    took the single ``completed_stage_evidence`` slot
+    (``_best_completed_stage_success_evidence`` keeps one winner), and in
+    ``queue_stage_with_no_producer`` the producer can never name a ``download`` target at all.
+    The row-present twin reads the row as it is NOW and refuses; the row-absent arm reads the
+    record and pins.  This is the permanent limitation clause of the spec scenario
+    "Unresolvable cycle-grammar marker pins with marker-record evidence", pinned as current
+    behaviour rather than delivered parity -- closing it needs the completed-stage producer
+    widened, which is refused because that mapping also drives restart routing.
+
+    The same clause carries one shape that is not about post-write fate at all: a target already
+    ANNOTATED repaired when the marker was written.  The annotation lives on the projection's row
+    copy, never on the persisted row the writer reads, so the record cannot carry it either
+    (issue #1482) and the gate pins there too.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    write_time_job = _unresolvable_cohort_master_job(stage=stage)
+    cohort_job_id = write_time_job["job_id"]
+    current_job = {**write_time_job, "status": "succeeded", "error_code": None, "slurm_job_id": 880123}
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    marker["details"].update(_recorded_marker_details(write_time_job))
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), current_job],
+        failed_stage=stage,
+        **state_overrides,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the record says ``failed`` while the row says ``succeeded``, and no state mapping
+    # names this target.
+    assert decision_state["pipeline_events"][0]["details"]["target_status"] == "failed"
+    assert current_job["status"] == "succeeded"
+    assert (
+        scheduler_state_manual_retry_module._state_completed_stage_evidence_names_job(
+            decision_state, cohort_job_id
+        )
+        is False
+    )
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, True)
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 5
+
+
+def test_half_record_marker_decides_exactly_as_the_same_legacy_marker() -> None:
+    """A half record is not a record: it must fall back, bit for bit, to the legacy arm.
+
+    ``record_manual_repair`` still produces this shape whenever the target row carries no stage
+    -- the empty value is not written and the sanitizer passes no empties through -- so the
+    completeness gate is ``target_status`` AND ``failed_stage``, both present.  With only half
+    of it the gate cannot rebuild the row it claims to (no stage to compare, and a reconstruction
+    that answered the live-failure question without one would be a different rule), so the
+    marker decides through the delivered backstop, id token included, exactly as a marker that
+    recorded nothing at all.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage="convert", suffix="_retry_2"),
+        "status": "submission_failed",
+        "retry_count": 2,
+        "slurm_job_id": None,
+        "stage": None,
+    }
+    cohort_job_id = cohort_job["job_id"]
+
+    def _state_for(marker: dict[str, Any]) -> dict[str, Any]:
+        return _decision_path_filtered_state(
+            candidate,
+            _decision_path_state(
+                candidate,
+                events=[marker],
+                jobs=[_decision_path_own_forecast_job()],
+                failed_stage="convert",
+            ),
+        )
+
+    half_record_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    half_record_marker["details"].update(_recorded_marker_details(cohort_job))
+    legacy_marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    half_record_state = _state_for(half_record_marker)
+    legacy_state = _state_for(legacy_marker)
+
+    # Premise: the record really is a HALF one -- the status half survived sanitization, the
+    # stage half was never written because the row carried no stage.
+    half_record_details = half_record_state["pipeline_events"][0]["details"]
+    assert half_record_details["target_status"] == "submission_failed"
+    assert "failed_stage" not in half_record_details
+
+    half_record_verdict = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        half_record_state, half_record_state["pipeline_events"][0]
+    )
+    legacy_verdict = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        legacy_state, legacy_state["pipeline_events"][0]
+    )
+
+    assert half_record_verdict == legacy_verdict is True
+    assert scheduler_module._manual_retry_new_attempt(
+        half_record_state, previous_attempt=0
+    ) == scheduler_module._manual_retry_new_attempt(legacy_state, previous_attempt=0) == 5
+
+
+def test_stage_less_legacy_marker_pins_on_an_id_token_the_target_row_never_carried() -> None:
+    """The token backstop's ceiling, pinned as accepted behaviour rather than closed.
+
+    The cohort master's id ends in the ``download`` token while the row's ``stage`` field says
+    ``convert`` -- production ids embed several stage tokens, so the two disagree routinely.  A
+    stage-less legacy marker has nothing but that text, so it pins a ``download`` repair here
+    where the twin, reading the row's stage FIELD, refuses.  The ceiling is capped to the legacy
+    marker set plus the half records the current writer still produces: every marker written
+    with a full record decides on the record instead.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    cohort_job = {
+        **_unresolvable_cohort_master_job(stage="download"),
+        "stage": "convert",
+    }
+    cohort_job_id = cohort_job["job_id"]
+    marker = _decision_path_manual_retry_marker(
+        entity_id=cohort_job_id,
+        retry_count=5,
+        previous_job_id=cohort_job_id,
+        event_id=42,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[marker],
+        jobs=[_decision_path_own_forecast_job(), cohort_job],
+        failed_stage="download",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the id token and the row's stage field really do disagree, the marker records
+    # neither, and arm 2 is closed by the candidate's own live failure.
+    assert cohort_job_id.endswith("_download")
+    assert cohort_job["stage"] == "convert"
+    assert "failed_stage" not in decision_state["pipeline_events"][0]["details"]
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+
+    row_present = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        state, state["pipeline_events"][0]
+    )
+    row_absent = scheduler_state_manual_retry_module._marker_event_pins_attempt(
+        decision_state, decision_state["pipeline_events"][0]
+    )
+
+    assert (row_present, row_absent) == (False, True)
 
 
 def test_completed_stage_named_succeeded_target_refuses_the_pin_with_and_without_its_row() -> None:
@@ -8543,6 +10717,190 @@ def test_manual_retry_candidate_bypasses_repository_active_placeholder(
     assert orchestrator.calls[0]["basins"][0]["manual_retry_attempt"] == 4
 
 
+def test_candidate_basin_manifest_mints_retry_attempt_only_under_active_manual_retry_decision() -> None:
+    """#1201 E9 — the scheduler→chain seam is where a marker claim becomes a chain field.
+
+    ``_candidate_manual_retry_attempt`` mints BOTH ``manual_retry_attempt`` and
+    ``retry_attempt`` onto the basin payload, which reach the chain as direct fields
+    and shadow its own ``state_evidence`` read entirely.  A claim that no active
+    manual-retry decision backs must therefore be stopped here, not downstream.
+    """
+
+    base = _scheduler_candidate_fixture()
+    inactive_evidence = {
+        "decision": "retry_missing_forecast_output",
+        "restart_stage": "forecast",
+        "manual_retry": {"marker": True, "new_attempt": 1},
+    }
+    inactive = scheduler_module._candidate_with_state_evidence(base, inactive_evidence)
+    markerless = scheduler_module._candidate_with_state_evidence(
+        base, {key: value for key, value in inactive_evidence.items() if key != "manual_retry"}
+    )
+    active = scheduler_module._candidate_with_state_evidence(
+        base,
+        {
+            "decision": "manual_retry",
+            "reason": "manual_retry_requested",
+            "manual_retry": {"marker": True, "allowed": True, "new_attempt": 4},
+        },
+    )
+
+    output_uri = "s3://nhms/forecast/gfs/2026052106/model_a/"
+    inactive_manifest = scheduler_module._candidate_basin_manifest(inactive, output_uri=output_uri)
+    markerless_manifest = scheduler_module._candidate_basin_manifest(markerless, output_uri=output_uri)
+    active_manifest = scheduler_module._candidate_basin_manifest(active, output_uri=output_uri)
+
+    assert "retry_attempt" not in inactive_manifest
+    assert "manual_retry_attempt" not in inactive_manifest
+    assert active_manifest["retry_attempt"] == 4
+    assert active_manifest["manual_retry_attempt"] == 4
+    # The two withheld keys are the WHOLE delta: everything else the projection emits
+    # (state_evidence passthrough, restart_stage, warm-start fields, ...) is unchanged,
+    # and state_evidence still carries the marker verbatim for downstream auditing.
+    assert set(inactive_manifest) == set(markerless_manifest)
+    assert {key: value for key, value in inactive_manifest.items() if key != "state_evidence"} == {
+        key: value for key, value in markerless_manifest.items() if key != "state_evidence"
+    }
+    assert inactive_manifest["state_evidence"]["manual_retry"] == {"marker": True, "new_attempt": 1}
+
+
+def test_completed_stage_resume_lane_marker_echo_is_dropped_without_calling_it_stale(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1201 E10 — a preempting lane carrying a live marker is REACHABLE.
+
+    Reachability was probed against the real decision function, not assumed:
+    ``resume_after_completed_stage`` returns at ``scheduler_state_decision`` BEFORE the
+    manual-retry lane, and its evidence is built with ``**base_evidence``, which the
+    evidence-owner face already filled with the raw ``manual_retry`` echo.  Before this
+    change that echo minted ``retry_attempt``/``manual_retry_attempt`` = 1 onto the
+    basin payload of a candidate whose decision was a resume.
+
+    The marker here is NOT asserted to be stale — the manual retry it describes may be
+    perfectly live and merely preempted — which is why the judgement, the log wording
+    and the spec all say "no active manual-retry decision" instead.  The drop is a safe
+    direction for THIS lane (a resume derives the next free attempt and still runs);
+    for a terminal failed row under a non-forced decision the candidate converges on
+    markerless behaviour instead, which is pinned chain-side (#1201 E1(b)).
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "source_id": "gfs",
+        "cycle_time": _dt("2026-05-21T06:00:00Z"),
+        "model_id": "model_a",
+        "candidate_id": candidate.candidate_id,
+        "cycle_id": "gfs_2026052106",
+        "run_id": candidate.run_id,
+        "hydro_status": "created",
+        "pipeline_status": "succeeded",
+        "restart_stage": "parse",
+        "completed_stage_evidence": {"stage": "forecast", "status": "succeeded", "restart_stage": "parse"},
+        "manual_retry": {"marker": True, "new_attempt": 1},
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_after_completed_stage")
+    assert decision.evidence["decision"] == "retry_after_completed_stage"
+    assert decision.evidence["manual_retry"] == {"marker": True, "new_attempt": 1}
+
+    preempted = scheduler_module._candidate_with_state_evidence(candidate, decision.evidence)
+    assert scheduler_module._candidate_manual_retry_attempt(preempted) is None
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        manifest = scheduler_module._candidate_basin_manifest(preempted, output_uri="s3://nhms/out/")
+
+    assert "retry_attempt" not in manifest
+    assert "manual_retry_attempt" not in manifest
+    (record,) = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    message = record.getMessage()
+    assert "no active manual-retry decision" in message
+    assert "stale" not in message.lower()
+    assert "claimed_attempt=1" in message
+    assert "decision=retry_after_completed_stage" in message
+    assert "reason=resume_after_completed_stage" in message
+
+
+def test_manual_retry_claim_superseded_by_strict_warm_start_upgrade_degrades_to_derived_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1201 E11 — a FRESH manual-retry decision rewritten in flight loses its pin, by design.
+
+    ``_upgrade_retry_for_strict_warm_start_manifest`` applies to any surviving
+    ``action == "retry"`` decision, including the manual-retry lane, and
+    ``_strict_warm_start_retry_run_manifest_evidence`` spreads ``**dict(retry_evidence)``
+    while overwriting BOTH ``decision`` and ``reason`` — so a live operator claim can
+    reach the minting point under a decision face that is no longer manual retry.
+
+    The intended answer, pinned here, is that the claim is then treated as one with no
+    active decision: nothing is minted and the stage targets the superseding lane's own
+    derived attempt (that decision is in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``, so it
+    still submits).  Markerless equivalence outranks the attempt pin; design D0
+    must-preserve 1 is limited accordingly.
+
+    Audit-face residue, asserted so it is visible rather than assumed away: the evidence
+    still carries ``retry_policy.attempt`` and ``manual_retry.new_attempt`` = 4 while the
+    submitted suffix will be derived.  ``retry_policy`` has no non-test consumer outside
+    the evidence builders, so this is an audit inconsistency, not an operational one.
+    """
+
+    fresh_evidence: dict[str, Any] = {
+        "decision": "manual_retry",
+        "reason": "manual_retry_requested",
+        "restart_stage": "forecast",
+        "manual_retry": {
+            "marker": True,
+            "requested": True,
+            "allowed": True,
+            "previous_attempt": 3,
+            "new_attempt": 4,
+        },
+        "retry_policy": {"attempt": 4},
+        "run_manifest_initial_state": {"state_id": None, "quality": "cold_start_no_state"},
+    }
+    strict = {
+        "ready": True,
+        "candidate_state": {
+            "init_state_id": "state_gfs_model_a_2026052100",
+            "init_state_uri": "s3://nhms/states/gfs/model_a/2026052100/state.cfg.ic",
+            "init_state_quality": "fresh",
+            "init_state_valid_time": "2026-05-21T00:00:00Z",
+        },
+    }
+
+    base = _scheduler_candidate_fixture()
+    fresh = scheduler_module._candidate_with_state_evidence(base, copy.deepcopy(fresh_evidence))
+    assert scheduler_module._candidate_manual_retry_attempt(fresh) == 4
+
+    upgraded = scheduler_candidates_module._upgrade_retry_for_strict_warm_start_manifest(
+        CandidateStateDecision(action="retry", reason="manual_retry_requested", evidence=fresh_evidence),
+        strict,
+    )
+
+    assert upgraded is not None
+    assert upgraded.evidence["decision"] == "retry_strict_warm_start_retry_run_manifest_mismatch"
+    assert upgraded.evidence["reason"] == "strict_warm_start_retry_run_manifest_mismatch"
+    # The marker block and the recorded attempt survive the rewrite verbatim.
+    assert upgraded.evidence["manual_retry"]["new_attempt"] == 4
+    assert upgraded.evidence["manual_retry"]["allowed"] is True
+    assert upgraded.evidence["retry_policy"]["attempt"] == 4
+
+    superseded = scheduler_module._candidate_with_state_evidence(base, upgraded.evidence)
+    assert scheduler_module._candidate_manual_retry_attempt(superseded) is None
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        manifest = scheduler_module._candidate_basin_manifest(superseded, output_uri="s3://nhms/out/")
+
+    assert "retry_attempt" not in manifest
+    assert "manual_retry_attempt" not in manifest
+    (record,) = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    message = record.getMessage()
+    assert "claimed_attempt=4" in message
+    assert "decision=retry_strict_warm_start_retry_run_manifest_mismatch" in message
+
+
 def test_terminal_pipeline_success_overrides_stale_created_hydro_placeholder() -> None:
     candidate = _scheduler_candidate_fixture()
     identity = _production_identity_fixture()
@@ -8616,6 +10974,111 @@ def test_completed_forecast_cycle_copyback_skips_stale_created_hydro_without_sub
     assert skipped["state_evidence"]["decision"] == "skip_terminal"
     assert skipped["state_evidence"]["terminal_source"] == "forecast_cycle"
     assert orchestrator.calls == []
+
+
+def test_completed_forecast_cycle_stale_journal_identity_is_quarantined_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """§8.7 quarantine survives the real ``build_candidates`` routing (#1157 E7).
+
+    Same fixture shape as the copyback skip above — a ``complete``
+    ``forecast_cycle`` with matching copyback evidence, which without the
+    quarantine skips as ``terminal_completed_cycle`` — but the journal records
+    a stale predecessor.  Driving it through ``run_once`` (not a unit call on
+    ``_journal_predecessor_identity_quarantine``) is the point: it pins that
+    the quarantine is wired into the candidate construction path and that the
+    demoted skip really leaves ``skipped_candidates`` empty.
+    """
+
+    class JournalIdentityRawCandidateStateRepository(RawCandidateStateRepository):
+        """The candidate-state double plus the journal identity accessors.
+
+        The quarantine reads the recorded ``init_state_id`` JOURNAL-ONLY, off
+        the repository by ``getattr``, so both surfaces have to live on the
+        same object for the real wiring to reach a judgement.
+        """
+
+        def __init__(self, state: dict[str, Any], *, recorded_init_state_id: str) -> None:
+            super().__init__(state)
+            self.recorded_init_state_id = recorded_init_state_id
+
+        def completed_pipeline_init_state_id(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> str | None:
+            del source_id, cycle_time, model_id
+            return self.recorded_init_state_id
+
+        def completed_pipeline_init_state_id_occurrences(
+            self, *, source_id: str, cycle_time: datetime, model_id: str, init_state_id: str
+        ) -> int:
+            del source_id, cycle_time, model_id, init_state_id
+            return 0
+
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    # The scheduler floors 06Z back to the previous allowed cycle hour (00Z),
+    # so the expected predecessor lead is 6; a lead-12 token shares the base
+    # key and is therefore a POSITIVE mismatch, not a no-judgement shape.
+    _base, stale_init_state_id = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=12,
+    )
+    _base, expected_init_state_id = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id=candidate.source_id,
+        model_id=candidate.model_id,
+        candidate_valid_time=candidate.cycle_time_utc,
+        required_lead_hours=6,
+    )
+    assert stale_init_state_id != expected_init_state_id
+    active_repository = JournalIdentityRawCandidateStateRepository(
+        {
+            **identity,
+            "candidate_id": candidate.candidate_id,
+            "hydro_status": "created",
+            "pipeline_status": "created",
+            "forecast_cycle": {
+                "cycle_id": candidate.cycle_id,
+                "source_id": candidate.source_id,
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "complete",
+            },
+            "copyback_evidence": {
+                "stage": "copyback",
+                "status": "succeeded",
+                "source_id": candidate.source_id,
+                "cycle_id": candidate.cycle_id,
+                "model_id": candidate.model_id,
+                "run_id": candidate.run_id,
+                "candidate_id": candidate.candidate_id,
+                "copyback_source_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            },
+        },
+        recorded_init_state_id=stale_init_state_id,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["decision"] == "retry_journal_predecessor_identity_mismatch"
+    assert state_evidence["journal_predecessor_identity"] == {
+        "recorded_init_state_id": stale_init_state_id,
+        "expected_init_state_id": expected_init_state_id,
+        "required_lead_hours": 6,
+        "quarantined_skip_reason": "terminal_completed_cycle",
+    }
+    assert result.evidence["counts"]["submitted_count"] == 1
 
 
 def test_completed_forecast_cycle_copyback_identity_mismatch_does_not_skip(
@@ -9796,12 +12259,604 @@ def test_journal_tier_probe_store_error_blocks_fail_closed_and_the_pass_survives
     assert orchestrator.calls == []
 
 
+# ---------------------------------------------------------------------------
+# #1394 -- the probe's file-kind verdict.  ``LocalObjectStore.exists`` goes
+# through ``stat_no_follow``, which refuses only SYMLINKS: a directory squatting
+# on a file key stats fine, so both probe legs used to call an unreadable
+# artifact "present" -- the fail-OPEN mirror image of the #1365 ruling.
+# ---------------------------------------------------------------------------
+
+#: A forcing witness key: 6 segments against the ``forcing/...`` pattern's 5, so
+#: the closed-world validator admits it as a FILE key and the object leg really
+#: reaches the store (gate O6 does not pre-empt).
+_SQUATTED_OBJECT_FILE_KEY = "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+
+#: Both non-regular kinds the two legs must refuse alike.  The store answers
+#: ``directory`` for one and ``other`` for the FIFO, and the spec delta says "a
+#: directory squatting on a file key, or any other non-regular entry" -- so a
+#: parametrization over directories alone would let ``other`` be dropped from
+#: ``_NON_REGULAR_OBJECT_KINDS`` (object leg) or the local leg's ``S_ISREG``
+#: narrowed to ``S_ISDIR`` without a single case turning red (round-1 F-COV-2).
+#: The predicate is carried alongside so each case pins the kind it actually
+#: created rather than trusting the parameter name.
+_NON_REGULAR_SQUATTER_KINDS = (
+    pytest.param("directory", stat.S_ISDIR, id="directory"),
+    pytest.param("other", stat.S_ISFIFO, id="fifo"),
+)
+
+
+def _create_non_regular_squatter(path: Path, kind: str) -> None:
+    """Create the named non-regular entry at ``path``, WHOLE parent chain included.
+
+    The parent chain matters for both kinds (gate O8 on the object leg): a
+    missing ancestor is a ``FileNotFoundError``, which the store reports as
+    ``absent`` and the probe as ``(True, None)`` -- a different tuple that would
+    make the case prove nothing.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        path.mkdir()
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
+def test_object_leg_reports_a_non_regular_entry_on_a_file_key_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    squatter_kind: str,
+    is_expected_kind: Any,
+) -> None:
+    # #1394 AC-1, object leg.  Every pre-emption gate ahead of the file-kind check
+    # is disarmed on purpose and pinned below, because each of them produces a
+    # DIFFERENT tuple and would make this case prove nothing: the root is
+    # configured (O3), ``tmp_path`` is already realpath-canonical so the store root
+    # is not itself an unsafe path (O4/O9 -- a bare ``tempfile.mkdtemp()`` on macOS
+    # carries ``/var -> /private/var`` and turns every object-leg case into
+    # ``artifact_probe_error``), the key is deep enough for the validator (O6), and
+    # the squatter is created with its WHOLE parent chain (O8 -- a missing ancestor
+    # is ``FileNotFoundError`` and yields ``(True, None)``).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    assert Path(os.path.realpath(object_store_root)) == object_store_root
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    squatter = object_store_root / _SQUATTED_OBJECT_FILE_KEY
+    _create_non_regular_squatter(squatter, squatter_kind)
+
+    # Independent oracles for the three gates the verdict actually depends on: the
+    # validator admits the key, the entry really is the kind this case claims, and
+    # the existence probe alone still says "present".
+    from packages.common.storage import validate_object_path
+
+    assert validate_object_path(_SQUATTED_OBJECT_FILE_KEY).valid is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
+    assert LocalObjectStore(object_store_root, "").object_kind(_SQUATTED_OBJECT_FILE_KEY) == squatter_kind
+    assert (
+        scheduler_state_failure_module._object_manifest_is_missing(candidate, _SQUATTED_OBJECT_FILE_KEY) is False
+    )
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        _SQUATTED_OBJECT_FILE_KEY,
+    ) == (True, "artifact_target_not_a_file")
+    # Distinguishable from every other verdict this branch can reach, which is the
+    # whole point of a new token: a rebuild cannot clear a squatting entry.  Read
+    # off the module's own constants, so collapsing two of them into one literal
+    # is caught here rather than silently satisfying the tuple above.
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON == "artifact_target_not_a_file"
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON not in {
+        None,
+        "object_store_root_unconfigured",
+        scheduler_state_failure_module._ARTIFACT_PROBE_ERROR_REASON,
+    }
+
+
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
+@pytest.mark.parametrize("as_file_uri", [False, True])
+def test_local_leg_reports_a_contained_non_regular_entry_with_the_same_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    as_file_uri: bool,
+    squatter_kind: str,
+    is_expected_kind: Any,
+) -> None:
+    # #1394 AC-1, local leg: ``Path.exists()`` is True for a directory (and for a
+    # FIFO) too.  The entry must sit INSIDE an allowed containment root or gate L5
+    # pre-empts with ``local_artifact_path_outside_allowed_roots``, so the root is
+    # configured and the containment verdict is pinned independently first.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    squatter = object_store_root / "runs" / "run_a" / "output" / "basin_a"
+    _create_non_regular_squatter(squatter, squatter_kind)
+    value = f"file://{squatter}" if as_file_uri else str(squatter)
+
+    assert scheduler_state_failure_module._local_artifact_path_is_allowed(candidate, squatter) == (True, None)
+    assert squatter.exists() is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, value) == (
+        True,
+        "artifact_target_not_a_file",
+    )
+
+
+def test_local_leg_keeps_a_contained_symlink_to_a_regular_file_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D3: the two legs are aligned on DIRECTORIES only.  The object leg
+    # refuses every symlink because ``stat_no_follow`` treats following one as a
+    # containment problem; the local leg computes containment on the FULLY resolved
+    # path (``_realpath_or_none`` is ``realpath(strict=True)``), so a symlink
+    # resolving to a regular file inside its allowed root is readable and stays
+    # present.  Refusing it here would fail-close artifacts that work today, which
+    # is outside #1394 -- this pin exists so the divergence cannot be "fixed" by
+    # accident.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    target = object_store_root / "real-artifact.json"
+    target.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    link = object_store_root / "linked-artifact.json"
+    link.symlink_to(target)
+
+    assert link.is_symlink() is True
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(link)) == (False, None)
+
+
+@pytest.mark.parametrize(
+    "artifact_uri",
+    [
+        # The validator admits this one, so the kind query resolves a real path and
+        # the store answers "absent".
+        _SQUATTED_OBJECT_FILE_KEY,
+        # The validator refuses this one, so the kind query's ``resolve_path``
+        # raises ``ValueError``.  Letting that reach the probe's
+        # ``except (OSError, ValueError)`` leg would silently turn "present" into
+        # "missing with a null reason" -- the defect this case guards.
+        "unrecognized-prefix/whatever.json",
+    ],
+)
+def test_file_kind_check_never_converts_a_present_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact_uri: str,
+) -> None:
+    # #1394 D1 constraint 2: the file-kind check may only ADD the non-regular
+    # verdict.  Patched present + physically absent is exactly the geometry the
+    # existing raw-manifest helper family relies on, so a check that flipped
+    # absent-or-unresolvable would ripple far beyond this test.
+    #
+    # The patch goes on ``scheduler_state_failure_module`` itself, NOT on the
+    # facade: compat propagates a facade patch into these modules only FOR THE
+    # DURATION of a call entered through a compat-wrapped facade function, and this
+    # test calls the probe directly.  A facade patch here would silently degrade
+    # into "the probe ran against the real store".
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    monkeypatch.setattr(
+        scheduler_state_failure_module,
+        "_object_manifest_is_missing",
+        lambda _candidate, _uri: False,
+    )
+    assert not (object_store_root / artifact_uri).exists()
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, artifact_uri) == (False, None)
+
+
+#: A deployment prefix carrying a PATH SEGMENT rather than a bare bucket -- the
+#: #1397 trigger, and a shape supported elsewhere in the repo
+#: (``object_store_validation.py`` ``_operational_prefix`` keeps ``parsed.path``).
+_PATH_SEGMENT_OBJECT_STORE_PREFIX = "s3://nhms/nwm"
+
+#: A deployment prefix with NO ``s3://`` scheme at all.  Every tracked config sets
+#: an ``s3://`` prefix (``.env.example``, ``infra/env/*.example``), so the bare-key
+#: arm of ``normalize_object_key`` -- the ``candidate.startswith(prefix.rstrip("/")
+#: + "/")`` branch, which exists only for this shape -- is exercised nowhere else.
+#: Two leftover segments rather than one, so a fix that special-cased a single
+#: stray segment would not satisfy it.
+_NON_S3_OBJECT_STORE_PREFIX = "nhms-prod/m10"
+
+
+@pytest.mark.parametrize(
+    "object_store_prefix",
+    ["s3://nhms", _PATH_SEGMENT_OBJECT_STORE_PREFIX, _NON_S3_OBJECT_STORE_PREFIX],
+)
+def test_present_file_key_is_probed_as_recorded_under_any_prefix_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_store_prefix: str,
+) -> None:
+    # #1397 regression: the classifier is consulted on the NORMALIZED key, so a
+    # deployment whose prefix carries a path segment -- or carries no ``s3://``
+    # scheme at all (#1397 AC-4) -- is served identically to a bare-bucket one.
+    # Before the fix the leftover ``nwm/`` (resp. ``nhms-prod/m10/``) segments made
+    # the validator reject a physically present FILE key as prefix-shaped.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, object_store_prefix)
+    recorded = store.uri_for_key(_SQUATTED_OBJECT_FILE_KEY)
+    store.write_bytes_atomic(_SQUATTED_OBJECT_FILE_KEY, b'{"schema_version": "nhms.forcing_package.v1"}')
+    assert recorded.startswith(f"{object_store_prefix}/")
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+    # The production expression at the journal/direct call site, spelled out so the
+    # classifier and the probe are exercised as one framing decision.
+    probe_uri = (
+        scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+        if scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded)
+        else recorded
+    )
+    assert probe_uri == recorded
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, probe_uri) == (False, None)
+
+
+def test_path_segment_prefix_no_longer_fabricates_a_witness_beneath_a_present_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397, the fault the framing mismatch produced.  Kept as an explicit pin so
+    # the regression above cannot be satisfied by a classifier that merely answers
+    # False for the wrong reason: the RAW framing really does reject this key, the
+    # fabricated witness really does sit beneath a regular file, and probing it
+    # really does raise into ``artifact_probe_error`` -- which
+    # ``scheduler_candidates`` then refuses as ``forcing_artifact_reference_unsafe``.
+    from packages.common.storage import validate_object_path
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    recorded = store.uri_for_key(_SQUATTED_OBJECT_FILE_KEY)
+    store.write_bytes_atomic(_SQUATTED_OBJECT_FILE_KEY, b'{"schema_version": "nhms.forcing_package.v1"}')
+
+    assert validate_object_path(recorded).valid is False
+    fabricated = scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+    assert fabricated == f"{recorded}/forcing_package.json"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, fabricated) == (
+        True,
+        "artifact_probe_error",
+    )
+
+
+def test_directory_shaped_package_still_derives_its_witness_under_a_path_segment_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 must-preserve: normalize-first must not cost #1365 its witness
+    # derivation.  A 5-segment package PREFIX stays prefix-shaped after the
+    # deployment prefix is stripped, so the derived manifest file key is still what
+    # gets probed -- end to end, on a physically present package.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=_PATH_SEGMENT_OBJECT_STORE_PREFIX,
+    )
+    package["store"].write_bytes_atomic(package["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    package_uri = package["package_uri"]
+    # Independent oracle for the production shape: 5 path segments BELOW the
+    # deployment prefix, path segment included.
+    assert package_uri.removeprefix(_PATH_SEGMENT_OBJECT_STORE_PREFIX).strip("/").count("/") == 4
+
+    for recorded in (package_uri, package_uri.rstrip("/")):
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is True
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, package_uri),
+    )
+
+    assert decision is not None
+    assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    assert decision.evidence["forcing_provenance"]["probe_key"] == f"{package_uri.rstrip('/')}/forcing_package.json"
+
+
+def test_foreign_bucket_reference_keeps_its_repair_eligible_null_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D4 tail: a reference naming another bucket makes the shared pure
+    # normalizer raise, the classifier folds that into "probe it as recorded", and
+    # the probe's own ``ValueError`` leg yields the repair-eligible null-reason
+    # residual -- exactly the routing this reference had before normalize-first.
+    from packages.common.object_store import normalize_object_key
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    candidate = _scheduler_candidate_fixture()
+    recorded = f"s3://other-bucket/{_SQUATTED_OBJECT_FILE_KEY}"
+
+    with pytest.raises(ValueError, match="bucket does not match"):
+        normalize_object_key(recorded, "s3://nhms")
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, recorded) == (True, None)
+
+
+#: The package PREFIX the witness derivation is built for: the same five canonical
+#: segments as ``_SQUATTED_OBJECT_FILE_KEY``'s parent, trailing ``/`` included, so
+#: the closed-world validator refuses it as a file key and the classifier must
+#: answer True.
+_PACKAGE_PREFIX_URI = f"{_SQUATTED_OBJECT_FILE_KEY.rsplit('/', 1)[0]}/"
+
+
+def test_non_s3_prefix_keeps_the_witness_derivation_and_the_unnormalizable_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4, the two NON-file-key routings a scheme-less deployment prefix must
+    # keep.  The present-file-key half is the ``_NON_S3_OBJECT_STORE_PREFIX``
+    # parametrization above; without this negative half that half could be satisfied
+    # by a classifier that answered False for everything.
+    from packages.common.object_store import normalize_object_key
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _NON_S3_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+
+    # #1365 preserved: normalizing first must not cost a DIRECTORY-shaped package its
+    # witness.  The prefix segments come off, the five canonical segments stay
+    # prefix-shaped, and the manifest FILE key derived from the recorded value is
+    # what the probe resolves -- resolvable (no ``artifact_probe_error``) and absent,
+    # i.e. the ordinary repair-eligible missing-package verdict.
+    package_uri = f"{_NON_S3_OBJECT_STORE_PREFIX}/{_PACKAGE_PREFIX_URI}"
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == f"{_NON_S3_OBJECT_STORE_PREFIX}/{_SQUATTED_OBJECT_FILE_KEY}"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
+
+    # An ``s3://`` reference recorded under a scheme-less prefix makes the shared
+    # pure normalizer raise (it has no bucket to compare against), the classifier
+    # folds that into "probe it as recorded", and the probe's own ``ValueError`` leg
+    # yields the D4 repair-ELIGIBLE null-reason residual -- the same routing this
+    # reference had before normalize-first, and the same one the foreign-bucket case
+    # above documents.
+    unnormalizable = f"s3://nhms/{_SQUATTED_OBJECT_FILE_KEY}"
+    with pytest.raises(ValueError, match="must be an S3 URI"):
+        normalize_object_key(unnormalizable, _NON_S3_OBJECT_STORE_PREFIX)
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, unnormalizable) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, unnormalizable) == (True, None)
+
+
+#: Percent-encoded recorded FILE keys under a bare-bucket prefix (#1397 AC-4).  Only
+#: the ``s3://`` arm of ``normalize_object_key`` unquotes; the closed-world
+#: validator's own ``_normalize_object_path`` never does, which is how the two
+#: framings can disagree about one recorded reference.
+_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS = (
+    # ``%20`` inside a path segment -- the realistic shape, and the one the
+    # store-level pin ``test_normalize_key_percent_decodes_only_the_s3_arm`` uses.
+    # Segment COUNT is unchanged by decoding, so the validator answers the same
+    # either way: this row pins classifier/probe AGREEMENT and that the probe
+    # resolves the DECODED path, not the framing fix itself.
+    "s3://nhms/forcing/gfs/2026%2005%2021/basin_a_v1/model_a/forcing_package.json",
+    # ``%2F`` -- encoded SEPARATORS.  The raw framing sees one segment and rejects a
+    # physically present file key as prefix-shaped; the normalized framing sees six
+    # and admits it.  This is the row that actually discriminates the two framings.
+    "s3://nhms/forcing%2Fgfs%2F2026052106%2Fbasin_a_v1%2Fmodel_a%2Fforcing_package.json",
+)
+
+#: The decoded key ``_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS[0]`` resolves to.
+_PERCENT_DECODED_OBJECT_FILE_KEY = "forcing/gfs/2026 05 21/basin_a_v1/model_a/forcing_package.json"
+
+
+def test_percent_encoded_recorded_value_is_framed_alike_by_classifier_and_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4: a percent-encoded recorded reference must reach the classifier and
+    # the probe as the SAME key.  Before normalize-first the classifier asked the
+    # validator about the still-encoded value while the probe asked the store about
+    # the decoded one, so a present package could have a witness fabricated beneath
+    # its own file key.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, "s3://nhms")
+    for key in (_PERCENT_DECODED_OBJECT_FILE_KEY, _SQUATTED_OBJECT_FILE_KEY):
+        store.write_bytes_atomic(key, b'{"schema_version": "nhms.forcing_package.v1"}')
+
+    for recorded in _PERCENT_ENCODED_RECORDED_FILE_KEY_URIS:
+        # Independent oracle: the store really does resolve this encoded reference to
+        # a physically present object, so a "missing" verdict below would be false.
+        assert store.exists(recorded) is True
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+        # The production expression at the journal/direct call site, spelled out so
+        # the classifier and the probe are exercised as one framing decision.
+        probe_uri = (
+            scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+            if scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded)
+            else recorded
+        )
+        assert probe_uri == recorded
+        assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, probe_uri) == (False, None)
+
+    # #1365 preserved, the negative half: a percent-encoded DIRECTORY-shaped package
+    # still needs its witness, and the derived manifest FILE key is resolvable and
+    # absent -- the ordinary repair-eligible missing-package verdict, not a probe
+    # error.  A distinct cycle so no seeded object above can answer for it.
+    package_uri = "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/"
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/forcing_package.json"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
+
+
+def test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D4 / spec: the shape classifier must never construct a store and
+    # must never raise.  A SYMLINKED store ROOT is the non-tautological oracle for
+    # it: ``LocalObjectStore.__post_init__`` runs ``ensure_directory_no_follow`` on
+    # the root, and the resulting ``SafeFilesystemError`` becomes an
+    # ``ObjectStoreError`` -- a ``RuntimeError``, which the classifier's
+    # ``except ValueError`` cannot fold.  A classifier that asked the store instead
+    # of the pure normalizer would therefore ESCAPE from here, and because this
+    # classification runs OUTSIDE the probe's containment it would abort the whole
+    # scheduler pass for every remaining candidate -- the exact #1365 fault.
+    #
+    # tasks.md 4.1 originally recorded this SHALL as deliberately prose-only on the
+    # grounds that any scenario "could only be a tautology".  That rationale is
+    # wrong, and this case is the counterexample: nothing here asserts "no store was
+    # constructed", it asserts an OBSERVABLE that only the store-free derivation can
+    # produce under a root no store can be built on.
+    real_root = tmp_path / "real-object-store"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-object-store"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(linked_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+
+    # Independent oracle: the store really cannot be built on this root, and the
+    # fault really is outside every ``except ValueError`` the classifier owns.
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(linked_root, "")
+
+    # Both classifier answers, exactly as under a healthy root: a package prefix
+    # needs its witness, an admissible file key does not.
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, _PACKAGE_PREFIX_URI) is True
+    assert (
+        scheduler_state_failure_module._needs_package_manifest_witness(candidate, _SQUATTED_OBJECT_FILE_KEY)
+        is False
+    )
+
+    # End to end: the PROBE does construct a store, so the same unsafe root surfaces
+    # as this candidate's contained ``artifact_probe_error`` blocker -- one blocked
+    # candidate with evidence, not an aborted pass.
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, _PACKAGE_PREFIX_URI),
+    )
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=_PACKAGE_PREFIX_URI,
+        unsafe_reason="artifact_probe_error",
+    )
+    # The witness really was derived (``probe = manifest``), which is what proves
+    # the classifier's True answer above reached production framing.
+    assert decision.evidence["forcing_provenance"]["probe"] == "manifest"
+    assert decision.evidence["forcing_provenance"]["probe_key"] == (
+        f"{_PACKAGE_PREFIX_URI.rstrip('/')}/forcing_package.json"
+    )
+
+
+def test_normalize_key_follows_the_shared_pure_normalizer_at_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 requires ONE normalization derivation, not two that can drift.  A
+    # byte-for-byte copy would satisfy any equality assertion, so the oracle is
+    # runtime delegation: perturb the pure function and ``normalize_key`` must move
+    # with it.  (Delegation vs duplication is otherwise a code-review property.)
+    from packages.common import object_store as object_store_module
+
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    recorded = "s3://nhms/raw/gfs/2026052106/manifest.json"
+    assert store.normalize_key(recorded) == "raw/gfs/2026052106/manifest.json"
+
+    monkeypatch.setattr(
+        object_store_module,
+        "normalize_object_key",
+        lambda key_or_uri, object_store_prefix="": f"perturbed/{object_store_prefix}/{key_or_uri}",
+    )
+
+    assert store.normalize_key(recorded) == f"perturbed/s3://nhms/{recorded}"
+
+
+def test_normalize_key_percent_decodes_only_the_s3_arm(tmp_path: Path) -> None:
+    # must-preserve: the ``s3://`` arm has always unquoted and the bare-key arm has
+    # always not.  Extracting the pure normalizer must not "align" the two under
+    # cover of #1397's normalize-first change.
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+
+    assert store.normalize_key("raw/gfs/2026%2005%2021/manifest.json") == "raw/gfs/2026%2005%2021/manifest.json"
+    assert store.normalize_key("s3://nhms/raw/gfs/2026%2005%2021/manifest.json") == (
+        "raw/gfs/2026 05 21/manifest.json"
+    )
+
+
+def test_sidecar_tier_directory_witness_raises_the_ordinary_missing_package_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1394 AC-2 / design.md D6: on the sidecar tier the derived witness key
+    # standing on a DIRECTORY emitted NO blocker at all before this change (the
+    # probe called it present).  It must now land on that tier's ordinary
+    # missing-package blocker CARRYING the new reason -- not on the #1203
+    # read-fault carve-out, which is keyed on exact equality with
+    # ``artifact_probe_error`` and is deliberately repair-ELIGIBLE (it never passes
+    # an ``unsafe_reason`` at all).  A directory is a determination, not an
+    # inability to determine.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    squatter = object_store_root / sidecar["manifest_key"]
+    squatter.mkdir(parents=True)
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=sidecar["package_uri"],
+        unsafe_reason="artifact_target_not_a_file",
+    )
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "object_store_sidecar",
+        "probe": "manifest",
+        "package_uri": sidecar["package_uri"],
+        "manifest_uri": sidecar["manifest_uri"],
+        "probe_key": sidecar["manifest_key"],
+        "forcing_version_id": candidate.forcing_version_id,
+        "artifact_exists": False,
+    }
+    # NOT the #1203 read-fault route, whose whole shape is a different blocker.
+    assert "tier_status" not in decision.evidence["forcing_provenance"]
+    # The repair channel's own predicate (``scheduler_candidates`` :1616): a
+    # non-null unsafe reason is refused as ``forcing_artifact_reference_unsafe``.
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] not in (None, "")
+
+
 # A recorded reference whose authority holds a "[": ``urlparse`` rejects it with
 # ``ValueError: Invalid IPv6 URL``, which is the shape-classification fault leg.
 _MALFORMED_RECORDED_PACKAGE_URI = "s3://[/forcing/gfs/2026052106/basin_a_v1/model_a/"
 
 
-def test_malformed_recorded_package_uri_shape_classification_never_raises() -> None:
+def test_malformed_recorded_package_uri_shape_classification_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # #1365 round-1b unit seam: the witness-derivation trigger runs OUTSIDE the
     # probe's own containment (it decides WHAT to probe), and the closed-world
     # validator it consults is itself a RAISING surface.  Independent oracle
@@ -9812,10 +12867,25 @@ def test_malformed_recorded_package_uri_shape_classification_never_raises() -> N
     with pytest.raises(ValueError):
         validate_object_path(_MALFORMED_RECORDED_PACKAGE_URI)
 
+    # #1397: the normalizer the classifier now consults first raises on this shape
+    # too (``urlparse`` again), and that ``ValueError`` must fold into the same
+    # containment rather than opening a second escape route out of a helper that
+    # runs OUTSIDE the probe.
+    from packages.common.object_store import normalize_object_key
+
+    with pytest.raises(ValueError):
+        normalize_object_key(_MALFORMED_RECORDED_PACKAGE_URI, "s3://nhms")
+
     # An unparseable reference is not a package prefix a witness can be derived
     # for, so classification answers "probe it as recorded" instead of raising.
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
     assert (
-        scheduler_state_failure_module._needs_package_manifest_witness(_MALFORMED_RECORDED_PACKAGE_URI) is False
+        scheduler_state_failure_module._needs_package_manifest_witness(
+            candidate,
+            _MALFORMED_RECORDED_PACKAGE_URI,
+        )
+        is False
     )
 
 
@@ -9961,17 +13031,37 @@ def test_package_manifest_probe_uri_is_the_single_producer_isomorphic_derivation
         ("", False),
     ],
 )
-def test_package_manifest_witness_trigger_is_validator_admissibility(value: str, expected: bool) -> None:
-    assert scheduler_state_failure_module._needs_package_manifest_witness(value) is expected
+def test_package_manifest_witness_trigger_is_validator_admissibility(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: bool,
+) -> None:
+    # #1397 task 3.5 must-preserve: under a bare-bucket prefix (every tracked
+    # deployment) and with no percent-encoding, normalize-first leaves EVERY answer
+    # in this table byte-for-byte where it was before the classifier started
+    # normalizing.  Both prefix shapes are exercised, including the empty one.
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    for bare_bucket_prefix in ("", "s3://nhms"):
+        monkeypatch.setenv("OBJECT_STORE_PREFIX", bare_bucket_prefix)
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, value) is expected
     # Independent oracle: the trigger is exactly "the closed-world validator does
     # not admit this non-local reference as a FILE key", re-derived here from
-    # ``validate_object_path`` itself rather than restated from the helper.
+    # ``validate_object_path`` itself rather than restated from the helper.  The
+    # question is now asked about the key the probe will resolve, so the oracle
+    # normalizes first with the store's own derivation.
+    from packages.common.object_store import normalize_object_key
     from packages.common.storage import validate_object_path
 
     stripped = value.strip()
     is_local = stripped.startswith(("file://", "/", "~"))
     expected_from_validator = bool(stripped) and not is_local and not validate_object_path(stripped).valid
     assert expected is expected_from_validator
+    if stripped and not is_local:
+        # ... and normalization under a bare bucket is a no-op for the validator's
+        # answer, which is what makes the two oracles agree.
+        normalized_answer = not validate_object_path(normalize_object_key(stripped, "s3://nhms")).valid
+        assert normalized_answer is expected
 
 
 def test_forcing_sidecar_key_and_manifest_derivation_match_the_producer_write_side() -> None:
@@ -10277,7 +13367,7 @@ def test_sanitized_journal_uri_recovers_through_the_sidecar_tier_end_to_end(
 def test_sidecar_probe_survives_a_producer_scheduler_prefix_drift(tmp_path: Path) -> None:
     # B10(a) (round-1 V2-C2): the record's manifest uri was written under a
     # DIFFERENT object-store prefix than the scheduler reads with.  Probing that
-    # uri verbatim raises inside ``_normalize_s3_uri`` and the probe swallows it
+    # uri verbatim raises inside ``normalize_object_key`` and the probe swallows it
     # into a false "missing" for a physically present package; the derived key has
     # no such leg.
     object_store_root = tmp_path / "object-store"
@@ -11508,6 +14598,16 @@ def test_exact_cycle_missing_forcing_repair_rejects_non_direct_grid_candidate(
         # (symlinked witness leaf, stale NFS handle) -- a rebuild cannot clear a
         # filesystem fault either, and the reason names which fault it was.
         ("probe_error", "rejected", "forcing_artifact_reference_unsafe", "artifact_probe_error"),
+        # #1394: a DIRECTORY standing on the derived witness key is a determination
+        # rather than a fault, but the routing is the same and for the same reason
+        # -- a rebuild cannot write the manifest file where the directory stands,
+        # so the reason is non-null and the channel refuses it.
+        (
+            "target_not_a_file",
+            "rejected",
+            "forcing_artifact_reference_unsafe",
+            "artifact_target_not_a_file",
+        ),
         # Paired positive: a probe that actually RAN and determined the package
         # absent stays repair-eligible, exactly as before #1365.
         ("configured_absent", "authorized", "exact_cycle_direct_grid_raw_manifest_ready", None),
@@ -11545,6 +14645,15 @@ def test_missing_forcing_repair_gate_separates_unprobed_from_probed_absent_block
             witness_path.symlink_to(relocated)
             with pytest.raises(ObjectStoreError):
                 LocalObjectStore(object_store_root, "").exists(f"{package_uri.rstrip('/')}/forcing_package.json")
+        elif store_mode == "target_not_a_file":
+            # ... or unless a DIRECTORY stands on the derived witness key, which
+            # the store stats happily (``stat_no_follow`` refuses only symlinks)
+            # and used to report as a present package.
+            witness_path = object_store_root / "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+            witness_path.mkdir(parents=True)
+            assert LocalObjectStore(object_store_root, "").exists(
+                f"{package_uri.rstrip('/')}/forcing_package.json"
+            )
     state = _missing_forcing_retry_state(
         candidate,
         raw_manifest=readiness,
@@ -12565,6 +15674,252 @@ def test_copyback_source_workspace_local_path_blocks_even_when_file_exists(
     assert decision.evidence["artifact_guard"]["unsafe_reason"] == "local_artifact_path_outside_allowed_roots"
 
 
+def _record_artifact_probe_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every uri handed to the artifact existence probe, delegating on.
+
+    The guard calls ``_artifact_uri_missing_status`` by BARE NAME inside
+    ``scheduler_state_failure``, so the recorder has to replace the attribute on
+    that module -- patching an importing module would never be consulted.
+    """
+
+    probed: list[str] = []
+    original = scheduler_state_failure_module._artifact_uri_missing_status
+
+    def _record(candidate: Any, artifact_uri: str) -> tuple[bool, str | None]:
+        probed.append(artifact_uri)
+        return original(candidate, artifact_uri)
+
+    monkeypatch.setattr(scheduler_state_failure_module, "_artifact_uri_missing_status", _record)
+    return probed
+
+
+def _withheld_copyback_state(candidate: Any, placeholder: str, *, required_arm: str) -> dict[str, Any]:
+    """Failure state whose resolved copyback reference is a redaction placeholder.
+
+    ``required_arm`` selects which half of ``copyback_required`` is exercised:
+    ``restart_stage`` rides the ``copyback`` restart stage (set membership),
+    ``state_flag`` rides ``_copyback_source_required``, and ``none`` leaves the
+    copyback requirement off entirely.
+    """
+
+    if required_arm == "restart_stage":
+        return _forecast_failure_state(
+            candidate,
+            failed_stage="copyback",
+            # Same shaping as the existing copyback restart-stage anchor: a
+            # non-transient code with an explicit ``retryable`` override keeps the
+            # state off both the recompute and the permanent branch.
+            error_code="COPYBACK_FAILED",
+            retryable=True,
+            copyback_source_uri=placeholder,
+        )
+    state = _copyback_downstream_failure_state(
+        candidate,
+        _production_identity_fixture(),
+        copyback_source=placeholder,
+        error_code="NODE_FAILURE",
+    )
+    if required_arm == "state_flag":
+        state["copyback_source_required"] = True
+    return state
+
+
+@pytest.mark.parametrize("required_arm", ["restart_stage", "state_flag"])
+@pytest.mark.parametrize("placeholder", sorted(EVIDENCE_REDACTION_PLACEHOLDERS))
+def test_withheld_copyback_reference_blocks_with_the_distinct_withheld_reason(
+    placeholder: str,
+    required_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367: a redaction placeholder is a WITHHELD reference, not a probeable one.
+    # Probing it always reports "missing" and lands on ``COPYBACK_SOURCE_MISSING``
+    # -- a determined-missing claim no probe made, and one the missing-forcing
+    # repair channel rejects, i.e. an uncleareable deadlock.  Both
+    # ``copyback_required`` arms are covered.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, placeholder, required_arm=required_arm)
+    expected_restart_stage = "copyback" if required_arm == "restart_stage" else "parse"
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_WITHHELD"
+    assert decision.evidence["classifier"] == "missing_upstream_artifact"
+    assert decision.evidence["restart_stage"] == expected_restart_stage
+    assert decision.evidence["artifact_guard"]["artifact_type"] == "copyback_source"
+    # The placeholder itself is the artifact reference: it is already redacted, so
+    # it is evidence-safe, and it tells the operator the reference was WITHHELD
+    # rather than absent.
+    assert decision.evidence["artifact_guard"]["artifact_uri"] == placeholder
+    assert decision.evidence["artifact_guard"]["artifact_exists"] is False
+    assert decision.evidence["artifact_guard"]["stable_classifier"] == "COPYBACK_SOURCE_WITHHELD"
+    # No probe ran on the withheld reference, so there is no probe-layer unsafe
+    # reason to report.  The recorder is global, so the pin is "the placeholder
+    # never reached the probe" -- unrelated lanes above the guard (the raw-manifest
+    # repair probe on the restart-stage geometry) legitimately probe their own uris.
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] is None
+    assert placeholder not in probed
+
+
+@pytest.mark.parametrize("placeholder", sorted(EVIDENCE_REDACTION_PLACEHOLDERS))
+def test_withheld_copyback_reference_without_a_copyback_requirement_does_not_block(
+    placeholder: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D1: a withheld reference carries no existence evidence at all, so with
+    # nothing requiring a copyback source there is nothing to determine -- the leg
+    # emits no blocker, exactly like the absent-reference arm.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, placeholder, required_arm="none")
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence.get("error_code") not in {"COPYBACK_SOURCE_MISSING", "COPYBACK_SOURCE_WITHHELD"}
+    assert placeholder not in probed
+
+
+def test_withheld_copyback_blocker_is_not_a_stable_missing_forcing_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D3: the forcing repair authorization channel licenses a single-cycle
+    # forcing REBUILD, which cannot clear a withheld copyback reference.  The
+    # withheld blocker must therefore stay outside that channel.
+    from services.orchestrator.scheduler_candidates import _decision_is_stable_missing_forcing_blocker
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm="restart_stage")
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.reason == "copyback_source_withheld"
+    assert _decision_is_stable_missing_forcing_blocker(decision) is False
+
+
+def test_withheld_copyback_reference_shadows_a_lower_priority_alias_without_probing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 D6: ``_first_artifact_uri`` resolves container-major, so a placeholder
+    # in the state-level key WINS the resolution.  A lower-priority alias that
+    # survived unredacted is an echo of unknown provenance -- probing it would
+    # bypass the withheld ruling on the authoritative reference -- so the leg does
+    # NOT continue scanning.  The echo is materialized as a PRESENT object here:
+    # a continue-scan would find it and emit no blocker at all.
+    object_store_root = tmp_path / "object-store"
+    surviving_alias = object_store_root / "runs" / "fcst_gfs_2026052106_model_a" / "output" / "summary.json"
+    surviving_alias.parent.mkdir(parents=True)
+    surviving_alias.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm="restart_stage")
+    state["copyback_evidence"] = {"copyback_source_uri": str(surviving_alias)}
+    probed = _record_artifact_probe_calls(monkeypatch)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["artifact_guard"]["artifact_uri"] == "[object-uri]"
+    assert "[object-uri]" not in probed
+    assert str(surviving_alias) not in probed
+
+
+def _withheld_copyback_manual_retry_marker(job_id: str) -> dict[str, Any]:
+    return _decision_path_manual_retry_marker(
+        entity_id=job_id,
+        retry_count=1,
+        previous_job_id=job_id,
+        details_model_id="model_a",
+    )
+
+
+@pytest.mark.parametrize("required_arm", ["restart_stage", "state_flag"])
+def test_manual_retry_pre_empts_the_withheld_copyback_blocker_on_failure_state_arms(
+    required_arm: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D: "manual retry is not an escape hatch" is FALSE for the
+    # failure-state geometries this change pins.  They reach the guard at
+    # ``scheduler_state_decision.py:277``/``:355``, both AFTER the manual-retry
+    # return (``:269``), so a production-shaped marker pre-empts the blocker.  It
+    # bypasses rather than clears: the withheld reference is untouched, so the
+    # blocker returns if the resubmitted run fails again (the no-marker arm of this
+    # same geometry is pinned by the withheld-blocker test above).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _withheld_copyback_state(candidate, "[object-uri]", required_arm=required_arm)
+    state["pipeline_events"] = [
+        _withheld_copyback_manual_retry_marker("job_cycle_gfs_2026052106_forecast_model_a_forecast")
+    ]
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+
+
+def test_withheld_copyback_blocker_on_the_completed_stage_arm_survives_a_manual_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1367 round-1 CAND-D, the other half: the completed-stage resume arm
+    # (``scheduler_state_decision.py:237``) is evaluated BEFORE the manual-retry
+    # return, so a marker does not pre-empt it.  This arm requires NO failure
+    # signal, which is exactly what makes it disjoint from the two arms above --
+    # and it is the arm the runbook routes to "report + #1464", since no operator
+    # channel reaches it.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    parse_job_id = "job_cycle_gfs_2026052106_forecast_model_a_parse"
+    state = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "copyback_source_uri": "[object-uri]",
+        "completed_stage_evidence": {
+            "restart_stage": "copyback",
+            "stage": "parse",
+            "status": "succeeded",
+            "job_id": parse_job_id,
+        },
+        "pipeline_jobs": [{**identity, "job_id": parse_job_id, "status": "succeeded", "stage": "parse"}],
+        "pipeline_events": [_withheld_copyback_manual_retry_marker(parse_job_id)],
+    }
+    # The disjointness premise, asserted rather than assumed.
+    assert scheduler_module._state_has_failure_signal(state) is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "copyback_source_withheld")
+    assert decision.evidence["error_code"] == "COPYBACK_SOURCE_WITHHELD"
+    assert decision.evidence["restart_stage"] == "copyback"
+
+
 # ---------------------------------------------------------------------------
 # #1402: the failure-state local artifact guard normalized its containment bases
 # (the resource-profile artifact roots and their env fallbacks) and the probed
@@ -12586,6 +15941,7 @@ _ARTIFACT_GUARD_LANE_FUNCTIONS = (
     "_local_artifact_path",
     "_local_artifact_path_is_allowed",
     "_local_artifact_allowed_roots",
+    "_local_artifact_target_is_not_a_file",
     "_path_is_relative_to",
     "_realpath_or_none",
 )
@@ -13054,9 +16410,9 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     # The loop root is carried by the candidate's RESOURCE PROFILE rather than by
     # ``OBJECT_STORE_ROOT``: the env var also seeds ``ProductionSchedulerConfig``,
     # whose own unguarded ``path.resolve()`` (``scheduler_config.py:930``, a
-    # separate site outside this lane, tracked as #1423) would raise on <=3.12
-    # before the scheduler is even constructed.  The guard reads both sources
-    # identically.
+    # separate site outside this lane) used to raise on <=3.12 before the
+    # scheduler was even constructed -- fixed under #1423, whose section below
+    # owns that seam.  The guard reads both sources identically.
     profile = {
         **_missing_forcing_repair_direct_grid_profile(),
         "object_store_copyback_root": str(loop_root),
@@ -13102,6 +16458,817 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     assert repair["reason"] == "forcing_artifact_reference_unsafe"
     assert repair["unsafe_reason"] == "local_artifact_root_unresolvable"
     assert result.evidence["counts"]["submitted_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #1423: the db-backed arm of ``_resolve_config_path_for_mode``
+# (``scheduler_config.py:928-930``) called ``path.resolve()`` bare.  On <=3.12 --
+# every production interpreter (CI 3.11, node-27 3.11.15, node-22 3.12.7) -- a
+# symlink loop in a configured root aborted ``ProductionSchedulerConfig``
+# construction with an errno-LESS ``RuntimeError``, so no preflight and no
+# blocker ever ran; on 3.13+ the same value was silently adopted as a field.
+# The fix adopts the paradigm its sibling ``_optional_config_path`` settled in
+# PR #1349: strict realpath, one non-strict realpath fallback for every strict
+# failure, and classification left to the storage preflight.
+#
+# The construction invariant below is deliberately narrow: it covers a loop in
+# the FINAL segment of a root that is not a containment base for other
+# configured paths.  ``WORKSPACE_ROOT`` / lock / evidence used to abort in
+# ``_confined_path`` and parent-segment loops in the preserve-final helpers,
+# which is why the parent-loop shapes below are exercised on the helper
+# directly; those sites were outside this issue and are closed by #1520, whose
+# construction-level cases sit in the block right after this one.
+# ---------------------------------------------------------------------------
+
+
+def _db_backed_config_resolve(path: Path) -> Path:
+    return scheduler_config_module._resolve_config_path_for_mode(path, db_free_required=False)
+
+
+def test_db_backed_config_resolve_canonicalises_unresolvable_paths_without_raising(tmp_path: Path) -> None:
+    # #1423 D4 decision table, db-backed arm.  Every expected value is built
+    # from the canonicalised tmp_path rather than from a second realpath() call
+    # on the same input, and every one of them holds on 3.11 through 3.14.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    existing = tmp_path / "existing-root"
+    existing.mkdir()
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    loop = _symlink_loop_dir(tmp_path, "config-loop")
+    parent_loop = _symlink_loop_dir(tmp_path, "parent-loop")
+
+    # A real directory canonicalises to itself, through any /var -> /private/var
+    # style platform symlink, exactly as the old resolve() did.
+    assert _db_backed_config_resolve(existing) == canonical_tmp / "existing-root"
+    # ENOENT keeps the historical semantics: configuration construction performs
+    # no existence validation, and the product is the old non-strict
+    # Path.resolve() product verbatim (that call raises on no supported CPython,
+    # so this equality is version-agnostic).
+    assert _db_backed_config_resolve(not_created_yet) == canonical_tmp / "nfs-not-mounted-yet"
+    assert _db_backed_config_resolve(not_created_yet) == not_created_yet.resolve()
+    # ELOOP is where the old bare resolve() aborted the process on <=3.12.  The
+    # loop is handed down canonicalised instead, for the storage preflight to
+    # classify.
+    assert _db_backed_config_resolve(loop) == canonical_tmp / "config-loop-a"
+    # Parent-segment loop: helper-direct only (the construction chain aborts
+    # earlier, in the preserve-final helpers, which #1423 does not touch).
+    assert (
+        _db_backed_config_resolve(parent_loop / "child" / "tail")
+        == canonical_tmp / "parent-loop-a" / "child" / "tail"
+    )
+    # The differential shape: strict resolution stops at ENOENT on the missing
+    # `gone` component, and the non-strict fallback collapses `..` onto the loop
+    # itself -- the exact input where Path.resolve() raised on <=3.12 while
+    # returning this value on 3.13+.
+    assert (
+        _db_backed_config_resolve(tmp_path / "gone" / ".." / "parent-loop-a" / "leaf")
+        == canonical_tmp / "parent-loop-a" / "leaf"
+    )
+
+
+def test_db_free_config_resolve_arm_keeps_graceful_degradation_for_symlink_loop(tmp_path: Path) -> None:
+    # The arm #1423 declared out of scope has since been drifted BY #1400, which
+    # aligned it with the database-backed arm above (strict ``os.path.realpath``
+    # falling back to the non-strict form).  The product is unchanged and the
+    # degradation is still graceful -- construction returns a Path and lets the
+    # storage preflight classify it -- but the reason changed: it is now the
+    # non-strict realpath returning a loop component verbatim, not an
+    # ``except (OSError, RuntimeError)`` arm handing back the input.
+    loop = _symlink_loop_dir(tmp_path, "db-free-control-loop")
+
+    assert scheduler_config_module._resolve_config_path_for_mode(loop, db_free_required=True) == loop
+
+
+def test_db_free_and_db_backed_config_resolve_arms_agree_on_one_canonical_form(tmp_path: Path) -> None:
+    """#1400 AC-6, stated as what it actually requires: one canonical form.
+
+    A foldable prefix is mandatory for this to have any content -- a bare
+    ``<realdir>/<loop>`` is already its own canonical form, so both arms return
+    it whatever they do internally.  ``<symdir>/<loop>`` and
+    ``<dir>/../<loop>`` are the shapes where the two primitives could disagree.
+
+    Honest scope of this test on THIS interpreter: on CPython 3.13+
+    ``Path.resolve(strict=False)`` IS non-strict ``os.path.realpath``, so the
+    two arms agreed before the change as well and this assertion cannot fail
+    locally.  Its discriminating power is on the CI 3.11 arm, where the old
+    db-free arm caught an errno-less ``RuntimeError`` and returned the value
+    unresolved while the database-backed arm returned the folded form.  Locally
+    the guarantee is structural instead, carried by
+    ``test_db_free_normalization_modules_call_resolve_only_where_allowlisted``:
+    with no ``.resolve()`` left in either arm, both can only reach the same
+    realpath primitive.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    real_dir = canonical_tmp / "real-dir"
+    real_dir.mkdir()
+    loop = _symlink_loop_dir(real_dir, "arm-parity-ring")
+    sym_dir = canonical_tmp / "sym-dir"
+    sym_dir.symlink_to(real_dir)
+    foldable = (sym_dir / loop.name, real_dir / "gone" / ".." / loop.name)
+    # Guard the discriminators: neither foldable input is already canonical, so
+    # the equalities below cannot be satisfied by lexical pass-through.
+    assert all(shape != loop for shape in foldable)
+    for value in (*foldable, loop):
+        db_free_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=True)
+        db_backed_arm = scheduler_config_module._resolve_config_path_for_mode(value, db_free_required=False)
+
+        assert db_free_arm == db_backed_arm, value
+        assert db_free_arm == loop, value
+
+
+@pytest.mark.parametrize(
+    ("root_env", "field_name"),
+    [("OBJECT_STORE_ROOT", "object_store_root"), ("LOG_ROOT", "log_root")],
+)
+def test_db_backed_config_construction_survives_symlink_loop_storage_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_env: str,
+    field_name: str,
+) -> None:
+    # The main anchor: on <=3.12 this construction raised an errno-less
+    # RuntimeError before any preflight could speak.  Both roots here are
+    # env-driven and neither is a containment base for another configured path.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, f"{field_name}-loop")
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("SLURM_SHARED_LOG_ROOT", raising=False)
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    monkeypatch.delenv("LOG_ROOT", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv(root_env, str(loop))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert getattr(config, field_name) == Path(os.path.realpath(tmp_path)) / loop.name
+
+
+def test_db_backed_config_construction_keeps_missing_storage_root_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # ENOENT zero-regression at the construction seam: a root may legitimately
+    # name a not-yet-created directory or an unmounted share, so construction
+    # neither validates existence nor changes the value it used to produce.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    not_created_yet = tmp_path / "nfs-not-mounted-yet"
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(not_created_yet))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert config.object_store_root == Path(os.path.realpath(tmp_path)) / "nfs-not-mounted-yet"
+    assert config.object_store_root == not_created_yet.resolve()
+    assert not config.object_store_root.exists()
+
+
+def test_slurm_preflight_blocks_symlink_loop_object_store_root_built_by_real_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The end-to-end half of the #1423 ruling: construction hands the loop down
+    # without adjudicating, and the storage preflight -- which reads the kernel
+    # errno, not an exception type -- owns the verdict and rejects submission
+    # before any Slurm job is created.  Identical on every supported CPython.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    loop = _symlink_loop_dir(tmp_path, "object-store-loop")
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=loop,
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    assert config.object_store_root == Path(os.path.realpath(tmp_path)) / loop.name
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    object_store_blockers = [blocker for blocker in preflight["blockers"] if blocker["field"] == "object_store_root"]
+    assert [blocker["code"] for blocker in object_store_blockers] == [
+        "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_UNSAFE_PATH"
+    ]
+    object_store_check = preflight["checks"]["storage_roots"]["object_store_root"]
+    assert object_store_check["contained"] is False
+    assert object_store_check["compute_node_visible"] is False
+
+
+# ---------------------------------------------------------------------------
+# #1520: the same construction chain's remaining bare ``resolve()`` sites, the
+# ones #1423 above had to leave standing.  ``_confined_path`` resolved a
+# containment base's parent, and both preserve-final helpers resolved a parent
+# segment, with ``Path.resolve()`` -- which raises an errno-LESS ``RuntimeError``
+# on a symlink loop up to 3.12 (``strict=False`` does NOT help; GH-113838 only
+# lands in 3.13) and quietly returns the unresolved path from 3.13 on.  So a
+# loop in a containment base's final segment, or in ANY configured root's parent
+# segment, aborted construction on every production interpreter while 3.13+ ran
+# on to a structured verdict.
+#
+# The fix applies the paradigm PR #1349 / #1423 settled -- strict realpath, one
+# non-strict realpath fallback, classification left to the downstream check --
+# to the parent segment, leaving the final component untouched.  Every
+# expectation below is version-agnostic and holds on 3.11 through 3.14; the
+# discriminating arm is <=3.12, where these same calls raised.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_residue_env(monkeypatch: pytest.MonkeyPatch, workspace_root: Path) -> None:
+    """A db-backed config whose only configured root is ``workspace_root``."""
+
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    monkeypatch.delenv("SLURM_SHARED_LOG_ROOT", raising=False)
+    for env_name in (
+        "OBJECT_STORE_ROOT",
+        "LOG_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+
+
+def test_resolve_residue_confined_path_canonicalises_parent_segment_loop(tmp_path: Path) -> None:
+    # Site ``scheduler_runtime_roots.py:558``.  The containment base itself is
+    # the loop, so the parent chain of everything confined under it is
+    # uncanonicalizable -- the shape ``WORKSPACE_ROOT``/``NHMS_SCHEDULER_LOCK_ROOT``
+    # reach in production.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "confined-loop")
+
+    # Loop as the direct parent, and one component deeper in the parent chain.
+    assert (
+        scheduler_module._confined_path(loop / "production-scheduler.lock", canonical_tmp, "lock_path")
+        == canonical_tmp / "confined-loop-a" / "production-scheduler.lock"
+    )
+    assert (
+        scheduler_module._confined_path(loop / "scheduler" / "evidence", canonical_tmp, "evidence_dir")
+        == canonical_tmp / "confined-loop-a" / "scheduler" / "evidence"
+    )
+    # A relative value still lands under the containment base.
+    assert (
+        scheduler_module._confined_path(Path("confined-loop-a") / "lock", canonical_tmp, "lock_path")
+        == canonical_tmp / "confined-loop-a" / "lock"
+    )
+
+
+def test_resolve_residue_confined_path_keeps_final_segment_loop_verbatim(tmp_path: Path) -> None:
+    # The final component is deliberately NOT resolved, before or after the fix:
+    # a loop there is carried through untouched for the downstream check.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "final-confined-loop")
+
+    assert scheduler_module._confined_path(loop, canonical_tmp, "evidence_dir") == (
+        canonical_tmp / "final-confined-loop-a"
+    )
+
+
+def test_resolve_residue_preserve_final_helpers_canonicalise_parent_segment_loop(tmp_path: Path) -> None:
+    # Sites ``scheduler_runtime_roots.py:597`` and ``:604``.  Both geometries:
+    # the loop as the final component (parent is sound) and the loop inside the
+    # parent chain (where the old bare resolve aborted on <=3.12).
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(tmp_path, "preserve-loop")
+
+    assert scheduler_module._config_path_preserve_final_component(loop) == canonical_tmp / "preserve-loop-a"
+    assert (
+        scheduler_module._config_path_preserve_final_component(loop / "tail")
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(loop, canonical_tmp)
+        == canonical_tmp / "preserve-loop-a"
+    )
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(loop / "tail", canonical_tmp)
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+    # The relative-base geometry is unchanged: a relative value is joined onto
+    # the base before the parent segment is canonicalised.
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(Path("preserve-loop-a") / "tail", canonical_tmp)
+        == canonical_tmp / "preserve-loop-a" / "tail"
+    )
+
+
+def test_resolve_residue_helpers_keep_missing_path_semantics(tmp_path: Path) -> None:
+    # ENOENT zero-regression: configuration construction validates no existence,
+    # and the product stays the old non-strict resolve product verbatim (that
+    # call raises on no supported CPython for a loop-free path, so the
+    # cross-check below is a genuine independent oracle).
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    missing = tmp_path / "nfs-not-mounted-yet" / "deep" / "leaf"
+    expected = canonical_tmp / "nfs-not-mounted-yet" / "deep" / "leaf"
+
+    assert scheduler_module._config_path_preserve_final_component(missing) == expected
+    assert scheduler_module._config_path_preserve_final_component(missing) == missing.parent.resolve() / missing.name
+    assert (
+        scheduler_module._config_path_relative_to_preserve_final(
+            Path("nfs-not-mounted-yet") / "deep" / "leaf",
+            canonical_tmp,
+        )
+        == expected
+    )
+    assert scheduler_module._confined_path(missing, canonical_tmp, "evidence_dir") == expected
+    assert not expected.exists()
+
+
+def test_resolve_residue_confined_path_keeps_non_loop_containment_refusal(tmp_path: Path) -> None:
+    # The containment verdict -- type, wording and field name -- is untouched
+    # for loop-free inputs, whether or not the offending parent exists.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    workspace_root = canonical_tmp / "workspace"
+    workspace_root.mkdir()
+    existing_outside = canonical_tmp / "outside"
+    existing_outside.mkdir()
+
+    for outside in (existing_outside / "production-scheduler.lock", canonical_tmp / "gone" / "lock"):
+        with pytest.raises(ValueError) as excinfo:
+            scheduler_module._confined_path(outside, workspace_root, "lock_path")
+        assert str(excinfo.value) == "production scheduler lock_path must be under workspace_root"
+
+
+@pytest.mark.parametrize(
+    ("root_env", "expected_message"),
+    [
+        # WORKSPACE_ROOT reaches the evidence directory's safety check, which
+        # reads the kernel's ELOOP off lstat().  The refusal still names
+        # `evidence_dir` -- that is the field under the guard -- but it now also
+        # carries the offending path and names workspace_root, because
+        # evidence_dir is only DERIVED from workspace_root and the operator set
+        # no evidence root at all.  #1520 declared that misattribution a
+        # non-goal and pinned it here; #1545 is the follow-up that corrects it,
+        # so the expectation is rewritten rather than pinned.  Templated because
+        # the message now embeds real paths; the lock-root row below has no
+        # placeholders and is compared byte-for-byte verbatim.
+        (
+            "WORKSPACE_ROOT",
+            "production scheduler evidence_dir must not resolve through a symlink loop: "
+            "{path} (the loop lies above the final component; check evidence_dir "
+            "and workspace_root {workspace_root})",
+        ),
+        ("NHMS_SCHEDULER_LOCK_ROOT", "production scheduler lock_path must be under workspace_root"),
+    ],
+)
+def test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_env: str,
+    expected_message: str,
+) -> None:
+    # The construction anchor for site :558.  On <=3.12 both of these raised an
+    # errno-less RuntimeError out of ``_confined_path`` before any check could
+    # speak; they now reach the same structured, field-named ValueError that
+    # 3.13+ already produced.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, "final-segment-loop")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv(root_env, str(loop))
+    resolved_workspace_root = Path(os.path.realpath(loop))
+    offending_path = resolved_workspace_root / "scheduler" / "evidence"
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == expected_message.format(
+        path=offending_path,
+        workspace_root=resolved_workspace_root,
+    )
+    if root_env == "WORKSPACE_ROOT":
+        # #1545's two acceptance points, asserted independently of the exact
+        # sentence: the refusal carries the offending path, and it lets the
+        # operator reach the workspace_root knob instead of pointing only at a
+        # derived evidence directory they never configured.
+        assert str(offending_path) in str(excinfo.value)
+        assert f"workspace_root {resolved_workspace_root}" in str(excinfo.value)
+
+
+# --- Undeterminable home directory in config construction (#1549) ------------
+#
+# `Path.expanduser()` throws a bare, errno-less RuntimeError when no home
+# directory can be determined.  Two production fields reach this module's own
+# bare expansions -- allowed_storage_roots and log_root -- and used to abort
+# construction there, producing no structured blocker at all.  Every other root
+# field aborts earlier in `_expanduser_for_mode`'s deliberate re-raise, which is
+# a standing design ruling and out of scope here.
+
+_UNKNOWN_HOME_ROOTS = "~nosuchuser_zz/roots"
+_UNKNOWN_HOME_LOGS = "~nosuchuser_zz/logs"
+_UNKNOWN_HOME_WORKSPACE = "~nosuchuser_zz/workspace"
+
+
+def _unknown_home_config(workspace_root: Path, *, db_free_required: bool) -> Any:
+    return ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        scheduler_db_free_required=db_free_required,
+    )
+
+
+def test_expanduser_residue_config_constructs_identically_on_both_database_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The acceptance anchor is an EQUALITY of products, not the absence of an
+    # exception: "it stopped throwing" would stay green even if the throw were
+    # traded for a value anchored at the wrong base.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+
+    db_backed = _unknown_home_config(workspace_root, db_free_required=False)
+    db_free = _unknown_home_config(workspace_root, db_free_required=True)
+
+    assert db_backed.allowed_storage_roots == db_free.allowed_storage_roots
+    assert db_backed.log_root == db_free.log_root
+    # The db-free arm's own product, spelled out: the tilde segment is kept
+    # verbatim, the allowed root is anchored at the cwd and the log root at
+    # workspace_root, so a base mix-up cannot hide behind the equality above.
+    canonical_cwd = Path(os.path.realpath(tmp_path))
+    canonical_workspace = Path(os.path.realpath(workspace_root))
+    assert db_backed.allowed_storage_roots == (canonical_cwd / _UNKNOWN_HOME_ROOTS,)
+    assert db_backed.log_root == canonical_workspace / _UNKNOWN_HOME_LOGS
+
+
+def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Compatibility-surface ledger item, not a live crash path: workspace_root
+    # re-raises earlier in `_expanduser_for_mode`, so this helper is asserted by
+    # calling it directly rather than through a field.
+    monkeypatch.chdir(tmp_path)
+
+    product = scheduler_module._config_path_preserve_final_component(_UNKNOWN_HOME_WORKSPACE)
+
+    assert product == scheduler_config_module._config_path_preserve_final_component_for_mode(
+        _UNKNOWN_HOME_WORKSPACE,
+        db_free_required=True,
+    )
+    assert product == Path(os.path.realpath(tmp_path)) / _UNKNOWN_HOME_WORKSPACE
+
+
+def test_expanduser_helpers_still_expand_a_determinable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The other half of the #1549 contract.  Every tilde above is deliberately
+    # UNEXPANDABLE, so all of it stays green even if the expansion is dropped
+    # altogether -- and master could leave that unpinned because it called
+    # stdlib expanduser() directly, while this change substitutes a hand-written
+    # wrapper whose happy branch is the one every real operator config takes.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    home = canonical_tmp / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._config_path_preserve_final_component("~/x") == home / "x"
+    assert scheduler_module._optional_config_path_relative_to("~/x", canonical_tmp) == home / "x"
+
+
+def test_expanduser_residue_preflight_classifies_structurally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The point of not throwing during construction: the value reaches the
+    # preflight, which owns classification and answers with a structured result.
+    # The codes below are what this geometry actually produces today -- the
+    # unresolvable root is admitted by the ENOENT tolerance arm and then fails
+    # to contain workspace_root, and neither missing lock nor evidence root
+    # exists yet.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+    config = ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        require_runtime_roots=True,
+    )
+
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"]] == [
+        "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
+        "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND",
+        "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND",
+    ]
+
+
+# --- Final-segment symlink verdicts (#1544) -----------------------------------
+#
+# The guard's final component used to be decided by a bare non-strict resolve,
+# which raises an errno-less RuntimeError on <=3.12 and silently ADOPTS a loop
+# on 3.13+.  Strict real-path plus an ELOOP split makes both interpreter arms
+# reach the same verdict; every other strict failure keeps the non-strict
+# product the arm has always used, so the accepting geometries below are
+# unchanged.  These assertions are about the converged behaviour and therefore
+# hold on every supported interpreter.
+
+
+def _guard_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    outside = Path(os.path.realpath(tmp_path)) / "outside"
+    outside.mkdir()
+    return workspace_root, outside
+
+
+def test_final_segment_loop_inside_workspace_is_a_structured_refusal(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    loop = _symlink_loop_dir(workspace_root, "inner-loop")
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(loop, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+def test_final_segment_symlink_whose_target_traverses_a_loop_names_the_looping_link(tmp_path: Path) -> None:
+    # ELOOP does not mean "the final component loops": here the final component
+    # is an ordinary, non-looping symlink and the cycle sits in the path its
+    # TARGET traverses.  The refusal must send the operator to the link that
+    # actually loops, not to the innocent one they configured.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    midloop = workspace_root / "midloop"
+    midloop.symlink_to(midloop)
+    link = workspace_root / "via-midloop"
+    link.symlink_to(midloop / "tail", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {link} "
+        f"(the symlink loop is at {midloop})"
+    )
+
+
+def test_final_segment_healthy_directory_symlink_is_accepted(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_to_a_file_is_refused_as_not_a_directory(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be a directory"
+
+
+def test_final_segment_symlink_escaping_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_absent_component_returns(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+
+    assert (
+        scheduler_module._require_safe_directory_final_component(
+            workspace_root / "absent",
+            workspace_root,
+            "evidence_dir",
+        )
+        is None
+    )
+
+
+def test_dangling_final_segment_symlink_pointing_inside_the_workspace_is_accepted(tmp_path: Path) -> None:
+    # THE regression fence for this change.  Strict real-path raises ENOENT on a
+    # dangling link, so a strict-only implementation would turn today's
+    # acceptance into a refusal and silently break working configurations.  The
+    # target MUST be inside the workspace: an outside target is refused for a
+    # different reason (see the next test), which would make this case red for
+    # the wrong cause.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(workspace_root / "never-created", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_dangling_final_segment_symlink_pointing_outside_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside / "never-created", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_symlink_reached_through_a_file_keeps_its_acceptance(tmp_path: Path) -> None:
+    # Strict real-path fails with ENOTDIR here, not ENOENT, and the geometry is
+    # accepted today: the non-strict fallback therefore has to cover every
+    # non-loop errno rather than ENOENT alone.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "a-file"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "tail", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(tmp_path: Path) -> None:
+    # Strict real-path fails with EACCES here -- a third non-loop errno the
+    # fallback has to carry.  HONEST LIMIT: the FINAL verdict on this geometry
+    # is not interpreter-independent, and that predates this change and lies
+    # outside it: `Path.exists()` swallows EACCES from 3.12 on but propagates
+    # PermissionError on 3.11, so master already accepts this on 3.14 and raises
+    # PermissionError on 3.11 at that later gate (tracked as #1623).  What this
+    # change owns is the real-path step, which must not turn EACCES into the
+    # loop refusal, and must not let it escape either.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "unreadable"
+    blocker.mkdir()
+    (blocker / "leaf").mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "leaf", target_is_directory=True)
+    blocker.chmod(0o600)
+    try:
+        if sys.version_info >= (3, 12):
+            # The CI interpreter gets NO tolerance: a blanket `except
+            # PermissionError` here would also swallow EACCES escaping the
+            # strict real-path step this change owns, i.e. it would stay green
+            # under exactly the regression it exists to fence.
+            verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+        else:
+            # 3.11 alone keeps the tolerance, for the later `Path.exists()`
+            # gate named above -- a divergence this change does not own.
+            try:
+                verdict = scheduler_module._require_safe_directory_final_component(
+                    link,
+                    workspace_root,
+                    "evidence_dir",
+                )
+            except PermissionError:
+                verdict = None
+    finally:
+        blocker.chmod(0o755)
+
+    assert verdict is None
+
+
+def test_final_segment_loop_refuses_on_the_database_backed_construction_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Every assertion above calls the guard directly, but the acceptance
+    # scenario is phrased about the CONFIGURATION being constructed.  The
+    # guard's only two call sites are both `evidence_dir` in scheduler_config,
+    # so this is the route an operator actually travels.
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(workspace_root, "loop-evidence")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(loop))
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+# --- Compatibility-surface path helpers (#1546) --------------------------------
+
+
+def test_compatibility_surface_helpers_normalize_a_loop(tmp_path: Path) -> None:
+    # Exposed only through the runtime-roots forwarders, so this is a ledger
+    # item rather than a live crash path: <=3.12 raised an errno-less
+    # RuntimeError here while 3.13+ adopted the loop.  Both now normalise.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(canonical_tmp, "compat-loop")
+
+    assert scheduler_module._resolve_optional_config_path(loop) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop, canonical_tmp) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop.name, canonical_tmp) == loop
+    # Normalisation itself, which the three equalities above cannot see: on an
+    # already-canonical input they are all satisfied by handing the value
+    # straight back.  This also pins the documented POSIX order -- symlinks
+    # first, `..` afterwards -- so the loop segment survives while the
+    # traversal through it collapses, which is what the old Path.resolve()
+    # produced on 3.13+ and what it refused to produce at all on <=3.12.
+    assert scheduler_module._resolve_optional_config_path(loop / "y" / ".." / "z") == loop / "z"
+    # The sibling helper carries its own copy of the paradigm, so it needs its
+    # own normalisation fence: fixing one of the two leaves the other handing
+    # the value back untouched.  Both spellings of the same value are pinned --
+    # absolute, and relative, where the base join is what goes through the
+    # canonicalisation.
+    assert scheduler_module._optional_config_path_relative_to(loop / "y" / ".." / "z", canonical_tmp) == loop / "z"
+    assert scheduler_module._optional_config_path_relative_to(f"{loop.name}/y/../z", canonical_tmp) == loop / "z"
+
+
+def test_compatibility_surface_helpers_keep_their_existing_contract(tmp_path: Path) -> None:
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    missing = canonical_tmp / "gone" / "leaf"
+
+    assert scheduler_module._resolve_optional_config_path(None) is None
+    assert scheduler_module._optional_config_path_relative_to(None, canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("", canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("gone/leaf", canonical_tmp) == missing
+    assert scheduler_module._resolve_optional_config_path(missing) == missing
+    assert not missing.exists()
+
+
+def test_compatibility_surface_relative_helper_keeps_an_undeterminable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # This one helper crosses both families: the bare expanduser belongs to the
+    # #1549 lane (keep the value, hand it down) and the bare resolve to the
+    # #1546 lane (normalise identically on every interpreter).  Fixing only one
+    # of the two leaves the other's throw in place.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._optional_config_path_relative_to(
+        _UNKNOWN_HOME_LOGS,
+        canonical_tmp,
+    ) == canonical_tmp / _UNKNOWN_HOME_LOGS
+
+
+def test_resolve_residue_config_parent_segment_loop_object_store_root_constructs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The construction anchor for sites :597/:604, on a root that is not a
+    # containment base: on <=3.12 the parent-segment loop aborted construction
+    # in the preserve-final helper, while 3.13+ built the canonical form below.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(tmp_path, "parent-segment-loop")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(loop / "tail"))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.db_free_required is False
+    assert config.object_store_root == canonical_tmp / "parent-segment-loop-a" / "tail"
+    # The preflight path keeps the same canonical form, so the storage preflight
+    # sees the loop and owns the verdict.
+    assert config._object_store_root_preflight_path == canonical_tmp / "parent-segment-loop-a" / "tail"
+
+
+def test_resolve_residue_config_keeps_missing_lock_root_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # ENOENT zero-regression through the construction chain: a lock root may
+    # legitimately name a directory the scheduler creates later.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    canonical_workspace = Path(os.path.realpath(workspace_root))
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(workspace_root / "not-created-yet" / "scheduler"))
+
+    config = ProductionSchedulerConfig()
+
+    assert config.lock_path == canonical_workspace / "not-created-yet" / "scheduler" / "production-scheduler.lock"
+    assert not config.lock_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -13499,6 +17666,714 @@ def test_unknown_user_tilde_copyback_source_blocks_one_candidate_and_the_pass_su
     # And the pass evidence really reached disk (the abort produced none).
     assert result.artifact_path is not None
     assert result.artifact_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# #1436 + #1441: the same throw face's remaining five sites.  ``Path.expanduser()``
+# raises an errno-LESS ``RuntimeError`` ("Could not determine home directory.",
+# identical on every supported CPython) whenever no home directory can be derived,
+# and at these five sites the call sits outside every try or behind an ``except``
+# that cannot catch it:
+#
+#   * ``scheduler_preflight._preflight_allowed_roots`` / ``._storage_root_check``
+#     -- no try at all, so the escape aborts the whole ``_slurm_preflight`` and
+#     the ``SLURM_PREFLIGHT_*`` structured blockers are lost (#1436);
+#   * ``retry._db_free_selector_allowed_roots`` / ``._db_free_selector_path_rejection``
+#     -- same, so the ``db_free_*`` rejections are never generated (#1436);
+#   * ``LocalObjectStore.__post_init__`` -- the expansion sits OUTSIDE the
+#     ``SafeFilesystemError`` conversion try, so the unified artifact probe's
+#     ``except ObjectStoreError`` and the sidecar tier's
+#     ``except (ObjectStoreError, OSError, ValueError)`` both miss it (#1441).
+#
+# The four #1436 sites take the family primitive (``Path(os.path.expanduser(...))``,
+# #1424/PR #1435): the value stays verbatim and falls through the arms each
+# function already has.  The object-store root deliberately does NOT -- keeping
+# the literal there would anchor the store at the cwd and really create a
+# ``~nosuchuser_zz`` directory -- so it converts to the domain ``ObjectStoreError``
+# instead.  Terminal states below are the task-0 probe's measurements, not guesses.
+# ---------------------------------------------------------------------------
+
+#: The unexpandable value used by the residue tests, in root rather than uri shape.
+_TILDE_RESIDUE_ROOT = "~nosuchuser_zz/roots"
+
+#: Both trigger faces of the one throw type: an unknown ``~user``, and a plain
+#: ``~`` on a runtime with neither ``HOME`` nor a passwd entry.
+_TILDE_RESIDUE_FACES = ("unknown_user_tilde", "homeless_plain_tilde")
+
+
+def _tilde_residue_value(face: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Arm one trigger face and hand back a value this interpreter cannot expand.
+
+    Self-証: ``_assert_tilde_is_genuinely_unexpandable`` re-proves the trigger on
+    every run, so these tests go red rather than vacuously green if a platform
+    (or a future CPython) stops raising here.
+    """
+
+    if face == "homeless_plain_tilde":
+        _break_home_directory_resolution(monkeypatch)
+        value = "~/roots"
+    else:
+        value = _TILDE_RESIDUE_ROOT
+    _assert_tilde_is_genuinely_unexpandable(value)
+    return value
+
+
+@dataclass(frozen=True)
+class _PreflightRootsConfigStub:
+    """Exactly the three attributes ``_preflight_allowed_roots`` reads.
+
+    A real ``ProductionSchedulerConfig`` cannot carry an unexpandable tilde this
+    far: construction expands every root itself
+    (``scheduler_config._expanduser_for_mode``) and on db-backed runtimes
+    deliberately re-raises -- that arm is the already-fixed #1423/#1520 territory
+    and out of scope here.  This stub pins the preflight helper's own seam.
+    """
+
+    allowed_storage_roots: tuple[Path, ...]
+    workspace_root: Path
+    db_free_required: bool = False
+
+
+@pytest.mark.parametrize("db_free_required", [False, True])
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoent_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+    db_free_required: bool,
+) -> None:
+    # Task 0 probe, measured terminal state (both the db-backed and the db-free
+    # arm): the verbatim value is a RELATIVE path, so strict realpath fails with
+    # ENOENT and the walk's ENOENT tolerance arm -- whose docstring already states
+    # that a merely missing root never produces a blocker -- admits it anchored at
+    # the cwd.  That cwd-anchored phantom root is the ACCEPTED new state of this
+    # change (issue #1436 acceptance 2's "or tolerated by the existing arm"
+    # branch); its geometry is the #1427 adjacency and is recorded here, not
+    # changed.  Scope sync: the PR carrying #1400/#1427 closes both, so
+    # "separately tracked" would stop naming a live tracker.  The
+    # geometry itself is untouched -- this arm is ``scheduler_preflight``'s, and
+    # that change treats only the ``retry`` leg -- and its live tracker is now
+    # #1627, the family-level ruling on whether every ENOENT non-strict fallback
+    # needs a loop-filtered re-check, whose payload carries this site
+    # (``scheduler_preflight``'s allowed-roots ENOENT arm) explicitly.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+    config = _PreflightRootsConfigStub(
+        allowed_storage_roots=(Path(value),),
+        workspace_root=tmp_path,
+        db_free_required=db_free_required,
+    )
+
+    resolved, blockers = scheduler_preflight_module._preflight_allowed_roots(config)
+
+    assert blockers == []
+    assert resolved == (Path(os.path.realpath(anchor / value)),)
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_storage_root_check_yields_out_of_root_when_the_cwd_is_outside_every_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state: the verbatim value continues into the
+    # existing contained -> visible ladder, and with the cwd outside every allowed
+    # root containment loses first, exactly as any other out-of-root value would.
+    allowed = tmp_path / "allowed-root"
+    allowed.mkdir()
+    anchor = tmp_path / "cwd-outside-every-root"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    check, blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root",
+        value,
+        (Path(os.path.realpath(allowed)),),
+    )
+
+    anchored = str(Path(os.path.realpath(anchor / value)))
+    assert check == {
+        "configured": True,
+        "path": anchored,
+        "contained": False,
+        "compute_node_visible": False,
+    }
+    assert blocker == {
+        "code": "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT",
+        "field": "workspace_root",
+        "path": anchored,
+        "message": "Slurm workspace_root must stay under configured project or production roots.",
+    }
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_storage_root_check_yields_not_visible_when_the_cwd_is_under_a_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # The ladder's other rung, for the same reason the artifact-guard lane pins
+    # both cwd geometries (#1424 D2): the verdict is a function of the process
+    # working directory, so "contained but not there" must be pinned too.
+    allowed = tmp_path / "allowed-root"
+    anchor = allowed / "runs"
+    anchor.mkdir(parents=True)
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    check, blocker = scheduler_preflight_module._storage_root_check(
+        "object_store_root",
+        value,
+        (Path(os.path.realpath(allowed)),),
+    )
+
+    anchored = str(Path(os.path.realpath(anchor / value)))
+    assert check == {
+        "configured": True,
+        "path": anchored,
+        "contained": True,
+        "compute_node_visible": False,
+    }
+    assert blocker == {
+        "code": "SLURM_PREFLIGHT_OBJECT_STORE_ROOT_NOT_VISIBLE",
+        "field": "object_store_root",
+        "path": anchored,
+        "message": "Slurm object_store_root must exist as a compute-node visible directory.",
+    }
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_db_free_selector_allowed_roots_falls_closed_as_relative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state: py3.14.2 live evidence in #1424 had
+    # this one ESCAPING, so the db_free rejection was never generated at all.  The
+    # verbatim value is relative, which is precisely what the existing
+    # non-absolute arm already rejects.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("env:NHMS_SCHEDULER_ALLOWED_ROOTS", value)
+
+    assert roots == ()
+    assert rejected == [
+        {
+            "field": "scheduler_allowed_roots",
+            "source": "env:NHMS_SCHEDULER_ALLOWED_ROOTS",
+            "reason": "db_free_allowed_root_relative",
+            "value": value,
+        }
+    ]
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_db_free_selector_path_rejection_falls_closed_as_relative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # Task 0 probe, measured terminal state.  The neighbouring normalization
+    # step -- #1400 has since replaced that ``path.resolve(strict=False)`` line
+    # with a strict ``os.path.realpath`` and a loop-filtered ENOENT fallback --
+    # must still never be reached by this value: the non-absolute arm answers
+    # first, which is what keeps an unexpandable tilde falling closed.
+    allowed = tmp_path / "allowed-root"
+    allowed.mkdir()
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_workspace_root",
+        "env:NHMS_SCHEDULER_WORKSPACE_ROOT",
+        value,
+        allowed_roots=(Path(os.path.realpath(allowed)),),
+    )
+
+    assert rejection == {
+        "field": "scheduler_workspace_root",
+        "source": "env:NHMS_SCHEDULER_WORKSPACE_ROOT",
+        "reason": "db_free_selector_path_relative",
+        "value": value,
+    }
+
+
+def test_tilde_residue_slurm_preflight_returns_structured_blockers_instead_of_aborting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1436 acceptance 1 at the escaping seam: ``scheduler_gateway._slurm_preflight``
+    # has no try, and neither does its caller
+    # (``scheduler_candidate_execution_evidence``), so the RuntimeError used to
+    # take the whole preflight -- and every ``SLURM_PREFLIGHT_*`` blocker it had
+    # already accumulated -- with it.
+    #
+    # The tilde values are injected onto the built config with
+    # ``object.__setattr__`` on purpose: config construction owns its own tilde
+    # handling (#1423/#1520, already fixed and out of scope), and what this test
+    # must pin is the preflight's behaviour once a tilde value reaches it.
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    anchor = roots["workspace_root"] / "anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    _assert_tilde_is_genuinely_unexpandable(_TILDE_RESIDUE_ROOT)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    object.__setattr__(config, "object_store_root", Path("~nosuchuser_zz/store"))
+    object.__setattr__(
+        config,
+        "allowed_storage_roots",
+        (Path(_TILDE_RESIDUE_ROOT), Path(os.path.realpath(tmp_path))),
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    # The allowed-roots walk admitted the tilde root through its ENOENT arm, so it
+    # contributes no blocker but does appear as a cwd-anchored containment base.
+    assert [blocker for blocker in preflight["blockers"] if blocker["field"] == "allowed_storage_roots"] == []
+    assert preflight["checks"]["allowed_roots"] == [
+        str(Path(os.path.realpath(anchor / _TILDE_RESIDUE_ROOT))),
+        str(Path(os.path.realpath(tmp_path))),
+    ]
+    # ...and the tilde object-store root got a structured verdict, not an abort.
+    assert [
+        blocker["code"] for blocker in preflight["blockers"] if blocker["field"] == "object_store_root"
+    ] == ["SLURM_PREFLIGHT_OBJECT_STORE_ROOT_NOT_VISIBLE"]
+    assert preflight["checks"]["storage_roots"]["object_store_root"] == {
+        "configured": True,
+        "path": str(Path(os.path.realpath(anchor / "~nosuchuser_zz/store"))),
+        "contained": True,
+        "compute_node_visible": False,
+    }
+    # Non-vacuous: the checks the escape used to destroy are all present.
+    assert set(preflight["checks"]) >= {"database", "storage_roots", "allowed_roots", "templates", "gateway"}
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_raises_the_domain_error_and_creates_no_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 1-3.  ``ObjectStoreError`` (not the bare RuntimeError) is
+    # what every reviewed caller already catches, and the literal-directory
+    # assertion is the reason this site does NOT take the family primitive: with
+    # the value kept verbatim, ``Path.cwd() / root`` plus
+    # ``ensure_directory_no_follow`` would materialise a real ``~nosuchuser_zz``
+    # directory under the working directory.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    value = _tilde_residue_value(face, monkeypatch)
+
+    with pytest.raises(ObjectStoreError) as excinfo:
+        LocalObjectStore(value)
+
+    assert type(excinfo.value) is ObjectStoreError
+    assert value in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "home directory" in str(excinfo.value.__cause__)
+    assert list(anchor.iterdir()) == []
+
+    # The ``Path`` spelling of the same root takes the identical arm.
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(Path(value))
+    assert list(anchor.iterdir()) == []
+
+
+def test_tilde_residue_object_store_error_stays_separate_from_the_unsafe_root_conversion(
+    tmp_path: Path,
+) -> None:
+    # Task 1.3's explicit constraint: the new ``except RuntimeError`` must not be
+    # merged with the existing ``ensure_directory_no_follow`` boundary.
+    # ``ObjectStoreError`` IS a ``RuntimeError``, so a merged handler would relabel
+    # every "root is unsafe" failure as "root is not expandable".
+    not_a_directory = tmp_path / "regular-file"
+    not_a_directory.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ObjectStoreError) as excinfo:
+        LocalObjectStore(not_a_directory / "store")
+
+    assert "Local object store root is unsafe" in str(excinfo.value)
+    assert "not expandable" not in str(excinfo.value)
+
+
+def test_tilde_residue_expandable_object_store_root_keeps_constructing_and_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1441 acceptance 5, the POSITIVE half (PR #1548 round-1 Note-3): the new
+    # ``except RuntimeError`` must not have disturbed the ordinary expandable
+    # root.  The independent oracle is the same store addressed by its
+    # pre-expanded ABSOLUTE spelling -- it never enters the guarded expression.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    key = "runs/run_001/logs/job.log"
+
+    tilde_store = LocalObjectStore("~/store-sub")
+
+    assert tilde_store.root == home / "store-sub"
+    assert tilde_store.root.is_dir()
+
+    absolute_store = LocalObjectStore(str(home / "store-sub"))
+    assert absolute_store.root == tilde_store.root
+    # ...and the two really are the same store, not merely equal-looking roots.
+    assert tilde_store.write_bytes_atomic(key, b"log-content") == absolute_store.uri_for_key(key)
+    assert absolute_store.read_bytes(key) == b"log-content"
+    assert tilde_store.exists(key) is True
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_keeps_the_artifact_probe_error_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 4: the unified probe's object leg already contains
+    # ``ObjectStoreError`` into a distinguishable fail-closed reason, so converting
+    # the throw type restores that attribution with ZERO caller changes.  Before
+    # the fix the bare RuntimeError went straight through both except arms and
+    # aborted the pass with no evidence at all.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    candidate = _artifact_guard_candidate(monkeypatch)
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    value = _tilde_residue_value(face, monkeypatch)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", value)
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate, "s3://nhms/forcing/gfs/2026052106/basin_a_v1/model_a/manifest.json"
+    ) == (True, "artifact_probe_error")
+    assert list(anchor.iterdir()) == []
+
+
+@pytest.mark.parametrize("face", _TILDE_RESIDUE_FACES)
+def test_tilde_residue_object_store_root_keeps_the_sidecar_unreadable_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    face: str,
+) -> None:
+    # #1441 acceptance 4, second reviewed caller: the sidecar tier's
+    # ``except (ObjectStoreError, OSError, ValueError)`` wraps the construction as
+    # well, so the same conversion restores ``sidecar_unreadable`` there.
+    anchor = tmp_path / "cwd-anchor"
+    anchor.mkdir()
+    monkeypatch.chdir(anchor)
+    candidate = _artifact_guard_candidate(monkeypatch)
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    value = _tilde_residue_value(face, monkeypatch)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", value)
+
+    provenance = scheduler_state_failure_module._forcing_sidecar_provenance(candidate)
+
+    assert provenance.witness is False
+    assert provenance.status == "sidecar_unreadable"
+    assert list(anchor.iterdir()) == []
+
+
+#: The #1436 lane, grouped PER MODULE on purpose: the collector below keys nodes
+#: by bare function name, and ``_path_is_relative_to`` exists in ``retry`` as well
+#: as in ``scheduler_state_failure``, so one merged dict would silently collide.
+_TILDE_RESIDUE_EXPANDUSER_LANES: tuple[tuple[Any, tuple[str, ...]], ...] = (
+    (scheduler_preflight_module, ("_preflight_allowed_roots", "_storage_root_check")),
+    (retry_module, ("_db_free_selector_allowed_roots", "_db_free_selector_path_rejection")),
+)
+
+
+def _module_lane_function_nodes(module: Any, names: Sequence[str]) -> dict[str, ast.FunctionDef]:
+    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    return {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    }
+
+
+def test_tilde_residue_lane_expands_tilde_only_through_os_path_expanduser() -> None:
+    # The #1424 receiver discriminant, extended to the four #1436 sites: no
+    # function in this lane may reach the raising expansion form again.  This lane
+    # carries the expanduser pin ONLY -- it is deliberately NOT fed to
+    # ``_resolve_call_names``.  Two of its members are ``scheduler_preflight``
+    # functions that are out of #1400's scope, and ``.resolve()`` coverage is
+    # carried instead by the module-level guard below, which asserts the
+    # OFFENDERS rather than a membership list.
+    for module, names in _TILDE_RESIDUE_EXPANDUSER_LANES:
+        lane = _module_lane_function_nodes(module, names)
+
+        assert sorted(lane) == sorted(names), f"{module.__name__} lane is incomplete"
+        for name, node in lane.items():
+            assert _expanduser_calls_with_foreign_receiver(node) == [], (
+                f"{module.__name__}.{name} still expands ~ off a Path receiver"
+            )
+            # Non-vacuous: each site really does still expand ``~``, so the pin
+            # cannot be satisfied by dropping tilde support altogether.
+            assert _os_path_expanduser_call_count(node) > 0, (
+                f"{module.__name__}.{name} no longer expands ~ at all"
+            )
+
+
+def test_issue_1400_removed_the_db_free_selector_path_resolve_line() -> None:
+    # Terminal state of #1436's scope fence, which named its own demolisher:
+    # "#1400 owns ``_db_free_selector_path_rejection``'s
+    # ``path.resolve(strict=False)`` and its ``except OSError``.  This change
+    # must not have 'helpfully' migrated it."  #1400 has now landed, so the pin
+    # flips from PRESENT to ABSENT.  That is an oracle STRENGTHENING, not a
+    # weakening: the fence was never a behaviour assertion, it carried its own
+    # retirement condition.  It is flipped rather than deleted so that #1436's
+    # lineage anchor survives; the module-level guard below states the same fact
+    # for every function in the two modules at once.
+    lane = _module_lane_function_nodes(retry_module, ("_db_free_selector_path_rejection",))
+
+    assert _resolve_call_names(lane["_db_free_selector_path_rejection"]) == []
+
+
+def _functions_calling_resolve(module: Any) -> set[str]:
+    """Every function in ``module`` that still calls ``.resolve()``, in any form."""
+
+    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    return {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _resolve_call_names(node)
+    }
+
+
+def test_db_free_normalization_modules_call_resolve_only_where_allowlisted() -> None:
+    # Built as "assert the OFFENDERS", not "assert the members": a membership
+    # tuple filtered out of the module cannot detect its own name being dropped
+    # (both sides shrink together), which is exactly the move that would smuggle
+    # a ``.resolve()`` back into this lane.  Enumerating every offender and
+    # comparing against an explicit allowlist has no name to drop.
+    #
+    # Scope ruling (deliberate, not a side effect): pinning ``retry`` as a WHOLE
+    # module is stronger than either issue asks for -- #1400 and #1427 only own
+    # the db-free selector adjudicators.  It is adopted because it is the only
+    # shape that cannot be neutralised by editing the guard's own input, and
+    # because the module measurably has zero remaining sites.  The cost is that
+    # any future ``.resolve()`` anywhere in ``retry`` must be justified into the
+    # allowlist below.
+    #
+    # The single allowlisted entry is a deliberate retention, not an oversight:
+    # ``_safe_preserve_final_component`` belongs to a different sub-family (a
+    # ``path.parent.resolve(strict=False)`` reachable through
+    # ``_confined_path_for_mode``'s fallback arm) that these two issues declare
+    # out of scope and that is routed for a family-level ruling of its own.
+    assert _functions_calling_resolve(retry_module) == set()
+    assert _functions_calling_resolve(scheduler_config_module) == {"_safe_preserve_final_component"}
+
+
+#: The one in-domain input class where the two primitives genuinely disagree and
+#: the disagreement is ACCEPTED rather than repaired (PR #1548 round-1 N1).
+#: ``Path("./~/x")`` normalizes the ``.`` away at construction, so its first tail
+#: component becomes ``~`` and ``Path.expanduser()`` expands it; ``os.path.expanduser``
+#: works on the raw string, sees a leading ``.`` and returns it verbatim.
+_TILDE_RESIDUE_ACCEPTED_DIVERGENCES = ("./~/x", "./~/approved/ws")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "~/roots",
+        "~",
+        "~/",
+        "~/a/../b",
+        "/abs/roots",
+        "relative/roots",
+        *_TILDE_RESIDUE_ACCEPTED_DIVERGENCES,
+    ],
+)
+def test_tilde_residue_primitive_is_byte_compatible_with_path_expanduser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    # Regression lock at the swapped expression itself: on every input the OLD
+    # primitive could handle, the new one yields the identical ``Path`` -- except
+    # for the two carve-outs below, both of which are recorded acceptances rather
+    # than silent gaps.
+    #
+    # Carve-out 1 (inherited from #1424, not parametrized here): homes that rstrip
+    # to ``''`` (``HOME`` of ``''``, ``/``, ``//``...) combined with a ``~//``
+    # value.  There the two primitives differ on the leading double slash, which
+    # the downstream realpath folds back, so no verdict moves.
+    #
+    # Carve-out 2 (PR #1548 round-1 N1, parametrized and asserted below): the
+    # ``./~/...`` shape.  Here the verdict really does move, and only at the three
+    # sites that take a raw ``str`` -- ``_storage_root_check``,
+    # ``_db_free_selector_allowed_roots`` and ``_db_free_selector_path_rejection``.
+    # ``_preflight_allowed_roots`` receives ``Path`` roots, which have already
+    # dropped the ``.`` before the expansion is reached, so it does not diverge.
+    # Measured direction at those three: the value stops being absolute, so the
+    # two selectors reject it (``db_free_allowed_root_relative`` /
+    # ``db_free_selector_path_relative``) and the storage-root check anchors it at
+    # the cwd and returns ``*_OUT_OF_ROOT``, where the old code silently admitted
+    # an expanded home path.  That is fail-CLOSED, and ``./~/x`` is not a plausible
+    # operator spelling of a storage root, so review accepted it as-is.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+    if value in _TILDE_RESIDUE_ACCEPTED_DIVERGENCES:
+        assert os.path.expanduser(value) == value
+        assert Path(os.path.expanduser(value)) != Path(value).expanduser()
+        # The discriminating half of "fail-closed": the new value is relative, so
+        # every downstream arm treats it as one; the old value was an absolute
+        # path inside the home directory.
+        assert not Path(os.path.expanduser(value)).is_absolute()
+        assert Path(value).expanduser() == home / value.removeprefix("./~/")
+        return
+
+    assert Path(os.path.expanduser(value)) == Path(value).expanduser()
+
+
+def test_tilde_residue_preflight_allowed_roots_keeps_every_expandable_arm_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for ``_preflight_allowed_roots``, arm by arm.  The
+    # independent oracle is the pre-expanded ABSOLUTE spelling of the same root:
+    # it never touches the changed line, so equal verdicts prove the expansion
+    # still happens and still feeds the same arms.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    existing = home / "existing"
+    existing.mkdir()
+    not_created_yet = home / "nfs-not-mounted-yet"
+    loop = _symlink_loop_dir(home, "allowed-loop")
+
+    def verdict(root: Path, *, db_free: bool) -> tuple[Any, Any]:
+        return scheduler_preflight_module._preflight_allowed_roots(
+            _PreflightRootsConfigStub(
+                allowed_storage_roots=(root,),
+                workspace_root=tmp_path,
+                db_free_required=db_free,
+            )
+        )
+
+    # Plain expandable root.
+    assert verdict(Path("~/existing"), db_free=False) == ((Path(os.path.realpath(existing)),), [])
+    assert verdict(Path("~/existing"), db_free=False) == verdict(existing, db_free=False)
+    # ENOENT arm: a not-yet-created root keeps its admitted, lexically normalized
+    # semantics.
+    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=False) == (
+        (Path(os.path.realpath(not_created_yet)),),
+        [],
+    )
+    assert verdict(Path("~/nfs-not-mounted-yet"), db_free=False) == verdict(not_created_yet, db_free=False)
+    # db-free lexical fallback arm (PR #831 tolerance): an unresolvable root is
+    # legitimate configuration there, and the EXPANDED value is what gets kept.
+    assert verdict(Path("~/allowed-loop-a"), db_free=True) == ((home / "allowed-loop-a",), [])
+    assert verdict(Path("~/allowed-loop-a"), db_free=True) == verdict(loop, db_free=True)
+    # db-backed unsafe arm: same root, blocker carrying the expanded path.
+    assert verdict(Path("~/allowed-loop-a"), db_free=False) == (
+        (),
+        [
+            {
+                "code": "SLURM_PREFLIGHT_ALLOWED_STORAGE_ROOTS_UNSAFE_PATH",
+                "field": "allowed_storage_roots",
+                "path": str(home / "allowed-loop-a"),
+                "message": "Slurm allowed storage root must be canonically resolvable.",
+            }
+        ],
+    )
+    assert verdict(Path("~/allowed-loop-a"), db_free=False) == verdict(loop, db_free=False)
+
+
+def test_tilde_residue_storage_root_check_keeps_expandable_and_absolute_verdicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for ``_storage_root_check``, against the same
+    # pre-expanded oracle.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    workspace = home / "workspace"
+    workspace.mkdir()
+    allowed = (Path(os.path.realpath(home)),)
+
+    tilde_check, tilde_blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root", "~/workspace", allowed
+    )
+
+    assert (tilde_check, tilde_blocker) == scheduler_preflight_module._storage_root_check(
+        "workspace_root", str(workspace), allowed
+    )
+    assert tilde_blocker is None
+    assert tilde_check == {
+        "configured": True,
+        "path": str(Path(os.path.realpath(workspace))),
+        "contained": True,
+        "compute_node_visible": True,
+    }
+    # And an absolute tilde-free root outside every allowed root still blocks.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _outside_check, outside_blocker = scheduler_preflight_module._storage_root_check(
+        "workspace_root", str(outside), allowed
+    )
+    assert outside_blocker is not None
+    assert outside_blocker["code"] == "SLURM_PREFLIGHT_WORKSPACE_ROOT_OUT_OF_ROOT"
+
+
+def test_tilde_residue_db_free_selector_lanes_keep_expandable_and_absolute_verdicts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Zero-regression lock for both retry.py sites, against the same oracle.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    approved = home / "approved"
+    approved.mkdir()
+    inside = approved / "workspace"
+    inside.mkdir()
+    outside = home / "outside"
+    outside.mkdir()
+
+    tilde_roots, tilde_rejected = retry_module._db_free_selector_allowed_roots("env", "~/approved")
+
+    assert (tilde_roots, tilde_rejected) == retry_module._db_free_selector_allowed_roots("env", str(approved))
+    assert tilde_rejected == []
+    assert tilde_roots == (Path(os.path.realpath(approved)),)
+
+    def rejection(value: str) -> dict[str, str] | None:
+        return retry_module._db_free_selector_path_rejection(
+            "scheduler_workspace_root", "env", value, allowed_roots=tilde_roots
+        )
+
+    # Expandable and contained -> admitted (no rejection), same as the absolute
+    # spelling.
+    assert rejection("~/approved/workspace") is None
+    assert rejection("~/approved/workspace") == rejection(str(inside))
+    # Expandable but outside -> the existing containment rejection, byte for byte.
+    assert rejection("~/outside") == {
+        "field": "scheduler_workspace_root",
+        "source": "env",
+        "reason": "db_free_selector_path_outside_allowed_roots",
+        "value": "~/outside",
+    }
+    assert rejection(str(outside))["reason"] == "db_free_selector_path_outside_allowed_roots"
 
 
 def test_terminal_state_save_event_overrides_stale_permanent_pipeline_failure() -> None:
@@ -14836,6 +19711,75 @@ def test_bounded_evidence_summarizes_candidate_rows_with_identity_and_incident_f
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_bounded_candidate_summary_retains_predecessor_pending_operator_signal() -> None:
+    """#1152: the single-boolean triage must survive bounded summarization.
+
+    §8.6 stalls append a blocked predecessor row every pass, so the passes that
+    carry this evidence are exactly the ones most likely to overflow
+    ``max_evidence_bytes`` and get summarized.  Dropping
+    ``operator_action_required`` there would make the runbook's triage step
+    ("read one boolean") unexecutable precisely where it is needed.
+    """
+
+    row = {
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_a:forecast_gfs_deterministic",
+        "model_id": "model_a",
+        "status": "blocked",
+        "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+        "state_evidence": {
+            "mode": "db_free_state_continuity",
+            "required_prior_cycle_time": "2026-05-21T00:00:00Z",
+            "self_heal_expected": False,
+            "operator_action_required": True,
+            "operator_action": "backfill_predecessor_state",
+            "runbook": "docs/runbooks/scheduler-dbfree-typed-reasons.md",
+            "self_heal_probe": {"ready": False, "reason": "state_snapshot_index_object_missing"},
+            "state_history": {"detail": _bounded_incident_verbose_text("predecessor-pending-history")},
+        },
+    }
+
+    summary = scheduler_evidence_payload_module._bounded_candidate_summary(row)
+
+    assert summary["operator_action_required"] is True
+    assert summary["reason"] == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    assert set(summary) <= _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS
+    # Idempotent: a second pass over the already-summarized row keeps it.
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(summary) == summary
+
+    # The retention guard is `value is not None` (scheduler_evidence_payload.py:265),
+    # NOT truthiness — so the self-healing leg (`operator_action_required: False`,
+    # emitted whenever the predecessor's own probe reads ready) must survive too.
+    # A truthiness guard would silently erase the "no operator needed" half of the
+    # triage and leave operators unable to distinguish it from an absent field.
+    self_healing_row = {
+        **row,
+        "candidate_id": "gfs:2026-05-21T12:00:00Z:model_b:forecast_gfs_deterministic",
+        "model_id": "model_b",
+        "state_evidence": {
+            **row["state_evidence"],
+            "self_heal_expected": True,
+            "operator_action_required": False,
+            "self_heal_probe": {"ready": True, "reason": None},
+        },
+    }
+    # No `operator_action` / `runbook`: the gate only attaches those on the
+    # not-self-healing leg (scheduler_generation_gate.py:760-762).
+    del self_healing_row["state_evidence"]["operator_action"]
+    del self_healing_row["state_evidence"]["runbook"]
+
+    self_healing_summary = scheduler_evidence_payload_module._bounded_candidate_summary(
+        self_healing_row
+    )
+
+    assert "operator_action_required" in self_healing_summary
+    assert self_healing_summary["operator_action_required"] is False
+    assert set(self_healing_summary) <= _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS
+    assert (
+        scheduler_evidence_payload_module._bounded_candidate_summary(self_healing_summary)
+        == self_healing_summary
+    )
+
+
 def test_bounded_evidence_summary_rows_are_idempotent_under_a_second_fallback() -> None:
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_summary_idempotent")
 
@@ -15484,7 +20428,7 @@ def test_bounded_evidence_preserves_timing_block_on_size_fallback() -> None:
 def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_paths() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_bounded")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": True,
@@ -15530,7 +20474,7 @@ def test_retention_bounded_evidence_preserves_frontier_block_while_stripping_ski
     survive the compaction that strips per-entry skipped detail."""
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_frontier")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": False,
@@ -15584,10 +20528,84 @@ def test_retention_bounded_evidence_preserves_frontier_block_while_stripping_ski
     assert "/private" not in rendered
 
 
+def test_retention_bounded_evidence_preserves_extra_roots_block_while_stripping_entries() -> None:
+    """[#1318 D3/2.10b] The additional-root block is bounded scalar evidence and
+    must survive the compaction that strips per-entry detail.
+
+    Without it a compacted receipt reports one ``retention_days`` and one
+    cross-root ``freed_bytes``, so a reader cannot tell which window governed
+    the additional roots -- and compaction is triggered by exactly the large
+    additional-root sweeps that most need to be read.
+    """
+    payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_extra_roots")
+    planned = [
+        {
+            "key": f"runs/fcst_gfs_20260{(index % 9) + 1:02d}0100_model_a",
+            "path": f"/private/workspace/runs/fcst_gfs_{index:06d}_model_a",
+            "cycle_time": "2026-05-01T00:00:00Z",
+            "reason": "run_cycle_aged_out",
+            "size_bytes": 4096,
+            "root": "/private/workspace",
+        }
+        for index in range(24_000)
+    ]
+    payload["retention"] = {
+        "schema_version": "nhms.production_scheduler.retention.v2",
+        "status": "completed",
+        "enabled": True,
+        "dry_run": True,
+        "retention_days": 14,
+        "cutoff": "2026-05-07T12:00:00Z",
+        "frontier": {
+            "active_lower_bound": "2026-05-07T06:00:00+00:00",
+            "source": "candidates",
+            "protected_count": 2,
+        },
+        "extra_roots": {
+            "enabled": True,
+            "retention_days": 30,
+            "cutoff": "2026-04-21T12:00:00Z",
+            "roots": ["/scratch/workspace", "/ghdc/data/nwm/object-store"],
+        },
+        "counts": {"planned": len(planned), "deleted": 0, "skipped": 0, "failed": 0},
+        "planned": planned,
+        "deleted": [],
+        "skipped": [],
+        "failed": [],
+        "freed_bytes": 0,
+    }
+
+    assert len(json.dumps(payload).encode("utf-8")) > scheduler_module.MAX_EVIDENCE_BYTES
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=scheduler_module.MAX_EVIDENCE_BYTES,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= scheduler_module.MAX_EVIDENCE_BYTES
+    retention = bounded["retention"]
+    assert retention["extra_roots"] == {
+        "enabled": True,
+        "retention_days": 30,
+        "cutoff": "2026-04-21T12:00:00Z",
+        "roots": ["/scratch/workspace", "/ghdc/data/nwm/object-store"],
+    }
+    assert retention["frontier"] == {
+        "active_lower_bound": "2026-05-07T06:00:00+00:00",
+        "source": "candidates",
+        "protected_count": 2,
+    }
+    # per-entry detail may collapse to counts, but the window attribution stays
+    assert "planned" not in retention
+    assert retention["planned_count"] == 24_000
+    assert "/private/workspace/runs" not in rendered
+
+
 def test_retention_bounded_evidence_compacts_paths_before_initial_fit() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_initial_fit")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": True,
@@ -20511,6 +25529,16 @@ def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+#: ``job_type`` a production writer emits for the failed downstream job of each
+#: stage this geometry is built at.  The raw-manifest legs match the failed job on
+#: ``stage`` alone, but keeping the pair consistent stops the fixture from
+#: describing a state no writer can produce.
+_RAW_MANIFEST_FAILED_JOB_TYPES = {
+    "convert": "convert_canonical",
+    "forecast": "run_shud_forecast_array",
+}
+
+
 def _raw_manifest_geometry_state(
     candidate: Any,
     *,
@@ -20518,6 +25546,7 @@ def _raw_manifest_geometry_state(
     retry_count: int = 1,
     retry_limit: int = 3,
     repaired: bool = False,
+    failed_stage: str = "convert",
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """State matching the raw-manifest repair (or repaired-downstream) geometry.
@@ -20525,8 +25554,17 @@ def _raw_manifest_geometry_state(
     ``repaired=False`` is channel (a): a manifest probed missing after a
     previously successful download.  ``repaired=True`` is channel (b): a repair
     download that finished AFTER the failed downstream job.
+
+    ``failed_stage`` moves the failed downstream job (and the state's own
+    ``failed_stage``) between the stages the raw-manifest legs admit.  The default
+    ``"convert"`` reproduces the original hard-coded geometry byte for byte, so
+    every pre-existing caller is unchanged; ``"forecast"`` is the native-SHUD
+    restart geometry, which is the only one whose restart plan makes the ladder's
+    forcing-package rung applicable (#1393 round-1 C1: with a single stage pinned,
+    the abstention seam could not see the terminals that legitimately flip).
     """
 
+    failed_job_type = _RAW_MANIFEST_FAILED_JOB_TYPES[failed_stage]
     jobs: list[dict[str, Any]] = [
         {
             "job_id": "job_cycle_gfs_2026052106_download",
@@ -20538,12 +25576,12 @@ def _raw_manifest_geometry_state(
             "finished_at": "2026-05-21T06:02:00Z",
         },
         {
-            "job_id": "job_cycle_gfs_2026052106_convert",
+            "job_id": f"job_cycle_gfs_2026052106_{failed_stage}",
             "run_id": "cycle_gfs_2026052106",
             "cycle_id": candidate.cycle_id,
             "status": "failed",
-            "stage": "convert",
-            "job_type": "convert_canonical",
+            "stage": failed_stage,
+            "job_type": failed_job_type,
             "error_code": error_code,
             "retry_count": retry_count,
             "finished_at": "2026-05-21T06:03:00Z",
@@ -20574,7 +25612,7 @@ def _raw_manifest_geometry_state(
         },
         "pipeline_jobs": jobs,
         "pipeline_status": "failed",
-        "failed_stage": "convert",
+        "failed_stage": failed_stage,
         "error_code": error_code,
         "retry_count": retry_count,
         "retry_limit": retry_limit,
@@ -20587,8 +25625,23 @@ def _raw_manifest_decision(
     candidate: Any,
     state: Mapping[str, Any],
     *,
+    object_store_root: Path,
     manifest_missing: bool,
 ) -> Any:
+    """Decide the raw-manifest geometry with the manifest probe stubbed.
+
+    #1393 seam 8: since both raw-manifest legs consult
+    ``_artifact_uri_missing_status``, the probe short-circuits fail-closed (and the
+    legs abstain) whenever no object-store root is configured -- the stub below
+    would never be reached.  Each caller therefore passes a per-test real
+    ``tmp_path`` root; the shared ``_scheduler_candidate_fixture`` is deliberately
+    left rootless (``tests/test_production_scheduler.py`` pins that emptiness for
+    the #1365 fail-closed seam).  With a root in play the stub is consulted from
+    inside the probe exactly as it used to be consulted from the legs, so every
+    caller's assertions are unchanged.
+    """
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     monkeypatch.setattr(
         scheduler_module,
         "_object_manifest_is_missing",
@@ -20618,6 +25671,7 @@ def test_raw_manifest_channels_refuse_remedy_non_causal_permanent_codes(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     repaired: bool,
+    tmp_path: Path,
 ) -> None:
     # Seams 1 and 3 (refusing half).  Re-ingesting raw input cannot resize a job's
     # memory nor lift a policy denial, so neither raw-manifest channel may
@@ -20625,7 +25679,13 @@ def test_raw_manifest_channels_refuse_remedy_non_causal_permanent_codes(
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code=error_code, repaired=repaired)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=not repaired,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -20648,6 +25708,7 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     expected_classifier: str,
+    tmp_path: Path,
 ) -> None:
     # Seam 2, the discriminating anchor for the D2 ruling: the geometry itself
     # (a manifest probed missing after a previously successful download) IS the
@@ -20659,7 +25720,13 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code=error_code)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20672,13 +25739,20 @@ def test_missing_raw_manifest_repair_stays_open_for_other_permanent_codes(
 
 def test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 3, open half (mirrors the end-to-end anchor
     # ``test_repaired_raw_manifest_allows_stale_downstream_failure_retry``).
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", repaired=True)
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=False)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=False,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20692,6 +25766,7 @@ def test_repaired_raw_manifest_downstream_retry_stays_open_for_unknown_codes(
 
 def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 11, channel (a) half: the causal open domain keeps its limit_exhausted
     # exemption byte for byte (the compat anchor at the INVALID_MANIFEST shape
@@ -20704,7 +25779,13 @@ def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
         retry_limit=3,
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20718,6 +25799,7 @@ def test_missing_raw_manifest_repair_still_repairs_with_exhausted_budget(
 @pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 9, first tail path.  A policy/permission failure is remedy-non-causal
     # for RE-INGESTING RAW INPUT, but a genuinely changed model package is a
@@ -20730,7 +25812,13 @@ def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
         extra={"run_manifest_model_package": _changed_model_package_prior()},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "retry"
@@ -20741,12 +25829,19 @@ def test_raw_manifest_refusal_still_lets_model_package_refresh_claim_candidate(
 @pytest.mark.usefixtures("recorded_forcing_package_present")
 def test_raw_manifest_refusal_without_package_change_falls_to_guard(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 9, second tail path: no other channel has a claim, so the guard blocks.
     candidate = _scheduler_candidate_fixture()
     state = _raw_manifest_geometry_state(candidate, error_code="TEMPLATE_NOT_ALLOWED")
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -20835,7 +25930,7 @@ def test_downstream_resume_refuses_recorded_non_transient_codes(error_code: str)
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
-@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED"])
+@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED", "SLURM_DEADLINE"])
 def test_downstream_resume_keeps_recorded_transient_codes(error_code: str) -> None:
     # Seam 4, complement: a recorded transient code within budget resumes exactly
     # as before this change.
@@ -20851,12 +25946,15 @@ def test_downstream_resume_keeps_recorded_transient_codes(error_code: str) -> No
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
 
 
-def test_downstream_resume_refuses_recorded_transient_code_with_exhausted_budget() -> None:
-    # Seam 11, channel (c) half.
+@pytest.mark.parametrize("error_code", ["NODE_FAILURE", "SLURM_DEADLINE"])
+def test_downstream_resume_refuses_recorded_transient_code_with_exhausted_budget(error_code: str) -> None:
+    # Seam 11, channel (c) half.  The dedicated reason comes from the SECOND
+    # transient surface (TRANSIENT_RETRY_REASON_CODES), so a code registered on only
+    # the retry surface would land on permanent_failure_guard here instead.
     candidate = _scheduler_candidate_fixture()
     state = _durable_downstream_failure_state(
         candidate,
-        error_code="NODE_FAILURE",
+        error_code=error_code,
         retry_count=3,
         retry_limit=3,
     )
@@ -20996,11 +26094,374 @@ def test_recorded_permanent_code_with_top_level_retryable_is_refused_by_both_sur
     assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
 
 
+# --- #1420: the domain split reads the CURRENT failure's own code, not the state's
+
+_PUBLISH_FAILED_JOB_ID = "job_cycle_gfs_2026052106_publish_model_a"
+#: A recovered stage that kept its ``error_code``: retried, succeeded, code never
+#: cleared.  Geometry A of #1420.
+_STALE_RECOVERED_CONVERT_JOB = {
+    "job_id": "job_cycle_gfs_2026052106_convert_model_a",
+    "status": "succeeded",
+    "stage": "convert",
+    "error_code": "CONVERT_CANONICAL_FAILED",
+}
+
+
+def _auto_retry_event(*, previous_error: str) -> dict[str, Any]:
+    """An auto-retry event shaped exactly like ``retry.py:448`` writes it.
+
+    ``entity_id`` binds to the failed publish row that is present in the state:
+    an id bound to no row at all is dropped by the identity filter, and a state
+    carrying a pending retry row instead lands on ``active_duplicate_pipeline``
+    -- either way the candidate would never reach the resume channel, which
+    would make the pre-wiring red of this geometry meaningless.
+    """
+
+    return {
+        "event_id": 91,
+        "pipeline_event_id": "event_retry_auto_publish",
+        "entity_type": "pipeline_job",
+        "entity_id": _PUBLISH_FAILED_JOB_ID,
+        "event_type": "retry",
+        "status_from": "failed",
+        "status_to": "pending",
+        "details": {
+            "trigger": "auto",
+            "retry_count": 1,
+            "previous_error": previous_error,
+            "backoff_seconds": 60,
+            "previous_job_id": _PUBLISH_FAILED_JOB_ID,
+            "slurm_job_id": "8801",
+            "failure": retry_module.classify_failure(previous_error, attempt=1, retry_limit=3),
+            "reused_existing_retry_job": False,
+        },
+    }
+
+
+def _durable_publish_failure_state(
+    candidate: Any,
+    *,
+    extra_jobs: Sequence[Mapping[str, Any]] = (),
+    events: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """SHUD finished durably; publish failed recording NO code of its own.
+
+    This is the geometry the placeholder domain exists for -- the reader has to
+    fabricate ``PUBLISH_FAILED`` because the failing stage recorded nothing --
+    and the base every #1420 geometry adds its stale historical code to.
+    """
+
+    identity = _production_identity_fixture()
+    state: dict[str, Any] = {
+        **identity,
+        "candidate_id": candidate.candidate_id,
+        "hydro_status": "succeeded",
+        "durable_shud_output_exists": True,
+        "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        "pipeline_status": "failed",
+        "failed_stage": "publish",
+        "retry_count": 1,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                **identity,
+                "job_id": "job_cycle_gfs_2026052106_forecast_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+            },
+            *({**identity, **job} for job in extra_jobs),
+            {
+                **identity,
+                "job_id": _PUBLISH_FAILED_JOB_ID,
+                "status": "failed",
+                "stage": "publish",
+                "retry_count": 1,
+            },
+        ],
+    }
+    if events:
+        state["pipeline_events"] = [{**identity, **event} for event in events]
+    return state
+
+
+def _run_once_for_state(tmp_path: Path, state: Mapping[str, Any]) -> Any:
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(dict(state)),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    return scheduler.run_once()
+
+
+def _recorded_code_state(**overrides: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {"failed_stage": "publish"}
+    state.update(overrides)
+    return state
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        # Top level: the candidate/cycle row's own failure field.
+        (_recorded_code_state(error_code="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        (_recorded_code_state(reason_code="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        (_recorded_code_state(failure_reason="PUBLISH_TASK_FAILED"), "PUBLISH_TASK_FAILED"),
+        # Retry-history keys are about the PREVIOUS attempt, never this failure.
+        (_recorded_code_state(previous_error="SLURM_JOB_FAILED", last_error="NODE_FAILURE"), None),
+        # hydro_run, in a status the journal does NOT clear the code for.
+        (
+            _recorded_code_state(hydro_run={"status": "failed", "error_code": "OUTPUT_INCOMPLETE"}),
+            "OUTPUT_INCOMPLETE",
+        ),
+        # hydro_run in a cleared status: the SQL backend never clears on a
+        # successful transition, so this code is residue from an older attempt.
+        (
+            _recorded_code_state(hydro_run={"status": "succeeded", "error_code": "OUTPUT_INCOMPLETE"}),
+            None,
+        ),
+        (
+            _recorded_code_state(hydro_run={"status": "published", "error_code": "OUTPUT_INCOMPLETE"}),
+            None,
+        ),
+        # No status to judge by: trust the code (conservative -- keeps the #1313
+        # permanence gate in force rather than opening a resume).
+        (_recorded_code_state(hydro_run={"error_code": "OUTPUT_INCOMPLETE"}), "OUTPUT_INCOMPLETE"),
+        # The failed stage's own job row.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish", "error_code": "PUBLISH_FAILED"}
+                ]
+            ),
+            "PUBLISH_FAILED",
+        ),
+        # Geometry A at unit level: a recovered stage's leftover code.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    dict(_STALE_RECOVERED_CONVERT_JOB),
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # The other half of the "repair markers are not always written" problem:
+        # another stage's FAILED row carries a code, this stage's does not.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_convert",
+                        "status": "failed",
+                        "stage": "convert",
+                        "error_code": "CONVERT_CANONICAL_FAILED",
+                    },
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # Stop at the FIRST matching failed row: an older same-stage attempt's
+        # code is not this attempt's record.
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_publish_retry_0",
+                        "status": "failed",
+                        "stage": "publish",
+                        "error_code": "PUBLISH_FAILED",
+                    },
+                    {"job_id": "job_publish_retry_1", "status": "failed", "stage": "publish"},
+                ]
+            ),
+            None,
+        ),
+        # Repaired-stage evidence rows stay excluded (as in ``_state_error_code``).
+        (
+            _recorded_code_state(
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_publish",
+                        "status": "failed",
+                        "stage": "publish",
+                        "error_code": "PUBLISH_FAILED",
+                        "repair_status": "repaired",
+                    }
+                ]
+            ),
+            None,
+        ),
+        # Production stages are aliases: both sides must normalize, or a real
+        # ``parse_output_array`` row would be missed by a bare string compare.
+        (
+            _recorded_code_state(
+                failed_stage="parse",
+                pipeline_jobs=[
+                    {
+                        "job_id": "job_parse",
+                        "status": "failed",
+                        "stage": "parse_output_array",
+                        "error_code": "PARSE_TASK_FAILED",
+                    }
+                ],
+            ),
+            "PARSE_TASK_FAILED",
+        ),
+        # No top-level ``failed_stage``: the stage is inferred from the jobs.
+        (
+            {
+                "pipeline_jobs": [
+                    {"job_id": "job_forecast", "status": "succeeded", "stage": "forecast"},
+                    {"job_id": "job_publish", "status": "failed", "stage": "publish", "error_code": "PUBLISH_FAILED"},
+                ]
+            },
+            "PUBLISH_FAILED",
+        ),
+        # Geometry B at unit level: an auto-retry event's ``previous_error``.
+        (_recorded_code_state(pipeline_events=[_auto_retry_event(previous_error="SLURM_JOB_FAILED")]), None),
+        # The event-derived PRODUCTION shape: a failed_task event never leaves its
+        # code in the event alone -- ``candidate_state_from_rows`` projects it to
+        # the top-level ``error_code`` (with a ``NODE_FAILURE`` fallback), which
+        # this scoping reads.
+        (
+            _recorded_code_state(
+                error_code="NODE_FAILURE",
+                pipeline_events=[
+                    {
+                        "event_id": 77,
+                        "event_type": "status_change",
+                        "status_to": "failed",
+                        "details": {"failed_task": {"task_id": "7", "stage": "publish"}},
+                    }
+                ],
+            ),
+            "NODE_FAILURE",
+        ),
+        # Never raises, whatever the state is missing.
+        ({}, None),
+    ],
+)
+def test_downstream_recorded_error_code_scoping_grid(state: dict[str, Any], expected: str | None) -> None:
+    # #1420 D2: the decision table for "did THIS failure record a code".
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) == expected
+
+
+def test_stale_recovered_stage_code_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+    # #1420 geometry A: SHUD is done, publish failed with no code of its own, and
+    # a convert row that was retried into success still carries
+    # ``CONVERT_CANONICAL_FAILED``.  Before the scoping this stale code routed the
+    # candidate into the recorded domain and refused a resume master would run.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate, extra_jobs=[_STALE_RECOVERED_CONVERT_JOB])
+
+    assert scheduler_state_failure_module._state_error_code(state) == "CONVERT_CANONICAL_FAILED"
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence["restart_stage"] == "publish"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+
+
+def test_auto_retry_previous_error_does_not_flip_the_resume_domain(tmp_path: Path) -> None:
+    # #1420 geometry B, the common shape: every candidate that was ever
+    # auto-retried carries a ``previous_error``, so the broad scan turned "SHUD
+    # computed, publish failed silently" into manual-intervention work.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(
+        candidate,
+        events=[_auto_retry_event(previous_error="SLURM_JOB_FAILED")],
+    )
+
+    # The event really is retained by the identity filter -- otherwise this
+    # geometry's pre-wiring red would come from the candidate being skipped.
+    assert scheduler_state_failure_module._state_error_code(state) == "SLURM_JOB_FAILED"
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert decision.evidence["restart_stage"] == "publish"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+
+
+def test_downstream_resume_control_group_without_any_historical_code(tmp_path: Path) -> None:
+    # #1420 control: the same base with no stale code anywhere resumes before and
+    # after the scoping, which is what makes geometries A/B attributable to the
+    # stale code alone.  (``test_downstream_resume_keeps_synthesized_placeholder
+    # _domain`` pins the same domain at decision level for the parse stage.)
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate)
+
+    assert scheduler_state_failure_module._state_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "resume_downstream_after_durable_shud")
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_stale_code_still_reaches_the_reason_code_text_surface() -> None:
+    # #1420 I6: only the DOMAIN SPLIT is scoped.  ``_failure_policy_payload``
+    # keeps its broad scan, so the operator still sees the most relevant code the
+    # state carries -- the resume channel just no longer treats it as this
+    # failure's own record.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(candidate, extra_jobs=[_STALE_RECOVERED_CONVERT_JOB])
+
+    failure = scheduler_state_failure_module._failure_policy_payload(state)
+    assert failure["reason_code"] == "CONVERT_CANONICAL_FAILED"
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is not None
+    assert decision.evidence["failure"]["reason_code"] == "CONVERT_CANONICAL_FAILED"
+    assert decision.evidence["failure"]["classifier"] == "unknown_failure"
+
+
+def test_stale_code_classifying_into_a_refused_classifier_still_refuses(tmp_path: Path) -> None:
+    # #1420 I7 boundary: the placeholder domain has always refused its three
+    # classifiers, and the stale code still reaches the classifier through the
+    # text surface above.  So a recovered stage's ``OUT_OF_MEMORY`` residue lands
+    # on ``resource_configuration`` and is refused -- pre-existing #1313
+    # semantics, unchanged by this scoping.
+    candidate = _scheduler_candidate_fixture()
+    state = _durable_publish_failure_state(
+        candidate,
+        extra_jobs=[{**_STALE_RECOVERED_CONVERT_JOB, "error_code": "OUT_OF_MEMORY"}],
+    )
+
+    assert scheduler_state_failure_module._downstream_recorded_error_code(state) is None
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    result = _run_once_for_state(tmp_path, state)
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    assert decision.evidence["failure"]["classifier"] == "resource_configuration"
+    assert result.evidence["counts"]["submitted_count"] == 0
+
+
 # --- seam 10: channels this change must NOT move
 
 
 @pytest.mark.usefixtures("recorded_forcing_package_present")
-@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "PARSE_TASK_FAILED", "SLURM_TIMEOUT"])
+@pytest.mark.parametrize("error_code", ["OUT_OF_MEMORY", "PARSE_TASK_FAILED", "SLURM_TIMEOUT", "SLURM_DEADLINE"])
 def test_missing_forecast_output_recompute_channel_is_unchanged(error_code: str) -> None:
     # Seam 10: the output-absence recompute channel declares ``remedy="exempt"``
     # and is deliberately NOT wired to the shared judgement -- recomputing an
@@ -21131,6 +26592,7 @@ def test_remedy_judgement_refusal_matrix(
 
 def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifest_repair(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # Seam 12 end to end: the code arm is load-bearing, not decorative.  A state
     # that overrides ``classifier`` (an identity-filter whitelisted transit key)
@@ -21142,7 +26604,13 @@ def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifes
         extra={"classifier": "unknown_failure"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21155,6 +26623,7 @@ def test_state_classifier_override_cannot_smuggle_out_of_memory_past_raw_manifes
 def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest_repair(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
+    tmp_path: Path,
 ) -> None:
     # Seam 12, end to end for the PER-REMEDY code arm (#1313 round-1 V1-C1).  The
     # smuggle shape is identical to the OOM one above: overriding ``classifier``
@@ -21168,7 +26637,13 @@ def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest
         extra={"classifier": "unknown_failure"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=True)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=True,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21183,6 +26658,7 @@ def test_state_classifier_override_cannot_smuggle_policy_codes_past_raw_manifest
 def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_manifest_channels(
     monkeypatch: pytest.MonkeyPatch,
     repaired: bool,
+    tmp_path: Path,
 ) -> None:
     # The classifier arm deliberately does NOT normalize casing (normalizing it
     # would change refresh-channel behaviour outside the zero-change line), so a
@@ -21196,7 +26672,13 @@ def test_state_classifier_casing_variant_cannot_smuggle_policy_code_past_raw_man
         extra={"classifier": "Policy_Blocked"},
     )
 
-    decision = _raw_manifest_decision(monkeypatch, candidate, state, manifest_missing=not repaired)
+    decision = _raw_manifest_decision(
+        monkeypatch,
+        candidate,
+        state,
+        object_store_root=tmp_path / "object-store",
+        manifest_missing=not repaired,
+    )
 
     assert decision is not None
     assert decision.action == "blocked"
@@ -21236,6 +26718,629 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
         {"resource_configuration", "policy_blocked"}
     )
+
+
+# ---------------------------------------------------------------------------
+# #1393 -- both raw-manifest repair legs consult the unified artifact probe and
+# ABSTAIN whenever the probe reports a non-null unsafe reason.  Seams 1-9 of the
+# change design (seam 8, the geometry migration, is carried by the
+# ``_raw_manifest_decision`` family above rather than by a test of its own).
+# ---------------------------------------------------------------------------
+
+
+#: Every non-null unsafe reason ``_artifact_uri_missing_status`` can report on
+#: the object branch.  The first two mean "no probe verdict was reached"; the
+#: third (#1394) means the probe DID determine something -- that a non-regular
+#: entry stands on the manifest key -- which is equally not a licence to claim
+#: the candidate: neither leg may vouch for a manifest that cannot be read, and
+#: re-ingesting cannot write a file where a directory stands.  All three must
+#: make the raw-manifest legs abstain.
+_RAW_MANIFEST_ABSTENTION_REASONS = (
+    "object_store_root_unconfigured",
+    "artifact_probe_error",
+    "artifact_target_not_a_file",
+)
+
+#: A raw-manifest key whose closed-world validation raises ``ValueError`` inside
+#: ``LocalObjectStore.resolve_path``: the probe's ``(OSError, ValueError)``
+#: residual arm turns it into ``(True, None)``, i.e. "determined absent" with a
+#: NULL reason (#1365 D4), which stays repair-eligible.
+_UNRESOLVABLE_RAW_MANIFEST_URI = "raw/gfs/2026052106/../manifest.json"
+
+
+def _raw_manifest_probe_fault_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw-manifest key is a SYMLINK.
+
+    ``LocalObjectStore.exists`` refuses to stat a symlinked target and raises
+    ``ObjectStoreError`` -- the production shape of an NFS ESTALE/EIO handle --
+    which is the fault the unified probe contains as ``artifact_probe_error``.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    manifest_path = object_store_root / _RECORDED_RAW_MANIFEST_URI
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere-manifest.json"
+    elsewhere.write_bytes(b'{"source_id": "gfs"}')
+    manifest_path.symlink_to(elsewhere)
+    return object_store_root
+
+
+def _apply_raw_manifest_unsafe_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    """Put the process in the geometry that yields ``unsafe_reason`` for the manifest key."""
+
+    if unsafe_reason == "object_store_root_unconfigured":
+        monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    elif unsafe_reason == "artifact_probe_error":
+        _raw_manifest_probe_fault_root(monkeypatch, tmp_path)
+    elif unsafe_reason == "artifact_target_not_a_file":
+        _raw_manifest_directory_squatter_root(monkeypatch, tmp_path)
+    else:  # pragma: no cover - guards the parametrization against silent drift
+        raise AssertionError(f"unhandled unsafe reason: {unsafe_reason}")
+
+
+def _raw_manifest_directory_squatter_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw-manifest key is a DIRECTORY.
+
+    ``stat_no_follow`` refuses only symlinks, so this target stats cleanly and
+    ``LocalObjectStore.exists`` still reports it present -- the #1394 fail-open
+    the probe's file-kind verdict now catches.  The whole parent chain is created
+    (``parents=True``): a missing ancestor is a plain ``FileNotFoundError`` and
+    would produce the null-reason "determined absent" verdict instead.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir(exist_ok=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    (object_store_root / _RECORDED_RAW_MANIFEST_URI).mkdir(parents=True)
+    return object_store_root
+
+
+def _healthy_raw_manifest_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw manifest is a real, readable file.
+
+    The control half of the de-shadowing grid: with a genuine probe verdict of
+    "present" the repaired-downstream leg claims the candidate, which is exactly
+    the claim that used to be issued -- from a probe that never ran -- whenever the
+    store was unconfigured or the probe object unreadable.  Nothing is stubbed
+    here, so the shadow it demonstrates is the production one.
+    """
+
+    object_store_root = tmp_path / "healthy-object-store"
+    manifest_path = object_store_root / _RECORDED_RAW_MANIFEST_URI
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b'{"source_id": "gfs"}')
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    return object_store_root
+
+
+#: Whether the ladder's forcing rung can NAME the unsafe reason depends on which
+#: key was unsafe, and the abstention reasons differ there.
+#: ``object_store_root_unconfigured`` is a property of the process -- no root at
+#: all -- so every key reports it, including the forcing package manifest the rung
+#: probes.  ``artifact_probe_error`` and ``artifact_target_not_a_file`` are
+#: properties of ONE leaf (the symlinked raw manifest, the directory squatting on
+#: the raw manifest key), so the forcing rung's own key still reaches a genuine
+#: "probed, determined absent" verdict and the guard records
+#: ``unsafe_reason: None``.
+#:
+#: That NULL is the recorded AC-1 limitation made visible rather than a leak: an
+#: abstaining leg deposits no evidence, so the raw manifest's own reason never
+#: reaches the terminal.  Both arms still flip the terminal, which is the property
+#: under test.
+_FORCING_GUARD_UNSAFE_REASONS: dict[str, str | None] = {
+    "object_store_root_unconfigured": "object_store_root_unconfigured",
+    "artifact_probe_error": None,
+    "artifact_target_not_a_file": None,
+}
+
+
+def _assert_raw_manifest_geometry_is_unsafe(candidate: Any, unsafe_reason: str) -> None:
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}",
+    ) == (True, unsafe_reason)
+
+
+def test_unconfigured_store_no_longer_vouches_for_raw_manifest_existence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seam 1 / AC-1 behaviour face.  With no root configured the bare
+    # ``_object_manifest_is_missing`` fail-OPENED ("present"), so the downstream leg
+    # emitted ``manifest_exists: true`` plus ``automatic_retry_allowed: true`` from
+    # a probe that had never run.  Now the probe fails closed with a reason and the
+    # leg abstains; the decision must come from the remaining ladder instead.
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    assert candidate.resource_profile.get("object_store_root") in (None, "")
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "object_store_root_unconfigured")
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+
+    assert (
+        scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence(
+            candidate,
+            state,
+            {},
+        )
+        is None
+    )
+    assert (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence(candidate, state, {})
+        is None
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.reason != "retry_downstream_after_raw_repair"
+    assert decision.evidence["reason"] != "retry_downstream_after_raw_repair"
+    # No raw-manifest leg spoke, so no existence claim reaches evidence at all.
+    assert "raw_manifest_repair" not in decision.evidence
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+
+
+@pytest.mark.parametrize("error_code", ["SLURM_TIMEOUT", "NODE_FAILURE", "PREEMPTED"])
+@pytest.mark.parametrize("repaired", [False, True])
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_keeps_transient_failures_on_automatic_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error_code: str,
+    repaired: bool,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2, the availability-regression lock behind the abstention ruling.  The
+    # rejected alternative (fail closed into a manual/blocked channel) would have
+    # converted every transient failure in a cycle -- a single NFS wobble is enough
+    # to raise ``artifact_probe_error`` for the whole batch -- from an automatic
+    # retry into an operator ticket.  Abstention must leave the generic retry rung
+    # untouched.
+    candidate = _scheduler_candidate_fixture()
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code=error_code,
+        repaired=repaired,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is True
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is False
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_unshadows_forcing_guard_for_forecast_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2's de-shadowing grid, first geometry (round-1 C1).  The availability
+    # lock above pins the stage whose terminal must NOT move; on its own it reads
+    # as "abstention changes nothing", which is false.  A ``forecast`` restart
+    # needs a forcing package, so the ladder's forcing rung applies to it -- and
+    # that rung sits BELOW the raw-manifest legs.  While a leg claims the
+    # candidate the rung never runs; once the leg abstains the rung runs and
+    # blocks fail-closed.  Losing that would mean the change silently converted a
+    # blocked-on-missing-forcing candidate into an automatic retry.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        failed_stage="forecast",
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    # Control: a real root with a real manifest -- the leg has a verdict, claims
+    # the candidate, and shadows the forcing rung.
+    _healthy_raw_manifest_root(monkeypatch, tmp_path)
+    shadowed = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert shadowed is not None
+    assert (shadowed.action, shadowed.reason) == ("retry", "retry_downstream_after_raw_repair")
+    assert shadowed.evidence["raw_manifest_repair"]["manifest_exists"] is True
+    assert shadowed.evidence["retry_policy"]["automatic_retry_allowed"] is True
+
+    # Same state, unsafe probe: the leg abstains and the rung it was shadowing
+    # takes the decision.
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "missing_forcing_package_uri")
+    assert decision.evidence["decision"] == "blocked_missing_upstream_artifact"
+    assert decision.evidence["restart_stage"] == "forecast"
+    # The leg deposited nothing: no existence claim survives into the terminal.
+    assert "raw_manifest_repair" not in decision.evidence
+    guard = decision.evidence["artifact_guard"]
+    assert guard["artifact_type"] == "forcing_package_uri"
+    assert guard["artifact_exists"] is False
+    assert guard["stable_classifier"] == "FORCING_PACKAGE_URI_MISSING"
+    assert guard["unsafe_reason"] == _FORCING_GUARD_UNSAFE_REASONS[unsafe_reason]
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_unshadows_permanent_guard_for_remedy_permitted_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_reason: str,
+) -> None:
+    # Seam 2's de-shadowing grid, second geometry (round-1 C1), and the behaviour
+    # face of seam 9.  ``INVALID_MANIFEST`` is permanent, but re-ingesting the raw
+    # input IS causal for it, so the raw-manifest legs are permitted to overwrite
+    # the classification (#1313).  That permission is the shadow: only a leg with
+    # a real probe verdict may use it, and when the probe never ran the #1313
+    # permanent guard must reassert itself -- an operator ticket, not a silent
+    # automatic retry of a malformed input.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="INVALID_MANIFEST",
+        repaired=True,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    # Control: with a verdict the leg exercises its remedy permission.
+    _healthy_raw_manifest_root(monkeypatch, tmp_path)
+    shadowed = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert shadowed is not None
+    assert (shadowed.action, shadowed.reason) == ("retry", "retry_downstream_after_raw_repair")
+    assert shadowed.evidence["failure"]["permanent"] is False
+    assert shadowed.evidence["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
+    assert shadowed.evidence["retry_policy"]["manual_retry_required"] is False
+
+    # Same state, unsafe probe: no verdict, so no permission to overwrite.
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("blocked", "permanent_failure_guard")
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert "raw_manifest_repair" not in decision.evidence
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["failure"]["reason_code"] == "INVALID_MANIFEST"
+    assert decision.evidence["failure"]["classifier"] == "malformed_input"
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+
+
+def test_unconfigured_store_does_not_let_the_repair_leg_invent_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 3 / the recorded AC-2 limitation.  Discriminating half first: with a
+    # real (empty) root the very same state IS a genuine repair geometry, so the
+    # repair leg claims it.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", retry_count=0)
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}",
+    ) == (True, None)
+    claimed = scheduler_state_failure_module._missing_raw_manifest_repair_evidence(
+        candidate,
+        state,
+        {},
+    )
+    assert claimed is not None
+    assert claimed["raw_manifest_repair"]["manifest_exists"] is False
+
+    # Now take the root away.  The manifest is still genuinely absent, but nothing
+    # probed it, so the leg abstains rather than asserting either way -- the repair
+    # channel stays untriggered until a root is configured, which is identical to
+    # the pre-change outcome for THIS leg (the old fail-open said "present", which
+    # also produced ``None``).
+    monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "object_store_root_unconfigured")
+
+    assert (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence(candidate, state, {})
+        is None
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.reason != "repair_missing_raw_manifest"
+    assert "raw_manifest_repair" not in decision.evidence
+
+
+def test_raw_manifest_probe_fault_blocks_one_candidate_and_the_pass_survives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 4 / AC-3, through the real ``run_once`` path.  ``ObjectStoreError`` is a
+    # ``RuntimeError`` subclass: raised from the bare leg call it escaped
+    # ``_candidate_state_decision``, ``_build_candidates`` and ``run_once``'s only
+    # except arm, aborting the whole pass -- every other candidate in the batch went
+    # unevaluated, every pass, until the filesystem fault cleared.  Now the probe
+    # contains it, the leg abstains, and the faulted candidate takes a ladder
+    # terminal while its healthy neighbour still schedules.
+    _raw_manifest_probe_fault_root(monkeypatch, tmp_path)
+    candidate = _scheduler_candidate_fixture()
+    _assert_raw_manifest_geometry_is_unsafe(candidate, "artifact_probe_error")
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        retry_count=3,
+        retry_limit=3,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=_PerModelCandidateStateRepository({"model_a": state, "model_b": {}}),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"]
+    assert [entry["model_id"] for entry in blocked] == ["model_a"]
+    # A ladder terminal (the exhausted-budget permanent guard), not an invented
+    # raw-manifest verdict and not a crash.
+    assert blocked[0]["reason"] == "retry_limit_exhausted"
+    assert blocked[0]["state_evidence"]["decision"] == "permanent_failure"
+    assert "raw_manifest_repair" not in blocked[0]["state_evidence"]
+    # The discriminating half: the pass kept going and the neighbour was submitted.
+    assert result.evidence["counts"]["candidate_count"] == 2
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [basin["model_id"] for call in orchestrator.calls for basin in call["basins"]] == [
+        "model_b"
+    ]
+    assert result.artifact_path is not None
+    assert result.artifact_path.exists()
+
+
+def test_configured_store_keeps_both_raw_manifest_legs_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 5 / AC-4.  Independent oracle for "byte-for-byte": the bare helper the
+    # legs used to call is still in the tree, so assert the unified probe agrees
+    # with it -- verdict AND null reason -- for both the absent and the present
+    # manifest, and then assert the evidence each leg builds on top of that verdict
+    # in full.  (The two ``run_once`` anchors for this pair are
+    # ``test_missing_raw_manifest_after_successful_download_repairs_from_full_chain``
+    # and ``test_repaired_raw_manifest_allows_stale_downstream_failure_retry``,
+    # which stay untouched.)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    manifest_uri = f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}"
+
+    assert scheduler_state_failure_module._object_manifest_is_missing(candidate, manifest_uri) is True
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, manifest_uri) == (
+        True,
+        None,
+    )
+    repair_state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_JOB_FAILED",
+        retry_count=0,
+    )
+    repair = scheduler_state_failure_module._missing_raw_manifest_repair_evidence(
+        candidate,
+        repair_state,
+        {},
+    )
+    assert repair is not None
+    assert repair["decision"] == "retry_failed"
+    assert repair["reason"] == "repair_missing_raw_manifest"
+    assert repair["restart_from_stage"] == "download"
+    assert repair["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+    assert repair["failure"]["classifier"] == "recoverable_missing_raw_manifest"
+    assert repair["raw_manifest_repair"] == {
+        "manifest_uri": manifest_uri,
+        "manifest_exists": False,
+        "successful_download_stage": True,
+        "downstream_failed_stage": "convert",
+    }
+    assert repair["retry_policy"] == {
+        "automatic_retry_allowed": True,
+        "manual_retry_required": False,
+        "attempt": 0,
+        "retry_limit": 3,
+    }
+
+    LocalObjectStore(str(object_store_root)).write_bytes_atomic(
+        _RECORDED_RAW_MANIFEST_URI,
+        b'{"source_id": "gfs"}',
+    )
+
+    assert scheduler_state_failure_module._object_manifest_is_missing(candidate, manifest_uri) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, manifest_uri) == (
+        False,
+        None,
+    )
+    downstream_state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+    downstream = scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence(
+        candidate,
+        downstream_state,
+        {},
+    )
+    assert downstream is not None
+    assert downstream["decision"] == "retry_failed"
+    assert downstream["reason"] == "retry_downstream_after_raw_repair"
+    assert downstream["restart_from_stage"] == "download"
+    assert downstream["fresh_ingestion"] == {
+        "required": False,
+        "mode": "reuse_repaired_raw_then_full_chain",
+    }
+    assert downstream["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
+    assert downstream["raw_manifest_repair"] == {
+        "manifest_uri": manifest_uri,
+        "manifest_exists": True,
+        "successful_download_stage": True,
+        "successful_download_job_id": "job_cycle_gfs_2026052106_download_retry_1",
+        "downstream_failed_stage": "convert",
+        "downstream_failed_job_id": "job_cycle_gfs_2026052106_convert",
+    }
+    assert downstream["retry_policy"] == {
+        "automatic_retry_allowed": True,
+        "manual_retry_required": False,
+        "attempt": 0,
+        "retry_limit": 3,
+    }
+
+
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_both_raw_manifest_legs_consult_the_unified_probe_and_abstain(
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_reason: str,
+) -> None:
+    # Seam 6, the wiring pin for the AC-1 abstention departure: because an
+    # abstaining leg emits NO evidence, the distinguishable reason cannot be read
+    # off a terminal, so pin it where it exists -- each leg consults
+    # ``_artifact_uri_missing_status`` with its own ``(candidate, str(uri))`` and
+    # returns ``None`` once the reason comes back non-null.  This is also what
+    # separates the real fix from a call-site ``try/except ObjectStoreError``: a
+    # swallow never reaches the unified probe at all.
+    candidate = _scheduler_candidate_fixture()
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="SLURM_TIMEOUT",
+        repaired=True,
+        retry_count=0,
+    )
+    manifest_uri = f"s3://nhms/{_RECORDED_RAW_MANIFEST_URI}"
+
+    for leg in (
+        scheduler_state_failure_module._missing_raw_manifest_repair_evidence,
+        scheduler_state_failure_module._repaired_raw_manifest_downstream_retry_evidence,
+    ):
+        consulted: list[tuple[str, str]] = []
+
+        def _spy(spied_candidate: Any, spied_uri: str) -> tuple[bool, str | None]:
+            consulted.append((spied_candidate.candidate_id, spied_uri))
+            return True, unsafe_reason
+
+        monkeypatch.setattr(
+            scheduler_state_failure_module,
+            "_artifact_uri_missing_status",
+            _spy,
+        )
+
+        assert leg(candidate, state, {}) is None
+        assert consulted == [(candidate.candidate_id, manifest_uri)]
+        assert isinstance(consulted[0][1], str)
+
+
+def test_unresolvable_raw_manifest_reference_still_reaches_the_repair_channel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Seam 7, the ``(True, None)`` residual arm, carried over verbatim from #1365
+    # D4: a recorded reference the closed-world validator cannot resolve counts as
+    # ABSENT with a null reason, because a full re-ingestion re-records the
+    # reference and therefore IS an effective remedy.  Abstention is for unsafe
+    # reasons only; this one is null, so the repair leg still claims.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    # Independent oracle: the store helper really does raise ``ValueError`` here,
+    # so the residual arm under test is load-bearing rather than decorative.
+    with pytest.raises(ValueError):
+        LocalObjectStore(str(object_store_root)).resolve_path(_UNRESOLVABLE_RAW_MANIFEST_URI)
+    assert (
+        scheduler_state_failure_module._is_raw_manifest_object_uri(_UNRESOLVABLE_RAW_MANIFEST_URI)
+        is True
+    )
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        _UNRESOLVABLE_RAW_MANIFEST_URI,
+    ) == (True, None)
+    state = _raw_manifest_geometry_state(candidate, error_code="SLURM_JOB_FAILED", retry_count=0)
+    state["forecast_cycle"] = {
+        **state["forecast_cycle"],
+        "manifest_uri": _UNRESOLVABLE_RAW_MANIFEST_URI,
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "repair_missing_raw_manifest"
+    assert decision.evidence["raw_manifest_repair"] == {
+        "manifest_uri": _UNRESOLVABLE_RAW_MANIFEST_URI,
+        "manifest_exists": False,
+        "successful_download_stage": True,
+        "downstream_failed_stage": "convert",
+    }
+    assert decision.evidence["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+
+
+@pytest.mark.parametrize("repaired", [False, True])
+@pytest.mark.parametrize("unsafe_reason", _RAW_MANIFEST_ABSTENTION_REASONS)
+def test_raw_manifest_abstention_keeps_permanent_refusals_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repaired: bool,
+    unsafe_reason: str,
+) -> None:
+    # Seam 9, the #1313 regression lock on the other side of the abstention: a
+    # remedy-non-causal permanent code stays blocked, now reached through the
+    # ladder's permanent guard rather than through a leg-internal permanence
+    # consultation.  Abstention must not hand a refused candidate an automatic
+    # retry by the back door.
+    candidate = _scheduler_candidate_fixture()
+    _apply_raw_manifest_unsafe_geometry(monkeypatch, tmp_path, unsafe_reason)
+    _assert_raw_manifest_geometry_is_unsafe(candidate, unsafe_reason)
+    state = _raw_manifest_geometry_state(
+        candidate,
+        error_code="OUT_OF_MEMORY",
+        repaired=repaired,
+        retry_count=1,
+        retry_limit=3,
+    )
+
+    decision = scheduler_module._candidate_state_decision(candidate, dict(state))
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "permanent_failure_guard"
+    assert decision.evidence["decision"] == "permanent_failure"
+    assert decision.evidence["failure"]["permanent"] is True
+    assert decision.evidence["retry_policy"]["automatic_retry_allowed"] is False
+    assert decision.evidence["retry_policy"]["manual_retry_required"] is True
 
 
 def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
@@ -22976,6 +29081,100 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
         assert raw_secret not in artifact_text
     assert "[redacted]" in evidence_text
     assert "[redacted]" in artifact_text
+
+
+def test_orchestrator_exception_evidence_records_an_attributable_traceback_tail(tmp_path: Path) -> None:
+    """#1380 — a bare message string cannot locate the frame that raised.
+
+    The 2026-08-14 pass recorded ``dictionary changed size during iteration``
+    for all 17 IFS runs and nothing else, so the raising site had to be
+    guessed.  The tail keeps file:line (paths are not redacted; secrets and
+    URLs still are) and stays bounded.
+    """
+
+    class RaisingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            raise RuntimeError("dictionary changed size during iteration https://user:pass@example.test/x")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: RaisingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        tail = model_run["error_traceback_tail"]
+        assert model_run["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+        assert "test_production_scheduler.py" in tail
+        assert "in orchestrate_cycle" in tail
+        assert "RuntimeError: dictionary changed size during iteration" in tail
+        assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+        # No leading-indent match: ``_error_traceback_tail`` strips the tail,
+        # which eats the first frame's two-space indent.
+        assert tail.count('File "') <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_FRAMES
+        assert "user:pass" not in tail
+
+
+def test_orchestrator_exception_traceback_tail_stays_within_the_character_cap() -> None:
+    def raise_with_a_long_message() -> None:
+        raise RuntimeError("x" * 8000)
+
+    try:
+        raise_with_a_long_message()
+    except RuntimeError as error:
+        tail = scheduler_execution_module._error_traceback_tail(error)
+
+    assert len(tail) <= scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS
+    assert "raise_with_a_long_message" in tail
+
+
+def test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_frames() -> None:
+    """The frame budget is 3, not "as deep as the stack happens to be".
+
+    A ``<= ERROR_TRACEBACK_TAIL_FRAMES`` assertion moves with the constant, so
+    raising the budget would go unnoticed until a 17-run pass wrote 17 full
+    stacks into the durable evidence.  This pins the number against a stack
+    deeper than the budget.
+    """
+
+    def innermost() -> None:
+        raise RuntimeError("deep")
+
+    def middle() -> None:
+        innermost()
+
+    def outer(depth: int) -> None:
+        if depth:
+            outer(depth - 1)
+            return
+        middle()
+
+    try:
+        outer(12)
+    except RuntimeError as error:
+        tail = scheduler_execution_module._error_traceback_tail(error)
+
+    assert tail.count('File "') == 3
+    # Well under the character cap, so three frames is the frame budget
+    # talking and not front-truncation doing the trimming for it.
+    assert len(tail) < scheduler_execution_module.ERROR_TRACEBACK_TAIL_MAX_CHARS // 2
+    assert "in innermost" in tail
+    assert "in middle" in tail
+    # Only the deepest ``outer`` recursion level survives the tail, and the
+    # test frame that started the stack is dropped.
+    assert tail.count("in outer") == 1
+    assert "in test_orchestrator_exception_traceback_tail_keeps_exactly_the_last_three_frames" not in tail
 
 
 @pytest.mark.parametrize("result_status", ["failed", "submission_failed"])
@@ -27121,6 +33320,7 @@ _BOUNDED_CANDIDATE_SUMMARY_ALLOWED_KEYS = frozenset(
         "decision",
         "missing_forcing_repair_status",
         "quarantined_skip_reason",
+        "operator_action_required",
         "summary_error",
     }
 )
@@ -27378,8 +33578,13 @@ def _scheduler_env_roots(root: Path) -> dict[str, Path]:
         "lock_root": workspace_root / "locks",
         "evidence_root": workspace_root / "evidence",
     }
+    # Explicit mode, not the ambient umask (#1513). These roots become the DIRECT
+    # parent of provider locks, and `provider_atomic`'s gate is fail-closed on any
+    # 0o022 bit there; a bare `Path.mkdir` lands 0o775 under umask 0002 and
+    # reddens this whole file on node-27. `Path.mkdir(mode=..., parents=True)`
+    # would not do -- it applies the mode to the leaf only.
     for path in roots.values():
-        path.mkdir(parents=True, exist_ok=True)
+        make_directory_with_explicit_mode(path)
     return roots
 
 
@@ -27458,8 +33663,10 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
         monkeypatch.setenv(key, "file")
     db_free_dir = roots["workspace_root"] / "db-free"
     object_index_dir = roots["object_store_root"] / "db-free"
-    db_free_dir.mkdir(parents=True, exist_ok=True)
-    object_index_dir.mkdir(parents=True, exist_ok=True)
+    # `object_index_dir` is the measured trip point (#1513): it is the direct
+    # parent of the canonical-readiness and state-index provider locks.
+    make_directory_with_explicit_mode(db_free_dir)
+    make_directory_with_explicit_mode(object_index_dir)
     paths = {
         "NHMS_SCHEDULER_REGISTRY_MANIFEST": db_free_dir / "registry-manifest.json",
         "NHMS_SCHEDULER_CANONICAL_READINESS_INDEX": object_index_dir / "canonical-readiness-index.json",
@@ -27471,9 +33678,14 @@ def _set_db_free_scheduler_env(monkeypatch: Any, root: Path) -> tuple[dict[str, 
             "NHMS_SCHEDULER_JOURNAL_ROOT",
             "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT",
         }:
-            path.mkdir(parents=True, exist_ok=True)
+            make_directory_with_explicit_mode(path)
         else:
-            path.write_text("{}", encoding="utf-8")
+            # Explicit 0o644, not the ambient umask (#1513): these stubs are
+            # provider DESTINATIONS, and `atomic_replace_provider_bytes` refuses
+            # to publish over an existing file whose mode is not exactly
+            # `SHARED_PROVIDER_MODE`. A bare `write_text` lands 0o664 under
+            # umask 0002.
+            write_provider_destination(path)
         monkeypatch.setenv(key, str(path))
     return roots, paths
 
@@ -28841,6 +35053,105 @@ def test_db_free_required_path_symlink_loop_blocks_without_crash(
     assert "secret-token-loop" not in rendered
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+# ---------------------------------------------------------------------------
+# #1400 site 2: the required-path check attributes a symlink loop as unsafe
+# instead of folding it lexically and letting a downstream gate call it "not
+# created".  These cases call the adjudicator directly and assert the
+# ``(code, reason)`` PAIR: the code alone is blind on some of these geometries
+# (a path under a loop already carried ``db_free_required_path_unsafe``, from
+# the parent-lstat gate), and the directory names deliberately avoid every word
+# in ``_DB_FREE_CREDENTIAL_WORDS`` -- the loop test above never reaches the
+# resolution step at all, because its ``secret-token-loop`` component is
+# answered by the credential gate first.
+# ---------------------------------------------------------------------------
+
+
+def _db_free_required_path_verdict(value: Path | str, allowed_roots: tuple[Path, ...]) -> tuple[str, str] | None:
+    _check, blocker = scheduler_config_module._db_free_path_check(
+        "NHMS_SCHEDULER_JOURNAL_ROOT",
+        str(value),
+        kind="directory",
+        allowed_roots=allowed_roots,
+    )
+    return None if blocker is None else (blocker["code"], blocker["reason"])
+
+
+@pytest.mark.parametrize("shape", ["the_loop_itself", "under_the_loop"])
+def test_db_free_required_path_symlink_loop_is_attributed_as_unsafe_path(tmp_path: Path, shape: str) -> None:
+    """#1400 AC-2: a loop reports the errno-derived reason.
+
+    ``the_loop_itself`` was ``('db_free_required_path_not_found','not_found')``
+    before this change -- the lexical fold produced the loop path, containment
+    passed, and the broken symlink's ``exists()`` answered False, sending
+    operators to "create the path" for a path that cannot be created.
+    ``under_the_loop`` was already blocked, but with the generic ``unsafe`` from
+    the parent-lstat gate; the resolution step now answers first with the
+    errno-derived value.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "required-ring")
+    value = loop if shape == "the_loop_itself" else loop / "child"
+
+    assert _db_free_required_path_verdict(value, (root,)) == ("db_free_required_path_unsafe", "unsafe_path")
+
+
+def test_db_free_required_path_indirect_phantom_loop_is_rejected_by_the_recheck(tmp_path: Path) -> None:
+    """The ONLY geometry that reaches the required-path check's re-check arm.
+
+    A literal ``..`` component never gets that far: the component gate answers
+    ``('db_free_required_path_unsafe','traversal')`` on the configured value's
+    own lexical parts.  A symlink whose TARGET TEXT carries the phantom shape
+    has no ``..`` of its own, so the gate stays silent, strict resolution stops
+    at the missing component with ENOENT, and only re-resolving the non-strict
+    fallback finds the loop.  Without this case the re-check can be deleted with
+    every test still green.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "required-ring")
+    indirect = root / "indirect"
+    indirect.symlink_to(f"never-created/../{loop.name}")
+    # Guard every step of the geometry, so the case cannot silently degrade into
+    # one of the earlier gates.
+    assert scheduler_config_module._db_free_local_path_component_reason(indirect) is None
+    assert _allowed_root_errno(indirect) == errno.ENOENT
+    assert Path(os.path.realpath(indirect)) == loop
+    assert _allowed_root_errno(loop) == errno.ELOOP
+
+    assert _db_free_required_path_verdict(indirect, (root,)) == ("db_free_required_path_unsafe", "unsafe_path")
+
+
+def test_db_free_required_path_not_yet_created_keeps_downstream_adjudication(tmp_path: Path) -> None:
+    """ENOENT stays admitted by the resolution step, verdict stays downstream.
+
+    Existence is not this step's business: a required path whose final
+    components do not exist yet is answered by the pre-existing missing-parent
+    and not-found blockers, exactly as before.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    missing_leaf = root / "journal"
+    missing_parent = root / "not-made-yet" / "journal"
+    assert _allowed_root_errno(missing_leaf) == errno.ENOENT
+    assert Path(os.path.realpath(missing_leaf)) == missing_leaf.resolve(strict=False)
+
+    assert _db_free_required_path_verdict(missing_leaf, (root,)) == (
+        "db_free_required_path_not_found",
+        "not_found",
+    )
+    assert _db_free_required_path_verdict(missing_parent, (root,)) == (
+        "db_free_required_path_parent_missing",
+        "parent_missing",
+    )
 
 
 @pytest.mark.parametrize("path_env", _DB_FREE_PATH_ENV_KEYS)
@@ -33942,10 +40253,14 @@ def test_db_free_config_keeps_lexical_tolerance_for_preexisting_loop_allowed_roo
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """B5: the db-free arm is a declared non-goal and must not drift.
+    """B5: a pre-existing loop root is still tolerated, never turned into a raise.
 
-    `_optional_config_path_for_mode` never reaches `_optional_config_path` on
-    this arm, so the PR #831 lexical tolerance keeps producing the root itself.
+    The db-free arm was a declared non-goal for #1423; #1400 has since aligned it
+    with the database-backed arm, so `_optional_config_path_for_mode` now reaches
+    a strict `os.path.realpath` and falls back to the non-strict form. The
+    product is the same root PR #831's lexical tolerance produced -- non-strict
+    realpath returns a loop component verbatim -- so config construction still
+    hands the value down for the preflight to classify.
     """
 
     _set_db_free_scheduler_env(monkeypatch, tmp_path / "approved")
@@ -34831,6 +41146,312 @@ def test_db_free_selector_path_rejection_when_every_allowed_root_is_unresolvable
     assert [item["reason"] for item in rejected] == ["db_free_allowed_root_unresolvable"]
     assert rejection is not None
     assert rejection["reason"] == "db_free_allowed_roots_missing"
+
+
+# ---------------------------------------------------------------------------
+# #1427 (selector ROOT level) + #1400 (selector PATH level): the ENOENT
+# admission at both levels is loop-filtered, not errno-scoped alone.  Strict
+# resolution stops at the first missing component, so a "<missing>/../<loop>"
+# phantom fails with ENOENT while its non-strict fallback still lands on the
+# loop -- the two levels would otherwise hand one physical target two opposite
+# verdicts, and the path level is judged against the root level's product.
+# Unless a case is explicitly about out-of-root values, every geometry below
+# keeps the loop lexically UNDER a cleanly resolving root, so that a containment
+# rejection can never stand in for a resolution one.
+# ---------------------------------------------------------------------------
+
+
+def test_db_free_selector_allowed_roots_rejects_phantom_loop_root(tmp_path: Path) -> None:
+    """#1427 AC-1: `<missing>/../<loop>` draws the bare loop's verdict.
+
+    The direct form is already rejected by the ELOOP arm above; this form is the
+    one the errno split alone admitted, and it is the ONLY carrier of the defect
+    (a phantom root that resolves cleanly is legitimately admitted).
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(canonical_tmp, "phantom-ring")
+    phantom_root = canonical_tmp / "gone" / ".." / loop.name
+    # Guard the geometry: strict resolution really does answer ENOENT here (not
+    # ELOOP), and the non-strict fallback really does land on the loop.
+    assert _allowed_root_errno(phantom_root) == errno.ENOENT
+    assert Path(os.path.realpath(phantom_root)) == loop
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(phantom_root))
+
+    assert roots == ()
+    assert rejected == [
+        {
+            "field": "scheduler_allowed_roots",
+            "source": "runtime_manifest",
+            "reason": "db_free_allowed_root_unresolvable",
+            "value": str(phantom_root),
+        }
+    ]
+
+
+def test_db_free_selector_allowed_roots_admits_never_created_root(tmp_path: Path) -> None:
+    """The second-ENOENT arm keeps its admitted semantics.
+
+    ``test_db_free_selector_allowed_roots_admits_missing_root`` above cannot
+    carry this: its `<missing>/../<realdir>` form re-resolves CLEANLY, so the
+    re-check's errno predicate is never evaluated there and a mutation that
+    makes the predicate vacuous stays invisible.  A root that simply has not
+    been created yet (an unmounted share) is the shape that evaluates it.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    not_yet = canonical_tmp / "not-yet" / "roots"
+    # Both resolutions answer ENOENT: the strict one and the strict re-check of
+    # the non-strict fallback.
+    assert _allowed_root_errno(not_yet) == errno.ENOENT
+    assert _allowed_root_errno(Path(os.path.realpath(not_yet))) == errno.ENOENT
+
+    roots, rejected = retry_module._db_free_selector_allowed_roots("runtime_manifest", str(not_yet))
+
+    assert roots == (not_yet,)
+    assert rejected == []
+
+
+def test_db_free_selector_path_rejection_admits_never_created_path(tmp_path: Path) -> None:
+    """Submission-time adjudication still performs no existence check.
+
+    The equality below is the byte-compatibility anchor: the primitive this lane
+    now normalizes through reproduces the product of the removed
+    ``path.resolve(strict=False)`` verbatim, so the admitted value did not drift.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    never_created = root / "never-created" / "state.json"
+    assert _allowed_root_errno(never_created) == errno.ENOENT
+    assert Path(os.path.realpath(never_created)) == never_created.resolve(strict=False)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(never_created),
+        allowed_roots=(root,),
+    )
+
+    assert rejection is None
+
+
+@pytest.mark.parametrize("shape", ["the_loop_itself", "under_the_loop"])
+def test_db_free_selector_path_rejection_rejects_symlink_loop_path(tmp_path: Path, shape: str) -> None:
+    """#1400 AC-1: the dead `db_free_selector_path_unresolvable` really fires.
+
+    It was dead on both interpreter arms -- `except OSError` could not catch the
+    errno-less RuntimeError strict ``Path.resolve()`` raised on <=3.12, and the
+    non-strict form stopped raising at all on 3.13+, so the loop was admitted by
+    a purely lexical containment comparison.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "selector-ring")
+    value = loop if shape == "the_loop_itself" else loop / "state.json"
+    # The loop is lexically inside the configured root, so containment cannot be
+    # the reason for the rejection.
+    assert value.is_relative_to(root)
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(value),
+        allowed_roots=(root,),
+    )
+
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(value),
+    }
+
+
+def test_db_free_selector_path_rejection_rejects_phantom_loop_path(tmp_path: Path) -> None:
+    """The path level carries the same loop-filtered admission as the root level.
+
+    Without the re-check this value takes the ENOENT arm and is admitted, which
+    would reproduce one level down the fail-open #1427 removes one level up.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    loop = _symlink_loop_dir(root, "selector-ring")
+    phantom = root / "never-created" / ".." / loop.name
+    assert _allowed_root_errno(phantom) == errno.ENOENT
+    assert Path(os.path.realpath(phantom)) == loop
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(phantom),
+        allowed_roots=(root,),
+    )
+
+    # The COMPLETE record, matching the sibling loop case above: the reason
+    # alone would not catch a rejection routed with the wrong field, source or
+    # echoed value.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(phantom),
+    }
+
+
+def test_db_free_selector_path_rejection_rejects_every_non_enoent_errno(tmp_path: Path) -> None:
+    """The rejection is errno-scoped, not loop-scoped.
+
+    ENOTDIR is the non-loop errno provokable without a real NFS server or a
+    permission trick; ESTALE and EACCES land on the same arm by construction.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    plainfile = root / "plainfile"
+    plainfile.write_text("not a directory", encoding="utf-8")
+    value = plainfile / "state.json"
+    assert _allowed_root_errno(value) == errno.ENOTDIR
+
+    rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        str(value),
+        allowed_roots=(root,),
+    )
+
+    # The COMPLETE record, matching the sibling loop case above.
+    assert rejection == {
+        "field": "scheduler_state_index",
+        "source": "runtime_manifest",
+        "reason": "db_free_selector_path_unresolvable",
+        "value": str(value),
+    }
+
+
+def test_db_free_lanes_report_the_resolution_reason_for_out_of_root_loops(tmp_path: Path) -> None:
+    """Resolution now precedes containment, so the reason changes for one subclass.
+
+    A value that is BOTH a loop and outside the bases now reports the resolution
+    reason rather than the containment one -- an unresolvable value has no
+    trustworthy location to compare against.  Both were already rejections, so
+    the verdict is unchanged; a cleanly resolving out-of-root value (the control
+    below) keeps the containment reason untouched.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    outside = canonical_tmp / "outside"
+    outside.mkdir()
+    outside_loop = _symlink_loop_dir(outside, "outside-ring")
+    outside_clean = outside / "plain"
+    outside_clean.mkdir()
+
+    def _selector_reason(value: Path) -> str | None:
+        rejection = retry_module._db_free_selector_path_rejection(
+            "scheduler_state_index",
+            "runtime_manifest",
+            str(value),
+            allowed_roots=(root,),
+        )
+        return None if rejection is None else rejection["reason"]
+
+    assert _selector_reason(outside_loop) == "db_free_selector_path_unresolvable"
+    assert _selector_reason(outside_clean) == "db_free_selector_path_outside_allowed_roots"
+    assert _db_free_required_path_verdict(outside_loop, (root,)) == (
+        "db_free_required_path_unsafe",
+        "unsafe_path",
+    )
+    assert _db_free_required_path_verdict(outside_clean, (root,)) == (
+        "db_free_required_path_outside_boundary",
+        "outside_boundary",
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions, so EACCES cannot be provoked")
+def test_db_free_required_path_permission_fault_is_attributed_as_not_writable(tmp_path: Path) -> None:
+    """The reason mapper's EACCES/EPERM arm, which no other case reaches.
+
+    ``db_free_required_path_unsafe`` now carries the shared errno
+    classification, and the loop cases above only ever witness its
+    ``unsafe_path`` value -- with them alone the whole mapper is
+    indistinguishable from a constant. EACCES is the one non-loop errno
+    provokable without a real NFS server (an unreadable parent directory);
+    EPERM and the ``unavailable`` catch-all land on the same mapping by
+    construction, the latter witnessed by the NUL case below.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    blocked_parent = root / "blocked-parent"
+    blocked_parent.mkdir()
+    value = blocked_parent / "journal"
+    blocked_parent.chmod(0o000)
+    try:
+        # Independent oracle for the geometry: the kernel really does refuse
+        # this canonicalization with EACCES (so neither the ENOENT fallback nor
+        # the ELOOP/ENOTDIR mapping is what answers), and the earlier component
+        # gate stays silent, so the resolution step is what adjudicates.
+        assert scheduler_config_module._db_free_local_path_component_reason(value) is None
+        assert _allowed_root_errno(value) == errno.EACCES
+
+        assert _db_free_required_path_verdict(value, (root,)) == (
+            "db_free_required_path_unsafe",
+            "not_writable",
+        )
+    finally:
+        # Restore before pytest's tmp_path cleanup walks the tree.
+        blocked_parent.chmod(0o700)
+
+
+def test_db_free_normalization_folds_embedded_nul_into_existing_rejections(tmp_path: Path) -> None:
+    """An unrepresentable path string is rejected, not raised, at all three sites.
+
+    Every resolution primitive raises ``ValueError`` (not ``OSError``) for an
+    embedded NUL, so before this change it escaped each adjudicator: measured
+    ``ValueError: lstat: embedded null character in path``.
+    """
+
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    root = canonical_tmp / "clean-root"
+    root.mkdir()
+    nul_value = f"{root}/state\x00.json"
+
+    roots, root_rejections = retry_module._db_free_selector_allowed_roots("runtime_manifest", nul_value)
+    path_rejection = retry_module._db_free_selector_path_rejection(
+        "scheduler_state_index",
+        "runtime_manifest",
+        nul_value,
+        allowed_roots=(root,),
+    )
+    _check, required_path_blocker = scheduler_config_module._db_free_path_check(
+        "NHMS_SCHEDULER_STATE_INDEX",
+        nul_value,
+        kind="file",
+        allowed_roots=(root,),
+    )
+
+    assert roots == ()
+    assert [item["reason"] for item in root_rejections] == ["db_free_allowed_root_unresolvable"]
+    assert path_rejection is not None
+    assert path_rejection["reason"] == "db_free_selector_path_unresolvable"
+    assert required_path_blocker is not None
+    assert required_path_blocker["code"] == "db_free_required_path_unsafe"
+    # The reason too, not just the code: a ValueError carries no errno, so it
+    # takes the mapper's ``unavailable`` catch-all rather than the ``unsafe_path``
+    # the loop cases produce. Without this pin that arm of the mapper is
+    # unwitnessed.
+    assert required_path_blocker["reason"] == "unavailable"
+    assert required_path_blocker["error_type"] == "ValueError"
 
 
 def test_db_free_slurm_preflight_masks_env_and_grib_paths(
@@ -38327,6 +44948,1469 @@ def test_strict_warm_start_budget_binds_on_the_truncated_production_geometry() -
     assert decision.evidence["retry_policy"]["retry_limit"] == 3
 
 
+# --- #1179: attempt-floor carry across the candidate-state truncation --------
+
+_RETENTION_CYCLE_ID = "gfs_2026072000"
+_RETENTION_CYCLE_RUN_ID = "cycle_gfs_2026072000"
+_RETENTION_RUN_ID = "fcst_gfs_2026072000_model_a"
+_RETENTION_CYCLE_TIME = "2026-07-20T00:00:00Z"
+_RETENTION_BASE = "2026-07-20T01:00:00Z"
+
+
+def _retention_job(
+    job_id: str,
+    *,
+    stage: str | None,
+    job_type: str,
+    status: str,
+    minutes: int,
+    retry_count: int = 0,
+    run_id: str = _RETENTION_CYCLE_RUN_ID,
+    model_id: str | None = None,
+) -> dict[str, Any]:
+    """One pipeline-job row of the #1179 truncation geometries.
+
+    Cycle scope (model-less, ``cycle_`` run id) is the production row shape the
+    issue reproduced on; ``finished_at`` is what ``_pipeline_job_truth_sort_key``
+    reads first, so ``minutes`` alone orders the freshness window.
+    """
+
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": _RETENTION_CYCLE_ID,
+        "model_id": model_id,
+        "job_type": job_type,
+        "stage": stage,
+        "status": status,
+        "retry_count": retry_count,
+        "created_at": _dt(_RETENTION_BASE) + timedelta(minutes=minutes),
+        "finished_at": _dt(_RETENTION_BASE) + timedelta(minutes=minutes),
+    }
+
+
+def _retention_forecast_retry_job(attempt: int, *, minutes: int, status: str = "failed") -> dict[str, Any]:
+    """The wedge row: attempt N recorded ONLY in the ``_retry_N`` id suffix."""
+
+    return _retention_job(
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_{attempt}",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status=status,
+        minutes=minutes,
+    )
+
+
+def _retention_publish_filler(count: int, *, first_minute: int = 10) -> list[dict[str, Any]]:
+    """Geometry B filler: succeeded ``publish`` rows.
+
+    ``publish`` is in ``TERMINAL_PIPELINE_COMPLETION_STAGES``, so a succeeded
+    filler suppresses the ``restart_stage`` derivation and leaves
+    ``failed_stage``/``stage``/``restart_stage`` all empty -- the only shape in
+    which ``_failed_stage``'s row scan is reachable at all (design D3).
+    """
+
+    return [
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}",
+            stage="publish",
+            job_type="publish_tiles",
+            status="succeeded",
+            minutes=first_minute + index,
+        )
+        for index in range(count)
+    ]
+
+
+def _retention_state(
+    jobs: list[dict[str, Any]],
+    *,
+    job_limit: int,
+    retry_limit: int = 3,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    state = chain_repository_state_module.candidate_state_from_rows(
+        source_id="GFS",
+        cycle_time=_dt(_RETENTION_CYCLE_TIME),
+        model_id="model_a",
+        run_id=_RETENTION_RUN_ID,
+        forcing_version_id="forc_gfs_2026072000_model_a",
+        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+        hydro_run={"run_id": _RETENTION_RUN_ID, "status": "published", "init_state_id": None},
+        pipeline_jobs=jobs,
+        pipeline_events=events or [],
+        forcing_version=None,
+        forecast_cycle=None,
+        retry_limit=retry_limit,
+        job_limit=job_limit,
+        event_limit=job_limit,
+    )
+    assert state is not None
+    return state
+
+
+def _retention_job_ids(state: Mapping[str, Any]) -> list[str]:
+    return [str(job["job_id"]) for job in state["pipeline_jobs"]]
+
+
+def _retention_floors(state: Mapping[str, Any]) -> dict[str, int]:
+    from services.orchestrator.scheduler_state_rows import STAGE_RETRY_ATTEMPT_FLOORS_KEY
+
+    floors = state[STAGE_RETRY_ATTEMPT_FLOORS_KEY]
+    assert isinstance(floors, dict)
+    return floors
+
+
+def _retention_floor_keys(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Deep snapshot of the two carried-floor keys, for the no-writeback pin."""
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    return copy.deepcopy(
+        {
+            key: state[key]
+            for key in (STAGE_RETRY_ATTEMPT_FLOORS_KEY, STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+            if key in state
+        }
+    )
+
+
+def test_attempt_floor_carries_the_out_of_window_forecast_attempt() -> None:
+    """E1 (#1179) -- the reverse geometry: the wedge row is the OLDEST row.
+
+    Pure-freshness truncation drops ``*_forecast_retry_87``, so the row scan
+    alone reads 0 and #1173's L2 budget never binds. The projection carries the
+    attempt across the truncation as a floor instead -- the dropped row stays
+    dropped, only the NUMBER survives.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 5
+    retry_row = _retention_forecast_retry_job(87, minutes=1)
+    filler = _retention_publish_filler(job_limit + 1)
+    jobs = [retry_row, *filler]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert state["pipeline_jobs_total"] == len(jobs)
+    assert state["state_truncated"] is True
+    assert len(state["pipeline_jobs"]) == job_limit
+    # The row itself is NOT rescued: the selection stays pure freshness.
+    assert retry_row["job_id"] not in _retention_job_ids(state)
+    assert _retention_floors(state) == {"forecast": 87}
+    assert state["retry_count"] == 0
+    assert _state_retry_attempt(state, stage="forecast") == 87
+
+
+def test_strict_warm_start_budget_binds_on_the_reverse_truncation_geometry() -> None:
+    """E5 (#1179) -- the L2 budget really blocks once the true attempt survives."""
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_limit
+
+    job_limit = 5
+    jobs = [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)]
+    state = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    assert _state_retry_limit(state) == 3
+
+    decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        state,
+    )
+
+    assert (decision.action, decision.reason) == ("blocked", "strict_warm_start_retry_budget_exhausted")
+    assert decision.evidence["decision"] == "blocked_strict_warm_start_init_state_mismatch"
+    assert decision.evidence["retry_policy"]["attempt"] == 87
+
+
+def test_truncation_selection_stays_pure_freshness_in_both_geometries() -> None:
+    """E2' (#1179) -- the row selection is the load-bearing invariant.
+
+    Both expected lists are written out rather than compared against a
+    pre-change run: the freshness-ordered top-5 of each input, in ascending
+    projection order. The reverse geometry is the one v1's row retention moved;
+    it must select exactly what pure freshness selects.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 5
+
+    reverse = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+    )
+    assert _retention_job_ids(reverse) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}" for index in range(1, 6)
+    ]
+
+    friendly = _retention_state(
+        [*_retention_publish_filler(job_limit + 1, first_minute=1), _retention_forecast_retry_job(87, minutes=40)],
+        job_limit=job_limit,
+    )
+    assert _retention_job_ids(friendly) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_2",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_3",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_4",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_5",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
+    ]
+    assert _state_retry_attempt(reverse, stage="forecast") == 87
+    assert _state_retry_attempt(friendly, stage="forecast") == 87
+
+
+def test_attempt_floors_do_not_widen_the_job_limit() -> None:
+    """E4' (#1179) -- four out-of-window stages, still exactly ``job_limit`` rows.
+
+    Floors are a number per stage, not a slot: however many stages carry an
+    attempt, the projected row set is the freshness top-``job_limit``, and every
+    one of those attempts is still readable.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 2
+    jobs = [
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3",
+            stage="convert",
+            job_type="convert_canonical",
+            status="failed",
+            minutes=1,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_retry_4",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=2,
+        ),
+        _retention_forecast_retry_job(5, minutes=3),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_parse_retry_6",
+            stage="parse",
+            job_type="parse_output_array",
+            status="failed",
+            minutes=4,
+        ),
+        *_retention_publish_filler(2, first_minute=50),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert _retention_job_ids(state) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_0",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_1",
+    ]
+    assert _retention_floors(state) == {"convert": 3, "forcing": 4, "forecast": 5, "parse": 6}
+    assert _state_retry_attempt(state, stage="convert") == 3
+    assert _state_retry_attempt(state, stage="forcing") == 4
+    assert _state_retry_attempt(state, stage="forecast") == 5
+    assert _state_retry_attempt(state, stage="parse") == 6
+
+
+def test_stage_attempt_floors_follow_the_consumer_derivation_chain() -> None:
+    """E10' (#1179) -- the floor dict is built with the consumer's own chain.
+
+    Four row shapes, one per way the derivation can diverge:
+
+    * ``copyback`` is canonical to the consumers but absent from the projection
+      module's ``_STAGE_ALIASES``;
+    * ``download`` is the mirror image -- in ``_STAGE_ALIASES``, not canonical;
+    * an attempt can live in a persisted ``retry_count`` with no numeric id
+      suffix at all (``retry.py`` mints ``*_retry_active`` with ``retry_count=N``),
+      so a pure job-id parse loses it;
+    * a row's ``stage`` column is nullable, so the stage has to fall back to
+      ``job_type`` the way ``_job_stage_name`` does.
+
+    A canonical stage whose rows are all attempt 0 (``publish`` here) stays out
+    of the dict: a zero floor would say nothing.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    jobs = [
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_copyback_retry_7",
+            stage="copyback",
+            job_type="run_tree_copyback",
+            status="failed",
+            minutes=1,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_download_retry_9",
+            stage="download",
+            job_type="download_gfs",
+            status="failed",
+            minutes=2,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_retry_active",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=3,
+            retry_count=6,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
+            stage=None,
+            job_type="run_shud_forecast_array",
+            status="failed",
+            minutes=4,
+        ),
+        *_retention_publish_filler(job_limit + 1, first_minute=20),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert _retention_floors(state) == {"copyback": 7, "forcing": 6, "forecast": 87}
+    assert _state_retry_attempt(state, stage="copyback") == 7
+    assert _state_retry_attempt(state, stage="forcing") == 6
+    assert _state_retry_attempt(state, stage="forecast") == 87
+    assert _state_retry_attempt(state, stage="download") == 0
+    assert _state_retry_attempt(state, stage="publish") == 0
+
+
+def test_projected_state_always_carries_a_stage_attempt_floor_mapping() -> None:
+    """E-v2-sel (#1179) -- the new state key's shape, and its absence elsewhere."""
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 3
+    empty = _retention_state(_retention_publish_filler(job_limit + 1), job_limit=job_limit)
+    assert empty[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+
+    carrying = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+    )
+    assert carrying[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+
+    # A state no projection produced carries no floors key and reads exactly as
+    # it did before: the row scan and nothing else.
+    foreign = {
+        "retry_count": 0,
+        "pipeline_jobs": [_retention_forecast_retry_job(4, minutes=1)],
+    }
+    assert STAGE_RETRY_ATTEMPT_FLOORS_KEY not in foreign
+    assert _state_retry_attempt(foreign, stage="forecast") == 4
+    assert _state_retry_attempt(foreign, stage="convert") == 0
+
+
+def test_stage_less_retry_attempt_reading_ignores_the_floors() -> None:
+    """E12'' (#1179) -- floors are stage-scoped; the flat-first read is untouched.
+
+    The floors are per-stage maxima over the UNFILTERED cycle-wide rows, which is
+    exactly the cross-scope charge the stage argument exists to prevent. A
+    stage-less read must still answer with the candidate-scoped flat count.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+    )
+
+    assert _retention_floors(state) == {"forecast": 87}
+    assert state["retry_count"] == 0
+    assert _state_retry_attempt(state) == 0
+    assert _state_retry_attempt(state, stage=None) == 0
+    assert _state_retry_attempt(state, stage="publish") == 0
+
+
+def test_geometry_b_keeps_the_failed_stage_invisible_while_the_floor_carries() -> None:
+    """E11-v2 (#1179) -- the floor and row visibility are decoupled, on purpose.
+
+    ``_failed_stage`` only walks job rows when ``failed_stage``/``stage``/
+    ``restart_stage`` are ALL empty, which the succeeded-``publish`` filler
+    (geometry B) is chosen to produce. v1 rescued the failed row into the window
+    and flipped this to ``"forecast"``; v2 leaves the row where truncation put it
+    -- and still reads the true attempt. The ``is None`` here is a hard
+    assertion, not a baseline: it is the S1/S2 class of visibility flip staying
+    shut.
+    """
+
+    from services.orchestrator.scheduler_state_failure import _failed_stage
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 5
+    filler = _retention_publish_filler(job_limit + 1)
+    baseline_state = _retention_state(filler, job_limit=job_limit)
+    assert all(baseline_state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
+    assert _failed_stage(baseline_state) is None
+
+    state = _retention_state([_retention_forecast_retry_job(87, minutes=1), *filler], job_limit=job_limit)
+
+    assert all(state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
+    assert _failed_stage(state) is None
+    assert _state_retry_attempt(state, stage="forecast") == 87
+
+
+def _retention_adopted_manual_marker_event() -> dict[str, Any]:
+    """An adopted manual-retry marker carrying NO operator attempt claim.
+
+    Without a pinned ``retry_count`` the mint falls back to
+    ``previous_attempt + 1``, read through ``_failed_stage``.
+    """
+
+    return {
+        "event_id": 9,
+        "entity_type": "pipeline_job",
+        "entity_id": f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
+        "event_type": "manual_retry",
+        "created_at": _dt("2026-07-20T02:00:00Z"),
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "previous_job_id": f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87",
+        },
+    }
+
+
+def test_manual_retry_mint_keeps_todays_geometry_b_behaviour() -> None:
+    """E12-v2 (#1179) -- the mint gap under geometry B is an accepted boundary.
+
+    ``_manual_retry_state_evidence`` scopes the attempt by ``_failed_stage``,
+    which geometry B leaves ``None`` (the failed row is outside the window and
+    the terminal filler empties the three stage keys). The stage-less read then
+    answers with the flat count, so the mint re-derives ``_retry_1`` -- an
+    idempotency key the journal already holds, i.e. a silent no-op.
+
+    This pins the geometry-B branch only -- the one where ``_failed_stage`` is
+    ``None``. That branch is unchanged from before #1179 and is NOT fixed here:
+    making the mint stage-aware without row visibility needs its own change
+    (#1577). Pinned so that fix has a red leg to flip. The nameable-stage branch
+    of the same mint DOES move with the floors, and is pinned separately by
+    ``test_manual_retry_mints_the_carried_attempt_when_the_stage_is_nameable``.
+    """
+
+    from types import SimpleNamespace
+
+    from services.orchestrator.chain_runtime_utils import _pipeline_retry_job_id, _retry_attempt_from_basins
+    from services.orchestrator.scheduler_state_failure import _failed_stage, _manual_retry_state_evidence
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 5
+    jobs = [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)]
+    state = _retention_state(
+        jobs,
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[_retention_adopted_manual_marker_event()],
+    )
+    assert _failed_stage(state) is None
+    # The number IS reachable -- just not through the stage the mint asks for.
+    assert _state_retry_attempt(state, stage="forecast") == 87
+
+    candidate = SimpleNamespace(
+        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+        run_id=_RETENTION_RUN_ID,
+    )
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+
+    assert evidence["decision"] == "manual_retry"
+    assert evidence["manual_retry"]["allowed"] is True
+    assert evidence["manual_retry"]["previous_attempt"] == 0
+    assert evidence["manual_retry"]["new_attempt"] == 1
+
+    minted_attempt = _retry_attempt_from_basins([{"state_evidence": evidence}])
+    assert minted_attempt == 1
+    base_job_id = f"job_{_RETENTION_CYCLE_RUN_ID}_forecast"
+    assert _pipeline_retry_job_id(base_job_id, minted_attempt) == f"{base_job_id}_retry_1"
+
+
+def test_reentrant_candidate_geometry_projects_exactly_as_before() -> None:
+    """E-v2-S1 (#1179) -- the candidate-scope visibility flip stays shut.
+
+    A candidate-scoped ``*_forecast_retry_5`` failure, its own newer succeeded
+    forecast and publish rows, and enough fresher cycle-scope publish rows to
+    push all three out of the window. Pulling the failed row back in (what v1
+    did) makes ``candidate_jobs`` non-empty and reports the candidate as failed
+    -- contradicting the untruncated truth, where the retry SUCCEEDED. The
+    floors carry attempt 5 without touching any of that.
+    """
+
+    from services.orchestrator.scheduler_state_failure import _failed_stage
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 5
+    candidate_rows = [
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_forecast_retry_5",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="failed",
+            minutes=1,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_forecast_run2",
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            status="succeeded",
+            minutes=2,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+        _retention_job(
+            f"job_{_RETENTION_RUN_ID}_publish_run2",
+            stage="publish",
+            job_type="publish_tiles",
+            status="succeeded",
+            minutes=3,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+    ]
+    filler = _retention_publish_filler(job_limit + 1)
+
+    state = _retention_state([*candidate_rows, *filler], job_limit=job_limit)
+
+    assert _retention_job_ids(state) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}" for index in range(1, 6)
+    ]
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert _failed_stage(state) is None
+    assert _retention_floors(state) == {"forecast": 5}
+    assert _state_retry_attempt(state, stage="forecast") == 5
+
+
+def test_completed_stage_evidence_survives_an_out_of_window_wedge() -> None:
+    """E-v2-S2 (#1179) -- the resume-after-completed-stage evidence keeps its row.
+
+    The window is exactly full: the ``convert`` success is its OLDEST member, so
+    rescuing the out-of-window ``*_forecast_retry_9`` row (what v1 did) evicts
+    the one row ``restart_stage`` is derived from and the cycle stalls every
+    pass. The floor carries attempt 9 with the window untouched.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    jobs = [
+        _retention_forecast_retry_job(9, minutes=1),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_convert",
+            stage="convert",
+            job_type="convert_canonical",
+            status="succeeded",
+            minutes=2,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_a",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=3,
+        ),
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_b",
+            stage="forcing",
+            job_type="produce_forcing_array",
+            status="failed",
+            minutes=4,
+        ),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert _retention_job_ids(state) == [
+        f"job_{_RETENTION_CYCLE_RUN_ID}_convert",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_a",
+        f"job_{_RETENTION_CYCLE_RUN_ID}_forcing_b",
+    ]
+    assert state["restart_stage"] == "forcing"
+    assert state["completed_stage_evidence"]["stage"] == "convert"
+    assert _state_retry_attempt(state, stage="forecast") == 9
+
+
+def test_out_of_window_active_row_is_not_resurrected_by_the_floors() -> None:
+    """E-v2-S3 (#1179) -- a stale ``running`` row stays out of the active set.
+
+    v1 rescued it because it carried the stage's maximum attempt, re-arming
+    ``_state_active_jobs`` (and with it the duplicate-pipeline skip) off a row
+    truncation had already aged out. Carrying only the number leaves the active
+    scan reading exactly the rows pure freshness selected.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_active_jobs, _state_retry_attempt
+
+    job_limit = 3
+    stale_active = _retention_forecast_retry_job(9, minutes=1, status="running")
+    stale_active.pop("finished_at")
+    stale_active["started_at"] = _dt(_RETENTION_BASE) + timedelta(minutes=1)
+    stale_active["slurm_job_id"] = "991177"
+    jobs = [stale_active, *_retention_publish_filler(job_limit)]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert stale_active["job_id"] not in _retention_job_ids(state)
+    assert _state_active_jobs(state) == []
+    assert _state_retry_attempt(state, stage="forecast") == 9
+
+
+def test_flat_retry_count_carrier_row_keeps_its_window_slot() -> None:
+    """E-v2-S4 (#1179) -- the top-level ``retry_count`` is not squeezed out.
+
+    ``state["retry_count"]`` aggregates the candidate-scoped rows that survived
+    truncation. The carrier here is the window's oldest row and is NOT its
+    stage's attempt maximum, so v1's retention evicted it and the flat count
+    collapsed to 0 for the evidence-owner / manual-retry consumers that read it.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    job_limit = 3
+    carrier = _retention_job(
+        f"job_{_RETENTION_RUN_ID}_forecast",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="reserved",
+        minutes=2,
+        retry_count=4,
+        run_id=_RETENTION_RUN_ID,
+        model_id="model_a",
+    )
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        carrier,
+        *_retention_publish_filler(2, first_minute=3),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert carrier["job_id"] in _retention_job_ids(state)
+    assert state["retry_count"] == 4
+    assert _state_retry_attempt(state) == 4
+    assert _state_retry_attempt(state, stage="forecast") == 87
+
+
+def _retention_candidate(
+    *,
+    cycle_id: str = _RETENTION_CYCLE_ID,
+    cycle_time: str = _RETENTION_CYCLE_TIME,
+) -> Any:
+    """The candidate the #1179 retention geometries project for.
+
+    Its ``run_id``/``forcing_version_id`` are exactly the ones ``_retention_state``
+    projects with, so the identity filter compares the real production identity
+    rather than a hand-written stand-in.
+    """
+
+    return scheduler_module._candidate_for(
+        discovery=CycleDiscovery(
+            cycle_id=cycle_id,
+            source_id="gfs",
+            cycle_time=_dt(cycle_time),
+            cycle_hour=0,
+            available=True,
+            status="discovered",
+        ),
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id="model_a",
+            basin_id="basin_a",
+            basin_version_id="basin_a_v1",
+            river_network_version_id="basin_a_rivnet_v1",
+            segment_count=3,
+            output_segment_count=3,
+            model_package_uri="s3://nhms/models/model_a/package/",
+            shud_code_version="2.0",
+            resource_profile={},
+            resource_profile_summary={},
+            display_capabilities={},
+        ),
+        horizon={},
+    )
+
+
+def _retention_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Run ``state`` through the real identity/scope filter the consumers read behind."""
+
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_identity_filter import _candidate_state_decision_state
+
+    candidate = _retention_candidate()
+    return _candidate_state_decision_state(state, _candidate_state_evidence(candidate, state))
+
+
+def _retention_own_failed_forecast_job(*, minutes: int, error_code: str = "SLURM_TIMEOUT") -> dict[str, Any]:
+    """The candidate's OWN first failure: candidate run id, model named, attempt 0."""
+
+    job = _retention_job(
+        f"job_{_RETENTION_RUN_ID}_forecast",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=minutes,
+        run_id=_RETENTION_RUN_ID,
+        model_id="model_a",
+    )
+    job["error_code"] = error_code
+    return job
+
+
+def test_attempt_floors_narrow_with_the_rows_identity_filtering_deletes(tmp_path: Path) -> None:
+    """E13a (#1179) -- the R2-A geometry, driven through the real journal.
+
+    A model-less SUFFIXED cohort row (``run_id`` ``cycle_gfs_..._forcing_job``,
+    ``retry_count`` 3) is handed to every candidate of the cycle by the journal
+    (``_job_matches_candidate``) and then deleted by the identity filter, which
+    only exempts the BARE cycle run id (``_stage_cycle_run_matches_candidate``).
+    Its attempt must leave with it: nothing is truncated here (2 rows, the
+    default job limit), so a floor surviving the deletion is a pure identity leak
+    -- it reads the candidate's FIRST failure as limit-exhausted and closes the
+    remedy channels behind ``permanent``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+    from services.orchestrator.scheduler_state_failure import _failed_stage, _failure_policy_payload
+    from services.orchestrator.scheduler_state_rows import STAGE_RETRY_ATTEMPT_FLOORS_KEY
+    from tests.test_file_orchestration_journal import (
+        _cycle_run_id_job,
+        _latest_view,
+        _own_failed_forecast_job,
+        _write_journal_pipeline_job,
+        _write_json,
+    )
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+
+    own = _own_failed_forecast_job(cycle_time)
+    own.update({"stage": "forcing", "job_type": "produce_forcing_array", "error_code": "SLURM_TIMEOUT"})
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[own]),
+    )
+    cohort = _write_journal_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id=None,
+            stage="forcing",
+            status="failed",
+            retry_count=3,
+            run_id_suffix="_forcing_job",
+        ),
+        cycle_time=cycle_time,
+    )
+
+    state = FileOrchestrationJournalRepository(journal_root).candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id=f"fcst_gfs_{stamp}_model_a",
+        forcing_version_id=f"forc_gfs_{stamp}_model_a",
+        candidate_id=f"gfs:{cycle_time.isoformat()}:model_a:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=100,
+        event_limit=100,
+    )
+    assert state is not None
+    assert state["state_truncated"] is False
+    assert {str(job["job_id"]) for job in state["pipeline_jobs"]} == {own["job_id"], cohort["job_id"]}
+    assert state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forcing": 3}
+
+    candidate = _retention_candidate(cycle_id=f"gfs_{stamp}", cycle_time="2026-06-28T00:00:00Z")
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    assert evidence["production_identity_validation"]["legacy_non_authoritative"] == ["pipeline_jobs[1]"]
+
+    decision_state = scheduler_module._candidate_state_decision_state(state, evidence)
+
+    assert [str(job["job_id"]) for job in decision_state["pipeline_jobs"]] == [own["job_id"]]
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _failed_stage(decision_state) == "forcing"
+    failure = _failure_policy_payload(decision_state)
+    assert (failure["attempt"], failure["retryable"], failure["permanent"]) == (0, True, False)
+
+    decision = _candidate_state_decision(candidate, state)
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.evidence["retry_policy"]["attempt"] == 0
+
+
+def test_attempt_floors_are_erased_on_the_shared_cycle_aggregate_arm() -> None:
+    """E13b (#1179) -- the shared-cycle-aggregate arm erases the carried attempts.
+
+    With no candidate-scoped row at all the projection reports a shared-cycle
+    aggregate, and the filter scopes that aggregate down to the candidate's own
+    evidence -- here, to nothing. The cycle-scope ``convert`` row's attempt 3 was
+    surviving that scoping as a floor and still answering
+    ``_state_retry_attempt(stage="convert")``; erasing the pipeline decision
+    surface has to erase the carried attempts with it.
+
+    It is the STRIP half that does it on this arm, not a narrowing call: the
+    floors keys were added to ``_strip_top_level_pipeline_decision_fields``
+    alongside ``retry_attempt``/``attempt``/``retry_count`` (E13d), and both of
+    this arm's branches reach a strip unless the top-level source-cycle blocker
+    holds (E13e). Design D1.6 states the same division.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    jobs = [
+        _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3",
+            stage="convert",
+            job_type="convert_canonical",
+            status="failed",
+            minutes=1,
+        ),
+        *_retention_publish_filler(1, first_minute=10),
+    ]
+
+    state = _retention_state(jobs, job_limit=5)
+
+    assert state["shared_cycle_aggregate"] is True
+    assert state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"convert": 3}
+    assert _state_retry_attempt(state, stage="convert") == 3
+
+    decision_state = _retention_decision_state(state)
+
+    assert decision_state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) in (None, {})
+    assert _state_retry_attempt(decision_state, stage="convert") == 0
+
+
+def test_attempt_floor_narrowing_spares_the_candidates_own_cycle_scope_wedge() -> None:
+    """E13c (#1179) -- narrowing must not disarm E1/E5.
+
+    The wedge row of the reverse geometry carries the BARE cycle run id and no
+    model: it is the cycle's own row, authoritative for every candidate of the
+    cycle, and truncation dropped it long before the filter ran. Recomputing the
+    floors from the surviving rows would zero it and kill the whole change; only
+    the foreign model's row loses its floor here.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 5
+    wedge = _retention_forecast_retry_job(87, minutes=1)
+    foreign = _retention_job(
+        f"job_{_RETENTION_CYCLE_RUN_ID}_model_b_convert",
+        stage="convert",
+        job_type="convert_canonical",
+        status="failed",
+        minutes=15,
+        retry_count=4,
+        model_id="model_b",
+    )
+    jobs = [
+        wedge,
+        *_retention_publish_filler(job_limit, first_minute=10),
+        foreign,
+        _retention_own_failed_forecast_job(minutes=20),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit)
+
+    assert wedge["job_id"] not in _retention_job_ids(state)
+    assert foreign["job_id"] in _retention_job_ids(state)
+    assert state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87, "convert": 4}
+
+    decision_state = _retention_decision_state(state)
+
+    assert foreign["job_id"] not in [str(job["job_id"]) for job in decision_state["pipeline_jobs"]]
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+    assert _state_retry_attempt(decision_state, stage="forecast") == 87
+    assert _state_retry_attempt(decision_state, stage="convert") == 0
+
+
+def test_stripping_the_pipeline_decision_surface_takes_the_attempt_floors() -> None:
+    """E13d (#1179) -- the floors keys belong with the attempt keys in the strip list."""
+
+    from services.orchestrator.scheduler_state_identity_filter import _strip_top_level_pipeline_decision_fields
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    state = {
+        "retry_count": 4,
+        "failed_stage": "forecast",
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY: {"forecast": 87},
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY: {"forecast": [{"job_id": "job_x", "run_id": "cycle_gfs_x"}]},
+        "candidate_id": "kept",
+    }
+
+    _strip_top_level_pipeline_decision_fields(state)
+
+    assert state == {"candidate_id": "kept"}
+
+
+#: An execution-cohort run id, in the shape
+#: ``scheduler_execution.candidate_execution_cohort_run_id`` mints: the cycle run
+#: id, the cohort's stage, and a digest of its member candidates. The identity
+#: filter's cycle-run exemption (``_stage_cycle_run_matches_candidate``) admits
+#: only the BARE cycle run id, so this row is authoritative for no candidate at
+#: all even though the journal hands it to every one of them.
+_RETENTION_COHORT_RUN_ID = f"{_RETENTION_CYCLE_RUN_ID}_forecast_cohort_ab12cd34ef56"
+
+
+def _retention_terminal_evidence(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The terminal-skip evidence the strict-warm-start ladder carries at that read.
+
+    Built by the real evidence owner, so ``candidate_identity`` -- the only thing
+    the narrowing needs -- is the production payload rather than a stand-in.
+    """
+
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+
+    return {
+        **_candidate_state_evidence(_retention_candidate(), state),
+        "terminal_source": "pipeline_job",
+        "terminal_status": "succeeded",
+    }
+
+
+def test_strict_warm_start_budget_reads_the_narrowed_attempt_floors() -> None:
+    """E16 (#1179) -- the budget read applies the candidate-authority narrowing.
+
+    This is the one attempt read that takes the RAW projected state: the
+    identity-filtered decision state is a local of
+    ``_candidate_state_decision_evaluated`` and never flows back to it. A cohort
+    row truncated out of the window therefore used to spend a budget that is not
+    its own, and the resulting ``blocked`` decision is in neither force-resubmit
+    whitelist -- the candidate's FIRST strict-warm-start mismatch would wedge
+    with no automatic remedy.
+
+    The wedge half is the counterweight, and the reason the fix narrows the
+    floors rather than running the whole decision state here: the bare cycle run
+    id is the cycle's own row, authoritative for every candidate of the cycle,
+    and its floor must still block (E5). Running
+    ``_candidate_state_decision_state`` instead would take the shared-cycle
+    aggregate arm and strip that floor away.
+
+    Both halves also pin the narrowing as read-only over the caller's state.
+    """
+
+    job_limit = 5
+    filler = _retention_publish_filler(job_limit + 1)
+    cohort = _retention_job(
+        f"job_{_RETENTION_COHORT_RUN_ID}_forecast",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=1,
+        retry_count=3,
+        run_id=_RETENTION_COHORT_RUN_ID,
+    )
+
+    cohort_state = _retention_state([cohort, *filler], job_limit=job_limit, retry_limit=3)
+
+    assert cohort["job_id"] not in _retention_job_ids(cohort_state)
+    assert _retention_floors(cohort_state) == {"forecast": 3}
+    cohort_floor_keys = _retention_floor_keys(cohort_state)
+
+    cohort_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        _retention_terminal_evidence(cohort_state),
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        cohort_state,
+    )
+
+    assert (cohort_decision.action, cohort_decision.reason) == (
+        "retry",
+        "strict_warm_start_terminal_init_state_mismatch",
+    )
+    assert "retry_policy" not in cohort_decision.evidence
+    # The narrowing on the decision path must not flow back into the raw state
+    # this budget read takes: it is the caller's state, shared with every other
+    # read of the pass, and the narrowing is authoritative only for THIS read.
+    assert _retention_floor_keys(cohort_state) == cohort_floor_keys
+
+    wedge_state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *filler],
+        job_limit=job_limit,
+        retry_limit=3,
+    )
+    wedge_floor_keys = _retention_floor_keys(wedge_state)
+
+    wedge_decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        _retention_terminal_evidence(wedge_state),
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        wedge_state,
+    )
+
+    assert (wedge_decision.action, wedge_decision.reason) == ("blocked", "strict_warm_start_retry_budget_exhausted")
+    assert wedge_decision.evidence["retry_policy"]["attempt"] == 87
+    assert _retention_floor_keys(wedge_state) == wedge_floor_keys
+
+
+def test_attempt_floors_narrow_on_the_source_cycle_blocker_sub_branch() -> None:
+    """E13e (#1179) -- the aggregate arm's blocker branch narrows rather than strips.
+
+    The shared-cycle-aggregate arm normally erases the whole pipeline decision
+    surface, floors included (E13b). Its source-cycle-blocker branch is the one
+    place that does NOT: when the top-level failure IS the source-cycle download
+    blocker, the top-level keys are kept so the blocker stays visible, and the
+    narrowing call is then the only thing standing between a non-candidate-scoped
+    contributor and the decision surface.
+
+    NOTE the shape: ``_top_level_source_cycle_download_blocker`` compares the
+    candidate identity against the STATE's ``run_id``, and every producer writes
+    the candidate's own run id there, so no projection reachable today lands in
+    this branch with floors still attached. The state below is a real projection
+    with that one field replaced. The leg exists so the guard cannot be deleted
+    as dead while the predicate that gates it stays live -- deleting the
+    narrowing call makes it fail.
+    """
+
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_identity_filter import (
+        _candidate_identity_from_evidence,
+        _candidate_scoped_shared_cycle_aggregate_state,
+        _top_level_source_cycle_download_blocker,
+    )
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 3
+    download = _retention_job(
+        f"job_{_RETENTION_CYCLE_RUN_ID}_download",
+        stage="download",
+        job_type="download_source_cycle",
+        status="failed",
+        minutes=30,
+    )
+    download["error_code"] = "GFS_DOWNLOAD_TIMEOUT"
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        *_retention_publish_filler(job_limit, first_minute=10),
+        download,
+    ]
+
+    projected = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    assert projected["shared_cycle_aggregate"] is True
+    assert projected["failed_stage"] == "download"
+    assert _retention_floors(projected) == {"forecast": 87}
+
+    evidence = _candidate_state_evidence(_retention_candidate(), projected)
+    expected = _candidate_identity_from_evidence(evidence["candidate_identity"])
+    blocker_state = {**projected, "run_id": _RETENTION_CYCLE_RUN_ID}
+    assert _top_level_source_cycle_download_blocker(expected, blocker_state) is True
+
+    filtered = _candidate_scoped_shared_cycle_aggregate_state(blocker_state, evidence)
+
+    # The blocker itself stays visible -- this branch skipped the strip ...
+    assert filtered["failed_stage"] == "download"
+    assert filtered["pipeline_status"] == "failed"
+    # ... so the narrowing is what drops the cycle-scope contributor's attempt.
+    assert filtered[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _state_retry_attempt(filtered, stage="forecast") == 0
+
+
+def test_attempt_floors_narrow_on_the_inconclusive_source_cycle_arm() -> None:
+    """E13f (#1179) -- the inconclusive-source-cycle arm narrows the floors too.
+
+    When truncation leaves a source-cycle download failure unresolvable, the
+    filter deletes every row referencing the unresolved job ids rather than
+    letting an unprovable failure drive a decision. A floor whose only
+    contributor is such a row has to leave with them -- the arm runs BEFORE the
+    strip that would otherwise cover it, so the narrowing call is load-bearing
+    here.
+
+    The wedge row's ``previous_job_id`` link to the unresolved download job is
+    written explicitly: it is a real pipeline-job field (``retry.py`` stamps it
+    on every minted retry) but no production writer links a forecast row to a
+    source-cycle download job, so this pins the arm's contract rather than an
+    observed geometry. The control half -- the same rows without the link --
+    keeps the floor, so the assertion is about the reference and nothing else.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    manifest_uri = "s3://nhms/raw/gfs/2026072000/manifest.json"
+    forecast_cycle = {"cycle_id": _RETENTION_CYCLE_ID, "status": "raw_complete", "manifest_uri": manifest_uri}
+    job_limit = 4
+
+    def _download(suffix: str, *, status: str, minutes: int) -> dict[str, Any]:
+        return _retention_job(
+            f"job_{_RETENTION_CYCLE_RUN_ID}_download_{suffix}",
+            stage="download",
+            job_type="download_source_cycle",
+            status=status,
+            minutes=minutes,
+        )
+
+    # Two unrepaired download failures and a later success that could be either
+    # one's retry: with the window truncated the link is unprovable, which is
+    # what the projection reports as ``inconclusive_truncated``.
+    failed_a = _download("a", status="failed", minutes=30)
+    failed_b = _download("b", status="failed", minutes=31)
+    repair_candidate = _download("retry", status="succeeded", minutes=32)
+    wedge = _retention_forecast_retry_job(87, minutes=1)
+    own = _retention_own_failed_forecast_job(minutes=20)
+
+    def _project(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        state = chain_repository_state_module.candidate_state_from_rows(
+            source_id="GFS",
+            cycle_time=_dt(_RETENTION_CYCLE_TIME),
+            model_id="model_a",
+            run_id=_RETENTION_RUN_ID,
+            forcing_version_id="forc_gfs_2026072000_model_a",
+            candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+            hydro_run={"run_id": _RETENTION_RUN_ID, "status": "published", "init_state_id": None},
+            pipeline_jobs=jobs,
+            pipeline_events=[],
+            forcing_version=None,
+            forecast_cycle=forecast_cycle,
+            retry_limit=3,
+            job_limit=job_limit,
+            event_limit=job_limit,
+        )
+        assert state is not None
+        return state
+
+    rows = [wedge, failed_a, failed_b, repair_candidate, own]
+    control = _project([dict(row) for row in rows])
+
+    assert control["source_cycle_repair_evidence"]["status"] == "inconclusive_truncated"
+    assert control["source_cycle_repair_evidence"]["unresolved_failed_job_ids"] == [
+        failed_a["job_id"],
+        failed_b["job_id"],
+    ]
+    # Not the aggregate arm: the candidate's own row is in the window.
+    assert control["shared_cycle_aggregate"] is False
+    assert _retention_floors(control) == {"forecast": 87}
+    assert _retention_decision_state(control)[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+
+    linked_wedge = {**wedge, "previous_job_id": failed_a["job_id"]}
+    state = _project([linked_wedge, failed_a, failed_b, repair_candidate, own])
+
+    assert _retention_floors(state) == {"forecast": 87}
+
+    decision_state = _retention_decision_state(state)
+
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _state_retry_attempt(decision_state, stage="forecast") == 0
+
+
+def test_tied_attempt_floor_contributors_keep_the_floor_alive() -> None:
+    """E17 (#1179) -- a stage's floor survives while ANY contributor does.
+
+    The floor builder records EVERY row that reached a stage's maximum, not the
+    first: the rows arrive freshest-first, so recording only the first would
+    record the freshest -- here the foreign model's row -- and the narrowing
+    would then drop a floor the candidate's own cycle row still proves. The
+    freshness order is the load-bearing part of this geometry, not decoration.
+    """
+
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        _state_retry_attempt,
+    )
+
+    job_limit = 5
+    wedge = _retention_forecast_retry_job(87, minutes=1)
+    foreign = _retention_job(
+        "job_fcst_gfs_2026072000_model_b_forecast_retry_87",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=2,
+        run_id="fcst_gfs_2026072000_model_b",
+        model_id="model_b",
+    )
+    jobs = [
+        wedge,
+        foreign,
+        *_retention_publish_filler(job_limit, first_minute=10),
+        _retention_own_failed_forecast_job(minutes=20),
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    window = _retention_job_ids(state)
+    assert wedge["job_id"] not in window
+    assert foreign["job_id"] not in window
+    assert _retention_floors(state) == {"forecast": 87}
+    # Freshest first: the foreign row is the one a "record the first" builder
+    # would have kept, and it is the one identity filtering deletes.
+    assert [str(row["job_id"]) for row in state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]] == [
+        foreign["job_id"],
+        wedge["job_id"],
+    ]
+
+    decision_state = _retention_decision_state(state)
+
+    assert decision_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+    assert [
+        str(row["job_id"]) for row in decision_state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]
+    ] == [wedge["job_id"]]
+    assert _state_retry_attempt(decision_state, stage="forecast") == 87
+
+
+def test_carried_attempt_floor_makes_a_transient_failure_permanent() -> None:
+    """E14 (#1179) -- the failure policy moves with the attempt, on purpose.
+
+    The candidate's own in-window row fails with a transient code, so before this
+    change the policy read ``attempt`` 0 / retriable. With the out-of-window
+    ``*_forecast_retry_87`` row's attempt carried across the truncation the same
+    failure is at the budget, and ``classify_failure`` turns it permanent: the
+    remedy channels gated on ``failure["permanent"]``
+    (``scheduler_state_failure`` :418/:473/:1481/:1557/:1641/:1689/:1723) close
+    and ``_permanent_failure_evidence`` starts answering. That is this issue's
+    budget binding, not a bookkeeping detail, so it is pinned here.
+
+    Both consumers are fed the identity-filtered decision state, which is what
+    the production ladder passes them -- the narrowing is part of the answer,
+    not a detour around it.
+    """
+
+    from services.orchestrator.scheduler_state_failure import (
+        _failed_stage,
+        _failure_policy_payload,
+        _permanent_failure_evidence,
+    )
+
+    job_limit = 5
+    own = _retention_own_failed_forecast_job(minutes=20)
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        *_retention_publish_filler(job_limit, first_minute=10),
+        own,
+    ]
+
+    state = _retention_state(jobs, job_limit=job_limit, retry_limit=3)
+
+    assert own["job_id"] in _retention_job_ids(state)
+    assert _failed_stage(state) == "forecast"
+    assert state["error_code"] == "SLURM_TIMEOUT"
+    assert state["retry_count"] == 0
+
+    decision_state = _retention_decision_state(state)
+
+    failure = _failure_policy_payload(decision_state)
+
+    assert failure["attempt"] == 87
+    assert failure["retryable"] is False
+    assert failure["permanent"] is True
+    assert failure["limit_exhausted"] is True
+
+    permanent = _permanent_failure_evidence(_retention_candidate(), decision_state, {})
+
+    assert permanent is not None
+    assert (permanent["decision"], permanent["reason"]) == ("permanent_failure", "retry_limit_exhausted")
+
+
+def test_manual_retry_mints_the_carried_attempt_when_the_stage_is_nameable() -> None:
+    """E15 (#1179) -- the mint's nameable-stage branch mints the TRUE next attempt.
+
+    A failed row inside the window is not the same thing as the maximum-attempt
+    row inside the window: here the candidate's own ``*_forecast_retry_2`` row
+    names the failed stage while the cycle's ``*_forecast_retry_87`` row sits
+    outside it. The mint used to derive ``_retry_3`` from the window-local value
+    and collide with an attempt the journal had already spent; with the floor
+    carried it mints ``_retry_88``. This is a persisted identity change, so it
+    gets its own pin.
+
+    Fed the identity-filtered decision state, as the production ladder feeds it:
+    the mint reads the floor only because the wedge row is the cycle's own and
+    survives the narrowing.
+    """
+
+    from services.orchestrator.chain_runtime_utils import _pipeline_retry_job_id, _retry_attempt_from_basins
+    from services.orchestrator.scheduler_state_failure import _failed_stage, _manual_retry_state_evidence
+
+    job_limit = 5
+    own_retry = _retention_job(
+        f"job_{_RETENTION_RUN_ID}_forecast_retry_2",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=20,
+        run_id=_RETENTION_RUN_ID,
+        model_id="model_a",
+    )
+    jobs = [
+        _retention_forecast_retry_job(87, minutes=1),
+        *_retention_publish_filler(job_limit, first_minute=10),
+        own_retry,
+    ]
+    marker = _retention_adopted_manual_marker_event()
+    marker["entity_id"] = own_retry["job_id"]
+    marker["details"]["previous_job_id"] = own_retry["job_id"]
+
+    state = _retention_state(jobs, job_limit=job_limit, retry_limit=100, events=[marker])
+
+    assert own_retry["job_id"] in _retention_job_ids(state)
+    assert _failed_stage(state) == "forecast"
+
+    decision_state = _retention_decision_state(state)
+
+    evidence = _manual_retry_state_evidence(_retention_candidate(), decision_state, {})
+
+    assert evidence["manual_retry"]["allowed"] is True
+    assert evidence["manual_retry"]["previous_attempt"] == 87
+    assert evidence["manual_retry"]["new_attempt"] == 88
+
+    minted_attempt = _retry_attempt_from_basins([{"state_evidence": evidence}])
+    assert minted_attempt == 88
+    base_job_id = f"job_{_RETENTION_RUN_ID}_forecast"
+    assert _pipeline_retry_job_id(base_job_id, minted_attempt) == f"{base_job_id}_retry_88"
+
+
+def test_released_identity_blocked_reservation_is_not_auto_retriable(tmp_path: Path) -> None:
+    """E6 (#1179) -- pin the released row's shape AND its retry verdict.
+
+    Driven through the real reserve-then-release sequence: the row's empty
+    ``error_code`` comes from the reservation write points, and the release
+    transition copies the field rather than stamping one. Stamping a transient
+    code (``SLURM_RESERVATION_LOST`` is in ``TRANSIENT_ERROR_CODES``) at either
+    site would open an automatic duplicate submission -- and fail this test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.persistence import PipelineJob
+    from services.orchestrator.retry_identity import effective_retry_attempt
+    from tests.test_orchestration_chain import _DbFreeRetryGateService
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    assert reserved["status"] == "reserved"
+
+    written = repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    )
+    assert written == 1
+
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+    assert released.get("error_code") in (None, "")
+
+    job = PipelineJob(
+        job_id=job_id,
+        run_id=released.get("run_id"),
+        cycle_id=released.get("cycle_id"),
+        job_type=str(released.get("job_type") or "run_shud_forecast_array"),
+        model_id=released.get("model_id"),
+        status=str(released["status"]),
+        stage=released.get("stage"),
+    )
+    job.retry_count = effective_retry_attempt(job.job_id, released.get("retry_count"))
+    job.error_code = released.get("error_code")
+
+    assert _DbFreeRetryGateService(max_retries=3).should_auto_retry(job) is False
+
+
+def test_reclaimed_reservation_release_is_not_auto_retriable_either(tmp_path: Path) -> None:
+    """E6c (#1179) -- the SECOND reservation write point, driven through reclaim.
+
+    ``reclaim_pipeline_job_reservation`` re-seeds a reservation from scratch, and
+    that seed is where the reclaimed row's ``error_code`` comes from -- the first
+    write point never touches this row again. So the full production door has to
+    be walked: reserve, permit (``absence_retry_permitted`` is the ONLY shape
+    reclaim accepts), reclaim, then release. Stamping a transient code at the
+    reclaim seed (``SLURM_RESERVATION_LOST`` is in ``TRANSIENT_ERROR_CODES``)
+    would make every release of a reclaimed reservation an automatic duplicate
+    submission -- and fail this test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.persistence import PipelineJob
+    from services.orchestrator.retry_identity import effective_retry_attempt
+    from tests.test_orchestration_chain import _DbFreeRetryGateService
+
+    record = dict(vars(_accepted_submit_reserved_cohort_row()))
+    job_id = str(record["job_id"])
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = repository.get_pipeline_job(job_id)
+    assert permitted["status"] == "reservation_lost"
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+
+    assert (
+        repository.reclaim_pipeline_job_reservation(
+            {
+                **permitted,
+                "expected_submission_attempt": permitted["submission_attempt"],
+                "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+                "status": "reserved",
+                "submission_attempt": int(permitted["submission_attempt"]) + 1,
+                "submit_outcome": None,
+                "reconciliation_source": None,
+                "reconciliation_decision": None,
+                "matched_slurm_job_id": None,
+            }
+        )
+        is not None
+    )
+    reclaimed = repository.get_pipeline_job(job_id)
+    assert reclaimed["status"] == "reserved"
+
+    written = repository.release_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(reclaimed["submission_attempt"]),
+        expected_submission_attempt_started_at=reclaimed["submission_attempt_started_at"],
+        identity_blocked_streak=3,
+    )
+    assert written == 1
+
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+    assert released.get("error_code") in (None, "")
+
+    job = PipelineJob(
+        job_id=job_id,
+        run_id=released.get("run_id"),
+        cycle_id=released.get("cycle_id"),
+        job_type=str(released.get("job_type") or "run_shud_forecast_array"),
+        model_id=released.get("model_id"),
+        status=str(released["status"]),
+        stage=released.get("stage"),
+    )
+    job.retry_count = effective_retry_attempt(job.job_id, released.get("retry_count"))
+    job.error_code = released.get("error_code")
+
+    assert _DbFreeRetryGateService(max_retries=3).should_auto_retry(job) is False
+
+
 def test_identity_blocked_convergence_facts_survive_bounded_evidence_and_proofs() -> None:
     """tasks 2.7 -- both evidence fidelities and both proof shapes stay readable."""
 
@@ -38579,3 +46663,2178 @@ def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_pat
     assert items["model_b"]["candidate_outcome"]["status"] == "active"
     assert items["model_b"]["candidate_outcome"].get("reason") is None
     assert items["model_b"]["error_code"] == "CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"
+
+
+def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:
+    """A fresh scheduler whose only candidate is blocked with a stable reason.
+
+    The scheduler is a systemd one-shot, so every cross-pass test builds a NEW
+    ``ProductionScheduler`` over the SAME workspace (hence the same evidence
+    root) instead of reusing one in-memory object.
+    """
+
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    readiness = FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=_canonical_rows(
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    variables=GFS_REQUIRED_STANDARD_VARIABLES,
+                    forecast_hours=(0, 3),
+                    policy_identity=policy,
+                    source_object_identity=source_object,
+                    omit_pairs={("shortwave_down", 3)},
+                ),
+                forecast_hours=(0, 3),
+                policy_identity=policy,
+                source_object_identity=source_object,
+                canonical_product_id=f"canon_gfs_{format_cycle_time(cycle_time)}",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+    return ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), **config_kwargs),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        canonical_readiness_provider=readiness,
+    )
+
+
+def _no_progress_blocked_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+    return _no_progress_blocked_scheduler(tmp_path, **config_kwargs).run_once()
+
+
+def test_repeated_blocked_candidate_reason_opens_no_progress_circuit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    results = [_no_progress_blocked_pass(tmp_path) for _ in range(3)]
+
+    blocks = [result.evidence["no_progress_circuit"] for result in results]
+    assert [block["open"] for block in blocks[:2]] == [[], []]
+    assert blocks[2]["open"] == [
+        {
+            "subject_kind": "candidate",
+            "subject_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "reason": "blocked:missing_canonical_leads",
+            "consecutive_passes": 3,
+            "first_pass_id": results[0].evidence["pass_id"],
+            "last_pass_id": results[2].evidence["pass_id"],
+        }
+    ]
+    # The durable artifact, not just the in-memory result, carries the block.
+    persisted = json.loads(Path(results[2].artifact_path or "").read_text(encoding="utf-8"))
+    assert persisted["no_progress_circuit"] == blocks[2]
+    warnings = [
+        record for record in caplog.records if "SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert f"last={results[2].evidence['pass_id']}" in warnings[0].getMessage()
+
+
+def _reserved_unbound_wedge_pass(tmp_path: Path, **config_kwargs: Any) -> SchedulerPassResult:
+    """One fresh pass whose only work is a reserved-unbound row that cannot be proven.
+
+    Mirrors the #1116 wedge: the comment querier refuses (this cluster does not
+    store job comments), so the row stays ``reserved`` and reappears, identical,
+    on every later pass.
+    """
+
+    from services.orchestrator.reconcile import ReconcileQueryUnavailable
+
+    def _comment_query(_idempotency_key: str, **_kwargs: Any) -> tuple[Any, ...]:
+        raise ReconcileQueryUnavailable(
+            "accounting does not store job comments",
+            reason_class="comment_accounting_unproven",
+        )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    scheduler = _RealProductionScheduler(
+        _config(
+            tmp_path,
+            dry_run=False,
+            scheduler_journal_backend="file",
+            scheduler_journal_root=tmp_path / "journal",
+            database_url=None,
+            database_url_configured=False,
+            **config_kwargs,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=repository,
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=_noop_reconcile_sacct_query,
+    )
+    return scheduler.run_once()
+
+
+def _no_progress_candidate_row(
+    reason: str | None,
+    *,
+    candidate_id: str | None = None,
+    status: str = "blocked",
+    operator_action_required: bool = False,
+) -> dict[str, Any]:
+    """A real ``SchedulerCandidate.to_dict`` row — the adapter's actual contract."""
+
+    candidate = _scheduler_candidate_fixture()
+    state_evidence: dict[str, Any] = {"decision": "block" if status == "blocked" else "submit"}
+    if operator_action_required:
+        state_evidence["operator_action_required"] = True
+    if candidate_id is not None:
+        candidate = replace(candidate, candidate_id=candidate_id)
+    return replace(candidate, status=status, reason=reason, state_evidence=state_evidence).to_dict()
+
+
+def _no_progress_reconcile_outcome(
+    *,
+    job_id: str = "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+    action: str = "query_unavailable",
+    reason_class: str | None = "comment_accounting_unproven",
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "idempotency_key": "cycle_gfs_2026071200_forecast_fixture:forecast",
+        "action": action,
+        "status": "reserved",
+        "slurm_job_id": None,
+        "reconciliation_source": "slurm_exact_comment",
+        "reconciliation_decision": "accounting_unavailable",
+        "reconciliation_reason_class": reason_class,
+        "identity_blocked_streak": None,
+    }
+
+
+def _no_progress_observe(
+    payload: Mapping[str, Any],
+    *,
+    pass_id: str,
+    tmp_path: Path,
+    threshold: int = 3,
+) -> dict[str, Any] | None:
+    """Drive one observation over a shared evidence root (the persistence seam)."""
+
+    return scheduler_no_progress_module.observe_pass(
+        payload,
+        pass_id=pass_id,
+        threshold=threshold,
+        evidence_dir=tmp_path / "scheduler" / "evidence",
+        workspace_root=tmp_path,
+    )
+
+
+def _no_progress_tracker_path(tmp_path: Path) -> Path:
+    return tmp_path / "scheduler" / "evidence" / scheduler_no_progress_module.STATE_FILENAME
+
+
+def test_no_progress_candidate_adapter_reads_blocked_rows_only() -> None:
+    payload = {
+        "candidates": [
+            _no_progress_candidate_row(None, candidate_id="cand_selected", status="selected"),
+            _no_progress_candidate_row(
+                "permanent_failure_guard",
+                candidate_id="cand_permanent",
+                operator_action_required=True,
+            ),
+            _no_progress_candidate_row("", candidate_id="cand_blank_reason"),
+        ],
+        "blocked_candidates": [
+            _no_progress_candidate_row("block_predecessor_pending", candidate_id="cand_pending"),
+        ],
+        # status stays ``selected`` on a skip row, and a successful skip lives here.
+        "skipped_candidates": [
+            {
+                **_no_progress_candidate_row(None, candidate_id="cand_skipped", status="selected"),
+                "reason": "terminal_hydro_success",
+            }
+        ],
+    }
+
+    observations = scheduler_no_progress_module.candidate_observations(payload)
+
+    assert observations.source_present is True
+    assert [
+        (item.subject_kind, item.subject_id, item.reason, item.operator_action_required)
+        for item in observations.observations
+    ] == [
+        ("candidate", "cand_permanent", "blocked:permanent_failure_guard", True),
+        ("candidate", "cand_pending", "blocked:block_predecessor_pending", False),
+    ]
+
+
+def test_no_progress_candidate_adapter_keeps_the_first_row_of_a_duplicated_subject(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "candidates": [_no_progress_candidate_row("first_reason", candidate_id="cand_a")],
+        "blocked_candidates": [_no_progress_candidate_row("second_reason", candidate_id="cand_a")],
+    }
+
+    block = _no_progress_observe(payload, pass_id="pass_1", tmp_path=tmp_path, threshold=1)
+
+    assert block is not None
+    assert block["tracked"] == 1
+    assert [entry["reason"] for entry in block["open"]] == ["blocked:first_reason"]
+
+
+def test_no_progress_reconcile_adapter_reads_completed_reserved_unbound_outcomes() -> None:
+    payload = {
+        "restart_reconcile": {
+            "status": "completed",
+            "reserved_unbound": {
+                "count": 2,
+                "outcomes": [
+                    _no_progress_reconcile_outcome(),
+                    _no_progress_reconcile_outcome(job_id="job_b", action="bound", reason_class=None),
+                ],
+            },
+        }
+    }
+
+    observations = scheduler_no_progress_module.reconcile_observations(payload)
+
+    assert observations.source_present is True
+    assert [(item.subject_kind, item.subject_id, item.reason) for item in observations.observations] == [
+        (
+            "job",
+            "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            "query_unavailable:comment_accounting_unproven",
+        ),
+        ("job", "job_b", "bound"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reconcile",
+    [
+        None,
+        {"status": "error", "reserved_unbound_error": "sacct exited 1"},
+        {"status": "skipped", "reason": "reconcile_store_unavailable"},
+        {"status": "completed"},
+    ],
+)
+def test_no_progress_adapters_report_absent_sources(reconcile: Any) -> None:
+    payload: dict[str, Any] = {}
+    if reconcile is not None:
+        payload["restart_reconcile"] = reconcile
+
+    assert scheduler_no_progress_module.candidate_observations(payload).source_present is False
+    assert scheduler_no_progress_module.reconcile_observations(payload).source_present is False
+
+
+def test_changed_reason_resets_the_no_progress_streak(tmp_path: Path) -> None:
+    reasons = ["missing_canonical_leads", "permanent_failure_guard", "permanent_failure_guard"]
+    blocks = [
+        _no_progress_observe(
+            {
+                "candidates": [],
+                "blocked_candidates": [_no_progress_candidate_row(reason, candidate_id="cand_a")],
+            },
+            pass_id=f"pass_{index}",
+            tmp_path=tmp_path,
+        )
+        for index, reason in enumerate(reasons)
+    ]
+    fourth = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_3",
+        tmp_path=tmp_path,
+    )
+
+    assert fourth is not None
+    assert [block["open"] for block in blocks if block is not None] == [[], [], []]
+    assert fourth["open"] == [
+        {
+            "subject_kind": "candidate",
+            "subject_id": "cand_a",
+            "reason": "blocked:permanent_failure_guard",
+            "consecutive_passes": 3,
+            # The streak restarted on the pass that changed the reason.
+            "first_pass_id": "pass_1",
+            "last_pass_id": "pass_3",
+        }
+    ]
+
+
+def test_absent_subject_with_a_present_source_clears_the_entry(tmp_path: Path) -> None:
+    blocked_payload = {
+        "candidates": [],
+        "blocked_candidates": [_no_progress_candidate_row("missing_canonical_leads", candidate_id="cand_a")],
+    }
+
+    first = _no_progress_observe(blocked_payload, pass_id="pass_0", tmp_path=tmp_path)
+    cleared = _no_progress_observe(
+        {"candidates": [], "blocked_candidates": []},
+        pass_id="pass_1",
+        tmp_path=tmp_path,
+    )
+    restarted = _no_progress_observe(blocked_payload, pass_id="pass_2", tmp_path=tmp_path)
+
+    assert first is not None and cleared is not None and restarted is not None
+    assert first["tracked"] == 1
+    assert cleared["tracked"] == 0
+    assert restarted["tracked"] == 1
+    assert json.loads(_no_progress_tracker_path(tmp_path).read_text(encoding="utf-8"))["entries"] == [
+        {
+            "adapter": "candidate",
+            "subject_kind": "candidate",
+            "subject_id": "cand_a",
+            "reason": "blocked:missing_canonical_leads",
+            "consecutive_passes": 1,
+            "first_pass_id": "pass_2",
+            "last_pass_id": "pass_2",
+        }
+    ]
+
+
+def test_absent_reconcile_source_preserves_the_reserved_unbound_streak(tmp_path: Path) -> None:
+    completed = {
+        "candidates": [],
+        "blocked_candidates": [],
+        "restart_reconcile": {
+            "status": "completed",
+            "reserved_unbound": {"count": 1, "outcomes": [_no_progress_reconcile_outcome()]},
+        },
+    }
+    sacct_fault = {
+        "candidates": [],
+        "blocked_candidates": [],
+        "restart_reconcile": {"status": "error", "reserved_unbound_error": "sacct exited 1"},
+    }
+
+    first = _no_progress_observe(completed, pass_id="pass_0", tmp_path=tmp_path)
+    faulted = _no_progress_observe(sacct_fault, pass_id="pass_1", tmp_path=tmp_path)
+    second = _no_progress_observe(completed, pass_id="pass_2", tmp_path=tmp_path)
+    third = _no_progress_observe(completed, pass_id="pass_3", tmp_path=tmp_path)
+
+    assert first is not None and faulted is not None and second is not None and third is not None
+    assert [first["tracked"], faulted["tracked"], second["tracked"]] == [1, 1, 1]
+    assert [block["open"] for block in (first, faulted, second)] == [[], [], []]
+    # The sacct fault neither counted nor cleared: pass 0, 2 and 3 are the three
+    # fully-observed passes that opened it.
+    assert third["open"][0]["consecutive_passes"] == 3
+    assert third["open"][0]["first_pass_id"] == "pass_0"
+
+
+def test_healthy_pass_injects_an_empty_circuit_without_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["no_progress_circuit"] == {
+        "threshold": 3,
+        "tracked": 0,
+        "state_reset": "missing",
+        "open": [],
+        "truncated": 0,
+    }
+    assert [record for record in caplog.records if record.name.endswith("scheduler_no_progress")] == []
+
+
+def test_early_exit_and_aborted_passes_never_touch_the_no_progress_tracker(
+    tmp_path: Path,
+) -> None:
+    first = _no_progress_blocked_pass(tmp_path)
+    second = _no_progress_blocked_pass(tmp_path)
+    assert second.evidence["no_progress_circuit"]["tracked"] == 1
+    tracker = _no_progress_tracker_path(tmp_path)
+    tracker_bytes = tracker.read_bytes()
+
+    # (a) lock contention: the pass never holds the lease, so it must not share
+    # the tracker file with the pass that does.
+    contended_scheduler = _no_progress_blocked_scheduler(tmp_path)
+    lock_path = Path(contended_scheduler.config.lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+                "lease_token": "existing-token",
+                "pass_id": "existing",
+            }
+        ),
+        encoding="utf-8",
+    )
+    contended = contended_scheduler.run_once()
+    lock_path.unlink()
+
+    # (b) resource-limit abort via the intra-pass progress guard.
+    aborted = ProductionScheduler(
+        _config(
+            tmp_path,
+            now=_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+            progress_guard_max_no_progress_steps=0,
+        ),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    ).run_once()
+
+    assert contended.status == "lock_contended"
+    assert aborted.evidence["execution_boundary"] == "scheduler_progress_guard_blocked"
+    assert "no_progress_circuit" not in contended.evidence
+    assert "no_progress_circuit" not in aborted.evidence
+    assert tracker.read_bytes() == tracker_bytes
+
+    third = _no_progress_blocked_pass(tmp_path)
+
+    assert third.evidence["no_progress_circuit"]["open"][0]["consecutive_passes"] == 3
+    assert third.evidence["no_progress_circuit"]["open"][0]["first_pass_id"] == first.evidence["pass_id"]
+
+
+def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1116 visibility: a deliberately non-convergent reserved row becomes legible."""
+
+    from tests.test_gateway_reconcile import _file_cohort_repository
+
+    caplog.set_level(logging.WARNING)
+    _file_cohort_repository(tmp_path, member_count=1)
+
+    results = [_reserved_unbound_wedge_pass(tmp_path) for _ in range(3)]
+
+    outcomes = results[2].evidence["restart_reconcile"]["reserved_unbound"]["outcomes"]
+    assert outcomes[0]["reconciliation_reason_class"] == "comment_accounting_unproven"
+    assert [result.evidence["no_progress_circuit"]["open"] for result in results[:2]] == [[], []]
+    assert results[2].evidence["no_progress_circuit"]["open"] == [
+        {
+            "subject_kind": "job",
+            "subject_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+            "reason": "query_unavailable:comment_accounting_unproven",
+            "consecutive_passes": 3,
+            "first_pass_id": results[0].evidence["pass_id"],
+            "last_pass_id": results[2].evidence["pass_id"],
+        }
+    ]
+    warnings = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_OPEN_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.parametrize("threshold", [0, -1])
+def test_disabled_no_progress_circuit_is_byte_for_byte_the_old_behaviour(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    threshold: int,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="services.orchestrator.scheduler_no_progress")
+
+    results = [_no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=threshold) for _ in range(3)]
+
+    evidence_root = tmp_path / "scheduler" / "evidence"
+    for result in results:
+        assert "no_progress_circuit" not in result.evidence
+        persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+        assert "no_progress_circuit" not in persisted
+    assert not _no_progress_tracker_path(tmp_path).exists()
+    assert list(evidence_root.glob("*.tmp")) == []
+    assert [record for record in caplog.records if record.name.endswith("scheduler_no_progress")] == []
+
+
+def test_disabled_no_progress_circuit_stays_absent_on_the_compaction_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
+
+    result = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "resource_limit_blocked"
+    assert persisted["limit"]["reason"] == "evidence_size_limit_exceeded"
+    assert "no_progress_circuit" not in persisted
+    assert "no_progress_circuit" not in result.evidence
+
+
+def test_no_progress_circuit_threshold_comes_from_env_and_from_the_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assert _config(tmp_path).no_progress_circuit_passes == 3
+
+    monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "5")
+    assert _config(tmp_path).no_progress_circuit_passes == 5
+    assert _config(tmp_path, no_progress_circuit_passes=2).no_progress_circuit_passes == 2
+
+    monkeypatch.setenv("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", "0")
+    result = _no_progress_blocked_pass(tmp_path)
+    assert "no_progress_circuit" not in result.evidence
+
+
+def test_corrupt_tracker_state_resets_with_a_marker_without_failing_the_pass(
+    tmp_path: Path,
+) -> None:
+    first = _no_progress_blocked_pass(tmp_path)
+    tracker = _no_progress_tracker_path(tmp_path)
+    tracker.write_text('{"schema_version": "nhms.scheduler.no_pro', encoding="utf-8")
+
+    second = _no_progress_blocked_pass(tmp_path)
+
+    assert first.evidence["no_progress_circuit"]["state_reset"] == "missing"
+    assert second.status == first.status
+    assert second.evidence["no_progress_circuit"] == {
+        "threshold": 3,
+        "tracked": 1,
+        "state_reset": "corrupt",
+        "open": [],
+        "truncated": 0,
+    }
+    # Counting restarted from the corrupt reset, and the file is valid again.
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+    third = _no_progress_blocked_pass(tmp_path)
+    assert "state_reset" not in third.evidence["no_progress_circuit"]
+    assert third.evidence["no_progress_circuit"]["tracked"] == 1
+
+
+def test_enabled_healthy_pass_always_rewrites_the_tracker_file(tmp_path: Path) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    )
+
+    first = scheduler.run_once()
+    tracker = _no_progress_tracker_path(tmp_path)
+    written = json.loads(tracker.read_text(encoding="utf-8"))
+    second = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [])},
+    ).run_once()
+
+    assert first.evidence["no_progress_circuit"]["state_reset"] == "missing"
+    assert written == {
+        "schema_version": scheduler_no_progress_module.STATE_SCHEMA_VERSION,
+        "entries": [],
+    }
+    assert "state_reset" not in second.evidence["no_progress_circuit"]
+    assert list((tmp_path / "scheduler" / "evidence").glob("*.tmp")) == []
+
+
+def test_no_progress_open_entries_are_truncated_at_fifty(tmp_path: Path) -> None:
+    payload = {
+        "candidates": [],
+        "blocked_candidates": [
+            _no_progress_candidate_row("permanent_failure_guard", candidate_id=f"cand_{index:03d}")
+            for index in range(51)
+        ],
+    }
+
+    block = _no_progress_observe(payload, pass_id="pass_0", tmp_path=tmp_path, threshold=1)
+
+    assert block is not None
+    assert block["tracked"] == 51
+    assert len(block["open"]) == scheduler_no_progress_module.MAX_OPEN_ENTRIES
+    assert block["truncated"] == 1
+    assert [entry["subject_id"] for entry in block["open"][:2]] == ["cand_000", "cand_001"]
+    persisted = json.loads(_no_progress_tracker_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(persisted["entries"]) == 51
+
+
+def test_bounded_evidence_payload_keeps_the_circuit_block_and_pops_it_when_absent() -> None:
+    block = {
+        "threshold": 3,
+        "tracked": 1,
+        "open": [
+            {
+                "subject_kind": "candidate",
+                "subject_id": "cand_a",
+                "reason": "blocked:permanent_failure_guard",
+                "consecutive_passes": 3,
+                "first_pass_id": "pass_0",
+                "last_pass_id": "pass_2",
+            }
+        ],
+        "truncated": 0,
+    }
+
+    kept = scheduler_module._bounded_evidence_payload(
+        {"status": "planned", "no_progress_circuit": block},
+        reason="evidence_size_limit_exceeded",
+    )
+    absent = scheduler_module._bounded_evidence_payload(
+        {"status": "planned"},
+        reason="evidence_size_limit_exceeded",
+    )
+
+    assert kept["no_progress_circuit"] == block
+    assert "no_progress_circuit" not in absent
+
+
+def test_retention_skips_the_no_progress_tracker_as_unrecognised(tmp_path: Path) -> None:
+    """The tracker survives retention today because it is not ``scheduler_*``."""
+
+    from scripts import node22_scheduler_evidence_retention as retention_script
+
+    now = _dt("2026-07-05T12:00:00Z")
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    tracker = evidence_root / scheduler_no_progress_module.STATE_FILENAME
+    tracker.write_text('{"schema_version": "v1", "entries": []}', encoding="utf-8")
+    stale = evidence_root / "scheduler_2026040100_deadbeefcafe.json"
+    stale.write_text("{}", encoding="utf-8")
+    old = (now - timedelta(days=100)).timestamp()
+    for path in (tracker, stale):
+        os.utime(path, (old, old))
+
+    assert retention_script._is_pass_evidence(tracker.name) is False
+    receipt = retention_script.run_retention(
+        retention_script.SchedulerEvidenceRetentionConfig(
+            evidence_root=evidence_root,
+            retention_days=30,
+            max_bytes=512 * 1024 * 1024,
+            receipt_retention_days=180,
+            whitelist_globs=(),
+            summary_path=None,
+        ),
+        now=now,
+    )
+
+    skipped = [item["path"] for item in receipt["skipped_paths_by_reason"]["unrecognised"]]
+    assert str(tracker) in skipped
+    assert tracker.exists()
+    assert not stale.exists()
+
+
+def test_bounded_fit_sheds_the_circuit_block_before_touching_existing_keys() -> None:
+    """Under byte pressure the marker goes first, so existing trimming is unmoved."""
+
+    block = {
+        "threshold": 3,
+        "tracked": 1,
+        "open": [
+            {
+                "subject_kind": "candidate",
+                "subject_id": "cand_a",
+                "reason": "blocked:permanent_failure_guard",
+                "consecutive_passes": 3,
+                "first_pass_id": "pass_0",
+                "last_pass_id": "pass_2",
+            }
+        ],
+        "truncated": 0,
+    }
+    payload = {
+        "status": "resource_limit_blocked",
+        "pass_id": "scheduler_2026052112_deadbeefcafe",
+        "candidates": [_no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")],
+        "blocked_candidates": [],
+        "source_cycles": [],
+    }
+    without_marker = dict(payload)
+    with_marker = {**payload, "no_progress_circuit": block}
+    budget = len(json.dumps(without_marker, separators=(",", ":"), sort_keys=True).encode("utf-8")) + 8
+
+    assert not scheduler_evidence_payload_module._payload_fits(
+        with_marker,
+        max_evidence_bytes=budget,
+        compact=True,
+    )
+    fitted = scheduler_evidence_payload_module._fit_bounded_evidence_payload(
+        with_marker,
+        max_evidence_bytes=budget,
+    )
+    baseline = scheduler_evidence_payload_module._fit_bounded_evidence_payload(
+        without_marker,
+        max_evidence_bytes=budget,
+    )
+
+    assert "no_progress_circuit" not in fitted
+    assert fitted == baseline
+
+
+def test_tracker_state_symlink_is_not_followed_on_read_or_write(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-tracker.json"
+    outside_payload = json.dumps(
+        {
+            "schema_version": scheduler_no_progress_module.STATE_SCHEMA_VERSION,
+            "entries": [
+                {
+                    "adapter": "candidate",
+                    "subject_kind": "candidate",
+                    "subject_id": "cand_a",
+                    "reason": "blocked:permanent_failure_guard",
+                    "consecutive_passes": 9,
+                    "first_pass_id": "pass_planted",
+                    "last_pass_id": "pass_planted",
+                }
+            ],
+        }
+    )
+    outside.write_text(outside_payload, encoding="utf-8")
+    tracker = evidence_dir / scheduler_no_progress_module.STATE_FILENAME
+    tracker.symlink_to(outside)
+
+    block = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_0",
+        tmp_path=tmp_path,
+    )
+
+    assert block is not None
+    assert block["state_reset"] == "corrupt"
+    # The planted count was never read, and the planted file was never written.
+    assert block["open"] == []
+    assert outside.read_text(encoding="utf-8") == outside_payload
+    assert tracker.is_symlink() is False
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+
+
+def test_stale_tracker_tmp_sibling_does_not_block_the_overwrite(tmp_path: Path) -> None:
+    """A crash between create and replace must not wedge the tracker forever."""
+
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    stale_tmp = evidence_dir / scheduler_no_progress_module.STATE_TMP_FILENAME
+    stale_tmp.write_text("half written", encoding="utf-8")
+
+    block = _no_progress_observe(
+        {
+            "candidates": [],
+            "blocked_candidates": [
+                _no_progress_candidate_row("permanent_failure_guard", candidate_id="cand_a")
+            ],
+        },
+        pass_id="pass_0",
+        tmp_path=tmp_path,
+    )
+
+    assert block is not None
+    assert block["tracked"] == 1
+    assert not stale_tmp.exists()
+    tracker = evidence_dir / scheduler_no_progress_module.STATE_FILENAME
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["subject_id"] == "cand_a"
+
+
+@pytest.mark.parametrize("plant", ["dangling_symlink", "directory"])
+def test_tracker_write_failure_is_surfaced_and_self_heals(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    plant: str,
+) -> None:
+    """A tracker write that cannot land must never be silent (issue #1118 C1)."""
+
+    caplog.set_level(logging.WARNING)
+    first = _no_progress_blocked_pass(tmp_path)
+    tracker = _no_progress_tracker_path(tmp_path)
+    stale_tmp = tracker.with_name(scheduler_no_progress_module.STATE_TMP_FILENAME)
+    if plant == "dangling_symlink":
+        stale_tmp.symlink_to(tracker.with_name("no-such-target.json"))
+    else:
+        stale_tmp.mkdir()
+
+    blocked = _no_progress_blocked_pass(tmp_path)
+
+    assert first.evidence["no_progress_circuit"]["tracked"] == 1
+    assert blocked.evidence["no_progress_circuit"]["state_write_failed"] is True
+    write_failures = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_STATE_WRITE_FAILED_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(write_failures) == 1
+    # The count could not advance on disk, and the unusable temp path is gone.
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 1
+    assert not stale_tmp.exists() and not stale_tmp.is_symlink()
+
+    recovered = _no_progress_blocked_pass(tmp_path)
+
+    # Counting resumes from the last durable value (1), not from the frozen pass.
+    assert "state_write_failed" not in recovered.evidence["no_progress_circuit"]
+    assert json.loads(tracker.read_text(encoding="utf-8"))["entries"][0]["consecutive_passes"] == 2
+
+
+def test_near_limit_pass_is_not_degraded_by_the_circuit_block(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The size gate itself must not see the marker's bytes (issue #1118 C3)."""
+
+    disabled = _no_progress_blocked_pass(tmp_path, no_progress_circuit_passes=0)
+    disabled_artifact = Path(disabled.artifact_path or "").read_bytes()
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", len(disabled_artifact) + 40)
+
+    enabled = _no_progress_blocked_pass(tmp_path)
+    enabled_artifact = json.loads(Path(enabled.artifact_path or "").read_text(encoding="utf-8"))
+
+    # Per-pass identity only: pass id, lease token, clocks, artifact path.
+    volatile = ("pass_id", "artifact_path", "timing", "started_at", "finished_at", "retention", "lock")
+    assert enabled.status == "planned"
+    assert "limit" not in enabled.evidence
+    assert "no_progress_circuit" not in enabled_artifact
+    assert {key: value for key, value in enabled_artifact.items() if key not in volatile} == {
+        key: value
+        for key, value in json.loads(disabled_artifact.decode("utf-8")).items()
+        if key not in volatile
+    }
+
+
+def test_unexpected_observation_error_fails_open_without_failing_the_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("adapter shape drifted")
+
+    monkeypatch.setattr(scheduler_no_progress_module, "observe_adapters", _boom)
+
+    result = _no_progress_blocked_pass(tmp_path)
+
+    assert result.status == "planned"
+    assert result.evidence["blocked_candidates"][0]["reason"] == "missing_canonical_leads"
+    assert "no_progress_circuit" not in result.evidence
+    assert "no_progress_circuit" not in json.loads(
+        Path(result.artifact_path or "").read_text(encoding="utf-8")
+    )
+    failures = [
+        record
+        for record in caplog.records
+        if scheduler_no_progress_module.CIRCUIT_FAILED_LOG_TOKEN in record.getMessage()
+    ]
+    assert len(failures) == 1
+
+
+# ---------------------------------------------------------------------------
+# #1196: an unreadable warm-start env toggle never enables the terminal-skip
+# shortcut.
+#
+# The seam is the real DB-free ``_strict_warm_start_for_candidate``: a non
+# db-free scheduler returns at scheduler_core.py:742 before the shortcut is
+# reached, so only the db-free shape exercises it.
+# ---------------------------------------------------------------------------
+
+#: Logger the gate warns on when the orchestrator env cannot be parsed.
+_WARM_START_GATE_LOGGER = "services.orchestrator.scheduler_generation_gate"
+_WARM_START_UNREADABLE_TOKEN = "SCHEDULER_WARM_START_ENV_UNREADABLE"
+#: Cadence of ``allowed_cycle_hours_utc=(0, 12)`` -> 12h lead for every cycle.
+_WARM_START_TOGGLE_LEAD_HOURS = 12
+_WARM_START_TOGGLE_CANDIDATE_CYCLE = "2026-05-21T12:00:00Z"
+_WARM_START_TOGGLE_PREDECESSOR_CYCLE = "2026-05-21T00:00:00Z"
+_WARM_START_TOGGLE_NOW = "2026-05-21T18:00:00Z"
+
+
+def _seed_completed_journal_cycle_latest_view(
+    journal_root: Path, *, cycle_time: datetime, model_id: str = "model_a"
+) -> Path:
+    """Write a completed latest-view row so ``has_completed_pipeline`` is True.
+
+    Reuses the journal test module's own latest-view composer so the fixture
+    stays pinned to the shape the reader validates.  Imported inside the
+    function because ``tests.test_file_orchestration_journal`` imports THIS
+    module at load time.
+    """
+    from tests.test_file_orchestration_journal import _latest_view, _write_json
+
+    latest = _latest_view(cycle_time=cycle_time, model_id=model_id, hydro_status="complete")
+    path = journal_root / "latest" / "gfs" / format_cycle_time(cycle_time) / f"{model_id}.json"
+    _write_json(path, latest)
+    return path
+
+
+def _warm_start_toggle_state_entries(roots: Mapping[str, Path], checksum: str) -> list[dict[str, Any]]:
+    """Three consecutive current-generation checkpoints, one per 12h cycle.
+
+    Each entry sits exactly at its own cycle's expected warm-start identity
+    (``valid_time`` = cycle, ``cycle_id`` = cycle - 12h, ``lead_hours`` = 12),
+    so both the 12Z candidate and its 00Z predecessor see current-generation
+    history and land on the §8 warm-continue tail — the branch that re-reads the
+    orchestrator env via ``_db_free_strict_warm_start_required_for``.
+    """
+    entries = []
+    for valid_time, producer_cycle_id in (
+        (_WARM_START_TOGGLE_CANDIDATE_CYCLE, "gfs_2026052100"),
+        (_WARM_START_TOGGLE_PREDECESSOR_CYCLE, "gfs_2026052012"),
+        ("2026-05-20T12:00:00Z", "gfs_2026052000"),
+    ):
+        entries.append(
+            _old_generation_state_entry(
+                roots,
+                old_package_checksum=checksum,
+                state_id=f"state_gfs_model_a_{format_cycle_time(_dt(valid_time))}_current_gen",
+                valid_time=valid_time,
+                cycle_id=producer_cycle_id,
+                lead_hours=_WARM_START_TOGGLE_LEAD_HOURS,
+            )
+        )
+    return entries
+
+
+@dataclass
+class _WarmStartToggleFixture:
+    scheduler: Any
+    model: dict[str, Any]
+    registered_model: Any
+    journal_root: Path
+
+    def cycle(self, cycle_time: str) -> Any:
+        parsed = _dt(cycle_time)
+        return scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id=cycle_id_for("gfs", parsed),
+                source_id="gfs",
+                cycle_time=parsed,
+                cycle_hour=parsed.hour,
+                available=True,
+                status="discovered",
+            ),
+            horizon={},
+        )
+
+    def candidate(self, cycle_time: str) -> scheduler_module.SchedulerCandidate:
+        cycle = self.cycle(cycle_time)
+        return scheduler_module._candidate_for(
+            discovery=cycle.discovery, model=self.registered_model, horizon={}
+        )
+
+
+def _warm_start_toggle_fixture(monkeypatch: Any, tmp_path: Path) -> _WarmStartToggleFixture:
+    """DB-free scheduler whose §8 gate reaches the env-rereading tail."""
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    candidate_cycle = _dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    generated_at = _dt(_WARM_START_TOGGLE_NOW)
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=candidate_cycle,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    package_checksum = str(fixture["package_checksum"])
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=candidate_cycle,
+        package_checksum=package_checksum,
+        generated_at=generated_at,
+        entries=_warm_start_toggle_state_entries(roots, package_checksum),
+    )
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": package_checksum,
+        },
+    }
+    journal_root = paths["NHMS_SCHEDULER_JOURNAL_ROOT"]
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at, allowed_cycle_hours_utc=(0, 12)),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=scheduler_module.FileOrchestrationJournalRepository(journal_root),
+        orchestrator_factory=lambda _source_id: pytest.fail(
+            "the §8 gate probe must not build an orchestrator"
+        ),
+    )
+    return _WarmStartToggleFixture(
+        scheduler=scheduler,
+        model=model,
+        registered_model=scheduler_module._coerce_registered_model(model),
+        journal_root=journal_root,
+    )
+
+
+def _spy_on_strict_warm_start_evidence(
+    monkeypatch: Any, caplog: Any
+) -> list[dict[str, Any]]:
+    """Wrap the REAL ``strict_warm_start_evidence`` and record entry.
+
+    Records the log messages already emitted at entry so a test can prove the
+    unreadable-env warning landed BEFORE the strict path was taken.  Entry —
+    not a non-``None`` return — is the positive signal that the terminal-skip
+    shortcut was not taken: the strict path can legitimately return ``None``
+    itself (e.g. the legacy history-exists early return).
+    """
+    calls: list[dict[str, Any]] = []
+    real = scheduler_generation_gate_module.strict_warm_start_evidence
+
+    def _spy(scheduler: Any, candidate: Any, cycle: Any) -> Any:
+        calls.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "cycle_time_utc": candidate.cycle_time_utc,
+                "logs_at_entry": [record.getMessage() for record in caplog.records],
+            }
+        )
+        return real(scheduler, candidate, cycle)
+
+    monkeypatch.setattr(
+        scheduler_generation_gate_module, "strict_warm_start_evidence", _spy
+    )
+    return calls
+
+
+def test_unreadable_warm_start_env_takes_strict_path_and_fails_loudly(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 verdict 2: an unrelated env typo must not silently skip §8.
+
+    Before the fix the gate folded the parse failure into ``False``, the D8.9
+    terminal-skip fired on the journal-complete cycle and
+    ``_strict_warm_start_for_candidate`` returned ``None`` with no exception
+    and no log line.  Now: warning first, strict path entered, and the parse
+    failure re-raised from the warm-continue tail.
+    """
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    # Fixture guard: the D8.9 preflight really does see a completed pipeline,
+    # so the shortcut is genuinely reachable and this test cannot pass vacuously.
+    assert fixture.scheduler._candidate_pipeline_already_complete(candidate) is True
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        calls = _spy_on_strict_warm_start_evidence(monkeypatch, caplog)
+        with pytest.raises(ValueError) as raised:
+            fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle)
+
+    # (a) the strict path was entered — the shortcut did not fire.
+    assert [call["candidate_id"] for call in calls] == [candidate.candidate_id]
+    # (b) the terminal state is loud: the same parse failure re-raises from
+    # the env re-read on the warm-continue tail.
+    assert "invalid literal for int() with base 10: 'abc'" in str(raised.value)
+    # (c) the attributable warning had already landed when strict was entered.
+    assert any(
+        _WARM_START_UNREADABLE_TOKEN in message for message in calls[0]["logs_at_entry"]
+    )
+    assert [
+        record.name
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == [_WARM_START_GATE_LOGGER]
+
+
+def test_explicitly_disabled_warm_start_env_still_terminal_skips(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 must-preserve (D8.9): explicit false + journal-complete pipeline
+    keeps the pre-§8 terminal-skip, and unset behaves the same way."""
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        calls = _spy_on_strict_warm_start_evidence(monkeypatch, caplog)
+        monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+        assert fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+        monkeypatch.delenv("NHMS_REQUIRE_FORECAST_WARM_START", raising=False)
+        assert fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle) is None
+
+    assert calls == []
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == []
+
+
+def test_explicitly_enabled_warm_start_env_keeps_section8_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 must-preserve: explicit true still bypasses the compat shortcut
+    and emits §8 evidence for the journal-complete cycle, with no new logging."""
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=_dt(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    )
+    candidate = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    cycle = fixture.cycle(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    monkeypatch.delenv("FORECAST_HORIZON_HOURS", raising=False)
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        evidence = fixture.scheduler._strict_warm_start_for_candidate(candidate, cycle)
+
+    assert evidence is not None
+    assert evidence["ready"] is True
+    assert (
+        evidence["registry_cutover_transition"]["decision"]
+        == scheduler_generation_module.TransitionDecision.WARM_CONTINUE
+    )
+    # The strict-required tail returns the raw index evidence before the
+    # compat ``mode`` relabelling — the byte shape env=true always had.
+    assert "mode" not in evidence
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == []
+
+
+def _predecessor_pending_successor(
+    fixture: _WarmStartToggleFixture,
+) -> scheduler_module.SchedulerCandidate:
+    """A blocked successor pointing §8.6 at the 00Z predecessor cycle."""
+    successor = fixture.candidate(_WARM_START_TOGGLE_CANDIDATE_CYCLE)
+    predecessor_time = _dt(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+    return replace(
+        successor,
+        status="blocked",
+        reason="state_snapshot_index_prior_checkpoint_missing_after_history",
+        state_evidence={
+            "registry_cutover_transition": {
+                "decision": (
+                    scheduler_generation_module.TransitionDecision.BLOCK_PREDECESSOR_PENDING
+                ),
+                "generation": "gen-fixture",
+                "selected_predecessor": {
+                    "source_id": "gfs",
+                    "valid_time": _format_iso_z(predecessor_time),
+                    "lead_hours": _WARM_START_TOGGLE_LEAD_HOURS,
+                    "generation": "gen-fixture",
+                    "cycle_id": cycle_id_for("gfs", predecessor_time),
+                },
+            }
+        },
+    )
+
+
+def _emit_predecessor_backfill(
+    fixture: _WarmStartToggleFixture,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """Drive §8.6 predecessor emission through the REAL §8 gate."""
+
+    def _blocked_candidate_factory(
+        candidate: Any, reason: str, *, state_evidence: dict[str, Any] | None = None
+    ) -> Any:
+        return replace(
+            candidate, status="blocked", reason=reason, state_evidence=state_evidence or {}
+        )
+
+    candidates: list[Any] = []
+    blocked: list[Any] = [_predecessor_pending_successor(fixture)]
+    evidence = scheduler_backfill_predecessor_module.emit_predecessor_candidates(
+        models=[fixture.registered_model],
+        cycles=[fixture.cycle(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=scheduler_module._candidate_for,
+        strict_warm_start_for_candidate=fixture.scheduler._strict_warm_start_for_candidate,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        active_repository=fixture.scheduler.active_repository,
+    )
+    return candidates, blocked, evidence
+
+
+def test_unreadable_warm_start_env_fails_backfill_predecessor_closed(
+    monkeypatch: Any,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1196 verdict 4 (intended behavior change): on the §8.6 backfill path
+    an unreadable env stops ADMITTING the predecessor.
+
+    Before the fix the folded ``False`` plus the predecessor's own
+    journal-complete pipeline short-circuited the gate to ``None``, and
+    ``emit_predecessor_candidates`` admitted the predecessor with no error and
+    no log line.  Now the strict path raises, the emitter records
+    ``predecessor_gate_failed`` and the root cause is already in the log.
+    """
+    fixture = _warm_start_toggle_fixture(monkeypatch, tmp_path)
+    predecessor_time = _dt(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+    _seed_completed_journal_cycle_latest_view(
+        fixture.journal_root, cycle_time=predecessor_time
+    )
+    # Fixture guard: without a journal-complete PREDECESSOR the pre-fix gate
+    # would already fail closed and this lock would spin on nothing.
+    assert (
+        fixture.scheduler._candidate_pipeline_already_complete(
+            fixture.candidate(_WARM_START_TOGGLE_PREDECESSOR_CYCLE)
+        )
+        is True
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    monkeypatch.setenv("FORECAST_HORIZON_HOURS", "abc")
+
+    with caplog.at_level(logging.WARNING, logger=_WARM_START_GATE_LOGGER):
+        candidates, blocked, evidence = _emit_predecessor_backfill(fixture)
+
+    assert candidates == []
+    assert [record["reason"] for record in evidence] == ["predecessor_gate_failed"]
+    assert evidence[0]["error"] == "ValueError"
+    assert len(blocked) == 1
+    assert [
+        record.name
+        for record in caplog.records
+        if _WARM_START_UNREADABLE_TOKEN in record.getMessage()
+    ] == [_WARM_START_GATE_LOGGER]
+
+# --- Batch S (#1298 / #1299 / #1300): attempt / stage / live-failure scope discipline ---
+#
+# Three derivations that the row population's own candidate-identity discipline did not
+# reach.  ``pipeline_jobs`` is the UNFILTERED cycle-wide list, so every derivation that
+# scans it has to subtract the cohort's rows itself:
+#
+# * #1298 -- ``_state_retry_attempt``'s stage axis only ever had a suffix-aware arm for
+#   CANONICAL downstream stages; a non-canonical stage (a single-basin cycle's
+#   ``model_id``-stamped ``download`` row) short-circuited to the flat top-level
+#   ``retry_count``, which the journal's clean-reservation invariant has reset to 0.
+# * #1299 -- ``_state_jobs`` synthesizes the state itself as one id-less job row when the
+#   state carries no rows, so a top-level ``pipeline_status`` reached the candidate-scope
+#   live-failure domain the module's own docstring said it could not.
+# * #1300 -- ``_failed_stage``'s row scan named a model-less cohort row's stage as the
+#   candidate's failed stage, so the cohort's persisted counter became the candidate's
+#   attempt and retry-limit budget.
+#
+# REACHABILITY of ``_candidate_failed_stage``'s row-scan branch (#1300 AC, closed here).
+# The branch is only reached when no top-level ``failed_stage``/``stage``/``restart_stage``
+# resolves while job rows survive.  The five shapes, and what each one does:
+#
+# 1. the candidate has a surviving candidate-scoped row: the projection writes THAT row's
+#    stage into the top-level ``stage`` key (``chain_repository_state.py:856-859``), so the
+#    explicit-key branch decides and nothing changes (pinned by
+#    ``test_surviving_candidate_row_keeps_the_top_level_failed_stage_path_out_of_cycle_scope``);
+# 2. the candidate's live failure is a ``cancelled`` row or hydro run -- invisible to the
+#    projection's failed-job selection -- while the cohort row survives: the shape #1300
+#    reproduced (``test_cohort_stage_counter_*``);
+# 3. the repaired-stage-evidence branch (``chain_repository_state.py:825-830``) clears the
+#    failed job while retaining every row -- but it fires only when the candidate owns NO
+#    rows (``failed_task is None and not candidate_jobs``), which is not the head shape
+#    below.  Its sibling nulling block (``:884-896``) does write ``stage``/``failed_stage``
+#    None while retaining rows, but only inside ``if restart_stage not in (None, "")``, so
+#    its output always carries a non-empty ``restart_stage`` that the explicit-key loop
+#    reads third.  Since #1461 the completed-stage scan (``:902-916``) is an independent
+#    ``if`` rather than that block's ``elif``, so repaired evidence carrying NO restart stage
+#    no longer suppresses it: that only ever ADDS a non-empty ``restart_stage``, i.e. it
+#    moves shapes further away from this row-scan branch, never towards it.  No branch here
+#    casts "candidate row present + no top-level stage key";
+# 4. the identity filter's ``_strip_top_level_pipeline_decision_fields``
+#    (``scheduler_state_identity_filter.py:678``) removes those keys from the decision
+#    state while retaining rows;
+# 5. the top-level key is cast by ``active_source_cycle_failure``
+#    (``chain_repository_state.py:820-824``) -- a CYCLE-SCOPE source-cycle download row.
+#    That is the explicit-key branch and stays byte-for-byte unchanged: #1287's download AC
+#    depends on it (pinned by the ``download`` case of ``test_cohort_stage_counter_*``).
+#
+# Shape 4 is the ONLY true reachable channel for the head shape used below: with a
+# surviving candidate row the DB projection always writes shape 1's top-level ``stage``,
+# so "candidate row present + no top-level stage" cannot be cast by the projection
+# directly.  The second parametrization axis of ``test_cohort_stage_counter_*`` (the keys
+# present with a ``None`` value) is therefore a SYNTHETIC shape pinning an equivalence --
+# absent keys and null keys must read alike -- not a second reachable channel.
+
+_BATCH_S_COHORT_JOB_TYPES = {
+    "forecast": "run_shud_forecast_array",
+    "convert": "convert_canonical",
+    "forcing": "produce_forcing_array",
+    "parse": "parse_shud_output",
+    "state_save_qc": "state_save_qc",
+    "publish": "publish_tiles",
+    "download": "download_source_cycle",
+}
+
+
+def _batch_s_cohort_job(stage: str, *, retry_count: int = 7, status: str = "failed") -> dict[str, Any]:
+    """A multi-basin cycle's model-less cohort row at ``stage``.
+
+    ``chain_runtime_utils._cycle_pipeline_job_model_id`` returns ``None`` for every cycle
+    stage once the cycle has more than one basin, and
+    ``accepted_submit_identity`` writes the forecast cohort stage model-less
+    unconditionally -- so this is the production cohort row shape, and
+    ``_job_is_cycle_scope_row`` recognises it (empty ``model_id`` + ``cycle_`` run id).
+    Its ``retry_count`` is the counter the auto-retry service durably persists for the
+    WHOLE cohort.
+    """
+
+    return {
+        "job_id": f"job_cycle_gfs_2026052106_{stage}",
+        "run_id": "cycle_gfs_2026052106",
+        "cycle_id": "gfs_2026052106",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "model_id": None,
+        "stage": stage,
+        "job_type": _BATCH_S_COHORT_JOB_TYPES[stage],
+        "status": status,
+        "error_code": "NODE_FAILURE",
+        "retry_count": retry_count,
+        "updated_at": "2026-05-21T06:10:00Z",
+    }
+
+
+def _batch_s_cohort_marker(stage: str, *, retry_count: int = 8) -> dict[str, Any]:
+    """The operator's manual retry of the cohort row above.
+
+    ``retry_count`` is the row's counter plus one, the relation the journal mints
+    (``file_orchestration_journal.record_manual_repair``).
+    """
+
+    return _decision_path_manual_retry_marker(
+        entity_id=f"job_cycle_gfs_2026052106_{stage}",
+        retry_count=retry_count,
+        previous_job_id=f"job_cycle_gfs_2026052106_{stage}",
+        event_id=42,
+    )
+
+
+def _batch_s_stamped_job(*, stage: str, attempt: int, **overrides: Any) -> dict[str, Any]:
+    """The candidate's OWN row at a cycle stage, as a SINGLE-BASIN cycle stamps it.
+
+    Same helper the round-4 family-floor group uses: a non-empty ``model_id`` makes this
+    candidate scope, so the cycle-scope subtraction must NOT drop it.
+    """
+
+    job = _decision_path_single_basin_cohort_job(
+        stage=stage,
+        job_type=_BATCH_S_COHORT_JOB_TYPES[stage],
+        attempt=attempt,
+    )
+    job.update(overrides)
+    return job
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_attempt"),
+    [
+        pytest.param("download", 4, id="non_canonical_download"),
+        pytest.param("forecast", 4, id="canonical_forecast"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("job_overrides", "expected_id_only_attempt"),
+    [
+        pytest.param({}, 4, id="attempt_from_id_suffix"),
+        pytest.param(
+            {"job_id": "cycle_gfs_2026052106_retry_active", "retry_count": 4},
+            0,
+            id="attempt_from_recorded_count",
+        ),
+    ],
+)
+def test_non_canonical_family_stage_fallback_floor_mints_the_next_attempt(
+    stage: str,
+    expected_attempt: int,
+    job_overrides: dict[str, Any],
+    expected_id_only_attempt: int,
+) -> None:
+    """#1298 (E1/E2): the family floor must read a NON-canonical stage's consumed attempt too.
+
+    The candidate's only live failure is a ``cancelled`` row that records the consumed
+    attempt 4; the top-level ``retry_count`` is 0 (the journal's clean-reservation
+    invariant) and no failed stage resolves, so ``_fallback_previous_attempt``'s gate is open
+    and the family floor is what decides.  The stage cases differ in ONE field -- the row's
+    ``stage`` literal -- and must answer identically.
+
+    The second axis is WHERE the row's attempt is recorded, because the arm's counting rule
+    takes the higher of the two.  ``attempt_from_id_suffix`` is the auto-retry shape
+    (``_pipeline_retry_job_id`` mints ``_retry_4`` while the master row's counter is 0).
+    ``attempt_from_recorded_count`` is the FIRST manual retry of a run:
+    ``retry._next_manual_retry_job_id_for_run`` mints ``<run_id>_retry_active``, which
+    ``split_retry_job_identity`` cannot parse, and ``_create_pending_manual_retry_job``
+    carries the attempt in ``retry_count`` alone -- so on that row the recorded counter is
+    the only attempt evidence and dropping it re-mints a consumed identity.
+
+    Before the fix ``_state_retry_attempt(state, stage="download")`` short-circuited to the
+    flat 0 because ``download`` is not in ``DOWNSTREAM_RESTART_STAGES``, so the floor
+    vanished and ``new_attempt`` re-minted the consumed attempt 1: production reads that as a
+    reservation conflict and silently skips the submission.  The canonical control already
+    answered 5 and must keep doing so.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    job = _batch_s_stamped_job(
+        stage=stage,
+        attempt=4,
+        status="cancelled",
+        error_code=None,
+        **job_overrides,
+    )
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[job],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the row survived filtering, it really is candidate scope, its attempt really
+    # comes from the axis under test, the gate really is open, and the family really is the
+    # single stage under test.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        job_overrides.get("job_id", f"job_cycle_gfs_2026052106_{stage}_retry_4")
+    ]
+    assert (
+        scheduler_state_rows_module._job_is_cycle_scope_row(decision_state["pipeline_jobs"][0]) is False
+    )
+    assert (
+        scheduler_state_rows_module.effective_retry_attempt(job["job_id"], 0) == expected_id_only_attempt
+    )
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) is None
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {stage}
+
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage=stage) == expected_attempt
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 5
+
+
+def test_stage_less_state_retry_attempt_is_unchanged_beside_non_canonical_rows() -> None:
+    """#1298 (E3): the ``stage=None`` arm keeps its flat-first order and cross-job max.
+
+    The evidence-owner and the stage-less manual-retry consumers read that arm, so the new
+    non-canonical arm must sit strictly beside it.  Both of its branches are pinned on one
+    state carrying a cycle-scope ``download`` row (recorded 7) and the candidate's own
+    ``download_retry_4``: with a flat key the flat value wins outright (0, even though rows
+    carry more), and without any flat key the answer is the max over EVERY row's recorded
+    count -- cycle-scope rows included (7).  That second reading is the pre-existing
+    window-sensitive flat channel of #1579; the projection always writes a top-level
+    ``retry_count``, but the identity filter's top-level strip removes it while the rows
+    survive, so the channel stays reachable on the decision path and this batch does not
+    narrow it.
+
+    The same flat-less state is also the sharpest place to pin the two arms apart: with a
+    ``stage`` argument the answer is the candidate's own 4 (the new arm's candidate-scope
+    scan), without one it is the cohort's 7.  That is the ``flat is None`` sub-domain, where
+    the new arm NARROWS master's stage-blind cross-row max rather than widening it.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            _decision_path_cycle_download_job(retry_count=7),
+            _batch_s_stamped_job(stage="download", attempt=4, status="cancelled", error_code=None),
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    flat_less = {
+        key: value
+        for key, value in decision_state.items()
+        if key not in ("retry_attempt", "attempt", "retry_count")
+    }
+
+    assert decision_state["retry_count"] == 0
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state) == 0
+    assert scheduler_state_rows_module._state_retry_attempt(flat_less) == 7
+    assert scheduler_state_rows_module._state_retry_attempt(flat_less, stage="download") == 4
+
+
+def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter() -> None:
+    """#1298 (E4): the new arm carries the candidate-scope discipline from its first day.
+
+    The identity filter keeps the source-cycle ``download`` row (its retained-download
+    carve-out), so a raw stage-name match would read the COHORT's persisted counter 7 beside
+    the candidate's own consumed 4 -- #1300's defect reproduced on the brand new arm, and a
+    direct regression of #1287's download AC (3 -> 8).
+
+    Mutation pin: delete the ``not _job_is_cycle_scope_row(job)`` conjunct from
+    ``_state_non_canonical_stage_retry_attempt`` and this test reds with 7 / 8.
+
+    The last assertion pins the other half of the arm's composition -- the flat term the
+    canonical arm also carries.  The projection aggregates the flat ``retry_count`` as a max
+    across the candidate's rows at ALL stages, so a flat value above the row-derived one is
+    ordinary; dropping the ``max(flat or 0, ...)`` wrapper lowers the answer and reds here.
+    It is asserted on a copy so the leg's own ``previous_attempt == 0`` premise (which needs
+    flat 0) is untouched.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            _decision_path_cycle_download_job(retry_count=7),
+            _batch_s_stamped_job(stage="download", attempt=4, status="cancelled", error_code=None),
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: both rows survived, the cohort row really is cycle scope and really does carry
+    # the higher consumed record, and only the candidate's own row is in the family.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_cycle_gfs_2026052106_download",
+        "job_cycle_gfs_2026052106_download_retry_4",
+    ]
+    cohort_row, own_row = decision_state["pipeline_jobs"]
+    assert scheduler_state_rows_module._job_is_cycle_scope_row(cohort_row) is True
+    assert (
+        scheduler_state_rows_module.effective_retry_attempt(cohort_row["job_id"], cohort_row["retry_count"])
+        == 7
+    )
+    assert scheduler_state_rows_module._job_is_cycle_scope_row(own_row) is False
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"download"}
+
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="download") == 4
+    assert (
+        scheduler_state_rows_module._state_retry_attempt(
+            {**decision_state, "retry_count": 6}, stage="download"
+        )
+        == 6
+    )
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 5
+
+
+def _batch_s_non_canonical_window_jobs() -> list[dict[str, Any]]:
+    """A candidate-scoped ``download`` pair whose HIGHER attempt is the oldest row.
+
+    The projection truncates ``pipeline_jobs`` to ``job_limit`` by pure freshness, so a
+    small enough window drops ``_retry_9`` and keeps ``_retry_4``.  Everything is
+    ``model_id``-stamped on the candidate's own run id, i.e. candidate scope throughout.
+    """
+
+    return [
+        _retention_job(
+            "job_fcst_gfs_2026072000_model_a_download_retry_9",
+            stage="download",
+            job_type="download_source_cycle",
+            status="cancelled",
+            minutes=1,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+        *[
+            _retention_job(
+                f"job_fcst_gfs_2026072000_model_a_publish_{index}",
+                stage="publish",
+                job_type="publish_tiles",
+                status="succeeded",
+                minutes=20 + index,
+                run_id=_RETENTION_RUN_ID,
+                model_id="model_a",
+            )
+            for index in range(2)
+        ],
+        _retention_job(
+            "job_fcst_gfs_2026072000_model_a_download_retry_4",
+            stage="download",
+            job_type="download_source_cycle",
+            status="cancelled",
+            minutes=30,
+            run_id=_RETENTION_RUN_ID,
+            model_id="model_a",
+        ),
+    ]
+
+
+def test_non_canonical_arm_reads_only_the_projected_row_window() -> None:
+    """#1298 (E5): the non-canonical arm is window-sensitive, on purpose and on the record.
+
+    ``stage_retry_attempt_floors`` (#1179) skips every row whose stage is not canonical, so
+    a non-canonical stage carries NO upper bound across the ``job_limit`` truncation: the
+    arm answers what the surviving window holds (4) rather than the untruncated maximum (9).
+    This is the live proof of the boundary the arm's docstring and the spec both state; the
+    #1298 trigger geometry (a single-basin cycle with a handful of rows) sits far from the
+    truncation, so the floors key domain is deliberately not widened for it.
+    """
+
+    jobs = _batch_s_non_canonical_window_jobs()
+    truncated = _retention_state(jobs, job_limit=3)
+    untruncated = _retention_state(jobs, job_limit=10)
+
+    # Premise: the window really did drop the higher row, and no floor covers ``download``.
+    assert "job_fcst_gfs_2026072000_model_a_download_retry_9" not in _retention_job_ids(truncated)
+    assert "job_fcst_gfs_2026072000_model_a_download_retry_9" in _retention_job_ids(untruncated)
+    assert "download" not in truncated[scheduler_state_rows_module.STAGE_RETRY_ATTEMPT_FLOORS_KEY]
+
+    assert scheduler_state_rows_module._state_retry_attempt(untruncated, stage="download") == 9
+    assert scheduler_state_rows_module._state_retry_attempt(truncated, stage="download") == 4
+
+
+def _batch_s_synthesized_state(
+    *,
+    pipeline_status: str | None,
+    jobs_shape: str,
+    stage: str | None = None,
+) -> dict[str, Any]:
+    """A state with NO job rows: ``_state_jobs`` synthesizes the state itself as one row.
+
+    ``pipeline_jobs`` absent and ``pipeline_jobs: []`` both fall through to that third
+    fallback, and the synthesized row carries no ``job_id`` -- the shape no production read
+    path can cast (the DB SELECT's first column and the journal's upsert key are both
+    ``job_id``).
+    """
+
+    state: dict[str, Any] = {
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "pipeline_events": [
+            _decision_path_manual_retry_marker(
+                entity_id="job_cycle_gfs_2026052106_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+            )
+        ],
+    }
+    if pipeline_status is not None:
+        state["pipeline_status"] = pipeline_status
+    if stage is not None:
+        state["stage"] = stage
+    if jobs_shape == "empty_list":
+        state["pipeline_jobs"] = []
+    return state
+
+
+@pytest.mark.parametrize("jobs_shape", ["absent", "empty_list"])
+@pytest.mark.parametrize(
+    "pipeline_status",
+    ["cancelled", "failed", "permanently_failed", "succeeded", None],
+    ids=["cancelled", "failed", "permanently_failed", "succeeded", "absent"],
+)
+def test_synthesized_id_less_row_is_not_a_live_candidate_scope_failure(
+    pipeline_status: str | None,
+    jobs_shape: str,
+) -> None:
+    """#1299 (E6): a top-level ``pipeline_status`` must not close the only-failure-left arm.
+
+    ``_state_jobs``'s third fallback returns ``dict(state)``, ``_job_status_text`` reads
+    ``status or pipeline_status or job_status``, and the cycle-scope pin rule's arm 2 asks
+    "is this cycle failure the only failure left".  So on a row-less state the top-level
+    ``pipeline_status`` -- which records the very cycle failure being repaired -- was read as
+    a candidate-scope live failure and the operator's pinned ``retry_count`` 5 was discarded
+    for a re-minted 1.
+
+    All ten cells now answer 5: the failing statuses join ``succeeded`` and the absent key
+    instead of splitting off.  Before the fix ``cancelled`` / ``failed`` /
+    ``permanently_failed`` answered 1 on both ``pipeline_jobs`` shapes.
+    """
+
+    state = _batch_s_synthesized_state(pipeline_status=pipeline_status, jobs_shape=jobs_shape)
+
+    # Premise: this really is the synthesized-row shape -- one row, no job id.
+    synthesized = scheduler_state_rows_module._state_jobs(state)
+    assert len(synthesized) == 1
+    assert synthesized[0].get("job_id") is None
+
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(state) is False
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 5
+
+
+def test_id_bearing_cancelled_row_is_still_a_live_candidate_scope_failure() -> None:
+    """#1299 (E7): the row-identity guard must not touch REAL rows.
+
+    A ``cancelled`` model-scoped forecast row is a live candidate-scope failure (#1287), so
+    the cross-stage cycle-download marker's counter 5 stays refused and the derivation falls
+    back to the candidate's own budget.  Narrowing the guard to "carries a job id" is what
+    keeps this #1287 semantic intact.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_decision_path_cycle_download_marker()],
+        jobs=[
+            {**_decision_path_own_forecast_job(), "status": "cancelled"},
+            _decision_path_cycle_download_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(decision_state) is True
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == 1
+    assert "new_attempt" not in scheduler_module._manual_retry_payload(decision_state)
+
+
+@pytest.mark.parametrize(
+    ("shape", "state_fields"),
+    [
+        pytest.param(
+            "flattened_with_job_id",
+            {
+                "job_id": "job_model_a_forecast",
+                "pipeline_status": "failed",
+                "stage": "forecast",
+            },
+            id="flattened_with_job_id",
+        ),
+        pytest.param(
+            "single_mapping",
+            {
+                "pipeline_job": {
+                    "job_id": "job_model_a_forecast",
+                    "pipeline_status": "failed",
+                    "stage": "forecast",
+                }
+            },
+            id="single_mapping",
+        ),
+    ],
+)
+def test_id_bearing_flattened_and_single_mapping_states_keep_their_live_failure_reading(
+    shape: str,
+    state_fields: dict[str, Any],
+) -> None:
+    """#1299 (E8): the guard is ID-shaped, not row-count-shaped.
+
+    ``_unresolvable_marker_entity_pins_attempt`` has a recorded dependency on the fail-open
+    behaviour of the single-mapping and flattened historical state shapes, and BOTH of those
+    embed a job id -- the flattened one at the state's top level, which ``_state_jobs``'s
+    field set recognises.  So both keep synthesizing an id-BEARING row, both keep reading as
+    a live candidate-scope failure, and both keep refusing the marker's 5.  Only the id-less
+    row moves; the docstring and the spec say exactly that.
+    """
+
+    state: dict[str, Any] = {
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "pipeline_events": [
+            _decision_path_manual_retry_marker(
+                entity_id="job_cycle_gfs_2026052106_download",
+                retry_count=5,
+                previous_job_id="job_cycle_gfs_2026052106_download",
+            )
+        ],
+        **state_fields,
+    }
+
+    assert scheduler_state_rows_module._state_jobs(state)[0]["job_id"] == "job_model_a_forecast"
+    assert scheduler_state_manual_retry_module._state_has_candidate_scope_failed_job(state) is True
+    assert scheduler_state_manual_retry_module._restarted_stage_family(state) == {"forecast"}
+    assert scheduler_module._manual_retry_new_attempt(state, previous_attempt=0) == 1
+
+
+def test_synthesized_id_less_row_contributes_no_stage_to_the_restarted_stage_family() -> None:
+    """#1299 (E8 flank): the family's membership test is the same predicate, so it narrows too.
+
+    An id-less flattened state carrying a failing ``pipeline_status`` and a top-level
+    ``stage`` used to hand ``_restarted_stage_family`` a stage that no real row backs.  The
+    family narrows with the live-failure domain by construction -- which is the direction the
+    domain's definition demands, and harmless for the pin, whose arm 2 opens on "no live
+    failure" anyway.
+    """
+
+    state = _batch_s_synthesized_state(pipeline_status="failed", jobs_shape="absent", stage="forecast")
+
+    assert scheduler_state_rows_module._state_jobs(state)[0]["stage"] == "forecast"
+    assert scheduler_state_manual_retry_module._restarted_stage_family(state) == set()
+
+
+def _batch_s_cohort_stage_state(
+    candidate: scheduler_module.SchedulerCandidate,
+    *,
+    stage: str,
+    top_level_shape: str,
+    events: list[dict[str, Any]],
+    **overrides: Any,
+) -> dict[str, Any]:
+    """#1300's head shape: a cohort row beside the candidate's own consumed ``cancelled`` row.
+
+    ``top_level_shape`` selects how the top-level stage keys go missing (see the reachability
+    enumeration at the top of this block).  ``absent`` is the real channel: the identity
+    filter's ``_strip_top_level_pipeline_decision_fields`` pops the keys while the rows are
+    re-attached after the strip.  ``explicit_none`` is a SYNTHETIC shape -- no projection
+    branch emits null stage keys beside a surviving candidate row -- and what it pins is the
+    resolver's equivalence: a key absent and a key present with a ``None`` value must both
+    fall through to the row scan, so a future projection change that starts writing the keys
+    null cannot flip the answer.
+    """
+
+    state = _decision_path_state(
+        candidate,
+        events=events,
+        jobs=[
+            _batch_s_cohort_job(stage),
+            _decision_path_consumed_own_forecast_job(status="cancelled", error_code=None),
+        ],
+        failed_stage=None,
+        **overrides,
+    )
+    if top_level_shape == "explicit_none":
+        # The repaired branch writes the keys PRESENT and null, where the strip removes them
+        # outright -- ``_failed_stage`` reads both the same way, and that equivalence is what
+        # this axis pins.
+        state["stage"] = None
+        state["failed_stage"] = None
+        state["repaired_stage_evidence"] = {
+            # A DIFFERENT job than the marker's target: this axis is about the top-level keys
+            # the projection nulls, not about marker staleness.
+            "original_failed_job_id": "job_model_a_forcing_retry_1",
+            "job_id": "job_model_a_forcing_retry_2",
+        }
+    return state
+
+
+@pytest.mark.parametrize("top_level_shape", ["absent", "explicit_none"])
+@pytest.mark.parametrize(
+    "stage",
+    ["convert", "forcing", "parse", "state_save_qc", "publish", "download"],
+)
+def test_cohort_stage_counter_is_not_charged_to_the_candidate_budget(
+    stage: str,
+    top_level_shape: str,
+) -> None:
+    """#1300 (E9/E12): a cohort row's stage must never become the candidate's failed-stage axis.
+
+    The cohort row persists ``retry_count`` 7 and the operator's marker over it carries 8;
+    the candidate's own live failure is a ``cancelled`` forecast row whose id records the
+    consumed attempt 2.  The candidate's own answer is 3 -- its own record plus one.
+
+    Before the fix every CANONICAL cohort stage answered 8: ``_failed_stage`` named the
+    cohort's stage, the stage-scoped derivation then counted the cohort row (and zeroed the
+    candidate's own forecast row for "not matching the stage"), and the fallback's gate saw a
+    canonical stage and skipped the family floor entirely.  ``download`` already answered 3
+    because it is not canonical -- PR #1293's #1287 AC -- and is carried here as the
+    regression pin for that column.
+
+    All four switched consumption points are needed for 3: with only the three in
+    ``scheduler_state_failure`` switched, the gate still reads the unscoped ``_failed_stage``,
+    stays closed on a canonical cohort stage and answers 1 -- a replay of the consumed
+    ``_retry_2`` identity, worse than the 8 it replaces.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _batch_s_cohort_stage_state(
+        candidate,
+        stage=stage,
+        top_level_shape=top_level_shape,
+        events=[_batch_s_cohort_marker(stage)],
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: both rows survive filtering, no top-level stage key resolves, the unscoped
+    # derivation really does name the cohort's stage, and the candidate's own record is 2.
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        f"job_cycle_gfs_2026052106_{stage}",
+        "job_model_a_forecast_retry_2",
+    ]
+    assert scheduler_state_failure_module._failed_stage(decision_state) == stage
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) is None
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"forecast"}
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="forecast") == 2
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["retry_policy"]["attempt"] == 3
+    assert decision.evidence["manual_retry"]["previous_attempt"] == 0
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize(
+    "stage",
+    ["convert", "forcing", "parse", "state_save_qc", "publish", "download"],
+)
+def test_cohort_stage_counter_does_not_exhaust_the_candidate_retry_limit(stage: str) -> None:
+    """#1300 (E10): the same blind axis also drove the automatic-retry classification.
+
+    Same geometry without the marker and with ``retry_limit`` 3: the cohort's 7th retry made
+    ``classify_failure`` report ``limit_exhausted`` and the ladder demoted a candidate on its
+    own SECOND attempt to a permanent ``retry_limit_exhausted`` block -- silently, with no
+    evidence of whose counter it was.  Every stage now classifies the candidate against its
+    own attempt and stays retryable.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _batch_s_cohort_stage_state(
+        candidate,
+        stage=stage,
+        top_level_shape="absent",
+        events=[],
+        retry_limit=3,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    payload = scheduler_state_failure_module._failure_policy_payload(decision_state)
+
+    assert payload["attempt"] == 0
+    assert payload["limit_exhausted"] is False
+    assert payload["permanent"] is False
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    assert decision is not None
+    # The candidate is retried rather than demoted.  The exact rung differs per stage (the
+    # missing-output recompute channel claims the late stages first), so the pin is the
+    # ACTION plus the absence of the permanent-block reason the cohort's counter produced.
+    assert decision.action == "retry"
+    assert decision.reason != "retry_limit_exhausted"
+
+
+def test_surviving_candidate_row_keeps_the_top_level_failed_stage_path_out_of_cycle_scope() -> None:
+    """#1300 (E11 leg 2): the explicit-key branch is byte-for-byte unchanged.
+
+    Reachable shape 1: the candidate has a surviving candidate-scoped failed row, so the
+    projection writes its stage into the top-level key and the row scan is never reached.
+    The candidate's consumed ``_retry_2`` forecast record therefore still composes
+    ``previous_attempt`` 2 beside the cohort's 7.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_batch_s_cohort_marker("convert")],
+        jobs=[
+            _batch_s_cohort_job("convert"),
+            _decision_path_consumed_own_forecast_job(),
+        ],
+        failed_stage="forecast",
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) == "forecast"
+    assert scheduler_state_failure_module._failed_stage(decision_state) == "forecast"
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 2
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 3
+
+
+def test_failed_stage_still_routes_restarts_from_the_cycle_scope_row() -> None:
+    """#1300 (E11 leg 3): the routing consumer keeps the UNSCOPED derivation.
+
+    ``_failed_stage`` answers "which stage of this cycle failed" and the restart router wants
+    exactly that -- a cohort row may name the stage to restart from.  Only the consumers that
+    eat ATTEMPT semantics were repointed, so the retry evidence's ``stage`` /
+    ``restart_stage`` still name the cohort's ``convert`` even though the candidate-scoped
+    derivation resolves nothing.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[],
+        jobs=[
+            _batch_s_cohort_job("convert", retry_count=0),
+            _decision_path_consumed_own_forecast_job(status="cancelled", error_code=None),
+        ],
+        failed_stage=None,
+        retry_limit=9,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    evidence = scheduler_state_failure_module._retry_failure_evidence(candidate, decision_state, {})
+
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) is None
+    assert evidence["stage"] == "convert"
+    assert evidence["restart_stage"] == "convert"
+    assert evidence["restart_from_stage"] == "convert"
+
+
+def test_gate_open_surface_floors_only_within_the_restarted_stage_family() -> None:
+    """#1300 (E11 leg 4): the gate's newly opened surface only ever raises, within the family.
+
+    Repointing ``_fallback_previous_attempt``'s gate at the candidate-scoped derivation opens
+    it on every geometry where ``_failed_stage`` is canonical while
+    ``_candidate_failed_stage`` resolves nothing -- the widest behaviour change in this batch.
+    Here that surface carries a cross-stage trap: the candidate's own ``forcing_retry_7`` row
+    sits OUTSIDE the restarted stage family (it is succeeded, so it is no live failure), so
+    the newly opened floor must not charge its 7.
+
+    Before: gate closed on the cohort's canonical ``convert``, ``previous_attempt`` composed
+    the cohort's 7, ``new_attempt`` 8.  After: the gate opens, the family is ``{"forecast"}``
+    alone and the floor is the candidate's own consumed 2 -- 3, not 8 and not the forcing
+    row's 8.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_batch_s_cohort_marker("convert")],
+        jobs=[
+            _batch_s_cohort_job("convert"),
+            _decision_path_own_consumed_forcing_job(attempt=7),
+            _decision_path_consumed_own_forecast_job(status="cancelled", error_code=None),
+        ],
+        failed_stage=None,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+
+    # Premise: the gate really is open only because of the repointing, and the cross-stage
+    # consumed record really is present and really is outside the family.
+    assert (
+        scheduler_state_rows_module._canonical_downstream_stage(
+            scheduler_state_failure_module._failed_stage(decision_state)
+        )
+        == "convert"
+    )
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) is None
+    assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"forecast"}
+    assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="forcing") == 7
+
+    previous_attempt = _production_previous_attempt(decision_state)
+    assert previous_attempt == 0
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=previous_attempt) == 3
+
+
+@pytest.mark.usefixtures("recorded_forcing_package_present")
+@pytest.mark.parametrize(
+    ("retry_limit", "with_marker", "expected_classification", "expected_decision"),
+    [
+        pytest.param(9, True, (True, False, False), None, id="within_limit"),
+        pytest.param(3, True, (False, True, True), None, id="limit_exhausted"),
+        pytest.param(
+            3,
+            False,
+            (False, True, True),
+            ("blocked", "retry_limit_exhausted"),
+            id="limit_exhausted_blocks_the_decision",
+        ),
+    ],
+)
+def test_candidate_scoped_non_canonical_failure_reaches_the_policy_axis_without_the_cohort_counter(
+    retry_limit: int,
+    with_marker: bool,
+    expected_classification: tuple[bool, bool, bool],
+    expected_decision: tuple[str, str] | None,
+) -> None:
+    """#1298 x #1300 (E13): the two fixes meet on one state and neither leaks.
+
+    The candidate's own ``model_id``-stamped ``download_retry_4`` row is FAILED, so
+    ``_candidate_failed_stage``'s row scan names ``download`` after skipping the cohort's
+    ``download`` row -- and the policy payload's attempt axis then reads that non-canonical
+    stage through the new arm, which excludes the very cohort row (counter 7) the scan just
+    skipped.  Both halves are load-bearing: without #1300 the axis is the cohort's row all
+    the same, and without #1298 a resolved ``download`` axis short-circuits to the flat 0.
+
+    ``retry_limit`` is the second axis because the new attempt value is not only reported,
+    it CLASSIFIES.  Master answered the flat 0 here and stayed retryable at every limit; the
+    candidate's own consumed attempt 4 now exhausts a limit of 3, and the marker-less cell
+    carries that through to the emitted decision (``blocked`` / ``retry_limit_exhausted``
+    where master retried).  That is the main spec's "the configured retry limit bounds
+    retries even for misclassified failures" taking effect on a non-canonical stage; the
+    marker-bearing cells stay on the manual-retry rung, which claims the decision first, so
+    the demotion is only observable without a marker (E10's shape at the opposite verdict).
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    state = _decision_path_state(
+        candidate,
+        events=[_batch_s_cohort_marker("download")] if with_marker else [],
+        jobs=[
+            _decision_path_cycle_download_job(retry_count=7),
+            _batch_s_stamped_job(stage="download", attempt=4, status="failed", error_code="NODE_FAILURE"),
+        ],
+        failed_stage=None,
+        retry_limit=retry_limit,
+    )
+
+    decision_state = _decision_path_filtered_state(candidate, state)
+    payload = scheduler_state_failure_module._failure_policy_payload(decision_state)
+
+    assert [job["job_id"] for job in decision_state["pipeline_jobs"]] == [
+        "job_cycle_gfs_2026052106_download",
+        "job_cycle_gfs_2026052106_download_retry_4",
+    ]
+    assert scheduler_state_failure_module._candidate_failed_stage(decision_state) == "download"
+    assert payload["stage"] == "download"
+    assert payload["attempt"] == 4
+    assert (payload["retryable"], payload["permanent"], payload["limit_exhausted"]) == (
+        expected_classification
+    )
+
+    if expected_decision is not None:
+        decision = scheduler_module._candidate_state_decision(candidate, state)
+        assert decision is not None
+        assert (decision.action, decision.reason) == expected_decision
+
+
+def test_strict_warm_start_budget_state_retry_attempt_is_unreachable_from_the_non_canonical_arm() -> None:
+    """#1298 (E14, AC-4): the sibling budget read point reads a CONSTANT canonical stage.
+
+    ``scheduler_candidates._strict_warm_start_terminal_mismatch_decision`` reads
+    ``_state_retry_attempt(state, stage=_STRICT_WARM_START_TERMINAL_RESTART_STAGE)`` with
+    that constant fixed to ``"forecast"``, so the new arm is structurally unreachable there.
+    This is the live evidence rather than a table verdict: a candidate-scoped
+    ``download_retry_9`` row sits in the same state and the new arm really does read it
+    (9), while the budget still answers the forecast record 2 and blocks at ``retry_limit`` 2.
+    """
+
+    state = _retention_state(
+        [
+            _retention_job(
+                "job_fcst_gfs_2026072000_model_a_download_retry_9",
+                stage="download",
+                job_type="download_source_cycle",
+                status="cancelled",
+                minutes=1,
+                run_id=_RETENTION_RUN_ID,
+                model_id="model_a",
+            ),
+            _retention_job(
+                "job_fcst_gfs_2026072000_model_a_forecast_retry_2",
+                stage="forecast",
+                job_type="run_shud_forecast_array",
+                status="failed",
+                minutes=5,
+                run_id=_RETENTION_RUN_ID,
+                model_id="model_a",
+            ),
+        ],
+        job_limit=10,
+        retry_limit=2,
+    )
+
+    # Premise: the new arm is live on this very state.
+    assert scheduler_state_rows_module._state_retry_attempt(state, stage="download") == 9
+    assert scheduler_state_rows_module._state_retry_attempt(state, stage="forecast") == 2
+
+    decision = scheduler_candidates_module._strict_warm_start_terminal_mismatch_decision(
+        {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        {"ready": True, "candidate_state": {"init_state_id": "state_a"}},
+        state,
+    )
+
+    assert decision.action == "blocked"
+    assert decision.reason == "strict_warm_start_retry_budget_exhausted"
+    assert decision.evidence["retry_policy"]["attempt"] == 2
+    assert decision.evidence["retry_policy"]["retry_limit"] == 2

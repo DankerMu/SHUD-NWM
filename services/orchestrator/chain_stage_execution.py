@@ -13,6 +13,7 @@ from services.orchestrator.accepted_submit_identity import (
     AcceptedSubmitTransition,
     accepted_submit_pipeline_job_model_id,
 )
+from services.orchestrator.chain_array_accounting import settled_cohort_master
 from services.orchestrator.chain_config import SubmitDisposition
 from services.orchestrator.chain_types import (
     ArrayAggregation,
@@ -624,6 +625,11 @@ def submit_and_wait_cycle_stage(
         deps.aggregation_error_message(aggregation) if aggregation is not None else terminal.get("error_message")
     )
     if aggregation is not None:
+        # ``terminal`` is a gateway job here, so its ``job_id`` is the master
+        # Slurm id the gateway just reported.  Keep feeding that to the
+        # projection's identity guard: a gateway that reports a different master
+        # than the one we bound must still be caught, which the submitted
+        # ``slurm_job_id`` could never do (it always matches the durable row).
         durable_outcome = orchestrator._record_cycle_stage_status_override(
             stage,
             context,
@@ -631,6 +637,7 @@ def submit_and_wait_cycle_stage(
             terminal,
             aggregation,
             log_uri or None,
+            master_slurm_job_id=str(terminal.get("job_id") or slurm_job_id),
         )
         result_status = str(durable_outcome.get("status") or result_status)
         result_error_code = durable_outcome.get("error_code")
@@ -808,6 +815,24 @@ def run_local_publish_stage(
     )
 
 
+def _durable_cohort_master(
+    orchestrator: StageExecutionOrchestrator,
+    pipeline_job_id: str,
+) -> Mapping[str, Any] | None:
+    """The stored cohort master, but only while it is settled (#1410).
+
+    The resume caller hands in a snapshot that may disagree with the record —
+    the recovery path exists precisely because it does — so the decision has to
+    be read off the durable row.
+    """
+
+    reader = getattr(orchestrator.repository, "get_pipeline_job", None)
+    if not callable(reader):
+        return None
+    durable = reader(pipeline_job_id)
+    return durable if settled_cohort_master(durable) else None
+
+
 def resume_cycle_stage(
     orchestrator: StageExecutionOrchestrator,
     stage: StageDefinition,
@@ -866,7 +891,35 @@ def resume_cycle_stage(
             str(job["job_id"]),
         )
         status = aggregation.status
-        if (
+        # A cohort master that is already terminal and covers its whole cohort
+        # has nothing this pass can add: its outcome is the durable one, not the
+        # one this pass just re-aggregated from Slurm (#1410).  Skipping the
+        # write path here — not inside the journal — keeps the projection itself
+        # unconditional for the geometries that still owe one, above all a bound
+        # master that never got projected.
+        settled_master = (
+            _durable_cohort_master(orchestrator, str(job["job_id"])) if accepted_submit_projection else None
+        )
+        if settled_master is not None:
+            status = str(settled_master.get("status") or status)
+            if not settled_master.get("log_uri"):
+                # The projection and the log publication are two side effects of
+                # one branch, and only the projection is settled: a first pass
+                # whose ``fetch_logs`` failed committed the projection and then
+                # raised, leaving a settled master with no log at all.  Publish
+                # it here, or no pass ever will (#1410 round-2).  The decision
+                # reads the durable row for the same reason the gate does — the
+                # caller snapshot may carry the sanitized ``[object-uri]`` of a
+                # log that really was published, and the stored ``None`` is the
+                # only honest "never published".  The row pointer is left alone:
+                # no typed write accepts one for a master row (#1592).
+                publication = orchestrator._display_log_publication_for_pipeline_job(settled_master)
+                if publication is not None:
+                    deferred_publish_attempt = orchestrator._try_publish_log_for_advertise(
+                        str(job["slurm_job_id"]),
+                        publication,
+                    )
+        elif (
             accepted_submit_projection
             or str(job.get("status")) not in deps.terminal_job_statuses
             or status != str(job.get("status"))
@@ -900,6 +953,7 @@ def resume_cycle_stage(
                 terminal,
                 aggregation,
                 log_uri,
+                master_slurm_job_id=str(job["slurm_job_id"]),
             )
             status = str(durable_outcome.get("status") or status)
             if publication_attempt is not None:

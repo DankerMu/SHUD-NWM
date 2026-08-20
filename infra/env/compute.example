@@ -123,6 +123,15 @@ NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS=300
 # reporting 2), so no-progress must be read from the repeated
 # `identity_mismatch_blocked` evidence rows instead.
 NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT=3
+# Consecutive fully-observed passes reporting the same (subject, reason) before
+# the observe-only no-progress circuit marks it open: a `no_progress_circuit`
+# block in the pass evidence plus one aggregated
+# `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN` warning per pass. It never changes a
+# scheduling decision. `<= 0` disables it completely — no tracker state file
+# under the evidence root, no evidence key, no log line. Early-exit, pre-lock,
+# lock-contended and resource-limit-aborted passes neither count nor clear, so
+# the count spans more wall-clock than the same number of timer ticks.
+NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES=3
 NHMS_SCHEDULER_RECONCILE_SLURM_USER=frd_muziyao
 NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT=replace-with-node22-slurm-account
 NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
@@ -221,3 +230,39 @@ NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 NHMS_RETENTION_ENABLED=true
 NHMS_RETENTION_DRY_RUN=false
 NHMS_RETENTION_DAYS=14
+# Issue #1318: a scheduler pass historically swept OBJECT_STORE_ROOT only, so
+# the run workspaces under WORKSPACE_ROOT/runs and
+# NHMS_OBJECT_STORE_COPYBACK_ROOT/runs were never reclaimed. When the switch
+# below is on, those two roots are swept as well -- runs/ ONLY. Their raw/,
+# canonical/ and forcing/ trees are never touched: the copyback root's forcing/
+# tree is node-27's live display serving surface, and its queryable window is
+# exactly the cycle directories still on that disk.
+# Default off: turning it on is an operational decision, because the first
+# enforcing sweep deletes thousands of run directories at once. Before setting
+# it true here, run one pass with NHMS_RETENTION_ENABLED=true +
+# NHMS_RETENTION_DRY_RUN=true and review the planned list (each entry carries
+# the root it belongs to). Rollback is this one switch.
+NHMS_RETENTION_EXTRA_ROOTS_ENABLED=false
+# Independent window for those additional roots; NHMS_RETENTION_DAYS keeps
+# governing OBJECT_STORE_ROOT. Longer on purpose: a run workspace is the only
+# post-mortem record of a failed run, and node-27's ingest reads copyback run
+# trees off the same NFS export (steady-state lag is minutes, so 30 days leaves
+# ample margin). `nhms-pipeline cleanup --retention-days N` overrides the
+# object-store window only; this one always comes from here.
+NHMS_RETENTION_EXTRA_ROOTS_DAYS=30
+# Manual `cleanup` runs outside a scheduler pass have no in-memory frontier, so
+# since issue #1407 they read the active lower bound from the newest pass
+# receipt under NHMS_SCHEDULER_EVIDENCE_ROOT. A receipt whose start time is
+# more than this many hours away from now -- in either direction, so a clock
+# jump cannot mint a permanently "fresh" receipt -- is not trusted (default 24:
+# passes run on a minutes-scale loop, so a day of silence means the pipeline is
+# stopped and deletion should wait). An unusable value here (zero, negative,
+# non-numeric, or out of range) falls back to the default rather than failing.
+# When the frontier is unknown for any reason -- no receipt, no frontier block,
+# a pass whose retention was disabled or errored, a malformed bound, or a read
+# error -- cleanup is forced into dry-run and prints the blocker reason; it
+# never falls back to unprotected wall-clock deletion, and there is no bypass
+# flag. Recovery for the "pass retention did not run" case: run one pass with
+# NHMS_RETENTION_ENABLED=true + NHMS_RETENTION_DRY_RUN=true (deletes nothing,
+# records the frontier). Pass-side retention is unaffected by this setting.
+# NHMS_RETENTION_FRONTIER_MAX_AGE_HOURS=24

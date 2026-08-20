@@ -221,6 +221,12 @@ class ProductionSchedulerConfig:
     identity_blocked_streak_limit: int = field(
         default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT", 3)
     )
+    # Consecutive fully-observed passes reporting the same (subject, reason)
+    # before the observe-only no-progress circuit marks it open (#1118). ``<= 0``
+    # disables the marker completely: no tracker file, no evidence key, no log.
+    no_progress_circuit_passes: int = field(
+        default_factory=lambda: _scheduler._env_int("NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES", 3)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _scheduler._env_int(
             "NHMS_CANDIDATE_STATE_JOB_LIMIT",
@@ -510,6 +516,11 @@ class ProductionSchedulerConfig:
             self,
             "identity_blocked_streak_limit",
             int(self.identity_blocked_streak_limit),
+        )
+        object.__setattr__(
+            self,
+            "no_progress_circuit_passes",
+            int(self.no_progress_circuit_passes),
         )
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
@@ -927,11 +938,48 @@ def _safe_preserve_final_component(path: Path) -> Path:
 
 def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path:
     if not db_free_required:
-        return path.resolve()
+        try:
+            return Path(os.path.realpath(path, strict=True))
+        except OSError:
+            # Same paradigm as _optional_config_path
+            # (scheduler_runtime_roots.py:576-590): classification belongs to
+            # the storage preflight, not to config construction, so hand the
+            # canonicalised value down and let _storage_root_check report
+            # SLURM_PREFLIGHT_<FIELD>_UNSAFE_PATH on every supported CPython
+            # instead of aborting the whole process on <=3.12.
+            #
+            # A single non-strict os.path.realpath() covers every strict
+            # failure: it never raises on 3.11-3.14 and reproduces the product
+            # of the old non-strict Path.resolve() verbatim -- POSIX order,
+            # symlinks first and `..` afterwards. Splitting on errno would buy
+            # nothing, because both would-be lanes converge on this same
+            # product (design D1).
+            return Path(os.path.realpath(path))
+    # The db-free arm is aligned with the arm above rather than given an errno
+    # split of its own: this function has no rejection channel (it returns a
+    # Path), so classification stays with the storage preflight. What the
+    # alignment buys is one canonical form on both interpreter arms -- the old
+    # `Path.resolve(strict=False)` returned a loop-bearing value unresolved on
+    # <=3.12 (the errno-less RuntimeError landed in the except arm) and folded
+    # on 3.13+, so downstream classification acted on two shapes. The except
+    # tuple is deliberately OSError only: the fallback call raises ValueError
+    # again for an unrepresentable path string, so catching ValueError here
+    # would turn a pre-existing escape into an escape from inside the handler.
+    # That escape is retained exactly as it stands today.
+    #
+    # The two arms are now TEXTUALLY IDENTICAL, and the split is retained
+    # deliberately rather than collapsed into a single body: they rest on
+    # different written bases -- the db-backed arm on issue #1423 / PR #1522
+    # (whose own design D1 adopts the #1347 paradigm that was written for
+    # _optional_config_path in scheduler_runtime_roots.py, a different function
+    # in a different module), this one on this change's design D8 -- and either
+    # may be re-decided on its own.
+    # Collapsing them would erase the seam at which one of the two lanes can
+    # later take an errno split without disturbing the other.
     try:
-        return path.resolve(strict=False)
-    except (OSError, RuntimeError):
-        return path
+        return Path(os.path.realpath(path, strict=True))
+    except OSError:
+        return Path(os.path.realpath(path))
 
 
 def _resolve_optional_config_path_for_mode(value: Path | None, *, db_free_required: bool) -> Path | None:
@@ -1114,13 +1162,67 @@ def _db_free_allowed_roots_and_blockers(
 
 
 def _db_free_path_identity(value: str | Path | None) -> Path | None:
+    # Non-strict os.path.realpath, not Path.resolve(strict=False): the latter
+    # returns the unresolved path on <=3.12 (it raises an errno-less
+    # RuntimeError on a loop, which the old except arm swallowed) and the folded
+    # form on 3.13+, so the identity verdicts this helper feeds
+    # (ProductionSchedulerConfig's topology comparisons) were
+    # interpreter-dependent. The realpath form folds on every supported version.
+    # This helper has no rejection channel and its callers compare only its own
+    # products, so the pre-existing ValueError escape on an unrepresentable path
+    # string is retained as-is -- folding it would need a sentinel this lane
+    # does not define.
     if value in (None, ""):
         return None
     path = _expanduser_for_mode(str(value).strip(), db_free_required=True)
+    return Path(os.path.realpath(path))
+
+
+def _db_free_loop_filtered_realpath(path: Path) -> tuple[Path | None, OSError | ValueError | None]:
+    """Normalize a db-free required path, or report why it cannot be normalized.
+
+    Strict resolution + errno split + loop-filtered ENOENT admit, the same
+    paradigm the retry lane's selector adjudicators carry: ``Path.resolve()`` is
+    not a usable loop predicate on the supported interpreter range (the
+    non-strict form stopped raising on symlink loops in CPython 3.13+, the
+    strict form raises an errno-less ``RuntimeError`` on <=3.12), while strict
+    ``os.path.realpath`` raises ``OSError`` carrying an errno everywhere.
+
+    ENOENT keeps the historical admitted semantics -- a required path whose
+    final components do not exist yet is adjudicated by the downstream
+    missing-parent / not-found blockers, not by this step -- but the admission
+    is loop-filtered: the non-strict fallback is re-resolved strictly, so a
+    fallback that still lands on a symlink loop is reported rather than folded
+    lexically and then mis-attributed as "not created".
+    """
+
     try:
-        return path.resolve(strict=False)
-    except (OSError, RuntimeError):
-        return path
+        return Path(os.path.realpath(path, strict=True)), None
+    except (OSError, ValueError) as error:
+        if getattr(error, "errno", None) != ENOENT:
+            return None, error
+    try:
+        fallback = os.path.realpath(path)
+    except (OSError, ValueError) as fallback_error:
+        return None, fallback_error
+    try:
+        os.path.realpath(fallback, strict=True)
+    except (OSError, ValueError) as recheck_error:
+        if getattr(recheck_error, "errno", None) != ENOENT:
+            return None, recheck_error
+    return Path(fallback), None
+
+
+def _db_free_resolution_failure_reason(error: OSError | ValueError) -> str:
+    # _scheduler_root_os_error_reason returns UPPERCASE tokens and, unlike
+    # _scheduler_root_blocker, _db_free_blocker does not lowercase what it is
+    # handed -- hence the explicit .lower(), matching the call in
+    # _db_free_allowed_roots_and_blockers above. A ValueError carries no errno
+    # (the mapper reads error.errno unguarded), so an unrepresentable path
+    # string takes the mapper's own catch-all token instead.
+    if isinstance(error, OSError):
+        return _scheduler._scheduler_root_os_error_reason(error).lower()
+    return "unavailable"
 
 
 def _db_free_path_check(
@@ -1169,16 +1271,33 @@ def _db_free_path_check(
             unsafe_component_reason,
             path=str(path),
         )
-    try:
-        resolved = path.resolve(strict=False)
-    except (OSError, RuntimeError) as error:
+    # A value that fails this step no longer reaches the containment comparison
+    # or the parent-lstat gate below, so a loop reports the errno-derived unsafe
+    # reason instead of being folded lexically and then attributed as
+    # "not found" (inside the bases) or "outside boundary" (outside them). Both
+    # of those were already rejections, so for a PERSISTENT fault -- a loop, an
+    # unreadable parent -- the reported reason changes within the rejected class
+    # only, and the verdict does not move.
+    #
+    # A TRANSIENT non-ENOENT errno is the exception, and it is a deliberate
+    # fail-closed trade rather than an oversight. The pre-change form resolved
+    # through Path.resolve(strict=False), whose non-strict realpath swallows
+    # every errno internally, so no resolution-layer fault could produce a
+    # blocker at all; a one-shot ESTALE/EIO on an otherwise healthy NFS path was
+    # admitted here and then passed the later lstat/exists gates. It now blocks,
+    # and db_free_runtime_preflight is pass-level (scheduler_runtime.py:650),
+    # so the pass aborts with db_free_runtime_preflight_blocked before the lock
+    # is taken. Self-healing on the next pass, and evidence is written -- but on
+    # NFS-backed node-22 this is availability traded for containment safety.
+    resolved, resolution_error = _db_free_loop_filtered_realpath(path)
+    if resolution_error is not None:
         check.update({"absolute": True, "contained": False})
         return check, _db_free_blocker(
             "db_free_required_path_unsafe",
             env,
-            "unsafe",
+            _db_free_resolution_failure_reason(resolution_error),
             path=str(path),
-            error_type=type(error).__name__,
+            error_type=type(resolution_error).__name__,
         )
     contained = any(_path_is_relative_to(resolved, root) for root in allowed_roots)
     check.update({"absolute": True, "resolved_path": "[local-path]", "contained": contained})

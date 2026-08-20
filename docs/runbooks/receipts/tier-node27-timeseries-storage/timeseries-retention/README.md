@@ -4,12 +4,17 @@ This directory holds committed live receipts from `scripts/node27_timeseries_ret
 
 ## Receipt schema versions (dual-version reading)
 
-Every receipt committed here so far declares `schema_version: "1.0"`. The
-emitter moved to `1.1` in #1369, which added the required top-level
-`archive_gate` object; the `1.0` files in this directory are **not**
-back-filled and stay byte-unchanged as the historical record (the schema
-file itself only validates `1.1`, so validate an old receipt against the
-schema revision that produced it — `git log schemas/timeseries_retention_receipt.schema.json`).
+This directory holds receipts of two schema versions side by side: the
+receipts from before 2026-08-14 declare `schema_version: "1.0"`, and the
+four receipts dated 2026-08-14 (`retention-dryrun-20260814T095619Z.json`,
+`retention-enforce-20260814T095746Z.json`, `retention-20260814T095802Z.json`,
+`retention-20260814T095832Z.json`; see §Receipts below) declare
+`schema_version: "1.1"` with `archive_gate.mode = "disabled"`. The emitter
+moved to `1.1` in #1369, which added the required top-level `archive_gate`
+object; the `1.0` files in this directory are **not** back-filled and stay
+byte-unchanged as the historical record (the schema file itself only
+validates `1.1`, so validate an old receipt against the schema revision that
+produced it — `git log schemas/timeseries_retention_receipt.schema.json`).
 
 Reading rule:
 
@@ -17,8 +22,14 @@ Reading rule:
   pre-#1369 hard gate, i.e. both archive receipts were loaded and judged.
   Everything the receipt says about candidates, deferrals and
   `salvage_backed_windows` is archive-backed.
-- **`schema_version: "1.1"` with `archive_gate.mode = "enabled"`** — same
-  fail-closed semantics, now stated explicitly.
+- **`schema_version: "1.1"` with `archive_gate.mode = "enabled"`** — never
+  produced on node-27, and unproducible after #1370: node-27 went straight
+  from the `1.0` shape to `1.1` with `mode = "disabled"`, and the runner now
+  refuses `--archive-gate enabled` (`enabled` is a retired mode). The schema
+  enum still admits the value only so historical `1.1` receipts stay
+  validatable. A receipt with this shape did not come from this runner —
+  question its provenance first. See
+  `docs/runbooks/tier-node27-timeseries-storage.md` §8.5.
 - **`schema_version: "1.1"` with `archive_gate.mode = "disabled"`** — the
   archive gates were skipped under
   `docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11`

@@ -118,6 +118,8 @@ __all__ = (
     "evaluate_transition_decision",
     "expected_journal_init_state_tokens",
     "generation_evidence",
+    "journal_identity_quarantine_breaker_engaged",
+    "journal_identity_quarantine_occurrence_count",
     "journal_init_state_lineage_matches_expected",
     "load_cutover_declaration",
     "match_declaration_entry",
@@ -140,7 +142,11 @@ CUTOVER_DECLARATION_SCHEMA_VERSION = "nhms.scheduler.registry_package_cutover.v1
 #: declaration file cannot exhaust scheduler memory before validation.
 MAX_CUTOVER_DECLARATION_BYTES = 256 * 1024
 
-CUTOVER_TRANSITION_MODES = frozenset({"replace"})
+#: Mirrors the publisher constant and the schema enum.  ``"retire"`` (#1433) is
+#: accepted so a retirement declaration does not invalidate the whole shared
+#: file for this consumer; retirement entries are skipped during normalization
+#: below because they derive no generation.
+CUTOVER_TRANSITION_MODES = frozenset({"replace", "retire"})
 
 #: Allowed cycle hours for a declared cutover ``effective_cycle_utc``.  This
 #: MUST mirror the publisher constant (``CUTOVER_CYCLE_HOURS`` in
@@ -812,6 +818,17 @@ def load_cutover_declaration(
                 "_load_error_index": index,
             }
         seen_model_ids.add(model_id)
+        if str(entry["transition_mode"]).strip() == "retire":
+            # #1433: a retirement declares that a model LEAVES the canonical
+            # registry; it carries no new package, so it can never bind a
+            # candidate here.  Skip it before the checksum normalization below
+            # turns its ``null`` ``new_checksum`` into the string ``"None"``,
+            # and after the duplicate-id check above so a duplicated id is
+            # still caught.  The entry is not added to ``normalized_entries``,
+            # so ``match_declaration_entry`` never returns it and the
+            # ``_declaration_load_evidence`` entry count reflects the entries
+            # this consumer acts on, not the file's line count.
+            continue
         old_checksum = str(entry["old_checksum"]).strip()
         new_checksum = str(entry["new_checksum"]).strip()
         effective_cycle = _parse_effective_cycle(entry["effective_cycle_utc"])
@@ -1445,3 +1462,71 @@ def journal_init_state_lineage_matches_expected(
     if recorded.startswith(f"{expected_base}_"):
         return False
     return None
+
+
+#: How many FAILED quarantine-convergence attempts must the journal prove
+#: before the §8.7 quarantine stops retrying (#1157).  One is enough because
+#: the counted rows are provenance-stamped quarantine RERUNS: the original
+#: defect run needs no counting (the caller's own positive mismatch witnesses
+#: it), so a single stamped rerun that came back with the same stale token IS
+#: the failed convergence.  Counting bare same-token masters instead would let
+#: unrelated whitelisted replacements (missing run manifest, missing forecast
+#: output) pre-arm the breaker and fail-stop the FIRST quarantine judgement,
+#: before the convergence layer ever ran.  Deliberately a constant, not a
+#: configuration knob (YAGNI).
+_JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD = 1
+
+
+def journal_identity_quarantine_occurrence_count(
+    repository: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    recorded_init_state_id: str,
+) -> int:
+    """Read how many quarantine RERUNS already re-recorded this stale token.
+
+    The accessor counts only provenance-stamped quarantine reruns, so this is
+    a count of PROVEN failed convergence attempts — not of same-token masters,
+    which unrelated whitelisted replacements also mint.
+
+    Accessor injection follows the repository ``getattr`` convention (cf.
+    ``scheduler_discovery._journal_predecessor_identity_is_stale``), so a
+    repository without ``completed_pipeline_init_state_id_occurrences`` — a DB
+    repository, or any test double — simply yields ``0``.
+
+    TOTAL: every unavailable shape (no repository, no accessor, an accessor
+    that raises, a non-integer answer) returns ``0``, which leaves the breaker
+    disengaged and the quarantine retry in force.  That direction is the safe
+    one: an undercount costs one more rerun, an overcount would fail-stop a
+    cycle that was still converging.
+    """
+    accessor = (
+        getattr(repository, "completed_pipeline_init_state_id_occurrences", None)
+        if repository is not None
+        else None
+    )
+    if not callable(accessor):
+        return 0
+    try:
+        count = int(
+            accessor(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+                init_state_id=recorded_init_state_id,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a foreign accessor must not break the pass
+        return 0
+    return count if count > 0 else 0
+
+
+def journal_identity_quarantine_breaker_engaged(occurrences: Any) -> bool:
+    """Whether ``occurrences`` reaches the §8.7 quarantine breaker threshold."""
+
+    try:
+        return int(occurrences) >= _JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
+    except (TypeError, ValueError):
+        return False

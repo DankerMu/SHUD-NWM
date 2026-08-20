@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import os
 import pathlib
+import sys
 import uuid
 from collections.abc import Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -86,6 +88,26 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip_e2e)
         if "grib" in item.keywords and grib_skip_reason:
             item.add_marker(skip_grib)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Release the selector meta-guard suite's parse cache before shutdown.
+
+    ``tests/test_select_ci_tests.py`` memoizes its AST parses; carrying those
+    trees into CPython's finalization costs far more than dropping them here —
+    measured on the run lane, 8.4 s of pure exit time (unconfigure at 12.96 s,
+    atexit at 21.38 s) against 0.11-0.23 s for the clear below.
+
+    This must be a hook, not a fixture in that module: ``--collect-only`` runs
+    no fixtures yet still caches the ~188 trees collection touches, and an
+    ``atexit`` callback fires too late — ~4.5 s of the finalization happens
+    before ``atexit``, so it recovers only ~2 s of it.
+    """
+    del config
+    module = sys.modules.get("tests.test_select_ci_tests")
+    if module is not None:
+        module._PARSE_CACHE.clear()
+        gc.collect()
 
 
 @pytest.fixture(autouse=True)

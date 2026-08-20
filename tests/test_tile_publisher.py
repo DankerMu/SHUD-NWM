@@ -41,7 +41,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from packages.common import safe_fs as safe_fs_module
 from packages.common.object_store import ObjectStoreError
+from services.tile_publisher import publisher as publisher_module
 from services.tile_publisher.publisher import (
     PublishError,
     PublishResult,
@@ -1074,6 +1076,143 @@ def test_publish_qdown_copyback_exact_root_validates_complete_run_tree(tmp_path:
         {"object_key": FORCING_KEY, "run_ids": ["run-a"], "forcing_version_ids": ["forcing-1"]}
     ]
     assert publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+
+
+def _inject_alias_identity(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
+    """Make `roots` report one filesystem identity through the guards' probe.
+
+    Patched on the publisher module namespace, which is where both same-root
+    branches resolve the name -- patching `packages.common.safe_fs` instead
+    would leave the production call points untouched. No portable, root-free
+    construction produces two concurrently existing realpaths over one inode
+    (see the honest limit in tests/test_safe_fs.py), so the alias is injected
+    at this seam.
+    """
+
+    resolved = {root.resolve() for root in roots}
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() in resolved:
+            return (0x1192, 0x1192)
+        return real_probe(path)
+
+    monkeypatch.setattr(publisher_module, "directory_identity_no_follow", probe)
+
+
+def test_copyback_run_products_skips_alias_root_reporting_one_filesystem_identity(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two distinct realpaths, one inode (#1192): under the pre-change resolved-
+    # path string comparison this pair reads as two roots and the run products
+    # get mirrored onto the alias.
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    copyback_root.mkdir()
+    _inject_alias_identity(monkeypatch, Path(publisher.object_store.root), copyback_root)
+
+    summary = publisher._copyback_run_products(["run-a"])
+
+    assert summary == {
+        "status": "skipped",
+        "reason": "copyback_root_matches_object_store_root",
+        "root": str(copyback_root.resolve()),
+        "run_ids": ["run-a"],
+    }
+    assert list(copyback_root.iterdir()) == []
+
+
+def test_copyback_qdown_products_skips_alias_root_reporting_one_filesystem_identity(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _inject_alias_identity(monkeypatch, Path(publisher.object_store.root), copyback_root)
+
+    with _store(create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    copyback = result.lineage["object_store_copyback"]
+    assert copyback["status"] == "skipped"
+    assert copyback["reason"] == "copyback_root_matches_object_store_root"
+    assert copyback["root"] == str(copyback_root.resolve())
+    assert copyback["run_ids"] == ["run-a"]
+    assert copyback["runs"] == [{"run_id": "run-a", "object_key": "runs/run-a"}]
+    assert copyback["forcing_packages"] == [
+        {"object_key": FORCING_KEY, "run_ids": ["run-a"], "forcing_version_ids": ["forcing-1"]}
+    ]
+    # `_prepare_copyback_root` creates the root before the guard runs; nothing
+    # may have been written into it.
+    assert list(copyback_root.iterdir()) == []
+
+
+def _inject_probe_failure(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make the guards' probe fail for `target` only, on the publisher namespace.
+
+    Only the copyback side fails, so a handler that blamed the wrong root -- or
+    let the raw `OSError` escape into whatever generic handler is upstream --
+    cannot pass by accident.
+    """
+
+    resolved = target.resolve()
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == resolved:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(publisher_module, "directory_identity_no_follow", probe)
+
+
+def test_copyback_run_products_probe_failure_is_diagnosed_as_an_unsafe_staging_root(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1610: the same-root guard's own failure posture.  A bare OSError here
+    # would escape `_copyback_run_products` and lose the copyback diagnosis.
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    copyback_root.mkdir()
+    _inject_probe_failure(monkeypatch, copyback_root)
+
+    with pytest.raises(PublishError) as error:
+        publisher._copyback_run_products(["run-a"])
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["copyback_root"] == str(copyback_root)
+    assert "probe blocked" in error.value.details["error"]
+    assert list(copyback_root.iterdir()) == []
+
+
+def test_copyback_qdown_products_probe_failure_is_diagnosed_as_an_unsafe_staging_root(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _inject_probe_failure(monkeypatch, copyback_root)
+
+    with _store(create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["copyback_root"] == str(copyback_root)
+    assert "probe blocked" in error.value.details["error"]
+    assert list(copyback_root.iterdir()) == []
 
 
 def test_publish_qdown_copyback_exact_root_rejects_incomplete_run_tree(tmp_path: Any) -> None:

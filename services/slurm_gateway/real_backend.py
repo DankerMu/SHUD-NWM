@@ -137,6 +137,18 @@ SLURM_STATE_MAP = {
     "OUT_OF_MEMORY": SlurmJobStatus.FAILED,
     "PREEMPTED": SlurmJobStatus.FAILED,
     "DEADLINE": SlurmJobStatus.FAILED,
+    # BOOT_FAIL is terminal for accounting purposes, so it also decides the
+    # file-cohort task projection in reconcile._file_cohort_task_projections, which
+    # reads this map without a default: before the entry existed a BOOT_FAIL array
+    # task stalled on outcome "unverified" and left the cohort accounting incomplete.
+    "BOOT_FAIL": SlurmJobStatus.FAILED,
+    # REVOKED and SPECIAL_EXIT are terminal for accounting purposes too -- the
+    # slurm_validation TERMINAL_SLURM_STATES vocabulary has always enumerated them --
+    # so they belong here for the same reason BOOT_FAIL does.  Registering them is
+    # orthogonal to map_slurm_error_code, which deliberately leaves both unmapped so
+    # they keep falling to the generic SLURM_JOB_FAILED code.
+    "REVOKED": SlurmJobStatus.FAILED,
+    "SPECIAL_EXIT": SlurmJobStatus.FAILED,
     "CANCELLED": SlurmJobStatus.CANCELLED,
 }
 
@@ -145,10 +157,19 @@ def map_slurm_error_code(raw_state: str) -> str:
     normalized = _normalize_slurm_state(raw_state)
     if normalized == "TIMEOUT":
         return "SLURM_TIMEOUT"
-    if normalized in {"NODE_FAIL", "PREEMPTED"}:
+    if normalized in {"NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}:
         return "NODE_FAILURE"
     if normalized == "OUT_OF_MEMORY":
         return "OUT_OF_MEMORY"
+    if normalized == "DEADLINE":
+        # Distinct from SLURM_TIMEOUT: the job did not burn its walltime, the
+        # --deadline scheduling window closed on it.  Same transient class, different
+        # operator remedy (reschedule in the next cycle window).
+        return "SLURM_DEADLINE"
+    # REVOKED (federation-only) and SPECIAL_EXIT (never observed on this control
+    # plane) stay deliberately unmapped: either one appearing means an unexpected
+    # deployment shape, and the generic unknown code is what stops automatic resume
+    # and routes the failure to an operator.
     return "SLURM_JOB_FAILED"
 
 
@@ -185,7 +206,10 @@ def _sacct_metric_fields(fields: Sequence[str]) -> dict[str, Any]:
 
 
 def _normalize_slurm_state(raw_state: str) -> str:
-    normalized = raw_state.strip().upper().split()[0].rstrip("+")
+    parts = raw_state.strip().upper().split()
+    if not parts:
+        return "UNKNOWN"
+    normalized = parts[0].rstrip("+")
     return normalized if re.fullmatch(r"[A-Z0-9_]+", normalized) else "UNKNOWN"
 
 
@@ -439,7 +463,9 @@ class RealSlurmGateway(SlurmGateway):
             "--format=JobID,JobName,State,ExitCode,Start,End",
         ]
         if not start_time:
-            start_time = (self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
+            # sacct reads bare timestamps in the host's local timezone.
+            lookback_start = (self._now() - timedelta(hours=DEFAULT_LIST_LOOKBACK_HOURS)).astimezone()
+            start_time = lookback_start.strftime("%Y-%m-%dT%H:%M:%S")
         command.append(f"--starttime={start_time}")
         if end_time:
             command.append(f"--endtime={end_time}")

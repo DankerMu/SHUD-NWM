@@ -563,6 +563,119 @@ def test_state_checkpoint_tracker_captures_native_lake_checkpoint(tmp_path: Path
     assert tracker.missing_hours() == []
 
 
+def test_state_checkpoint_tracker_missing_hours_are_uncaptured_targets_only(tmp_path: Path) -> None:
+    """#1320: the invariant that made `install_recovered`'s re-entry guard dead.
+
+    Every hour `missing_hours()` yields is a key of `targets` that is absent from
+    `captured`, and the recovery loop is the only caller of `install_recovered`.
+    The deleted guard (`targets.get(hour) is None or hour in captured`) was
+    unreachable exactly while this holds, so a change that re-introduces a
+    reachable path must red this test before it reaches the guard-less install.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.missing_hours() == [6, 12]
+    for hour in tracker.missing_hours():
+        assert tracker.targets.get(hour) is not None
+        assert hour not in tracker.captured
+
+    (output_dir / "demo.cfg.ic.update").write_text("2 2 360.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker.capture_available()
+
+    assert tracker.missing_hours() == [12]
+    for hour in tracker.missing_hours():
+        assert tracker.targets.get(hour) is not None
+        assert hour not in tracker.captured
+
+
+def test_state_checkpoint_tracker_install_recovered_leaves_sibling_hours_missing(tmp_path: Path) -> None:
+    """#1320: capturing hour A must not mark hour B captured.
+
+    The other half of the re-entry guard's deadness: the recovery loop iterates
+    `missing_hours()` and installs one hour at a time, so a successful install
+    may only ever remove its OWN hour from the missing set.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = scratch / "demo.cfg.ic.update"
+    source.write_text("2 2 360.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.install_recovered(6, source, source_root=scratch) is True
+
+    assert sorted(tracker.captured) == [6]
+    assert tracker.missing_hours() == [12]
+    checkpoint_dir = output_dir / "state_checkpoints"
+    assert (checkpoint_dir / "demo.f006.cfg.ic.update").read_text(encoding="utf-8").startswith("2 2 360.000000")
+    assert not (checkpoint_dir / "demo.f012.cfg.ic.update").exists()
+    assert tracker.recovery_outcomes == {6: "recovered"}
+
+
+def test_state_checkpoint_tracker_records_gate_rejected_header_in_plain_decimal(tmp_path: Path) -> None:
+    """#1320: the gate-rejection rendering site is wired to the helper, not just
+    the observed trail.
+
+    Every other test that greps this outcome uses a relative minute (720/1440),
+    which `:g` and `_format_header_minute` render byte-identically — only an
+    epoch-form header tells the two apart, and it is the form the manifest
+    stores, so `gate_rejected(header=...)` must stay greppable against it.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = scratch / "demo.cfg.ic.update"
+    # Structurally complete, but the header is an epoch minute nowhere near the
+    # f006 target: the rerun ran and the header gate rejected it, so the outcome
+    # must name the rerun's OWN header.
+    source.write_text("2 2 29607840.000000\n1 0.1\n2 0.2\n1 0\n2 0\n", encoding="utf-8")
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.install_recovered(6, source, source_root=scratch) is False
+
+    assert tracker.recovery_outcomes == {6: "gate_rejected(header=29607840)"}
+    assert tracker.missing_hours() == [6]
+    assert not (output_dir / "state_checkpoints" / "demo.f006.cfg.ic.update").exists()
+
+
+def test_state_checkpoint_tracker_recovery_outcome_summary_renders_every_recorded_hour(tmp_path: Path) -> None:
+    """#1320: the live path of the `recovery_outcome_summary` empty guard.
+
+    The guard is kept as a total-function contract, so the non-empty rendering
+    it guards — hour-sorted, one entry per recorded hour, accumulated lanes
+    joined by `+` — is what the failure message and the receipt actually carry.
+    """
+
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    assert tracker.recovery_outcome_summary() == ""
+
+    tracker.record_recovery_outcome(12, "timeout")
+    tracker.record_recovery_outcome(6, "gate_rejected(no_state)")
+    tracker.record_recovery_outcome(6, "cfg_restore_failed")
+
+    assert tracker.recovery_outcome_summary() == (
+        "; recovery outcomes: f006=gate_rejected(no_state)+cfg_restore_failed, f012=timeout"
+    )
+
+
 def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
@@ -1245,7 +1358,13 @@ def test_runtime_direct_grid_stages_either_accepted_station_index_member(
 
 
 def test_runtime_direct_grid_manifest_declaring_both_index_members_fails_closed(tmp_path: Path) -> None:
-    """B4 (#1176): canonical + legacy in one manifest is fail-closed ambiguity."""
+    """B4 (#1176) / AC2 (#1355): canonical + legacy in one manifest is fail-closed ambiguity.
+
+    This is real package contamination, not workspace residue, so the #1355
+    staging hygiene must not mask it: the manifest gate runs in
+    ``_prepare_forcing_package_context``, upstream of any staging, and still
+    raises.
+    """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(
@@ -1345,10 +1464,15 @@ def test_runtime_direct_grid_manifest_gate_returns_empty_without_index_member(tm
 
 
 def test_runtime_direct_grid_both_index_files_staged_on_disk_fails_closed(tmp_path: Path) -> None:
-    """B5 (#1176): the filesystem probe adjudicates independently of the manifest.
+    """B5 (#1176) / defense in depth (#1355): the filesystem probe adjudicates independently.
 
-    A stray second index file that the manifest never declared (e.g. shipped
-    inside the model package) must not let the runtime silently pick one.
+    Since #1355 the direct-grid staging deletes any undeclared accepted member
+    before writing, so residue — including a stray copy smuggled in by the model
+    package, which is staged earlier — can no longer reach this gate. What
+    survives the hygiene is a write that bypassed the allowlisted staging
+    entirely, which is exactly what calling ``_prepare_shud_project_forcing``
+    directly on a hand-built tree models. The gate stays, and its message now
+    points at that out-of-band writer instead of at prior-attempt residue.
     """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
@@ -1384,6 +1508,11 @@ def test_runtime_direct_grid_both_index_files_staged_on_disk_fails_closed(tmp_pa
     assert exc_info.value.error_code == "DIRECT_GRID_FORCING_INDEX_AMBIGUOUS"
     assert CANONICAL_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
     assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    # The hypothesis is the out-of-band writer, and the remediation is to report
+    # the workspace — not the pre-#1355 "a prior attempt left this; hand-delete it".
+    assert "out-of-band write" in exc_info.value.message
+    assert "most likely cause is a prior attempt" not in exc_info.value.message
+    assert "manually remove" not in exc_info.value.message
     assert not (model_input_dir / "alias-a.tsd.forc").exists()
 
 
@@ -1527,6 +1656,432 @@ def test_runtime_direct_grid_manifest_declared_member_absent_from_object_tree_fa
 
     assert exc_info.value.error_code == "FORCING_CHECKSUM_READ_FAILED"
     assert declared_member in exc_info.value.message
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def _write_single_station_direct_grid_sp_att(object_root: Path) -> None:
+    """Point every element's FORC ownership at station 1.
+
+    ``_write_basins_package`` ships FORC ids {2, 3}, which a one-station
+    direct-grid package fails on (``DIRECT_GRID_FORCING_OWNERSHIP_RANGE``) long
+    before anything about staging hygiene is observable.
+    """
+    (
+        object_root
+        / "models"
+        / "basins_basin_a_shud"
+        / "vbasins-test"
+        / "package"
+        / "alias-a.sp.att"
+    ).write_text(
+        "2\n"
+        "ID\tA\tB\tC\tFORC\n"
+        "1\t0\t0\t0\t1\n"
+        "2\t0\t0\t0\t1\n",
+        encoding="utf-8",
+    )
+
+
+def _repoint_package_manifest_index_member(
+    object_root: Path,
+    checksums: dict[str, str],
+    *,
+    member: str,
+    longitude: int,
+) -> dict[str, str]:
+    """Re-publish the forcing package so its only station-index member is ``member``.
+
+    Models the #1176 identity migration landing between two attempts of one
+    run_id: the object tree drops the previous identity and the package manifest
+    declares the new one. ``longitude`` distinguishes the new member's rows, so
+    the staged ``{project}.tsd.forc`` reveals which member was actually consumed.
+    """
+    entry = _write_residual_index_member(object_root, member, longitude=longitude)
+    for other in SHUD_FORCING_INDEX_MEMBERS:
+        if other != member:
+            (_forcing_shud_object_dir(object_root) / other.rsplit("/", 1)[-1]).unlink(missing_ok=True)
+
+    def _transform(payload: dict[str, Any]) -> None:
+        payload["files"] = [
+            file_entry
+            for file_entry in payload["files"]
+            if file_entry.get("relative_path") not in set(SHUD_FORCING_INDEX_MEMBERS)
+        ] + [entry]
+
+    return {
+        **_rewrite_package_manifest(object_root, checksums, transform=_transform),
+        "tsd_relative_path": member,
+        "tsd_checksum": entry["checksum"],
+    }
+
+
+def _seed_direct_grid_attempt_one_residue(
+    tmp_path: Path,
+    object_root: Path,
+    runtime: SHUDRuntime,
+    *,
+    index_member: str = LEGACY_SHUD_FORCING_INDEX_MEMBER,
+) -> tuple[dict[str, str], Path]:
+    """Run one direct-grid staging of ``index_member`` and return its checksums + input dir.
+
+    The staged ``shud/<index_member>`` this leaves behind IS the prior-attempt
+    residue: ``input/<project>`` is reused verbatim by the next attempt of the
+    same run_id (deterministic run_id, ``chain_forecast_state.py``), so a later
+    attempt that declares only the *other* accepted member meets both identities
+    on disk. Either member can be the residue — the migration runs canonical-ward
+    in production, but the deletion set is the manifest's complement, not a
+    hardcoded name, so both directions are exercised.
+
+    Attempt N is driven through the real staging entry point rather than a full
+    ``prepare_workspace`` because it is modelled as failing *after* forcing
+    staging and *before* station-CSV consumption — the staged-checksum
+    verification and initial-state staging both sit in that window. Re-driving a
+    direct-grid attempt that got all the way through consumption is blocked by a
+    separate, pre-existing gate (``DIRECT_GRID_STATION_FILENAME_COLLISION``
+    refuses to overwrite the station CSV it copied to the model input root last
+    attempt), which is its own defect and not what #1355 adjudicates.
+    """
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+        index_member=index_member,
+    )
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_artifact(
+        manifest["forcing"]["forcing_uri"],
+        input_dir / "alias-a",
+        forcing_context=runtime._prepare_forcing_package_context(manifest),
+    )
+
+    assert (input_dir / "alias-a" / "shud" / index_member.rsplit("/", 1)[-1]).is_file()
+    return checksums, input_dir
+
+
+@pytest.mark.parametrize(
+    "residue_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["residue-legacy", "residue-canonical"],
+)
+def test_runtime_direct_grid_prior_attempt_index_residue_self_heals_before_staging(
+    tmp_path: Path,
+    residue_member: str,
+) -> None:
+    """AC1 (#1355): a re-drive across the identity migration heals itself instead of deadlocking.
+
+    Attempt N stages ``residue_member`` into the reused input workspace and then
+    fails (simulated here by simply re-driving). Attempt N+1's package manifest
+    declares only the other accepted member. Before the fix the filesystem
+    ambiguity gate saw both members and raised the non-retryable
+    ``DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`` — for that run_id, forever, until a
+    human deleted the file on the compute node. Now staging deletes the
+    undeclared member first, and the run consumes the freshly declared one
+    (longitude 777, not the residue's 100).
+
+    Both directions run because the deletion target is the manifest's
+    complement, not a name: hardcoding the legacy member as the thing to delete
+    satisfies the production-ward direction alone.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=residue_member,
+    )
+    model_input_dir = input_dir / "alias-a"
+    declared_member = _other_index_member(residue_member)
+
+    migrated = _repoint_package_manifest_index_member(
+        object_root,
+        checksums,
+        member=declared_member,
+        longitude=777,
+    )
+    attempt_two = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(migrated))
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
+
+    runtime.prepare_workspace(attempt_two, input_dir)
+
+    staged_shud_dir = model_input_dir / "shud"
+    assert (staged_shud_dir / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (staged_shud_dir / residue_member.rsplit("/", 1)[-1]).exists()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t777\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert repository.statuses == []
+
+
+def test_runtime_direct_grid_hygiene_deletes_only_the_accepted_index_member_set(
+    tmp_path: Path,
+) -> None:
+    """AC (#1355) deletion-scope contract: hygiene touches nothing but the index members.
+
+    Indiscriminate clearing of the reused input workspace is an explicit
+    non-goal — it would destroy the model package / IC staging assumptions and
+    the triage evidence. Prior-attempt station CSVs and unrelated staged files
+    survive; only the undeclared accepted station-index member goes.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(tmp_path, object_root, runtime)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    (staged_shud_dir / "forcing_099.csv").write_text("prior attempt station csv\n", encoding="utf-8")
+    (staged_shud_dir / "unrelated.txt").write_text("operator note\n", encoding="utf-8")
+
+    migrated = _repoint_package_manifest_index_member(
+        object_root,
+        checksums,
+        member=CANONICAL_SHUD_FORCING_INDEX_MEMBER,
+        longitude=777,
+    )
+    attempt_two = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(migrated))
+
+    runtime.prepare_workspace(attempt_two, input_dir)
+
+    assert not (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert (staged_shud_dir / "forcing_099.csv").read_text(encoding="utf-8") == "prior attempt station csv\n"
+    assert (staged_shud_dir / "unrelated.txt").read_text(encoding="utf-8") == "operator note\n"
+
+
+def _direct_grid_canonical_only_attempt(
+    tmp_path: Path,
+    object_root: Path,
+) -> tuple[dict[str, Any], Path]:
+    """Publish a canonical-only direct-grid package and return its manifest + input dir.
+
+    The staged tree is left empty on purpose so a caller can plant exactly the
+    undeclared legacy residue shape it wants hygiene to trip over.
+    """
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    (input_dir / "alias-a" / "shud").mkdir(parents=True)
+    return manifest, input_dir
+
+
+@pytest.mark.parametrize("residue_shape", ["directory", "symlink"], ids=["directory", "symlink"])
+def test_runtime_direct_grid_undeletable_index_residue_fails_loud(
+    tmp_path: Path,
+    residue_shape: str,
+) -> None:
+    """AC3 (#1355): residue the unlink primitive refuses ends the attempt, it does not degrade.
+
+    ``unlink_no_follow`` refuses both directories and symlinks outright
+    (``packages/common/safe_fs.py``). There is no two-way branch here (#1164
+    ``_clear_packaged_initial_states`` is the exemplar): staging must not
+    proceed on top of residue it could not remove.
+    """
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_canonical_only_attempt(tmp_path, object_root)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    if residue_shape == "directory":
+        residue.mkdir()
+    else:
+        residue.symlink_to(staged_shud_dir / "elsewhere.tsd.forc")
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    # Staging stopped at the hygiene failure: this attempt's declared member was
+    # never written on top of the residue.
+    assert not (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_index_residue_unlink_io_error_fails_loud(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3 (#1355) I/O shape: a raw ``OSError`` from the unlink is re-coded, not swallowed."""
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_canonical_only_attempt(tmp_path, object_root)
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).write_text("residue\n", encoding="utf-8")
+
+    def _raise_oserror(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(runtime_module, "unlink_no_follow", _raise_oserror)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert LEGACY_SHUD_FORCING_INDEX_MEMBER in exc_info.value.message
+    assert "read-only file system" in exc_info.value.message
+    assert not (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).exists()
+
+
+def test_direct_grid_residue_cleanup_failed_is_not_auto_retryable() -> None:
+    """AC3 (#1355) retry stance: a file that will not unlink will not unlink on a retry.
+
+    Only ``TRANSIENT_ERROR_CODES`` is pinned. Whether the code also gets
+    registered in ``NON_TRANSIENT_ERROR_CODES`` is deliberately left open — this
+    change does not touch ``retry.py``, so the code takes its unknown-code
+    default of non-transient.
+    """
+    from services.orchestrator.retry import TRANSIENT_ERROR_CODES
+
+    assert "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED" not in TRANSIENT_ERROR_CODES
+
+
+def test_runtime_non_direct_grid_staging_leaves_residual_index_member_alive(
+    tmp_path: Path,
+) -> None:
+    """AC4 (#1355) lane isolation: the hygiene never reaches non-direct-grid staging.
+
+    Non-direct-grid staging goes through ``_stage_directory_artifact``'s
+    whole-prefix copy and never enters the direct-grid variant, so a residual
+    member there stays a legitimate steady state resolved by the manifest
+    anchor. This is the explicit counter-example to the direct-grid deletion.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    residue.write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t777\t30\t1\t1\t1\tforcing.csv\n",
+        encoding="utf-8",
+    )
+    assert _declared_package_manifest_index_members(object_root) == {CANONICAL_SHUD_FORCING_INDEX_MEMBER}
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert residue.is_file()
+    tsd_forc = (input_dir / "alias-a" / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert "777" not in tsd_forc
+
+
+@pytest.mark.parametrize(
+    "declared_member",
+    [LEGACY_SHUD_FORCING_INDEX_MEMBER, CANONICAL_SHUD_FORCING_INDEX_MEMBER],
+    ids=["declares-legacy", "declares-canonical"],
+)
+def test_runtime_direct_grid_single_member_package_hygiene_is_a_no_op(
+    tmp_path: Path,
+    declared_member: str,
+) -> None:
+    """AC4 (#1355) no-regression: a declared member is never a deletion target.
+
+    A single-member package re-driven over its own prior-attempt staging must
+    behave bit-for-bit as before: the declared member is kept (the deletion set
+    is its complement, and the absent other member is a ``missing_ok`` no-op).
+    Run for both identities so the anchor pins preservation of *whichever*
+    member the manifest declares, not of one hardcoded name — the legacy
+    direction alone is the historical-package regression, the canonical
+    direction is the post-migration steady state.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_single_station_direct_grid_sp_att(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    checksums, input_dir = _seed_direct_grid_attempt_one_residue(
+        tmp_path,
+        object_root,
+        runtime,
+        index_member=declared_member,
+    )
+    model_input_dir = input_dir / "alias-a"
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {declared_member}
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (model_input_dir / "shud" / declared_member.rsplit("/", 1)[-1]).is_file()
+    assert not (model_input_dir / "shud" / _other_index_member(declared_member).rsplit("/", 1)[-1]).exists()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    assert repository.statuses == []
+
+
+def test_runtime_direct_grid_zero_declared_index_member_deletes_residue_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """AC (#1355) zero-declared anchor: absence must not be papered over by residue.
+
+    A manifest declaring no accepted station-index member used to *succeed* on a
+    reused workspace, because ``_stage_standard_shud_forcing`` found the prior
+    attempt's member on disk and silently ran the model on stale forcing. With
+    the deletion set being the whole two-member set, the residue is gone and the
+    absence surfaces as the fail-closed
+    ``DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING`` it always should have been.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    # Ownership matches the residue's single station on purpose: without it the
+    # pre-fix behaviour would trip a downstream .sp.att check instead of showing
+    # what this anchor is about — a run that completes on stale forcing.
+    _write_single_station_direct_grid_sp_att(object_root)
+    _write_forcing(object_root)
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    manifest_content = json_bytes({"lineage": {"forcing_mapping_mode": "direct_grid"}, "files": []})
+    (forcing_dir / "forcing_package.json").write_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(
+        {
+            "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
+            "manifest_checksum": sha256_bytes(manifest_content),
+            "tsd_checksum": "",
+            "csv_checksum": "",
+        }
+    )
+    manifest["forcing"]["files"] = []
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "alias-a" / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    residue = staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME
+    residue.write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\tforcing.csv\n",
+        encoding="utf-8",
+    )
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING"
+    assert not residue.exists()
     assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 
@@ -1720,6 +2275,263 @@ def test_runtime_non_direct_grid_package_manifest_declaring_both_members_prefers
     runtime.prepare_workspace(manifest, input_dir)
 
     _assert_staged_index_member_content(input_dir / "alias-a", repository)
+
+
+def _dot_prefixed_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    return {**entry, "relative_path": f"./{entry['relative_path']}"}
+
+
+def _uri_only_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in entry.items() if key != "relative_path"}
+
+
+def _underivable_declaration(entry: dict[str, Any]) -> dict[str, Any]:
+    """No ``relative_path`` and a ``uri`` outside ``forcing_uri`` — underivable."""
+    return {**_uri_only_declaration(entry), "uri": "s3://nhms/somewhere-else/qhh.tsd.forc"}
+
+
+def _declared_index_member_entry(files: list[dict[str, Any]]) -> dict[str, Any]:
+    for entry in files:
+        if entry.get("relative_path") in set(SHUD_FORCING_INDEX_MEMBERS):
+            return entry
+    raise AssertionError("no station-index member is declared in the files list")
+
+
+def _reshape_declared_index_member(files: list[dict[str, Any]], reshape: Any) -> None:
+    """Rewrite the station-index entry of a ``files`` list into another accepted shape."""
+    entry = _declared_index_member_entry(files)
+    files[files.index(entry)] = reshape(entry)
+
+
+def _assert_staged_index_member_longitude(
+    model_input_dir: Path,
+    repository: FakeHydroRunRepository,
+    *,
+    longitude: int,
+) -> None:
+    """Both members staged; ``longitude`` (100 packaged, 777 residual) says which one won."""
+    staged_shud_dir = model_input_dir / "shud"
+    assert (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).is_file()
+    assert (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
+    tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
+    assert f"1\t{longitude}\t30\t1\t1\t1\tforcing.csv" in tsd_forc
+    other_longitude = 777 if longitude == 100 else 100
+    # Row-shaped, not the bare number: the staged header line carries the run
+    # workspace path, and ``2026050100`` contains ``100``.
+    assert f"1\t{other_longitude}\t30\t" not in tsd_forc
+    assert (model_input_dir / "forcing.csv").exists()
+    assert repository.statuses == []
+
+
+@pytest.mark.parametrize(
+    "reshape",
+    [_dot_prefixed_declaration, _uri_only_declaration],
+    ids=["dot-prefixed", "uri-only"],
+)
+def test_runtime_non_direct_grid_package_manifest_shape_variants_resolve_declared_member(
+    tmp_path: Path,
+    reshape: Any,
+) -> None:
+    """#1357 2.1/2.2: the anchor accepts every shape the direct-grid lane accepts.
+
+    ``forcing_package.json`` has no schema and the direct-grid lane deliberately
+    tolerates both a ``./`` prefix and a bare ``uri``; matching the anchor by raw
+    string equality made those declarations invisible, so the dual-member tree
+    fell back canonical-first onto the stale orphan (longitude 777) with no error.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: _reshape_declared_index_member(payload["files"], reshape),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert "files" not in manifest["forcing"]
+    # Raw equality sees nothing: only normalization can resolve this declaration.
+    assert _declared_package_manifest_index_members(object_root) == set()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
+
+
+@pytest.mark.parametrize(
+    "reshape",
+    [_dot_prefixed_declaration, _uri_only_declaration],
+    ids=["dot-prefixed", "uri-only"],
+)
+def test_runtime_non_direct_grid_run_manifest_shape_variants_resolve_declared_member(
+    tmp_path: Path,
+    reshape: Any,
+) -> None:
+    """#1357 2.3: the diagnostic run-manifest lane gets the same shape tolerance.
+
+    Same widening as the package-manifest lane, anchored on ``forcing.files``
+    (written only by ``scripts/create_qhh_shud_manifest.py``) after the published
+    package manifest drops its file list.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload.pop("files", None),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    _reshape_declared_index_member(manifest["forcing"]["files"], reshape)
+    assert _declared_package_manifest_index_members(object_root) == set()
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
+
+
+@pytest.mark.parametrize(
+    ("keep_valid_sibling", "expected_longitude"),
+    [(False, 777), (True, 100)],
+    ids=["invalid-only-falls-back-canonical", "invalid-does-not-blind-valid-sibling"],
+)
+def test_runtime_non_direct_grid_unresolvable_declaration_is_skipped_not_raised(
+    tmp_path: Path,
+    keep_valid_sibling: bool,
+    expected_longitude: int,
+) -> None:
+    """#1357 2.4: the anchor is a resolver, not a gate.
+
+    The direct-grid normalizer raises on an unsafe ``relative_path`` or a ``uri``
+    outside ``forcing_uri``; reusing it here must not hand the non-direct-grid
+    lane a new fail-closed surface. Bad entries are skipped per entry, so a valid
+    sibling declaration still resolves and an all-bad list just falls back
+    canonical-first onto the residual member (longitude 777).
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    residual_entry = _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+
+    def _inject_unresolvable(payload: dict[str, Any]) -> None:
+        _reshape_declared_index_member(
+            payload["files"],
+            _dot_prefixed_declaration if keep_valid_sibling else _underivable_declaration,
+        )
+        payload["files"].append(_underivable_declaration(residual_entry))
+        payload["files"].append({**residual_entry, "relative_path": f"../{residual_entry['relative_path']}"})
+        # Both of the skip wrapper's escape hatches, not just the unsafe-path one:
+        # neither key at all (the underivable branch's missing-uri error) and a
+        # uri whose bracket-malformed authority makes ``urlparse`` raise a bare
+        # ``ValueError`` rather than a ``SHUDRuntimeError``.
+        payload["files"].append({"role": "notes", "checksum": "x"})
+        payload["files"].append({"role": "notes2", "checksum": "x", "uri": "s3://buck[et/notes.txt"})
+
+    checksums = _rewrite_package_manifest(object_root, checksums, transform=_inject_unresolvable)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=expected_longitude)
+
+
+def test_runtime_non_direct_grid_mixed_shape_both_members_declared_falls_back_canonical(
+    tmp_path: Path,
+) -> None:
+    """#1357 2.5: ambiguity survives shape mixing — both declared means None.
+
+    Today the ``./``-shaped canonical declaration is invisible to the anchor, so
+    the manifest looks like a single legacy declaration and resolves to it by
+    accident. Once both shapes are read, this is the same both-members ambiguity
+    the plain-shape pin covers and it must resolve canonical-first (longitude 777
+    here), not keep the accidental legacy answer.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    residual_entry = _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload["files"].append(_dot_prefixed_declaration(residual_entry)),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=777)
+
+
+def test_runtime_non_direct_grid_duplicate_shapes_of_one_member_resolve_to_that_member(
+    tmp_path: Path,
+) -> None:
+    """#1357 2.5 extra: declaring one member twice is not ambiguity (zero delta).
+
+    ``shud/qhh.tsd.forc`` plus ``./shud/qhh.tsd.forc`` collapse to a single
+    element, so the manifest still names exactly one accepted member. Green
+    before and after the widening; it pins that normalization does not turn a
+    duplicate into a both-members ``None``.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        station_ids=(1,),
+        index_member=LEGACY_SHUD_FORCING_INDEX_MEMBER,
+    )
+    _write_residual_index_member(object_root, CANONICAL_SHUD_FORCING_INDEX_MEMBER, longitude=777)
+
+    checksums = _rewrite_package_manifest(
+        object_root,
+        checksums,
+        transform=lambda payload: payload["files"].append(
+            _dot_prefixed_declaration(_declared_index_member_entry(payload["files"]))
+        ),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    assert _declared_package_manifest_index_members(object_root) == {LEGACY_SHUD_FORCING_INDEX_MEMBER}
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    _assert_staged_index_member_longitude(input_dir / "alias-a", repository, longitude=100)
 
 
 @pytest.mark.parametrize(
@@ -2490,6 +3302,287 @@ def test_runtime_direct_grid_station_filename_collision_fails_without_overwritin
     assert repository.statuses == ["created", "failed"]
     assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_INVALID"
     assert "2\t0\t0\t0\t3" in model_sp_att.read_text(encoding="utf-8")
+
+
+def _direct_grid_three_station_attempt(tmp_path: Path, object_root: Path) -> tuple[dict[str, Any], Path]:
+    """A direct-grid manifest whose row set declares three station CSVs.
+
+    Station id 1 is included on purpose so the declared target set contains the
+    plain ``forcing.csv`` name the #1491 field report deadlocked on; ids 2/3 are
+    the ones ``_write_basins_package``'s ``.sp.att`` claims FORC ownership of.
+    """
+
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1, 2, 3),
+    )
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+    return manifest, input_dir
+
+
+def _object_store_shud_dir(object_root: Path) -> Path:
+    return object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model" / "shud"
+
+
+def test_runtime_direct_grid_second_attempt_restages_station_csvs_over_prior_attempt_residue(
+    tmp_path: Path,
+) -> None:
+    """#1491 red: a retried attempt on the same run workspace must not deadlock.
+
+    ``run_id`` is deterministic and a retry reuses ``input/<project>/`` verbatim,
+    so the station CSVs the FIRST attempt copied are still sitting on this
+    attempt's declared targets. Pre-fix the second ``prepare_workspace`` raised
+    ``DIRECT_GRID_STATION_FILENAME_COLLISION`` — a code absent from
+    ``TRANSIENT_ERROR_CODES`` — permanently wedging the run_id.
+
+    The residue is corrupted in place between the two passes, so tolerating the
+    existing file is not enough to pass: the second pass must re-materialize the
+    CURRENT staging's bytes.
+    """
+
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_three_station_attempt(tmp_path, object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    model_input_dir = input_dir / "alias-a"
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    station_csvs = ["forcing.csv", "forcing_002.csv", "forcing_003.csv"]
+    assert sorted(path.name for path in model_input_dir.glob("forcing*.csv")) == station_csvs
+    expected = {
+        name: (_object_store_shud_dir(object_root) / name).read_bytes() for name in station_csvs
+    }
+    for name in station_csvs:
+        (model_input_dir / name).write_bytes(b"residue drift from the previous attempt\n")
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    for name in station_csvs:
+        assert (model_input_dir / name).read_bytes() == expected[name]
+
+
+def test_runtime_direct_grid_model_package_member_on_station_csv_target_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """#1491 boundary: what THIS attempt staged is still a collision, not residue.
+
+    ``prepare_workspace`` stages the model package before it copies station CSVs,
+    so a package member named like a declared station CSV is the real thing the
+    second branch of ``_validate_direct_grid_station_filename_target`` protects.
+    Anchoring the hygiene on the row set's NAMES would silently overwrite it.
+    """
+
+    object_root = tmp_path / "object-store"
+    package_member = (
+        object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package" / "forcing.csv"
+    )
+    manifest, input_dir = _direct_grid_three_station_attempt(tmp_path, object_root)
+    package_member_bytes = b"model package member that is not a station CSV\n"
+    package_member.write_bytes(package_member_bytes)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    model_input_dir = input_dir / "alias-a"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert exc_info.value.message.endswith(": forcing.csv")
+    assert (model_input_dir / "forcing.csv").read_bytes() == package_member_bytes
+
+
+def test_runtime_direct_grid_duplicate_station_filenames_in_one_row_set_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """#1491 boundary: ``.tsd.forc`` is untrusted input, two rows one name stays a refusal.
+
+    ``_read_shud_forcing_station_rows`` does not de-duplicate and the package
+    manifest's ``required_relative_paths`` is a set, so a single declared
+    ``shud/forcing_002.csv`` entry is enough for the checksum layer to pass while
+    the row set still carries two rows. The second row's copy must not become a
+    silent last-write-wins overwrite of the first.
+    """
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(2, 3),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing_dir / "shud"
+    tsd_content = (
+        "2 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "2\t100\t30\t2\t1\t1\tforcing_002.csv\n"
+        "3\t100\t30\t3\t1\t1\tforcing_002.csv\n"
+    )
+    (shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).write_text(tsd_content, encoding="utf-8")
+    (shud_dir / "forcing_003.csv").unlink()
+    manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"] = [
+        {**package_manifest["files"][0], "checksum": sha256_bytes(tsd_content.encode("utf-8"))},
+        next(entry for entry in package_manifest["files"] if entry["relative_path"] == "shud/forcing_002.csv"),
+    ]
+    manifest_content = json_bytes(package_manifest)
+    manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    checksums["tsd_checksum"] = sha256_bytes(tsd_content.encode("utf-8"))
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _drop_runtime_forcing_files(_shud_project_manifest_with_forcing_checksums(checksums))
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert exc_info.value.message.endswith(": forcing_002.csv")
+    assert (input_dir / "alias-a" / "forcing_002.csv").read_bytes() == (
+        shud_dir / "forcing_002.csv"
+    ).read_bytes()
+
+
+def test_direct_grid_station_filename_target_still_refuses_every_reserved_name(tmp_path: Path) -> None:
+    """#1491 boundary: the reserved-name branch of the predicate is untouched.
+
+    Only reachable at the helper layer: ``_direct_grid_station_filename`` requires
+    a ``.csv`` suffix and no reserved name has one, so staging refuses these with
+    ``DIRECT_GRID_STATION_FILENAME_INVALID`` first (pinned by
+    ``test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att``).
+    """
+
+    model_input_dir = tmp_path / "input-dir-not-named-for-project"
+    model_input_dir.mkdir()
+    reserved_suffixes = (
+        ".sp.att",
+        ".sp.mesh",
+        ".sp.riv",
+        ".sp.rivseg",
+        ".cfg.para",
+        ".cfg.calib",
+        ".cfg.ic",
+        ".tsd.forc",
+    )
+
+    for suffix in reserved_suffixes:
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            _validate_direct_grid_station_filename_target(
+                model_input_dir / f"alias-a{suffix}",
+                model_input_dir=model_input_dir,
+                project_name="alias-a",
+            )
+        assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+
+
+@pytest.mark.parametrize("residue_shape", ["directory", "symlink"], ids=["directory", "symlink"])
+def test_runtime_direct_grid_station_csv_residue_that_will_not_unlink_fails_loud(
+    tmp_path: Path,
+    residue_shape: str,
+) -> None:
+    """#1491 AC: residue the unlink primitive refuses ends the attempt, fail-LOUD.
+
+    Reuses ``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`` (#1355): same function
+    family, same deletion primitive, same retry stance. Because the hygiene runs
+    before ANY staging, the failure also leaves no partially staged product — the
+    model package marker deleted between the passes stays absent.
+    """
+
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_three_station_attempt(tmp_path, object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    model_input_dir = input_dir / "alias-a"
+    runtime.prepare_workspace(manifest, input_dir)
+
+    (model_input_dir / "forcing.csv").unlink()
+    if residue_shape == "directory":
+        (model_input_dir / "forcing.csv").mkdir()
+    else:
+        (model_input_dir / "forcing.csv").symlink_to(model_input_dir / "elsewhere.csv")
+    (model_input_dir / "alias-a.sp.att").unlink()
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert "forcing.csv" in exc_info.value.message
+    assert not (model_input_dir / "alias-a.sp.att").exists()
+
+
+def test_runtime_direct_grid_station_csv_residue_unlink_io_error_fails_loud(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1491 AC (I/O shape): a raw ``OSError`` from the unlink is re-coded, not swallowed."""
+
+    object_root = tmp_path / "object-store"
+    manifest, input_dir = _direct_grid_three_station_attempt(tmp_path, object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    model_input_dir = input_dir / "alias-a"
+    runtime.prepare_workspace(manifest, input_dir)
+    (model_input_dir / "alias-a.sp.att").unlink()
+
+    def _raise_oserror(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(runtime_module, "unlink_no_follow", _raise_oserror)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED"
+    assert "read-only file system" in exc_info.value.message
+    assert "forcing.csv" in exc_info.value.message
+    assert not (model_input_dir / "alias-a.sp.att").exists()
+
+
+def test_runtime_non_direct_grid_second_attempt_behaviour_is_unchanged(tmp_path: Path) -> None:
+    """#1491 lane isolation: non-direct-grid staging never enters the new deletion path.
+
+    ``_copy_staged_file_no_follow`` (:1121) already overwrites, so re-preparation
+    was never blocked here and no station CSV is ever unlinked in this lane.
+
+    The manifest keeps its runtime ``forcing.files`` on purpose: that is what
+    makes the declared-name set NON-empty (``{'forcing.csv'}``) on this lane, so
+    the only thing standing between it and the deletion path is the
+    ``is_direct_grid`` guard.  Dropping the files instead would empty the set and
+    the case would return at the emptiness check, nailing nothing.  The residue
+    is therefore also replayed in symlink form: the guard holding means the
+    symlink is adjudicated by the copy primitive (``WORKSPACE_PATH_UNSAFE``), not
+    by a deletion this lane must never attempt
+    (``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED``).
+    """
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, station_ids=(1,))
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+    model_input_dir = input_dir / "alias-a"
+
+    runtime.prepare_workspace(manifest, input_dir)
+    expected = (model_input_dir / "forcing.csv").read_bytes()
+    (model_input_dir / "forcing.csv").write_bytes(b"residue drift from the previous attempt\n")
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (model_input_dir / "forcing.csv").read_bytes() == expected
+
+    (model_input_dir / "forcing.csv").unlink()
+    (model_input_dir / "forcing.csv").symlink_to(model_input_dir / "elsewhere.csv")
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "WORKSPACE_PATH_UNSAFE"
 
 
 def test_runtime_direct_grid_rejects_non_csv_station_filename_before_unbounded_member_read(
@@ -3731,6 +4824,69 @@ print("The successful end.")
 '''
 
 
+# Native project-mode stub that leaves the cfg text it was invoked with inside its
+# own output dir. #1317 half (a) asserts the cadence the recovery rerun WRITES, and
+# the published cfg is restored byte-for-byte in the inner `finally`, so reading it
+# after the rerun only ever shows the original text.
+_PROJECT_CFG_CAPTURING_SOLVER_STUB = '''
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+output_dir = Path(argv[argv.index("-o") + 1])
+project = argv[-1]
+cfg_text = (Path("input") / project / (project + ".cfg.para")).read_text(encoding="utf-8")
+cfg = {}
+for line in cfg_text.splitlines():
+    parts = line.split("\\t")
+    if len(parts) < 2:
+        continue
+    cfg[parts[0].strip()] = parts[1].strip()
+total_minutes = (float(cfg["END"]) - float(cfg["START"])) * 1440.0
+output_dir.mkdir(parents=True, exist_ok=True)
+(output_dir / "captured.cfg.para").write_text(cfg_text, encoding="utf-8")
+(output_dir / (project + ".cfg.ic.update")).write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+# `cfg`-style sibling of the capturing stub: `generate_cfg_para` only writes
+# `Update_IC_STEP` in project mode, so the recovery rerun must not append it to a
+# cfg-style file either.
+_CFG_STYLE_CAPTURING_SOLVER_STUB = '''
+import sys
+from datetime import datetime
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+def _parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+cfg_path = Path(sys.argv[1])
+cfg = _read_cfg(cfg_path)
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+total_minutes = (_parse(cfg["END_TIME"]) - _parse(cfg["START_TIME"])).total_seconds() / 60.0
+(output_dir / "captured.cfg.para").write_text(cfg_path.read_text(encoding="utf-8"), encoding="utf-8")
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 %.6f\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n" % total_minutes,
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
 _IC_DERIVED_SOLVER_STUB = '''
 import sys
 from datetime import datetime
@@ -4048,6 +5204,83 @@ def test_run_shud_recovers_watcher_missed_checkpoint_via_deterministic_rerun(
     assert repository.failures == []
 
 
+def test_run_shud_recovery_rerun_sets_update_ic_step_to_its_own_target_hour(tmp_path: Path) -> None:
+    """#1317 half (a) red: the rerun must make its own target hour reachable.
+
+    SHUD writes a restart file only when the elapsed model time divides
+    ``Update_IC_STEP`` (``MD_update.cpp:226-229``), END included, so a rerun that
+    inherits the manifest's cadence cannot produce an hour that cadence does not
+    divide. The loop is per-hour, so ``hour * 60`` always divides the rerun's own
+    END and no gcd is needed.
+
+    Construction (both constraints matter, drop either and the red evaporates):
+      * the published cfg carries ``Update_IC_STEP\t360`` (what
+        ``generate_cfg_para`` writes for ``state_checkpoint_hours=[6, 12]``), so
+        the f012 rerun's required 720 is provably different from the pre-fix text;
+      * the cadence is captured by the stub DURING the rerun, because the inner
+        ``finally`` restores the published cfg byte-for-byte afterwards.
+
+    f006 additionally pins that the value is the ROW's hour, not the manifest's
+    global minimum that happens to equal it.
+    """
+
+    stub = tmp_path / "cfg_capturing_solver.py"
+    stub.write_text(_PROJECT_CFG_CAPTURING_SOLVER_STUB, encoding="utf-8")
+    runtime = _runtime(tmp_path, FakeHydroRunRepository(), shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_project_dirs(tmp_path)
+    cfg_path.write_text(
+        cfg_path.read_text(encoding="utf-8") + "Update_IC_STEP\t360\n",
+        encoding="utf-8",
+    )
+    manifest = _manifest()
+    manifest["runtime"]["command_style"] = "shud_project"
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    manifest["runtime"]["update_ic_step_minutes"] = 360
+    cfg_before = cfg_path.read_bytes()
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    recovery_root = workspace / "state_checkpoint_recovery"
+    f006_cfg = (recovery_root / "f006" / "captured.cfg.para").read_text(encoding="utf-8")
+    f012_cfg = (recovery_root / "f012" / "captured.cfg.para").read_text(encoding="utf-8")
+    assert "Update_IC_STEP\t360" in f006_cfg
+    assert "Update_IC_STEP\t720" in f012_cfg
+    assert "Update_IC_STEP\t360" not in f012_cfg
+    payload = json.loads(
+        (output_dir / "state_checkpoints" / "state_checkpoints.json").read_text(encoding="utf-8")
+    )
+    assert payload["recovery_outcomes"] == {"6": "recovered", "12": "recovered"}
+    # #1317 isolation: the injected cadence is scoped to the scratch rerun only.
+    assert cfg_path.read_bytes() == cfg_before
+    assert "Update_IC_STEP\t360" in cfg_path.read_text(encoding="utf-8")
+
+
+def test_run_shud_cfg_style_recovery_rerun_does_not_append_update_ic_step(tmp_path: Path) -> None:
+    """#1317 half (a) gate: the injection follows ``generate_cfg_para``'s project-mode gate.
+
+    ``generate_cfg_para`` only writes ``Update_IC_STEP`` in project mode
+    (:619-624), and ``_replace_or_append`` appends a key that is absent, so an
+    ungated injection would hand a cfg-style file a key its producer never writes.
+    """
+
+    stub = tmp_path / "cfg_style_capturing_solver.py"
+    stub.write_text(_CFG_STYLE_CAPTURING_SOLVER_STUB, encoding="utf-8")
+    runtime = _runtime(tmp_path, FakeHydroRunRepository(), shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [12]
+    cfg_before = cfg_path.read_bytes()
+
+    runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    captured = (
+        workspace / "state_checkpoint_recovery" / "f012" / "captured.cfg.para"
+    ).read_text(encoding="utf-8")
+    assert "Update_IC_STEP" not in captured
+    assert "END_TIME = 2026-05-01T12:00:00Z" in captured
+    assert cfg_path.read_bytes() == cfg_before
+
+
 def test_run_shud_recovers_every_missing_hour_with_scoped_scratch_and_logs(tmp_path: Path) -> None:
     """#1315: multi-hour miss recovers each hour in its own scratch dir.
 
@@ -4332,7 +5565,7 @@ def test_run_shud_recovery_skips_only_the_hour_whose_cfg_write_fails(tmp_path: P
 
     assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
     assert "f006" in exc_info.value.message
-    assert "f012" not in exc_info.value.message.split("(")[0]
+    assert "f012" not in exc_info.value.message.split(";")[0]
     assert "f006=cfg_write_failed" in exc_info.value.message
     checkpoint_dir = output_dir / "state_checkpoints"
     # The other hour is still recovered, and the manifest is still written.
@@ -4741,6 +5974,183 @@ def test_run_shud_recovery_keeps_partial_gates_and_reports_observed_headers(tmp_
     # disk problem that did not happen.
     assert "state_checkpoints.json write failed" not in exc_info.value.message
     assert cfg_path.read_bytes() == cfg_before
+
+
+_WATCHER_HELD_SOLVER_STUB = '''
+import sys
+import time
+from pathlib import Path
+
+def _read_cfg(path):
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+cfg = _read_cfg(sys.argv[1])
+output_dir = Path(cfg["OUTPUT_DIR"])
+output_dir.mkdir(parents=True, exist_ok=True)
+if "state_checkpoint_recovery" in output_dir.parts:
+    # Recovery rerun: exits 0 leaving no state behind, so every missing hour
+    # ends as `gate_rejected(no_state)` and the run reaches the failure message.
+    print("The successful end.")
+    sys.exit(0)
+# Main solve: stay alive until the watcher signals it has sampled enough
+# headers, so the observed trail's length is set by the test rather than by how
+# many polls happen to fit in the solve.
+release = output_dir.parent / "watcher_sampled_enough"
+deadline = time.monotonic() + 20.0
+while not release.exists() and time.monotonic() < deadline:
+    time.sleep(0.005)
+(output_dir / "demo.cfg.ic.update").write_text(
+    "2 2 1440.000000\\n1 0.1\\n2 0.2\\n1 0\\n2 0\\n",
+    encoding="utf-8",
+)
+print("The successful end.")
+'''
+
+
+def test_execute_receipt_keeps_recovery_outcomes_when_the_observed_trail_is_long(tmp_path: Path) -> None:
+    """#1320: receipt truncation must sacrifice the observed trail, not the outcomes.
+
+    The task-outcome receipt keeps only the first
+    `TASK_OUTCOME_MESSAGE_MAX_LENGTH` characters of the failure message, and the
+    observed-header trail is the one unbounded field (it grows with run
+    duration — a 24h run at a 10-minute cadence measured a 901-char message).
+    With the trail in front, the per-hour recovery outcomes — the most
+    actionable field, and array accounting's only channel — were cut out of the
+    receipt entirely.
+    """
+
+    stub = tmp_path / "watcher_held_solver.py"
+    stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
+    object_root = tmp_path / "object-store"
+    _write_package(object_root)
+    _write_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    run_id = manifest["run_id"]
+    workspace = tmp_path / "workspace" / "runs" / run_id
+    output_dir = workspace / "output"
+    real_read = runtime_module._read_cfg_ic_header_minute
+    sampled: list[float] = []
+
+    def _fresh_epoch_minute_per_poll(path: Path) -> float | None:
+        # A distinct epoch-form minute per watcher poll: the tracker records
+        # every change, so 60 polls put >512 chars of trail into the message.
+        if Path(path) != output_dir / "demo.cfg.ic.update":
+            return real_read(path)
+        sampled.append(29607840.0 + 60.0 * len(sampled))
+        if len(sampled) >= 60:
+            (workspace / "watcher_sampled_enough").write_text("go\n", encoding="utf-8")
+        return sampled[-1]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fresh_epoch_minute_per_poll)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.execute(manifest)
+
+    message = exc_info.value.message
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert len(message) > runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "recovery outcomes:" in message
+    # `_assert_attempt_failure_accounting` pins the pre-solve status sequence;
+    # this lane fails after `staged`/`running`, so the same three pieces of
+    # collateral are asserted against the sequence this lane really produces.
+    assert repository.statuses == ["created", "staged", "running", "failed"]
+    assert repository.failures[0][0] == "STATE_CHECKPOINTS_MISSING"
+    assert "STATE_CHECKPOINTS_MISSING" in (workspace / "logs" / "runtime_error.log").read_text(encoding="utf-8")
+    receipt = json.loads((workspace / "logs" / "task_outcome.json").read_text(encoding="utf-8"))
+    assert receipt["run_id"] == run_id
+    assert receipt["error_code"] == "STATE_CHECKPOINTS_MISSING"
+    assert len(receipt["error_message"]) == runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "recovery outcomes:" in receipt["error_message"]
+    assert "f006=gate_rejected(no_state)" in receipt["error_message"]
+    assert "f012=gate_rejected(no_state)" in receipt["error_message"]
+    # Epoch-form minutes stay greppable against the manifest's own values.
+    assert "observed cfg.ic.update header minutes: 29607840, 29607900" in message
+    assert "2.96078e+07" not in message
+
+
+def test_task_outcome_receipt_keeps_the_manifest_write_note_when_the_trail_is_long(tmp_path: Path) -> None:
+    """#1320: the manifest-write note is the OTHER bounded field ordered ahead
+    of the observed trail.
+
+    It is what tells the operator that the fallback diagnostic — the manifest
+    carrying the same trails — never landed either, so a receipt that keeps only
+    the unbounded trail leaves the miss unlocatable from both channels at once.
+    """
+
+    stub = tmp_path / "watcher_held_solver.py"
+    stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    manifest = _manifest()
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    real_read = runtime_module._read_cfg_ic_header_minute
+    real_write = runtime_module._write_text_no_follow
+    sampled: list[float] = []
+
+    def _fresh_epoch_minute_per_poll(path: Path) -> float | None:
+        if Path(path) != output_dir / "demo.cfg.ic.update":
+            return real_read(path)
+        sampled.append(29607840.0 + 60.0 * len(sampled))
+        if len(sampled) >= 60:
+            (workspace / "watcher_sampled_enough").write_text("go\n", encoding="utf-8")
+        return sampled[-1]
+
+    def _fail_manifest_write(path: Path, content: str, **kwargs: Any) -> Path:
+        if Path(path).name == "state_checkpoints.json":
+            raise SHUDRuntimeError("WORKSPACE_WRITE_FAILED", f"Failed to write staged file {path}: no space left")
+        return real_write(path, content, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runtime_module, "_read_cfg_ic_header_minute", _fresh_epoch_minute_per_poll)
+        patch.setattr(runtime_module, "_write_text_no_follow", _fail_manifest_write)
+        with pytest.raises(SHUDRuntimeError) as exc_info:
+            runtime.run_shud(manifest, cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINTS_MISSING"
+    assert len(exc_info.value.message) > runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    # The production truncation, on the production message (`execute()` runs
+    # exactly this call on a failed attempt).
+    runtime._write_task_outcome_receipt(log_dir, manifest["run_id"], exc_info.value)
+
+    receipt = json.loads((log_dir / "task_outcome.json").read_text(encoding="utf-8"))
+    assert len(receipt["error_message"]) == runtime_module.TASK_OUTCOME_MESSAGE_MAX_LENGTH
+    assert "state_checkpoints.json write failed" in receipt["error_message"]
+    assert "recovery outcomes:" in receipt["error_message"]
+
+
+def test_format_header_minute_renders_epoch_minutes_in_plain_decimal() -> None:
+    """#1320: `:g` rendered `29607840.0` as `2.96078e+07`, ungreppable against
+    the manifest, which stores the full-precision value."""
+
+    assert runtime_module._format_header_minute(29607840.0) == "29607840"
+    assert runtime_module._format_header_minute(1440.0) == "1440"
+    assert runtime_module._format_header_minute(720.0) == "720"
+
+
+def test_format_header_minute_keeps_non_integral_minutes_lossless() -> None:
+    """Header minutes are not integral by construction (`float(token)` of
+    whatever the header carries), so rounding them away is forbidden."""
+
+    assert runtime_module._format_header_minute(720.5) == "720.5"
+    assert runtime_module._format_header_minute(29607840.25) == "29607840.25"
+
+
+@pytest.mark.parametrize("minute", [float("nan"), float("inf"), float("-inf")])
+def test_format_header_minute_renders_non_finite_minutes_without_raising(minute: float) -> None:
+    """The bare `float(token)` parse admits nan/inf, and `int(nan)` raises: a
+    diagnostic rendering must never change the run's error code."""
+
+    assert runtime_module._format_header_minute(minute) == repr(minute)
 
 
 def test_run_shud_writes_witness_manifest_when_no_hours_are_requested(tmp_path: Path) -> None:

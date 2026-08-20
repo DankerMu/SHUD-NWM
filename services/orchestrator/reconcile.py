@@ -314,10 +314,52 @@ def _private_data_allows_global_jobs(stdout: str) -> bool:
     return found
 
 
+def default_comment_storage_probe(slurm_bin_path: str = "") -> Callable[[], bool]:
+    """Prove accounting actually stores the sbatch ``--comment``.
+
+    On a cluster whose ``AccountingStoreFlags`` omits ``job_comment`` the comment
+    search can never find a genuinely in-flight job, so its empty answer is not an
+    absence proof. Every unproven case — probe failure, missing line, ``(null)``,
+    a flag list without ``job_comment`` — returns False (fail closed).
+    """
+
+    scontrol = f"{slurm_bin_path.rstrip('/')}/scontrol" if slurm_bin_path else "scontrol"
+
+    def _probe() -> bool:
+        try:
+            stdout = _bounded_visibility_stdout([scontrol, "show", "config"])
+        except ReconcileQueryUnavailable as error:
+            LOGGER.warning("comment storage probe could not execute: %s", error)
+            return False
+        if not _accounting_store_flags_allow_comment(stdout):
+            LOGGER.warning(
+                "accounting does not store job comments: AccountingStoreFlags lacks job_comment"
+            )
+            return False
+        return True
+
+    return _probe
+
+
+def _accounting_store_flags_allow_comment(stdout: str) -> bool:
+    for line in stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "accountingstoreflags":
+            flags = {
+                token.strip().lower()
+                for token in value.replace(",", " ").split()
+                if token.strip()
+            }
+            if "job_comment" in flags:
+                return True
+    return False
+
+
 def default_comment_sacct_querier(
     slurm_bin_path: str = "",
     *,
     global_visibility_probe: Callable[[], bool] | None = None,
+    comment_storage_probe: Callable[[], bool] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> CommentSacctQuerier:
     """Build a comment querier: idempotency_key -> the job sbatch recorded.
@@ -337,6 +379,8 @@ def default_comment_sacct_querier(
     scan_budget = _SacctScanBudget()
     visibility_probe = global_visibility_probe or default_global_accounting_visibility_probe(slurm_bin_path)
     visibility_proven: bool | None = None
+    storage_probe = comment_storage_probe or default_comment_storage_probe(slurm_bin_path)
+    comment_storage_proven: bool | None = None
 
     def _pages() -> tuple[tuple[datetime, datetime], ...]:
         end = now().astimezone(UTC).replace(microsecond=0)
@@ -364,9 +408,18 @@ def default_comment_sacct_querier(
     ) -> tuple[SacctRecord, ...]:
         target_comment = slurm_comment_for(idempotency_key)
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
-        nonlocal visibility_proven
+        nonlocal visibility_proven, comment_storage_proven
         if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
             raise ReconcileQueryUnavailable("accepted-submit contract version is unsupported")
+        # Ahead of the visibility gate so every scope — owner, global and legacy —
+        # is covered: without stored comments no scope's empty answer proves absence.
+        if comment_storage_proven is None:
+            comment_storage_proven = bool(storage_probe())
+        if not comment_storage_proven:
+            raise ReconcileQueryUnavailable(
+                "accounting does not store job comments",
+                reason_class="comment_accounting_unproven",
+            )
         if not any(owner_scope) and accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION:
             if visibility_proven is None:
                 visibility_proven = bool(visibility_probe())
@@ -379,8 +432,9 @@ def default_comment_sacct_querier(
         matches: list[SacctRecord] = []
         seen_ids: set[str] = set()
         for page_start, page_end in pages:
-            start_time = page_start.strftime("%Y-%m-%dT%H:%M:%S")
-            end_time = page_end.strftime("%Y-%m-%dT%H:%M:%S")
+            # sacct reads bare timestamps in the host's local timezone.
+            start_time = page_start.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+            end_time = page_end.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
             page_key = (*owner_scope, start_time, end_time)
             if page_key not in indexed_matches_by_page:
                 command = [
@@ -1285,7 +1339,10 @@ CommentSacctQuerier = Callable[..., "CommentAccountingResult | SacctRecord | Seq
 class ReservationReconcileOutcome:
     job_id: str
     idempotency_key: str
-    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed".
+    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed"
+    # | "journal_quarantined".
+    # "journal_quarantined": the FileOrchestrationJournalError branch; the only
+    # producer of quarantine_reason / quarantine_field (see those fields below).
     # "absence_unconfirmed": accounting answered absent (query succeeded, no
     # matching comment row) but the reservation is younger than
     # RESERVATION_ABSENCE_GRACE, so the absence may merely be slurmdbd

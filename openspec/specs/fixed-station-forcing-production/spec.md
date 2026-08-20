@@ -114,7 +114,7 @@ The runtime producer's direct-grid `met.met_station` mirror maintenance SHALL NO
 
 ### Requirement: Forcing package station-index identity is basin-neutral and fails closed
 
-The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity.
+The SHUD forcing package main station-index member SHALL carry the fixed basin-neutral canonical identity `shud/stations.tsd.forc`, with the legacy identity `shud/qhh.tsd.forc` accepted read-only for historical packages. Producers SHALL emit only the canonical member. Direct-grid consumers SHALL resolve the station index by requiring exactly one member from the {canonical, legacy} set in both the package manifest and the staged filesystem, failing closed on ambiguity or absence and on a manifest-declared member that is absent from the object tree. Before writing any member, direct-grid staging SHALL delete from the staged tree every accepted station-index member that this attempt's checksum-verified package manifest does not declare — prior-attempt workspace residue self-heals instead of poisoning the run — deleting nothing outside the accepted-member set; a residue deletion that fails SHALL terminate the attempt loudly with the dedicated typed error `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` instead of continuing to stage. Ambiguity that survives this hygiene — a manifest declaring more than one accepted member, or a staged filesystem still carrying more than one accepted member after hygiene — remains fail-closed. Non-direct-grid staging, which copies the whole package prefix and can therefore legitimately hold a residual second member from an in-place re-produce, SHALL resolve a multi-member filesystem by the declared member from the package manifest, or the run manifest's diagnostic file list when the package manifest publishes none, with canonical-first fallback instead of failing, and SHALL NOT delete residual members. No consumer SHALL treat the member filename as evidence of the forcing data's basin identity. The declaration-source matching SHALL accept the same entry shapes the direct-grid consumer accepts for the identical manifest: a `./`-prefixed `relative_path` normalizes before the accepted-member intersection, and an entry that omits `relative_path` resolves through its `uri` relative to the forcing package root; an entry that is invalid or underivable under these rules is skipped, because the anchor is a best-effort resolver and SHALL NOT introduce a new fail-closed surface on the non-direct-grid lane.
 
 #### Scenario: canonical member published for every basin
 
@@ -128,17 +128,31 @@ The SHUD forcing package main station-index member SHALL carry the fixed basin-n
 - **THEN** the runtime resolves, checksums, and stages it exactly as before the migration
 - **AND** existing object-store packages are not rewritten.
 
+#### Scenario: prior-attempt workspace residue self-heals at direct-grid staging
+
+- **WHEN** a direct-grid run's reused input workspace carries a staged station-index member from a prior attempt that this attempt's checksum-verified package manifest does not declare (for example a pre-migration `shud/qhh.tsd.forc` under a manifest that declares only `shud/stations.tsd.forc`)
+- **THEN** direct-grid staging deletes the undeclared accepted member before writing any member, the staging completes without `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS`, and the staged tree holds exactly the declared station-index member
+- **AND** the deletion is confined to the accepted station-index member set: prior-attempt station CSVs and files outside that set are not deleted.
+
+#### Scenario: residue deletion failure fails loud with a dedicated typed code
+
+- **WHEN** the pre-staging deletion of an undeclared accepted station-index member fails (for example the member path is a directory, or the unlink raises an I/O error)
+- **THEN** the attempt terminates with the typed error `DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED` naming the member, staging does not continue past the failure
+- **AND** the orchestrator does not auto-retry it: the code is not in `TRANSIENT_ERROR_CODES`.
+
 #### Scenario: ambiguous index membership fails closed
 
-- **WHEN** a direct-grid package manifest lists more than one station-index member from the {canonical, legacy} set, or a direct-grid package's staged filesystem contains both files
+- **WHEN** a direct-grid package manifest lists more than one station-index member from the {canonical, legacy} set, or a direct-grid staged filesystem still contains both files after the pre-staging hygiene
 - **THEN** the runtime raises the fail-closed error `DIRECT_GRID_FORCING_INDEX_AMBIGUOUS` naming the conflicting members
-- **AND** no fallback member selection is attempted.
+- **AND** no fallback member selection is attempted
+- **AND** the filesystem-level message attributes the surviving ambiguity to writes outside the manifest-allowlisted staging (out-of-band writes), not to prior-attempt residue, which the hygiene has already removed.
 
 #### Scenario: non-direct-grid staging resolves a residual second member by manifest
 
 - **WHEN** a non-direct-grid package's staged filesystem contains both station-index files, as a full-prefix copy can after a pre-migration prefix is re-produced in place
 - **THEN** the runtime resolves the member to stage from the first available declaration source — the checksum-verified package manifest's `files` list when it publishes a non-empty one, otherwise the run manifest's diagnostic `forcing.files` entries — staging the member that source names when it names exactly one accepted member, and the canonical member otherwise
-- **AND** the run does not fail on the residual member.
+- **AND** the run does not fail on the residual member
+- **AND** the residual member is not deleted: the pre-staging hygiene applies only to the direct-grid lane.
 
 #### Scenario: missing index membership fails closed for direct-grid
 
@@ -154,6 +168,26 @@ The SHUD forcing package main station-index member SHALL carry the fixed basin-n
 
 - **WHEN** the real QHH model asset `data/Basins/qhh/input/qhh/qhh.tsd.forc` or its bootstrap tooling is exercised
 - **THEN** its QHH-specific naming and semantics are unchanged by this contract.
+
+#### Scenario: dot-prefixed manifest declaration still anchors the legacy member
+
+- **WHEN** a non-direct-grid staged filesystem carries both station-index members and the declaration source names the legacy member with a `./`-prefixed `relative_path` (a shape the direct-grid checksum lane already accepts)
+- **THEN** the anchor resolves the legacy member and the run does not silently fall back to the stale canonical member
+
+#### Scenario: uri-only manifest declaration still anchors the legacy member
+
+- **WHEN** the declaration source's entry for the legacy member omits `relative_path` and carries only a `uri` located under the forcing package root
+- **THEN** the anchor derives the member from the `uri` and resolves the legacy member
+
+#### Scenario: an underivable entry is skipped without failing the lane
+
+- **WHEN** a declaration-source entry is invalid or its `uri` is not under the forcing package root
+- **THEN** that entry is skipped, the anchor falls back to canonical-first when no other entry names exactly one accepted member, and no error is raised on the non-direct-grid lane
+
+#### Scenario: a declaration naming both accepted members still falls back
+
+- **WHEN** the declaration source names both accepted station-index members, in plain, dot-prefixed, or uri-only shapes
+- **THEN** the anchor returns no member and staging falls back to canonical-first, preserving the pre-existing ambiguity semantics
 
 ### Requirement: Station handoff provenance records the actually-resolved forcing-index member
 
@@ -178,4 +212,66 @@ The DB-free file plane's station-inventory handoff (`_handoff_station_rows`) SHA
 
 - **WHEN** a station's properties already include a `source` value (e.g. QHH bootstrap real-asset stations)
 - **THEN** the handoff preserves that value verbatim
+
+### Requirement: Bootstrap seed station provenance follows the parameterized project identity
+
+The model-registry bootstrap's station seeding (`_seed_station_rows`) SHALL derive the persisted station provenance labels `properties_json.source` and `properties_json.elevation_metadata.source` from the invocation's `project_name` (as `<project_name>.tsd.forc`), consistent with the row's `project_name` and `forcing_source_identity` fields and with the sibling river-segment lane's parameterized provenance — never from a hardcoded basin literal. Under the default QHH invocation the persisted values SHALL remain byte-identical to `"qhh.tsd.forc"`.
+
+#### Scenario: Non-default project bootstrap writes self-consistent provenance
+
+- **WHEN** the bootstrap seeds station rows with a non-default
+  `project_name` (for example `heihe`)
+- **THEN** each persisted row's `source` and
+  `elevation_metadata.source` equal `heihe.tsd.forc`, its
+  `forcing_source_identity` begins with `heihe.tsd.forc:`, its
+  `project_name` is `heihe`, and none of these fields carries the
+  `qhh` literal
+
+#### Scenario: Default QHH bootstrap output is unchanged
+
+- **WHEN** the bootstrap seeds station rows with the default
+  `project_name` `qhh`
+- **THEN** the persisted `source` and `elevation_metadata.source`
+  values are byte-identical to `"qhh.tsd.forc"`
+
+### Requirement: Direct-grid station CSV staging SHALL treat a prior attempt's own residue as replaceable while still refusing anything this attempt staged
+
+Staging SHALL remove only station CSV residue that predates this attempt's
+staging, and SHALL keep failing closed when a file this same attempt just
+staged — a model package member, a forcing package member, or an initial
+state — already occupies a declared station CSV target path. A retried SHUD
+attempt reuses the same deterministic run workspace, so its own previous
+output is not a collision; a file the current attempt produced is. Removal is
+no-follow and contained within the model input directory, and a removal
+failure SHALL abort the attempt with the existing residue-cleanup error code
+rather than continuing to stage. Two rows declaring the same filename in one
+row set remain a refusal, not a last-write-wins overwrite.
+
+#### Scenario: a second attempt on the same run workspace stages successfully
+
+WHEN the same manifest is staged twice into the same run workspace, so the
+station CSV targets from the first attempt are still present
+THEN the second staging succeeds and every staged station CSV holds the
+content produced by the current staging pass
+
+#### Scenario: a file staged by this same attempt still fails closed
+
+WHEN the model package staged earlier in this same attempt carries a member
+whose name equals a declared station CSV target
+THEN staging fails with the direct-grid station filename collision error and
+the already-staged copy of that member inside the model input directory is
+left byte-for-byte unchanged
+
+#### Scenario: duplicate declarations in one row set are refused
+
+WHEN the forcing station row set declares the same filename twice
+THEN staging fails with the direct-grid station filename collision error
+rather than silently letting the second copy overwrite the first
+
+#### Scenario: residue deletion failure aborts loudly
+
+WHEN removing a prior attempt's station CSV fails
+THEN the attempt terminates with the existing direct-grid residue cleanup
+error code, staging does not continue, and no partially staged station CSV
+set is left behind
 

@@ -27,7 +27,7 @@ AND skips resubmission while the job remains active.
 
 ### Requirement: Resumable downstream failures
 
-The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily, subject to the permanence judgement of `job-retry-mechanism`: for a downstream failure whose genuinely recorded error code classifies as permanent, defaults non-transient under the unknown-code clause, or has exhausted its retry budget, the downstream-resume channel refuses to resume, and absent another legitimate channel claim (e.g. a genuinely changed model package) the candidate falls to the permanent-failure guard.
+The scheduler SHALL resume from durable successful stage outputs instead of re-running expensive upstream stages unnecessarily, subject to the permanence judgement of `job-retry-mechanism`: for a downstream failure whose genuinely recorded error code — one recorded by the failing stage itself: its own failed job row, or the candidate/run-level failure fields; stale codes left by recovered stages or by retry-history keys (`last_error`, `previous_error`) are not evidence for this judgement — classifies as permanent, defaults non-transient under the unknown-code clause, or has exhausted its retry budget, the downstream-resume channel refuses to resume, and absent another legitimate channel claim (e.g. a genuinely changed model package) the candidate falls to the permanent-failure guard.
 
 #### Scenario: parse failed after SHUD success
 
@@ -37,9 +37,15 @@ AND does not rerun native SHUD unless configured to force rerun.
 
 #### Scenario: recorded non-transient downstream failure is guarded, not resumed
 
-WHEN SHUD output exists but the downstream failure carries a genuinely recorded error code that is non-transient (e.g. `OUTPUT_INCOMPLETE`), unknown and defaulted non-transient (e.g. a recorded `PARSE_FAILED`, `SLURM_JOB_FAILED`), or over its retry budget
+WHEN SHUD output exists but the downstream failure carries a genuinely recorded error code that is non-transient (e.g. `OUTPUT_INCOMPLETE` or a recorded `PARSE_FAILED`, classified non-transient since the stage-failure family joined the non-transient list), unknown and defaulted non-transient (e.g. a recorded `SLURM_JOB_FAILED`), or over its retry budget
 THEN the downstream-resume channel refuses to resume
 AND absent another legitimate channel claim (e.g. a genuinely changed model package under `job-retry-mechanism`) the candidate moves to the permanent-failure guard with automatic retry refused, where resumption requires an explicit operator retry action, consistent with the permanent failure guard scenario of this spec
+
+#### Scenario: stale historical codes do not flip the resume domain
+
+WHEN SHUD output exists and the current downstream failure records no error code of its own, while the state still carries a stale code elsewhere — a recovered (succeeded) stage's leftover `error_code`, or a retry-history key such as an auto-retry event's `previous_error`
+THEN the downstream-resume judgement treats the failure as the reader-synthesized placeholder domain (the stale code is not evidence for the domain split)
+AND the resume is then decided by the placeholder domain's existing classifier rules — the stale code still reaches the classifier through the reason-code text surface, so a stale code classifying into that domain's refused classifiers (e.g. `OUT_OF_MEMORY` → resource configuration) keeps its existing refusal (unchanged `job-retry-mechanism` semantics), while codes outside them resume as they would with no stale code present
 
 #### Scenario: source unavailable retry policy
 
@@ -50,7 +56,7 @@ AND retry evidence records a classifier, reason code, attempt count, retry limit
 
 #### Scenario: transient array task retry
 
-WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, timeout, or out-of-memory within retry limits
+WHEN an array task fails with a transient Slurm/runtime classification such as node failure, preemption, or timeout within retry limits (`OUT_OF_MEMORY` is NOT transient: per `job-retry-mechanism`'s Retry Guard — Non-Transient Error Exclusion it is a configuration error that takes the permanent-failure path with automatic retry refused)
 THEN retry targets the failed task or candidate scope rather than rerunning successful sibling tasks
 AND persisted/evidence fields record the failure classifier, retry attempt, retry limit, stage/task identity, and reused successful sibling outputs.
 

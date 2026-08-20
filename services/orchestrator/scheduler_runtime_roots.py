@@ -551,11 +551,79 @@ def _normalize_sources(sources: Sequence[str]) -> tuple[tuple[str, ...], list[di
     return tuple(normalized), exclusions
 
 
+def _canonical_parent(path: Path) -> Path:
+    """Canonicalise a path's parent segment on every supported CPython.
+
+    Same paradigm as _optional_config_path below: strict os.path.realpath, one
+    non-strict os.path.realpath fallback for every strict failure, and no
+    verdict of its own -- the caller's containment check or the storage
+    preflight classifies what comes back.  Path.resolve() cannot be used here
+    because a symlink loop in the parent segment makes it raise an errno-less
+    RuntimeError up to 3.12 (strict=False does not help; GH-113838 lands in
+    3.13), aborting configuration construction on every production interpreter
+    while 3.13+ walks on to a structured verdict.  The non-strict fallback
+    reproduces the old Path.resolve() product verbatim -- POSIX order, symlinks
+    first and `..` afterwards -- so loop-free and ENOENT inputs are unchanged
+    (design D1/D2 of #1423).
+    """
+
+    parent = path.parent
+    try:
+        return Path(os.path.realpath(parent, strict=True))
+    except OSError:
+        return Path(os.path.realpath(parent))
+
+
+def _canonical_path(path: Path) -> Path:
+    """Canonicalise a whole path on every supported CPython.
+
+    Same paradigm as _canonical_parent above, applied to the full path instead
+    of its parent segment: strict os.path.realpath, one non-strict
+    os.path.realpath fallback for every strict failure, and no verdict of its
+    own.  Path.resolve() cannot be used because a symlink loop makes it raise an
+    errno-less RuntimeError up to 3.12 while 3.13+ silently adopts the loop as
+    the result (GH-113838), so the two interpreters disagree on the same input.
+    The non-strict fallback reproduces the old Path.resolve() product verbatim
+    -- POSIX order, symlinks first and `..` afterwards -- so loop-free and
+    ENOENT inputs are unchanged (#1546).
+    """
+
+    try:
+        return Path(os.path.realpath(path, strict=True))
+    except OSError:
+        return Path(os.path.realpath(path))
+
+
+def _expanduser_or_verbatim(value: Path | str) -> Path:
+    """Expand a leading ``~``, keeping the raw value when no home can be determined.
+
+    Path.expanduser() throws a bare, errno-less RuntimeError for
+    ``~<unknown user>`` (and for ``~`` with no passwd entry and HOME unset).
+    Config construction must not abort on that: classification of an unusable
+    root belongs to the storage preflight, and an abort here produces no
+    structured blocker at all.  Swallowing the throw and handing the raw value
+    on to the caller's own anchoring is exactly what the database-free arm does
+    in scheduler_config._expanduser_for_mode(..., db_free_required=True), so the
+    two database arms come out byte-identical on such input (#1549).
+
+    This is deliberately the opposite direction from packages/common/safe_fs.py,
+    which narrows the same bare throw into a structured refusal: that module is
+    a write-side primitive where a mis-anchored path is a filesystem side
+    effect, while here the value is only carried down to a classifier.
+    """
+
+    path = Path(value)
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        return path
+
+
 def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = workspace_root / path
-    resolved_parent = path.parent.resolve()
+    resolved_parent = _canonical_parent(path)
     candidate = resolved_parent / path.name
     _scheduler._require_under_workspace(resolved_parent, workspace_root, field_name)
     return candidate
@@ -569,7 +637,10 @@ def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None
 def _optional_config_path(value: Path | str | None) -> Path | None:
     if value in (None, ""):
         return None
-    expanded = Path(value).expanduser()
+    # A tilde whose home cannot be determined is kept verbatim rather than
+    # aborting construction, for the same reason the strict failure below is
+    # handed on: classification belongs to the preflight (#1549).
+    expanded = _expanduser_or_verbatim(value)
     try:
         return Path(os.path.realpath(expanded, strict=True))
     except OSError:
@@ -591,17 +662,17 @@ def _optional_config_path(value: Path | str | None) -> Path | None:
 
 
 def _config_path_preserve_final_component(value: Path | str) -> Path:
-    path = Path(value).expanduser()
+    path = _expanduser_or_verbatim(value)
     if not path.is_absolute():
         path = Path.cwd() / path
-    return path.parent.resolve(strict=False) / path.name
+    return _canonical_parent(path) / path.name
 
 
 def _config_path_relative_to_preserve_final(value: Path | str, base: Path) -> Path:
-    path = Path(value).expanduser()
+    path = _expanduser_or_verbatim(value)
     if not path.is_absolute():
         path = base / path
-    return path.parent.resolve(strict=False) / path.name
+    return _canonical_parent(path) / path.name
 
 
 def _optional_config_path_relative_to_preserve_final(value: Path | str | None, base: Path) -> Path | None:
@@ -613,16 +684,19 @@ def _optional_config_path_relative_to_preserve_final(value: Path | str | None, b
 def _resolve_optional_config_path(value: Path | None) -> Path | None:
     if value is None:
         return None
-    return value.resolve()
+    return _canonical_path(value)
 
 
 def _optional_config_path_relative_to(value: Path | str | None, base: Path) -> Path | None:
     if value in (None, ""):
         return None
-    path = Path(value).expanduser()
+    # Two families cross in this one helper: the bare expanduser is the #1549
+    # lane (keep the value, do not throw) and the bare resolve is the #1546 lane
+    # (canonicalise identically on every interpreter).
+    path = _expanduser_or_verbatim(value)
     if not path.is_absolute():
         path = base / path
-    return path.resolve()
+    return _canonical_path(path)
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -701,16 +775,81 @@ def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) 
         raise ValueError(f"production scheduler {field_name} must be under workspace_root") from error
 
 
+def _symlink_loop_refusal(field_name: str, path: Path, attribution: str) -> ValueError:
+    """Build the loop refusal shared by both real-path arms of the guard below.
+
+    One sentence and one path presentation for both arms; the *attribution*
+    deliberately differs, because the two arms blame different knobs -- forcing
+    a single wording would make the final-component arm point at workspace_root
+    even when the loop is in the root the operator actually configured, which is
+    the same misattribution this change exists to remove (#1545 design D1).
+
+    The path is carried verbatim, like this guard's sibling refusals: the guard
+    receives neither an evidence-redaction flag nor a config handle, so it
+    cannot reproduce the preflight lane's ``[local-path]`` treatment.
+    """
+
+    return ValueError(
+        f"production scheduler {field_name} must not resolve through a symlink loop: {path} ({attribution})"
+    )
+
+
 def _require_safe_directory_final_component(path: Path, workspace_root: Path, field_name: str) -> None:
-    _scheduler._require_under_workspace(path.parent.resolve(), workspace_root, field_name)
+    # Parent-segment arm, same paradigm as _confined_path: a loop ABOVE the
+    # final component must reach the lstat() verdict below on every CPython
+    # instead of aborting here on <=3.12 (#1520).
+    _scheduler._require_under_workspace(_canonical_parent(path), workspace_root, field_name)
     try:
         path_stat = path.lstat()
     except FileNotFoundError:
         return
     except OSError as error:
+        if error.errno == ELOOP:
+            # A loop somewhere above the final component.  This arm is reached
+            # both when workspace_root itself loops -- and then this field is
+            # merely derived from it, so the bare field name used to send
+            # operators to a knob they never set -- and when the loop sits
+            # inside a root they did configure, so name both (#1545).
+            raise _symlink_loop_refusal(
+                field_name,
+                path,
+                f"the loop lies above the final component; check {field_name} "
+                f"and workspace_root {workspace_root}",
+            ) from error
+        # Every other lstat failure keeps its wording verbatim: the non-loop
+        # geometries on this arm (workspace_root is a regular file, or its mode
+        # denies traversal) are pinned elsewhere, hence an errno split here
+        # rather than a rewrite of the arm.
         raise ValueError(f"production scheduler {field_name} must be a safe directory") from error
     if stat.S_ISLNK(path_stat.st_mode):
-        resolved = path.resolve(strict=False)
+        # Strict real-path is the only source of a verdict that both interpreter
+        # arms agree on: non-strict resolution raises an errno-less RuntimeError
+        # on <=3.12 and silently adopts the loop on 3.13+ (#1544).
+        try:
+            resolved = Path(os.path.realpath(path, strict=True))
+        except OSError as error:
+            if error.errno == ELOOP:
+                # ELOOP fires for a cycle ANYWHERE in the resolution, not only
+                # in the final component: this link's target may itself
+                # traverse a loop that lives elsewhere, and the lstat arm above
+                # only cleared the parent segment of *path*.  The kernel names
+                # the looping component in error.filename -- byte-identically
+                # on every supported CPython -- so the attribution follows it
+                # instead of asserting a geometry that may not hold; naming the
+                # wrong link is the misattribution #1545 exists to remove.
+                raise _symlink_loop_refusal(
+                    field_name,
+                    path,
+                    f"the symlink loop is at {error.filename or path}",
+                ) from error
+            # Every other strict failure falls back to the non-strict product
+            # this arm has always used, so only the loop changes verdict.  The
+            # fallback is load-bearing and wider than ENOENT alone: a dangling
+            # link raises ENOENT, a target reached through a file raises
+            # ENOTDIR, and a target under an unreadable directory raises EACCES
+            # -- all three are accepted today, and refusing them here would
+            # silently break configurations that work.
+            resolved = Path(os.path.realpath(path))
         _scheduler._require_under_workspace(resolved, workspace_root, field_name)
         if resolved.exists() and not resolved.is_dir():
             raise ValueError(f"production scheduler {field_name} must be a directory")

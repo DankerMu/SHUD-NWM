@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from packages.common import provider_atomic, state_manager
+from packages.common import provider_atomic, safe_fs, state_manager
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.safe_fs import SafeFilesystemError
@@ -776,6 +777,170 @@ def test_replay_refuses_identical_and_overlapping_roots(
     assert not (fixture.receipt_root / "latest.json").exists()
 
 
+def test_replay_refuses_alias_roots_reporting_one_filesystem_identity(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two distinct realpaths, one inode: the guard must still refuse (#1192).
+
+    The injection replaces the probe the guard actually calls, so it pins that
+    the guard consumes filesystem identity rather than the resolved path
+    string.  Under the pre-#1192 string comparison this alias pair is read as
+    two different roots, the replay proceeds, and the scoped merge takes the
+    provider destination lock twice on one lockfile and blocks forever.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    alias_destination = fixture.root / "alias-destination"
+    alias_destination.mkdir()
+    _inject_alias_identity(monkeypatch, fixture.reference_root, alias_destination)
+
+    exit_code = _call_without_hanging(
+        lambda: replay.main(
+            [
+                "--reference-root",
+                str(fixture.reference_root),
+                "--destination-root",
+                str(alias_destination),
+                "--cycle",
+                "gfs_2026072000",
+                "--enforce",
+            ]
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert payload["reason"] == "roots_identical"
+    assert not (alias_destination / "scheduler/state-index/index-last.json").exists()
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_replay_still_refuses_a_symlink_alias_destination_root(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Symlink aliases are caught by `.resolve()`, NOT by the identity probe.
+
+    `_resolved_root` folds the link away before the guard runs, so both roots
+    arrive as one resolved path and the identity comparison holds trivially.
+    The probe itself cannot take this input: its per-component no-follow walk
+    rejects a symlink final component outright. Do not read this test as
+    evidence that the helper handles symlinks.
+
+    Accepted limit recorded alongside (proposal Known Limits): the overlap
+    check stays a resolved-path string comparison, so an alias that makes one
+    root a *child* of the other stays undetectable. No test claims otherwise.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    alias = fixture.root / "reference-alias"
+    alias.symlink_to(fixture.reference_root, target_is_directory=True)
+
+    exit_code = replay.main(
+        [
+            "--reference-root",
+            str(fixture.reference_root),
+            "--destination-root",
+            str(alias),
+            "--cycle",
+            "gfs_2026072000",
+            "--enforce",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert payload["reason"] == "roots_identical"
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def _inject_alias_identity(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
+    """Make `roots` report one filesystem identity through the guard's probe.
+
+    Patched on the replay module's own namespace, which is where the guard
+    resolves the name -- patching `packages.common.safe_fs` instead would leave
+    the production call point untouched.  No portable, root-free construction
+    produces two concurrently existing realpaths over one inode (see the honest
+    limit in tests/test_safe_fs.py), so the alias is injected at this seam.
+    """
+
+    resolved = {root.resolve() for root in roots}
+    real_probe = safe_fs.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() in resolved:
+            return (0x1192, 0x1192)
+        return real_probe(path)
+
+    monkeypatch.setattr(replay, "directory_identity_no_follow", probe)
+
+
+def _call_without_hanging(call: Any) -> Any:
+    """Run `call` on a daemon thread and fail if it has not returned in 5s.
+
+    This is a generic non-return net for the guard path, nothing narrower: if
+    the guard ever stops returning -- blocks, spins, waits on any lock -- the
+    suite fails in 5s instead of wedging the session.  `daemon=True` is not
+    optional -- a non-daemon thread keeps the interpreter alive at exit waiting
+    for exactly the thread that never finishes.  A thread stuck here goes on
+    holding whatever fd it took for the rest of this pytest session.
+
+    The two caller shapes in this file differ in whether that can actually
+    happen, so the bound means different things to each.
+
+    For the **probe-seam** caller
+    (`test_replay_refuses_alias_roots_reporting_one_filesystem_identity`) the
+    helper cannot reproduce the `fcntl.flock` self-deadlock that motivates the
+    guard (provider_atomic.py:221 takes the blocking path without LOCK_NB).
+    That deadlock is real in production, where a bind-mount alias makes two
+    realpaths name one directory, so the scoped merge locks one lockfile twice.
+    There the alias is injected at the probe seam, so on the real filesystem
+    the two roots stay genuinely distinct directories; the provider lock is
+    path-keyed (`provider_lock_path`, and the in-process gate keys on
+    `os.path.abspath`), so even a regressed guard that reaches the merge takes
+    two distinct lockfiles and returns.  Measured: under a string-compare
+    mutant that test reds in ~0.3s on an ordinary assertion or
+    `FileNotFoundError`.  Reproducing the deadlock through that seam would need
+    a real bind mount, which has no portable root-free construction (see the
+    honest limit in tests/test_safe_fs.py).
+
+    For the **hardlink** caller
+    (`test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit`)
+    it is the other way round: nothing is injected, `os.link` puts the
+    destination lockfile on the source inode, so the two lock names reach one
+    file and the blocking `flock` genuinely self-deadlocks.  The 5s join is a
+    real tripwire there and must not be removed.  Measured under the branch-B
+    deletion mutant (state_manager.py:1980-1983 -> `return`): that test and its
+    `run_tree_copyback` sibling both consume the whole join budget -- `2 failed
+    in 10.28s` with four hang-regression occurrences and zero
+    `provider_lock_parent_unsafe`, against a `2 passed in 0.45s` pristine
+    baseline.  pyproject.toml carries no `pytest-timeout` and no `addopts`, so
+    this `thread.join(5.0)` is the only bound in the process: drop it and a
+    regression wedges the local session and burns the CI unit-test job's full
+    `timeout-minutes: 35`.
+    """
+
+    outcome: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # noqa: BLE001 -- re-raised on the caller's thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5.0)
+    if thread.is_alive():
+        pytest.fail("hang regression: the same-root guard did not return within 5s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 def test_replay_enforce_requires_private_receipt_root(
     fixture: Fixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -987,3 +1152,130 @@ def _valid_state_bytes(seed: bytes) -> bytes:
         "2\t0.1\t0.1\t0.1\t0.1\t0.1\n"
         "1\t0.5\n"
     ).encode()
+
+
+@pytest.fixture(name="private_umask_fixture")
+def private_umask_fixture_factory(tmp_path: Path) -> Fixture:
+    """`fixture`, but built under `umask 0o077` so the lock parents come out private.
+
+    Written for #1609/#1610, when `ensure_directory_no_follow` created the lock
+    parent with a bare `os.mkdir` (`0o777 & ~umask`): under an ambient `umask 002`
+    that landed 0o775 and `provider_lock_parent_unsafe` (provider_atomic.py:209-210)
+    fired in fixture setup -- an error, not a failure, and nothing about the guard
+    under test.  #1513 pinned that `os.mkdir` to an explicit 0o755 (safe_fs.py:68),
+    so the lock-parent gate no longer depends on the ambient umask and this wrapper
+    is no longer load-bearing for it (measured: the suite is green with the wrapper
+    neutralized).
+
+    It is kept because it is behavior-neutral -- `0o755 & ~0o077 == 0o700`, the
+    same private mode it always produced -- and because it keeps the fixture's
+    private-mode posture explicit rather than implicit in safe_fs's pin.  The
+    construction sits inside the `try` so a raise cannot leak 0o077 into the rest
+    of the session.
+    """
+
+    previous_umask = os.umask(0o077)
+    try:
+        return Fixture(tmp_path)
+    finally:
+        os.umask(previous_umask)
+
+
+def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
+    private_umask_fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1609 A.7: this tool classifies by reason allowlist, not by phase.
+
+    A phase-free error is enough for `run_tree_copyback`, but here an unlisted
+    reason falls through to commit-uncertain -- exit 3, `merge_commit_state:
+    "uncertain"`, the committed-tail verification and a receipt -- for a refusal
+    that took no lock and touched nothing.  This is the nail that makes forgetting
+    the allowlist a red instead of a false green: the suite otherwise only spot
+    checks individual reasons and has no coverage test over the allowlist.
+    """
+
+    _apply_env(monkeypatch, private_umask_fixture)
+    assert "state_snapshot_index_copyback_lock_identical" in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    source_lock = provider_atomic.provider_lock_path(private_umask_fixture.source_index)
+    destination_lock = provider_atomic.provider_lock_path(private_umask_fixture.destination_index)
+    # Both lock parents private, or `provider_lock_parent_unsafe` fires first.
+    source_lock.parent.chmod(0o700)
+    destination_lock.parent.chmod(0o700)
+    destination_lock.unlink()
+    os.link(source_lock, destination_lock)
+    index_before = private_umask_fixture.destination_index.read_bytes()
+
+    previous_umask = os.umask(0o077)
+    try:
+        exit_code = _call_without_hanging(lambda: replay.main(["--cycle", "gfs_2026072000", "--enforce"]))
+    finally:
+        os.umask(previous_umask)
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert exit_code != 3
+    assert error["status"] == "refused"
+    assert error["status"] != "merge_committed_incomplete"
+    assert error["reason"] == "merge_failed"
+    assert error["error_reason"] == "state_snapshot_index_copyback_lock_identical"
+    # The committed tail never ran: no receipt, no uncertain verdict, no
+    # read-back of a destination nothing wrote.
+    assert not (private_umask_fixture.receipt_root / "latest.json").exists()
+    assert private_umask_fixture.destination_index.read_bytes() == index_before
+    assert not private_umask_fixture.new_shared_object.exists()
+
+
+def test_replay_allowlists_the_lock_identity_unavailable_refusal() -> None:
+    """#1610: the guard's *other* reason must classify as a refusal too.
+
+    `_refuse_identical_copyback_lockfiles` raises two reasons, both from the same
+    pre-commit point, and only one of them was pinned above.  A probe that cannot
+    answer takes no lock and touches nothing, so leaving
+    `state_snapshot_index_copyback_lock_identity_unavailable` off the allowlist
+    would fall through to commit-uncertain -- exit 3, the committed tail, a
+    receipt -- for a merge that provably never started.
+    """
+
+    assert (
+        "state_snapshot_index_copyback_lock_identity_unavailable"
+        in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    )
+
+
+def test_replay_root_identity_probe_failure_stays_root_unavailable(
+    fixture: Fixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1610: `_root_identity`'s own failure posture, previously unenforced.
+
+    A probe failure must reuse `root_unavailable` and name the field, not escape
+    as a bare OSError traceback (rc 1, no stderr payload) and not degrade into a
+    permissive pass.
+    """
+
+    _apply_env(monkeypatch, fixture)
+    real_probe = safe_fs.directory_identity_no_follow
+    target = fixture.destination_root.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(replay, "directory_identity_no_follow", probe)
+    index_before = fixture.destination_index.read_bytes()
+
+    exit_code = replay.main(["--cycle", "gfs_2026072000", "--enforce"])
+
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert exit_code != 1
+    assert payload["reason"] == "root_unavailable"
+    assert payload["field"] == "destination_root"
+    assert payload["path"] == str(target)
+    assert fixture.destination_index.read_bytes() == index_before
+    assert not (fixture.receipt_root / "latest.json").exists()

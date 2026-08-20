@@ -780,6 +780,84 @@ def test_seed_station_rows_passes_properties_without_digest_to_insert(
     assert isinstance(argslist[0][8], Json)
 
 
+@pytest.mark.parametrize(
+    ("project_name", "expected_source"),
+    [("qhh", "qhh.tsd.forc"), ("heihe", "heihe.tsd.forc")],
+)
+def test_seed_station_rows_provenance_follows_project_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    project_name: str,
+    expected_source: str,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_execute_values(
+        cursor: Any,
+        sql: str,
+        argslist: list[tuple[Any, ...]],
+        *,
+        template: str,
+        page_size: int,
+    ) -> None:
+        del cursor, sql, template, page_size
+        calls.append({"argslist": argslist})
+
+    class FakeCursor:
+        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            del sql, params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    station = qhh_bootstrap.QhhForcingStation(
+        station_id="qhh_forc_001",
+        station_name="QHH forcing station 001",
+        forcing_index=1,
+        longitude=100.1,
+        latitude=30.1,
+        x=1.0,
+        y=2.0,
+        z=-9999.0,
+        elevation_m=0.0,
+        forcing_filename="X000001.csv",
+        original_id="1",
+    )
+    monkeypatch.setattr(qhh_bootstrap, "execute_values", fake_execute_values, raising=False)
+    monkeypatch.setattr("psycopg2.extras.execute_values", fake_execute_values)
+
+    qhh_bootstrap._seed_station_rows(
+        FakeCursor(),
+        model={
+            "model_id": "basins_qhh_shud",
+            "basin_id": "qhh",
+            "basin_version_id": "qhh_v1",
+        },
+        stations=[station],
+        project_name=project_name,
+        # Filename deliberately decoupled from project_name: the seed lane takes
+        # the two as independent inputs, so a filename-derived source must fail.
+        tsd_forc_path=tmp_path / "input.tsd.forc",
+        tsd_forc_checksum="sha",
+    )
+
+    assert calls
+    properties = calls[0]["argslist"][0][8].adapted
+
+    assert properties["source"] == expected_source
+    assert properties["elevation_metadata"]["source"] == expected_source
+    assert properties["forcing_source_identity"].startswith(f"{expected_source}:")
+    assert properties["project_name"] == project_name
+
+    if project_name != "qhh":
+        # Scoped to these four provenance values only: the harness model/basin/
+        # station ids legitimately contain "qhh".
+        assert "qhh" not in properties["source"]
+        assert "qhh" not in properties["elevation_metadata"]["source"]
+        assert "qhh" not in properties["forcing_source_identity"]
+        assert "qhh" not in properties["project_name"]
+
+
 def test_existing_output_segment_digest_ignores_deterministic_geometry_backfill_properties() -> None:
     expected = {
         "seed": "qhh_production_bootstrap",

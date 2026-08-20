@@ -7,11 +7,16 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from packages.common.provider_atomic import ProviderAtomicError
-from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow, rmtree_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    directory_identity_no_follow,
+    ensure_directory_no_follow,
+    rmtree_no_follow,
+)
 from packages.common.state_manager import StateManagerError, merge_state_snapshot_index_copyback
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -43,7 +48,12 @@ def copyback_run_trees(
     object_root = _existing_directory(Path(object_store_root), "object_store_root")
     target_root = ensure_directory_no_follow(Path(copyback_root)).resolve()
 
-    if object_root == target_root:
+    # Sameness is filesystem identity, not the resolved path string: an aliased
+    # root (bind mount, second mount point of one export) resolves to a
+    # different string but is the same directory, and passing it through would
+    # self-deadlock on the provider destination lock during the state-index
+    # merge below (#1192).  Both operands are already resolved.
+    if _directory_identity(object_root, "object_store_root") == _directory_identity(target_root, "copyback_root"):
         for run_id in unique_run_ids:
             _validate_run_tree(object_root / _run_key(run_id), run_id=run_id)
         return {
@@ -104,27 +114,45 @@ def copyback_run_trees(
                     authoritative_run_ids=unique_run_ids,
                 )
             except (ProviderAtomicError, StateManagerError) as error:
-                if isinstance(error, ProviderAtomicError) and error.phase == "release_uncertain":
-                    # The provider lock releases only after the destination
-                    # compare-and-swap, so this failure says "the shared index
-                    # may already hold the merged entries".  Reporting it as
-                    # the fail-closed code would push a possible commit back
-                    # into the "nothing happened" bucket and send the operator
-                    # bisection the wrong way (#1193); the phase, not the
-                    # reason, is the discriminator so future release-period
-                    # reasons land in the same bucket.
+                # The merge classifies itself: every provider raise point past
+                # the destination compare-and-swap carries a phase saying so,
+                # and it reaches here under either of two carriers -- the bare
+                # provider error (lock release, #1193) or the state-manager
+                # error that rewraps it with the phase kept in its evidence
+                # (the whole replace/postread/rollback family, #1364).  The
+                # discriminator is "not provably pre-commit", the same proof
+                # philosophy the replay tool refuses on: only an audited
+                # pre-commit raise point shows the shared index unchanged, so
+                # any future phase lands on the safe side by default.  The
+                # no-phase bucket lands on the fail-closed code, which is safe
+                # not because a missing phase proves anything but because every
+                # no-phase `_state_index_error` raise point in the merge call
+                # graph sits before the destination compare-and-swap (audited
+                # in this change's design D1); a future post-CAS raise MUST
+                # carry a phase to land in the uncertain bucket.
+                # `provider_restored_previous` (phase postcommit) is uncertain
+                # too: the rollback verified, but the merged bytes were
+                # briefly visible to concurrent readers, and the operator's
+                # next step -- check the shared entry_count -- is the same.
+                phase = getattr(error, "phase", None)
+                if phase is None:
+                    evidence = getattr(error, "evidence", None)
+                    if isinstance(evidence, Mapping):
+                        phase = evidence.get("phase")
+                error_reason = getattr(error, "reason", None)
+                if phase is not None and phase != "precommit":
                     raise RunTreeCopybackError(
                         "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
                         (
-                            "State-index copyback merge may have committed; provider lock "
-                            "release failed after the compare-and-swap."
+                            "State-index copyback merge may have committed; the failure arose at "
+                            f"or past the destination compare-and-swap (phase={phase})."
                         ),
-                        {"object_key": object_key, "error": str(error), "error_reason": error.reason},
+                        {"object_key": object_key, "error": str(error), "error_reason": error_reason},
                     ) from error
                 raise RunTreeCopybackError(
                     "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
                     "State-index copyback merge failed closed.",
-                    {"object_key": object_key, "error": str(error)},
+                    {"object_key": object_key, "error": str(error), "error_reason": error_reason},
                 ) from error
             summary = {
                 "file_count": 1,
@@ -170,6 +198,26 @@ def _existing_directory(path: Path, field: str) -> Path:
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE",
             "Object-store root is unavailable for run-tree copyback.",
+            {field: str(path), "error": str(error)},
+        ) from error
+
+
+def _directory_identity(path: Path, field: str) -> tuple[int, int]:
+    """Filesystem identity of an already-resolved root, or the existing refusal.
+
+    Both operands of the identity comparison probe through here, so the message
+    has to name the one that actually failed -- an operator told "object-store
+    root" while the copyback root is the broken mount debugs the wrong side
+    (#1192).  The code stays the shared `OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE`.
+    """
+
+    try:
+        return directory_identity_no_follow(path)
+    except (OSError, SafeFilesystemError) as error:
+        operand = "Object-store copyback root" if field == "copyback_root" else "Object-store root"
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_ROOT_UNAVAILABLE",
+            f"{operand} is unavailable for run-tree copyback.",
             {field: str(path), "error": str(error)},
         ) from error
 
@@ -376,6 +424,19 @@ def _copy_tree_no_symlinks(source: Path, target: Path) -> dict[str, Any]:
         _reject_symlink(current)
         relative = current.relative_to(source)
         destination_dir = target / relative
+        # ACL-mask-preserving BY CONSTRUCTION -- do not "fix" this into
+        # `ensure_directory_no_follow` (#1513).  The copyback tree's shared root
+        # (`runs/`) carries a `default:user:nwm:rwx` POSIX ACL, and when such an
+        # ACL is present the umask is ignored and any explicit mode passed to
+        # `mkdir` clamps the inherited ACL *mask* instead -- degrading that grant
+        # to `#effective:r-x`.  A mode-less `mkdir` lets the ACL supply the mode
+        # and leaves `mask::rwx` intact.
+        #
+        # Do NOT go looking for a live consumer of that grant: there is none
+        # today (`find` reports zero nwm-owned entries under `runs/`; node-22 is
+        # the sole writer and node-27 only reads).  The point is that this site
+        # is already on the correct side of the incompatibility if one ever
+        # appears, not that something depends on it right now.
         destination_dir.mkdir(parents=True, exist_ok=True)
         for dirname in list(dirs):
             _reject_symlink(current / dirname)

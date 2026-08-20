@@ -223,6 +223,46 @@ def test_manifest_uri_is_required_before_database(
     assert error["model_id"] == model_id
 
 
+def test_import_refusal_payload_carries_model_causes_before_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A model the #1197 IC header gate marked invalid is refused for import; the
+    refusal payload has to carry the model record's cause keys (#1432)."""
+
+    root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    (input_dir / "alias-a.cfg.ic").write_text("23106\t6\n1\t0.1\n", encoding="utf-8")
+    inventory = discover_basins_inventory(root)
+    write_inventory(inventory, inventory_path)
+    model = inventory["models"][0]
+    manifest = _package_manifest_for_model(model, model_id, inventory=inventory)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_MODEL_NOT_IMPORTABLE"
+    assert error["message"] == "Basins model is not importable from this inventory."
+    assert error["model_id"] == model_id
+    assert error["path"] == model["source_path"]
+    assert error["status"] == "partial"
+    assert error["missing_required_files"] == []
+    assert [reason.split(":")[0] for reason in error["invalid_required_files"]] == ["alias-a.cfg.ic"]
+    assert error["unreadable_required_files"] == []
+
+
 def test_import_accepts_raw_inventory_byte_checksum_for_noncanonical_json(tmp_path: Path) -> None:
     _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))

@@ -1,0 +1,199 @@
+# job-retry-mechanism delta
+
+## MODIFIED Requirements
+
+### Requirement: Retry Guard — Non-Transient Error Exclusion
+
+The Orchestrator SHALL NOT automatically retry jobs that failed with non-transient error codes.
+
+#### Scenario: Non-transient error codes block auto-retry
+
+- **WHEN** a `pipeline_job` fails with one of the following error codes:
+  - `INVALID_MANIFEST` — manifest file is malformed or missing required fields
+  - `PERMISSION_DENIED` — insufficient permissions to access resources
+  - `OUTPUT_INCOMPLETE` — output schema validation failed (data integrity error, not retryable)
+  - `TEMPLATE_NOT_ALLOWED` — sbatch template rejected by security policy
+  - `MANIFEST_SCHEMA_INVALID` — manifest file fails JSON schema validation
+  - `OUT_OF_MEMORY` — Slurm OOM kill (configuration error: memory_gb too low for workload, not transient)
+  - `SHUD_FAILED` — SHUD runtime failure; rerunning the same configuration does not converge (classifier: `shud_runtime_failure`)
+  - `FAILED_RUN` — SHUD runtime failure, legacy spelling (same family as `SHUD_FAILED`)
+  - `RUNTIME_FAILED` — SHUD runtime failure, legacy spelling (same family as `SHUD_FAILED`)
+  - `CONVERT_FAILED` — downstream stage failure, minted as `{STAGE}_FAILED` over the canonical downstream stage domain
+  - `FORCING_FAILED` — downstream stage failure (same minted family)
+  - `FORECAST_FAILED` — downstream stage failure (same minted family)
+  - `PARSE_FAILED` — downstream stage failure (same minted family)
+  - `STATE_SAVE_QC_FAILED` — downstream stage failure (same minted family)
+  - `PUBLISH_FAILED` — downstream stage failure (same minted family)
+  - `COPYBACK_FAILED` — downstream stage failure (same minted family)
+  - `STATE_SAVE_QC_TASK_FAILED` — task-level downstream failure code
+  - `PARSE_TASK_FAILED` — task-level downstream failure code
+  - `PUBLISH_TASK_FAILED` — task-level downstream failure code
+- **THEN** the Orchestrator MUST NOT schedule an automatic retry
+- **THEN** the Orchestrator SHALL mark the job as permanently failed immediately
+- **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "non_transient_error", "error_code": "<code>"}`
+
+#### Scenario: Transient error codes allow auto-retry
+
+- **WHEN** a `pipeline_job` fails with one of the following error codes:
+  - `SLURM_TIMEOUT` — Slurm walltime exceeded
+  - `SLURM_DEADLINE` — Slurm `--deadline` scheduling window closed before completion (transient scheduling failure)
+  - `NODE_FAILURE` — compute node crashed or became unreachable
+  - `STORAGE_WRITE_FAILED` — transient storage I/O error
+  - `SBATCH_SUBMISSION_FAILED` — sbatch command returned non-zero (transient Slurm scheduler issue)
+  - `SLURM_UNAVAILABLE` — Slurm controller unreachable at submission time
+- **THEN** the Orchestrator SHALL proceed with automatic retry (subject to `max_retries` and backoff)
+
+#### Scenario: Unknown error code defaults to non-transient
+
+- **WHEN** a `pipeline_job` fails with an error code not listed in the non-transient or transient lists
+- **THEN** the Orchestrator SHALL treat it as non-transient and MUST NOT schedule an automatic retry
+- **THEN** a `pipeline_event` SHALL be appended with `details_json` containing `{"auto_retry_skipped": true, "reason": "unknown_error_code_defaulted_non_transient", "error_code": "<code>"}`
+- **THEN** the Orchestrator SHALL log a warning: `"unknown error_code '<code>' defaulted to non-transient — add to classification list"`
+
+#### Scenario: Stage-failure codes track the canonical downstream stage domain
+
+- **WHEN** the canonical downstream restart stage domain (`DOWNSTREAM_RESTART_STAGES`) contains a stage
+- **THEN** the non-transient classification set SHALL contain that stage's minted failure code `{STAGE}_FAILED`, derived mechanically from the domain constant rather than maintained as a hand-copied list, so a future canonical stage cannot mint an unclassified production-mainline code
+
+#### Scenario: Classification parity between this requirement and code is test-anchored
+
+- **WHEN** the repository test suite runs
+- **THEN** a test SHALL read this requirement's non-transient code list from the spec text and assert that `OUT_OF_MEMORY` appears there, is a member of the orchestrator's non-transient classification set, and is absent from every transient classification surface (`TRANSIENT_ERROR_CODES` and the scheduler-state transient retry-reason set), so that a reopened spec-code drift on this code fails the suite rather than surviving to review
+
+#### Scenario: auto_retry_skipped payload rides the permanently_failed event
+
+- **WHEN** the guard blocks automatic retry for a non-transient or unknown error code and marks the job permanently failed
+- **THEN** the `auto_retry_skipped` payload is merged into the existing `permanently_failed` pipeline event's `details_json` (no separate event type), constructed by a single shared helper consumed by both the DB plane and the file-journal plane so the reason literals have exactly one source
+
+#### Scenario: the auto_retry_skipped key appears iff a recorded error code is classification-blocked
+
+- **WHEN** a job is marked permanently failed because its TRANSIENT error code exhausted the retry budget, or because it reached permanent failure with no recorded error code
+- **THEN** the `permanently_failed` event's `details_json` does NOT contain the `auto_retry_skipped` key — the key appears if and only if a recorded error code was blocked by classification; the keyless cases (no recorded code vs. retries exhausted) are distinguished from each other by the existing `failure.limit_exhausted` / `failure.reason_code` fields
+- **AND** a job with a NON-TRANSIENT recorded error code carries the key even when its attempt count also exceeds the retry limit (classification blocks first)
+
+#### Scenario: db-free scheduler plane disposition
+
+- **WHEN** the db-free scheduler plane handles a guard-blocked failure
+- **THEN** the portion flowing through `FileJournalRetryService` emits the payload via the file-journal sink
+- **AND** the pure-adjudication path (`scheduler_state_failure._failure_policy_payload`) remains sink-free per its `pipeline_event_writes_proven_absent` evidence contract and is NOT required to write pipeline events
+- **AND** the unknown-code warning obligation is likewise exempted on the pure-adjudication path (it is re-evaluated every scheduler pass with no append anchor; the single warning is emitted where the mark event lands, at the file-journal sink)
+
+### Requirement: Pre-Guard Evidence Channels Consult Permanence
+
+Every db-free decision-ladder evidence channel that can emit an automatic-retry decision before the permanent-failure guard — except the output-absence recompute channel, recorded exempt below — SHALL consult a single shared permanence judgement before overwriting a permanent failure classification, and SHALL refuse the overwrite when the failure's classification proves the channel's remedy cannot address the cause.
+
+The permanent-failure guard remains consulted at emitting return points
+(never as an unconditional pre-pass). The recorded-code scoping governs the
+downstream-resume channel's unknown-code clause only: reader-synthesized
+placeholder codes (defaults fabricated when the state records no error code at all)
+are not evidence under that clause and keep their existing behavior,
+including the existing classifier-based refusals; the raw-manifest and
+model-package channels consult the judgement for every permanent
+classification, recorded code or not. The clause's recorded-code domain is
+scoped to codes recorded by the failing stage itself — stale codes from
+recovered stages or retry-history keys are not evidence for the domain split,
+even though they still supply the reason-code text. The fabrication condition
+and the domain condition are therefore different sets: a failure whose own
+stage recorded nothing sits in the placeholder domain even when a stale code
+elsewhere supplies its classification.
+
+This requirement carves out deliberate, recorded exceptions to "Retry
+Guard — Non-Transient Error Exclusion" (and, where noted, to the
+unknown-code default and max-retries clauses) for three geometries whose
+structural evidence proves the remedy causal — these are recorded
+exceptions to those clauses' blanket prohibitions, not reinterpretations:
+
+- **Output-absence recompute** (ruled in #1161): when durable forecast
+  output is absent, the recompute channel may schedule an automatic restart
+  from the forecast stage for its approved code set (including
+  `OUT_OF_MEMORY`), including with an exhausted retry budget (the channel
+  carries no budget gate), and is exempt from the consultation obligation
+  above (it gates on its own approved code set instead).
+- **Raw-manifest repair and post-repair downstream retry**: when the
+  geometry itself evidences an input defect (a manifest probed missing
+  after a previously successful download, or a repair download newer than
+  the failure), the channels may re-emit their repair/retry decisions for
+  any recorded code outside the remedy-non-causal classes — input-defect
+  codes (e.g. `INVALID_MANIFEST`), unknown-default codes (e.g.
+  `SLURM_JOB_FAILED`), and other listed non-transient codes (e.g.
+  `OUTPUT_INCOMPLETE`) — including with an exhausted retry budget.
+- **Model-package refresh** (ruled in #1161): when the model package
+  genuinely changed, the refresh channel may claim codes outside its own
+  refusal set (e.g. `TEMPLATE_NOT_ALLOWED`), because the changed package is
+  itself the causal remedy for policy/template rejections, including with
+  an exhausted retry budget.
+
+Manual-retry paths are out of scope: their emitted decision, reason, and
+retry policy are unchanged (the `failure.retryable` evidence field narrows
+with the shared classification).
+
+#### Scenario: Raw-manifest repair channels refuse remedy-non-causal permanent codes
+
+- **WHEN** a candidate's failure state matches the missing-raw-manifest
+  repair geometry (or the repaired-raw-manifest downstream geometry) and the
+  recorded failure classifies as permanent with a classification proving the
+  input-repair remedy non-causal (resource/configuration or policy/permission
+  class — at minimum `OUT_OF_MEMORY`)
+- **THEN** the channel SHALL NOT emit a retry decision — the ladder falls
+  through to the remaining channels and, absent another legitimate claim,
+  to the permanent-failure guard with `automatic_retry_allowed: false`
+
+#### Scenario: Raw-manifest geometry evidence keeps other codes repairable
+
+- **WHEN** the same raw-manifest geometries match with any other recorded
+  code — input-defect codes (e.g. `INVALID_MANIFEST`) or unknown codes
+  defaulted non-transient (e.g. `SLURM_JOB_FAILED`), including with an
+  exhausted retry budget
+- **THEN** the repair/downstream-retry decision SHALL be emitted exactly as
+  before — the geometry itself (a manifest probed missing after a previously
+  successful download, or a repair download newer than the failure) is the
+  causal evidence that re-ingesting input is on point, and the repair remedy
+  SHALL NOT be retired for production code shapes
+
+#### Scenario: Downstream resume refuses recorded permanent and unknown-default codes
+
+- **WHEN** a candidate with durable SHUD output fails a downstream stage
+  with a genuinely recorded code that is non-transient (e.g.
+  `OUTPUT_INCOMPLETE`, or a recorded `PARSE_FAILED` since the
+  stage-failure family joined the non-transient list) or unknown and
+  defaulted non-transient (e.g. a recorded `SLURM_JOB_FAILED`), or whose
+  retry budget is exhausted
+- **THEN** the downstream-resume channel SHALL NOT emit a resume decision;
+  a recorded transient code within budget SHALL keep the existing resume
+  behavior unless the state explicitly marks the failure permanent
+  (top-level `permanent: true`, which forces permanence — see the top-level
+  key scenario below)
+
+#### Scenario: Synthesized placeholder codes keep existing downstream behavior
+
+- **WHEN** a downstream failure state records no error code for the failing
+  stage itself (stale codes elsewhere in the state — recovered stages,
+  retry-history keys — do not count, even when such a stale code still
+  supplies the classification's reason code), so the classification rests on
+  no code this failure recorded — a stage-derived placeholder the reader
+  synthesizes when the state carries no code at all
+- **THEN** the downstream-resume decision SHALL behave exactly as before
+  this change — the unknown-code clause governs recorded codes, not
+  reader-fabricated defaults
+
+#### Scenario: Top-level state retryable cannot whiten a permanent code
+
+- **WHEN** a candidate state carries a top-level `retryable: true` key while
+  its failure classifies as permanent (e.g. `OUT_OF_MEMORY`)
+- **THEN** the permanence classification SHALL stand and the decision falls
+  to the permanent-failure guard; the top-level key MAY only reassert
+  retryability for codes whose classification is already retryable, and an
+  explicit top-level `permanent: true` still forces permanence
+
+#### Scenario: Model-package refresh and output-absence recompute rulings unchanged
+
+- **WHEN** a candidate matches the model-package refresh geometry (permanent
+  failure + changed package, refusing the resource-configuration class and
+  `OUT_OF_MEMORY`), or the missing-forecast-output recompute geometry with a
+  code in its approved recompute set
+- **THEN** both channels SHALL behave exactly as before this change — the
+  refresh channel's refusal list moves to the shared judgement source with
+  zero semantic change, and a code refused by the raw-manifest channels MAY
+  still be legitimately claimed by the refresh channel when the package
+  genuinely changed
+

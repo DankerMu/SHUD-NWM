@@ -170,6 +170,7 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
   - lint 门：`markdown-lint`<-`docs/**`、`openapi-validate`<-`openapi/**`、`json-schema-validate`<-`schemas/**`。
 - **PR 上后端只跑定向测试，与 draft/ready 无关**：
   - 命中 `backend` filter 的**所有** PR（draft 或 ready 一视同仁），后端单测一律只有 `unit-test-targeted`（显示名 **"Unit Tests"**，timeout 35min）：由 `scripts/select_ci_tests.py` 按本 PR diff 选出测试文件再 `pytest -q`；选不出文件时降级为 `pytest tests/ -q --collect-only` 冒烟——只验 import/语法，**不执行任何断言**，该分支带 `::warning` 注解 + step summary 显式标注本次 0 断言执行。
+  - **Unit Tests 的第三种模式（塌缩）**：当定向选择塌缩为只剩 selector meta-guard 套件（`meta_guard_only=true`——删掉一个 `tests/test_*.py`、只改**未路由的** `tests/` 支持模块（carve-out 的 `conftest.py`/`integration_helpers.py`，或无非门控 importer 套件的支持模块；有 importer 套件的支持模块已按 #1487 路由到其真实套件，不塌缩），或改 selector 自身的 PR），该套件照常执行断言，**并额外**跑一次全树 `pytest tests/ -q --collect-only`；这一分支的 `::warning` / step summary **不**声称"0 断言执行"（定向那次确实执行了）。此类 PR 的绿只等于"meta-guard 断言通过 + 全树 import/语法通过"，**不**代表被删/被改模块的下游断言跑过。
   - 全量 `unit-test`（显示名 **"Unit Tests (full)"**，`-m "not e2e and not grib and not integration"`）**只在 push master（即 merge 之后）或手动 `workflow_dispatch` 跑**，`pull_request` 事件下永不触发。
   - `real-db-integration`（显示名 **"SQL Migration Dry Run"**）在 PR/push 上需同时满足：命中上面那个窄 `database` filter **且** 非 draft（push 视同非 draft）。draft 状态只影响这一个 job。例外：手动 `workflow_dispatch` **绕过 filter 无条件跑**——这是显式的真实-DB dry-run 逃生门。
 - **PR 上的 CI 绿 ≠ 全量 pytest 通过**：PR 只证明"被选中的那几个测试文件通过"；全量回归要到 merge 后的 master run（或手动 `workflow_dispatch`）才跑，回归是**事后**发现的。真实快速反馈仍以 **node-27 真实 DB** 为准（CI 不是迭代 oracle）。

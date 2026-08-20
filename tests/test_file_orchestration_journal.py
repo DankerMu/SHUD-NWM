@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
+import itertools
 import json
+import logging
 import os
 import stat
+import sys
+import threading
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -16,6 +23,8 @@ from packages.common import safe_fs
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
+from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator.chain import SlurmClientError
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
@@ -31,9 +40,17 @@ from tests.test_production_scheduler import (
     FakeAdapter,
     _dt,
     _model,
+    _scheduler_candidate_fixture,
     _set_db_free_scheduler_env,
     _write_db_free_file_provider_fixtures,
     _write_db_free_raw_manifest_fixture,
+)
+from tests.test_retry import (
+    _RETRY_MODULE_LOGGER,
+    _UNKNOWN_ERROR_CODE,
+    _auto_retry_skipped_warnings,
+    _spec_non_transient_error_codes,
+    _unknown_error_code_warning,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
@@ -613,6 +630,44 @@ def test_candidate_state_applies_the_direct_file_forcing_fallback_the_context_re
     recovered_uri = state["forcing_version"]["forcing_package_uri"]
     assert recovered_uri == "[object-uri]"
     assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
+
+
+def test_candidate_state_withholds_a_recorded_copyback_source_uri_behind_the_placeholder(
+    tmp_path: Path,
+) -> None:
+    # #1367 premise pin: the geometry the copyback withheld-reference guard exists
+    # for is produced by this read, not simulated.  An s3-shaped
+    # ``copyback_source_uri`` recorded on a job crosses the public-read redaction
+    # boundary and reaches the scheduler as ``[object-uri]``, which is exactly what
+    # the guard's alias resolution then hands the copyback leg.
+    from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _active_job(cycle_time)
+    recorded_uri = "s3://nhms/runs/fcst_gfs_2026062800_model_a/output/summary.json"
+    job["details"] = {"copyback_source_uri": recorded_uri}
+    _write_json(
+        journal_root / "latest/gfs/2026062800/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="failed", jobs=[job]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert state is not None
+    recovered_uri = state["pipeline_jobs"][0]["details"]["copyback_source_uri"]
+    assert recovered_uri == "[object-uri]"
+    assert recovered_uri in EVIDENCE_REDACTION_PLACEHOLDERS
+    assert recorded_uri not in json.dumps(state, sort_keys=True)
+    # The guard resolves the withheld value, not the recorded one.
+    assert (
+        scheduler_state_failure_module._first_artifact_uri(
+            state,
+            ("copyback_source_uri", "copyback_source", "copyback_source_path", "copyback_uri"),
+        )
+        == "[object-uri]"
+    )
 
 
 def test_candidate_state_marks_the_journal_row_forcing_provenance_tier(tmp_path: Path) -> None:
@@ -1578,13 +1633,17 @@ def test_foreign_model_cycle_run_row_stays_visible_to_the_duplicate_submission_g
     ] == [foreign["job_id"]]
 
 
-def test_foreign_model_cycle_run_row_stays_visible_to_the_completion_gate(tmp_path: Path) -> None:
-    """Negative regression for the completion gate specifically.
+def test_foreign_model_cycle_run_row_no_longer_completes_the_candidate(tmp_path: Path) -> None:
+    """The completion gate's answer on the foreign shape, frozen then unfrozen.
 
     A queued row is a vacuous input for ``has_completed_pipeline``; only a
-    succeeded completion-stage row discriminates.  The DB side of this gate reads
-    ``hydro.hydro_run`` alone (``chain_repository.py:97-109``) and has no job-row
-    predicate to align with, so the journal side keeps its current answer.
+    succeeded completion-stage row discriminates.  #1288 froze this answer at
+    ``True`` because the DB side of this gate reads ``hydro.hydro_run`` alone
+    (``chain_repository.py:98-111``) and offered no job-row predicate to copy;
+    #1302 unfroze it: the gate answers a candidate-scoped question, and that
+    DB three-key (source/cycle/model) restriction is exactly the direction the
+    journal side now aligns with — another model's completion is never this
+    candidate's completion.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1599,7 +1658,290 @@ def test_foreign_model_cycle_run_row_stays_visible_to_the_completion_gate(tmp_pa
     )
     repository = FileOrchestrationJournalRepository(journal_root)
 
-    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
+def test_foreign_model_completion_row_does_not_complete_the_candidate(tmp_path: Path, stage: str) -> None:
+    """#1302 main discriminator: a foreign model's completion is not this candidate's.
+
+    Every completion stage of the default terminal contract is covered — the
+    foreign row is excluded by identity, not by stage.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage=stage,
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
+def test_foreign_model_completion_row_does_not_complete_under_production_terminal_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """Same verdict under the production ``forecast_state_save_qc`` terminal contract.
+
+    That contract returns ``has_terminal_completion`` directly
+    (``file_orchestration_journal.py:575-576``), so the narrowed conjunction is
+    the only thing standing between the foreign row and a ``True``.  The
+    ``publish``/``parse`` rows answered ``False`` before this change too (they
+    are not terminal under that contract) and must keep doing so.
+    """
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage=stage,
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("hydro_status", ["failed", "cancelled", "created"])
+def test_foreign_model_completion_row_cannot_complete_a_failed_candidate(
+    tmp_path: Path, hydro_status: str
+) -> None:
+    """The harmful shape: the candidate itself failed, another model finished.
+
+    Before #1302 the foreign row flipped this candidate to "completed" and four
+    consumer surfaces skipped it silently.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(
+            cycle_time=cycle_time,
+            hydro_status=hydro_status,
+            jobs=[_own_failed_forecast_job(cycle_time)],
+        ),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("run_id_suffix", ["", "_state_save_qc_cohort_abc123"])
+def test_model_less_cohort_completion_row_still_completes_every_candidate(
+    tmp_path: Path, run_id_suffix: str
+) -> None:
+    """Negative regression: the cohort completion contract (#841) is untouched.
+
+    Both cohort run-id shapes — the exact cycle run id and the journal-only
+    suffix widening — complete every candidate of the cycle; only the foreign
+    NAMED row leaves.  The suffixed row can only enter through the shared cycle
+    journal segment (see ``_write_journal_pipeline_job``).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    cohort = _cycle_run_id_job(
+        cycle_time,
+        model_id=None,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+        run_id_suffix=run_id_suffix,
+    )
+    for model_id in ("model_a", "model_b"):
+        _write_json(
+            journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/{model_id}.json",
+            _latest_view(
+                cycle_time=cycle_time,
+                model_id=model_id,
+                jobs=[_own_failed_forecast_job(cycle_time, model_id=model_id)],
+            ),
+        )
+    if run_id_suffix:
+        _write_journal_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    else:
+        _write_direct_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    for model_id in ("model_a", "model_b"):
+        assert (
+            repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id=model_id) is True
+        ), model_id
+
+
+def test_candidate_own_completion_evidence_still_completes_the_candidate(tmp_path: Path) -> None:
+    """Negative regression: every own-evidence arm of the gate keeps answering ``True``.
+
+    The candidate's own NAMED cycle-run row, its own ``fcst_...`` run-id row and
+    its own completed hydro run are the three legal completion sources left after
+    the foreign exclusion (the hydro arm is reachable under the default terminal
+    contract only — ``file_orchestration_journal.py:575-579``).
+    """
+
+    cycle_stamp = format_cycle_time(_dt("2026-06-28T00:00:00Z"))
+    own_named_cycle_row = _cycle_run_id_job(
+        _dt("2026-06-28T00:00:00Z"),
+        model_id="model_a",
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    own_run_id_row = _own_failed_forecast_job(_dt("2026-06-28T00:00:00Z"))
+    own_run_id_row.update(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_model_a_state_save_qc",
+            "idempotency_key": f"gfs:{cycle_id_for('gfs', _dt('2026-06-28T00:00:00Z'))}:model_a:state_save_qc",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+        }
+    )
+    shapes: dict[str, dict[str, Any]] = {
+        "own_named_cycle_row": {"jobs": [own_named_cycle_row], "hydro_status": None},
+        "own_run_id_row": {"jobs": [own_run_id_row], "hydro_status": None},
+        "own_completed_hydro_run": {"jobs": [], "hydro_status": "succeeded"},
+    }
+
+    for name, shape in shapes.items():
+        cycle_time = _dt("2026-06-28T00:00:00Z")
+        journal_root = tmp_path / name
+        _write_json(
+            journal_root / f"latest/gfs/{cycle_stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, hydro_status=shape["hydro_status"], jobs=shape["jobs"]),
+        )
+        _write_direct_pipeline_job(
+            journal_root,
+            _cycle_run_id_job(
+                cycle_time,
+                model_id="model_b",
+                stage="state_save_qc",
+                status="succeeded",
+                retry_count=0,
+            ),
+            cycle_time=cycle_time,
+        )
+        repository = FileOrchestrationJournalRepository(journal_root)
+
+        assert (
+            repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+        ), name
+
+
+def test_foreign_model_non_terminal_stage_row_never_completed_the_candidate(tmp_path: Path) -> None:
+    """Negative regression: a foreign ``forecast`` success was never a completion."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage="forecast",
+        status="succeeded",
+        retry_count=0,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+def test_foreign_model_completion_row_leaves_the_duplicate_submission_gates_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Negative regression: the shared row predicate was NOT narrowed.
+
+    On the very fixture whose completion verdict flips, the cycle-level
+    duplicate-submission gates keep seeing the foreign rows — their DB
+    counterparts match the cycle run id unconditionally
+    (``chain_repository.py:74-79`` / ``:177-181``).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _foreign_model_cycle_run_fixture(
+        journal_root,
+        cycle_time,
+        with_marker=False,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    foreign_active = _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(cycle_time, model_id="model_b", status="queued", retry_count=0),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    assert [
+        job.get("job_id")
+        for job in repository.active_slurm_jobs(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    ] == [foreign_active["job_id"]]
+
+
+def test_foreign_model_completion_row_suppresses_the_hydro_active_arm(tmp_path: Path) -> None:
+    """Behaviour anchor for a master-side hole this change deliberately leaves open.
+
+    ``has_active_pipeline`` keeps its own local ``has_terminal_completion``
+    (``file_orchestration_journal.py:534-540``) over the UNnarrowed shared row
+    predicate, so another model's completion row suppresses the hydro-active arm
+    and this candidate's ACTIVE hydro run answers ``False`` — while the DB
+    counterpart (``chain_repository.py:57-95``) is a plain UNION with no
+    suppression clause and answers ``True``.  The hole predates #1302 (which only
+    narrowed ``has_completed_pipeline``); before it, the completion gate's wrong
+    ``True`` happened to mask the shape.
+
+    This assertion PINS the current behaviour, it does not endorse it.  The fix
+    is issue #1472 — flip this assertion to ``True`` there, do not delete it.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[]),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
@@ -3024,6 +3366,178 @@ def test_file_journal_manual_repair_marker_event_records_the_failed_stage(tmp_pa
     assert "stage" not in event["details"]
 
 
+_MARKER_RECORD_CYCLE_TIME = _dt("2026-05-21T06:00:00Z")
+
+
+def _cohort_marker_journal(
+    journal_root: Path,
+    *,
+    stage: str = "download",
+    job_id: str | None = None,
+    status: str = "failed",
+    retry_count: int = 4,
+) -> FileOrchestrationJournalRepository:
+    """One cycle's journal: a cohort master at ``stage``, the candidate's own row, one marker.
+
+    The cohort master is model-less on the cycle run id -- the row a manual repair of a cycle
+    stage targets, and the row both row-absence mechanisms take away from the decision state.
+    Its timestamps are older than the candidate's own row on purpose, so a job window of one
+    truncates exactly it while the event window keeps its marker.  The marker is written by the
+    real ``record_manual_repair``, so its ``details`` are the production write face, not a
+    hand-built approximation of it.
+    """
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    cycle_stamp = format_cycle_time(_MARKER_RECORD_CYCLE_TIME)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": job_id or f"job_cycle_gfs_{cycle_stamp}_{stage}",
+            "run_id": f"cycle_gfs_{cycle_stamp}",
+            "cycle_id": cycle_id_for("gfs", _MARKER_RECORD_CYCLE_TIME),
+            "job_type": "download_source_cycle",
+            "model_id": None,
+            "stage": stage,
+            "status": status,
+            "error_code": "SLURM_TIMEOUT",
+            "retry_count": retry_count,
+            "idempotency_key": f"gfs:gfs_{cycle_stamp}:cohort:{stage}",
+            "created_at": "2026-05-21T06:00:00Z",
+            "updated_at": "2026-05-21T06:05:00Z",
+            "finished_at": "2026-05-21T06:05:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_model_a_forecast",
+            "run_id": f"fcst_gfs_{cycle_stamp}_model_a",
+            "cycle_id": cycle_id_for("gfs", _MARKER_RECORD_CYCLE_TIME),
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "stage": "forecast",
+            "status": "pending",
+            "retry_count": 0,
+            "idempotency_key": f"gfs:gfs_{cycle_stamp}:basin_a:forecast",
+            "created_at": "2026-05-21T07:00:00Z",
+            "updated_at": "2026-05-21T07:10:00Z",
+        }
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    service.record_manual_repair(f"cycle_gfs_{cycle_stamp}", trusted_internal=True)
+    return repository
+
+
+@pytest.mark.parametrize(
+    ("job_id", "status", "retry_count", "expected_pin", "expected_attempt"),
+    [
+        (None, "failed", 4, True, 5),
+        ("job_cycle_gfs_2026052106_download_retry_2", "submission_failed", 2, False, 1),
+    ],
+    ids=["live_failure_record_pins", "unsubmitted_placeholder_record_refuses"],
+)
+def test_file_journal_manual_repair_target_record_decides_the_pin_end_to_end(
+    tmp_path: Path,
+    job_id: str | None,
+    status: str,
+    retry_count: int,
+    expected_pin: bool,
+    expected_attempt: int,
+) -> None:
+    """Write face to decision state, with no hand-built marker anywhere in between.
+
+    ``record_manual_repair`` writes the target's shape, the projection truncates the target row
+    out of the job window, the identity filter sanitizes the surviving event, and the pin gate
+    rebuilds the row from what is left.  Both cells share every input but the target row's own
+    shape: a live failure pins the operator's ``retry_count``, and a row that is really an
+    unsubmitted auto-retry placeholder (``submission_failed``, a ``_retry_<n>`` id, a positive
+    retry count, no Slurm binding) refuses it exactly as the row-present twin refuses that row --
+    the shape whose evidence used to die with the row.
+
+    The placeholder cell is a genuine write-face shape, not a constructed one:
+    ``submission_failed`` is in ``MANUAL_RETRY_SOURCE_STATUSES``, so the manual repair really
+    does select such a row as its target.
+    """
+
+    repository = _cohort_marker_journal(
+        tmp_path / "journal",
+        job_id=job_id,
+        status=status,
+        retry_count=retry_count,
+    )
+    target_job_id = job_id or "job_cycle_gfs_2026052106_download"
+    state = _candidate_state(repository, cycle_time=_MARKER_RECORD_CYCLE_TIME, job_limit=1)
+    assert state is not None
+    candidate = _scheduler_candidate_fixture()
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision_state = scheduler_module._candidate_state_decision_state(state, evidence)
+    marker_event = decision_state["pipeline_events"][0]
+    details = marker_event["details"]
+
+    # Premise: the target row really was truncated away, its marker really survived, and the
+    # record really came through the sanitizer intact.
+    assert target_job_id not in [job["job_id"] for job in decision_state["pipeline_jobs"]]
+    assert marker_event["entity_id"] == target_job_id
+    assert details["target_status"] == status
+    assert details["target_retry_count"] == retry_count
+    # ``False`` is a recorded value, not an absence: the writer writes it and the sanitizer
+    # passes it through, which is what keeps a marker-flagged row out of the placeholder gate.
+    assert details["target_manual_retry_marker"] is False
+    # The pre-existing whitelist keys are untouched by the new ones.
+    assert details["failed_stage"] == "download"
+    assert details["retry_count"] == retry_count + 1
+    assert details["previous_job_id"] == target_job_id
+    assert details["trigger"] == "manual"
+    assert details["manual_retry_marker"] is True
+    assert details["prior_failure_reason"] == "SLURM_TIMEOUT"
+
+    assert (
+        scheduler_state_manual_retry_module._marker_event_pins_attempt(decision_state, marker_event)
+        is expected_pin
+    )
+    assert scheduler_module._manual_retry_new_attempt(decision_state, previous_attempt=0) == expected_attempt
+
+
+@pytest.mark.parametrize(
+    ("stage", "keeps_details"),
+    [("parse", False), ("state_save_qc", False), ("publish", False), ("download", True)],
+)
+def test_file_journal_completion_stage_compaction_unadopts_the_cycle_marker(
+    tmp_path: Path,
+    stage: str,
+    keeps_details: bool,
+) -> None:
+    """The pin gate's journal-path live domain is the SUBMISSION stages, and this is why.
+
+    ``_compact_cycle_scope_event`` drops ``details`` wholesale from a model-less cycle-scope
+    event at a completion stage (``_CYCLE_SCOPE_COMPLETION_STAGES``: parse / state_save_qc /
+    publish), as an evidence-size guard.  A marker event without ``details`` fails
+    ``_manual_retry_marker_shape``, so it is never ADOPTED at all -- it does not fall back to
+    the id-token backstop, it stops being a marker.  Everything the marker recorded, stage
+    evidence and target record alike, goes with it.  The submission-stage control proves the
+    compaction is what does it rather than the fixture.
+    """
+
+    repository = _cohort_marker_journal(tmp_path / "journal", stage=stage)
+    state = _candidate_state(repository, cycle_time=_MARKER_RECORD_CYCLE_TIME)
+    assert state is not None
+    marker_event = next(
+        event for event in state["pipeline_events"] if event["entity_id"].startswith("job_cycle_")
+    )
+
+    assert stage in journal_module._CYCLE_SCOPE_COMPLETION_STAGES or keeps_details
+    assert bool(marker_event.get("details")) is keeps_details
+    assert (
+        scheduler_state_manual_retry_module._manual_retry_marker_shape(marker_event) is keeps_details
+    )
+    assert (
+        scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, marker_event)
+        is keeps_details
+    )
+    if keeps_details:
+        assert marker_event["details"]["failed_stage"] == stage
+        assert marker_event["details"]["target_status"] == "failed"
+
+
 def test_file_journal_manual_repair_marker_event_survives_terminal_stage_gating(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3203,6 +3717,119 @@ def test_file_journal_manual_retry_uses_failed_source_when_durable_hydro_is_part
     event = next(event for event in state["pipeline_events"] if event["entity_id"] == "job_partial_failed_source")
     assert event["details"]["previous_job_id"] == "job_partial_failed_source"
     assert event["details"]["prior_failure_reason"] == "OUTPUT_INCOMPLETE"
+
+
+def _durable_hydro_manual_retry_fixture(
+    tmp_path: Path,
+    *,
+    durable_status: str,
+) -> tuple[FileOrchestrationJournalRepository, FileJournalRetryService, datetime]:
+    """A file-lane run whose one retryable source job sits under a durable hydro status."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status("fcst_gfs_2026062800_model_a", durable_status)
+    failed = _pipeline_reservation_record(cycle_time, job_id="job_durable_status_failed")
+    failed.update(
+        {
+            "status": "failed",
+            "error_code": "SLURM_TIMEOUT",
+            "created_at": "2026-06-28T00:00:00Z",
+            "updated_at": "2026-06-28T00:05:00Z",
+            "finished_at": "2026-06-28T00:05:00Z",
+        }
+    )
+    repository.upsert_pipeline_job(failed)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    return repository, service, cycle_time
+
+
+@pytest.mark.parametrize("durable_status", ["succeeded", "parsed", "published"])
+def test_file_journal_manual_retry_refuses_durable_hydro_success_without_mutation(
+    tmp_path: Path,
+    durable_status: str,
+) -> None:
+    """The file twin of the DB lane's durable-success refusal (openspec change durable-status-name-split).
+
+    Both operator entry points read `MANUAL_RETRY_DURABLE_SUCCESS_STATUSES`; a run whose
+    durable hydro status is one of its members is refused even though a failed job would
+    otherwise be a perfectly good retry source.  The arm had no coverage before this change,
+    so a botched rename here could have swapped the set silently.
+    """
+
+    journal_root = tmp_path / "journal"
+    repository, service, cycle_time = _durable_hydro_manual_retry_fixture(tmp_path, durable_status=durable_status)
+    before_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7010", "status": "submitted"}
+
+    gateway = Gateway()
+
+    with pytest.raises(RetryNotFoundError):
+        service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    with pytest.raises(RetryNotFoundError):
+        service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+
+    after_records = (journal_root / "journal/gfs/2026062800.jsonl").read_text(encoding="utf-8")
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert gateway.requests == []
+    assert after_records == before_records
+    assert state is not None
+    assert state["pipeline_events_total"] == 0
+    assert {job["job_id"] for job in state["pipeline_jobs"]} == {"job_durable_status_failed"}
+
+
+def test_file_journal_manual_retry_proceeds_when_durable_hydro_status_is_complete(tmp_path: Path) -> None:
+    """`"complete"` is durable success for the scheduler but must not block a manual retry.
+
+    This is the lane-level half of the membership split: the DB lane cannot express
+    `"complete"` (no such `hydro.run_status` enum value) but the file journal can, so the
+    merge direction "add `complete` to the manual-retry set" is only observable here.
+    """
+
+    repository, service, cycle_time = _durable_hydro_manual_retry_fixture(tmp_path, durable_status="complete")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.requests.append(request)
+            return {"job_id": "7011", "status": "submitted"}
+
+    gateway = Gateway()
+
+    repair = service.record_manual_repair("fcst_gfs_2026062800_model_a", trusted_internal=True)
+    retried = service.attempt_manual_retry("fcst_gfs_2026062800_model_a", gateway, trusted_internal=True)
+    state = _candidate_state(repository, cycle_time=cycle_time)
+
+    assert repair.job_id == "job_durable_status_failed"
+    assert repair.status == "manual_repair_requested"
+    assert retried.status == "submitted"
+    assert gateway.requests
+    assert state is not None
+    assert "job_durable_status_failed" in {job["job_id"] for job in state["pipeline_jobs"]}
+    assert retried.job_id in {job["job_id"] for job in state["pipeline_jobs"]}
 
 
 def test_file_journal_active_manual_retry_blocks_repair_and_submission_without_mutation(tmp_path: Path) -> None:
@@ -6490,6 +7117,308 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
     )
 
 
+# ---------------------------------------------------------------------------
+# §8.7 breaker (#1157): how many PROVEN failed quarantine-convergence attempts
+# re-recorded one token.  Two filters compose:
+#   - the distinctness key is the forecast cohort MASTER row — reconcile COPIES
+#     the identity onto each per-model terminal row under a different
+#     ``job_id``, so counting rows instead of masters would double every
+#     submission;
+#   - the row must carry §8.7 quarantine-rerun provenance for THIS model.
+#     Unrelated whitelisted replacements (missing run manifest, missing
+#     forecast output) re-record the same token but carry no provenance, and
+#     must not pre-arm the breaker into fail-stopping the first quarantine.
+# ---------------------------------------------------------------------------
+
+_BREAKER_TOKEN = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+_BREAKER_OTHER_TOKEN = "state_gfs_model_a_2026062800_gfs_2026062800_f000"
+
+
+def _breaker_identity_entry(
+    *, model_id: str = "model_a", init_state_id: str = _BREAKER_TOKEN, array_task_id: int = 0
+) -> dict[str, Any]:
+    return {
+        "array_task_id": array_task_id,
+        "model_id": model_id,
+        "init_state_id": init_state_id,
+    }
+
+
+def _cohort_master_job(
+    cycle_time: datetime,
+    *,
+    job_suffix: str = "",
+    status: str = "succeeded",
+    identities: list[dict[str, Any]] | None = None,
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """One forecast cohort MASTER row: model-less, cycle-scoped, identity-bearing.
+
+    ``quarantine_rerun_model_ids=None`` models a row written by something other
+    than a §8.7 quarantine rerun — including every journal written before
+    #1157, which has no such field at all.
+    """
+    run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    row = {
+        "job_id": f"job_{run_id}_forecast{job_suffix}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": run_id,
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": status,
+        "model_id": None,
+        "init_state_identities": identities
+        if identities is not None
+        else [_breaker_identity_entry()],
+    }
+    if quarantine_rerun_model_ids is not None:
+        row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
+    return row
+
+
+def _reconciled_terminal_job(
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+    array_task_id: int = 0,
+    identities: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The per-model terminal row reconcile copies the master's entry onto."""
+    run_id = f"fcst_gfs_{format_cycle_time(cycle_time)}_{model_id}"
+    return {
+        "job_id": f"job_{run_id}_forecast_reconciled_17667_{array_task_id}",
+        "run_id": run_id,
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "candidate_id": (
+            f"gfs:{cycle_time.isoformat()}:{model_id}:forecast_gfs_deterministic"
+        ),
+        "job_type": "run_shud_forecast_array",
+        "stage": "forecast",
+        "status": "succeeded",
+        "model_id": model_id,
+        "array_task_id": array_task_id,
+        "slurm_job_id": f"17667_{array_task_id}",
+        "init_state_identities": identities
+        if identities is not None
+        else [_breaker_identity_entry(array_task_id=array_task_id)],
+    }
+
+
+def _breaker_journal(
+    tmp_path: Path,
+    cycle_time: datetime,
+    jobs: list[dict[str, Any]],
+    *,
+    hydro_status: str | None = "complete",
+    model_ids: tuple[str, ...] = ("model_a",),
+) -> FileOrchestrationJournalRepository:
+    journal_root = tmp_path / "journal"
+    for model_id in model_ids:
+        latest = _latest_view(
+            cycle_time=cycle_time,
+            model_id=model_id,
+            hydro_status=hydro_status,
+            jobs=jobs,
+        )
+        if hydro_status is not None:
+            latest["hydro_run"]["init_state_id"] = _BREAKER_TOKEN
+        _write_json(
+            journal_root / "latest/gfs" / format_cycle_time(cycle_time) / f"{model_id}.json",
+            latest,
+        )
+    return FileOrchestrationJournalRepository(journal_root)
+
+
+def _breaker_occurrences(
+    repository: FileOrchestrationJournalRepository,
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+    init_state_id: str = _BREAKER_TOKEN,
+) -> int:
+    return repository.completed_pipeline_init_state_id_occurrences(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=model_id,
+        init_state_id=init_state_id,
+    )
+
+
+def test_init_state_occurrences_counts_only_provenance_stamped_masters(
+    tmp_path: Path,
+) -> None:
+    """R1 (#1157 Class B): only PROVEN quarantine reruns count.
+
+    Three same-token masters sit on this cycle: the original defect run (no
+    provenance), an unrelated whitelisted replacement (no provenance), and one
+    stamped quarantine rerun.  Only the stamped one is a failed convergence
+    attempt, so the count is 1 — counting all three would fail-stop a cycle
+    whose quarantine had not yet been retried even once.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_2",
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ],
+    )
+
+    assert _breaker_occurrences(repository, cycle_time) == 1
+    # A stamped rerun that recorded a DIFFERENT token does not count for this one.
+    assert _breaker_occurrences(repository, cycle_time, init_state_id=_BREAKER_OTHER_TOKEN) == 0
+
+
+def test_init_state_occurrences_ignores_another_models_provenance(tmp_path: Path) -> None:
+    """The stamp is per-model: a cohort rerunning model_b does not arm model_a.
+
+    A single cohort submission can carry a quarantine rerun for one member and
+    ordinary work for the others, so a bare "this cohort was a rerun" reading
+    would fail-stop innocent models of the same cycle.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(
+                cycle_time,
+                identities=[
+                    _breaker_identity_entry(),
+                    _breaker_identity_entry(model_id="model_b", array_task_id=1),
+                ],
+                quarantine_rerun_model_ids=["model_b"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 1
+
+
+def test_init_state_occurrences_counts_one_submission_once(tmp_path: Path) -> None:
+    """The distinctness pin: master + its reconcile-copied terminal row = 1.
+
+    ``tests/test_file_orchestration_journal.py`` already pins that reconcile
+    copies each task's entry onto a per-model terminal row with its own
+    ``job_id``; counting rows would read one stamped rerun as two.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+            _reconciled_terminal_job(cycle_time),
+        ],
+    )
+
+    assert _breaker_occurrences(repository, cycle_time) == 1
+
+
+@pytest.mark.parametrize(
+    "leg",
+    [
+        "no_journal",
+        "blank_token",
+        "terminal_row_only",
+        "unsucceeded_master",
+        "unreadable_identities",
+        "legacy_rows_without_provenance_field",
+        "unreadable_provenance",
+    ],
+)
+def test_init_state_occurrences_returns_zero_for_uncountable_shapes(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """Never raises; every uncountable shape is 0 (breaker stays disengaged)."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    jobs: list[dict[str, Any]] = []
+    if leg == "terminal_row_only":
+        # A reconcile copy with no surviving master: not a submission record.
+        jobs = [_reconciled_terminal_job(cycle_time)]
+    elif leg == "unsucceeded_master":
+        jobs = [_cohort_master_job(cycle_time, status="running", quarantine_rerun_model_ids=["model_a"])]
+    elif leg == "unreadable_identities":
+        # Corrupt map shapes: a scalar instead of a list, and a non-mapping entry.
+        jobs = [
+            _cohort_master_job(cycle_time, identities=[], quarantine_rerun_model_ids=["model_a"]),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_1",
+                identities=[],
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ]
+        jobs[0]["init_state_identities"] = _BREAKER_TOKEN
+        jobs[1]["init_state_identities"] = ["not-a-mapping"]
+    elif leg == "legacy_rows_without_provenance_field":
+        # Deploy safety: every journal written before #1157 looks like this.
+        # Two same-token masters used to arm the breaker; now they must not.
+        jobs = [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(cycle_time, job_suffix="_retry_1"),
+        ]
+    elif leg == "unreadable_provenance":
+        jobs = [_cohort_master_job(cycle_time, quarantine_rerun_model_ids=[])]
+        jobs[0]["journal_predecessor_quarantine_rerun_model_ids"] = "model_a"
+
+    repository = (
+        FileOrchestrationJournalRepository(tmp_path / "journal")
+        if leg == "no_journal"
+        else _breaker_journal(tmp_path, cycle_time, jobs)
+    )
+
+    token = "" if leg == "blank_token" else _BREAKER_TOKEN
+    assert _breaker_occurrences(repository, cycle_time, init_state_id=token) == 0
+
+
+def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
+    tmp_path: Path,
+) -> None:
+    """Truncation pin (#1157 D3): the count reads the journal, not the payload.
+
+    ``candidate_state`` bounds its job list, so counting from that payload
+    would silently undercount a busy cycle and never engage the breaker.  Here
+    the bounded payload is provably truncated while the accessor still sees
+    the stamped rerun master.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    filler = [
+        _reconciled_terminal_job(cycle_time, array_task_id=index, identities=[])
+        for index in range(1, 8)
+    ]
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time),
+            _cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_1",
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+            *filler,
+        ],
+    )
+
+    bounded = _candidate_state(repository, cycle_time=cycle_time, job_limit=2, event_limit=2)
+    assert bounded is not None
+    assert bounded["state_truncated"] is True
+    assert len(bounded["pipeline_jobs"]) == 2
+
+    assert _breaker_occurrences(repository, cycle_time) == 1
+
+
 def test_next_current_master_retry_identity_is_stable_after_helper_consolidation() -> None:
     from services.orchestrator.file_orchestration_journal import _next_current_master_retry_identity
 
@@ -6950,6 +7879,300 @@ def test_file_journal_cycle_rows_cache_observes_continuation_segments(tmp_path: 
     assert reader._cycle_rows(
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
     ).pipeline_jobs["job_rotation"]["error_message"] == "rolled-over"
+
+
+def _hammer_until(
+    work: Callable[[], None],
+    *,
+    stop: threading.Event,
+    deadline: float,
+    failures: list[BaseException],
+    batch: int = 1,
+) -> Callable[[], None]:
+    def loop() -> None:
+        try:
+            while not stop.is_set() and time.monotonic() < deadline:
+                for _ in range(batch):
+                    work()
+        except BaseException as error:  # noqa: BLE001 - an unguarded cache race is what this asserts
+            failures.append(error)
+            stop.set()
+
+    return loop
+
+
+@contextlib.contextmanager
+def _fine_grained_thread_switching() -> Iterator[None]:
+    """Drop the GIL switch interval to 1µs for a cache-race hammer.
+
+    ``sys.setswitchinterval`` is a process-global knob, so it is restored on
+    the way out.  At the 5ms default a pure-memory hammer takes tens of
+    milliseconds to interleave badly enough to crash; at 1µs the same cohort
+    crashes in ~1ms, which is what buys the deadlines below their margin.
+    """
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous)
+
+
+def _join_all(threads: list[threading.Thread], *, stop: threading.Event) -> None:
+    """Join a hammer cohort under one absolute budget.
+
+    A per-thread ``join(timeout=30)`` multiplies by the cohort size (4 threads
+    deadlocked = 120s), and asserting inside the join loop leaves the later
+    threads unjoined and still running.  One shared deadline, ``stop`` set the
+    moment it lapses so a merely slow (not deadlocked) cohort can drain, and
+    daemon threads so a truly wedged worker cannot outlive the interpreter.
+    """
+    limit = time.monotonic() + 30.0
+    for thread in threads:
+        thread.daemon = True
+        thread.start()
+    timed_out = False
+    for thread in threads:
+        thread.join(timeout=max(0.0, limit - time.monotonic()))
+        if thread.is_alive():
+            stop.set()
+            timed_out = True
+    stuck = [thread.name for thread in threads if thread.is_alive()]
+    assert not timed_out, (
+        f"cohort exceeded the 30s budget; still alive: {stuck or 'none (drained after stop)'}"
+        " — cache/write lock order deadlock"
+    )
+
+
+def test_file_journal_cycle_rows_cache_sweep_excludes_concurrent_stores(tmp_path: Path) -> None:
+    """#1380 red proof — the stale-key sweep is the widest unguarded window.
+
+    ``_apply_record_to_cycle_rows_cache`` is the only full-table iteration
+    over ``_cycle_rows_cache``; every append inside a write window runs it
+    while other cohort threads sharing the repository keep storing and
+    evicting through ``_cache_cycle_rows``.  The cache is filled to its
+    production capacity first, so every store also evicts.  Unguarded, the
+    sweep thread raises ``RuntimeError: dictionary changed size during
+    iteration`` (or the equivalent ``dictionary keys changed`` variant —
+    the first is the message the 2026-08-14 production pass recorded).
+
+    Measured on this cohort with ``_cache_lock`` neutralised at runtime
+    (6 runs each): 42-73ms to red at the default 5ms switch interval, 0.6-1.3ms
+    at 1µs.  The default interval only clears 0.7s/73ms ≈ 9.6x, so the hammer
+    runs under ``_fine_grained_thread_switching`` and the 0.7s deadline keeps
+    a ≥500x margin over the measured worst case.
+    """
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_segment = format_cycle_time(cycle_time)
+    other_segment = format_cycle_time(_dt("2026-06-28T06:00:00Z"))
+    rows = journal_module._CycleRows()
+    for index in range(journal_module.MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES):
+        repository._cache_cycle_rows(("gfs", other_segment, f"model_{index}", ("gfs",)), rows, fingerprint=None)
+    repository._cache_cycle_rows(("gfs", cycle_segment, None, None), rows, fingerprint=None)
+    record = _journal_record(
+        record_type="forecast_cycle",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id=None,
+        payload={
+            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "status": "raw_complete",
+        },
+    )
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    stored = itertools.count()
+
+    def store_cycle_rows() -> None:
+        key = ("gfs", other_segment, f"churn_{next(stored)}", ("gfs",))
+        repository._cache_cycle_rows(key, rows, fingerprint=None)
+
+    def sweep_stale_keys() -> None:
+        repository._apply_record_to_cycle_rows_cache(source_id="gfs", cycle_time=cycle_time, record=record)
+
+    with _fine_grained_thread_switching():
+        deadline = time.monotonic() + 0.7
+        _join_all(
+            [
+                threading.Thread(
+                    target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-a",
+                ),
+                threading.Thread(
+                    target=_hammer_until(store_cycle_rows, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-b",
+                ),
+                threading.Thread(
+                    target=_hammer_until(sweep_stale_keys, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="sweep",
+                ),
+            ],
+            stop=stop,
+        )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+    assert len(repository._cycle_rows_cache) <= journal_module.MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES
+
+
+def test_file_journal_read_caches_survive_concurrent_readers_and_a_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1380 — one repository instance shared by concurrent orchestration threads.
+
+    The scheduler builds a single ``active_repository`` per pass and hands it
+    to every per-cohort orchestrator in the submission thread pool, so the
+    read-side caches take concurrent lookups and evictions through the real
+    read paths while a writer holds the cycle write window.  Cache capacities
+    are squeezed to 2 so every read evicts.  Unlike the sweep test above this
+    one is IO-bound (a ``_cycle_rows`` miss costs milliseconds), so it is a
+    lock-order and end-to-end guard rather than a probabilistic race prover:
+    a reversed lock order deadlocks it.  Measured with ``_cache_lock``
+    neutralised at runtime: green 6/6 for the full deadline at both the 5ms
+    default and a 1µs switch interval, i.e. it has no time-to-red to size a
+    margin against.  The ``_read_bytes_cache`` race is pinned by the direct
+    mutator hammer below instead.
+    """
+    monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_READ_CACHE_ENTRIES", 2)
+    journal_root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(journal_root)
+    cycle_times = [_dt(f"2026-06-28T{hour:02d}:00:00Z") for hour in range(4)]
+    writer_cycle = _dt("2026-06-29T00:00:00Z")
+    for cycle_time in [*cycle_times, writer_cycle]:
+        repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
+        repository.upsert_pipeline_job(_rotation_job(cycle_time))
+    # The writer owns a cycle of its own: readers must not open a file that
+    # is being atomically replaced, which is a pre-existing safe_fs race and
+    # not the cache defect under test.
+    writer_segment = format_cycle_time(writer_cycle)
+    journal_files = sorted(
+        path
+        for path in journal_root.rglob("*")
+        if path.is_file() and path.suffix in {".json", ".jsonl"} and writer_segment not in str(path)
+    )
+    assert journal_files
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    deadline = time.monotonic() + 0.6
+
+    def read_cycle_rows() -> None:
+        for cycle_time in cycle_times:
+            for model_id in (None, "model_a"):
+                repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=model_id)
+
+    def read_journal_bytes() -> None:
+        for path in journal_files:
+            repository._read_bytes_limited_cached(path)
+
+    def append_records() -> None:
+        repository.update_forecast_cycle_status(
+            source_id="gfs", cycle_time=writer_cycle, status="raw_complete"
+        )
+
+    _join_all(
+        [
+            threading.Thread(
+                target=_hammer_until(read_cycle_rows, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-rows-a",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_cycle_rows, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-rows-b",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_journal_bytes, stop=stop, deadline=deadline, failures=failures),
+                name="read-bytes",
+            ),
+            threading.Thread(
+                target=_hammer_until(append_records, stop=stop, deadline=deadline, failures=failures),
+                name="writer",
+            ),
+        ],
+        stop=stop,
+    )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+
+
+def test_file_journal_read_bytes_cache_mutators_stay_atomic_under_contention(tmp_path: Path) -> None:
+    """#1380 red proof — the read-bytes cache, driven at its mutator seam.
+
+    ``_read_bytes_cache_store`` / ``_read_bytes_cache_drop`` /
+    ``_read_bytes_cache_mark_validated`` are the entire mutation surface of
+    ``_read_bytes_cache``, and the store path advances ``next(iter(...))``
+    over the same dict while evicting.  The end-to-end reader test above
+    cannot reach that window — every iteration pays for real IO — so this one
+    drives the three mutators directly with the cache pre-filled to its
+    production capacity, which makes every store evict.
+
+    Measured with ``_cache_lock`` neutralised at runtime (a no-op context
+    manager, i.e. the pre-fix shape): red in 0.5-3.2ms, 14/14, with
+    ``RuntimeError: dictionary changed size during iteration`` or its
+    ``dictionary keys changed`` sibling — a ≥150x margin under the 0.5s
+    deadline.  The oracle is that crash, not the cache accounting:
+    ``_read_bytes_cache_total`` does not measurably drift pre-fix.
+
+    ``_direct_jobs_cycle_cache`` is not hammered here — see the note in
+    tasks.md D.2.
+    """
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    content = b"x" * 64
+    signature = (1, len(content), 1)
+    capacity = journal_module.MAX_FILE_JOURNAL_READ_CACHE_ENTRIES
+    recycled_key = "recycled"
+    for index in range(capacity - 1):
+        repository._read_bytes_cache_store(f"seed-{index}", signature, content)
+    repository._read_bytes_cache_store(recycled_key, signature, content)
+    assert len(repository._read_bytes_cache) == capacity
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    stored = itertools.count()
+
+    def store_new_key() -> None:
+        repository._read_bytes_cache_store(f"churn-{next(stored)}", signature, content)
+
+    def drop_and_restore() -> None:
+        # Net-zero on cache size, so every concurrent store keeps evicting.
+        repository._read_bytes_cache_drop(recycled_key)
+        repository._read_bytes_cache_store(recycled_key, signature, content)
+
+    def mark_validated() -> None:
+        # ``content`` is the identical object that was stored, so this takes
+        # the read-modify-write branch rather than returning early.
+        repository._read_bytes_cache_mark_validated(recycled_key, content)
+
+    with _fine_grained_thread_switching():
+        deadline = time.monotonic() + 0.5
+        _join_all(
+            [
+                threading.Thread(
+                    target=_hammer_until(store_new_key, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-a",
+                ),
+                threading.Thread(
+                    target=_hammer_until(store_new_key, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="store-b",
+                ),
+                threading.Thread(
+                    target=_hammer_until(drop_and_restore, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="drop-restore",
+                ),
+                threading.Thread(
+                    target=_hammer_until(mark_validated, stop=stop, deadline=deadline, failures=failures, batch=50),
+                    name="mark-validated",
+                ),
+            ],
+            stop=stop,
+        )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+    assert len(repository._read_bytes_cache) <= capacity
 
 
 def _segment_job_record(
@@ -7801,6 +9024,250 @@ def test_cohort_init_state_identity_is_frozen_and_out_of_the_cycle_scope_project
     ]
 
 
+# ---------------------------------------------------------------------------
+# #1187: derived per-model rows freeze the mapping exactly like the master row.
+# ---------------------------------------------------------------------------
+
+
+_TERMINAL_TASK_JOB_ID = "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0"
+
+
+def _durable_pipeline_job_payloads(journal_root: Path, job_id: str) -> list[dict[str, Any]]:
+    """Every durable jsonl payload written for one job id, oldest first.
+
+    The public read sanitizes ``*_uri`` values, so an assertion made against
+    ``get_pipeline_job`` cannot tell a laundered placeholder apart from a
+    correctly persisted URI. Only the jsonl payload can.
+    """
+
+    payloads: list[dict[str, Any]] = []
+    for path in sorted((journal_root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("record_type") != "pipeline_job":
+                continue
+            payload = record.get("payload") or {}
+            if payload.get("job_id") == job_id:
+                payloads.append(payload)
+    return payloads
+
+
+def _projected_cohort_with_identities(tmp_path: Path, *, member_count: int = 3) -> tuple[Any, dict[str, Any]]:
+    """Reserve, bind and project one cohort whose master carries identities."""
+
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(index) for index in range(member_count)],
+    )
+    assert repository.reserve_pipeline_job(record) is not None
+    _bind_and_project_cohort(repository, record, member_count=member_count)
+    return repository, record
+
+
+def test_per_model_row_public_round_trip_cannot_launder_the_durable_state_uri(
+    tmp_path: Path,
+) -> None:
+    """#1187 J9: a public round-trip must not wash ``s3://`` into a placeholder.
+
+    ``get_pipeline_job`` → ``upsert_pipeline_job`` on a derived per-model row
+    carries the display-sanitized mapping back into the write path. Without the
+    per-model freeze the merge accepts it and the durable lineage evidence is
+    replaced by ``[object-uri]``.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+    public_row = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    assert public_row["init_state_identities"] == [
+        {**_cohort_init_state_identity(0), "init_state_uri": "[object-uri]"}
+    ]
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(dict(public_row))
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "case"),
+    [
+        pytest.param(None, "explicit_none", id="explicit_none"),
+        pytest.param([], "explicit_empty", id="explicit_empty"),
+        pytest.param(
+            [{**_cohort_init_state_identity(0), "init_state_id": "state_forged"}],
+            "wrong_content",
+            id="structurally_valid_wrong_content",
+        ),
+    ],
+)
+def test_per_model_row_rejects_a_divergent_init_state_mapping(
+    tmp_path: Path,
+    payload: Any,
+    case: str,
+) -> None:
+    """#1187 J10/J11: erasing and forging are both divergence, both refused.
+
+    An explicit ``None``/``[]`` would flatten the lineage evidence; a payload
+    that is structurally valid but names a different state is the case a
+    placeholder-tolerant merge could never catch. Both must be rejected with
+    the durable mapping intact.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(
+            {**public_before, "init_state_identities": payload}
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+    assert repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID) == public_before
+    del case
+
+
+def test_per_model_freeze_is_typed_and_only_covers_contract_current_rows(
+    tmp_path: Path,
+) -> None:
+    """#1187 J16: the new gate's own negative oracle, plus its historical edge.
+
+    Half of this test is the gate firing with its exact typed error and zero
+    durable write; the other half is the boundary it must NOT cross — a
+    marker-free per-model row predates this contract, normalization does not
+    own its mapping, and gating it would change historical rows' behaviour.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS,
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+        accepted_submit_row_kind,
+    )
+
+    assert ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS == ("init_state_identities",)
+
+    # Correctly keyed to this row's own task, so the shape gate passes and only
+    # the freeze can reject it.
+    divergent = [{**_cohort_init_state_identity(0), "init_state_checksum": "sha256:" + "b" * 64}]
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    assert public_before[ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD] == ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(
+            {**public_before, "status": "failed", "init_state_identities": divergent}
+        )
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    assert _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1] == (
+        durable_before
+    )
+
+    # The historical shape: same row kind, no contract marker. Its mapping is
+    # outside the accepted-submit contract, so the write still goes through.
+    legacy_job_id = "job_fcst_gfs_2026072000_model_0_forecast_legacy"
+    legacy = {
+        key: value
+        for key, value in public_before.items()
+        if key != ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+    }
+    legacy["job_id"] = legacy_job_id
+    legacy["init_state_identities"] = [_cohort_init_state_identity(0)]
+    assert repository.upsert_pipeline_job(dict(legacy)) is not None
+    # The marker, not the row kind, is what holds this row outside the gate.
+    assert accepted_submit_row_kind(repository.get_pipeline_job(legacy_job_id)) == "candidate"
+
+    rewritten = repository.upsert_pipeline_job({**legacy, "init_state_identities": divergent})
+    assert rewritten["init_state_identities"] == [
+        {**divergent[0], "init_state_uri": "[object-uri]"}
+    ]
+
+
+def test_per_model_upsert_that_omits_the_mapping_keeps_it_silently(tmp_path: Path) -> None:
+    """#1187 J17: the freeze must not fail closed on the constructor's default.
+
+    ``_pipeline_job_row`` injects this field unconditionally with an empty
+    default, so a gate that compared the incoming row instead of the merged one
+    would reject every ordinary per-model upsert that simply does not mention
+    the mapping. Today those writes succeed and keep the persisted value; that
+    must stay true.
+    """
+
+    repository, _record = _projected_cohort_with_identities(tmp_path)
+    durable_before = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_before["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+    public_before = repository.get_pipeline_job(_TERMINAL_TASK_JOB_ID)
+    without_mapping = {
+        key: value for key, value in public_before.items() if key != "init_state_identities"
+    }
+    without_mapping["status"] = "failed"
+    without_mapping["error_code"] = "SLURM_TASK_FAILED"
+
+    updated = repository.upsert_pipeline_job(without_mapping)
+
+    assert updated["status"] == "failed"
+    durable_after = _durable_pipeline_job_payloads(tmp_path / "journal", _TERMINAL_TASK_JOB_ID)[-1]
+    assert durable_after["status"] == "failed"
+    assert durable_after["init_state_identities"] == durable_before["init_state_identities"]
+    assert durable_after["init_state_identities"] == [_cohort_init_state_identity(0)]
+
+
+def test_master_public_snapshot_replay_still_fails_closed(tmp_path: Path) -> None:
+    """#1187 J12 (design D-B2): the public view is not a valid write payload.
+
+    The public read replaces object URIs with display placeholders, so an
+    unmodified replay of a public master snapshot presents a mapping the caller
+    does not actually hold. That is refused rather than special-cased — a
+    caller needing replay needs a durable read, not a laxer write gate.
+    """
+
+    member_count = 3
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=member_count,
+        init_state_identities=[_cohort_init_state_identity(index) for index in range(member_count)],
+    )
+    assert repository.reserve_pipeline_job(record) is not None
+    job_id = str(record["job_id"])
+    public_master = repository.get_pipeline_job(job_id)
+    assert public_master["init_state_identities"] == [
+        {**_cohort_init_state_identity(index), "init_state_uri": "[object-uri]"}
+        for index in range(member_count)
+    ]
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(dict(public_master))
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "init_state_identities"
+    # Documentation, not an oracle: at this entry point no single-guard mutation
+    # can falsify this line. The contract-current structural master arm always
+    # ends at ``file_orchestration_journal.py:1757``
+    # (``return _public_scheduler_row(existing)``), so the write below it is
+    # unreachable for this row and the row cannot change. Only a two-site
+    # mutation (also deleting that early return) flips it. Kept because deleting
+    # an assertion mid-review reads as weakening the oracle — but the evidence
+    # narrative must not claim it proves zero-write. The same caveat applies to
+    # the byte-identical half of #1180 J5/J7/J8.
+    assert repository.get_pipeline_job(job_id) == public_master
+
+
 def test_hydro_run_row_records_initial_state_quality(tmp_path: Path) -> None:
     """#1164: the journal row carries the initial-state quality face.
 
@@ -8638,3 +10105,747 @@ def test_cohort_projection_still_writes_terminal_status_for_unmarked_masters(tmp
     _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
 
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+
+
+def _non_master_permanently_failed_details(
+    tmp_path: Path,
+    *,
+    error_code: str | None,
+    retry_count: int = 0,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    """Drive one plain (non-master) journal row to its permanent-failure event."""
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_auto_retry_skipped")
+    record["retry_count"] = retry_count
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_auto_retry_skipped",
+        "failed",
+        error_code=error_code,
+        error_message="stage failed",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=max_retries, backoff_schedule=[0]))
+
+    handled = service.handle_failed_job(repository.get_pipeline_job("job_auto_retry_skipped"))
+
+    assert handled.status == "permanently_failed"
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    events = [event for event in state["pipeline_events"] if event["event_type"] == "permanently_failed"]
+    assert len(events) == 1
+    return dict(events[0]["details"])
+
+
+@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
+def test_file_journal_permanently_failed_event_carries_auto_retry_skipped(
+    tmp_path: Path,
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the file-journal plane's non-master production point emits the payload."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=error_code)
+
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "non_transient_error"
+    assert details["error_code"] == error_code
+    assert details["failure"]["retryable"] is False
+    assert details["automatic_retry_stopped"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_file_journal_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the spec warning fires once per appended event, from the shared helper."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert details["error_code"] == _UNKNOWN_ERROR_CODE
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+def test_file_journal_permanently_failed_event_omits_auto_retry_skipped_when_budget_exhausted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 discrimination rule: an exhausted TRANSIENT code is not guard-blocked."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code="SLURM_TIMEOUT", retry_count=3)
+
+    assert "auto_retry_skipped" not in details
+    assert details["failure"]["limit_exhausted"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_file_journal_permanently_failed_event_omits_auto_retry_skipped_without_an_error_code(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 edge: a missing code is not a code, so there is nothing to audit-classify."""
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        details = _non_master_permanently_failed_details(tmp_path, error_code=None)
+
+    assert "auto_retry_skipped" not in details
+    assert details["failure"]["reason_code"] == "UNKNOWN_FAILURE"
+    assert details["failure"]["limit_exhausted"] is False
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("error_code", _spec_non_transient_error_codes())
+def test_master_permanently_failed_event_carries_auto_retry_skipped(
+    tmp_path: Path,
+    error_code: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314: the master production point feeds the payload through the typed transition."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=error_code)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "non_transient_error"
+    assert details["error_code"] == error_code
+    assert details["failure"]["retryable"] is False
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_master_permanently_failed_event_flags_an_unknown_error_code_and_warns_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    job = repository.get_pipeline_job(str(record["job_id"]))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["auto_retry_skipped"] is True
+    assert details["reason"] == "unknown_error_code_defaulted_non_transient"
+    assert details["error_code"] == _UNKNOWN_ERROR_CODE
+    assert _auto_retry_skipped_warnings(caplog) == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+
+
+def test_master_permanently_failed_event_omits_auto_retry_skipped_when_budget_exhausted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 discrimination rule on master geometry (production attempt shape)."""
+
+    from services.orchestrator.retry_identity import effective_retry_attempt
+
+    repository, record = _retry_attempt_failed_cohort_master(
+        tmp_path,
+        error_code="NODE_FAILURE",
+        attempt=2,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    persisted_before = repository.get_pipeline_job(str(record["job_id"]))
+    job = {
+        **persisted_before,
+        "retry_count": effective_retry_attempt(
+            persisted_before["job_id"],
+            persisted_before.get("retry_count"),
+        ),
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        handled = service.handle_failed_job(job)
+
+    events = _permanently_failed_events(repository, record)
+    assert handled.status == "permanently_failed"
+    assert len(events) == 1
+    assert "auto_retry_skipped" not in events[0]["details"]
+    assert events[0]["details"]["failure"]["limit_exhausted"] is True
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+def test_duplicate_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 decision 3: the warning is append-gated, so an idempotent re-mark is silent."""
+
+    repository, record = _terminally_failed_cohort_master(tmp_path, error_code=_UNKNOWN_ERROR_CODE)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = dict(repository.get_pipeline_job(str(record["job_id"])))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        first = service.mark_permanently_failed(stale_snapshot)
+        warnings_after_first = _auto_retry_skipped_warnings(caplog)
+        second = service.mark_permanently_failed(stale_snapshot)
+
+    assert first.status == "permanently_failed"
+    assert second.status == "permanently_failed"
+    assert len(_permanently_failed_events(repository, record)) == 1
+    assert warnings_after_first == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)]
+    assert _auto_retry_skipped_warnings(caplog) == warnings_after_first
+
+
+def test_duplicate_non_master_mark_warns_once_per_appended_event(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Non-master twin of the master duplicate-mark test — pinning what the plane does.
+
+    The master branch has a persisted-row idempotency oracle, so a re-mark appends
+    nothing and warns nothing.  The non-master branch has no such oracle: its gate
+    reads the CALLER's snapshot, so re-driving the same stale ``failed`` snapshot
+    appends a second ``permanently_failed`` event (the durable status update itself
+    no-ops).  The duplicate event predates #1314; what #1314 owes is that warnings
+    track APPENDED events one-for-one, and that is what this pins — a warning count
+    that drifts from the event count in either direction is the regression.
+    Production callers re-read the row between passes, so the shape is reachable
+    only by re-using a snapshot across marks.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _pipeline_reservation_record(cycle_time, job_id="job_auto_retry_skipped_twin")
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        "job_auto_retry_skipped_twin",
+        "failed",
+        error_code=_UNKNOWN_ERROR_CODE,
+        error_message="stage failed",
+        finished_at=cycle_time,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = dict(repository.get_pipeline_job("job_auto_retry_skipped_twin"))
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        first = service.mark_permanently_failed(stale_snapshot)
+        second = service.mark_permanently_failed(stale_snapshot)
+
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    events = [event for event in state["pipeline_events"] if event["event_type"] == "permanently_failed"]
+    warnings = _auto_retry_skipped_warnings(caplog)
+    assert first.status == "permanently_failed"
+    assert second.status == "permanently_failed"
+    assert len(events) == 2
+    assert all(event["details"]["reason"] == "unknown_error_code_defaulted_non_transient" for event in events)
+    assert warnings == [_unknown_error_code_warning(_UNKNOWN_ERROR_CODE)] * len(events)
+    # Re-driving after a fresh read is what production does, and it is inert.
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        service.mark_permanently_failed(repository.get_pipeline_job("job_auto_retry_skipped_twin"))
+    assert _auto_retry_skipped_warnings(caplog) == warnings
+
+
+def test_stale_master_mark_leaves_no_orphan_auto_retry_skipped_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1314 decision 3: a live master returns ``stale`` without appending — no warning."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    assert repository.transition_pipeline_job_runtime_status(str(record["job_id"]), "running").committed
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    stale_snapshot = {
+        **repository.get_pipeline_job(str(record["job_id"])),
+        "status": "failed",
+        "error_code": _UNKNOWN_ERROR_CODE,
+    }
+
+    with caplog.at_level(logging.WARNING, logger=_RETRY_MODULE_LOGGER):
+        marked = service.mark_permanently_failed(stale_snapshot)
+
+    assert marked.status == "running"
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "running"
+    assert _permanently_failed_events(repository, record) == []
+    assert _auto_retry_skipped_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# #1167: containment-aware existence probes over the journal tree.
+# ---------------------------------------------------------------------------
+
+
+_PROBE_CYCLE = _dt("2026-06-28T00:00:00Z")
+_PROBE_CYCLE_SEGMENT = format_cycle_time(_PROBE_CYCLE)
+_COHORT_CYCLE = _dt("2026-07-20T00:00:00Z")
+_COHORT_CYCLE_SEGMENT = format_cycle_time(_COHORT_CYCLE)
+
+
+def _symlink_over_directory(path: Path, *, stash: Path) -> None:
+    """Swap one real journal directory for a symlink to a real, empty directory.
+
+    The decoy and the displaced original both live outside the journal root so
+    the scene isolates the parent-component probe: every path component up to
+    the symlink is a real directory, and the symlink's target simply does not
+    contain the entry being probed.
+    """
+
+    stash.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.exists():
+        path.rename(stash / f"stashed-{path.name}")
+    decoy = stash / f"decoy-{path.name}"
+    decoy.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(decoy, target_is_directory=True)
+
+
+def _journal_tree_bytes(root: Path) -> dict[str, bytes]:
+    """Durable journal content only; the empty flock files are not records.
+
+    Following symlinks during the walk is load-bearing: the tampered scenes
+    replace ``journal/<source>`` with a symlink, and a write that leaked
+    through it lands in the decoy.  A non-following walk stops at the symlink
+    and reports the leaked bytes as "nothing changed".  Symlinked directories
+    are traversed, so the bytes behind them count; a symlinked FILE is dropped
+    outright and its target bytes are invisible here — no fixture plants one
+    inside ``root`` today, and a zero-write assertion in a scene that does
+    would need a different helper.
+    Precondition: the tamper fixtures keep their decoys OUTSIDE ``root``, so
+    the tree has no symlink cycle; a cycle would not hang the walk — the
+    kernel's symlink limit ends the descent and ``os.walk``'s default
+    ``onerror`` swallows it — but the snapshot would silently gain duplicated
+    keys from the repeated descent; no cycle detection is added here on
+    purpose.
+    """
+
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(
+            Path(dirpath) / name
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=True)
+            for name in filenames
+        )
+        if not path.is_symlink() and path.is_file() and ".locks" not in path.parts
+    }
+
+
+def test_probe_fails_loud_when_the_journal_source_parent_is_a_symlink(tmp_path: Path) -> None:
+    """E1 — a symlinked parent component is no longer reported as 'absent'.
+
+    ``os.stat(follow_symlinks=False)`` does not follow the FINAL component but
+    happily follows a symlinked parent, so the segment probe used to look into
+    the decoy, find no cycle file and let the read return ``[]`` — a tampered
+    or misconfigured tree downgraded to "this cycle has no records".
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+
+    repository = FileOrchestrationJournalRepository(root)
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert caught.value.reason == "file_journal_unreadable"
+
+    # The public read surfaces it the way it surfaces a corrupt journal file:
+    # a blocked row carrying the reason, not a silently empty status list.
+    blocked = FileOrchestrationJournalRepository(root).list_stage_statuses(
+        source_id="gfs",
+        cycle_time=_PROBE_CYCLE,
+    )
+    assert [row["file_journal"]["reason"] for row in blocked] == ["file_journal_unreadable"]
+
+
+def test_symlinked_journal_source_parent_fails_a_sequence_write_loud(tmp_path: Path) -> None:
+    """E2 — the sequence-floor sibling of the same probe idiom, on a write.
+
+    A silently skipped slot would underestimate the floor and let a replay
+    sequence be reused, which is unrecoverable state corruption.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+    before = _journal_tree_bytes(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=cycle_id_for("gfs", _PROBE_CYCLE),
+            event_type="cycle_note",
+            status_from=None,
+            status_to=None,
+        )
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(root) == before
+
+
+def test_symlink_occupying_a_segment_slot_fails_loud_on_read_and_on_the_floor(
+    tmp_path: Path,
+) -> None:
+    """E3 — an end symlink in a probed slot is loud on both consumers.
+
+    The read side already reached the hardened reader with this token, so only
+    the origin of the error moves.  The floor probe is the real change: it used
+    to ``lstat`` the slot, see "not a regular file" and skip it, so a tampered
+    tree silently reset the floor to 1 while a segment carrying sequence 7 sat
+    right there.
+    """
+
+    root = tmp_path / "journal"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _write_jsonl(
+        outside / "planted.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_planted", sequence=7)],
+    )
+    (root / "journal" / "gfs").mkdir(parents=True)
+    (root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl").symlink_to(outside / "planted.jsonl")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as read_caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert read_caught.value.reason == "file_journal_unreadable"
+
+    with pytest.raises(FileOrchestrationJournalError) as floor_caught:
+        FileOrchestrationJournalRepository(root)._next_sequence(
+            source_id="gfs",
+            cycle_time=_PROBE_CYCLE,
+        )
+    assert floor_caught.value.reason == "file_journal_unreadable"
+
+
+def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: Path) -> None:
+    """E4 — the third copy of the idiom, the ``latest/`` directory probe.
+
+    The latest view holds the highest replay sentinel of the cycle, so a
+    symlinked ``latest/<source>`` that made the cycle directory look absent
+    dropped the floor from 10 back to 2 and handed the next write a sequence
+    the cycle had already used.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    latest_view = _latest_view(cycle_time=_PROBE_CYCLE, jobs=[_active_job(_PROBE_CYCLE)])
+    latest_view["replay"]["latest_sequence"] = 9
+    _write_json(root / "latest" / "gfs" / _PROBE_CYCLE_SEGMENT / "model_a.json", latest_view)
+    assert (
+        FileOrchestrationJournalRepository(root)._next_sequence(
+            source_id="gfs",
+            cycle_time=_PROBE_CYCLE,
+        )
+        == 10
+    )
+
+    _symlink_over_directory(root / "latest" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+    before = _journal_tree_bytes(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as floor_caught:
+        repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert floor_caught.value.reason == "file_journal_unreadable"
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=cycle_id_for("gfs", _PROBE_CYCLE),
+            event_type="cycle_note",
+            status_from=None,
+            status_to=None,
+        )
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(root) == before
+
+
+def test_genuine_absence_under_real_directories_stays_a_legal_empty_read(tmp_path: Path) -> None:
+    """E5 — the guard-rail: ``FileNotFoundError`` is absence, never a fault.
+
+    ``stat_no_follow`` raises the same ``FileNotFoundError`` for a missing
+    entry and for a missing PARENT component, so mapping either one to loud
+    would kill every cold-start read of a brand new source.
+    """
+
+    root = tmp_path / "journal"
+    (root / "journal" / "gfs").mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+    assert repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+    assert repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert repository.list_stage_statuses(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+
+    cold = FileOrchestrationJournalRepository(tmp_path / "never-initialized")
+    assert cold._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
+    assert cold._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+
+
+def test_directory_occupying_a_segment_slot_still_reaches_the_hardened_reader(
+    tmp_path: Path,
+) -> None:
+    """E6 — a safe but non-regular occupant stays the reader's call, not the probe's."""
+
+    root = tmp_path / "journal"
+    (root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl").mkdir(parents=True)
+    repository = FileOrchestrationJournalRepository(root)
+
+    assert repository._journal_segment_exists(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl"
+    )
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE)
+    assert caught.value.reason == "file_journal_unreadable"
+
+
+def test_sequence_floor_probe_is_containment_aware_at_its_own_seam(tmp_path: Path) -> None:
+    """E3 sibling — the floor probe pinned directly, not through its caller.
+
+    ``_cycle_segment_paths`` pre-filters every path this probe receives today,
+    so no end-to-end lane can distinguish it from a bare ``os.stat``.  The pin
+    lives at the seam so a #1165-family change to that pre-filtering cannot
+    silently hand the probe an uncontained path.
+    """
+
+    root = tmp_path / "journal"
+    _write_jsonl(
+        root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl",
+        [_segment_job_record(_PROBE_CYCLE, job_id="job_probe_base", sequence=1)],
+    )
+    _symlink_over_directory(root / "journal" / "gfs", stash=tmp_path / "outside")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with pytest.raises(journal_module._JournalProbeContainmentError):
+        repository._sequence_regular_file_exists(root / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl")
+
+    # The other half of the seam's contract: under a chain of real directories
+    # a missing entry is still plain absence, never a fault.
+    honest = FileOrchestrationJournalRepository(tmp_path / "honest")
+    (tmp_path / "honest" / "journal" / "gfs").mkdir(parents=True)
+    assert (
+        honest._sequence_regular_file_exists(
+            tmp_path / "honest" / "journal" / "gfs" / f"{_PROBE_CYCLE_SEGMENT}.jsonl"
+        )
+        is False
+    )
+
+
+def _reserved_cohort_master_on_disk(base: Path) -> tuple[Any, dict[str, Any]]:
+    repository, record = _reserved_cohort_master(base, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    return repository, record
+
+
+def _corrupt_cohort_cycle_log(repository: Any) -> None:
+    (repository.root / "journal" / "gfs" / f"{_COHORT_CYCLE_SEGMENT}.jsonl").write_text(
+        "{not json\n",
+        encoding="utf-8",
+    )
+
+
+def _d7_upsert(repository: Any, record: Mapping[str, Any]) -> Any:
+    # A member row, not the master: its direct file resolves the id without a
+    # global scan, so the lane reaches the segment probe.
+    return repository.upsert_pipeline_job(
+        {
+            "job_id": "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0",
+            "run_id": "fcst_gfs_2026072000_model_0",
+            "source_id": "gfs",
+            "cycle_id": "gfs_2026072000",
+            "job_type": "run_shud_forecast",
+            "model_id": "model_0",
+            "stage": "forecast",
+            "status": "failed",
+            "error_code": "NODE_FAILURE",
+            "created_at": _COHORT_CYCLE,
+            "updated_at": _COHORT_CYCLE,
+        }
+    )
+
+
+def _d7_reject(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.reject_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=1,
+        finished_at=_dt("2026-07-20T01:00:00Z"),
+        error_code="SBATCH_REJECTED",
+        error_message="scheduler rejected the forecast array",
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+    )
+
+
+def _d7_mark_permanently_failed(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.mark_pipeline_job_permanently_failed(str(record["job_id"]))
+
+
+def _d7_permit_retry(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.permit_pipeline_job_retry(
+        str(record["job_id"]),
+        accepted_submit_contract_version=None,
+        expected_submission_attempt=1,
+    )
+
+
+def _d7_insert_event(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.insert_pipeline_event(
+        entity_type="forecast_cycle",
+        entity_id=cycle_id_for("gfs", _COHORT_CYCLE),
+        event_type="cycle_note",
+        status_from=None,
+        status_to=None,
+    )
+
+
+def _d7_update_status(repository: Any, record: Mapping[str, Any]) -> Any:
+    return repository.update_pipeline_job_status(str(record["job_id"]), "failed")
+
+
+def _d7_project(repository: Any, record: Mapping[str, Any]) -> Any:
+    return _project_cohort_failure(repository, record, error_code="NODE_FAILURE")
+
+
+_D7_WRITE_LANES: dict[str, tuple[Any, Any]] = {
+    "upsert_pipeline_job": (_terminally_failed_cohort_master, _d7_upsert),
+    "reject_pipeline_job_submit_attempt": (_reserved_cohort_master_on_disk, _d7_reject),
+    "mark_pipeline_job_permanently_failed": (_reserved_cohort_master_on_disk, _d7_mark_permanently_failed),
+    "permit_pipeline_job_retry": (_reserved_cohort_master_on_disk, _d7_permit_retry),
+    "insert_pipeline_event": (_reserved_cohort_master_on_disk, _d7_insert_event),
+    "update_pipeline_job_status": (_reserved_cohort_master_on_disk, _d7_update_status),
+    "project_forecast_cohort_tasks": (_terminally_failed_cohort_master, _d7_project),
+}
+
+
+@pytest.mark.parametrize("lane", sorted(_D7_WRITE_LANES))
+def test_symlinked_parent_fails_every_public_write_lane_in_reader_fault_parity(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    """E7a/E7b/E7d and design D7 — one parity-table row per public write lane.
+
+    The contract is the pair, not either half: a containment fault reaches the
+    caller as the SAME exception type a corrupt journal file already reaches it
+    with, so no lane gains a new exception type and none goes quiet.  Only the
+    reason token and the type are pinned — the message text differs by platform
+    (Linux ELOOP vs macOS ENOTDIR) and the originating frame is not contractual.
+
+    Before this change these lanes surfaced, respectively, ``OrchestratorError``
+    from the eventual safe_fs write, ``file_journal_authority_transition_requires
+    _typed_api`` derived from the empty read, or a silent no-op.
+    """
+
+    build, action = _D7_WRITE_LANES[lane]
+
+    tampered_root = tmp_path / "symlinked"
+    tampered_root.mkdir()
+    tampered, tampered_record = build(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+    before = _journal_tree_bytes(tampered.root)
+    with pytest.raises(FileOrchestrationJournalError) as tampered_caught:
+        action(tampered, tampered_record)
+    assert tampered_caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(tampered.root) == before
+
+    corrupt_root = tmp_path / "corrupt"
+    corrupt_root.mkdir()
+    corrupt, corrupt_record = build(corrupt_root)
+    _corrupt_cohort_cycle_log(corrupt)
+    with pytest.raises(FileOrchestrationJournalError) as corrupt_caught:
+        action(corrupt, corrupt_record)
+    assert corrupt_caught.value.reason == "file_journal_malformed_json"
+
+
+def test_a_write_that_silently_no_opped_under_a_symlinked_parent_now_fails_loud(
+    tmp_path: Path,
+) -> None:
+    """E7c / D7 row 3 — the one success-to-failure flip, and the point of #1167.
+
+    A reserved master is not permanently-failable, so ``stale`` is the honest
+    answer on an intact tree.  Under a symlinked parent the journal read came
+    back empty and the method returned that same ``stale`` — the caller could
+    not distinguish a tampered tree from an honest refusal.
+    """
+
+    honest_root = tmp_path / "honest"
+    honest_root.mkdir()
+    honest, honest_record = _reserved_cohort_master_on_disk(honest_root)
+    assert honest.mark_pipeline_job_permanently_failed(str(honest_record["job_id"])).outcome == "stale"
+
+    tampered_root = tmp_path / "tampered"
+    tampered_root.mkdir()
+    tampered, tampered_record = _reserved_cohort_master_on_disk(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+    before = _journal_tree_bytes(tampered.root)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        tampered.mark_pipeline_job_permanently_failed(str(tampered_record["job_id"]))
+
+    assert caught.value.reason == "file_journal_unreadable"
+    assert _journal_tree_bytes(tampered.root) == before
+
+
+def test_probe_faults_are_exactly_as_loud_as_reader_faults_on_a_swallow_lane(
+    tmp_path: Path,
+) -> None:
+    """E7e — parity on the lanes that already absorb journal faults.
+
+    The carrier must not inherit the public journal error.  At head every
+    probe consumption sits directly inside a choke frame's ``try``, so no
+    broad handler on this lane can reach a carrier before conversion; the
+    ``issubclass`` line is a forward-looking guard against FUTURE shapes —
+    conversion moved outward, or a broad handler introduced between a probe
+    and its choke frame — where a subclass would be swallowed into the
+    silent-empty failure mode this change exists to remove.  (The
+    fixture-review-era measurement of that hazard was taken against the
+    pre-choke-frame code shape.)  The observables below pin the other half —
+    the fault stays absorbed to the SAME answer a corrupt journal file
+    already yields, so no lane gains loudness here.  They are pinned
+    absolutely rather than against each other because a common-mode drift
+    (both lanes degrading to ``[]``) would satisfy an equality.
+    """
+
+    assert not issubclass(journal_module._JournalProbeContainmentError, FileOrchestrationJournalError)
+
+    tampered_root = tmp_path / "symlinked"
+    tampered_root.mkdir()
+    tampered, _ = _terminally_failed_cohort_master(tampered_root)
+    _symlink_over_directory(tampered.root / "journal" / "gfs", stash=tmp_path / "outside")
+
+    corrupt_root = tmp_path / "corrupt"
+    corrupt_root.mkdir()
+    corrupt, _ = _terminally_failed_cohort_master(corrupt_root)
+    _corrupt_cohort_cycle_log(corrupt)
+
+    for repository in (tampered, corrupt):
+        assert repository._cycle_materialization_model_ids_unlocked(
+            source_id="gfs",
+            cycle_time=_COHORT_CYCLE,
+        ) == ["model_0", "model_1"]
+        assert (
+            repository.has_completed_pipeline(
+                source_id="gfs",
+                cycle_time=_COHORT_CYCLE,
+                model_id="model_0",
+            )
+            is False
+        )

@@ -83,6 +83,7 @@
     "previous_model_count": 13,
     "prospective_model_count": 19,
     "mode": "full",
+    "generation": "manifest-b44ab3b785f4",
     "added": {
       "items": [
         "basin-001",
@@ -117,6 +118,7 @@
     "removed": {"items": [], "total": 0, "truncated": false},
     "package_changed": {"items": [], "total": 0, "truncated": false},
     "refused": {"items": [], "total": 0, "truncated": false},
-    "declared_cutovers": {"items": [], "total": 0, "truncated": false}
+    "declared_cutovers": {"items": [], "total": 0, "truncated": false},
+    "declared_retirements": {"items": [], "total": 0, "truncated": false}
   }
 }

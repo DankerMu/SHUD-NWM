@@ -18,16 +18,24 @@ Safety posture (never-break-userspace):
   (``active_lower_bound``); ``None`` keeps the historical pure wall-clock
   behaviour.
 - Individual deletion failures are recorded and do not abort the pass.
+- Additional run-workspace roots (issue #1318) are swept ``runs/``-only under
+  their own window, behind a default-off gate. Their cycle-scoped prefixes are
+  never touched: the copyback root's ``forcing/`` tree is node-27's live
+  disk-only display serving surface.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from packages.common.safe_fs import SafeFilesystemError, rmtree_no_follow
+from services.orchestrator.run_identity import parse_run_cycle
 
 # Per-cycle prefixes whose second path segment ({source}) contains cycle
 # directories named ``%Y%m%d%H``. Confirmed against worker key construction:
@@ -36,9 +44,9 @@ from typing import Any
 #   forcing/{source}/{cycle}/...    (workers/forcing_producer/producer.py)
 CYCLE_SCOPED_PREFIXES: tuple[str, ...] = ("raw", "canonical", "forcing")
 
-# ``runs/{run_id}/...`` holds per-run workspace artifacts (chain.py). Run ids
-# embed the compact cycle, e.g. ``fcst_gfs_2026051600_<model>`` or carry a
-# trailing ``_%Y%m%d%H`` token.
+# ``runs/{run_id}/...`` holds per-run workspace artifacts (chain.py). Only the
+# canonical run-id shapes (``services.orchestrator.run_identity``) are admitted
+# here, e.g. ``fcst_gfs_2026051600_<model>``; anything else is preserved.
 RUNS_PREFIX = "runs"
 
 # Always-protected top-level prefixes (published display products).
@@ -56,14 +64,37 @@ CYCLE_NAME_LENGTH = 10  # len("%Y%m%d%H")
 # issue's wording (``below_pipeline_frontier``) would read inverted here.
 PIPELINE_FRONTIER_EXEMPT_REASON = "pipeline_frontier_exempt"
 
+# Skip reason for an additional root whose ``runs/`` entry is a symlink (#1318 /
+# design D6). ``runs_root.is_dir()`` follows symlinks, so a swapped ``runs/``
+# would point the enumeration -- and therefore the deletion surface -- outside
+# the root. Recorded rather than silently ignored so the receipt says why the
+# root produced nothing.
+RUNS_ROOT_SYMLINK_REASON = "runs_root_symlink_skipped"
+
+# Skip reason for an additional root whose configured value is relative (#1318
+# task 5.1). Resolving it would anchor a deletion surface to whatever working
+# directory the process happens to have been started in; recorded rather than
+# dropped silently because -- unlike an unset root -- it is a misconfiguration
+# somebody has to see.
+EXTRA_ROOT_NOT_ABSOLUTE_REASON = "extra_root_not_absolute"
+
 
 @dataclass
 class RetentionConfig:
-    """Resolved retention behaviour."""
+    """Resolved retention behaviour.
+
+    The two additional-root fields carry defaults because ``cli.py`` and the
+    tests construct this dataclass positionally; that makes it a hazard, not a
+    convenience. Every construction point must derive its values from
+    :meth:`from_env` (``dataclasses.replace`` on a ``from_env()`` base), or the
+    dataclass defaults silently substitute for the operator's environment.
+    """
 
     enabled: bool
     dry_run: bool
     retention_days: int
+    extra_roots_enabled: bool = False
+    extra_roots_retention_days: int = 30
 
     @classmethod
     def from_env(cls) -> RetentionConfig:
@@ -71,6 +102,8 @@ class RetentionConfig:
             enabled=_env_flag("NHMS_RETENTION_ENABLED", default=False),
             dry_run=_env_flag("NHMS_RETENTION_DRY_RUN", default=True),
             retention_days=_env_int("NHMS_RETENTION_DAYS", default=14),
+            extra_roots_enabled=_env_flag("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", default=False),
+            extra_roots_retention_days=_env_int("NHMS_RETENTION_EXTRA_ROOTS_DAYS", default=30),
         )
 
 
@@ -83,6 +116,7 @@ class RetentionTarget:
     cycle_time: datetime
     reason: str
     size_bytes: int
+    root: Path
 
 
 @dataclass
@@ -100,6 +134,28 @@ class RetentionResult:
     freed_bytes: int = 0
     active_lower_bound: datetime | None = None
     active_lower_bound_source: str | None = None
+    extra_roots_enabled: bool = False
+    extra_roots_retention_days: int = 0
+    extra_roots_cutoff: str = ""
+    extra_roots: list[str] = field(default_factory=list)
+
+    def extra_roots_block(self) -> dict[str, Any]:
+        """Receipt block describing the additional-root window (issue #1318).
+
+        Always present and always populated, gate open or closed: with the gate
+        closed ``enabled`` is false and ``roots`` is empty, but the window and
+        cutoff still report the *configured* values so a reader can tell what
+        opening the gate would reclaim. ``roots`` lists every root that survived
+        hygiene (blank discarded) and deduplication, resolved to an absolute
+        path -- including ones that do not exist on disk, so a mistyped root is
+        visible in the receipt instead of vanishing silently.
+        """
+        return {
+            "enabled": self.extra_roots_enabled,
+            "retention_days": self.extra_roots_retention_days,
+            "cutoff": self.extra_roots_cutoff,
+            "roots": list(self.extra_roots),
+        }
 
     def frontier(self) -> dict[str, Any]:
         """Receipt block describing the frontier bound applied to this plan.
@@ -119,12 +175,13 @@ class RetentionResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "nhms.production_scheduler.retention.v1",
+            "schema_version": "nhms.production_scheduler.retention.v2",
             "enabled": self.enabled,
             "dry_run": self.dry_run,
             "retention_days": self.retention_days,
             "cutoff": self.cutoff,
             "frontier": self.frontier(),
+            "extra_roots": self.extra_roots_block(),
             "counts": {
                 "planned": len(self.planned),
                 "deleted": len(self.deleted),
@@ -175,12 +232,14 @@ def _parse_cycle_name(name: str) -> datetime | None:
 
 
 def _extract_run_cycle(run_id: str) -> datetime | None:
-    """Find an embedded ``%Y%m%d%H`` token inside a run id."""
-    for token in run_id.split("_"):
-        parsed = _parse_cycle_name(token)
-        if parsed is not None:
-            return parsed
-    return None
+    """Resolve the cycle of a canonical run id, or None (#1405).
+
+    Delegates to the shared canonical shapes so a deletion surface admits only
+    names the pipeline actually mints. The previous token scan took the first
+    ``_``-separated token that parsed as ``%Y%m%d%H``, which both accepted
+    stray non-run directories and could bind a run to the wrong timestamp.
+    """
+    return parse_run_cycle(run_id)
 
 
 def _dir_size(path: Path) -> int:
@@ -194,19 +253,22 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def _frontier_exempt_entry(key: str, path: Path, cycle_time: datetime) -> dict[str, Any]:
+def _frontier_exempt_entry(key: str, path: Path, cycle_time: datetime, root: Path) -> dict[str, Any]:
     """Skip entry for a target protected by the pipeline frontier.
 
     Deliberately carries no ``size_bytes``: the exemption is adjudicated before
     ``_dir_size``, so a protected directory is never rglob/stat-walked. During
     catch-up the protected directories are the largest and hottest ones, and
-    the walk runs over NFS every pass (design D4).
+    the walk runs over NFS every pass (design D4). ``root`` is what makes
+    identically named ``runs/<run_id>`` entries on different roots
+    distinguishable (issue #1318); it costs no filesystem access.
     """
     return {
         "key": key,
         "path": str(path),
         "cycle_time": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": PIPELINE_FRONTIER_EXEMPT_REASON,
+        "root": str(root),
     }
 
 
@@ -248,19 +310,19 @@ def _classify_cycle_dir(
 ) -> None:
     key = cycle_dir.relative_to(root).as_posix()
     if cycle_dir.name in STATIC_SEGMENTS:
-        skipped.append({"key": key, "reason": "static_asset_protected"})
+        skipped.append({"key": key, "root": str(root), "reason": "static_asset_protected"})
         return
     cycle_time = _parse_cycle_name(cycle_dir.name)
     if cycle_time is None:
-        skipped.append({"key": key, "reason": "unparseable_cycle_name"})
+        skipped.append({"key": key, "root": str(root), "reason": "unparseable_cycle_name"})
         return
     # Adjudication order (design D4): not-yet-expired first so the two skip
     # reasons stay distinguishable, frontier exemption second, deletion last.
     if cycle_time >= cutoff:
-        skipped.append({"key": key, "reason": "within_retention_window"})
+        skipped.append({"key": key, "root": str(root), "reason": "within_retention_window"})
         return
     if active_lower_bound is not None and cycle_time >= active_lower_bound:
-        skipped.append(_frontier_exempt_entry(key, cycle_dir, cycle_time))
+        skipped.append(_frontier_exempt_entry(key, cycle_dir, cycle_time, root))
         return
     targets.append(
         RetentionTarget(
@@ -269,6 +331,7 @@ def _classify_cycle_dir(
             cycle_time=cycle_time,
             reason=f"{prefix}_cycle_aged_out",
             size_bytes=_dir_size(cycle_dir),
+            root=root,
         )
     )
 
@@ -277,27 +340,39 @@ def _collect_run_targets(
     root: Path,
     cutoff: datetime,
     active_lower_bound: datetime | None = None,
+    *,
+    reject_symlinked_runs_root: bool = False,
 ) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
-    """Scan per-run workspace directories under ``runs/``."""
+    """Scan per-run workspace directories under ``runs/``.
+
+    ``reject_symlinked_runs_root`` is set for additional roots (issue #1318 /
+    design D6): ``Path.is_dir()`` follows symlinks, so a ``runs/`` entry that
+    has been replaced by a link would silently extend the enumeration -- and
+    the deletion surface -- outside the root. The object-store root keeps its
+    historical behaviour; changing it is out of this change's scope.
+    """
     targets: list[RetentionTarget] = []
     skipped: list[dict[str, Any]] = []
     runs_root = root / RUNS_PREFIX
+    if reject_symlinked_runs_root and runs_root.is_symlink():
+        skipped.append({"key": RUNS_PREFIX, "root": str(root), "reason": RUNS_ROOT_SYMLINK_REASON})
+        return targets, skipped
     if not runs_root.is_dir():
         return targets, skipped
     for run_dir in _iter_dirs(runs_root):
         key = run_dir.relative_to(root).as_posix()
         cycle_time = _extract_run_cycle(run_dir.name)
         if cycle_time is None:
-            skipped.append({"key": key, "reason": "unparseable_run_cycle"})
+            skipped.append({"key": key, "root": str(root), "reason": "unparseable_run_cycle"})
             continue
         # Same two-level adjudication as cycle targets (design D2/D4): a failed
         # run workspace whose cycle is still in flight keeps its SHUD
         # stdout/stderr readable for post-mortem.
         if cycle_time >= cutoff:
-            skipped.append({"key": key, "reason": "within_retention_window"})
+            skipped.append({"key": key, "root": str(root), "reason": "within_retention_window"})
             continue
         if active_lower_bound is not None and cycle_time >= active_lower_bound:
-            skipped.append(_frontier_exempt_entry(key, run_dir, cycle_time))
+            skipped.append(_frontier_exempt_entry(key, run_dir, cycle_time, root))
             continue
         targets.append(
             RetentionTarget(
@@ -306,6 +381,7 @@ def _collect_run_targets(
                 cycle_time=cycle_time,
                 reason="run_cycle_aged_out",
                 size_bytes=_dir_size(run_dir),
+                root=root,
             )
         )
     return targets, skipped
@@ -319,6 +395,67 @@ def _iter_dirs(parent: Path) -> list[Path]:
     return [entry for entry in entries if entry.is_dir() and not entry.is_symlink()]
 
 
+def _resolve_runs_only_roots(
+    values: Sequence[Path | str | None],
+    *,
+    primary: Path | None,
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Resolve, sanitise and de-duplicate the additional ``runs/``-only roots.
+
+    Returns the resolved roots plus the skip entries for the values that were
+    discarded loudly; this function is where *all* additional-root path hygiene
+    lives, and neither caller validates a root before handing it over.
+
+    Hygiene (issue #1318 task 1.2): ``None``, empty and whitespace-only values
+    are discarded **before** ``Path()`` is ever constructed --
+    ``Path("").expanduser().resolve()`` is the process working directory, which
+    would drag ``<cwd>/runs`` into the deletion surface, and
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is unset (``None``) on any deployment
+    that is not db-free. Those discards stay silent: an unset copyback root is
+    the normal case, not a misconfiguration.
+
+    A non-blank value that is still relative after ``expanduser()`` is discarded
+    **before** ``resolve()`` and recorded in ``skipped`` (task 5.1): resolving it
+    would anchor the deletion surface to the invocation working directory. The
+    value is stripped first, because ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` reaches
+    here as the bare environment string -- surrounding whitespace included.
+
+    De-duplication is by resolved absolute path (design D5): the object-store
+    root wins, because it is swept with the fuller cycle-prefix semantics.
+    Overlapping-but-unequal roots are *not* rejected -- additional roots only
+    ever scan ``<root>/runs``, and ``A/runs`` cannot intersect ``A/b/runs``, so
+    equality is the only way to produce a duplicate target.
+    """
+    resolved: list[Path] = []
+    skipped: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    if primary is not None:
+        seen.add(primary)
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            skipped.append(
+                {
+                    "key": RUNS_PREFIX,
+                    "root": str(value),
+                    "reason": EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+                }
+            )
+            continue
+        candidate = candidate.resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved.append(candidate)
+    return resolved, skipped
+
+
 def plan_retention(
     *,
     object_store_root: Path | str | None,
@@ -329,6 +466,10 @@ def plan_retention(
     published_artifact_root: Path | str | None = None,
     active_lower_bound: datetime | None = None,
     active_lower_bound_source: str | None = None,
+    runs_only_roots: Sequence[Path | str | None] = (),
+    extra_roots_cutoff: datetime | None = None,
+    extra_roots_retention_days: int | None = None,
+    extra_roots_enabled: bool = False,
 ) -> RetentionResult:
     """Build a retention plan (no deletion performed).
 
@@ -339,8 +480,29 @@ def plan_retention(
     label recorded in the receipt so the receipt says *why* the bound is where
     it is; retention itself never interprets it, which keeps this module
     scheduler-agnostic.
+
+    ``runs_only_roots`` are additional run-workspace roots (issue #1318). They
+    are swept ``runs/``-only: no cycle-scoped prefix on them is ever considered,
+    because the copyback root's ``forcing/`` tree is node-27's live display
+    serving surface. They use ``extra_roots_cutoff`` /
+    ``extra_roots_retention_days``, which default to the object-store window
+    when a direct caller supplies neither. The adjudication order, the frontier
+    exemption and the protected-path check are identical on every root.
+    ``extra_roots_enabled`` is recorded verbatim in the receipt; gating happens
+    in :func:`run_retention`, which passes an empty root sequence when the gate
+    is closed.
     """
     bound = _normalize_bound(active_lower_bound)
+    extra_cutoff = extra_roots_cutoff if extra_roots_cutoff is not None else cutoff
+    extra_days = (
+        extra_roots_retention_days if extra_roots_retention_days is not None else retention_days
+    )
+    primary_root = (
+        Path(object_store_root).expanduser().resolve() if object_store_root is not None else None
+    )
+    extra_roots, extra_root_skipped = _resolve_runs_only_roots(
+        runs_only_roots, primary=primary_root
+    )
     result = RetentionResult(
         enabled=enabled,
         dry_run=dry_run,
@@ -348,12 +510,11 @@ def plan_retention(
         cutoff=cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         active_lower_bound=bound,
         active_lower_bound_source=active_lower_bound_source,
+        extra_roots_enabled=extra_roots_enabled,
+        extra_roots_retention_days=extra_days,
+        extra_roots_cutoff=extra_cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        extra_roots=[str(root) for root in extra_roots],
     )
-    if object_store_root is None:
-        return result
-    root = Path(object_store_root).expanduser().resolve()
-    if not root.is_dir():
-        return result
 
     published_resolved = (
         Path(published_artifact_root).expanduser().resolve()
@@ -361,17 +522,43 @@ def plan_retention(
         else None
     )
 
-    cycle_targets, cycle_skipped = _collect_cycle_targets(root, cutoff, bound)
-    run_targets, run_skipped = _collect_run_targets(root, cutoff, bound)
-    result.skipped.extend(cycle_skipped)
-    result.skipped.extend(run_skipped)
+    if primary_root is not None and primary_root.is_dir():
+        cycle_targets, cycle_skipped = _collect_cycle_targets(primary_root, cutoff, bound)
+        run_targets, run_skipped = _collect_run_targets(primary_root, cutoff, bound)
+        result.skipped.extend(cycle_skipped)
+        result.skipped.extend(run_skipped)
+        _record_targets(result, [*cycle_targets, *run_targets], primary_root, published_resolved)
 
-    for target in [*cycle_targets, *run_targets]:
+    # Deliberately *after* the object-store root but *outside* its availability
+    # check (task 1.2d): an unconfigured or missing OBJECT_STORE_ROOT used to
+    # return early, which would have made the additional roots silently dead on
+    # exactly the CLI path where OBJECT_STORE_ROOT is an unvalidated getenv.
+    result.skipped.extend(extra_root_skipped)
+    for extra_root in extra_roots:
+        extra_targets, extra_skipped = _collect_run_targets(
+            extra_root,
+            extra_cutoff,
+            bound,
+            reject_symlinked_runs_root=True,
+        )
+        result.skipped.extend(extra_skipped)
+        _record_targets(result, extra_targets, extra_root, published_resolved)
+    return result
+
+
+def _record_targets(
+    result: RetentionResult,
+    targets: Sequence[RetentionTarget],
+    root: Path,
+    published_resolved: Path | None,
+) -> None:
+    for target in targets:
         if _is_protected(target.path, root, published_resolved):
-            result.skipped.append({"key": target.key, "reason": "protected_path"})
+            result.skipped.append(
+                {"key": target.key, "root": str(root), "reason": "protected_path"}
+            )
             continue
         result.planned.append(_target_payload(target))
-    return result
 
 
 def _normalize_bound(value: datetime | None) -> datetime | None:
@@ -403,6 +590,7 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
         "cycle_time": target.cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": target.reason,
         "size_bytes": target.size_bytes,
+        "root": str(target.root),
     }
 
 
@@ -414,6 +602,7 @@ def run_retention(
     published_artifact_root: Path | str | None = None,
     active_lower_bound: datetime | None = None,
     active_lower_bound_source: str | None = None,
+    runs_only_roots: Sequence[Path | str | None] = (),
 ) -> RetentionResult:
     """Plan and (when enabled and not dry-run) execute retention cleanup.
 
@@ -423,9 +612,18 @@ def run_retention(
     ``active_lower_bound`` / ``active_lower_bound_source`` are forwarded to
     :func:`plan_retention` unchanged; omitting them keeps the historical pure
     wall-clock behaviour.
+
+    ``runs_only_roots`` are the additional run-workspace roots (issue #1318).
+    They are swept only when ``config.extra_roots_enabled`` is true; with the
+    gate closed an empty sequence is forwarded, so the plan is identical key
+    for key to the pre-#1318 plan. The additional-root window
+    (``config.extra_roots_retention_days``) is independent of the object-store
+    window and is reported in the receipt either way.
     """
     resolved = config or RetentionConfig.from_env()
-    cutoff = now.astimezone(UTC) - timedelta(days=resolved.retention_days)
+    now_utc = now.astimezone(UTC)
+    cutoff = now_utc - timedelta(days=resolved.retention_days)
+    extra_cutoff = now_utc - timedelta(days=resolved.extra_roots_retention_days)
     result = plan_retention(
         object_store_root=object_store_root,
         cutoff=cutoff,
@@ -435,19 +633,50 @@ def run_retention(
         published_artifact_root=published_artifact_root,
         active_lower_bound=active_lower_bound,
         active_lower_bound_source=active_lower_bound_source,
+        runs_only_roots=tuple(runs_only_roots) if resolved.extra_roots_enabled else (),
+        extra_roots_cutoff=extra_cutoff,
+        extra_roots_retention_days=resolved.extra_roots_retention_days,
+        extra_roots_enabled=resolved.extra_roots_enabled,
     )
     if not resolved.enabled or resolved.dry_run:
         return result
+    extra_roots = set(result.extra_roots)
     for entry in result.planned:
-        _delete_entry(entry, result)
+        root = entry.get("root")
+        _delete_entry(
+            entry,
+            result,
+            containment_root=Path(root) if root in extra_roots else None,
+        )
     return result
 
 
-def _delete_entry(entry: dict[str, Any], result: RetentionResult) -> None:
+def _delete_entry(
+    entry: dict[str, Any],
+    result: RetentionResult,
+    *,
+    containment_root: Path | None = None,
+) -> None:
+    """Remove one planned entry, recording failure instead of raising.
+
+    ``containment_root`` is set for additional roots (design D6): removal goes
+    through ``rmtree_no_follow`` so the walk cannot follow a symlink out of the
+    root that is being swept. The object-store root keeps the historical
+    ``shutil.rmtree``; changing it is out of this change's scope.
+
+    ``SafeFilesystemError`` is a ``RuntimeError``, **not** an ``OSError``, so it
+    must be named explicitly here: letting it escape would collapse the pass
+    receipt to ``{"status": "error"}`` (scheduler_runtime) and abort the
+    ``cleanup`` CLI mid-sweep (cli.py wraps nothing), both violating this
+    module's "failures never abort the pass" contract.
+    """
     path = Path(entry["path"])
     try:
-        shutil.rmtree(path)
-    except OSError as error:
+        if containment_root is not None:
+            rmtree_no_follow(path, containment_root=containment_root)
+        else:
+            shutil.rmtree(path)
+    except (OSError, SafeFilesystemError) as error:
         result.failed.append({**entry, "error": str(error)})
         return
     result.deleted.append(entry)

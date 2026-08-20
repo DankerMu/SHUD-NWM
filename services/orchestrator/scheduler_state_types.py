@@ -27,6 +27,11 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
 STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
+# Scheduler durable-success predicate: "is the pipeline durably done?". Holds "complete" on top of
+# the three members of the manual-retry refusal set in services/orchestrator/retry.py, which
+# answers the different question "may an operator retry this run?" and is named distinctly on
+# purpose (change durable-status-name-split — grep that name for both sides). Do not merge the
+# two: collapsing this set to three members would change scheduler behavior.
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
@@ -57,6 +62,7 @@ NATIVE_SHUD_STAGE_ALIASES = {"forecast", "run_shud_forecast", "forecast_run", "a
 TRANSIENT_RETRY_REASON_CODES = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
+    "SLURM_DEADLINE",
     "NODE_FAILURE",
     "PREEMPTED",
     "STORAGE_WRITE_FAILED",

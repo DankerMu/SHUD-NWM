@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -13,8 +13,13 @@ from services.orchestrator.scheduler_state_failure import (
     _state_has_failure_signal,
     _state_has_only_repaired_pipeline_failure_signal,
 )
-from services.orchestrator.scheduler_state_manual_retry import _event_is_manual_retry_marker
+from services.orchestrator.scheduler_state_manual_retry import (
+    MARKER_TARGET_ROW_DETAIL_KEYS,
+    _event_is_manual_retry_marker,
+)
 from services.orchestrator.scheduler_state_rows import (
+    STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+    STAGE_RETRY_ATTEMPT_FLOORS_KEY,
     _bounded_task_result_rows,
     _is_source_cycle_download_stage,
     _legacy_identity_values,
@@ -93,7 +98,40 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
 
 def _candidate_state_filtered_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     filtered = _inconclusive_source_cycle_decision_state(state)
+    filtered = _candidate_authoritative_stage_retry_attempt_floor_state(filtered, evidence)
     return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+
+def _candidate_authoritative_stage_retry_attempt_floor_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep only the attempt floors (#1179) some candidate-authoritative row proves.
+
+    The row deletions above run off ``legacy_sources``, which names row POSITIONS
+    -- a floor contributor has no position, because the geometry this change
+    exists for is one where truncation removed it from ``pipeline_jobs`` before
+    any filter saw it.  Judging the contributors therefore means re-running the
+    predicate that classification is itself built from
+    (``scheduler_state_evidence_owner._candidate_state_identity_validation``),
+    and doing it on EVERY path into the decision state rather than only when
+    some surviving row happened to be non-authoritative too.  The source-cycle
+    download blocker keeps the same escape the row loop grants it.
+    """
+
+    filtered = dict(state)
+    expected = _candidate_identity_from_evidence(evidence.get("candidate_identity") or {})
+    if not expected:
+        return filtered
+    _narrow_stage_retry_attempt_floors(
+        filtered,
+        lambda row: _state_row_has_authoritative_candidate_proof(expected, row)
+        # Unreachable today -- a floor contributor is always a canonical
+        # DOWNSTREAM stage row and ``download`` is not one -- and kept for
+        # symmetry with the row loop's predicate, so promoting download into the
+        # floors cannot silently drop this escape.
+        or _global_source_cycle_download_blocker_job(row, evidence),
+    )
+    return filtered
 
 def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
     unresolved_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
@@ -106,6 +144,10 @@ def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[
             dict(job) for job in job_rows if not _state_row_references_job_ids(job, unresolved_job_ids)
         ]
         filtered.pop("jobs", None)
+    _narrow_stage_retry_attempt_floors(
+        filtered,
+        lambda row: not _state_row_references_job_ids(row, unresolved_job_ids),
+    )
     single_job = state.get("pipeline_job") or state.get("job")
     if isinstance(single_job, Mapping) and _state_row_references_job_ids(single_job, unresolved_job_ids):
         filtered.pop("pipeline_job", None)
@@ -121,6 +163,56 @@ def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[
         ]
         filtered.pop("events", None)
     return filtered
+
+def _narrow_stage_retry_attempt_floors(
+    filtered: dict[str, Any],
+    row_survives: Callable[[Mapping[str, Any]], bool],
+) -> None:
+    """Narrow the carried attempt floors (#1179) with the rows this filter deleted.
+
+    The floors are built over the projection's UNFILTERED cycle-wide rows, so a
+    stage's maximum may come from a row that is not this candidate's at all --
+    a model-less suffixed cohort row, say, which the journal hands to every
+    candidate of the cycle and this filter then deletes as non-authoritative.
+    Left alone, its attempt would still reach the candidate's failure-policy,
+    budget and mint derivations and read the candidate's FIRST failure as
+    limit-exhausted.
+
+    Narrowing runs over the recorded contributors, NOT over the surviving rows:
+    the geometry this whole change exists for is a contributor that truncation
+    removed from ``pipeline_jobs`` before any filter saw it, and recomputing the
+    floors from the survivors would zero exactly the floors #1179 carries.  A
+    stage keeps its floor while at least one contributor passes ``row_survives``
+    -- the same predicate the caller just applied to the rows.  With no recorded
+    contributors (a state from outside this projection) there is nothing to
+    judge and the floors are left as they are.
+    """
+
+    floors = filtered.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY)
+    if not isinstance(floors, Mapping):
+        return
+    recorded = filtered.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+    recorded = recorded if isinstance(recorded, Mapping) else {}
+    retained_floors: dict[str, Any] = {}
+    retained_sources: dict[str, list[dict[str, Any]]] = {}
+    for stage, floor in floors.items():
+        contributors = recorded.get(stage)
+        rows = (
+            [row for row in contributors if isinstance(row, Mapping)]
+            if isinstance(contributors, Sequence) and not isinstance(contributors, str | bytes | bytearray)
+            else []
+        )
+        if not rows:
+            retained_floors[stage] = floor
+            continue
+        surviving = [dict(row) for row in rows if row_survives(row)]
+        if not surviving:
+            continue
+        retained_floors[stage] = floor
+        retained_sources[stage] = surviving
+    filtered[STAGE_RETRY_ATTEMPT_FLOORS_KEY] = retained_floors
+    if isinstance(filtered.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY), Mapping):
+        filtered[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY] = retained_sources
 
 def _inconclusive_source_cycle_unresolved_job_ids(state: Mapping[str, Any]) -> set[str]:
     repair_evidence = state.get("source_cycle_repair_evidence")
@@ -225,6 +317,13 @@ def _candidate_scoped_shared_cycle_aggregate_state(
             _strip_top_level_pipeline_decision_fields(filtered)
         filtered["pipeline_jobs"] = retained_jobs
         filtered.pop("jobs", None)
+        _narrow_stage_retry_attempt_floors(
+            filtered,
+            lambda row: _shared_cycle_row_is_candidate_scoped(expected, row)
+            # Same unreachable-but-symmetric escape as the authority narrowing
+            # above: no floor contributor carries a ``download`` stage.
+            or _global_source_cycle_download_blocker_job(row, evidence),
+        )
         filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
         filtered.pop("events", None)
         if filtered.get("pipeline_jobs") == []:
@@ -232,6 +331,9 @@ def _candidate_scoped_shared_cycle_aggregate_state(
         if filtered.get("pipeline_events") == []:
             filtered.pop("pipeline_events", None)
         return filtered
+    # This branch needs no floor narrowing: the strip below is unconditional and
+    # pops both floor keys outright, so a narrowing call here would only ever run
+    # on an empty mapping.
     _strip_top_level_pipeline_decision_fields(filtered)
     filtered["pipeline_jobs"] = [
         dict(job) for job in _state_jobs(filtered) if _shared_cycle_row_is_candidate_scoped(expected, job)
@@ -494,6 +596,13 @@ def _candidate_state_decision_event(
                 # deletion is what creates that shape, so stripping this key would strip the
                 # evidence on exactly the path it serves.
                 "failed_stage",
+                # The rest of that target's write-time record, on the same reasoning: the gate
+                # rebuilds the deleted row from these keys and runs the resolved-row routing
+                # over the reconstruction (#1308).  Read from the consumer's own tuple rather
+                # than restated, so the writer, this whitelist and the gate cannot drift.  The
+                # ``value not in (None, "")`` filter below passes ``0`` and ``False`` through --
+                # they are recorded values, and the writer omits absences for the same reason.
+                *MARKER_TARGET_ROW_DETAIL_KEYS,
                 "retry_count",
                 "new_attempt",
                 "previous_job_id",
@@ -604,6 +713,12 @@ def _strip_top_level_pipeline_decision_fields(state: dict[str, Any]) -> None:
         "successful_sibling_outputs_reused",
         "shared_cycle_aggregate",
         "shared_cycle_ambiguous_failure",
+        # The carried attempt floors (#1179) belong with ``retry_attempt`` /
+        # ``attempt`` / ``retry_count`` above: a caller erasing the whole
+        # top-level pipeline decision surface must not leave a stage attempt
+        # behind for the failure policy to read.
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
     ):
         state.pop(key, None)
 

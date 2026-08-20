@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Sequence
 
@@ -22,6 +23,11 @@ from .file_orchestration_migration import (
     write_migration_receipt,
 )
 from .retention import RetentionConfig, run_retention
+from .retention_frontier import (
+    FrontierReadResult,
+    read_latest_pass_frontier,
+)
+from .retention_frontier import max_age_from_env as frontier_max_age_from_env
 from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
 
 
@@ -89,20 +95,100 @@ def _publish_qdown(*, cycle_id: str) -> dict[str, object]:
         raise PublishError("PUBLISH_QDOWN_FAILED", f"q_down publication failed: {error}") from error
 
 
+def _cleanup_frontier(*, now: datetime) -> tuple[FrontierReadResult, str | None]:
+    """Resolve the pipeline frontier for a manual cleanup (issue #1407).
+
+    The evidence directory derivation is inside the guard on purpose: building
+    ``ProductionSchedulerConfig`` runs confinement checks that raise, and a
+    traceback here would be an unprotected-deletion decision made by an
+    exception. Any failure becomes a fail-closed ``unavailable`` result.
+
+    The directory is returned alongside the read (issue #1503) because the
+    three commonest blocker reasons carry no receipt path, so the payload would
+    otherwise never say *where* the CLI looked — and ``WORKSPACE_ROOT``'s
+    relative default under a wrong working directory reads exactly like
+    genuinely missing evidence. ``None`` means the directory itself could not
+    be resolved.
+    """
+    try:
+        evidence_dir = ProductionSchedulerConfig().evidence_dir
+    except Exception:  # noqa: BLE001 - derivation failure must fail closed, not crash
+        return FrontierReadResult(status="unavailable", reason="evidence_dir_unresolved"), None
+    result = read_latest_pass_frontier(evidence_dir, now=now, max_age=frontier_max_age_from_env())
+    return result, str(evidence_dir)
+
+
 def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, object]:
+    """Plan (and optionally execute) retention outside a scheduler pass.
+
+    Unlike a scheduler pass, this entrypoint has no in-memory pipeline state, so
+    the active lower bound comes from the latest pass evidence receipt. When
+    that bound is unknown the cleanup is forced into dry-run regardless of
+    ``--execute``: the plan is still printed, but nothing is deleted. There is
+    no bypass flag by design.
+
+    Recovery for ``pass_retention_not_run`` (the pass ran with retention
+    disabled or errored, so it recorded no frontier): run one scheduler pass
+    with ``NHMS_RETENTION_ENABLED=true`` and ``NHMS_RETENTION_DRY_RUN=true`` --
+    the pass deletes nothing but writes a fresh frontier block, after which this
+    cleanup reads a bound again.
+
+    Additional-root scope (issue #1318): ``retention_days`` overrides the
+    object-store window **only**. The additional ``runs/``-only roots keep
+    ``NHMS_RETENTION_EXTRA_ROOTS_DAYS``, so ``cleanup --retention-days 1
+    --execute`` cannot turn into a one-day mass deletion across the workspace
+    and copyback roots. Those roots are read from ``WORKSPACE_ROOT`` and
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` as explicitly set: an unset or blank
+    value means that root is not swept, and the relative ``.nhms-workspace``
+    default used elsewhere is deliberately *not* applied to a deletion surface.
+    The whole additional-root behaviour stays behind
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED``, which defaults to off.
+    """
+    now = datetime.now(UTC)
     base = RetentionConfig.from_env()
-    config = RetentionConfig(
+    # ``replace`` on the env-derived base, never a fresh construction: the
+    # additional-root fields carry dataclass defaults, so building a new
+    # RetentionConfig here would silently substitute them for the operator's
+    # environment (issue #1318 task 1.9a).
+    config = replace(
+        base,
         enabled=True,
         dry_run=dry_run,
         retention_days=retention_days if retention_days is not None else base.retention_days,
     )
+    frontier, evidence_dir = _cleanup_frontier(now=now)
+    if frontier.status != "ok":
+        config = replace(config, dry_run=True)
     result = run_retention(
         object_store_root=os.getenv("OBJECT_STORE_ROOT"),
-        now=datetime.now(UTC),
+        now=now,
         config=config,
         published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"),
+        active_lower_bound=frontier.active_lower_bound,
+        active_lower_bound_source=frontier.source,
+        # Blank/unset values are discarded inside run_retention before any path
+        # resolution, and the whole sequence is dropped when the gate is closed.
+        runs_only_roots=(
+            os.getenv("WORKSPACE_ROOT"),
+            os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"),
+        ),
     )
-    return result.to_dict()
+    payload = result.to_dict()
+    if frontier.status == "ok":
+        # Top-level because retention's frontier block nulls its source whenever
+        # the bound is null; the mirrored "receipt:none" label must survive that.
+        payload["frontier_source"] = frontier.source
+        payload["evidence_dir"] = evidence_dir
+    else:
+        payload["frontier_blocker"] = {
+            "reason": frontier.reason,
+            "forced_dry_run": True,
+            "receipt_path": frontier.receipt_path,
+            # Always present, null only when the directory could not be
+            # resolved: the blocker shape must not vary by reason (#1503).
+            "evidence_dir": evidence_dir,
+        }
+    return payload
 
 
 def _prepare_file_journal_rollback(
@@ -459,7 +545,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(1) from error
 
     @cli.command("cleanup")
-    @click.option("--retention-days", default=None, type=int)
+    @click.option(
+        "--retention-days",
+        default=None,
+        type=int,
+        help=(
+            "Override the object-store retention window only. Additional "
+            "runs/-only roots keep NHMS_RETENTION_EXTRA_ROOTS_DAYS."
+        ),
+    )
     @click.option("--dry-run", "dry_run", flag_value=True, default=True, show_default=True)
     @click.option("--execute", "dry_run", flag_value=False, help="Actually delete aged artifacts.")
     def cleanup(retention_days: int | None, dry_run: bool) -> None:
@@ -698,7 +792,15 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     publish_qdown_parser = subparsers.add_parser("publish-qdown")
     publish_qdown_parser.add_argument("--cycle-id", required=True)
     cleanup_parser = subparsers.add_parser("cleanup")
-    cleanup_parser.add_argument("--retention-days", type=int, default=None)
+    cleanup_parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help=(
+            "Override the object-store retention window only. Additional "
+            "runs/-only roots keep NHMS_RETENTION_EXTRA_ROOTS_DAYS."
+        ),
+    )
     cleanup_parser.add_argument("--dry-run", action="store_true", default=True)
     cleanup_parser.add_argument("--execute", action="store_false", dest="dry_run")
     migrate_parser = subparsers.add_parser("migrate-scheduler-state")

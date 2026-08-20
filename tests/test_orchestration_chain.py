@@ -5,6 +5,7 @@ import dataclasses
 import importlib
 import inspect
 import json
+import logging
 import shlex
 import subprocess
 import sys
@@ -2944,8 +2945,8 @@ def test_copyback_commit_uncertain_failure_reaches_the_pipeline_event(
         del kwargs
         raise RunTreeCopybackError(
             "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
-            "State-index copyback merge may have committed; provider lock release failed "
-            "after the compare-and-swap.",
+            "State-index copyback merge may have committed; the failure arose at or past the "
+            "destination compare-and-swap (phase=release_uncertain).",
             {
                 "object_key": "scheduler/state-index/index-last.json",
                 "error": "provider_lock_release_failed",
@@ -6899,6 +6900,288 @@ def _manual_retry_event(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _own_succeeded_forecast_job(**overrides: Any) -> dict[str, Any]:
+    """The candidate's OWN succeeded forecast row, model-scoped to the ``_source_cycle_retry_state`` fixture."""
+
+    payload = {
+        "job_id": "job_model_b_forecast",
+        "run_id": "fcst_gfs_2026050100_model_b",
+        "cycle_id": "gfs_2026050100",
+        "model_id": "model_b",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+        "status": "succeeded",
+        "retry_count": 0,
+        "submitted_at": "2026-05-01T00:40:00Z",
+        "finished_at": "2026-05-01T00:55:00Z",
+        "updated_at": "2026-05-01T00:55:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_psycopg_candidate_state_source_cycle_repair_keeps_the_candidates_completed_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E5: repaired evidence without a restart stage must not suppress the completed-stage scan.
+
+    ``_source_cycle_repaired_stage_evidence`` never carries ``restart_stage`` (``download`` has no
+    ``_stage_after`` successor), so the projection's repaired branch stored the evidence and
+    projected nothing -- and the completed-stage scan hung off that branch as an ``elif``, so it
+    never ran either.  The candidate's own succeeded forecast, an orthogonal fact, was erased:
+    ``restart_stage`` vanished, ``_failed_stage`` collapsed to ``None`` and the manual-retry
+    attempt arithmetic was re-minted from the fallback floor.
+
+    Geometry premise: without a ``forecast_cycle`` whose status and ``manifest_uri`` bind the raw
+    manifest, ``chain_source_cycle`` refuses to call anything repaired at all and this leg would
+    measure nothing -- ``_source_cycle_retry_state`` supplies that binding.  ``restart_stage`` is
+    ``_stage_after("forecast")``, which the compute-terminal toggle would move to
+    ``state_save_qc``, so the toggle is pinned unset.
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+            _own_succeeded_forecast_job(),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    # Premise: the source-cycle repair really happened, and its evidence carries no restart stage.
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["original_failed_job_id"] == "job_cycle_gfs_2026050100_download"
+    assert repaired["repairing_retry_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    assert repaired["stage"] == "download"
+    assert "restart_stage" not in repaired
+
+    # The two facts coexist: the upstream download was repaired AND this candidate reached forecast.
+    assert state["completed_stage_evidence"]["stage"] == "forecast"
+    assert state["completed_stage_evidence"]["job_id"] == "job_model_b_forecast"
+    assert state["restart_stage"] == "parse"
+    assert state["restart_from_stage"] == "parse"
+
+
+def _own_candidate_job(
+    *,
+    job_id: str,
+    stage: str,
+    job_type: str,
+    status: str,
+    updated_at: str,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A candidate-scoped row of the ``_source_cycle_retry_state`` fixture's model_b candidate."""
+
+    payload = {
+        "job_id": job_id,
+        "run_id": "fcst_gfs_2026050100_model_b",
+        "cycle_id": "gfs_2026050100",
+        "model_id": "model_b",
+        "stage": stage,
+        "job_type": job_type,
+        "status": status,
+        "retry_count": 0,
+        "updated_at": updated_at,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _own_manual_repair_event(*, entity_id: str, previous_job_id: str, event_id: int, created_at: str) -> dict[str, Any]:
+    """The ``record_manual_repair`` event linking a candidate-scoped retry to its target."""
+
+    return {
+        "event_id": event_id,
+        "entity_type": "pipeline_job",
+        "entity_id": entity_id,
+        "event_type": "retry",
+        "created_at": created_at,
+        "details": {
+            "trigger": "manual",
+            "manual_retry_marker": True,
+            "retry_count": 1,
+            "previous_job_id": previous_job_id,
+        },
+    }
+
+
+def test_psycopg_candidate_state_repaired_evidence_with_restart_stage_still_wins_the_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1461 E8 (must-preserve 2): the non-gap shape must stay byte-identical.
+
+    A manual-stage repair of a NON-terminal stage carries its own ``restart_stage``, and that
+    payload -- not a completed-stage scan -- is what supplies ``completed_stage_evidence`` and
+    nulls the five stale failure fields.  The succeeded ``convert`` row is the discriminator: if
+    the scan ran anyway it would win a strictly EARLIER restart stage (``forcing``) and overwrite
+    the repair's own (``forecast``).
+    """
+
+    monkeypatch.delenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", raising=False)
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _own_candidate_job(
+                job_id="job_model_b_convert",
+                stage="convert",
+                job_type="convert_canonical",
+                status="succeeded",
+                updated_at="2026-05-01T00:30:00Z",
+            ),
+            _own_candidate_job(
+                job_id="job_model_b_forcing_retry_1",
+                stage="forcing",
+                job_type="produce_forcing_array",
+                status="succeeded",
+                retry_count=1,
+                manual_retry_marker=True,
+                updated_at="2026-05-01T00:50:00Z",
+            ),
+            # The stale failed row was touched after the repair, so it is the row the projection
+            # would otherwise expose -- which is what makes the five nulled fields observable.
+            _own_candidate_job(
+                job_id="job_model_b_forcing",
+                stage="forcing",
+                job_type="produce_forcing_array",
+                status="failed",
+                error_code="NODE_FAILURE",
+                error_message="forcing failed",
+                updated_at="2026-05-01T01:00:00Z",
+            ),
+        ],
+        events=[
+            _own_manual_repair_event(
+                entity_id="job_model_b_forcing_retry_1",
+                previous_job_id="job_model_b_forcing",
+                event_id=30,
+                created_at="2026-05-01T00:50:00Z",
+            )
+        ],
+    )
+
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["stage"] == "forcing"
+    assert repaired["restart_stage"] == "forecast"
+    # The repaired payload IS the completed-stage evidence: the scan never ran, so the convert
+    # row's earlier restart stage is nowhere in the projection.
+    assert state["completed_stage_evidence"] == repaired
+    assert state["restart_stage"] == "forecast"
+    assert state["restart_from_stage"] == "forecast"
+    for key in ("pipeline_status", "stage", "failed_stage", "error_code", "error_message"):
+        assert state[key] is None
+
+
+def test_psycopg_candidate_state_terminal_completion_still_suppresses_the_scan_under_repaired_evidence() -> None:
+    """#1461 E9 (must-preserve 3): the cohort QC guard, not the ``elif``, is what suppresses.
+
+    ``_has_terminal_completion_stage_success`` scans the cycle-wide job base so a cycle-scope
+    ``state_save_qc``/``publish`` success can never be missed by a per-candidate filter.  Now that
+    the completed-stage scan is an independent ``if``, the guard is the ONLY thing standing
+    between a terminally completed candidate and a re-armed restart marker -- so it is pinned on
+    exactly the shape that reaches the scan for the first time.
+    """
+
+    from services.orchestrator.chain_repository_state import _has_terminal_completion_stage_success
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+            _own_succeeded_forecast_job(),
+            _own_candidate_job(
+                job_id="job_model_b_publish",
+                stage="publish",
+                job_type="publish_tiles",
+                status="succeeded",
+                updated_at="2026-05-01T01:05:00Z",
+            ),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    # Premise: this is the gap shape (repaired evidence, no restart stage of its own) AND the
+    # cycle already holds a terminal completion success.
+    assert "restart_stage" not in state["repaired_stage_evidence"]
+    assert _has_terminal_completion_stage_success(state["pipeline_jobs"]) is True
+
+    assert "completed_stage_evidence" not in state
+    assert "restart_stage" not in state
+    assert "restart_from_stage" not in state
+
+
+def test_psycopg_candidate_state_terminal_stage_manual_repair_keeps_its_evidence() -> None:
+    """#1461 E10: the manual-stage variant's own gap shape -- a repair with no ``_stage_after``.
+
+    ``state_save_qc`` is the last stage in ``_FORECAST_STAGE_ORDER``, so repairing it produces
+    repaired evidence carrying no ``restart_stage`` -- the same gap shape the source-cycle variant
+    always has, from the other producer.  The evidence is retained and the inner projection does
+    not fire, so the five stale failure fields keep their values.
+
+    The scan's CONDITION is now reached on this shape -- the ``elif`` no longer swallows it -- but
+    the terminal-completion guard short-circuits it before ``_best_completed_stage_success_evidence``
+    is ever called, because a succeeded ``state_save_qc`` retry is itself a terminal completion
+    success.  The candidate's own succeeded ``forecast`` row is what makes that decision
+    observable: it is exactly what the scan would return if the guard were gone (a
+    ``restart_stage="parse"`` marker on a candidate whose terminal stage is already repaired), so
+    the guard, and nothing else, is what keeps ``completed_stage_evidence`` absent here.  Same
+    guard as E9, on the manual-stage producer instead of the source-cycle one.
+    """
+
+    from services.orchestrator.chain_repository_state import _has_terminal_completion_stage_success
+
+    state = _source_cycle_retry_state(
+        jobs=[
+            _own_candidate_job(
+                job_id="job_model_b_state_save_qc_retry_1",
+                stage="state_save_qc",
+                job_type="save_state_snapshot",
+                status="succeeded",
+                retry_count=1,
+                manual_retry_marker=True,
+                updated_at="2026-05-01T00:50:00Z",
+            ),
+            _own_candidate_job(
+                job_id="job_model_b_state_save_qc",
+                stage="state_save_qc",
+                job_type="save_state_snapshot",
+                status="failed",
+                error_code="NODE_FAILURE",
+                error_message="state save qc failed",
+                updated_at="2026-05-01T01:00:00Z",
+            ),
+            _own_succeeded_forecast_job(),
+        ],
+        events=[
+            _own_manual_repair_event(
+                entity_id="job_model_b_state_save_qc_retry_1",
+                previous_job_id="job_model_b_state_save_qc",
+                event_id=31,
+                created_at="2026-05-01T00:50:00Z",
+            )
+        ],
+    )
+
+    repaired = state["repaired_stage_evidence"]
+    assert repaired["stage"] == "state_save_qc"
+    assert "restart_stage" not in repaired
+    assert repaired["original_failed_job_id"] == "job_model_b_state_save_qc"
+
+    # The inner projection never fired, so the stale failure fields are untouched ...
+    assert state["pipeline_status"] == "failed"
+    assert state["stage"] == "state_save_qc"
+    assert state["error_code"] == "NODE_FAILURE"
+    # ... and the scan the repaired branch no longer blocks is held by the terminal-completion
+    # guard instead, with a completed forecast row sitting right there for it to have returned.
+    forecast_row = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_model_b_forecast")
+    assert forecast_row["status"] == "succeeded"
+    assert _has_terminal_completion_stage_success(state["pipeline_jobs"]) is True
+    assert "completed_stage_evidence" not in state
+    assert "restart_stage" not in state
+
+
 def test_psycopg_candidate_state_source_cycle_retry_success_repairs_stale_failed_download() -> None:
     state = _source_cycle_retry_state(
         jobs=[
@@ -7952,6 +8235,68 @@ def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
         "parse_output",
     ]
     assert repository.hydro_runs["fcst_gfs_2026050100_model_0"]["status"] == "parsed"
+
+
+def test_trigger_ready_forecasts_does_not_skip_on_a_foreign_model_completion_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1302 consumer anchor: the trigger surface stops swallowing the candidate.
+
+    ``chain_forecast_trigger.py:247-251`` skips a "completed" candidate with a
+    bare ``continue`` — no skipped result, no event, no log — so a wrong verdict
+    from ``has_completed_pipeline`` erases the candidate silently.  Only the
+    completion gate is delegated to a real ``FileOrchestrationJournalRepository``
+    (seeded with another model's succeeded cycle-run row); readiness, cycle
+    listing and submission stay on the fake harness.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import _cycle_run_id_job, _write_direct_pipeline_job
+
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    journal_root = tmp_path / "foreign-model-journal"
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    journal = FileOrchestrationJournalRepository(journal_root)
+
+    class ForeignCompletionReadyForecastRepository(ReadyForecastRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            return journal.has_completed_pipeline(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ForeignCompletionReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == [
+        "run_shud_forecast",
+        "parse_output",
+    ]
 
 
 def test_trigger_ready_forecasts_demotes_stale_converter_version_before_submission(
@@ -9380,8 +9725,20 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(run_public_cycle, range(2)))
 
-    assert client.forecast_attempts == 2
     attempt_two_repo = FileOrchestrationJournalRepository(root)
+    # #1356: the first-round count is the flaky assertion — carry the cycle's
+    # rows so a red run names the job_id that took the extra submission
+    # instead of only reporting the count.
+    assert client.forecast_attempts == 2, [
+        (
+            row["job_id"],
+            row["idempotency_key"],
+            row["status"],
+            row["submission_attempt"],
+            row.get("reconciliation_decision"),
+        )
+        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    ]
     attempt_two = attempt_two_repo.query_reserved_unbound_jobs()[0]
     assert attempt_two.submission_attempt == 2, [
         (
@@ -11438,6 +11795,204 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
     assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 5
 
 
+def _patch_forecast_assembly_helpers(monkeypatch) -> None:
+    """Neutralize the assembly helpers that are irrelevant to checkpoint alignment.
+
+    Mirrors ``test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases``
+    minus its ``_forecast_state_checkpoint_hours`` patch, so the checkpoint hours
+    come from the REAL derivation driven by
+    ``NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC``.
+    """
+
+    from services.orchestrator import chain as chain_runtime
+
+    monkeypatch.setattr(
+        chain_runtime,
+        "_default_forcing_uri",
+        lambda source_id, compact_cycle, basin_version_id, model_id, store: (
+            f"patched://forcing/{source_id}/{compact_cycle}/{basin_version_id}/{model_id}/"
+        ),
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_station_metadata_for_basin",
+        lambda _basin: {
+            "schema_version": "patched.station.v1",
+            "state": "ready",
+            "station_count": 2,
+            "station_ids": ["s1", "s2"],
+            "source": "patched",
+            "quality_flag": "patched_station_ok",
+            "shud_station": "patched_station.txt",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_output_river_contract",
+        lambda _basin: {
+            "state": "ready",
+            "river_network_version_id": "patched-river",
+            "segment_count": 5,
+            "output_segment_count": 5,
+            "gis_segment_count": 9,
+            "river_segment_ids": ["r1"],
+            "identity_source": "patched",
+            "quality_flag": "patched_output_ok",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_project_name_for_basin",
+        lambda _basin, *, fallback: f"patched-project-{fallback}",
+    )
+
+
+_CHECKPOINT_ALIGNMENT_HORIZON_HOURS = 72
+"""#1317: pinned >= 19 so ``_forecast_state_checkpoint_hours``'s ``hour <= horizon``
+filter cannot drop the 19h lead the ``"0,5"`` minimal counter-example depends on."""
+
+
+def _build_forecast_run_manifest_for_alignment(tmp_path: Path) -> dict[str, Any]:
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    run_context = ForecastRunContext(
+        run_id="run-1",
+        source_id="gfs",
+        scenario_id="forecast_gfs_deterministic",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        model_id="model-1",
+        basin_id="basin-1",
+        basin_version_id="basin-v1",
+        river_network_version_id="river-v1",
+        segment_count=9,
+        model_package_uri="s3://models/model-1/",
+        forcing_version_id="forcing-v1",
+        forcing_package_uri="s3://forcing/gfs/",
+        start_time=cycle_time,
+        end_time=cycle_time + timedelta(hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS),
+        forecast_horizon_hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS,
+        run_manifest_uri="s3://runs/run-1/input/manifest.json",
+        output_uri="s3://runs/run-1/output/",
+        log_uri="s3://runs/run-1/logs/",
+        forcing_package_manifest_uri="s3://forcing/gfs/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:forcing-package",
+    )
+    return object.__new__(ForecastOrchestrator)._build_run_manifest(run_context)
+
+
+def _build_forecast_runtime_manifest_for_alignment(tmp_path: Path) -> dict[str, Any]:
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    basin = {
+        "run_id": "run-1",
+        "model_id": "model-1",
+        "basin_id": "basin-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "river-v1",
+    }
+    cycle_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs-2024010100",
+        run_id="cycle-run-1",
+        all_basins=[dict(basin)],
+        active_basins=[dict(basin)],
+    )
+    orchestrator = object.__new__(ForecastOrchestrator)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        forecast_horizon_hours=_CHECKPOINT_ALIGNMENT_HORIZON_HOURS,
+    )
+    orchestrator.object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    return orchestrator._build_forecast_runtime_manifest(cycle_context, dict(basin))
+
+
+@pytest.mark.parametrize(
+    # "0,5"    -> hours [5, 19],     step 300, 19*60 % 300 == 240 (minimal counter-example)
+    # "0,5,12" -> hours [5, 7, 12],  step 300, 2 of 3 unreachable, T+12 warm-start lead included
+    ("allowed_cycle_hours", "unreachable_hours"),
+    [("0,5", [19]), ("0,5,12", [7, 12])],
+)
+@pytest.mark.parametrize(
+    ("site", "builder"),
+    [
+        ("run", _build_forecast_run_manifest_for_alignment),
+        ("runtime", _build_forecast_runtime_manifest_for_alignment),
+    ],
+)
+def test_forecast_manifest_assembly_rejects_unreachable_state_checkpoint_hours(
+    tmp_path: Path,
+    monkeypatch,
+    allowed_cycle_hours: str,
+    unreachable_hours: list[int],
+    site: str,
+    builder,
+) -> None:
+    """#1317 half (b) red: a checkpoint hour the cadence cannot divide is refused.
+
+    ``update_ic_step_minutes`` is ``min(checkpoint_hours) * 60`` and SHUD only
+    writes a restart when the elapsed minutes divide it, so ``"0,5"`` (hours
+    ``[5, 19]``, step 300, ``19*60 % 300 == 240``) declares a checkpoint hour that
+    is structurally impossible to produce. Pre-fix both sites emitted that
+    manifest silently and the run died much later with
+    ``STATE_CHECKPOINTS_MISSING``, indistinguishable from a broken solver.
+
+    Both production sites are driven independently: ``chain_manifests.py:486`` and
+    ``:643`` are sibling copies and covering only one leaves a live path.
+    """
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", allowed_cycle_hours)
+    _patch_forecast_assembly_helpers(monkeypatch)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        builder(tmp_path)
+
+    assert exc_info.value.error_code == "STATE_CHECKPOINT_HOURS_UNREACHABLE"
+    assert exc_info.value.details["unreachable_hours"] == unreachable_hours
+    assert exc_info.value.details["update_ic_step_minutes"] == 300
+    assert site in {"run", "runtime"}
+
+
+@pytest.mark.parametrize(
+    # "0,12"     -> [12],     single-element set
+    # "0,6,12,18"-> [6],      single-element set
+    # "0,6,18"   -> [6, 12],  MULTI-element and still fully reachable: step 360 and
+    #               12*60 % 360 == 0.  The two single-element rows above cannot tell
+    #               the real "every hour must divide the step" gate from an over-strict
+    #               "hour must EQUAL min(checkpoint_hours)" one, because on a
+    #               single-element set the two predicates coincide.  This row is the
+    #               one that dies under the over-strict gate.
+    ("allowed_cycle_hours", "expected_hours"),
+    [("0,12", [12]), ("0,6,12,18", [6]), ("0,6,18", [6, 12])],
+)
+@pytest.mark.parametrize(
+    ("site", "builder"),
+    [
+        ("run", _build_forecast_run_manifest_for_alignment),
+        ("runtime", _build_forecast_runtime_manifest_for_alignment),
+    ],
+)
+def test_forecast_manifest_assembly_keeps_aligned_cycle_configurations_unchanged(
+    tmp_path: Path,
+    monkeypatch,
+    allowed_cycle_hours: str,
+    expected_hours: list[int],
+    site: str,
+    builder,
+) -> None:
+    """#1317 zero-regression: the default ``0,12`` and evenly spaced configs are untouched."""
+
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", allowed_cycle_hours)
+    _patch_forecast_assembly_helpers(monkeypatch)
+
+    manifest = builder(tmp_path)
+
+    assert manifest["runtime"]["state_checkpoint_hours"] == expected_hours
+    assert manifest["runtime"]["update_ic_step_minutes"] == min(expected_hours) * 60
+    assert site in {"run", "runtime"}
+
+
 def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -> None:
     from services.orchestrator import chain as chain_runtime
     from services.orchestrator import chain_manifests
@@ -12213,6 +12768,408 @@ def test_missing_forecast_output_retry_resubmits_lost_forecast_identity(tmp_path
     assert (
         client.submissions[0]["manifest"]["comment"]
         == "nhms_idem:cycle_gfs_2026050100_forecast_model_0:forecast:retry_1"
+    )
+
+
+# --- #1201: a manual-retry attempt claim needs an ACTIVE manual-retry decision ---
+#
+# Production shape (IFS/2026070512 hhe forecast): the candidate's persisted
+# ``manual_retry`` marker is echoed into every decision's ``state_evidence`` by the
+# evidence-owner face, so a claim of ``new_attempt`` 1 survived long after the
+# manual retry it described.  The chain read it into ``context.retry_attempt``, which
+# pinned the target job id to ``<stage>_retry_1`` — already occupied by a terminal row
+# bound to a Slurm job, which the reclaim predicate correctly refuses to take over.
+# Every pass then lost the reservation and skipped submission: the stage wedged.
+
+_MARKER_RUN_ID = "cycle_gfs_2026050100_forecast_model_0"
+_MARKER_BASE_JOB_ID = "job_cycle_gfs_2026050100_forecast_model_0_forecast"
+
+
+def _wedged_marker_repository() -> tuple[PipelineStore, StoreBackedCycleRepository]:
+    """Terminal, Slurm-bound rows on BOTH ``_forecast`` and ``_forecast_retry_1``."""
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    for job_id, slurm_job_id, idempotency_key in (
+        (_MARKER_BASE_JOB_ID, "6051", f"{_MARKER_RUN_ID}:forecast"),
+        (f"{_MARKER_BASE_JOB_ID}_retry_1", "6052", f"{_MARKER_RUN_ID}:forecast:retry_1"),
+    ):
+        job = store.create_job(
+            job_id=job_id,
+            run_id=_MARKER_RUN_ID,
+            cycle_id="gfs_2026050100",
+            job_type="run_shud_forecast_array",
+            slurm_job_id=slurm_job_id,
+            model_id="model_0",
+            stage="forecast",
+            status="failed",
+            idempotency_key=idempotency_key,
+        )
+        job.error_code = "SLURM_JOB_FAILED"
+        store.session.add(job)
+    store.session.commit()
+    return store, repository
+
+
+def _marker_claim_basins(*, decision: str, claim: int | None) -> list[dict[str, Any]]:
+    """One basin restarting at ``forecast``; ``claim=None`` is the markerless twin.
+
+    The twin carries ``orchestration_run_id`` exactly like the marker geometry: a
+    production single-basin candidate always does, and it is what decides cycle
+    scoping there.
+    """
+
+    basins = _basins(1)
+    state_evidence: dict[str, Any] = {"decision": decision, "restart_stage": "forecast"}
+    if claim is not None:
+        state_evidence["manual_retry"] = {"marker": True, "new_attempt": claim}
+    basins[0].update(
+        {
+            "orchestration_run_id": _MARKER_RUN_ID,
+            "restart_stage": "forecast",
+            "state_evidence": state_evidence,
+        }
+    )
+    return basins
+
+
+def test_wedged_marker_claim_forced_resubmit_targets_next_free_attempt(tmp_path: Path) -> None:
+    """E1(a): the #1201 live geometry — forced resubmit must reach ``_retry_2``.
+
+    ``retry_missing_forecast_output`` is in ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``, so
+    the terminal row is resubmitted either way; what the claim decided was the TARGET.
+    """
+
+    store, repository = _wedged_marker_repository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle(
+        "gfs", "2026050100", _marker_claim_basins(decision="retry_missing_forecast_output", claim=1)
+    )
+
+    forecast = result.stages[0]
+    assert forecast.stage == "forecast"
+    assert forecast.pipeline_job_id == f"{_MARKER_BASE_JOB_ID}_retry_2"
+    assert forecast.status == "succeeded"
+    assert result.status == "complete"
+    assert client.submissions[0]["stage"] == "forecast"
+    assert "skipped_duplicate_submission" not in {stage.status for stage in result.stages}
+    # The occupied row the claim used to aim at is untouched.
+    occupied = store.get_job(f"{_MARKER_BASE_JOB_ID}_retry_1")
+    assert occupied is not None
+    assert (occupied.slurm_job_id, occupied.status) == ("6052", "failed")
+    assert repository.jobs[f"{_MARKER_BASE_JOB_ID}_retry_2"]["slurm_job_id"] == "2001"
+
+
+def test_wedged_marker_claim_outside_force_set_matches_markerless_twin(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """E1(b): a dropped claim leaves the candidate exactly where a markerless one stands.
+
+    Outside the forced-resubmit set a terminal failed row is resumed — that is the
+    lane's own markerless policy, which this change neither widens nor narrows.  The
+    equivalence face is deliberately three-valued: resubmit-vs-resume, the derived
+    attempt, and whether anything was actually submitted.  The cycle-scoping predicate
+    is NOT on that face (design D3): it still reads the marker and still returns True
+    here.  Through ``_candidate_scoped_cycle_execution`` that is invisible in
+    production, because ``orchestration_run_id`` reaches the same answer; through
+    ``_replacement_retry_scoped_cycle_execution`` it is not, since that arm feeds
+    ``_active_orchestration_conflicts`` and a marker-carrying candidate can clear a
+    duplicate-orchestration gate its markerless twin is held at.  This fixture has no
+    active pipeline, so the two legs stay equal here — but that asymmetry is exactly
+    why the equivalence face is three-valued rather than universal.
+
+    This geometry is also what pins the drop record's wording (AC-4): nothing falls
+    through to a next free attempt here — nothing is submitted at all — so the record
+    may only state what the emitting site knows.
+    """
+
+    outcomes: dict[str, tuple[str, str, list[str]]] = {}
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        for label, claim in (("marker", 1), ("markerless", None)):
+            _store, repository = _wedged_marker_repository()
+            client = FakeCycleSlurmClient()
+            orchestrator = _orchestrator(tmp_path / label, repository, client)
+
+            result = orchestrator.orchestrate_cycle(
+                "gfs", "2026050100", _marker_claim_basins(decision="retry_transient_failure", claim=claim)
+            )
+
+            forecast = result.stages[0]
+            outcomes[label] = (
+                forecast.status,
+                forecast.pipeline_job_id,
+                [submission["stage"] for submission in client.submissions],
+            )
+
+    # Resumed the existing terminal row, derived no new attempt, submitted nothing.
+    assert outcomes["marker"] == ("failed", f"{_MARKER_BASE_JOB_ID}_retry_1", [])
+    assert outcomes["marker"] == outcomes["markerless"]
+
+    records = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    assert records, "the marker leg must leave a drop record"
+    message = records[0].getMessage()
+    assert "the marker-claimed attempt is not used" in message
+    # The record must not promise a fall-through the resume path never performs: this
+    # leg targeted nothing and submitted nothing, and the emitting site cannot know
+    # resubmit-vs-resume, so it says nothing about attempt targeting either.
+    assert "falling through" not in message
+    assert "targeting" not in message
+
+
+def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(tmp_path: Path) -> None:
+    """E2 judgement power: the fresh-marker identity leg with the direct field removed.
+
+    ``test_manual_retry_terminal_stage_submits_new_attempt_identity`` also sets
+    ``basin["manual_retry_attempt"]``, which shadows the ``state_evidence`` branch —
+    it would stay green even if that branch stopped honouring anything.  This twin
+    carries the claim ONLY on the evidence.
+    """
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    old_job = store.create_job(
+        job_id="job_cycle_gfs_2026050100_convert",
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        job_type="convert_canonical",
+        slurm_job_id="6051",
+        model_id=None,
+        stage="convert",
+        status="failed",
+        idempotency_key="cycle_gfs_2026050100:convert",
+    )
+    old_job.exit_code = 127
+    old_job.error_code = "SLURM_JOB_FAILED"
+    store.session.add(old_job)
+    store.session.commit()
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["state_evidence"] = {
+        "decision": "manual_retry",
+        "reason": "manual_retry_requested",
+        "manual_retry": {"allowed": True, "marker": True, "new_attempt": 4},
+        "fresh_ingestion": {"required": True, "mode": "full_chain"},
+    }
+    assert "manual_retry_attempt" not in basins[0]
+    assert "retry_attempt" not in basins[0]
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    retry_job_id = "job_cycle_gfs_2026050100_convert_retry_4"
+    assert result.status == "complete"
+    assert result.stages[0].pipeline_job_id == retry_job_id
+    assert repository.jobs[retry_job_id]["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
+
+
+def test_operator_direct_retry_attempt_fields_bypass_manual_retry_claim_judgement() -> None:
+    """E3: direct basin fields are the invocation's own input, not a scheduler projection."""
+
+    inactive_evidence = {"decision": "retry_transient_failure", "manual_retry": {"marker": True, "new_attempt": 1}}
+
+    assert chain_runtime_utils._retry_attempt_from_basins([{"retry_attempt": 5}]) == 5
+    assert chain_runtime_utils._retry_attempt_from_basins([{"manual_retry_attempt": 6}]) == 6
+    # Still honoured when the evidence alongside them carries no active decision.
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins([{"retry_attempt": 5, "state_evidence": inactive_evidence}])
+        == 5
+    )
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"manual_retry_attempt": 6, "state_evidence": inactive_evidence}]
+        )
+        == 6
+    )
+
+
+def test_wedged_marker_claim_leaves_no_marker_attempt_in_submission_consumers(tmp_path: Path) -> None:
+    """E4: the two ``context.retry_attempt`` consumers on the submit path.
+
+    Both read the same polluted field, so both are audited at their own seam: the
+    reservation evidence (``_reserve_cycle_stage``) and the SHUD runtime manifest
+    (``chain_manifests.build_forecast_runtime_manifest``).  The claim value is 7 so
+    "not the marker value" is distinguishable from the derived attempt.
+    """
+
+    reserve_records: list[dict[str, Any]] = []
+
+    class _ReconcileAwareRepository(StoreBackedCycleRepository):
+        supports_accepted_submit_reconcile = True
+
+        def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+            reserve_records.append(dict(record))
+            return super().reserve_pipeline_job(record)
+
+    store = _pipeline_store()
+    repository = _ReconcileAwareRepository(store)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _marker_claim_basins(decision="retry_missing_forecast_output", claim=7)
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=_MARKER_RUN_ID,
+        all_basins=normalized,
+        active_basins=list(normalized),
+        restart_stage="forecast",
+        retry_attempt=chain_runtime_utils._retry_attempt_from_basins(normalized),
+    )
+    assert context.retry_attempt is None
+
+    forecast_stage = M3_STAGES[2]
+    orchestrator._reserve_cycle_stage(
+        forecast_stage, context, f"{_MARKER_BASE_JOB_ID}_retry_2", f"{_MARKER_RUN_ID}:forecast:retry_2"
+    )
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, normalized[0])
+
+    assert reserve_records[0]["submission_attempt"] == 3
+    assert runtime_manifest["submission_attempt"] == 1
+    assert reserve_records[0]["submission_attempt"] != 7
+    assert runtime_manifest["submission_attempt"] != 7
+
+
+def test_dropped_manual_retry_claim_is_logged_with_the_decision_actually_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """E5 (AC-4): the drop leaves queryable evidence instead of a silent downgrade."""
+
+    basins = [
+        {
+            "basin_id": "basin_hhe",
+            "candidate_id": "ifs:2026-07-05T12:00:00Z:hhe:forecast_ifs_deterministic",
+            "cycle_id": "ifs_2026070512",
+            "state_evidence": {
+                "decision": "retry_transient_failure",
+                "manual_retry": {"marker": True, "new_attempt": 1},
+            },
+        }
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.retry_identity"):
+        assert chain_runtime_utils._retry_attempt_from_basins(basins) is None
+
+    (record,) = [entry for entry in caplog.records if "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED" in entry.getMessage()]
+    message = record.getMessage()
+    # The wording is deliberately "no active manual-retry decision", not "stale": a
+    # higher-priority lane may lawfully preempt a live marker.
+    assert "no active manual-retry decision" in message
+    assert "stale" not in message.lower()
+    assert "claimed_attempt=1" in message
+    assert "decision=retry_transient_failure" in message
+    assert "basin_id=basin_hhe" in message
+
+
+def test_manual_retry_scoped_cycle_execution_ignores_the_claim_judgement() -> None:
+    """E6 (design D3 boundary): the scoping predicate is deliberately left ungated.
+
+    It mints no attempt; it only helps choose the job set fed to
+    ``_next_retry_attempt_for_stage``.  Both halves of that statement are pinned here
+    so a later change that gates it has to say so.
+    """
+
+    from services.orchestrator import chain_forecast_cycle
+    from services.orchestrator.chain import _next_retry_attempt_for_stage
+
+    basin = {
+        "model_id": "model_0",
+        "run_id": "run_0",
+        "state_evidence": {
+            "decision": "retry_transient_failure",
+            "manual_retry": {"marker": True, "new_attempt": 1},
+        },
+    }
+    assert chain_runtime_utils._retry_attempt_from_basins([basin]) is None
+    assert chain_runtime_utils._manual_retry_scoped_cycle_execution([basin]) is True
+    assert chain_runtime_utils._candidate_scoped_cycle_execution([basin]) is True
+
+    repository = FakeCycleRepository()
+    repository.jobs = {
+        "job_run_0_forecast_retry_1": {
+            "job_id": "job_run_0_forecast_retry_1",
+            "run_id": "run_0",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "status": "failed",
+            "submitted_at": "2026-05-01T01:00:00Z",
+        },
+        "job_other_run_forecast_retry_9": {
+            "job_id": "job_other_run_forecast_retry_9",
+            "run_id": "other_run",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "status": "failed",
+            "submitted_at": "2026-05-01T02:00:00Z",
+        },
+    }
+    orchestrator = types.SimpleNamespace(
+        repository=repository,
+        _query_pipeline_jobs_by_cycle=lambda cycle_id: [
+            dict(job) for job in repository.jobs.values() if job["cycle_id"] == cycle_id
+        ],
+    )
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="run_0",
+        all_basins=[basin],
+        active_basins=[basin],
+    )
+
+    scoped_jobs = chain_forecast_cycle.query_pipeline_jobs_for_cycle_context(orchestrator, context)
+
+    # Run-scoped, so the other run's ``_retry_9`` never raises this stage's next attempt.
+    assert [job["job_id"] for job in scoped_jobs] == ["job_run_0_forecast_retry_1"]
+    assert _next_retry_attempt_for_stage(scoped_jobs, base_job_id="job_run_0_forecast", stage=M3_STAGES[2]) == 2
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        pytest.param(
+            {"decision": "manual_retry", "reason": "manual_retry_requested", "manual_retry": {"new_attempt": 3}},
+            3,
+            id="active-decision-honoured",
+        ),
+        pytest.param(
+            {"decision": "retry_transient_failure", "manual_retry": {"new_attempt": 3}},
+            None,
+            id="no-active-decision-dropped",
+        ),
+        pytest.param(
+            {"manual_retry": {"new_attempt": 3}},
+            None,
+            id="unjudgeable-fails-safe",
+        ),
+    ],
+)
+def test_manual_retry_claim_judgement_three_states(evidence: dict[str, Any], expected: int | None) -> None:
+    """E7: honour / drop / fail-safe drop, at the chain read side."""
+
+    assert chain_runtime_utils._retry_attempt_from_basins([{"state_evidence": evidence}]) == expected
+
+
+def test_reason_only_manual_retry_evidence_is_honoured() -> None:
+    """E8: the decision face is two keys; either one alone means an active decision."""
+
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"state_evidence": {"reason": "manual_retry_requested", "manual_retry": {"new_attempt": 2}}}]
+        )
+        == 2
+    )
+    assert (
+        chain_runtime_utils._retry_attempt_from_basins(
+            [{"state_evidence": {"decision": "manual_retry", "manual_retry": {"new_attempt": 2}}}]
+        )
+        == 2
     )
 
 
@@ -13577,10 +14534,13 @@ def test_persistent_file_journal_oom_cohort_stays_permanently_failed_across_two_
     passes return ``PipelineResult("failed")``.
 
     What it does NOT pin is projection stickiness (design D9 deviation (b),
-    tasks.md:69): pass two finds the master already terminal and exits through
-    the resume defer branch, so ``project_forecast_cohort_tasks``' sticky line
-    is never reached and this test stays green under a sticky revert.  The red
-    proof for stickiness lives in the journal-level unit tests
+    tasks.md:69).  This master is settled after pass one — terminal and
+    projected across its whole cohort — so the #1410 round-1 short-circuit keeps
+    pass two out of ``project_forecast_cohort_tasks`` altogether; the sticky
+    line inside the projection is never reached from here, and the assertions
+    below could not see it in any case, since they count ``permanently_failed``
+    events while a committed projection emits ``status_change``.  The red proof
+    for stickiness lives in the journal-level unit tests
     (``test_cohort_projection_keeps_a_permanently_failed_master_sticky`` and its
     write-through twin).
     """
@@ -13969,3 +14929,767 @@ def test_cycle_survives_a_failed_permanent_failure_mark_and_records_it(
     assert len(mark_failures) == 1
     assert mark_failures[0]["details"]["reason"] == expected_reason
     assert mark_failures[0]["status_to"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# #1410: the cohort projection receives the master Slurm identity explicitly.
+# ---------------------------------------------------------------------------
+
+
+_COHORT_JOB_ID = "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+
+
+def _forecast_cohort_basins() -> list[dict[str, Any]]:
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": {"restart_stage": "forecast"},
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    return basins
+
+
+def _forecast_cohort_context(
+    orchestrator: ForecastOrchestrator,
+    basins: list[dict[str, Any]],
+    *,
+    run_id: str,
+) -> CycleOrchestrationContext:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    normalized = orchestrator._normalize_cycle_basins(basins, "gfs", cycle_time)
+    return CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id=run_id,
+        all_basins=normalized,
+        active_basins=list(normalized),
+    )
+
+
+def _cohort_context_from_members(record: Mapping[str, Any]) -> CycleOrchestrationContext:
+    """A cycle context whose active basins are exactly the master's cohort members.
+
+    The projection normalizes its candidates against the durable
+    ``cohort_members``, so the two have to agree task-for-task.
+    """
+
+    basins = [
+        {
+            "task_id": member["array_task_id"],
+            "candidate_id": member["candidate_id"],
+            "run_id": member["run_id"],
+            "model_id": member["model_id"],
+            "basin_id": member["basin_id"],
+            "restart_stage": member["restart_stage"],
+        }
+        for member in record["cohort_members"]
+    ]
+    return CycleOrchestrationContext(
+        source_id=str(record["source_id"]),
+        cycle_time=_dt("2026-07-20T00:00:00Z"),
+        cycle_id=str(record["cycle_id"]),
+        run_id=str(record["run_id"]),
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+
+class _BoundCohortMasterSlurmClient:
+    """Array accounting for one already-bound master, with no submit history.
+
+    ``get_job_status`` must stay unreachable: the resume leg under test is the
+    already-terminal one, which never polls.
+    """
+
+    def __init__(self, master_slurm_job_id: str, *, run_id: str, task_count: int) -> None:
+        self.master_slurm_job_id = master_slurm_job_id
+        self.run_id = run_id
+        self.task_count = task_count
+        self.fetch_log_calls: list[str] = []
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        raise AssertionError(f"terminal job should not be polled: {job_id}")
+
+    def get_array_task_results(self, job_id: str) -> list[dict[str, Any]]:
+        assert job_id == self.master_slurm_job_id
+        return [
+            {
+                "task_id": index,
+                "job_id": f"{self.master_slurm_job_id}_{index}",
+                "status": "succeeded",
+                "exit_code": 0,
+                "log_uri": f"s3://nhms/runs/{self.run_id}/logs/{job_id}_{index}.out",
+                "error_message": None,
+                "accounting": {"elapsed": "00:01:00", "max_rss": "1024K", "alloc_tres": "cpu=1,mem=2G"},
+            }
+            for index in range(self.task_count)
+        ]
+
+    def fetch_logs(self, job_id: str) -> dict[str, Any]:
+        self.fetch_log_calls.append(job_id)
+        return {"job_id": job_id, "run_id": self.run_id, "complete": True, "logs": "ok"}
+
+
+def _spy_cohort_projections(repository: Any) -> list[dict[str, Any]]:
+    """Record every ``project_forecast_cohort_tasks`` call and its result."""
+
+    real = repository.project_forecast_cohort_tasks
+    calls: list[dict[str, Any]] = []
+
+    def spy(job_id: str, **kwargs: Any) -> dict[str, int]:
+        result = real(job_id, **kwargs)
+        calls.append({"job_id": job_id, "result": result, **kwargs})
+        return result
+
+    repository.project_forecast_cohort_tasks = spy  # type: ignore[method-assign]
+    return calls
+
+
+def test_submit_leg_projects_the_cohort_with_the_gateway_master_slurm_id(tmp_path: Path) -> None:
+    """#1410 sibling leg: submit/poll keeps handing the projection the gateway id."""
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    calls = _spy_cohort_projections(repository)
+    _orchestrator(tmp_path, repository, client).orchestrate_cycle(
+        "gfs", "2026050100", [dict(basin) for basin in basins]
+    )
+
+    master = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert master is not None
+    assert [call["master_slurm_job_id"] for call in calls] == [str(master["slurm_job_id"])]
+    assert str(master["slurm_job_id"]).isdigit()
+
+
+def test_resume_of_a_terminal_cohort_projects_with_the_real_master_slurm_id(tmp_path: Path) -> None:
+    """#1410: the already-terminal resume leg must not sniff the pipeline job id.
+
+    ``resume_cycle_stage`` keeps ``terminal = dict(job)`` — a pipeline row whose
+    ``job_id`` is the pipeline job id, not a Slurm id — so the projection has to
+    be handed the row's recorded ``slurm_job_id`` explicitly.
+
+    The master is a full-lifecycle one whose first pass saw a task still
+    running: the projection deferred, leaving the row ``reconcile_unverified``
+    with no projections, which is the shape a later resume still owes a
+    projection for.  A settled master takes the round-1 short-circuit instead
+    and never reaches the projector, so this is the only full-lifecycle replay
+    that still pins the identity — geometry-2 pins it too, from a base built
+    directly rather than replayed.
+    The resumed snapshot is terminal, which is what selects the leg under test —
+    the leg that never polls and therefore has no gateway job id to sniff.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient(array_results_by_stage={"forecast": ["succeeded", "running"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    unverified = _durable_cohort_master(repository.root)
+    assert unverified["status"] == "reconcile_unverified"
+    assert not unverified["candidate_projections"]
+    master_slurm_job_id = str(unverified["slurm_job_id"])
+    assert master_slurm_job_id.isdigit()
+    assert master_slurm_job_id != _COHORT_JOB_ID
+    stored_log_uri = str(unverified["log_uri"])
+    assert stored_log_uri.startswith("s3://")
+
+    client.array_results_by_stage["forecast"] = ["succeeded", "succeeded"]
+    job = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert job is not None
+    polls_before_resume = dict(client.poll_counts)
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(job["run_id"]))
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**job, "status": "succeeded"})
+
+    assert client.poll_counts == polls_before_resume
+    assert [call["master_slurm_job_id"] for call in calls] == [master_slurm_job_id]
+    projected = _durable_cohort_master(repository.root)
+    assert projected["status"] == "succeeded"
+    assert projected["reconciliation_decision"] == "matched_bound"
+    # The resumed snapshot only carried the sanitized ``[object-uri]``; the
+    # projection is handed no URI at all and leaves the stored one intact.
+    assert calls[0]["log_uri"] is None
+    assert projected["log_uri"] == stored_log_uri
+
+
+def test_resume_of_a_bound_unprojected_cohort_master_reconciles_matched_bound(
+    tmp_path: Path,
+) -> None:
+    """#1410 geometry-2: a durable non-terminal bound master resumed from a terminal snapshot.
+
+    The base is built directly rather than replayed through a cycle: a bound
+    master that never got projected, still ``submitted``, is the only geometry
+    where the defer is a real durable write instead of a terminal-row
+    short-circuit.  Before the fix the projection was fed the pipeline job id,
+    the journal's identity guard could never match it, and the master was
+    genuinely written to ``reconcile_unverified`` /
+    ``SLURM_MASTER_IDENTITY_MISMATCH`` / ``identity_mismatch_blocked``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import (
+        _PERMANENT_FAILURE_MASTER_SLURM_JOB_ID as MASTER_SLURM_JOB_ID,
+    )
+    from tests.test_file_orchestration_journal import (
+        _bind_cohort_master,
+        _master_events,
+        _reserved_cohort_master,
+    )
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    job_id = str(record["job_id"])
+    bound = repository.get_pipeline_job(job_id)
+    assert bound is not None
+    assert bound["status"] == "submitted"
+    assert str(bound["slurm_job_id"]) == MASTER_SLURM_JOB_ID
+    assert MASTER_SLURM_JOB_ID.isdigit()
+    assert not bound.get("candidate_projections")
+
+    client = _BoundCohortMasterSlurmClient(
+        MASTER_SLURM_JOB_ID,
+        run_id=str(record["run_id"]),
+        task_count=len(record["cohort_members"]),
+    )
+    calls = _spy_cohort_projections(repository)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    context = _cohort_context_from_members(record)
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**bound, "status": "succeeded"})
+
+    projected = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+    assert projected is not None
+    assert projected["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in projected["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert projected["reconciliation_decision"] == "matched_bound"
+    assert str(projected["matched_slurm_job_id"]) == MASTER_SLURM_JOB_ID
+    assert projected["error_code"] is None
+    assert [call["master_slurm_job_id"] for call in calls] == [MASTER_SLURM_JOB_ID]
+    assert calls[0]["result"]["total"] > 0
+
+    events = _master_events(repository, projected)
+    assert [event for event in events if event["event_type"] == "reconcile_unverified"] == []
+    assert any(
+        event["event_type"] == "status_change"
+        and (event.get("details") or {}).get("slurm_job_id") == MASTER_SLURM_JOB_ID
+        for event in events
+    )
+
+
+_COHORT_MASTER_SEMANTIC_FIELDS = (
+    "status",
+    "error_code",
+    "error_message",
+    "log_uri",
+    "finished_at",
+    "exit_code",
+    "candidate_projections",
+    "reconciliation_decision",
+    "matched_slurm_job_id",
+)
+
+
+def _durable_cohort_master(root: Path) -> dict[str, Any]:
+    """The master row as it is stored, without the public read's sanitization.
+
+    ``get_pipeline_job`` rewrites every object URI to ``[object-uri]``, so a real
+    ``log_uri`` and a laundered placeholder read back identical (#1410 F2/F3).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    row = FileOrchestrationJournalRepository(root)._pipeline_job_for_id_unlocked(_COHORT_JOB_ID)
+    assert row is not None
+    return dict(row)
+
+
+def _cohort_master_semantics(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: row.get(key) for key in _COHORT_MASTER_SEMANTIC_FIELDS}
+
+
+def test_resume_of_a_fully_projected_cohort_master_writes_nothing(tmp_path: Path) -> None:
+    """#1410 idempotency lock: the reconciled resume pass must not rewrite the master.
+
+    Both halves have to be able to fail.  The projector spy pins the write
+    itself — a settled master short-circuits before the projection, so no call
+    may reach it at all — and the row comparison reads the durable record
+    unsanitized, because the public read maps every object URI onto
+    ``[object-uri]`` and would happily accept a laundered placeholder as
+    "unchanged" (#1410 round-1 F3).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    public_before = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert public_before is not None
+    assert public_before["status"] == "succeeded"
+    before = _durable_cohort_master(repository.root)
+    assert str(before["log_uri"]).startswith("s3://")
+
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(before["run_id"]))
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, public_before)
+
+    assert calls == []
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+
+
+def test_second_cycle_pass_never_rewrites_a_settled_cohort_master(tmp_path: Path) -> None:
+    """#1410 round-1 F1: a settled master outranks a divergent second accounting read.
+
+    The resume leg re-aggregates from Slurm before it decides anything, so a
+    second ``orchestrate_cycle`` pass whose accounting disagrees with the
+    committed one used to rewrite the master's derived status while the
+    per-task ``candidate_projections`` stayed first-write sticky — a row that
+    contradicts itself.  A master that is terminal and covers its whole cohort
+    is settled: the pass must read its outcome off the durable row and write
+    nothing.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    before = _durable_cohort_master(repository.root)
+    assert before["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in before["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+
+    client.array_results_by_stage["forecast"] = ["failed", "succeeded"]
+    second = orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+    assert [stage.status for stage in second.stages if stage.stage == "forecast"] == ["succeeded"]
+    reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(_COHORT_JOB_ID)
+    assert reopened is not None
+    assert reopened["status"] == "succeeded"
+
+
+class _CohortProjectionOnlyRepository:
+    """Minimal cohort repository: the projector must never be reached."""
+
+    supports_accepted_submit_reconcile = True
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def project_forecast_cohort_tasks(self, job_id: str, **kwargs: Any) -> dict[str, int]:
+        self.calls.append({"job_id": job_id, **kwargs})
+        return {"total": 1, "pipeline_status": 1, "pipeline_event": 0}
+
+    def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
+        del job_id
+        return None
+
+
+@pytest.mark.parametrize("master_slurm_job_id", ["", "job_cycle_x"])
+def test_cohort_override_fails_closed_without_a_numeric_master_slurm_id(
+    master_slurm_job_id: str,
+) -> None:
+    """#1410: an empty or non-numeric master identity is attributable, not silent."""
+
+    from services.orchestrator.chain_array_accounting import record_cycle_stage_status_override
+    from services.orchestrator.chain_types import ArrayAggregation, ArrayTaskResult
+
+    repository = _CohortProjectionOnlyRepository()
+    orchestrator = types.SimpleNamespace(repository=repository)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[
+            {
+                "task_id": 0,
+                "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026050100_model_0",
+                "model_id": "model_0",
+                "restart_stage": "forecast",
+            }
+        ],
+    )
+    aggregation = ArrayAggregation(
+        total=1,
+        succeeded=1,
+        failed=0,
+        cancelled=0,
+        task_results=(ArrayTaskResult(task_id=0, slurm_job_id="2001_0", status="succeeded"),),
+    )
+
+    with pytest.raises(OrchestratorError) as error:
+        record_cycle_stage_status_override(
+            orchestrator,
+            M3_STAGES[2],
+            context,
+            _COHORT_JOB_ID,
+            {"job_id": _COHORT_JOB_ID, "status": "succeeded"},
+            aggregation,
+            None,
+            master_slurm_job_id=master_slurm_job_id,
+        )
+
+    assert error.value.error_code == "SLURM_MASTER_IDENTITY_UNAVAILABLE"
+    assert error.value.details["pipeline_job_id"] == _COHORT_JOB_ID
+    assert error.value.details["stage"] == M3_STAGES[2].stage
+    assert repository.calls == []
+
+
+class _ForecastLogFetchFailureSlurmClient(FakeCycleSlurmClient):
+    """Fails the forecast master's log fetch while ``fail_forecast_log_fetch`` is set.
+
+    A first pass whose publication failed after the projection committed is the
+    only way to reach a settled cohort master that owns no log at all.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.fail_forecast_log_fetch = True
+
+    def fetch_logs(self, job_id: str) -> dict[str, Any]:
+        if self.fail_forecast_log_fetch and self.jobs[job_id]["stage"] == "forecast":
+            self.fetch_log_calls.append(job_id)
+            raise RuntimeError("gateway log fetch failed")
+        return super().fetch_logs(job_id)
+
+
+def test_settled_cohort_master_republishes_the_log_its_first_pass_never_wrote(tmp_path: Path) -> None:
+    """#1410 round-2 A: the settled gate skips the projection, not the publication.
+
+    Publication and projection are two side effects of one branch.  The first
+    pass publishes before it projects, so a gateway log fetch that fails leaves
+    a master that is settled and yet carries no log and no ``log_uri`` — and
+    every later pass short-circuits on the settled gate.  Skipping the durable
+    write must not also strand the evidence: the log is republished under the
+    same deterministic candidate URI until it lands.  The row pointer stays
+    untouched, there being no typed write for it (#1592).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = _ForecastLogFetchFailureSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    with pytest.raises(OrchestratorError) as first_pass:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+    assert first_pass.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+
+    settled = _durable_cohort_master(repository.root)
+    assert settled["status"] == "succeeded"
+    assert [item["array_task_outcome"] for item in settled["candidate_projections"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert settled["log_uri"] is None
+    master_slurm_job_id = str(settled["slurm_job_id"])
+    candidate_uri = f"s3://nhms/runs/{settled['run_id']}/logs/forecast.log"
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 1
+    assert not orchestrator.object_store.exists(candidate_uri)
+
+    client.fail_forecast_log_fetch = False
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(settled["run_id"]))
+    resumed = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert resumed is not None
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, resumed)
+
+    assert calls == []
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 2
+    assert orchestrator.object_store.exists(candidate_uri)
+    republished = _durable_cohort_master(repository.root)
+    assert republished["log_uri"] is None
+    assert _cohort_master_semantics(republished) == _cohort_master_semantics(settled)
+
+    # Still deterministic on the third pass: same URI, same content, no error.
+    # The snapshot now claims a pointer the record does not have — a caller
+    # belief that must not talk the pass out of publishing.
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**resumed, "log_uri": candidate_uri})
+    assert client.fetch_log_calls.count(master_slurm_job_id) == 3
+    assert orchestrator.object_store.read_bytes(candidate_uri) == b"ok"
+    assert calls == []
+
+
+def test_settled_cohort_master_with_a_stored_log_never_republishes(tmp_path: Path) -> None:
+    """#1410 round-2 A negative arm: the durable pointer decides, not the snapshot.
+
+    The resumed snapshot here has lost its ``log_uri`` — the caller's row can
+    always disagree with the record, which is why the recovery path exists.  A
+    log that the durable row already points at must not be fetched and written
+    a second time from an accounting pass that never produced it.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    basins = _forecast_cohort_basins()
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [dict(basin) for basin in basins])
+
+    before = _durable_cohort_master(repository.root)
+    stored_log_uri = str(before["log_uri"])
+    assert stored_log_uri.startswith("s3://")
+    published = orchestrator.object_store.read_bytes(stored_log_uri)
+    fetches_before = list(client.fetch_log_calls)
+
+    calls = _spy_cohort_projections(repository)
+    context = _forecast_cohort_context(orchestrator, basins, run_id=str(before["run_id"]))
+    snapshot = repository.get_pipeline_job(_COHORT_JOB_ID)
+    assert snapshot is not None
+    orchestrator._resume_cycle_stage(M3_STAGES[2], context, {**snapshot, "log_uri": None})
+
+    assert calls == []
+    assert client.fetch_log_calls == fetches_before
+    after = _durable_cohort_master(repository.root)
+    assert _cohort_master_semantics(after) == _cohort_master_semantics(before)
+    assert orchestrator.object_store.read_bytes(stored_log_uri) == published
+
+
+def test_resume_gate_reads_the_durable_master_not_a_settled_looking_snapshot(tmp_path: Path) -> None:
+    """#1410 round-2 C: a settled-shaped snapshot cannot short-circuit the projection.
+
+    The caller hands in whatever it last read; only the record knows whether the
+    cohort was ever projected.  Here the durable master is bound and unprojected
+    while the snapshot claims a terminal status and full coverage — the
+    projection is still owed and must run.
+    """
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import (
+        _PERMANENT_FAILURE_MASTER_SLURM_JOB_ID as MASTER_SLURM_JOB_ID,
+    )
+    from tests.test_file_orchestration_journal import _bind_cohort_master, _reserved_cohort_master
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    job_id = str(record["job_id"])
+    bound = repository.get_pipeline_job(job_id)
+    assert bound is not None
+    assert bound["status"] == "submitted"
+    assert not bound.get("candidate_projections")
+    assert settled_cohort_master(bound) is False
+
+    snapshot = {
+        **bound,
+        "status": "succeeded",
+        "candidate_projections": [
+            _cohort_projection(member, "succeeded", master_slurm_job_id=MASTER_SLURM_JOB_ID)
+            for member in record["cohort_members"]
+        ],
+    }
+    assert settled_cohort_master(snapshot) is True
+
+    client = _BoundCohortMasterSlurmClient(
+        MASTER_SLURM_JOB_ID,
+        run_id=str(record["run_id"]),
+        task_count=len(record["cohort_members"]),
+    )
+    calls = _spy_cohort_projections(repository)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator._resume_cycle_stage(M3_STAGES[2], _cohort_context_from_members(record), snapshot)
+
+    assert [call["master_slurm_job_id"] for call in calls] == [MASTER_SLURM_JOB_ID]
+    assert calls[0]["result"]["total"] > 0
+    projected = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
+    assert projected is not None
+    assert projected["status"] == "succeeded"
+    assert projected["reconciliation_decision"] == "matched_bound"
+
+
+def _cohort_projection(
+    member: Mapping[str, Any],
+    outcome: str,
+    *,
+    master_slurm_job_id: str = "17667",
+) -> dict[str, Any]:
+    """One durable ``candidate_projections`` entry in its normalized shape."""
+
+    return {
+        "array_task_id": member["array_task_id"],
+        "candidate_id": member["candidate_id"],
+        "run_id": member["run_id"],
+        "model_id": member["model_id"],
+        "array_task_outcome": outcome,
+        "task_slurm_job_id": f"{master_slurm_job_id}_{member['array_task_id']}",
+        "error_code": None,
+    }
+
+
+def _settled_master_row(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """A durable master row that is terminal and covers its whole cohort.
+
+    The authority markers come from the journal suite's reservation fixture, so
+    the row carries the real contract version, ``cohort_members`` and
+    ``cohort_digest`` rather than hand-rolled look-alikes.
+    """
+
+    from tests.test_file_orchestration_journal import _reserved_cohort_master
+
+    _, record = _reserved_cohort_master(tmp_path, member_count=2)
+    row: dict[str, Any] = {
+        **record,
+        "status": "succeeded",
+        "slurm_job_id": "17667",
+        "candidate_projections": [
+            _cohort_projection(member, "succeeded") for member in record["cohort_members"]
+        ],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_settled_cohort_master_accepts_a_terminal_fully_projected_master(tmp_path: Path) -> None:
+    """#1410 round-2 C: the one shape the resume gate is allowed to short-circuit on."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path)) is True
+
+
+@pytest.mark.parametrize("status", ["submitted", "running", "reconcile_unverified"])
+def test_settled_cohort_master_rejects_a_non_terminal_status(tmp_path: Path, status: str) -> None:
+    """``reconcile_unverified`` is the marker of a projection that still owes a decision."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, status=status)) is False
+
+
+def test_settled_cohort_master_rejects_an_unprojected_master(tmp_path: Path) -> None:
+    """Terminal is not enough: a master with no projections still owes them."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, candidate_projections=[])) is False
+
+
+def test_settled_cohort_master_rejects_partial_cohort_coverage(tmp_path: Path) -> None:
+    """Coverage is the journal's own criterion: the projections must name every member."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    assert settled_cohort_master({**row, "candidate_projections": row["candidate_projections"][:1]}) is False
+
+
+def test_settled_cohort_master_rejects_a_non_terminal_task_outcome(tmp_path: Path) -> None:
+    """An ``unverified`` task means the cohort accounting never closed."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    projections = [dict(item) for item in row["candidate_projections"]]
+    projections[-1]["array_task_outcome"] = "unverified"
+    assert settled_cohort_master({**row, "candidate_projections": projections}) is False
+
+
+def test_settled_cohort_master_rejects_an_empty_cohort(tmp_path: Path) -> None:
+    """A master without members has nothing to have covered."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(_settled_master_row(tmp_path, cohort_members=[])) is False
+
+
+@pytest.mark.parametrize("row", [None, "job_cycle_gfs_2026072000_forecast", 17667, ["succeeded"]])
+def test_settled_cohort_master_rejects_a_non_mapping_row(row: Any) -> None:
+    """Anything that is not a row cannot be a settled master."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_rejects_a_row_outside_the_cohort_stage(tmp_path: Path) -> None:
+    """Only a forecast cohort master row classifies as ``master`` at all."""
+
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path, stage="download", job_type="download_gfs")
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_rejects_a_row_without_the_contract_marker(tmp_path: Path) -> None:
+    """A marker-free row is historical compatibility data, never a settled master."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path)
+    row.pop(ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD)
+    assert settled_cohort_master(row) is False
+
+
+def test_settled_cohort_master_refuses_to_judge_a_corrupt_contract_marker(tmp_path: Path) -> None:
+    """An explicit but unknown marker is corruption: loud, not quietly unsettled."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+        AcceptedSubmitEvidenceError,
+    )
+    from services.orchestrator.chain_array_accounting import settled_cohort_master
+
+    row = _settled_master_row(tmp_path, **{ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD: "nhms.accepted_submit.v0"})
+    with pytest.raises(AcceptedSubmitEvidenceError):
+        settled_cohort_master(row)
+
+
+def test_display_log_publication_withholds_a_sanitized_placeholder_pointer(tmp_path: Path) -> None:
+    """#1410 N1: ``[object-uri]`` is a withheld pointer, not a log URI.
+
+    The placeholder must neither be advertised (it would be laundered into
+    durable state) nor be republished over (the log it stands for was published
+    by some earlier pass).
+    """
+
+    orchestrator = _orchestrator(tmp_path, FakeCycleRepository(), FakeCycleSlurmClient())
+    publication = orchestrator._display_log_publication_for_pipeline_job(
+        {
+            "job_id": _COHORT_JOB_ID,
+            "run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+            "cycle_id": "gfs_2026050100",
+            "stage": "forecast",
+            "log_uri": "[object-uri]",
+        }
+    )
+
+    assert publication is not None
+    assert publication.advertised_uri is None
+    assert publication.should_persist_logs is False
+    # The candidate is the placeholder itself, which is inert only because
+    # nothing may persist under it.
+    assert publication.candidate_uri == "[object-uri]"

@@ -4,6 +4,7 @@
 TBD - created by archiving change m24-multibasin-continuous-daemon-live. Update Purpose after archive.
 ## Requirements
 ### Requirement: Warm-start IC is produced at the next cycle's init time
+
 A production forecast cycle SHALL run SHUD for the full product horizon and preserve selected
 T+6/T+12 checkpoint states from the same long run, so successor cycles can initialize from a SHUD
 initial-condition snapshot valid at their init time. `Update_IC_STEP` is a checkpoint write cadence,
@@ -19,7 +20,14 @@ not a shortened forecast horizon or a request for extra short production runs.
 - **WHEN** cycle N+1 consumes the saved state
 - **THEN** the snapshot `valid_time`, the `.cfg.ic` header minute-time, and the run's
   `start_time`/`cycle_time` all equal `T_{N+1}`
-- **AND** a mismatch among the three is a recorded blocker, not a silent restart at the wrong time.
+- **AND** a mismatch among the three is a blocker at the **candidate-snapshot** level — the
+  drifted candidate is rejected and is never consumed at the wrong time; on the degradation
+  terminals (next usable state, labeled cold start) the rejection is recorded through the
+  corrupted-state channel, while the systemic-escalation and exact-warm-start terminals fail the
+  run loudly without persisting the mark (escalation deliberately keeps the snapshots usable so
+  the alarm repeats). The run-level terminal is governed by the forecast-warm-start
+  degradation-ladder requirement, so a rejected candidate no longer implies a whole-run failure
+  outside the exact-warm-start policy.
 
 ### Requirement: Forecast checkpoint mechanics are functional, not assumed
 The forecast long-run checkpoint path SHALL be made end-to-end functional: checkpoint capture,
@@ -120,6 +128,19 @@ every artifact the manifest names is integrity-pinned by its checksum.
 - **AND** a successful solve with zero requested checkpoint hours writes the manifest with an
   empty `checkpoints` list, `provenance.requested_checkpoint_hours: []`, and a `final_ic` entry
   naming and checksumming the solve's final state, rather than omitting the file.
+
+#### Scenario: Failure-message diagnostics survive receipt truncation and render minutes losslessly
+
+- **WHEN** the `STATE_CHECKPOINTS_MISSING` failure message is truncated to the task-outcome
+  receipt's message budget while the observed-header-minutes trail is long (its length grows
+  with run duration), or an observed header minute is in epoch-minutes form
+- **THEN** the per-hour recovery-outcome trail is placed before the observed-header-minutes
+  trail in the message, so truncation sacrifices the observed trail first and the receipt's
+  `error_message` still names how each missing hour's recovery ended
+- **AND** header minutes rendered into the failure message — both the observed trail and the
+  recovery-outcome `gate_rejected(header=...)` value — render in plain decimal form (never
+  scientific notation), so an epoch-form minute remains greppable against the manifest's
+  full-precision values
 
 ### Requirement: Next cycle consumes the prior cycle's saved state
 A production forecast cycle SHALL initialize SHUD from the snapshot valid at its init time when one
@@ -403,4 +424,42 @@ the manifest.
   plus the `output_uri` root — is unchanged), and lanes that restart
   downstream stages without re-entering `execute()` (durable output
   reuse) observe no change.
+
+### Requirement: Declared state checkpoint hours SHALL be structurally reachable under the configured restart cadence
+
+Forecast manifest assembly SHALL reject, with a stable typed error code, any
+combination where a declared state checkpoint hour is not an integer multiple
+of `update_ic_step_minutes` — at every manifest production site, not just one
+— because SHUD writes a restart file only when the elapsed model time divides
+the configured `Update_IC_STEP`, including at END, so a checkpoint hour that
+does not divide the cadence can never be produced. The checkpoint recovery
+rerun SHALL set the cadence it needs for the hour it is recovering, so
+recovery stays correct independently of that
+configuration. The cadence written for a recovery rerun applies to that
+scratch rerun only; the main run's published configuration is restored
+afterwards.
+
+#### Scenario: a misaligned cycle configuration is refused instead of silently unreachable
+
+WHEN allowed cycle hours produce checkpoint hours that are not integer
+multiples of the derived restart cadence
+THEN forecast manifest assembly fails with a stable typed error code at each
+manifest production site, instead of emitting a manifest whose checkpoint
+hours can never be written
+
+#### Scenario: recovery rerun makes its target hour reachable
+
+WHEN the checkpoint recovery rerun shortens the run to a missing forecast
+hour
+THEN the configuration it writes sets the restart cadence to that hour's
+minute count, and after the rerun the main run's published configuration text
+is byte-for-byte what it was before
+
+#### Scenario: aligned configurations are unaffected
+
+WHEN the configured cycle hours are evenly spaced, including the default
+configuration
+THEN manifest assembly and checkpoint behavior are unchanged; analysis
+manifests, which declare no state checkpoint hours, are outside this
+requirement
 

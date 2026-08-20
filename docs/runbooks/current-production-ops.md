@@ -504,15 +504,22 @@ replace 前对 prospective vs 上一份 canonical `manifest-last.json` 做逐行
 outcome 都必须带）。分类桶：`added`（prospective 有、previous 无）、`unchanged`
 （同 `model_id` 且 `model_package_uri` / `manifest_uri` / `package_checksum` 逐字节
 相等）、`package_changed`（同 `model_id`，`package_checksum` 不同）、`removed`
-（previous 有、prospective 无）、`refused`、`declared_cutovers`。三个 refusal 原因均在
+（previous 有、prospective 无）、`refused`、`declared_cutovers`、
+`declared_retirements`（#1433：被 retire 声明放行的 removal，是 `removed` 的子集，
+不进 `refused`；老 receipt 没有这个桶，按 0 读）。三个 refusal 原因均在
 canonical replace 前退出、非零：
 
 - `registry_cutover_undeclared`：某个已存在 `model_id` 的 `package_checksum` 变了但没有
   匹配的 cutover declaration。先看 `registry_classification.refused` 找到具体 model 与
   old/new checksum；确认漂移是有意后按下述格式提交 declaration，再重跑。
 - `registry_cutover_removal_refused`：previous canonical 里的某个 `model_id` 在
-  prospective 里消失。#1080 不允许 removal；需要下线一个流域走单独的 declared workflow，
-  否则不要动 `NHMS_BASINS_ROOT` 里的对应目录。
+  prospective 里消失。触发面**不只是**「动了 `NHMS_BASINS_ROOT` 里的目录」——已注册
+  model 的包变 invalid（`*.cfg.ic` 头部畸形、缺 `*.tsd.rl` 且无模板可修等）会被 bulk
+  publish 合法 skip，prospective 因此少一行，同样判 removal；而 `--dry-run` 预览
+  **看不到**这条拒绝（dry_run 不评估 removal）。两形靠 refusal entry 区分（#1433）：
+  带 `status` / `missing_required_files` / `invalid_required_files` 三键 = 包变 invalid
+  被 skip（键值就是 publisher 的 not-publishable 判据）；无这三键 = model 目录真没了。
+  合法下线走下面的 **retire declaration 恢复顺序**；不打算下线就修包后重跑。
 - `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
   原因：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 指向的文件不存在 / 不可读（已被删除或
   轮转走）、schema 不匹配、`generation` 与 prospective 不一致、`old_checksum`/`new_checksum`
@@ -565,13 +572,64 @@ declaration"（只有当没有 `package_changed`/`removed` 时才允许）。**s
 前 12 位，**不含**任何 wall-clock 分量）。相同 model set 的重跑 refresh 得到 byte-
 identical 的 generation string，所以"先看被拒 receipt -> 拷 generation 到 declaration ->
 重跑 refresh"这个循环里，第二次 refresh 一定能匹配 declaration；只有 prospective
-model set 真正变了，generation 才会变（这时也必须重新出 declaration）。
+model set 真正变了，generation 才会变（这时也必须重新出 declaration）。被拒 receipt
+直接带这个值：`registry_classification.generation`（#1433 起）。dry_run receipt 该键
+为 `null`——id-only 分类的 prospective 行没有 checksum，其 generation 不是真实
+publish 绑定的那个值，**不要从 dry-run 拷**。
 
 操作流程（手动 CLI 路径）：先看被拒 receipt -> 拷 generation / old/new checksum 到
 declaration -> 提交 declaration 到 mode-0600 路径 ->
 `export NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<path>` -> 重跑 refresh。
 `effective_cycle_utc` 必须精确对齐 00:00 或 12:00 UTC，且落在
-`[now-24h, now+168h]` 区间；`transition_mode` 目前仅支持 `replace`。
+`[now-24h, now+168h]` 区间。`transition_mode` 有两个值：`replace`（换包，
+`new_checksum` 必须是 64 位 hex）和 `retire`（下线一行，`new_checksum` 必须显式写
+`null`——缺键与 `null` 语义不同，schema 两条 if/then 钉死这个配对）。
+
+**退役一个 model（retire declaration 恢复顺序，#1433，首选路径）**：这是
+`registry_cutover_removal_refused` 的正规出口，无论 removal 来自「删了目录」还是
+「包变 invalid 被 skip」。全程适用 #1104 并发禁令。
+
+1. 停 timer：`systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
+   再按上面的成对 status 判据确认 oneshot service 也已退出。
+2. 跑一趟**真实 refresh**（不加 `--dry-run`）。它会以
+   `registry_cutover_removal_refused` 拒——canonical 字节不变、零发布，这正是
+   本次要解决的那条拒绝——然后从这张被拒 receipt 的
+   `registry_classification.generation` 拷出本趟 prospective 的 generation。
+   **不要用 `--dry-run` 取这个值**：dry_run 走 id-only 分类（prospective 行只有
+   id、没有 checksum），既不评估 removal，其 `generation` 也不是真实 publish 会
+   绑定的那个值——receipt 里该键为 `null`。
+
+   ```bash
+   jq -r '.registry_classification.generation' <receipt>
+   ```
+
+3. 写 declaration，entry 形：`model_id` = 要退役的行、`old_checksum` = **previous
+   canonical 那一行**的 `package_checksum`（与上一步 generation 同源——都从这张
+   被拒 receipt 拷，`old_checksum` 取 `registry_classification.refused` 里那条
+   `registry_cutover_removal_refused` 行）、`new_checksum: null`、
+   `transition_mode: "retire"`、
+   `effective_cycle_utc` 对齐 00:00/12:00 UTC 且在窗口内。generation 绑定、过期
+   窗口、cycle 对齐、256 KiB 上限对 retire 逐条同样适用，没有任何 retire 专用豁免。
+4. 跑一趟 refresh（timer 路径同样受 gate 审计）。
+5. 核对 receipt：`registry_classification.declared_retirements` 里有这一行、
+   `refused` 里没有它、`outcome: "published"`。注意声明的是**整份文件**：任何一条
+   entry 无效（generation 不符、checksum 不符、retire 了一个还在发布的 model）都会
+   让本趟**一条 retirement 也不入桶**，全部按 `registry_cutover_declaration_invalid`
+   拒——退役是破坏性动作，不做「部分放行」。
+6. 删 declaration（systemd 路径是删掉 EnvironmentFile 里那整行，见下），恢复 timer。
+
+留在原地的 retire declaration 与 replace declaration 一样会过期并拖停每日管线，
+清理纪律完全相同。
+
+**遗留路径降级（`--allow-uncovered-cutover`）**：手动 CLI 的 bypass 仍然可用，但
+**仅当 declaration 通道不可用时**才用（例如连 dry-run 都跑不起来）。它依旧是审计
+红旗：要记 bypass 理由 + 双端 SHA-256 + 事后 declaration 复位。常规退役一律走上面
+的 retire declaration。
+
+**共享消费者提示（#1433）**：同一份 declaration 文件也被 scheduler 侧
+（`services/orchestrator/scheduler_generation.py`）读。retire entry 对它无意义，
+被容忍-跳过：并存的 replace entry 照常匹配，retire entry 永不匹配任何候选。恢复
+顺序不需要为 scheduler 侧加步骤，但要知道这个文件是两边共享的。
 
 **systemd 路径（timer/service，#1095 起可用）**：wrapper
 `scripts/scheduler_file_provider_refresh_once.sh` 把 EnvironmentFile 当数据解析并只接受固定
@@ -631,7 +689,8 @@ lifetime），中途修改 declaration 文件不会被生效，直到下一次 s
 manual publisher 默认也会跑 cutover gate，语义与 refresh runner 一致；未通过 gate 就
 不会替换 canonical。仅在 bootstrap（没有 previous canonical `manifest-last.json`）或
 显式一次性 recovery 时使用 `--allow-uncovered-cutover` 跳过（会在 stderr 打印 WARNING）。
-常规运维必须走 declaration + 重跑，绝不 default 到 bypass。
+常规运维必须走 declaration + 重跑，绝不 default 到 bypass；退役一行走 retire
+declaration（见上），bypass 仅在 declaration 通道不可用时才动。
 
 **并发禁令（#1104，operator-gated）**：`nhms-scheduler-file-provider-refresh.timer`
 或其 oneshot service 处于活跃状态时，**严禁**运行 manual publisher CLI。CLI 路径
@@ -1303,6 +1362,95 @@ proxy target and certificates. If local health fails, restart with
 `bash scripts/ops/start-display-api.sh` from `/home/nwm/NWM` and read
 `/tmp/display-api.log`.
 
+### 6.1 No-progress circuit（跨 pass 重复同一理由的证据标记，#1118）
+
+调度器每个**完整 pass** 会统计"同一主体连续报同一 no-progress 理由"的次数，
+达阈值即在证据里开闸。**纯观测**：不改调度决策、不停重试、不新增终态。
+
+阈值 `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`（默认 3；`<= 0` 完全禁用——
+不写状态文件、evidence 无该键、零日志）。跨 pass 计数落在
+`<evidence_root>/no-progress-tracker.json`（oneshot 每 tick 新进程，内存计数
+活不过一个 tick）；该文件不以 `scheduler_` 开头，retention 归 `unrecognised`
+永不删除。
+
+pass evidence 顶层 `no_progress_circuit` 块：
+
+```json
+{
+  "threshold": 3,
+  "tracked": 4,
+  "state_reset": "missing",
+  "open": [
+    {
+      "subject_kind": "job",
+      "subject_id": "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+      "reason": "query_unavailable:comment_accounting_unproven",
+      "consecutive_passes": 3,
+      "first_pass_id": "scheduler_2026081812_...",
+      "last_pass_id": "scheduler_2026081814_..."
+    },
+    {
+      "subject_kind": "candidate",
+      "subject_id": "gfs:2026-07-12T00:00:00+00:00",
+      "reason": "blocked:state_snapshot_index_prior_checkpoint_missing_after_history",
+      "consecutive_passes": 3,
+      "first_pass_id": "scheduler_2026081812_...",
+      "last_pass_id": "scheduler_2026081814_...",
+      "operator_action_required": true
+    }
+  ],
+  "truncated": 0
+}
+```
+
+- `tracked` = 本 pass 在跟踪的 (主体, 理由) 条目数；`open` 只列到阈值的，按
+  次数降序**最多 50 条**，多出的计在 `truncated`。
+- `state_reset` 只在状态文件缺失（`"missing"`，首次启用即如此）或损坏
+  （`"corrupt"`）时出现，两者都只是从零重算，**不会让 pass 失败**。健康期
+  每个完整 pass 都会重写状态文件，所以稳态下这个键不该再出现。
+- `operator_action_required` 只在该候选行自己带 #1152 三态判据时随行出现。
+- `state_write_failed: true` = **本 pass 的计数没落盘**（tracker 写盘失败），
+  下一 pass 会从最后一次成功落盘的值接着数，本 pass 白数一轮。出现即查
+  evidence_root 权限/挂载，以及是否有残留的 `no-progress-tracker.json.tmp`
+  （非常规残留——符号链接、空目录——会被下一 pass 自动清掉；非空目录或异主
+  文件要人工清）。同时会有一条
+  `SCHEDULER_NO_PROGRESS_CIRCUIT_STATE_WRITE_FAILED` 日志。
+- **超出 evidence 字节预算的 pass 上该块会被整块丢弃**（它是两道字节门里第一个
+  被舍的项，以保证尺寸裁决、既有键裁剪与 pass 终态都与本功能不存在时逐字相同）。
+  此时 journalctl 的聚合 WARNING 与状态文件里的计数都不受影响——按下面的 grep
+  走，别以为"没这个块=没开闸"。
+
+告警（journalctl 是当前唯一被实际消费的通道，每个开闸的完整 pass 一条聚合行）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'journalctl -u nhms-compute-scheduler.service --since "-24h" \
+     | grep SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN'
+```
+
+**`consecutive_passes` 数的是完整观察 pass，不是 timer tick**：早退、prelock
+阻塞、lock 争用、资源中止的 pass 既不计数也不清零（它们的候选列表本就是空的，
+在那里观察等于把计数误清零）。所以墙钟跨度可能明显大于同数 tick——不要拿
+`first_pass_id`/`last_pass_id` 的时间差除以 tick 间隔来反推。
+
+同样的 gap 还有 **adapter 级**的一层：某个 pass 里适配器的源整个缺席（reconcile
+段报错只写 `reserved_unbound_error`、dry-run），该适配器名下的条目**原样保留**
+（不计数也不清除），`last_pass_id` 就此冻结。所以读条目时对一下产物自己的
+`pass_id`：**`open` 条目的 `last_pass_id` 落后于本 pass 的 `pass_id`，说明这条
+是陈旧观测**（当前 pass 根本没看到该主体，只是没被清除），别当成"这一轮又卡了
+一次"。WARNING 行里的 `last=` 字段就是给这个对账用的。
+
+`reason` 的三类来源与下游处置：
+
+| reason 形状 | 来源 | 去哪儿处置 |
+|---|---|---|
+| `blocked:<candidate reason>`，且条目带 `operator_action_required: true` | #1152 predecessor-pending 三态判据 | [`scheduler-dbfree-typed-reasons.md`](scheduler-dbfree-typed-reasons.md)（`self_heal_expected` / `backfill_predecessor_state` 一节） |
+| `<action>:identity_mismatch_blocked` / 相关 identity 尾迹 | #1173 identity 阶梯（streak ≥ 3 自动放行为 `identity_mismatch_released`） | [`failed-basin-retry.md`](failed-basin-retry.md) § `identity_mismatch_released`；本文 §8.5 是同一条线的配置口径 |
+| `query_unavailable:comment_accounting_unproven` | #1116：本集群不存 job comment，reserved 行**设计性永久**扣着 | [`failed-basin-retry.md`](failed-basin-retry.md) §"Reserved rows held by `comment_accounting_unproven`"——**必须人工处置**，无自动出口 |
+
+开闸只说明"这个主体连续 N 个完整 pass 没动过"，不判定谁对谁错；先按上表定位
+到下游 runbook，再决定动不动手。
+
 ## 7. 当前运行口径
 
 This section is a live snapshot, not a permanent fact. Refresh it during handoff.
@@ -1599,22 +1747,36 @@ Exact-cycle missing-forcing regeneration (node-22 only):
      `artifact_guard.unsafe_reason` is `object_store_root_unconfigured` or
      `artifact_probe_error`, that key was **not** probed at all —
      `unsafe_reason` is the authoritative verdict, not `probe_key`.
-   - `artifact_exists` says whether that probed manifest object was found;
-     `false` on an `object_store_sidecar` source is a genuinely absent package,
-     not a read failure.
+     Do **not** generalize that to "a non-null `unsafe_reason` means nothing was
+     probed": `artifact_target_not_a_file` is the opposite case — the probe ran,
+     reached `probe_key`, and *determined* that something other than a regular
+     file stands there.
+   - `artifact_exists` says whether that probed manifest object was found *as a
+     regular file*. `false` on an `object_store_sidecar` source is still never a
+     read failure — a read fault leaves that tier as `source = absent` with a
+     read-fault `tier_status` instead — but since #1394 it covers two different
+     determinations, so read it together with `unsafe_reason`: a genuinely absent
+     package (`unsafe_reason` is `null`), or something other than a regular file
+     standing on the derived witness key (`artifact_target_not_a_file`). Only the
+     first one is a missing package.
    - `artifact_guard.unsafe_reason` says why the probe refused or could not use
      the reference; `null` usually means the reference was probeable and simply
      not found ("probed, determined absent"), but read it together with
      `forcing_provenance.tier_status` — on the `object_store_sidecar` tier a
      read fault surfaces as `forcing_version_row_absent` with a read-fault
      `tier_status` and a **null** `unsafe_reason`, and there the rebuild is
-     ineffective. Route by this table:
+     ineffective. That null-reason shape covers the tier's *read faults* only:
+     a non-regular witness target is a determination, so on that tier it surfaces
+     as the ordinary `missing_forcing_package_uri` blocker carrying a **non-null**
+     `artifact_target_not_a_file`, the same as on the journal and direct tiers.
+     Route by this table:
 
    | `unsafe_reason` | Fault | Does an exact-cycle forcing rebuild fix it? |
    |---|---|---|
    | `null` | The probe ran and the package is genuinely absent — **unless** `forcing_provenance.tier_status` is a read-fault status (see below), or the recorded reference is malformed enough that no probe could resolve it | Usually yes — that is exactly what the rebuild repairs. A malformed unresolvable reference is also repairable (the rebuild re-records it). **But** if `tier_status` is a read-fault status, no: on the `object_store_sidecar` tier `tier_status`, not `unsafe_reason`, is the authoritative verdict |
    | `object_store_root_unconfigured` | Neither the candidate's `object_store_root` nor `OBJECT_STORE_ROOT` is set, so no probe ran | No — the remedy is configuration; fix it and let the next pass re-probe |
    | `artifact_probe_error` | The object store refused the stat (symlinked witness leaf or ancestor, stale NFS handle, permissions) | No — a rebuild cannot clear a filesystem fault; fix the object/mount/permissions first |
+   | `artifact_target_not_a_file` | The probe **did** run and found something at `probe_key` that is not a regular file — almost always a directory squatting on a file key (a leftover placeholder, an interrupted writer, a rsync that created the path as a directory); a FIFO, socket or device node is judged the same way. Applies to the object leg and the local leg alike — but the two name their target differently, so inspect per leg | No — the rebuild would have to write a file where a directory stands (`IsADirectoryError`). Inspect it first. **Object leg**: `probe_key` is the *recorded reference* with the manifest filename appended — it is store-relative only when the recording was. The `object_store_sidecar` tier derives a bare key, so `ls -ld "$OBJECT_STORE_ROOT/$PROBE_KEY"` works there directly; the journal/direct tier stamps the producer's recorded uri verbatim, which under every tracked config carries an `s3://<bucket>[/<prefix path>]` head (`OBJECT_STORE_PREFIX`). Strip that head before joining — `ls -ld "$OBJECT_STORE_ROOT/${PROBE_KEY#"$OBJECT_STORE_PREFIX"/}"` — exactly as `normalize_object_key` does, and percent-decode as well if the recorded value carries `%XX`. **Local leg**: `probe_key` is already an absolute local path (or a `file://` uri) — `ls -ld` it directly with any `file://` stripped, and do **not** prefix the store root; also note this leg stamps `forcing_provenance` only for a journal/direct `forcing_version` that names the same uri, so it can be `null` entirely and then there is no `probe_key` at all. **Copyback leg**: never stamps a `probe_key` of its own — so check `artifact_guard.artifact_type` FIRST: when it is `copyback_source`, use `artifact_guard.artifact_uri` even if a `probe_key` is present, because that `probe_key` was stamped by the forcing leg earlier in the same pass and names the forcing manifest, not the squatted copyback path. Whenever `probe_key` is missing, the reference is `artifact_guard.artifact_uri`. Remove the placeholder once you are sure it holds no wanted data, then let the next pass re-probe or re-run the rebuild |
    | `invalid_local_artifact_path` / `local_artifact_path_outside_allowed_roots` / `local_artifact_path_unresolvable` | A local-path reference is unresolvable or outside the allowed roots | No — fix the path, or the roots this probe actually consults: resource-profile keys `object_store_root` / `object_store_copyback_root` / `copyback_root` / `published_artifact_root` plus env `OBJECT_STORE_ROOT` / `NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_PUBLISHED_ARTIFACT_ROOT` (**not** `NHMS_SCHEDULER_ALLOWED_ROOTS`, which feeds a different mechanism and is never read here) |
    | `local_artifact_root_unresolvable` | **A configured artifact ROOT itself could not be canonicalized**, and no remaining resolvable root contains the artifact. Investigate the root, **not** the artifact's placement: a symlink loop in the root chain, a directory the scheduler user cannot traverse (EACCES), a stale NFS handle (ESTALE) or an unmounted/half-mounted share, a non-directory component (ENOTDIR). Not only symlink loops — **every** errno other than `ENOENT` lands on this reason; `ENOENT` alone (a root that simply does not exist yet — including forms like `<missing>/../<loop>` where a missing component is hit before the loop) stays admitted and never produces this reason. Same root list as the row above | No — a rebuild cannot clear a filesystem or mount fault. Fix or unmount/remount the offending root (`readlink -f "$ROOT"` and `ls -ld` on each component reproduce the kernel's verdict), then let the next pass re-probe |
 
@@ -1677,6 +1839,45 @@ Business-readiness receipt after fix:
 - Scheduler evidence shows duplicate-free file-journal progress and lock release
   after the pass.
 
+#### 8.5.1 Withheld copyback source (`COPYBACK_SOURCE_WITHHELD`)
+
+A candidate blocked with reason `copyback_source_withheld` / error code
+`COPYBACK_SOURCE_WITHHELD` is **not** a missing-forcing blocker and none of the
+triage tables above apply to it. The blocker means the copyback source reference
+the scheduler resolved was a redaction placeholder (`[object-uri]`, `[uri]`,
+`[local-path]`, `[redacted]`, `sha256:[redacted]`): the public-read redaction
+boundary withheld the value, so existence could not be determined. Read it as
+"cannot determine", not "source determined absent" — that is what distinguishes
+it from `missing_copyback_source` / `COPYBACK_SOURCE_MISSING`, which does mean a
+probe ran and found nothing.
+
+- `artifact_guard.unsafe_reason` is `null` here because **no probe ran at all**.
+  The §8.5 `unsafe_reason` table above is keyed on probe verdicts and does not
+  cover this blocker; do not read its `null` row as "probed, determined absent".
+- `artifact_guard.artifact_uri` is the placeholder itself, i.e. the evidence that
+  the reference was withheld rather than absent.
+- The exact-cycle forcing rebuild does **not** apply: it repairs forcing
+  packages, and this blocker names a copyback reference. Running it burns a cycle
+  and clears nothing. The blocker is also refused by the missing-forcing repair
+  authorization channel by design.
+- Whether a manual retry request helps depends on which arm the candidate rides,
+  so check for a failure signal (failed pipeline status, failed hydro run, or a
+  failed job row) before choosing:
+  - **Failure-state candidate** (the common case, and the one this blocker's
+    regression tests pin): a manual retry request **does** pre-empt this blocker
+    and re-submits the candidate, exactly as it does for the missing-forcing
+    blockers. Note it **bypasses, not clears**: the withheld reference is
+    untouched, so if the resubmitted run fails again the blocker reappears on the
+    next pass.
+  - **Completed-stage resume candidate** (no failure signal at all; the state
+    carries `completed_stage_evidence` with a `copyback` restart stage): that arm
+    is evaluated *before* the manual-retry branch, so a manual retry request has
+    no effect and the candidate stays blocked. There is no operator clearing path
+    for this arm today — the DB-free public read re-redacts the reference on every
+    pass. Defining one depends on a copyback write side that does not exist yet;
+    it is tracked in issue #1464. Report the occurrence — the geometry is latent
+    in production and a live instance is itself the signal.
+
 ### 8.6 Heihe 底图和 DB 范围混用
 
 Current DB registered Heihe data uses `/home/ghdc/nwm/Basins/...` on node-27.
@@ -1695,11 +1896,11 @@ uses GIS segment ids directly, some segments can appear to have no flow.
 
 判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
 调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带两个
-`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（pre-commit fail-closed，
-另含尚未分流的 `replace_uncertain` 族，见下面的判读口径）或
-`OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193，index 可能已提交）——
-`details.details.error` 是具体的 reason（provider_atomic 或 state-manager 的都可能；
-`..._COMMIT_UNCERTAIN` 另有 `details.details.error_reason`）：
+`error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（纯 pre-commit fail-closed：
+index 未被改动，按"未提交"幂等重跑）或
+`OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（#1193/#1364，index 可能已提交）——
+两个 code 的 `details.details` 均含 `error_reason`（具体的 reason，provider_atomic 或
+state-manager 的都可能），`details.details.error` 是异常文本：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
@@ -1716,18 +1917,18 @@ uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entrie
 判读口径：
 
 - `OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN`（事件里嵌套的
-  `details.details.error_reason` 一般是 `provider_lock_release_failed`）—— **shared index
-  可能已经提交**：CAS 之后 provider 锁释放才失败，锁范围内的写已经做完。**不得**按
-  "未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已包含本批 entry、
-  以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再幂等重跑 stage
-  或走下面的 replay 补账；出现收缩就按下面 exit 3 的
-  `destination_entries_lost_after_merge` 分支停手。
-- `OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED` 覆盖 pre-commit fail-closed，**以及尚未分流的
-  `replace_uncertain` 族**（`provider_replace_uncertain`/`provider_postread_failed`：分流只认
-  phase 为 `release_uncertain` 的 ProviderAtomicError，这两个被包成 StateManagerError 后仍落
-  `..._FAILED`，此时 index 可能已提交；replay 侧同样按 commit-uncertain 处理）。看到
-  `..._FAILED` 且 `details.details.error` 是这两个 reason 之一时，同样先核 shared index 的
-  `entry_count` 再处置；其余 `..._FAILED` 才按"未提交"幂等重跑。
+  `details.details.error_reason` 是 destination CAS 之后三族——释放不确定 / 替换不确定 /
+  postcommit——的 reason 之一：
+  `provider_lock_release_failed`（CAS 之后锁释放失败）/`provider_replace_uncertain`
+  （替换已执行、持久化或身份确认失败）/`provider_postread_failed`（CAS 后回读失败且未
+  回滚）/`provider_restored_previous`（回读失败但回滚已校验成功））—— **shared index
+  可能已经提交**：这几族的 raise point 全部在 destination CAS 之后，锁范围内的写已经
+  做完。**不得**按"未提交、直接重跑"处置：先核对 shared index 的 `entry_count` 是否已
+  包含本批 entry、以及是否出现 lost 方向的收缩（对照 private index），确认没有丢失后再
+  幂等重跑 stage 或走下面的 replay 补账；出现收缩就按下面 exit 3 的
+  `destination_entries_lost_after_merge` 分支停手。`provider_restored_previous` 是其中
+  唯一 destination 已被 provider 回滚为旧字节的形，`entry_count` 预期**不含**本批
+  entry——核对确认后按幂等重跑处置，仍不得跳过核对（新 entry 曾短暂可见）。
 - `state_snapshot_index_object_missing` / `..._object_checksum_mismatch`，且缺失对象在
   **private** `OBJECT_STORE_ROOT` 下 —— 真故障，source 侧全量校验按设计 fail-closed，先查
   `/scratch` 上的 state 对象是否被误删/截断，不得放宽校验。
@@ -1794,7 +1995,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 | exit | stderr `status` | 含义 | 处置 |
 |---|---|---|---|
 | 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
-| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁**获取**类（`provider_lock_unavailable`/`provider_lock_changed` 等，**不含**释放期的 `provider_lock_release_failed`——那是 exit 3）/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁**获取**类（`provider_lock_unavailable`/`provider_lock_changed` 等，**不含**释放期的 `provider_lock_release_failed`——那是 exit 3）/校验类/`state_snapshot_index_copyback_conflict`/取锁**之前**的 lockfile 身份守卫两条（`state_snapshot_index_copyback_lock_identical`、`state_snapshot_index_copyback_lock_identity_unavailable`，#1609）等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外的 reason 工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`；给 merge 加新 reason 时**必须同步**这份 allowlist，否则一个什么都没碰的前置拒绝会被报成「可能已提交」 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
 | 3 | `merge_committed_incomplete` | merge **已提交或不能证明未提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
 
 exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命中多个，stderr 的 `reason`
@@ -2067,14 +2268,49 @@ set -a; . infra/env/node27-frontier-alert.env; set +a
 
 shim 的退出码即投递事实：0 = 目的地提交服务器**同步**回了 250（stderr 留一行
 `SMTP-ACCEPTED host=... code=250 recipients=<n>`）；69 = 投递失败
-（`SMTP-FAILED stage=connect|ehlo|login|send ...`，或部分收件人被拒的
+（`SMTP-FAILED stage=connect|ehlo|login|send ...`，其中会话预算到期那条带
+`reason=session-budget elapsed=<s> budget=<s>`，或部分收件人被拒的
 `SMTP-PARTIAL-REFUSAL ...`）；64 = 配置/用法错（缺 `NHMS_SMTP_USER` /
-`NHMS_SMTP_PASS`、端口非法、正文无收件人、From 与认证账号不一致）；70 = 内部故障
+`NHMS_SMTP_PASS`、端口非法、`NHMS_SMTP_SESSION_BUDGET_SEC` 非正数或 ≥60s、正文无
+收件人、From 与认证账号不一致）；70 = 内部故障
 兜底（整类 contained，永不吐 traceback）。全部非零都会被告警器当作发送失败记进
-receipt 与 JSONL，下一 tick 按 §10.5 的重试语义重来。socket 有 30s 超时（TLS 是
-**验证过的** `ssl.create_default_context()`——`SMTP_SSL` 的缺省 context 是
-`CERT_NONE` + 不校验主机名，那样授权码会递给任何应答方、250 也可被路径上伪造），
-外层还有告警器的 60s 墙。
+receipt 与 JSONL，下一 tick 按 §10.5 的重试语义重来。TLS 是**验证过的**
+`ssl.create_default_context()`——`SMTP_SSL` 的缺省 context 是 `CERT_NONE` + 不校验
+主机名，那样授权码会递给任何应答方、250 也可被路径上伪造。
+
+**三层时限，各管各的**（不是"嵌套超时"，三个值的量纲不同）：
+
+1. **单次操作 30s**（`SMTP_TIMEOUT_SEC`，socket 级）：每次阻塞读写各自计时，**会被
+   重置**。一次会话有 ≥8 次往返（connect/TLS/greeting/ehlo/login/MAIL/RCPT/DATA/
+   收尾点），所以它**不是**会话上限；对方每 29s 挤一个字节就能把它无限续期。
+2. **会话预算 45s**（`SESSION_BUDGET_SEC`，`setitimer(ITIMER_REAL)` 一次性闹钟）：
+   从连接前起算的墙钟，到期就在**当前 stage 上**中断正在阻塞的那次调用，打
+   `SMTP-FAILED stage=<stage> ... reason=session-budget` 并退 69，随后用
+   `close()` 而不是 `quit()` 拆链路（不再多一次往返）。要改用
+   `NHMS_SMTP_SESSION_BUDGET_SEC`（正数秒）——这是与下面那道 60s 墙**唯一的对齐
+   点**。该 env **必须严格小于 60s**：`SESSION_BUDGET_CEILING_SEC = 60.0` 把
+   ≥60 的值直接判成配置错（rc=64，连都不连），否则 SIGKILL 先到、stage 又丢，
+   等于把改动前的几何悄悄装回来。默认值与这道天花板都有跨模块测试盯着
+   （shim 不 import 告警器：它是被绝对路径 exec 的，依赖方向是 lane → shim，
+   常数是镜像的，测试就是校准点）。
+3. **告警器 60s 墙**（`SENDMAIL_TIMEOUT_SEC`，`subprocess` SIGKILL）：只是兜底，
+   正常情况轮不到它——第 2 层先退。
+
+**"没收到 250" ≠ "没投出去"**。RFC 5321 的收尾点一旦被服务器接收，投递责任就已
+转移；我们只是没等到那个 250。所以下面**三种**记录都要按"**信可能已经投出去**"读：
+
+- `rc=124` 且 receipt 里**没有** `SMTP-FAILED stage=` 行 —— **shim 自己挂死了**
+  （不是投递失败，投递失败会带 stage），连自己那行都没来得及打；
+- `rc=69` + `SMTP-FAILED stage=send ... reason=session-budget` —— 会话预算在
+  DATA 中途开了闸；
+- `rc=69` + `SMTP-FAILED stage=send ... error=TimeoutError`（或别的 socket 超时）
+  —— 同一个窗口，只是这次是单次操作先超时。
+
+其余 stage（`connect`/`ehlo`/`login`）的失败**确实**证明没投出去。三种"可能已投"
+的情况下，下一 tick 都会按设计重发（§10.5 的重试语义），operator 可能因此收到一封
+重复告警——这是**刻意选的**过报方向，不要按"重复发信"去查 bug。receipt 的 `error`
+里若带 `| sendmail stderr: ...` 尾巴，那是 shim 被 kill 前来得及打印的内容，优先按
+它定位。
 
 163 会拒绝 From 头与认证账号不一致的信，而 shim **不改** From 头——所以
 `NHMS_ALERT_EMAIL_FROM` 的**地址部分必须等于** `NHMS_SMTP_USER`（display-name

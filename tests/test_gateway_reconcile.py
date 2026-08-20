@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -25,6 +27,7 @@ from services.orchestrator.reconcile import (
     SacctRecord,
     reconcile_inflight_jobs,
 )
+from tests.test_real_slurm_gateway import _pinned_local_timezone
 
 
 def _authoritative_absence_query(
@@ -142,28 +145,33 @@ def _store() -> PipelineStore:
     return PipelineStore(Session(engine))
 
 
-def _file_cohort_repository(
-    tmp_path: Any,
+def _versioned_master_reservation_record(
     *,
     created_at: datetime | None = None,
     member_count: int = 18,
     expected_user: str | None = None,
     expected_account: str | None = None,
     corrupt_digest: bool = False,
-    with_runtime_rows: bool = True,
     submit_outcome: str | None = "submit_result_ambiguous",
     versioned: bool = True,
     source_id: str = "gfs",
-) -> Any:
+    init_state_identities: Any = None,
+) -> dict[str, Any]:
+    """The clean reservation payload ``_file_cohort_repository`` persists.
+
+    Extracted so a test can hand ``reserve_pipeline_job`` the very same shape
+    without laundering it through the public projection first (#1180 J6): on the
+    insert path the contract marker and the row kind come from the incoming
+    record, and the public view is not a valid write payload (design D-B2).
+    """
+
     from packages.common.source_identity import normalize_source_id
     from services.orchestrator.accepted_submit_identity import (
         ACCEPTED_SUBMIT_CONTRACT_VERSION,
         forecast_cohort_digest,
     )
     from services.orchestrator.chain_config import scenario_for_source
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
-    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
     cycle_time = datetime(2026, 7, 12, tzinfo=UTC)
     canonical_source_id = normalize_source_id(source_id)
     source_id = canonical_source_id.lower()
@@ -201,11 +209,47 @@ def _file_cohort_repository(
             "created_at": created_at or cycle_time,
             "updated_at": created_at or cycle_time,
         }
+    if init_state_identities is not None:
+        record["init_state_identities"] = init_state_identities
     record["cohort_digest"] = forecast_cohort_digest(record)
     if not versioned:
         record.pop("accepted_submit_contract_version")
     if corrupt_digest:
         record["cohort_digest"] = "0" * 64
+    return record
+
+
+def _file_cohort_repository(
+    tmp_path: Any,
+    *,
+    created_at: datetime | None = None,
+    member_count: int = 18,
+    expected_user: str | None = None,
+    expected_account: str | None = None,
+    corrupt_digest: bool = False,
+    with_runtime_rows: bool = True,
+    submit_outcome: str | None = "submit_result_ambiguous",
+    versioned: bool = True,
+    source_id: str = "gfs",
+    init_state_identities: Any = None,
+) -> Any:
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    source_id = normalize_source_id(source_id).lower()
+    record = _versioned_master_reservation_record(
+        created_at=created_at,
+        member_count=member_count,
+        expected_user=expected_user,
+        expected_account=expected_account,
+        corrupt_digest=corrupt_digest,
+        submit_outcome=submit_outcome,
+        versioned=versioned,
+        source_id=source_id,
+        init_state_identities=init_state_identities,
+    )
     repository.reserve_pipeline_job(record)
     if versioned and submit_outcome == "submit_result_ambiguous":
         from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
@@ -776,6 +820,141 @@ def test_file_cohort_reclaim_begins_attempt_with_fresh_locked_anchor_and_cas(
     assert committed.outcome == "applied"
 
 
+def _reclaim_init_state_identity(index: int, *, generation: str) -> dict[str, Any]:
+    """One well-formed per-model init-state identity for the reclaim cohort."""
+
+    return {
+        "array_task_id": index,
+        "model_id": f"model_{index}",
+        "init_state_id": f"state_gfs_model_{index}_2026071200_{generation}",
+        "init_state_checksum": f"sha256:{index}" + generation[-3:] + "a" * 59,
+        "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026071200/{generation}.cfg.ic",
+        "init_state_valid_time": "2026-07-12T00:00:00Z",
+    }
+
+
+def test_reclaimed_reservation_keeps_the_first_attempts_init_state_mapping(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1188 J13/J14/J15: reclaim is keep-first for the init-state mapping.
+
+    A reclaim opens a new submission attempt, so "stable from reservation" is
+    ambiguous at exactly this boundary. The adjudication is keep-first: the
+    reclaim request's freshly recomputed mapping is dropped and the first
+    attempt's mapping stays authoritative, all the way through to the terminal
+    per-model rows projected after the new attempt binds.
+    """
+
+    from datetime import timedelta
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    member_count = 2
+    attempt_one_started_at = datetime(2026, 7, 12, tzinfo=UTC)
+    mapping_a = [
+        _reclaim_init_state_identity(index, generation="attempt_one")
+        for index in range(member_count)
+    ]
+    mapping_b = [
+        _reclaim_init_state_identity(index, generation="attempt_two")
+        for index in range(member_count)
+    ]
+    assert mapping_a != mapping_b
+
+    repository = _file_cohort_repository(
+        tmp_path / "keep-first",
+        created_at=attempt_one_started_at,
+        member_count=member_count,
+        init_state_identities=mapping_a,
+    )
+    journal_root = tmp_path / "keep-first" / "journal"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    outcome = reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=_authoritative_absence_query,
+        grace=timedelta(seconds=120),
+        now=lambda: attempt_one_started_at + timedelta(seconds=121),
+    )[0]
+    assert outcome.action == "absence_retry_permitted"
+    attempt_one = repository.get_pipeline_job(job_id)
+    assert attempt_one["status"] == "reservation_lost"
+    assert _durable_pipeline_job_payloads(journal_root, job_id)[-1]["init_state_identities"] == (
+        mapping_a
+    )
+
+    locked_anchor = attempt_one_started_at + timedelta(seconds=123)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    reclaimed = repository.reclaim_pipeline_job_reservation(
+        {
+            **attempt_one,
+            "expected_submission_attempt": attempt_one["submission_attempt"],
+            "expected_submission_attempt_started_at": attempt_one["submission_attempt_started_at"],
+            "status": "reserved",
+            "submission_attempt": 2,
+            "submission_attempt_started_at": attempt_one_started_at + timedelta(seconds=122),
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "matched_slurm_job_id": None,
+            "init_state_identities": mapping_b,
+        }
+    )
+    monkeypatch.undo()
+
+    assert reclaimed is not None
+    # J14: the reclaim really took the success path — a request rejected by an
+    # identity gate would leave every one of these unchanged and make the
+    # keep-first assertion below vacuous.
+    assert reclaimed["submission_attempt"] == attempt_one["submission_attempt"] + 1
+    assert reclaimed["status"] == "reserved"
+    assert reclaimed["submission_attempt_started_at"] == locked_anchor.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert reclaimed["submission_attempt_started_at"] != attempt_one["submission_attempt_started_at"]
+
+    # J13: the new attempt kept the FIRST attempt's mapping, at the durable layer.
+    assert _durable_pipeline_job_payloads(journal_root, job_id)[-1]["init_state_identities"] == (
+        mapping_a
+    )
+
+    # J15: and the adjudication reaches the lineage evidence, not just the master.
+    _bind_current_file_cohort(
+        repository,
+        str(reclaimed["idempotency_key"]),
+        slurm_job_id="17667",
+    )
+    members = repository.get_pipeline_job(job_id)["cohort_members"]
+    repository.project_forecast_cohort_tasks(
+        job_id,
+        master_slurm_job_id="17667",
+        projections=[
+            {
+                **member,
+                "array_task_outcome": "succeeded",
+                "task_slurm_job_id": f"17667_{index}",
+                "restart_stage": "forecast",
+                "native_shud_resubmitted": False,
+            }
+            for index, member in enumerate(members)
+        ],
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+
+    for index in range(member_count):
+        terminal_job_id = (
+            f"job_fcst_gfs_2026071200_model_{index}_forecast_reconciled_17667_{index}"
+        )
+        terminal = _durable_pipeline_job_payloads(journal_root, terminal_job_id)[-1]
+        assert terminal["init_state_identities"] == [mapping_a[index]]
+
+
 @pytest.mark.parametrize(
     "decision",
     [
@@ -1154,6 +1333,127 @@ def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     assert failed_decision.evidence["classifier"] == "missing_upstream_artifact"
     assert failed_decision.evidence["restart_stage"] == "forecast"
     assert failed_decision.evidence["artifact_guard"]["artifact_exists"] is False
+
+
+def test_file_cohort_boot_fail_task_projects_failed_with_node_failure(tmp_path: Any) -> None:
+    # BOOT_FAIL is a Slurm terminal state (slurm_validation TERMINAL_SLURM_STATES has
+    # always enumerated it), but until it entered SLURM_STATE_MAP the cohort
+    # projection could not read it as terminal: the task stalled on
+    # ``unverified`` and the whole cohort reported task_accounting_incomplete.
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    for index in range(2):
+        repository.append_historical_hydro_run(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "run_type": "forecast",
+                "scenario_id": "operational",
+                "model_id": f"model_{index}",
+                "basin_version_id": f"basin_v{index}",
+                "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "init_state_id": f"state_{index}",
+                "source_id": "gfs",
+                "cycle_time": "2026-07-12T00:00:00Z",
+                "start_time": "2026-07-12T00:00:00Z",
+                "end_time": "2026-07-12T18:00:00Z",
+                "status": "failed",
+                "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
+                "output_uri": f"s3://nhms/runs/model_{index}/output",
+                "log_uri": f"s3://nhms/runs/model_{index}/logs",
+                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+                "error_message": "transport timeout",
+                "created_at": "2026-07-12T00:00:00Z",
+                "updated_at": "2026-07-12T00:01:00Z",
+            }
+        )
+    task_records = (
+        SacctRecord("17667_0", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=0),
+        SacctRecord("17667_1", "BOOT_FAIL", "nhms_forecast", exit_code="1:0", array_task_id=1),
+    )
+    master = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="COMPLETED",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=("17667_0", "17667_1"),
+        array_task_records=task_records,
+    )
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
+
+    assert outcomes[0].action == "terminal"
+    assert outcomes[0].status == "partially_failed"
+    cohort = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    projections = cohort["candidate_projections"]
+    assert projections[0]["array_task_outcome"] == "succeeded"
+    assert projections[1]["array_task_outcome"] == "failed"
+    # The durable cohort projection is bounded to identity keys, so the mapped code
+    # is read back off the projected hydro run.
+    failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "NODE_FAILURE"
+
+
+@pytest.mark.parametrize("raw_state", ["REVOKED", "SPECIAL_EXIT"])
+def test_file_cohort_unmapped_terminal_task_projects_failed(tmp_path: Any, raw_state: str) -> None:
+    # Same shape as the BOOT_FAIL case above: both states are enumerated by
+    # slurm_validation TERMINAL_SLURM_STATES, so a cohort carrying one of them must
+    # project a terminal task rather than stalling the whole cohort on
+    # task_accounting_incomplete.  The error code stays the generic unknown one --
+    # SLURM_STATE_MAP registration is orthogonal to map_slurm_error_code.
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    for index in range(2):
+        repository.append_historical_hydro_run(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "run_type": "forecast",
+                "scenario_id": "operational",
+                "model_id": f"model_{index}",
+                "basin_version_id": f"basin_v{index}",
+                "forcing_version_id": f"forc_gfs_2026071200_model_{index}",
+                "init_state_id": f"state_{index}",
+                "source_id": "gfs",
+                "cycle_time": "2026-07-12T00:00:00Z",
+                "start_time": "2026-07-12T00:00:00Z",
+                "end_time": "2026-07-12T18:00:00Z",
+                "status": "failed",
+                "run_manifest_uri": f"s3://nhms/runs/model_{index}/run-manifest.json",
+                "output_uri": f"s3://nhms/runs/model_{index}/output",
+                "log_uri": f"s3://nhms/runs/model_{index}/logs",
+                "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+                "error_message": "transport timeout",
+                "created_at": "2026-07-12T00:00:00Z",
+                "updated_at": "2026-07-12T00:01:00Z",
+            }
+        )
+    task_records = (
+        SacctRecord("17667_0", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=0),
+        SacctRecord("17667_1", raw_state, "nhms_forecast", exit_code="1:0", array_task_id=1),
+    )
+    master = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="COMPLETED",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=("17667_0", "17667_1"),
+        array_task_records=task_records,
+    )
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
+
+    assert outcomes[0].action == "terminal"
+    assert outcomes[0].status == "partially_failed"
+    assert outcomes[0].status != RECONCILE_UNVERIFIED_STATUS
+    cohort = repository.get_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    projections = cohort["candidate_projections"]
+    assert projections[0]["array_task_outcome"] == "succeeded"
+    assert projections[1]["array_task_outcome"] == "failed"
+    failed = repository._hydro_run_for("fcst_gfs_2026071200_model_1")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "SLURM_JOB_FAILED"
 
 
 @pytest.mark.parametrize(
@@ -4497,6 +4797,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         grace=timedelta(0),
@@ -4524,6 +4825,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         covered_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         grace=timedelta(0),
@@ -4545,6 +4847,7 @@ def test_default_comment_accounting_requires_full_attempt_coverage_but_still_bin
         matched_repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         now=lambda: query_end,
@@ -4774,6 +5077,7 @@ def test_versioned_accounting_saturation_is_public_bounded_unavailable_evidence(
         repository,
         comment_query=reconcile_module.default_comment_sacct_querier(
             global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
             now=lambda: query_end,
         ),
         now=lambda: query_end,
@@ -4912,7 +5216,10 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
         )
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
+    )
     assert query("key-a")[0].slurm_job_id == "17667"
     assert query("key-b")[0].slurm_job_id == "17668"
     assert scans == (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
@@ -4958,7 +5265,10 @@ def test_comment_sacct_querier_scans_once_and_reaps_oversized_stream(
     monkeypatch.setattr(reconcile_module.subprocess, "Popen", popen)
     monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 128)
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("secret-key")
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        )("secret-key")
     assert len(processes) == 1
     assert processes[0].reaped is True
 
@@ -9750,7 +10060,10 @@ def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(
         "_bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=lambda: True,
+    )
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="visibility is unproven"):
         query("key", accepted_submit_contract_version="nhms.accepted_submit.v1")
@@ -9768,7 +10081,10 @@ def test_comment_sacct_legacy_global_query_does_not_require_visibility_probe(
         "_bounded_sacct_stdout",
         lambda command: calls.append(list(command)) or "",
     )
-    query = reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: False)
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=lambda: True,
+    )
 
     assert tuple(query("legacy-key")) == ()
     assert calls
@@ -9962,6 +10278,284 @@ def test_global_accounting_visibility_probe_fails_closed_but_checks_both_when_on
     assert commands == [["scontrol", "show", "config"], ["sacctmgr", "show", "config"]]
 
 
+_RECONCILE_MODULE_LOGGER = "services.orchestrator.reconcile"
+
+
+def _reconcile_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _RECONCILE_MODULE_LOGGER and record.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flags_line", "expected"),
+    [
+        # node-22 renders the production value with padded spaces around "=".
+        ("AccountingStoreFlags    = (null)", False),
+        ("AccountingStoreFlags    = job_comment", True),
+        ("AccountingStoreFlags    = job_comment,job_extra", True),
+        ("AccountingStoreFlags    = job_extra", False),
+        ("AccountingStoreFlags    = ", False),
+        (None, False),
+    ],
+)
+def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    flags_line: str | None,
+    expected: bool,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any) -> str:
+        commands.append(list(command))
+        config = "PrivateData = none\nClusterName = qhh\n"
+        return config if flags_line is None else f"{config}{flags_line}\n"
+
+    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
+        assert reconcile_module.default_comment_storage_probe("/opt/slurm/bin")() is expected
+    assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
+    warnings = _reconcile_warnings(caplog)
+    if expected:
+        assert warnings == []
+    else:
+        assert any("accounting does not store job comments" in message for message in warnings)
+        assert not any("could not execute" in message for message in warnings)
+
+
+def test_comment_storage_probe_swallows_an_unrunnable_probe_with_a_distinct_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    commands: list[list[str]] = []
+
+    def run(command: Any) -> str:
+        commands.append(list(command))
+        raise reconcile_module.ReconcileQueryUnavailable("controller config unavailable")
+
+    monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
+    with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
+        assert reconcile_module.default_comment_storage_probe()() is False
+    assert commands == [["scontrol", "show", "config"]]
+    warnings = _reconcile_warnings(caplog)
+    assert any("comment storage probe could not execute" in message for message in warnings)
+    assert not any("accounting does not store job comments" in message for message in warnings)
+
+
+@pytest.mark.parametrize(
+    "query_kwargs",
+    [
+        {},
+        {"accepted_submit_contract_version": "nhms.accepted_submit.v1"},
+        {
+            "expected_user": "scheduler",
+            "expected_account": "account",
+            "accepted_submit_contract_version": "nhms.accepted_submit.v1",
+        },
+    ],
+    ids=["legacy", "global", "owner"],
+)
+def test_comment_sacct_refuses_every_scope_when_comment_storage_is_unproven(
+    monkeypatch: pytest.MonkeyPatch,
+    query_kwargs: dict[str, Any],
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: False,
+    )
+
+    with pytest.raises(
+        reconcile_module.ReconcileQueryUnavailable,
+        match="accounting does not store job comments",
+    ) as error:
+        query("key", **query_kwargs)
+    assert error.value.reason_class == "comment_accounting_unproven"
+    assert calls == []
+
+
+@pytest.mark.parametrize("proven", [True, False])
+def test_comment_storage_probe_runs_once_per_querier_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    proven: bool,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda command: calls.append(list(command)) or "",
+    )
+    probes = 0
+
+    def storage_probe() -> bool:
+        nonlocal probes
+        probes += 1
+        return proven
+
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=storage_probe,
+    )
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+
+    for key in ("key-a", "key-b"):
+        if proven:
+            assert tuple(query(key)) == ()
+        else:
+            with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
+                query(key)
+    assert probes == 1
+    assert len(calls) == (page_count if proven else 0)
+
+
+def test_comment_storage_gate_outranks_visibility_but_not_the_contract_version_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    probes = 0
+
+    def storage_probe() -> bool:
+        nonlocal probes
+        probes += 1
+        return False
+
+    both_unproven = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=storage_probe,
+    )
+    with pytest.raises(reconcile_module.ReconcileQueryUnavailable) as error:
+        both_unproven("key", accepted_submit_contract_version="nhms.accepted_submit.v1")
+    assert error.value.reason_class == "comment_accounting_unproven"
+
+    unsupported = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: False,
+        comment_storage_probe=storage_probe,
+    )
+    with pytest.raises(
+        reconcile_module.ReconcileQueryUnavailable,
+        match="contract version is unsupported",
+    ):
+        unsupported("key", accepted_submit_contract_version="nhms.accepted_submit.v0")
+    assert probes == 1
+
+
+def test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    query_end = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    # The genuinely in-flight cohort job, as a comment-less cluster reports it:
+    # accounting stores the row but drops the sbatch --comment, so the comment
+    # index can never see it.
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: "72001|nhms_forecast|RUNNING|0:0||scheduler|account\n",
+    )
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_visibility_stdout",
+        lambda _command: "PrivateData = none\nAccountingStoreFlags    = (null)\n",
+    )
+
+    outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    persisted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+    assert outcome.action == "query_unavailable"
+    assert outcome.status == "reserved"
+    assert outcome.reconciliation_decision == "accounting_unavailable"
+    assert outcome.reconciliation_reason_class == "comment_accounting_unproven"
+    assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+
+
+def test_comment_storing_cluster_still_binds_and_still_demotes_past_grace(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator import reconcile as reconcile_module
+
+    query_end = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+    matched_repository = _file_cohort_repository(
+        tmp_path / "matched",
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    comment = str(matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_comment"])
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: f"72001|nhms_forecast|RUNNING|0:0|{comment}|||\n",
+    )
+    bound = reconcile_module.reconcile_reserved_unbound_jobs(
+        matched_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        now=lambda: query_end,
+    )[0]
+    assert bound.action == "bound"
+    assert matched_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["slurm_job_id"] == "72001"
+
+    absent_repository = _file_cohort_repository(
+        tmp_path / "absent",
+        created_at=query_end - timedelta(days=1),
+        member_count=1,
+    )
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: "")
+    absent = reconcile_module.reconcile_reserved_unbound_jobs(
+        absent_repository,
+        comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+            now=lambda: query_end,
+        ),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )[0]
+    assert absent.action == "absence_retry_permitted"
+    assert absent_repository.get_accepted_submit_pipeline_job(pipeline_job_id)["status"] == "reservation_lost"
+
+
 @pytest.mark.parametrize("stream_fd", [1, 2])
 def test_global_accounting_visibility_process_bounds_stdout_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
@@ -10093,6 +10687,7 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     query = reconcile_module.default_comment_sacct_querier(
         global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
         now=lambda: datetime(2026, 7, 22, 12, tzinfo=UTC),
     )
 
@@ -10121,6 +10716,7 @@ def test_comment_sacct_production_cadence_pages_are_independently_bounded_and_ca
     assert all(any(item.startswith("--endtime=") for item in command) for command in commands)
 
 
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
 def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_scopes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10152,33 +10748,102 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
         return ""
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
-    query = reconcile_module.default_comment_sacct_querier(
-        global_visibility_probe=lambda: True,
-        now=advancing_now,
-    )
+    with _pinned_local_timezone("Asia/Shanghai"):
+        query = reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+            now=advancing_now,
+        )
 
-    late_proof = reconcile_module._query_comment_accounting_proof(
-        query,
-        late_key,
-        expected_user="scheduler",
-        expected_account="account",
-    )
-    assert late_proof.kind == "owned_match"
-    assert [record.slurm_job_id for record in late_proof.records] == ["17667"]
-    assert len(commands) == page_count * 2
-    assert scope_pages == {"owner": page_count, "global": page_count}
+        late_proof = reconcile_module._query_comment_accounting_proof(
+            query,
+            late_key,
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        assert late_proof.kind == "owned_match"
+        assert [record.slurm_job_id for record in late_proof.records] == ["17667"]
+        assert len(commands) == page_count * 2
+        assert scope_pages == {"owner": page_count, "global": page_count}
 
-    early_proof = reconcile_module._query_comment_accounting_proof(
-        query,
-        early_key,
-        expected_user="scheduler",
-        expected_account="account",
-    )
+        early_proof = reconcile_module._query_comment_accounting_proof(
+            query,
+            early_key,
+            expected_user="scheduler",
+            expected_account="account",
+        )
     assert early_proof.kind == "owned_match"
     assert [record.slurm_job_id for record in early_proof.records] == ["17668"]
     assert len(commands) == page_count * 2
     assert now_calls == [base_now]
-    assert "--endtime=2026-07-22T12:00:00" in commands[0]
+    # base_now is 2026-07-22T12:00Z; UTC+8 renders it as the host's local wall clock.
+    assert "--endtime=2026-07-22T20:00:00" in commands[0]
+
+
+# sacct reads bare timestamps in the host's local timezone, so the pinned instant below
+# is rendered differently per host TZ; expectations are literal, never recomputed.
+_PINNED_COMMENT_SCAN_NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
+
+
+def _rendered_page_bounds(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], int]:
+    """Return every sacct page command of one global-scope scan, newest page first."""
+    from services.orchestrator import reconcile as reconcile_module
+
+    page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
+    commands: list[list[str]] = []
+
+    def bounded(command: Any) -> str:
+        commands.append(list(command))
+        return ""
+
+    monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
+    reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=lambda: True,
+        now=lambda: _PINNED_COMMENT_SCAN_NOW,
+    )("gfs:tz:forecast")
+
+    assert len(commands) == page_count
+    return commands, page_count
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_are_local_wall_clock_east_of_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("Asia/Shanghai"):
+        commands, _ = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T12:00:00" in commands[0]
+    assert "--starttime=2026-07-05T12:00:00" in commands[-1]
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_are_local_wall_clock_west_of_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("America/New_York"):
+        commands, _ = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T00:00:00" in commands[0]
+    assert "--starttime=2026-07-05T00:00:00" in commands[-1]
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_comment_sacct_page_bounds_on_utc_host_are_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _pinned_local_timezone("UTC"):
+        commands, page_count = _rendered_page_bounds(monkeypatch)
+
+    assert "--endtime=2026-07-12T04:00:00" in commands[0]
+    assert "--starttime=2026-07-05T04:00:00" in commands[-1]
+    # Page identity is the rendered pair, so a UTC host must still see one command per page.
+    rendered_bounds = {
+        tuple(item for item in command if item.startswith(("--starttime=", "--endtime=")))
+        for command in commands
+    }
+    assert len(rendered_bounds) == page_count
 
 
 def test_comment_sacct_global_collision_is_detected_across_separate_pages(
@@ -10202,7 +10867,10 @@ def test_comment_sacct_global_collision_is_detected_across_separate_pages(
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        ),
         target,
         expected_user="scheduler",
         expected_account="account",
@@ -10226,7 +10894,10 @@ def test_comment_sacct_rejects_any_single_page_over_its_bound(
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", lambda _command: payload)
 
     with pytest.raises(reconcile_module.ReconcileQuerySaturated, match="bounded output") as error:
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True)("key")
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        )("key")
     expected = "rows" if boundary == "row" else "bytes"
     assert error.value.boundary == expected
     assert error.value.reason_class == f"bounded_output_{expected}_saturated"
@@ -10268,7 +10939,10 @@ def test_comment_sacct_querier_proves_owner_candidate_against_global_scope(
 
     monkeypatch.setattr(reconcile_module, "_bounded_sacct_stdout", bounded)
     proof = reconcile_module._query_comment_accounting_proof(
-        reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+        reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: True,
+        ),
         "key",
         expected_user="scheduler",
         expected_account="account",
@@ -10300,7 +10974,10 @@ def test_comment_sacct_global_overlimit_after_owner_candidate_fails_closed(
 
     with pytest.raises(reconcile_module.ReconcileQueryUnavailable, match="bounded output"):
         reconcile_module._query_comment_accounting_proof(
-            reconcile_module.default_comment_sacct_querier(global_visibility_probe=lambda: True),
+            reconcile_module.default_comment_sacct_querier(
+                global_visibility_probe=lambda: True,
+                comment_storage_probe=lambda: True,
+            ),
             "key",
             expected_user="scheduler",
             expected_account="account",
@@ -11676,3 +12353,396 @@ def test_identity_mismatch_released_row_is_a_non_reclaimable_terminal(tmp_path: 
 
     retry_record["cohort_digest"] = forecast_cohort_digest(retry_record)
     assert repository.reserve_pipeline_job(retry_record) is not None
+
+
+# ---------------------------------------------------------------------------
+# #1180: the streak / identity-release invariants are the only guard on the
+# ``identity_mismatch_released`` terminal semantics, and they need oracles of
+# their own — a guard nobody tests is a guard a refactor silently deletes.
+# ---------------------------------------------------------------------------
+
+
+_INVARIANT_JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+
+
+def _accepted_submit_invariant_fixture(tmp_path: Any, name: str) -> tuple[Any, dict[str, Any], Any]:
+    """One persisted versioned master plus its durable payload, for zero-write."""
+
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    repository = _file_cohort_repository(tmp_path / name, member_count=1)
+    public = repository.get_pipeline_job(_INVARIANT_JOB_ID)
+    assert public["status"] == "reserved"
+    assert public["submit_outcome"] == "submit_result_ambiguous"
+    durable = _durable_pipeline_job_payloads(tmp_path / name / "journal", _INVARIANT_JOB_ID)[-1]
+    return repository, public, durable
+
+
+def _assert_invariant_left_no_trace(
+    repository: Any,
+    tmp_path: Any,
+    name: str,
+    public: dict[str, Any],
+    durable: Any,
+) -> None:
+    from tests.test_file_orchestration_journal import _durable_pipeline_job_payloads
+
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) == public
+    assert _durable_pipeline_job_payloads(tmp_path / name / "journal", _INVARIANT_JOB_ID)[-1] == (
+        durable
+    )
+
+
+@pytest.mark.parametrize(
+    "streak",
+    [
+        pytest.param(-1, id="negative"),
+        pytest.param(1.0, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param("1", id="str"),
+    ],
+)
+def test_transition_rejects_a_streak_that_is_not_a_non_negative_int(
+    tmp_path: Any,
+    streak: Any,
+) -> None:
+    """#1180 J1: the counter's type gate (``bool`` included) rejects at construction."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "streak-type")
+
+    with pytest.raises(ValueError, match="identity blocked streak must be a non-negative integer"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "identity_mismatch_blocked",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                identity_blocked_streak=streak,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "streak-type", public, durable)
+
+
+def test_pre_outcome_transition_cannot_carry_a_streak(tmp_path: Any) -> None:
+    """#1180 J2: a new reserved attempt starts clean — no inherited counter."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "pre-outcome")
+
+    with pytest.raises(ValueError, match="pre-outcome transition must begin one reserved attempt"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition(None, status="reserved", identity_blocked_streak=1),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "pre-outcome", public, durable)
+
+
+def test_identity_released_transition_must_abandon_the_reservation(tmp_path: Any) -> None:
+    """#1180 J3: the release decision without ``reservation_lost`` is a lie.
+
+    This is the guard that keeps ``identity_mismatch_released`` meaning
+    "the reservation is gone"; recorded on a still-``reserved`` row it would
+    claim a convergence exit that never happened.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "released-status")
+
+    with pytest.raises(ValueError, match="identity released transition must abandon the reservation"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "identity_mismatch_released",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                identity_blocked_streak=3,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "released-status", public, durable)
+
+
+def test_non_identity_decision_cannot_carry_a_streak(tmp_path: Any) -> None:
+    """#1180 J4: the counter belongs to identity-mismatch transitions only."""
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, "foreign-decision")
+
+    with pytest.raises(
+        ValueError, match="identity blocked streak belongs to identity-mismatch transitions"
+    ):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "absence_retry_permitted",
+                submit_outcome="submit_result_ambiguous",
+                status="reservation_lost",
+                identity_blocked_streak=1,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+
+    _assert_invariant_left_no_trace(repository, tmp_path, "foreign-decision", public, durable)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason", "expected_field", "leg"),
+    [
+        pytest.param(
+            {"identity_blocked_streak": -1},
+            "file_journal_evidence_type_invalid",
+            "identity_blocked_streak",
+            "J5",
+            id="J5_streak_type",
+        ),
+        # J7/J8: these two legs pin the durable path's typed refusal, but their
+        # discriminating power over their OWN guard is a fixture accident. The
+        # persisted master here is decision-free and source-free, so each write
+        # also diverges on a field the #1183 ordinary-upsert freeze table
+        # (:1747-1754) reaches earlier; rebuild the same scenario on a persisted
+        # row that already carries a decision/source and the freeze fallback
+        # raises the identical (reason, field). One natural fixture edit turns
+        # them into silent no-ops. The isolation claim for
+        # ``accepted_submit_identity.py:646-649`` / ``:650-653`` is therefore
+        # carried by the two direct-call legs below, not by these.
+        pytest.param(
+            {
+                "reconciliation_decision": "identity_mismatch_released",
+                "reconciliation_source": "slurm_exact_comment",
+                "identity_blocked_streak": 3,
+            },
+            "file_journal_evidence_invariant_invalid",
+            "reconciliation_decision",
+            "J7",
+            id="J7_released_while_still_reserved",
+        ),
+        pytest.param(
+            {
+                "reconciliation_decision": "absence_retry_permitted",
+                "reconciliation_source": "slurm_exact_comment",
+                "identity_blocked_streak": 1,
+            },
+            "file_journal_evidence_invariant_invalid",
+            "identity_blocked_streak",
+            "J8",
+            id="J8_streak_on_a_foreign_decision",
+        ),
+    ],
+)
+def test_normalization_invariants_reject_the_ordinary_upsert_path(
+    tmp_path: Any,
+    mutation: dict[str, Any],
+    expected_reason: str,
+    expected_field: str,
+    leg: str,
+) -> None:
+    """#1180 J5/J7/J8: three of the guards on the durable write path.
+
+    ``upsert_pipeline_job`` against an already-persisted versioned master keeps
+    the "left no trace" half of the assertion a real claim about durable state
+    rather than a no-op around a direct function call — but see the caveat above
+    the J7/J8 params, and note that the byte-identical half is itself vacuous at
+    this entry point (``file_orchestration_journal.py:1757`` returns the existing
+    row unconditionally for a contract-current structural master).
+
+    Only J5 isolates its own guard here: it asserts
+    ``file_journal_evidence_type_invalid``, and the freeze fallback can only ever
+    raise ``file_journal_evidence_invariant_invalid``. The fourth guard (the
+    former J6 param, ``accepted_submit_identity.py:620-623``) cannot be isolated
+    at this entry point at all and now lives in
+    ``test_reserve_rejects_a_streak_carried_without_a_decision``; J7/J8 are
+    isolated by ``test_normalization_isolates_the_released_reservation_invariant``
+    and ``test_normalization_isolates_the_foreign_decision_streak_invariant``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    repository, public, durable = _accepted_submit_invariant_fixture(tmp_path, leg)
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job({**public, **mutation})
+
+    assert error.value.reason == expected_reason
+    assert error.value.field == expected_field
+    _assert_invariant_left_no_trace(repository, tmp_path, leg, public, durable)
+
+
+def test_reserve_rejects_a_streak_carried_without_a_decision(tmp_path: Any) -> None:
+    """#1180 J6: a fresh reservation cannot open with a non-zero streak.
+
+    This guard (``accepted_submit_identity.py:620-623``) is unreachable in
+    isolation through ``upsert_pipeline_job``: ``identity_blocked_streak`` sits
+    in the #1183 ordinary-upsert freeze table
+    (``ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS``), whose loop raises the
+    identical ``(reason, field)`` before normalization can, so deleting the guard
+    alone leaves that leg green.
+
+    ``reserve_pipeline_job`` has no such fallback — its clean-reservation
+    dirty-field set (``file_orchestration_journal.py:1779-1808``) deliberately
+    omits the counter — so the insert path is where this guard alone decides.
+    Zero-write is expressed as row absence rather than via
+    ``_assert_invariant_left_no_trace``: on an insert there is no prior row, and
+    that helper is unconditionally true at the upsert entry point anyway.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+
+    # Contamination control: the same shape with a zero streak reserves cleanly,
+    # so a red run here is the guard talking and not a malformed record. Its own
+    # repository, and the separation is load-bearing already at HEAD: the control
+    # record carries the very job id the absence assertion below queries
+    # (``_versioned_master_reservation_record(...)["job_id"] == _INVARIANT_JOB_ID``),
+    # so a shared repository would make that assertion find the CONTROL's row and
+    # go red with the guard intact. Under mutation it also matters: with the guard
+    # deleted the illegal record lands and would turn this into an ordinary job-id
+    # conflict. Do not consolidate the two repositories.
+    control = FileOrchestrationJournalRepository(tmp_path / "streak-insert-control" / "journal")
+    legal = _versioned_master_reservation_record(member_count=1)
+    legal["identity_blocked_streak"] = 0
+    assert control.reserve_pipeline_job(legal) is not None
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "streak-insert" / "journal")
+    record = _versioned_master_reservation_record(member_count=1)
+    record["identity_blocked_streak"] = 2
+    record["reconciliation_decision"] = None
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.reserve_pipeline_job(record)
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "identity_blocked_streak"
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# #1180 J7/J8 isolation legs. Every durable write entry point measured so far
+# (``upsert_pipeline_job`` / ``reserve_pipeline_job`` / the generic
+# ``transition_pipeline_job_submit_evidence`` / the typed
+# ``release_identity_blocked_reservation``) is blocked from isolating
+# ``accepted_submit_identity.py:646-649`` and ``:650-653`` by something that
+# raises first: the ordinary-upsert freeze table, the clean-reservation gate,
+# the ``AcceptedSubmitTransition`` twin guards plus the decision whitelist, and a
+# hard-coded ``status="reservation_lost"`` respectively. That enumeration is a
+# measurement, not a proof that no entry point exists; if one is found these legs
+# can be superseded. They are a SUPPLEMENT — the durable J7/J8 legs above and
+# their zero-write assertions stay exactly as they were, which is what fixture
+# review P1-5 was protecting. Measured across those same four entry points, no
+# live caller can violate either site — i.e. both are purely defensive as far as
+# anyone has measured, on the same basis and with the same limits as the
+# enumeration above — so the direct call is the only oracle available today.
+# ---------------------------------------------------------------------------
+
+
+def _direct_normalization_payload(**mutation: Any) -> dict[str, Any]:
+    """A contract-current master payload for direct normalization calls."""
+
+    return {
+        **_versioned_master_reservation_record(member_count=1),
+        "status": "reserved",
+        "submit_outcome": "submit_result_ambiguous",
+        **mutation,
+    }
+
+
+def test_normalization_isolates_the_released_reservation_invariant() -> None:
+    """#1180 J7 (isolation): ``identity_mismatch_released`` needs a lost reservation.
+
+    Single-fault geometry on purpose — the streak stays 0 so the sibling guard at
+    ``:650-653`` is structurally silent and cannot stand in for the one under
+    test.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+
+    legal = _direct_normalization_payload(
+        reconciliation_decision="identity_mismatch_released",
+        reconciliation_source="slurm_exact_comment",
+        status="reservation_lost",
+        identity_blocked_streak=0,
+    )
+    assert normalize_accepted_submit_evidence(legal)["status"] == "reservation_lost"
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            _direct_normalization_payload(
+                reconciliation_decision="identity_mismatch_released",
+                reconciliation_source="slurm_exact_comment",
+                status="reserved",
+                identity_blocked_streak=0,
+            )
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "reconciliation_decision"
+
+
+def test_normalization_isolates_the_foreign_decision_streak_invariant() -> None:
+    """#1180 J8 (isolation): the counter belongs to identity-mismatch decisions.
+
+    Single-fault geometry: the only illegal thing about the payload is the streak
+    riding an ``absence_retry_permitted`` decision.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+
+    legal = _direct_normalization_payload(
+        reconciliation_decision="absence_retry_permitted",
+        reconciliation_source="slurm_exact_comment",
+        identity_blocked_streak=0,
+    )
+    assert normalize_accepted_submit_evidence(legal)["identity_blocked_streak"] == 0
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            _direct_normalization_payload(
+                reconciliation_decision="absence_retry_permitted",
+                reconciliation_source="slurm_exact_comment",
+                identity_blocked_streak=1,
+            )
+        )
+
+    assert error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert error.value.field == "identity_blocked_streak"

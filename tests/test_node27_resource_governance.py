@@ -116,15 +116,29 @@ def test_default_services_carry_no_retired_archive_units() -> None:
     assert not [unit for unit in governance.DEFAULT_SERVICES if "archive" in unit]
 
 
-def test_governance_config_and_receipt_carry_no_archive_root() -> None:
+def test_governance_config_and_receipt_carry_no_archive_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """#1370: `collect_archive_root` and the `archive_root` receipt block are
     gone; a live receipt must not claim to observe a volume that no lane uses.
+
+    #1382: the attribute-level assertions below only pin the deletion of the
+    retired collector surfaces — a renamed collector or a generic collector
+    loop could reintroduce the top-level key with them still green. So this
+    test also builds the receipt artifact itself (collectors stubbed; no DB,
+    systemd, or filesystem probing) and pins the key's absence on the product.
     """
     assert not hasattr(governance, "collect_archive_root")
     assert not hasattr(governance.AuditThresholds(), "archive_free_warn_bytes")
     assert not hasattr(governance.AuditThresholds(), "archive_free_refuse_bytes")
     config = governance.config_from_args(governance.build_parser().parse_args([]))
     assert not hasattr(config, "archive_root")
+
+    monkeypatch.setattr(governance, "collect_filesystem", lambda _config: {"filesystems": {}})
+    monkeypatch.setattr(governance, "collect_postgres", lambda _url: {"status": "skipped"})
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    receipt = governance.build_receipt(config)
+    assert "archive_root" not in receipt
 
 
 def test_default_services_includes_timeseries_compression_units() -> None:

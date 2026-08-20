@@ -64,9 +64,22 @@ class SHUDRuntimeError(RuntimeError):
 # corrupted-state rejection so the snapshot degradation ladder keeps running.  That
 # translation covers ONLY snapshots whose header has no minute-time slot and that did
 # not already trip an earlier check: a 2-token header on a snapshot carrying a recorded
-# ``valid_time`` hits the pre-existing ``WARM_START_TIME_MISMATCH`` verification first
-# and still fails the whole run, unchanged by #1197.
+# ``valid_time`` hits the pre-existing ``WARM_START_TIME_MISMATCH`` verification first,
+# which since #1431 joins the SAME degradation ladder through its own rejection channel
+# in ``_stage_initial_state`` instead of failing the whole run -- with two named
+# exceptions that still fail the whole run: under the exact-warm-start policy (there is
+# no ladder to walk, so the original error propagates verbatim) and at a ladder
+# exhaustion where every rejected candidate -- at least two of them -- was rejected for a
+# time mismatch (``WARM_START_TIME_MISMATCH_SYSTEMIC``, below).
 IC_TIME_SHIFT_HEADER_INVALID = "IC_TIME_SHIFT_HEADER_INVALID"
+# Terminal error code for SYSTEMATIC warm-start time drift (#1431): every candidate the
+# ladder walked was rejected for a header/valid-time mismatch and there were at least two
+# of them.  One drifted snapshot is a snapshot accident and degrades; a unanimous plural
+# is a re-key/lineage defect the ladder must not launder into a quiet cold start.  Like
+# ``WARM_START_TIME_MISMATCH`` it is a permanent data defect: it is deliberately absent
+# from ``services/orchestrator/retry.py``'s ``TRANSIENT_ERROR_CODES`` (retrying it would
+# only re-read the same drifted bytes).
+WARM_START_TIME_MISMATCH_SYSTEMIC = "WARM_START_TIME_MISMATCH_SYSTEMIC"
 # A shiftable SHUD IC header needs at least the counts plus a trailing minute-time:
 # native ``<mesh> <mesh-state-columns> <minute-time>`` is the shortest legal form.
 MIN_CFG_IC_HEADER_NUMERIC_TOKENS = 3
@@ -545,6 +558,18 @@ class SHUDRuntime:
         _ensure_directory(input_dir)
         model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
         _ensure_directory(model_input_dir, containment_root=input_dir)
+        # #1491 invariant: an attempt's starting point is what IT declares.
+        # ``input/<project>/`` is reused verbatim across every attempt of a
+        # deterministic ``run_id``, so the station CSVs a PREVIOUS attempt copied
+        # still sit on this attempt's declared targets and the (unchanged)
+        # collision gate turns a retryable failure into a permanently wedged
+        # run_id.  The anchor is SOURCE/TIME, not name: the residue is removed
+        # here, BEFORE anything this attempt stages exists, so a model package
+        # member / forcing package member / initial state that lands on a
+        # declared station CSV target is still adjudicated by that gate.
+        forcing_context = self._forcing_package_context_for_attempt_hygiene(manifest)
+        if forcing_context is not None:
+            self._clear_predecessor_direct_grid_station_csvs(model_input_dir, forcing_context)
         # #1164 invariant: packaged 候选集恒等于本次 staging 产物;禁止事后猜测.
         # A manifest that declares a packaged IC clears every staged ``*.cfg.ic``
         # BEFORE the package is re-staged, so the exactly-one search below sees
@@ -557,7 +582,11 @@ class SHUDRuntime:
         if _declares_packaged_initial_condition(manifest):
             self._clear_packaged_initial_states(model_input_dir)
         self._stage_artifact(manifest["model"]["model_package_uri"], model_input_dir)
-        forcing_context = self._prepare_forcing_package_context(manifest)
+        if forcing_context is None:
+            # The hygiene probe swallowed this call's failure so that every
+            # pre-existing staging error still surfaces from its historical call
+            # site, in its historical order.  Redo it here and let it raise.
+            forcing_context = self._prepare_forcing_package_context(manifest)
         self._stage_artifact(
             manifest["forcing"]["forcing_uri"],
             model_input_dir,
@@ -715,13 +744,19 @@ class SHUDRuntime:
             # lost the sampling race.
             missing = ", ".join(f"f{hour:03d}" for hour in missing_checkpoints)
             observed = checkpoint_tracker.observed_header_minutes
-            observed_text = ", ".join(f"{minute:g}" for minute in observed) if observed else "none"
+            observed_text = ", ".join(_format_header_minute(minute) for minute in observed) if observed else "none"
             manifest_note = f"; state_checkpoints.json write failed: {manifest_error}" if manifest_error else ""
+            # Suffix ORDER is truncation policy (#1320): the task-outcome receipt
+            # keeps only the first TASK_OUTCOME_MESSAGE_MAX_LENGTH characters, so
+            # the two bounded fields — one recovery outcome per missing hour, and
+            # the note saying the fallback manifest itself failed to land — must
+            # precede the observed trail, which is the only field that grows
+            # without bound (one entry per distinct header the watcher sampled).
             raise SHUDRuntimeError(
                 "STATE_CHECKPOINTS_MISSING",
-                f"SHUD did not emit requested restart checkpoints: {missing} "
-                f"(observed cfg.ic.update header minutes: {observed_text})"
-                f"{checkpoint_tracker.recovery_outcome_summary()}{manifest_note}",
+                f"SHUD did not emit requested restart checkpoints: {missing}"
+                f"{checkpoint_tracker.recovery_outcome_summary()}{manifest_note}"
+                f" (observed cfg.ic.update header minutes: {observed_text})",
             )
         if manifest_error is not None:
             # Nothing is missing: the manifest is no longer diagnostics but the
@@ -822,6 +857,20 @@ class SHUDRuntime:
                 if project_mode:
                     end_day = _shud_start_day(manifest) + hour / 24.0
                     content = _replace_or_append(content, "END", _format_float(end_day), separator=separator)
+                    # #1317: SHUD writes a restart file only when the elapsed model
+                    # time divides Update_IC_STEP (MD_update.cpp:226-229), END
+                    # included -- so a rerun that inherited the manifest's cadence
+                    # cannot produce an hour that cadence does not divide.  This
+                    # loop is per-hour, so `hour * 60` divides THIS rerun's END by
+                    # construction and no gcd is involved.  Recovery is therefore
+                    # locally correct whatever the manifest configured.  Gated on
+                    # project mode to match `generate_cfg_para` (:619-624), the only
+                    # producer of this key: `_replace_or_append` appends a missing
+                    # key, so an ungated injection would hand a cfg-style file a key
+                    # its producer never writes.
+                    content = _replace_or_append(
+                        content, "Update_IC_STEP", str(hour * 60), separator=separator
+                    )
                 else:
                     end_time = _parse_time(manifest["start_time"]) + timedelta(hours=hour)
                     content = _replace_or_append(content, "END_TIME", _format_time(end_time), separator=separator)
@@ -957,8 +1006,8 @@ class SHUDRuntime:
         # production run manifest never carries ``forcing.files`` (the chain
         # assembler in services/orchestrator/chain_manifest_contracts.py emits
         # uri/checksum only), so run-manifest entries are the diagnostic lane
-        # fallback (scripts/create_qhh_shud_manifest.py writes them) and
-        # canonical-first inside the staging probe is the last resort.
+        # fallback (the diagnostic manifest helper under scripts/ writes them)
+        # and canonical-first inside the staging probe is the last resort.
         # ``_authoritative_package_manifest_checksum_entries`` is deliberately not
         # used here: it raises when the package manifest is absent, which would
         # newly fail-close the non-direct-grid lane.
@@ -1046,13 +1095,19 @@ class SHUDRuntime:
                     "Staged SHUD forcing package contains more than one station-index member "
                     f"in {shud_dir}: {', '.join(staged_members)}; refusing to guess which one "
                     "is authoritative. Direct-grid staging copies only manifest-allowlisted "
-                    "members, so the most likely cause is a prior attempt that staged a "
-                    "different station-index identity into this reused run input workspace "
-                    "(prior-attempt residue). Remediation: manually remove the stale member "
-                    "(or clear the run's input workspace) and re-drive; this error code is "
-                    "not retryable in place.",
+                    "members, and it deletes every undeclared accepted station-index member "
+                    "before writing (#1355), so prior-attempt residue can no longer be the "
+                    "cause: the most likely cause is an out-of-band write into this run "
+                    "input workspace, outside that allowlisted staging. Remediation: report "
+                    "this workspace for inspection instead of hand-deleting the extra member "
+                    "— the out-of-band writer, not the leftover file, is the defect; this "
+                    "error code is not retryable in place.",
                 )
-            declared_member = _manifest_declared_shud_forcing_index_member(checksum_entries)
+            declared_member = _manifest_declared_shud_forcing_index_member(
+                checksum_entries,
+                forcing_uri=str((manifest.get("forcing") or {}).get("forcing_uri") or ""),
+                object_store_prefix=self.config.object_store_prefix,
+            )
             staged_members = [
                 declared_member
                 if declared_member in staged_members
@@ -1164,6 +1219,133 @@ class SHUDRuntime:
             is_direct_grid=is_direct_grid,
         )
 
+    def _forcing_package_context_for_attempt_hygiene(
+        self, manifest: dict[str, Any]
+    ) -> _ForcingPackageContext | None:
+        """Resolve the forcing package context early, for #1491 attempt-start hygiene.
+
+        The station CSV names this attempt declares are only knowable from the
+        forcing package, and the hygiene has to run BEFORE the model package is
+        staged — otherwise it could not tell "a previous attempt left this" from
+        "this attempt just staged this", which is exactly what the collision gate
+        must keep refusing.
+
+        Resolving it early would, however, move every failure this call can raise
+        (package manifest read/checksum, member checksums, station filename
+        validation) ahead of model package staging, changing observable ordering:
+        ``test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att``
+        asserts the staged ``.sp.att`` bytes after a raise that happens inside
+        this very call.  So the probe is best-effort: on a failure that survives
+        the retry below it returns ``None`` and :meth:`prepare_workspace` re-runs
+        the call at its historical site, where it raises exactly as before.
+
+        A failure is retried ONCE in place, before the model package is staged.
+        The call is read-only, and a TRANSIENT failure (a flaky object-store read
+        of the package manifest or a member) would otherwise swallow the hygiene
+        for a run whose next attempt then hits the collision gate on its own
+        predecessor's station CSVs — #1491's wedged ``run_id``, reproduced
+        verbatim, on a code (``DIRECT_GRID_STATION_FILENAME_COLLISION``) that is
+        deliberately absent from ``TRANSIENT_ERROR_CODES`` and therefore never
+        retried at the scheduler level.
+
+        Call count, since this call is NOT memoized (:meth:`prepare_workspace`
+        merely reuses the returned object in a local): a successful attempt
+        resolves the context once; an attempt whose failure is deterministic
+        resolves it three times — this probe, the in-place retry, and the
+        historical call site — and :meth:`_verify_forcing_object_checksums`
+        re-hashes every declared member on each.
+
+        Skipping the hygiene on a swallowed failure is fail-CLOSED: staging then
+        behaves exactly as it did before this change (the collision gate refuses),
+        it never gains permission to overwrite anything.
+        """
+
+        try:
+            return self._prepare_forcing_package_context(manifest)
+        except Exception:  # noqa: BLE001 - a transient shape gets the in-place retry below
+            pass
+        try:
+            return self._prepare_forcing_package_context(manifest)
+        except Exception as error:  # noqa: BLE001 - re-raised verbatim at the historical call site
+            self._log_attempt_hygiene_probe_skip(manifest, error)
+            return None
+
+    def _log_attempt_hygiene_probe_skip(self, manifest: dict[str, Any], error: BaseException) -> None:
+        """Leave the swallowed probe failure in this run's log dir.
+
+        Without it the hygiene lane is the silent one: operations cannot tell
+        "the cleanup ran and found no residue" from "the cleanup never ran
+        because the forcing package could not be resolved", which is exactly the
+        difference between a healthy retry and a wedged ``run_id``.
+        """
+
+        try:
+            run_id = _safe_path_component(str(manifest.get("run_id") or ""))
+            log_dir = Path(self.config.workspace_root) / "runs" / run_id / "logs"
+            _write_text_no_follow(
+                log_dir / "attempt_hygiene_probe.err.log",
+                f"direct-grid attempt-start hygiene skipped for run {run_id}: "
+                f"{getattr(error, 'error_code', type(error).__name__)}\n",
+                containment_root=log_dir,
+            )
+        except (OSError, ValueError, SHUDRuntimeError, SafeFilesystemError):
+            # Diagnostics are best-effort, and this probe must never raise: the
+            # historical call site is the one that reports this failure.
+            return
+
+    def _clear_predecessor_direct_grid_station_csvs(
+        self,
+        model_input_dir: Path,
+        forcing_context: _ForcingPackageContext,
+    ) -> None:
+        """Remove station CSV residue left by an EARLIER attempt of this run_id.
+
+        Scope contract: the deletion set is exactly the station CSV targets this
+        attempt declares (``shud/<name>.csv`` members of the checksum-verified
+        package manifest) that already exist as entries of ``model_input_dir`` —
+        never a whole-directory clear, never a name outside that set.  Reserved
+        project files (``{project}.sp.att`` and friends) are structurally out of
+        reach: ``_direct_grid_station_filename`` requires a ``.csv`` suffix and no
+        reserved name has one.  Every removal is ``unlink_no_follow`` anchored on
+        ``model_input_dir``, so directory-form and symlink-form residue are
+        refused by the primitive rather than followed out of the workspace.
+
+        Non-direct-grid staging never enters here: it copies the whole package
+        prefix through ``_copy_staged_file_no_follow`` (:1121), which already
+        overwrites, so it never had this defect and gains no deletion.
+
+        Fail-LOUD, no two-way branch (#1164 :meth:`_clear_packaged_initial_states`
+        is the exemplar, #1355 the sibling): a removal that cannot be completed
+        re-codes as ``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`` — the existing
+        code for this function family's deletion primitive, deliberately absent
+        from ``TRANSIENT_ERROR_CODES`` — and ends the attempt.  Because this runs
+        before ANY staging, such an abort also leaves no partially staged station
+        CSV set behind.
+        """
+
+        if not forcing_context.is_direct_grid:
+            return
+        declared_names = _declared_direct_grid_station_csv_names(forcing_context.checksum_entries)
+        if not declared_names:
+            return
+        try:
+            present = set(list_directory_no_follow(model_input_dir, containment_root=model_input_dir))
+        except (SafeFilesystemError, OSError) as error:
+            raise SHUDRuntimeError(
+                "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                "Run input workspace could not be listed for prior-attempt station CSV cleanup "
+                f"before direct-grid staging: {error}",
+            ) from error
+        for name in sorted(declared_names & present):
+            try:
+                unlink_no_follow(model_input_dir / name, containment_root=model_input_dir, missing_ok=True)
+            except (SafeFilesystemError, OSError) as error:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                    f"Prior-attempt direct-grid station CSV {name} could not be removed from the "
+                    f"run input workspace before direct-grid staging: {error}",
+                ) from error
+
     def _read_authoritative_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
         if not package_manifest_uri:
@@ -1264,82 +1446,182 @@ class SHUDRuntime:
 
         rejected_state_ids: set[str] = set()
         before_time = _parse_time(manifest.get("cycle_time") or manifest["start_time"])
-        while True:
-            state_id = _initial_state_id(manifest)
-            state_uri = _initial_state_uri(manifest)
-            expected_checksum = _initial_state_checksum(manifest)
-            snapshot = self._state_snapshot(state_id)
-            if snapshot is not None:
-                state_uri = snapshot.state_uri
-                expected_checksum = snapshot.checksum
-                _set_initial_state_from_snapshot(
-                    manifest,
-                    snapshot,
-                    quality=_initial_state_quality(manifest) or "fresh",
-                )
-
-            if not state_uri:
-                if _exact_warm_start_required(manifest):
-                    raise SHUDRuntimeError(
-                        "WARM_START_UNAVAILABLE",
-                        "Exact warm-start policy rejects a selected state without a readable URI.",
+        # #1431 escalate accounting: one drifted snapshot is a snapshot accident and
+        # degrades like any other corrupt candidate, but a ladder whose candidates were
+        # ALL rejected for a time mismatch (at least two of them) is systematic drift and
+        # must stay fail-loud.  Both tallies are SETS of candidate identities, not
+        # iteration counters, because the SAME physical snapshot can be walked twice: a
+        # manifest that carries only an ``ic_file_uri`` (or a ``state_id`` the index no
+        # longer knows) is rejected once without ever entering ``rejected_state_ids``
+        # under the index's own id, and ``_next_usable_state`` then hands the very same
+        # object back with that id attached.  Counting iterations would let that ONE
+        # drifted snapshot fake the plural unanimity the escalate demands and fail every
+        # cycle with a false systemic alarm.  The identity is the resolved state URI: it is
+        # the one key stable across both rounds (and it is always set here -- the
+        # ``not state_uri`` exit below returns first).  URI-only candidates therefore count
+        # like any other; they just cannot be marked.
+        rejected_identities: set[str] = set()
+        mismatch_identities: set[str] = set()
+        last_time_mismatch_message: str | None = None
+        # Time-mismatch marks are DEFERRED rather than written as they happen: marking
+        # persists ``usable_flag=False``, so writing them on the systemic-escalate exit
+        # would make the next cycle find no usable candidate and cold-start silently --
+        # the systematic-drift alarm would ring exactly once.  Every other loop exit
+        # flushes them (the ``return``s below call the flush directly; the wrapper around
+        # the loop covers every exception exit), so the QC record is only withheld on the
+        # exit that is itself the loud signal.  Loop termination reads
+        # ``rejected_state_ids`` (in memory), never the persisted flag, so deferring
+        # cannot loop.
+        pending_mismatch_marks: list[dict[str, Any]] = []
+        try:
+            while True:
+                # Per-candidate, reset BEFORE anything else: a candidate that fails staging or
+                # the checksum never reaches the materialization ``try`` below, so a value left
+                # over from the previous iteration would count that rejection as a time
+                # mismatch and fake the unanimity the escalate below requires.
+                time_mismatch = False
+                state_id = _initial_state_id(manifest)
+                state_uri = _initial_state_uri(manifest)
+                expected_checksum = _initial_state_checksum(manifest)
+                snapshot = self._state_snapshot(state_id)
+                if snapshot is not None:
+                    state_uri = snapshot.state_uri
+                    expected_checksum = snapshot.checksum
+                    _set_initial_state_from_snapshot(
+                        manifest,
+                        snapshot,
+                        quality=_initial_state_quality(manifest) or "fresh",
                     )
-                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
-                self._sync_init_state_id(manifest)
-                return
 
-            self._clear_staged_initial_states(input_dir)
-            staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(state_uri, input_dir)
-            if staged_path is not None and (
-                expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
-            ):
-                try:
-                    self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
-                except SHUDRuntimeError as error:
-                    if error.error_code != IC_TIME_SHIFT_HEADER_INVALID:
-                        raise
-                    # A snapshot whose IC header has no minute-time slot is a
-                    # CORRUPT SNAPSHOT, not a broken run: translate the injector's
-                    # fail-closed refusal into the same rejection channel a
-                    # checksum mismatch uses, so this candidate is marked and the
-                    # ladder below moves on to the next usable state (or cold
-                    # start).  Letting it propagate here would turn one bad
-                    # snapshot into a whole failed forecast, losing the
-                    # degradation ladder this loop exists to provide.
-                    error_message = error.message
-                else:
-                    _set_runtime_init_mode(manifest, 3)
+                if not state_uri:
+                    self._flush_pending_corruption_marks(pending_mismatch_marks)
+                    if _exact_warm_start_required(manifest):
+                        raise SHUDRuntimeError(
+                            "WARM_START_UNAVAILABLE",
+                            "Exact warm-start policy rejects a selected state without a readable URI.",
+                        )
+                    _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
                     self._sync_init_state_id(manifest)
                     return
 
-            message = error_message or "Initial state checksum mismatch."
-            if state_id:
-                rejected_state_ids.add(state_id)
-                self._mark_init_state_corrupted(
-                    state_id,
-                    message=message,
-                    actual_checksum=actual_checksum,
-                    expected_checksum=expected_checksum,
-                )
-
-            if _exact_warm_start_required(manifest):
                 self._clear_staged_initial_states(input_dir)
-                raise SHUDRuntimeError(
-                    "WARM_START_UNAVAILABLE",
-                    f"Exact warm-start state {state_id or state_uri} is unavailable: {message}",
+                staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(
+                    state_uri, input_dir
                 )
+                if staged_path is not None and (
+                    expected_checksum is None or _checksum_matches(expected_checksum, actual_checksum)
+                ):
+                    try:
+                        self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
+                    except SHUDRuntimeError as error:
+                        if error.error_code == IC_TIME_SHIFT_HEADER_INVALID:
+                            # A snapshot whose IC header has no minute-time slot is a
+                            # CORRUPT SNAPSHOT, not a broken run: translate the injector's
+                            # fail-closed refusal into the same rejection channel a
+                            # checksum mismatch uses, so this candidate is marked and the
+                            # ladder below moves on to the next usable state (or cold
+                            # start).  Letting it propagate here would turn one bad
+                            # snapshot into a whole failed forecast, losing the
+                            # degradation ladder this loop exists to provide.
+                            error_message = error.message
+                        elif error.error_code == "WARM_START_TIME_MISMATCH":
+                            # #1431: same reasoning for a snapshot whose header time
+                            # disagrees with the valid_time it was recorded at -- it is not
+                            # the state it claims to be, i.e. one more corrupt candidate,
+                            # and a healthy neighbour in the index must still get its turn.
+                            # Under the exact-warm policy there is no ladder to walk, so the
+                            # historical whole-run failure is preserved verbatim (bare
+                            # re-raise: same code, message and traceback); only the
+                            # materialized IC is cleared first, matching the workspace
+                            # hygiene the exact-warm arm below already had.
+                            if _exact_warm_start_required(manifest):
+                                self._clear_staged_initial_states(input_dir)
+                                raise
+                            time_mismatch = True
+                            # Greppable token, so this rejection channel stays distinguishable
+                            # from the header-shape one in the recorded mark message.
+                            error_message = f"WARM_START_TIME_MISMATCH: {error.message}"
+                        else:
+                            raise
+                    else:
+                        self._flush_pending_corruption_marks(pending_mismatch_marks)
+                        _set_runtime_init_mode(manifest, 3)
+                        self._sync_init_state_id(manifest)
+                        return
 
-            next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
-            if next_state is None:
-                self._clear_staged_initial_states(input_dir)
-                _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
-                self._sync_init_state_id(manifest)
-                return
-            _set_initial_state_from_snapshot(
-                manifest,
-                next_state,
-                quality=assess_freshness(next_state.valid_time, before_time),
-            )
+                message = error_message or "Initial state checksum mismatch."
+                rejected_identities.add(state_uri)
+                if time_mismatch:
+                    mismatch_identities.add(state_uri)
+                    last_time_mismatch_message = message
+                if state_id:
+                    rejected_state_ids.add(state_id)
+                    mark: dict[str, Any] = {
+                        "state_id": state_id,
+                        "message": message,
+                        "actual_checksum": actual_checksum,
+                        "expected_checksum": expected_checksum,
+                    }
+                    if time_mismatch:
+                        pending_mismatch_marks.append(mark)
+                    else:
+                        self._mark_init_state_corrupted(
+                            state_id,
+                            message=message,
+                            actual_checksum=actual_checksum,
+                            expected_checksum=expected_checksum,
+                        )
+
+                if _exact_warm_start_required(manifest):
+                    # The pending marks are flushed by the wrapper around this loop, which
+                    # covers every exception exit but the systemic escalate.
+                    self._clear_staged_initial_states(input_dir)
+                    raise SHUDRuntimeError(
+                        "WARM_START_UNAVAILABLE",
+                        f"Exact warm-start state {state_id or state_uri} is unavailable: {message}",
+                    )
+
+                next_state = self._next_usable_state(manifest, before_time, rejected_state_ids)
+                if next_state is None:
+                    self._clear_staged_initial_states(input_dir)
+                    if len(mismatch_identities) >= 2 and mismatch_identities == rejected_identities:
+                        # Unanimous plural time mismatch (#1431): nothing on this ladder was
+                        # rejected for any other reason, so this is systematic drift (a bad
+                        # re-key batch), not a corrupt snapshot -- fail the run loudly instead
+                        # of cold-starting.  The pending marks are deliberately NOT flushed:
+                        # the candidates stay usable so the next cycle walks the same ladder
+                        # and raises the same alarm until the drift is fixed.
+                        raise SHUDRuntimeError(
+                            WARM_START_TIME_MISMATCH_SYSTEMIC,
+                            f"Systematic warm-start time drift: all {len(rejected_identities)} warm-start "
+                            f"candidate(s) were rejected for a time mismatch "
+                            f"({len(mismatch_identities)} of {len(rejected_identities)} rejections). "
+                            f"Last rejection: {last_time_mismatch_message}",
+                        )
+                    self._flush_pending_corruption_marks(pending_mismatch_marks)
+                    _set_cold_start_initial_state(manifest, quality="cold_start_no_state")
+                    self._sync_init_state_id(manifest)
+                    return
+                _set_initial_state_from_snapshot(
+                    manifest,
+                    next_state,
+                    quality=assess_freshness(next_state.valid_time, before_time),
+                )
+        except SHUDRuntimeError as error:
+            # Deferred-mark invariant, by construction (#1431): the systemic escalate is the
+            # ONLY exit that withholds the pending marks.  Several exception exits inside the
+            # loop -- an unexpected materialization code, ``STATE_LOOKUP_FAILED`` from the
+            # snapshot lookup, ``WORKSPACE_PATH_UNSAFE`` from the staged-state clear, the
+            # exact-warm refusals -- would otherwise drop a QC record this ladder already
+            # earned, leaving the drifted snapshot usable with nothing recorded against it.
+            if error.error_code != WARM_START_TIME_MISMATCH_SYSTEMIC:
+                self._flush_pending_corruption_marks(pending_mismatch_marks)
+            raise
+        except Exception:
+            # Anything unstructured (an object-store or filesystem error) is likewise not the
+            # systemic signal, so the earned marks must not leave with it.
+            self._flush_pending_corruption_marks(pending_mismatch_marks)
+            raise
 
     def _consume_packaged_initial_state(self, manifest: dict[str, Any], input_dir: Path) -> None:
         """Consume the packaged calibrated ``*.cfg.ic`` or raise (#1164).
@@ -1681,6 +1963,29 @@ class SHUDRuntime:
             expected_checksum=expected_checksum,
         )
 
+    def _flush_pending_corruption_marks(self, pending: list[dict[str, Any]]) -> None:
+        """Write the deferred time-mismatch corruption marks and empty the buffer (#1431).
+
+        Called on every ``_stage_initial_state`` loop exit except the systemic-escalate
+        raise, which withholds them on purpose so the drifted snapshots stay usable and
+        the next cycle re-raises the same alarm.  That "every" is true by construction,
+        not by enumeration: the three ``return`` exits call this directly, and the
+        try/except wrapped around the ladder loop flushes on the way out of ANY
+        propagating exception whose code is not
+        ``WARM_START_TIME_MISMATCH_SYSTEMIC`` -- including the exits that predate #1431
+        (an unexpected materialization code, ``STATE_LOOKUP_FAILED``,
+        ``WORKSPACE_PATH_UNSAFE``, the exact-warm refusals).
+        """
+
+        for mark in pending:
+            self._mark_init_state_corrupted(
+                mark["state_id"],
+                message=mark["message"],
+                actual_checksum=mark["actual_checksum"],
+                expected_checksum=mark["expected_checksum"],
+            )
+        pending.clear()
+
     def _next_usable_state(
         self,
         manifest: dict[str, Any],
@@ -1778,7 +2083,59 @@ class SHUDRuntime:
         *,
         forcing_context: _ForcingPackageContext,
     ) -> None:
+        """Stage the manifest-allowlisted direct-grid members over a reused input workspace.
+
+        #1355: ``input/<project>`` is reused across every attempt of a run_id, and
+        this staging only ever *wrote* allowlisted members, never deleting any.  A
+        re-drive that crosses the #1176 identity migration therefore left the prior
+        attempt's station-index member beside this attempt's, which the filesystem
+        ambiguity gate in :meth:`_stage_standard_shud_forcing` (correctly) refuses,
+        deadlocking every later attempt of that run_id until a human deletes the
+        file on the compute node.  So this staging opens with declared-member
+        anchored hygiene: before writing anything, every accepted station-index
+        member that THIS attempt's checksum-verified package manifest does not
+        declare is removed from the staged tree.
+
+        Deletion-scope contract: the deletion set is exactly
+        ``SHUD_FORCING_INDEX_MEMBERS`` minus what the manifest declares — one
+        file in the normal exactly-one-declared shape, both members when the
+        manifest declares none (which then fails closed on the missing
+        membership), and never anything outside that two-member set.  Prior-attempt
+        station CSVs and unrelated staged files are left alone: they are either
+        overwritten by this staging or adjudicated by the checksum/read paths.
+        Indiscriminate clearing of the input workspace is an explicit non-goal.
+
+        Fail-LOUD, no two-way branch (#1164 :meth:`_clear_packaged_initial_states`
+        is the exemplar): a deletion that cannot be completed re-codes as
+        ``DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED`` and ends the attempt rather
+        than staging on top of residue.  Directory-form and symlink-form residue
+        are refused by ``unlink_no_follow`` itself and land on that same code.
+        The orchestrator does not auto-retry it: the code is deliberately absent
+        from ``TRANSIENT_ERROR_CODES`` (a file that cannot be unlinked will not
+        unlink on a retry either), so it takes ``retry.py``'s unknown-code default
+        of non-transient.  Whether it is also registered in
+        ``NON_TRANSIENT_ERROR_CODES`` is left open on purpose — ``retry.py`` is
+        unchanged by this change.
+        """
+
         object_root = Path(self.config.object_store_root)
+        declared_index_members = {
+            str(entry["relative_path"])
+            for entry in forcing_context.checksum_entries
+            if str(entry["relative_path"]) in SHUD_FORCING_INDEX_MEMBERS
+        }
+        for member in SHUD_FORCING_INDEX_MEMBERS:
+            if member in declared_index_members:
+                continue
+            member_path = destination / Path(*PurePosixPath(member).parts)
+            try:
+                unlink_no_follow(member_path, containment_root=destination, missing_ok=True)
+            except (SafeFilesystemError, OSError) as error:
+                raise SHUDRuntimeError(
+                    "DIRECT_GRID_FORCING_RESIDUE_CLEANUP_FAILED",
+                    f"Undeclared staged SHUD station-index member {member} could not be removed "
+                    f"from the run input workspace before direct-grid staging: {error}",
+                ) from error
         staged_relative_paths: set[str] = set()
         for file_entry in forcing_context.checksum_entries:
             relative_posix = str(file_entry["relative_path"])
@@ -2950,6 +3307,35 @@ def _direct_grid_station_filename(raw_token: str) -> str:
     return token
 
 
+def _declared_direct_grid_station_csv_names(entries: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Station CSV target names this attempt declares, from its verified package manifest.
+
+    ``_direct_grid_runtime_checksum_entries`` builds the direct-grid entry set as
+    the station-index member plus one ``shud/<csv>`` entry per row of the
+    checksum-verified ``.tsd.forc``, so this is the same identity set the copy
+    loop later lands on — derived from the object store, not from whatever a
+    previous attempt happens to have left in the workspace.
+
+    A non-conforming name is skipped rather than raised on: this feeds hygiene
+    only, and the staging path adjudicates it (``DIRECT_GRID_STATION_FILENAME_INVALID``)
+    at its own site with its own ordering.
+    """
+
+    names: set[str] = set()
+    for entry in entries:
+        relative_path = str(entry.get("relative_path") or "").strip()
+        if not relative_path or relative_path in SHUD_FORCING_INDEX_MEMBERS:
+            continue
+        parts = PurePosixPath(relative_path).parts
+        if len(parts) != 2 or parts[0] != "shud":
+            continue
+        try:
+            names.add(_direct_grid_station_filename(parts[1]))
+        except SHUDRuntimeError:
+            continue
+    return names
+
+
 def _mapping_metadata_declares_direct_grid(metadata: Mapping[str, Any]) -> bool:
     for payload in _iter_mapping_metadata_payloads(metadata):
         if str(payload.get("forcing_mapping_mode") or "").strip() == "direct_grid":
@@ -3241,6 +3627,25 @@ def _read_cfg_ic_header_minute(path: Path) -> float | None:
     return cfg_ic_header_minute_time(header)
 
 
+def _format_header_minute(minute: float) -> str:
+    """Render a header minute-time as lossless plain decimal for diagnostics.
+
+    ``:g`` collapses an epoch-form minute (``29607840.0``) to ``2.96078e+07``,
+    which no longer greps against the full-precision value the manifest stores,
+    and ``:.0f`` would silently round: header minutes are NOT integral by
+    construction, ``_read_cfg_ic_header_minute`` returns whatever float parses.
+    The non-finite check comes FIRST because that same bare parse admits
+    ``nan``/``inf`` and ``int(nan)`` raises — a diagnostic rendering must never
+    change the run's error code.
+    """
+
+    if not math.isfinite(minute):
+        return repr(minute)
+    if minute == int(minute):
+        return str(int(minute))
+    return repr(minute)
+
+
 def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     if not _regular_file_exists(path, containment_root=path.parent):
         return
@@ -3341,6 +3746,14 @@ class _StateCheckpointTracker:
     def recovery_outcome_summary(self) -> str:
         """Compact ``; recovery outcomes: f012=...`` suffix for the failure message."""
 
+        # Total-function contract, kept deliberately (#1320): the only call site
+        # today is the STATE_CHECKPOINTS_MISSING raise in ``run_shud``, which is
+        # reached only after ``_recover_missing_state_checkpoints`` ran, and
+        # every exit lane of that loop records an outcome for its hour — so
+        # ``recovery_outcomes`` is provably non-empty THERE and this branch is
+        # unreachable from it (mutation-probed in #1316 round 4; no need to
+        # re-run the probe). It stays because a future caller on a no-recovery
+        # path would otherwise render the degenerate ``"; recovery outcomes: "``.
         if not self.recovery_outcomes:
             return ""
         rendered = ", ".join(f"f{hour:03d}={self.recovery_outcomes[hour]}" for hour in sorted(self.recovery_outcomes))
@@ -3415,9 +3828,12 @@ class _StateCheckpointTracker:
         structurally complete. Returns whether the hour is now captured.
         """
 
-        target_info = self.targets.get(hour)
-        if target_info is None or hour in self.captured:
-            return hour in self.captured
+        # ``hour`` comes from ``missing_hours()``, which yields only ``targets``
+        # keys absent from ``captured``, so the subscript is the invariant rather
+        # than a lookup that can fail (pinned by
+        # ``test_state_checkpoint_tracker_missing_hours_are_uncaptured_targets_only``
+        # and its sibling-hour test).
+        target_info = self.targets[hour]
         source_header = _read_cfg_ic_header_minute(source_path)
         if source_header is None:
             # rc == 0 but the rerun left no readable state behind: distinct from
@@ -3449,7 +3865,7 @@ class _StateCheckpointTracker:
             # Carry the rerun's OWN header minute: "the engine ran and landed at
             # 1440 instead of 720" is a different bug report from "the engine
             # never produced a state".
-            self.record_recovery_outcome(hour, f"gate_rejected(header={source_header:g})")
+            self.record_recovery_outcome(hour, f"gate_rejected(header={_format_header_minute(source_header)})")
             return False
         self.captured[hour] = {
             "lead_hours": hour,
@@ -3787,6 +4203,9 @@ def normalize_staged_ic_negative_residuals(
 
 def _manifest_declared_shud_forcing_index_member(
     checksum_entries: Sequence[Mapping[str, Any]] | None,
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
 ) -> str | None:
     """Return the station-index member the package manifest names, if exactly one.
 
@@ -3800,17 +4219,58 @@ def _manifest_declared_shud_forcing_index_member(
     list (producer shape: ``role``/``relative_path``/``uri``/``checksum``); the
     non-SHUD entries there carry no ``relative_path`` and drop out of the
     accepted-member intersection.
+
+    Declaration shapes are read through the direct-grid parser
+    (``_normalize_package_manifest_file_relative_path``) so the two lanes cannot
+    drift apart on the same ``forcing_package.json``: a ``./``-prefixed
+    ``relative_path`` normalizes, and a missing one is derived from ``uri``
+    relative to ``forcing_uri``. Unlike the direct-grid lane this anchor never
+    fails closed — an unsafe or underivable entry is skipped, leaving its
+    siblings to resolve. An unavailable ``forcing_uri`` therefore only costs the
+    uri-derived entries; ``./`` normalization needs no uri context.
     """
 
-    declared = {
-        str(entry.get("relative_path") or "").strip()
-        for entry in checksum_entries or ()
-        if isinstance(entry, Mapping)
-    }
+    declared: set[str] = set()
+    for entry in checksum_entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        relative_path = _normalized_package_manifest_file_relative_path_or_none(
+            entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
+        )
+        if relative_path is not None:
+            declared.add(relative_path)
     matched = declared & set(SHUD_FORCING_INDEX_MEMBERS)
     if len(matched) == 1:
         return next(iter(matched))
     return None
+
+
+def _normalized_package_manifest_file_relative_path_or_none(
+    file_entry: Mapping[str, Any],
+    *,
+    forcing_uri: str,
+    object_store_prefix: str,
+) -> str | None:
+    """Best-effort ``_normalize_package_manifest_file_relative_path``: ``None`` on reject.
+
+    The non-direct-grid staging anchor is a resolver, not a gate, so it must not
+    gain a fail-closed surface; per-entry skipping (rather than wrapping the whole
+    list) keeps one malformed entry from blinding the anchor to a valid sibling.
+    """
+
+    try:
+        return _normalize_package_manifest_file_relative_path(
+            file_entry,
+            forcing_uri=forcing_uri,
+            object_store_prefix=object_store_prefix,
+        )
+    # ``ValueError`` too: uri derivation runs the entry through ``urlparse``,
+    # which raises a bare ``ValueError`` on a bracket-malformed authority
+    # (``s3://buck[et/...``) instead of a ``SHUDRuntimeError``.
+    except (SHUDRuntimeError, ValueError):
+        return None
 
 
 def _forcing_checksum_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:

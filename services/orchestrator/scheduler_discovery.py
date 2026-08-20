@@ -302,6 +302,25 @@ def _journal_predecessor_identity_is_stale(
     key (legal fallback warm start) — yields ``False``: no judgement, legacy
     behavior.  Read-only: no journal mutation, no run-manifest read.
     """
+    return (
+        _journal_predecessor_identity_stale_tokens(context, discovery, model, horizon=horizon)
+        is not None
+    )
+
+
+def _journal_predecessor_identity_stale_tokens(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    model: SchedulerModelLike,
+    *,
+    horizon: Mapping[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Return ``(recorded, expected)`` tokens for a POSITIVE §8.7 mismatch, else ``None``.
+
+    Single judgement body behind both the completion-scoring predicate
+    :func:`_journal_predecessor_identity_is_stale` and the #1157 backfill-slot
+    breaker, so the two can never disagree on which models keep a cycle a gap.
+    """
     lead_hours_provider = context.required_lead_hours_for_candidate
     identity_provider = (
         getattr(context.active_repository, "completed_pipeline_init_state_id", None)
@@ -309,21 +328,27 @@ def _journal_predecessor_identity_is_stale(
         else None
     )
     if not callable(lead_hours_provider) or not callable(identity_provider):
-        return False
+        return None
     recorded_init_state_id = identity_provider(
         source_id=discovery.source_id,
         cycle_time=discovery.cycle_time,
         model_id=model.model_id,
     )
     if recorded_init_state_id in (None, ""):
-        return False
+        return None
     cycle_horizon = dict(horizon or {})
     candidate = context.candidate_factory(discovery=discovery, model=model, horizon=cycle_horizon)
     source_cycle = SchedulerSourceCycle(discovery=discovery, horizon=cycle_horizon)
     try:
         required_lead_hours = int(lead_hours_provider(candidate, source_cycle))
+        _expected_base, expected_init_state_id = _scheduler_generation.expected_journal_init_state_tokens(
+            source_id=candidate.source_id,
+            model_id=candidate.model_id,
+            candidate_valid_time=candidate.cycle_time_utc,
+            required_lead_hours=required_lead_hours,
+        )
     except _scheduler_generation.JOURNAL_IDENTITY_INPUT_ERRORS:
-        return False
+        return None
     matches = _scheduler_generation.journal_init_state_lineage_matches_expected(
         str(recorded_init_state_id),
         source_id=candidate.source_id,
@@ -331,7 +356,65 @@ def _journal_predecessor_identity_is_stale(
         candidate_valid_time=candidate.cycle_time_utc,
         required_lead_hours=required_lead_hours,
     )
-    return matches is False
+    if matches is not False:
+        return None
+    return str(recorded_init_state_id), expected_init_state_id
+
+
+def _breaker_engaged_gap_identities(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+    *,
+    horizon: Mapping[str, Any] | None,
+) -> list[dict[str, Any]] | None:
+    """Per-model identity evidence when a gap's ONLY cause is a broken quarantine (#1157 D4).
+
+    Returns ``None`` — keep the execution slot — unless the cycle would score
+    ``complete`` but for §8.7 stale flags AND every model carrying such a flag
+    is breaker-engaged.  A mixed cycle (one model breaker-engaged, another
+    genuinely incomplete) therefore still takes the slot and executes normally
+    for the incomplete model: excluding it would starve real work.
+
+    The cycle's completion status is untouched by this — it stays a gap, never
+    ``complete`` (the §8.7 no-ADMIT invariant).  Read-only throughout.
+    """
+    # Without the occurrence accessor the breaker can never engage, so skip the
+    # whole probe rather than re-scoring completion for every pass that has no
+    # journal to count from.
+    if not callable(
+        getattr(context.active_repository, "completed_pipeline_init_state_id_occurrences", None)
+    ):
+        return None
+    scoped_models = _models_in_completion_scope(context, discovery, models)
+    if not scoped_models:
+        return None
+    if _cycle_completion_verdict(context, discovery, scoped_models, horizon=horizon) != "complete":
+        return None
+    identities: list[dict[str, Any]] = []
+    for model in scoped_models:
+        tokens = _journal_predecessor_identity_stale_tokens(context, discovery, model, horizon=horizon)
+        if tokens is None:
+            continue
+        recorded_init_state_id, expected_init_state_id = tokens
+        occurrences = _scheduler_generation.journal_identity_quarantine_occurrence_count(
+            context.active_repository,
+            source_id=discovery.source_id,
+            cycle_time=discovery.cycle_time,
+            model_id=model.model_id,
+            recorded_init_state_id=recorded_init_state_id,
+        )
+        if not _scheduler_generation.journal_identity_quarantine_breaker_engaged(occurrences):
+            return None
+        identities.append(
+            {
+                "model_id": model.model_id,
+                "recorded_init_state_id": recorded_init_state_id,
+                "expected_init_state_id": expected_init_state_id,
+                "occurrences": occurrences,
+            }
+        )
+    return identities or None
 
 
 def _terminal_init_state_verdict(
@@ -493,17 +576,50 @@ def _select_backfill_source_cycles(
         gaps.append(discovery)
     available_gaps = [discovery for discovery in gaps if discovery.available]
     unavailable_gaps = [discovery for discovery in gaps if not discovery.available]
+    # §8.7 quarantine breaker (#1157): a cycle whose ONLY reason for being a
+    # gap is a stale journal lineage that a provenance-stamped quarantine
+    # rerun already re-recorded can never converge by rerunning, so it must
+    # stop holding the source's single oldest-first execution slot.  Walk from
+    # the oldest gap and release consecutive breaker-engaged cycles to the next
+    # one; the walk stops at the first cycle with real work, which keeps the slot.
+    breaker_released: list[tuple[CycleDiscovery, list[dict[str, Any]]]] = []
+    remaining_gaps = list(available_gaps)
+    while remaining_gaps:
+        identities = _breaker_engaged_gap_identities(
+            context,
+            remaining_gaps[0],
+            models,
+            horizon=context.source_horizon_metadata(remaining_gaps[0], adapter),
+        )
+        if identities is None:
+            break
+        breaker_released.append((remaining_gaps.pop(0), identities))
     # Backfill cycles feed cross-cycle warm start state. Even when operators
     # raise max_cycles_per_source for discovery breadth, only the oldest
     # available incomplete cycle may execute in this pass; later available gaps
     # wait until the prior window has produced a usable state. Unavailable
     # source cycles are evidence only and must not consume the execution slot.
-    selected_for_source = available_gaps[:1]
-    deferred = available_gaps[1:]
+    selected_for_source = remaining_gaps[:1]
+    deferred = remaining_gaps[1:]
     for discovery in unavailable_gaps:
         item = _source_cycle_evidence(discovery, horizon=context.source_horizon_metadata(discovery, adapter))
         item["selection_status"] = "not_selected"
         item["selection_reason"] = _source_cycle_not_selected_reason(discovery)
+        evidence.append(item)
+    for discovery, identities in breaker_released:
+        item = _source_cycle_evidence(discovery, horizon=context.source_horizon_metadata(discovery, adapter))
+        item["selection_status"] = "not_selected"
+        item["selection_reason"] = "journal_predecessor_identity_quarantine_breaker_engaged"
+        # The cycle stays a GAP in completion scoring — this entry only records
+        # that it no longer consumes the execution slot.
+        item["journal_predecessor_identity_quarantine"] = _evidence_safe(
+            {
+                "models": identities,
+                "occurrence_threshold": (
+                    _scheduler_generation._JOURNAL_IDENTITY_QUARANTINE_BREAKER_THRESHOLD
+                ),
+            }
+        )
         evidence.append(item)
     for discovery in deferred:
         evidence.append(
@@ -521,6 +637,7 @@ def _select_backfill_source_cycles(
             "gap_count": len(gaps),
             "available_gap_count": len(available_gaps),
             "unavailable_gap_count": len(unavailable_gaps),
+            "breaker_released_gap_count": len(breaker_released),
             "selected_count": len(selected_for_source),
             "deferred_count": len(deferred),
         }

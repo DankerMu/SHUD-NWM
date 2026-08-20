@@ -339,6 +339,7 @@ class ForecastOrchestratorRuntimeMixin:
         model_package_version: str | None = None,
         model_package_checksum: str | None = None,
         max_lead_hours: int | None = None,
+        quarantine_required_lead_hours: int | None = None,
     ) -> _chain.InitialStateSelection:
         from services.orchestrator import chain_forecast_state
 
@@ -350,6 +351,7 @@ class ForecastOrchestratorRuntimeMixin:
             model_package_version=model_package_version,
             model_package_checksum=model_package_checksum,
             max_lead_hours=max_lead_hours,
+            quarantine_required_lead_hours=quarantine_required_lead_hours,
         )
 
     def _select_strict_forecast_initial_state(
@@ -445,12 +447,25 @@ class ForecastOrchestratorRuntimeMixin:
         )
 
     def _exact_or_latest_usable_state(
-        self, *, model_id: str, cycle_time: _chain.datetime, before_time: _chain.datetime, source_id: str | None
+        self,
+        *,
+        model_id: str,
+        cycle_time: _chain.datetime,
+        before_time: _chain.datetime,
+        source_id: str | None,
+        lineage_cycle_id: str | None = None,
+        lineage_lead_hours: int | None = None,
     ) -> _chain.StateSnapshot | None:
         from services.orchestrator import chain_forecast_state
 
         return chain_forecast_state._exact_or_latest_usable_state(
-            self, model_id=model_id, cycle_time=cycle_time, before_time=before_time, source_id=source_id
+            self,
+            model_id=model_id,
+            cycle_time=cycle_time,
+            before_time=before_time,
+            source_id=source_id,
+            lineage_cycle_id=lineage_cycle_id,
+            lineage_lead_hours=lineage_lead_hours,
         )
 
     def _write_run_manifest(

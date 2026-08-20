@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
 
+from workers.model_registry import basins_discovery
 from workers.model_registry.basins_discovery import BasinsDiscoveryError, _walk_files, discover_basins_inventory
 from workers.model_registry.cli import _argparse_main
 
@@ -541,6 +544,185 @@ def test_multiple_matched_sp_mesh_files_are_rejected_as_ambiguous(tmp_path: Path
     assert "alias-a.sp.mesh" in ambiguous and "zz-second.sp.mesh" in ambiguous
     # Ambiguity is its own reason, not a shape verdict on the (well-formed) IC.
     assert "numeric token(s)" not in ambiguous
+
+
+# ---------------------------------------------------------------------------
+# Unreadable required files (#1430). The checksum walk used to `continue` past an
+# OSError: a required file that was matched by glob but could not be stat'ed or
+# hashed left no checksum entry, no quirk and no warning, so "present but
+# unreadable" registered as a healthy model.
+# ---------------------------------------------------------------------------
+
+
+def test_checksum_walk_marks_a_required_file_unreadable_when_stat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stat failure is injected INSIDE the walk, never around discovery.
+
+    ``Path.stat`` cannot be patched across a whole ``discover_basins_inventory``
+    run: on 3.11 ``Path.is_file()`` goes through ``self.stat()`` and does not
+    swallow EACCES, so the fake escapes at ``_glob_non_sidecar_files`` and aborts
+    discovery, while on 3.14 ``is_file()`` reaches ``os.path.isfile`` and misses
+    the patch entirely -- green locally, red on CI, pinning nothing either way.
+    Driving the walk directly keeps the injection to the one ``path.stat()`` the
+    size check makes. The discovery-level consequences (partial, quirk, payload
+    key) are pinned by the ``_sha256`` injection below, which needs no patching
+    of pathlib at all.
+    """
+
+    root = tmp_path / "basins"
+    input_dir = root / "basin-a" / "input" / "alias-a"
+    input_dir.mkdir(parents=True)
+    unreadable_name = "alias-a.tsd.lai"
+    (input_dir / unreadable_name).write_text("tsd.lai\n", encoding="utf-8")
+    readable = input_dir / "alias-a.tsd.mf"
+    readable.write_text("tsd.mf\n", encoding="utf-8")
+    expected_checksum = hashlib.sha256(readable.read_bytes()).hexdigest()
+    resolved_root = root.resolve()
+    warnings: list[basins_discovery.DiscoveryWarning] = []
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.name == unreadable_name:
+            raise PermissionError(errno.EACCES, "simulated stat failure")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", fake_stat)
+        checksums, unreadable = basins_discovery._checksums_for_required_files(
+            input_dir,
+            {"tsd_lai": [unreadable_name], "tsd_mf": [readable.name]},
+            resolved_root,
+            warnings,
+        )
+
+    assert [reason.split(":")[0] for reason in unreadable] == [unreadable_name]
+    assert [(warning.code, warning.path) for warning in warnings] == [
+        ("BASINS_REQUIRED_FILE_UNREADABLE", str(input_dir / unreadable_name))
+    ]
+    # The rest of the walk is unaffected: only the unreadable file lost its checksum.
+    assert checksums == {readable.name: expected_checksum}
+
+
+def test_unreadable_required_file_degrades_status_to_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "alias-a.tsd.lai"
+    real_sha256 = basins_discovery._sha256
+
+    def fake_sha256(path: Path) -> str:
+        if path.name == unreadable_name:
+            raise OSError(errno.EIO, "simulated hash failure")
+        return real_sha256(path)
+
+    monkeypatch.setattr(basins_discovery, "_sha256", fake_sha256)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert model["default_publish_eligible"] is False
+    # Matched by glob, so it is NOT missing -- and not a content-shape verdict either.
+    assert model["missing_required_files"] == []
+    assert model["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [unreadable_name]
+    assert "unreadable_required_file" in model["quirks"]
+    assert "unsafe_symlink_outside_root" not in model["quirks"]
+    assert [
+        warning["path"] for warning in inventory["warnings"] if warning["code"] == "BASINS_REQUIRED_FILE_UNREADABLE"
+    ] == [str(Path(model["input_dir"]) / unreadable_name)]
+    # The rest of the walk is unaffected: only the unreadable file lost its checksum.
+    assert unreadable_name not in model["checksums"]
+    assert model["checksums"]
+
+
+def test_checksum_walk_skips_root_escaping_files_without_calling_them_unreadable(tmp_path: Path) -> None:
+    """The unsafe-symlink skip is its own arm inside the checksum walk.
+
+    Driven directly, because discovery never gets an escaping path this far:
+    ``_match_required_files`` already drops it, so a discovery-level fixture
+    would leave the walk's resolve-None ``continue`` unexecuted and would stay
+    green even if that arm were folded into the unreadable verdict. Here the
+    walk is handed a ``required_files`` mapping that names the escaping file, so
+    the arm runs: no checksum entry AND no unreadable entry.
+    """
+
+    root = tmp_path / "basins"
+    input_dir = root / "basin-a" / "input" / "alias-a"
+    input_dir.mkdir(parents=True)
+    readable = input_dir / "alias-a.tsd.mf"
+    readable.write_text("tsd.mf\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "alias-a.cfg.para"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("cfg.para\n", encoding="utf-8")
+    escaping = input_dir / "alias-a.cfg.para"
+    try:
+        escaping.symlink_to(outside)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    warnings: list[basins_discovery.DiscoveryWarning] = []
+    checksums, unreadable = basins_discovery._checksums_for_required_files(
+        input_dir,
+        {"cfg_para": ["alias-a.cfg.para"], "tsd_mf": ["alias-a.tsd.mf"]},
+        root.resolve(),
+        warnings,
+    )
+
+    assert unreadable == []
+    assert [warning.code for warning in warnings] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert [warning.path for warning in warnings] == [str(escaping)]
+    # The escaping file is skipped; the rest of the walk is untouched.
+    assert checksums == {"alias-a.tsd.mf": hashlib.sha256(readable.read_bytes()).hexdigest()}
+
+
+def test_required_file_escaping_the_root_stays_on_the_symlink_channel(tmp_path: Path) -> None:
+    """Payload-level observation: an escaping required file reads as missing, not unreadable.
+
+    It never reaches the checksum walk (``_match_required_files`` drops it), so
+    this pins what an operator sees, not the walk's own symlink arm — that arm is
+    pinned by ``test_checksum_walk_skips_root_escaping_files_without_calling_them_unreadable``.
+    """
+
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+    outside = tmp_path / "outside" / "domain.shp"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("domain.shp\n", encoding="utf-8")
+    escaping = input_dir / "gis" / "domain.shp"
+    escaping.unlink()
+    escaping.symlink_to(outside)
+
+    inventory = discover_basins_inventory(root)
+    model = one_model(inventory)
+
+    assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
+    assert model["unreadable_required_files"] == []
+    assert "unreadable_required_file" not in model["quirks"]
+    assert model["missing_required_files"] == ["gis/domain.shp"]
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+
+
+def test_readable_required_files_keep_valid_status_and_checksum_shape(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    input_dir = make_valid_model(root / "basin-a", "alias-a")
+
+    model = one_model(discover_basins_inventory(root))
+
+    assert model["status"] == "valid"
+    assert model["unreadable_required_files"] == []
+    assert "unreadable_required_file" not in model["quirks"]
+    expected_checksums = {
+        relative_name: hashlib.sha256((input_dir / relative_name).read_bytes()).hexdigest()
+        for matches in model["required_files"].values()
+        for relative_name in matches
+    }
+    assert model["checksums"] == expected_checksums
 
 
 def make_valid_model(

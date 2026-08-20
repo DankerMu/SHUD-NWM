@@ -14,7 +14,7 @@ from packages.common.best_available import BestAvailableManager, BestAvailableSe
 from packages.common.forecast_store import _spliced_response_from_rows, analysis_window_for_issue_time
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot
-from packages.common.test_netcdf4 import encode_test_netcdf4
+from packages.common.test_netcdf4 import encode_test_netcdf4_bundle
 from services.orchestrator.chain import ForcingContext, ForecastOrchestrator, InitialStateSelection, ModelContext
 from services.orchestrator.chain import OrchestratorConfig as ChainOrchestratorConfig
 from workers.canonical_converter.converter import (
@@ -24,7 +24,7 @@ from workers.canonical_converter.converter import (
     ERA5CanonicalConverterConfig,
 )
 from workers.data_adapters.era5_adapter import ERA5Adapter, ERA5AdapterConfig, MockCDSClient
-from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
+from workers.data_adapters.gfs_adapter import GFS_NOMADS_BACKEND, GFSAdapter, GFSAdapterConfig
 from workers.forcing_producer import CanonicalProduct, ForcingProducer, ForcingProducerConfig, MetStation
 from workers.output_parser import (
     HydroRunContext,
@@ -547,7 +547,10 @@ async def test_m1_forecast_cycle_data_flow_and_api_response(tmp_path: Path) -> N
 
     assert repository.data_sources["gfs"]["native_format"] == "GRIB2"
     assert repository.cycles[("gfs", cycle_time)]["status"] in {"forcing_ready", "raw_complete"}
-    assert len(repository.canonical_products) == len(forecast_hours) * 7
+    # #1412: apcp/dswrf are not published at f000 (GFS_F000_UNAVAILABLE_VARIABLES),
+    # so the f000 bundle carries 7-2 variables and the cycle total is short by 2.
+    f000_gap = 2 if 0 in forecast_hours else 0
+    assert len(repository.canonical_products) == len(forecast_hours) * 7 - f000_gap
     assert repository.forcing_version is not None
     assert repository.forcing_rows
     assert repository.hydro_runs[run_id]["status"] == "parsed"
@@ -758,6 +761,19 @@ def _run_gfs_adapter(
             native_format="GRIB2",
             max_retries=1,
             poll_interval_seconds=0,
+            # #1412: the mocked payload oracle covers exactly the NOMADS
+            # bundle URLs from the manifest. The default backend chain tries
+            # cloud mirrors first (idx + Range GET + local cdo clip), which
+            # this fixture cannot honestly serve — and the default also reads
+            # ambient GFS_SOURCE_BACKENDS, so pin the chain hermetically.
+            source_backends=(GFS_NOMADS_BACKEND,),
+            # With NOMADS the only backend, _throttle_nomads and the circuit
+            # breaker become load-bearing: pin their state root to tmp (the
+            # config default reads ambient OBJECT_STORE_ROOT — on node-27,
+            # the e2e oracle, that is a real production state path) and
+            # disable the inter-request sleep window.
+            object_store_root=object_root,
+            nomads_min_interval_seconds=0,
         ),
         repository=repository,
         object_store=store,
@@ -766,8 +782,13 @@ def _run_gfs_adapter(
     )
     manifest = adapter.build_manifest(cycle_time, forecast_hours=forecast_hours)
     for entry in manifest.entries:
-        payloads_by_url[entry.remote_url] = encode_test_netcdf4(
-            entry.variable,
+        # #1412: cloud-era manifests are bundle-shaped (one entry per forecast
+        # hour carrying every variable); encode all bundle variables so the
+        # canonical converter's per-variable reads find their record.
+        bundle = (entry.metadata or {}).get("bundle") or {}
+        variables = list(bundle.get("variables") or [entry.variable])
+        payloads_by_url[entry.remote_url] = encode_test_netcdf4_bundle(
+            variables,
             entry.forecast_hour,
             cycle_time=cycle_time,
             longitudes=[110.0],

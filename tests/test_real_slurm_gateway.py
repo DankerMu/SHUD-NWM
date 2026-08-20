@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -30,7 +31,12 @@ from services.slurm_gateway.gateway import (
 )
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
-from services.slurm_gateway.real_backend import LOG_TRUNCATION_MARKER, RealSlurmGateway
+from services.slurm_gateway.real_backend import (
+    LOG_TRUNCATION_MARKER,
+    RealSlurmGateway,
+    _normalize_slurm_state,
+    map_slurm_error_code,
+)
 
 
 def _assert_slurm_state_error_code(monkeypatch, tmp_path: Path, slurm_state: str, expected_error_code: str) -> None:
@@ -964,7 +970,8 @@ def test_sacct_state_parsing(monkeypatch, tmp_path, slurm_state, expected):
         ("NODE_FAIL", "NODE_FAILURE"),
         ("PREEMPTED", "NODE_FAILURE"),
         ("OUT_OF_MEMORY", "OUT_OF_MEMORY"),
-        ("BOOT_FAIL", "SLURM_JOB_FAILED"),
+        ("BOOT_FAIL", "NODE_FAILURE"),
+        ("DEADLINE", "SLURM_DEADLINE"),
     ],
 )
 def test_failed_sacct_states_produce_stable_error_codes(
@@ -1006,7 +1013,9 @@ def test_out_of_memory_produces_out_of_memory_error_code(monkeypatch, tmp_path) 
 
 
 def test_unknown_terminal_produces_slurm_job_failed_error_code(monkeypatch, tmp_path) -> None:
-    _assert_slurm_state_error_code(monkeypatch, tmp_path, "BOOT_FAIL", "SLURM_JOB_FAILED")
+    # REVOKED is federation-only and deliberately unmapped, so it witnesses the
+    # generic unknown code now that BOOT_FAIL maps to NODE_FAILURE.
+    _assert_slurm_state_error_code(monkeypatch, tmp_path, "REVOKED", "SLURM_JOB_FAILED")
 
 
 def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> None:
@@ -1029,10 +1038,92 @@ def test_cancelled_state_does_not_produce_error_code(monkeypatch, tmp_path) -> N
 def test_slurm_error_codes_align_with_retry_sets() -> None:
     assert "SLURM_TIMEOUT" in TRANSIENT_ERROR_CODES
     assert "NODE_FAILURE" in TRANSIENT_ERROR_CODES
+    assert "SLURM_DEADLINE" in TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" in NON_TRANSIENT_ERROR_CODES
     assert "OUT_OF_MEMORY" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in TRANSIENT_ERROR_CODES
     assert "SLURM_JOB_FAILED" not in NON_TRANSIENT_ERROR_CODES
+    # Transient membership has a second surface (scheduler_state_types
+    # .TRANSIENT_RETRY_REASON_CODES); it is pinned in tests/test_retry.py, which
+    # already owns that import, so this file stays scoped to retry.py.
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected_error_code"),
+    [
+        ("TIMEOUT", "SLURM_TIMEOUT"),
+        ("NODE_FAIL", "NODE_FAILURE"),
+        ("PREEMPTED", "NODE_FAILURE"),
+        ("BOOT_FAIL", "NODE_FAILURE"),
+        ("OUT_OF_MEMORY", "OUT_OF_MEMORY"),
+        ("DEADLINE", "SLURM_DEADLINE"),
+        # Deliberately unmapped terminal forms: REVOKED is federation-only and
+        # SPECIAL_EXIT is unobserved on this control plane, so both fall through to
+        # the generic unknown code that waits for operator adjudication.
+        ("REVOKED", "SLURM_JOB_FAILED"),
+        ("SPECIAL_EXIT", "SLURM_JOB_FAILED"),
+        ("FAILED", "SLURM_JOB_FAILED"),
+        ("!! not a state", "SLURM_JOB_FAILED"),
+        # An empty or whitespace-only State field is the same "unrecognisable state"
+        # class as illegal characters: it normalizes to UNKNOWN and takes the
+        # fallback code instead of raising out of the parse legs.
+        ("", "SLURM_JOB_FAILED"),
+        ("   ", "SLURM_JOB_FAILED"),
+    ],
+)
+def test_map_slurm_error_code_maps_every_terminal_state(raw_state: str, expected_error_code: str) -> None:
+    assert map_slurm_error_code(raw_state) == expected_error_code
+
+
+@pytest.mark.parametrize("raw_state", ["", "   "])
+def test_normalize_slurm_state_treats_empty_state_as_unknown(raw_state: str) -> None:
+    assert _normalize_slurm_state(raw_state) == "UNKNOWN"
+
+
+def test_parse_sacct_status_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    record = gateway._parse_sacct_status(
+        "12345||1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+        "12345",
+    )
+
+    assert record.manifest["slurm_raw_state"] == "UNKNOWN"
+    assert record.status == SlurmJobStatus.FAILED
+
+
+def test_parse_sacct_list_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    records = gateway._parse_sacct_list(
+        "12345|nhms_forecast|   |1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n",
+    )
+
+    assert [record.manifest["slurm_raw_state"] for record in records] == ["UNKNOWN"]
+    assert records[0].status == SlurmJobStatus.FAILED
+
+
+def test_array_member_aggregation_empty_state_converges_to_unknown(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+
+    record = gateway._parse_sacct_status(
+        "12345_0||1:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        "12345_1|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:04:00\n",
+        "12345",
+    )
+
+    assert record.manifest["slurm_raw_state"] == "UNKNOWN"
+    assert record.status == SlurmJobStatus.FAILED
+
+
+def test_boot_fail_maps_to_failed_without_unmapped_warning(tmp_path, caplog) -> None:
+    gateway = _gateway(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="services.slurm_gateway.real_backend"):
+        status = gateway._map_slurm_state("BOOT_FAIL")
+
+    assert status == SlurmJobStatus.FAILED
+    assert [record for record in caplog.records if "Unmapped Slurm state" in record.getMessage()] == []
 
 
 def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
@@ -3355,6 +3446,73 @@ def test_list_jobs_defaults_to_lookback_start_time(monkeypatch, tmp_path):
 
     assert gateway.list_jobs(limit=100, offset=0) == []
     assert any(arg.startswith("--starttime=") for arg in calls[0])
+
+
+# sacct reads bare timestamps in the host's local timezone, so the pinned instant below
+# is rendered differently per host TZ; expectations are literal, never recomputed.
+_PINNED_LIST_JOBS_NOW = datetime(2026, 7, 12, 4, 0, 0, tzinfo=UTC)
+
+
+def _rendered_starttime(gateway, monkeypatch, *, pinned_now=None, **list_jobs_kwargs) -> str:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    if pinned_now is not None:
+        monkeypatch.setattr(gateway, "_now", lambda: pinned_now)
+
+    gateway.list_jobs(limit=100, offset=0, **list_jobs_kwargs)
+
+    return next(arg for arg in calls[0] if arg.startswith("--starttime="))
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_is_local_wall_clock_east_of_utc(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("Asia/Shanghai"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T12:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_is_local_wall_clock_west_of_utc(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("America/New_York"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T00:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_default_starttime_on_utc_host_is_unchanged(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("UTC"):
+        rendered = _rendered_starttime(gateway, monkeypatch, pinned_now=_PINNED_LIST_JOBS_NOW)
+
+    assert rendered == "--starttime=2026-07-11T04:00:00"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset() is POSIX-only")
+def test_list_jobs_explicit_start_time_is_passed_through_unconverted(monkeypatch, tmp_path):
+    gateway = _gateway(tmp_path)
+
+    with _pinned_local_timezone("America/New_York"):
+        rendered = _rendered_starttime(
+            gateway,
+            monkeypatch,
+            pinned_now=_PINNED_LIST_JOBS_NOW,
+            start_time="2026-07-01T09:30:00",
+        )
+
+    assert rendered == "--starttime=2026-07-01T09:30:00"
 
 
 def test_slurm_command_failure_details_are_bounded_and_redacted(monkeypatch, tmp_path):

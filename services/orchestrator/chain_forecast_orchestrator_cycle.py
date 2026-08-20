@@ -6,11 +6,13 @@ from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     INIT_STATE_IDENTITY_FIELD,
+    QUARANTINE_RERUN_PROVENANCE_FIELD,
     accepted_submit_contract_is_current,
     accepted_submit_pipeline_job_model_id,
     accepted_submit_row_kind,
     canonical_forecast_cohort_init_state_identities,
     canonical_forecast_cohort_members,
+    canonical_quarantine_rerun_model_ids,
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
@@ -24,6 +26,13 @@ _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
     "retry_strict_warm_start_terminal_run_manifest_missing",
     "retry_strict_warm_start_retry_run_manifest_mismatch",
     "retry_terminal_run_manifest_missing",
+    # §8.7 quarantine rerun (#1157): the cycle's forecast job already
+    # SUCCEEDED with a stale predecessor lineage, so an idle resume would
+    # re-adopt that very run.  The rerun only means anything as a real
+    # replacement submission.  Its breaker fail-stop decision
+    # (``blocked_journal_predecessor_identity_quarantine``) is deliberately
+    # NOT a member — nothing may revive it.
+    "retry_journal_predecessor_identity_mismatch",
 }
 _STAGE_ORDER = {
     "convert": 0,
@@ -482,6 +491,8 @@ class ForecastOrchestratorCycleMixin:
         terminal: dict[str, _chain.Any],
         aggregation: _chain.ArrayAggregation,
         log_uri: str | None,
+        *,
+        master_slurm_job_id: str,
     ) -> dict[str, _chain.Any]:
         return _chain.chain_array_accounting.record_cycle_stage_status_override(
             self,
@@ -491,6 +502,7 @@ class ForecastOrchestratorCycleMixin:
             terminal,
             aggregation,
             log_uri,
+            master_slurm_job_id=master_slurm_job_id,
             deps=_chain._array_accounting_dependencies(),
         )
 
@@ -592,6 +604,15 @@ class ForecastOrchestratorCycleMixin:
             init_state_identities = canonical_forecast_cohort_init_state_identities(
                 basins=context.active_basins,
             )
+            # #1157: same reservation-time capture, for the other half of the
+            # §8.7 story.  The scheduler's decision for each basin is visible
+            # only here; recording WHICH models this submission reruns under
+            # quarantine is what lets the breaker distinguish a failed
+            # convergence attempt from an unrelated whitelisted resubmit that
+            # merely re-recorded the same stale token.
+            quarantine_rerun_model_ids = canonical_quarantine_rerun_model_ids(
+                basins=context.active_basins,
+            )
             expected_user = self.config.reconcile_slurm_user
             expected_account = self.config.reconcile_slurm_account
             reservation_evidence = {
@@ -599,6 +620,7 @@ class ForecastOrchestratorCycleMixin:
                 "slurm_comment": _chain.slurm_comment_for(idempotency_key),
                 "cohort_members": list(members),
                 INIT_STATE_IDENTITY_FIELD: list(init_state_identities),
+                QUARANTINE_RERUN_PROVENANCE_FIELD: list(quarantine_rerun_model_ids),
                 "restart_stage": "forecast",
                 "submission_attempt": submission_attempt,
                 "submission_attempt_started_at": datetime.now(UTC),

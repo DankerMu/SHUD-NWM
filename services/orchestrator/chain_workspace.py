@@ -21,6 +21,7 @@ from services.orchestrator.chain_types import (
     DisplayLogPublicationAttempt,
     OrchestratorError,
 )
+from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 
 __all__ = (
     "display_log_publication_for_pipeline_job",
@@ -101,6 +102,14 @@ def display_log_publication_for_pipeline_job(
     existing_log_uri = str(job["log_uri"]) if job.get("log_uri") else None
     should_persist_logs = existing_log_uri is None
     advertised_uri = existing_log_uri
+    if advertised_uri in EVIDENCE_REDACTION_PLACEHOLDERS:
+        # The row came back through a sanitizing public read, which maps object
+        # URIs onto ``[object-uri]``: the log was withheld from this caller, not
+        # unset.  Advertising the placeholder launders it into durable state
+        # (#1410) and breaks the log tail for good; re-publishing under a
+        # recomputed URI would overwrite a log this pass never produced.  Say
+        # nothing and leave the stored URI alone.
+        advertised_uri = None
     return DisplayLogPublication(
         candidate_uri=candidate_uri,
         advertised_uri=advertised_uri,

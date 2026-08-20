@@ -267,9 +267,18 @@ The journal SHALL persist, on each versioned accepted-submit master row, a conse
 - **WHEN** the counter reaches the limit but the row is within the accepted-submit grace, or the limit is disabled (unset, zero, or negative), or the release compare-and-swap fails because the row's attempt state moved concurrently
 - **THEN** no status migration occurs and the pass records the ordinary `identity_mismatch_blocked` outcome
 
+#### Scenario: The streak and release invariants are test-anchored
+
+- **WHEN** the invariant guards for this counter and this decision are exercised — a negative or
+  non-integer streak, a pre-outcome transition carrying a non-zero streak, an
+  `identity_mismatch_released` decision whose status is not `reservation_lost`, and a
+  non-identity-mismatch decision carrying a non-zero streak
+- **THEN** each guard rejects the transition with its typed error and leaves the journal row
+  unchanged, and each guard has a negative test that fails when that guard alone is removed.
+
 ### Requirement: Accepted-submit cohort forecast terminal rows SHALL record init-state identity forward-only
 
-The accepted-submit cohort forecast path SHALL persist the init-state identity (`init_state_id`, `checksum`, `uri`, `valid_time`) **at reservation time**, where the planning context is available, as a per-model identity mapping keyed by `array_task_id`/`model_id` on the cohort master row, outside the cohort-digest input set; terminal per-model row construction SHALL read each row's identity from the master-row mapping by its own `array_task_id` rather than from cohort-member projection, and a scalar single-identity field SHALL NOT be used. The recording SHALL NOT alter the ordinary-upsert frozen-field semantics (the identity's value is stable from reservation onward) and SHALL NOT enter the cohort-digest member field set — historical rows' `forecast_cohort_digest` validation results SHALL be unchanged. Invalid or partial identity payloads SHALL be rejected by accepted-submit normalization. Existing journal rows without these fields SHALL remain readable unchanged — no migration, no backfill, no rewrite of historical rows.
+The accepted-submit cohort forecast path SHALL persist the init-state identity (`init_state_id`, `checksum`, `uri`, `valid_time`) **at reservation time**, where the planning context is available, as a per-model identity mapping keyed by `array_task_id`/`model_id` on the cohort master row, outside the cohort-digest input set; terminal per-model row construction SHALL read each row's identity from the master-row mapping by its own `array_task_id` rather than from cohort-member projection, and a scalar single-identity field SHALL NOT be used. The recording SHALL NOT alter the ordinary-upsert frozen-field semantics and SHALL NOT enter the cohort-digest member field set — historical rows' `forecast_cohort_digest` validation results SHALL be unchanged. The identity's value SHALL be stable from the **first** reservation onward: reclaiming a dead reservation into a new submission attempt SHALL NOT refresh the mapping, and derived per-model rows SHALL reject a divergent ordinary-upsert write to the mapping exactly as the master row does. That rejection SHALL apply only to writes that explicitly carry the mapping — an ordinary upsert that omits the field SHALL continue to keep the persisted value silently, as it does today. The keep-first reclaim boundary SHALL be re-adjudicated if this mapping ever becomes an input to completion verdicts: while it stays invisible to them, a stale first-attempt mapping can only make a reader refuse to skip work, never permit a wrong skip. Invalid or partial identity payloads SHALL be rejected by accepted-submit normalization. Existing journal rows without these fields SHALL remain readable unchanged — no migration, no backfill, no rewrite of historical rows.
 
 #### Scenario: New cohort terminal rows carry the identity
 
@@ -290,4 +299,282 @@ The accepted-submit cohort forecast path SHALL persist the init-state identity (
 
 - **WHEN** an upsert presents an init-state identity payload with a malformed or partial field set
 - **THEN** accepted-submit normalization rejects the transition rather than persisting a partial record
+
+#### Scenario: An upsert that omits the mapping keeps the persisted value
+
+- **WHEN** an ordinary upsert targets a derived per-model accepted-submit row without carrying an
+  init-state identity mapping at all
+- **THEN** the write succeeds and the persisted mapping is kept unchanged — the freeze SHALL NOT
+  fail closed on the row-constructor's default empty value.
+
+#### Scenario: Derived per-model rows freeze the mapping like the master row
+
+- **WHEN** an ordinary upsert targets a derived per-model accepted-submit row and carries an
+  init-state identity mapping that differs from the persisted one — including a public-view
+  round-trip whose object URI has been replaced by a display placeholder, an explicitly empty
+  mapping, and a structurally valid mapping with different content
+- **THEN** the write is rejected with an evidence-invariant error and the durable journal payload
+  retains the value captured at reservation time.
+
+#### Scenario: A reclaimed reservation keeps the first attempt's mapping
+
+- **WHEN** a dead reservation is reclaimed into a new submission attempt and the reclaim request
+  row carries a freshly recomputed init-state identity mapping that differs from the persisted one
+- **THEN** the persisted mapping remains the first attempt's value, the reclaim still succeeds with
+  its submission attempt incremented and its attempt anchor restamped, and terminal per-model rows
+  projected afterwards carry that same first-attempt mapping.
+
+#### Scenario: A public-view snapshot is not a valid write payload
+
+- **WHEN** a caller replays an unmodified public-view snapshot of an accepted-submit master row
+  back through the ordinary upsert path, where the public view has replaced object URIs with
+  display placeholders
+- **THEN** the write is rejected rather than laundering the placeholder into durable state.
+
+### Requirement: Reconcile sacct scan windows are rendered in the host's local wall clock
+
+The restart-reconciliation comment scan SHALL render its sacct page
+boundaries in the host's local wall-clock representation of the
+UTC-computed instants, because sacct interprets bare timestamps in the
+host's local timezone: page arithmetic stays on the monotonic UTC axis,
+and only the rendered `--starttime`/`--endtime` strings are converted, so
+the scanned interval equals the intended interval on every host timezone
+instead of being silently translated by the host offset (which on an
+east-of-UTC host shifted the whole window into the past and made every
+absence verdict for a job younger than the offset vacuous). The
+per-session page freeze and the page-cache identity keyed by the rendered
+strings keep their existing semantics, and on a UTC host the rendered
+strings are byte-for-byte what they were before. On DST-observing hosts
+the once-yearly fall-back hour renders an ambiguous local timestamp that
+sacct's timezone-less interface may resolve up to an hour off, so the
+coverage-complete gate can over-claim its scanned interval by at most one
+hour once a year (inherent to sacct, not to this conversion;
+spring-forward is safe because a UTC-to-local conversion never emits a
+skipped wall clock, and adjacent page boundaries sit twelve hours apart
+so rendered page keys can never collide).
+
+#### Scenario: an east-of-UTC host scans the intended window
+
+WHEN the reconcile comment scan runs on a host east of UTC
+THEN the rendered page boundaries are the local wall-clock forms of the
+UTC page instants, so a job submitted minutes ago falls inside the newest
+page instead of beyond it
+
+#### Scenario: a UTC host renders the same strings as before
+
+WHEN the host timezone is UTC
+THEN every rendered page boundary string is byte-for-byte identical to
+the pre-change output
+
+#### Scenario: page freeze and cache identity are unchanged
+
+WHEN a querier session renders its pages under any host timezone that
+stays stable for the session's duration
+THEN the page set is frozen once per session and the page-cache keys
+deduplicate exactly as before (a mid-session timezone change re-renders
+the same frozen UTC page to a different key, costing only a redundant
+sacct re-query — never a wrong verdict)
+
+### Requirement: Comment-based absence proof requires proven comment accounting capability
+
+The restart-reconciliation comment querier SHALL refuse to answer — raising
+its transient query-unavailable error with reason class
+`comment_accounting_unproven` before issuing any sacct command — unless a
+once-per-querier-instance probe of `scontrol show config` proves that
+`AccountingStoreFlags` includes the `job_comment` flag, because on a
+cluster whose accounting never stores the sbatch comment a comment search
+can never find a genuinely in-flight job, so treating its empty answer as
+a confirmed absence falsely demotes live reservations to
+`reservation_lost` and re-submits their cohorts. A probe that cannot run,
+a missing `AccountingStoreFlags` line, and a `(null)` or
+`job_comment`-less flag value all count as unproven (fail-closed toward
+refusing, never toward trusting the search), with a warning that
+distinguishes probe-execution failure from a cluster whose flags provably
+lack `job_comment`. Refusal keeps the existing transient-deny semantics:
+reserved rows stay reserved past the grace window and no absence
+conclusion is recorded. This outcome class deliberately does not
+converge on its own: it does not increment the identity-mismatch streak
+counter (whose convergence requirement covers only the
+`identity_mismatch_blocked` outcome family), adds no automatic release
+exit, and leaves disposition to the documented runbook procedure (which
+today may terminate in escalation rather than repair) — on
+such clusters no reliable automatic absence proof exists, so any
+automatic exit would trade duplicate submission against abandoning a
+live job. On clusters where the probe proves the capability, sacct query
+behavior is unchanged and the querier's raise-priority order is
+preserved: the accepted-submit contract-version check still raises first,
+and the global-visibility gate still applies to the queries it guarded
+before.
+
+#### Scenario: a cluster that does not store comments never confirms absence
+
+WHEN the probe reads `AccountingStoreFlags = (null)` (or the flag list
+lacks `job_comment`, or the line is absent, or scontrol fails)
+THEN every comment query — owner-scoped, global, and legacy — raises the
+transient query-unavailable error with reason class
+`comment_accounting_unproven` without invoking sacct, and a reserved row
+past its grace window stays reserved instead of being demoted to
+`reservation_lost`
+
+#### Scenario: a comment-storing cluster is unchanged
+
+WHEN the probe proves `AccountingStoreFlags` includes `job_comment`
+THEN owner-scope and global-scope comment queries page sacct exactly as
+before, owned matches still bind, and a coverage-complete confirmed
+absence older than the grace window still demotes to `reservation_lost`
+
+#### Scenario: the probe runs once per querier instance
+
+WHEN one querier instance serves multiple queries in a session
+THEN the capability probe executes at most once and its verdict is
+reused, and because the querier is rebuilt each reconcile pass a
+transient scontrol failure denies only that pass — the next pass probes
+again
+
+### Requirement: Journal existence probes SHALL enforce filesystem containment before declaring absence
+
+Every existence probe over the file orchestration journal tree (segment slot probes, sequence-floor file probes, and latest-directory probes) SHALL resolve the probed path with the same no-follow containment discipline as the hardened readers: a symlink in any parent component, or a symlink occupying the probed slot itself, SHALL fail loud as `file_journal_unreadable` instead of being reported as "absent" (or being silently skipped) — on every public surface, read or write, that reaches the probes, with exactly the exception type and fate that a hardened-reader fault (such as a corrupt journal file) already has on that same lane: a probe-detected containment fault is never softer than a reader fault and never introduces a new exception type at any public boundary. Genuine absence — the probed entry missing under a chain of real directories, including a wholly uninitialized journal tree — SHALL still be reported as absent, and failed writes SHALL leave zero bytes written. Known pre-existing limit, out of scope here and tracked as follow-up: a warm cycle-rows cache entry may keep serving a previously legal empty read after a tamper, because the pre-existing `_stat_signature` fingerprint cannot distinguish a real empty directory from a symlinked one; write surfaces still fail loud under a warm cache.
+
+#### Scenario: Symlinked parent with missing cycle file fails loud on read
+
+- **WHEN** `journal/<source>` (or any parent component) is a symlink whose
+  target directory does not contain the requested cycle's segment files
+- **THEN** the public cycle read raises `file_journal_unreadable` instead of
+  returning an empty record list
+
+#### Scenario: Sequence floor probe under a symlinked parent fails loud
+
+- **WHEN** the next-sequence computation probes segment or latest paths whose
+  parent component is a symlink
+- **THEN** the enclosing public write method fails loud with
+  `file_journal_unreadable` instead of silently skipping the slot and
+  underestimating the sequence floor
+
+#### Scenario: Symlink occupying a probed slot fails loud
+
+- **WHEN** a segment slot or sequence-floor path is itself a symlink
+- **THEN** the operation fails loud with `file_journal_unreadable` (the error
+  may originate in the probe or the hardened reader — the reason token, not
+  the origin or message, is the contract)
+
+#### Scenario: A write that silently no-opped under a symlinked parent now fails loud
+
+- **WHEN** a public journal write method whose empty probe result previously
+  made it succeed as a silent no-op (for example marking a job permanently
+  failed) runs against a symlinked journal parent
+- **THEN** it fails loud with `file_journal_unreadable` instead of reporting
+  success
+
+#### Scenario: Probe faults are exactly as loud as reader faults on swallow lanes
+
+- **WHEN** an internal lane that already absorbs hardened-reader journal
+  errors (returning a partial or empty result) encounters a probe-detected
+  containment fault
+- **THEN** the observable result is identical to that lane's existing
+  behavior for an unreadable journal file — the fault is neither swallowed
+  earlier than a reader fault would be, nor does it introduce a new silent
+  hole
+
+#### Scenario: Genuine absence under real directories stays a legal empty read
+
+- **WHEN** every path component up to the missing entry is a real directory,
+  or the journal tree for the source is wholly uninitialized (cold start)
+- **THEN** the cycle read returns an empty list and the next-sequence
+  computation returns the base sequence, exactly as before
+
+#### Scenario: Write surfaces fail in parity with reader faults, writing nothing
+
+- **WHEN** an append or any other public journal write targets a path whose
+  parent component is a symlink (the probes now detect the fault upstream of
+  the actual write)
+- **THEN** the write fails closed with `file_journal_unreadable`, carried by
+  the same exception type a reader fault already surfaces on that lane, with
+  zero bytes written — and pre-existing reader-raised errors on the write
+  path keep their current propagation unchanged
+
+### Requirement: Cohort terminal projection receives the master Slurm identity explicitly from its caller
+
+The forecast-cohort terminal projection SHALL receive the master Slurm
+identity as an explicit caller-supplied argument — the submit/poll leg
+supplies the gateway job's Slurm id and the resume leg supplies the
+pipeline row's recorded `slurm_job_id` — never by sniffing an id off
+whatever dictionary shape the caller happens to hold, because the resume
+leg's terminal dictionary is a pipeline row whose `job_id` is the
+pipeline job id, and sniffing it fed the identity-mismatch guard a value
+that can never equal the stored Slurm id: every already-terminal
+resume-path projection was silently skipped (an idempotent no-op) or
+mis-recorded as an identity-pollution event (the non-terminal resume
+sub-path polls first and already produced the correct value — the poll
+echoes the requested id back, so the sniffed value equalled the bound id;
+the fix unifies that sub-path onto the same explicit bound argument with
+identical results). An empty or non-numeric
+supplied identity on the projection path SHALL fail closed with a
+distinct, attributable error instead of degrading into an
+unattributable failure. The identity-mismatch guard itself is
+unchanged — it was correct and was being fed the wrong value.
+
+#### Scenario: resume reconciles with the real Slurm identity
+
+WHEN an already-terminal forecast-cohort pipeline row that still owes
+its projection is resumed
+THEN the projection receives the row's recorded Slurm id (not the
+pipeline job id) and reconciles as matched-bound against the stored
+identity — no identity-mismatch defer, no pollution event
+
+#### Scenario: a settled master is never re-projected
+
+WHEN a resumed forecast-cohort master is already terminal and its
+recorded projections fully cover the cohort with terminal outcomes
+THEN the resume pass does not re-enter the projection at all: the
+durable row's outcome prevails over whatever this pass re-aggregates,
+and the row's semantic fields stay byte-identical even when the fresh
+aggregation disagrees with the stored one — and when the settled row has
+no published log, the pass still publishes the log file to its
+deterministic location (the row's log pointer stays unset until a typed
+write for it exists)
+
+#### Scenario: the submit leg is unchanged
+
+WHEN the submit/poll leg records a cohort terminal outcome
+THEN the projection receives the same gateway Slurm id as before the
+change
+
+#### Scenario: a missing identity fails loudly
+
+WHEN the projection path is entered with an empty or non-numeric master
+Slurm identity
+THEN the call raises a distinct attributable error naming the pipeline
+job and stage, rather than degrading into an unattributable downstream
+failure
+
+### Requirement: Journal read caches are safe under concurrent orchestration threads sharing one repository instance
+
+The file journal repository's read-side caches SHALL tolerate concurrent
+readers and writers on a single shared repository instance without
+raising or corrupting cached values, because the production scheduler
+hands one repository instance to every per-cohort orchestrator and fans
+them out across a thread pool: cache population, lookup, and eviction
+are mutually exclusive critical sections, and taking the cache mutex
+never acquires the journal write mutex inside it (single lock order).
+Single-threaded cache semantics are unchanged: identical keys observe
+identical values and the eviction policy is untouched — only mutual
+exclusion is added.
+
+#### Scenario: concurrent cohorts hammer the shared caches
+
+WHEN multiple orchestration threads concurrently read cycle rows and
+journal files through one repository instance — including a concurrent
+journal writer applying records — while cache eviction is continuously
+triggered
+THEN no thread observes a runtime iteration error or a torn cache
+entry (a value not produced by any single store), and single-threaded
+cache semantics are unchanged; cross-thread read freshness beyond this
+is explicitly out of scope (the pre-existing ownership-blind
+write-window staleness is declared, not fixed, by this change)
+
+#### Scenario: single-threaded behavior is unchanged
+
+WHEN the repository is used from a single thread
+THEN cache hits, misses, and evictions behave byte-for-byte as before
+the change
 

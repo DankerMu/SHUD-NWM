@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -11,6 +12,7 @@ from packages.common.redaction import redact_payload
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence_module
+from services.orchestrator import scheduler_no_progress as _scheduler_no_progress
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
@@ -1402,6 +1404,23 @@ def run_once(self) -> SchedulerPassResult:
                 active_lower_bound=retention_bound,
                 active_lower_bound_source=retention_bound_source,
             )
+            # Issue #1118: the ONLY no-progress-circuit observation point. This
+            # is the fully-observed pass — the one whose candidate lists and
+            # reconcile segment are actually assembled. Every other evidence
+            # write in this module (early exit, pre-lock, lock contention,
+            # resource-limit abort) carries empty lists, so observing there
+            # would clear the accumulated counts; none of them may touch the
+            # tracker, which is why this hook is here and not on the shared
+            # ``_write_evidence``.
+            no_progress_circuit = _scheduler_no_progress.observe_pass(
+                evidence,
+                pass_id=pass_id,
+                threshold=int(getattr(self.config, "no_progress_circuit_passes", 0) or 0),
+                evidence_dir=Path(self.config.evidence_dir),
+                workspace_root=Path(self.config.workspace_root),
+            )
+            if no_progress_circuit is not None:
+                evidence[_scheduler_no_progress.EVIDENCE_KEY] = no_progress_circuit
             # Populate timing.pass BEFORE the write so the on-disk artifact
             # carries the block (Phase 4.5 C6). Use ``pass_status`` (pre-write
             # planned status) here; the evidence-size-fallback path can
@@ -1964,6 +1983,28 @@ def _run_retention(
     ``active_lower_bound`` (issue #1307) exempts cycles that are still in
     flight from wall-clock deletion; the default ``None`` keeps the previous
     behaviour for callers that have no pass context.
+
+    The scheduler workspace root and the object-store copyback root are
+    forwarded as additional ``runs/``-only roots (issue #1318), and only when
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on.
+
+    Neither value arrives pre-validated, so neither is trusted here (task 5.6):
+    the db-free topology preflight returns ``not_required`` outside db-free /
+    repair-authority mode, and ``object_store_copyback_root`` is never
+    normalised in ``__post_init__`` -- it is the bare
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` string, whitespace included. Blank,
+    relative and duplicate roots are the business of
+    :func:`~services.orchestrator.retention._resolve_runs_only_roots`, which
+    discards them before any path resolution.
+
+    The workspace root is read from ``WORKSPACE_ROOT`` rather than from
+    ``self.config.workspace_root`` (task 5.2): that field falls back to the
+    built-in relative default ``.nhms-workspace``, which ``__post_init__``
+    anchors with ``Path.cwd()``. It therefore reaches retention already
+    absolute, so no path filter can tell it apart from a configured root -- and
+    an unconfigured deployment would sweep ``<invocation cwd>/.nhms-workspace``.
+    A default must never become a deletion surface; this matches what
+    ``cli.py::_run_cleanup`` already does with the same two roots.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
@@ -1981,6 +2022,10 @@ def _run_retention(
             published_artifact_root=self.config.published_artifact_root,
             active_lower_bound=active_lower_bound,
             active_lower_bound_source=active_lower_bound_source,
+            runs_only_roots=(
+                os.getenv("WORKSPACE_ROOT"),
+                self.config.object_store_copyback_root,
+            ),
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}

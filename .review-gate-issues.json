@@ -1162,6 +1162,402 @@
           "rounds": 2
         }
       ]
+    },
+    "1393": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1439,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1431": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1445,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1447": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1452,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1314": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1459,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1294": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 1449,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "1367": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1465,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1320": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1469,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1302": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1470,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1357": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1473,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1408": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1477,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1415": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1481,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1375": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1484,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1453": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1486,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "1308": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1478,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1355": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1490,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1455": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1492,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1364": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1495,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1487": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1496,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1407": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1501,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1419": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1508,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1511": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1517,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1420": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1516,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1462": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1521,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1423": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1522,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1433": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1525,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1152": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1531,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
+    },
+    "1157": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1551,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1167": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1566,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1179": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1574,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
+    },
+    "1298": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1590,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1201": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1593,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1460": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1599,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1187": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1602,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1394": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1618,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1547": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1624,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1400": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1626,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   }
 }

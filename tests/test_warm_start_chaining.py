@@ -36,7 +36,13 @@ from services.orchestrator.chain import (
 )
 from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
 from tests.test_warm_start import FakeRuntimeRepository, FakeStateManager
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, _read_cfg_ic_header_minute
+from workers.shud_runtime.runtime import (
+    WARM_START_TIME_MISMATCH_SYSTEMIC,
+    SHUDRuntime,
+    SHUDRuntimeConfig,
+    SHUDRuntimeError,
+    _read_cfg_ic_header_minute,
+)
 
 
 def _dt(value: str) -> datetime:
@@ -629,6 +635,52 @@ def _consume_manifest(state: StateSnapshot, *, start_time: str, valid_time: str,
     }
 
 
+def _ic_bytes(header_time: str) -> bytes:
+    """A minimal native SHUD IC whose header minute-time is ``header_time``."""
+
+    return f"2 1 {_minute_time(header_time):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+
+
+def _publish_state(object_root: Path, state: StateSnapshot, content: bytes) -> None:
+    path = object_root / state.state_uri
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+class MarkRecordingStateManager(FakeStateManager):
+    """FakeStateManager that also records the corruption-mark MESSAGES (#1431).
+
+    The degradation ladder distinguishes its rejection channels only through the mark
+    message, so the token that separates a time mismatch from a header-shape refusal has
+    to be observable in the test double.
+    """
+
+    def __init__(self, snapshots: list[StateSnapshot]) -> None:
+        super().__init__(snapshots)
+        self.mark_messages: list[tuple[str, str]] = []
+
+    def mark_init_state_corrupted(
+        self,
+        state_id: str,
+        *,
+        message: str,
+        actual_checksum: str | None,
+        expected_checksum: str | None,
+    ) -> None:
+        self.mark_messages.append((state_id, message))
+        if state_id not in self.snapshots:
+            # Fidelity with the real StateManager.mark_init_state_corrupted: an id the
+            # index does not carry (a manifest naming a re-keyed-away state) is a
+            # zero-row UPDATE, not an error. The base double would KeyError.
+            return
+        super().mark_init_state_corrupted(
+            state_id,
+            message=message,
+            actual_checksum=actual_checksum,
+            expected_checksum=expected_checksum,
+        )
+
+
 def test_consume_materializes_canonical_ic_to_project_name(tmp_path: Path) -> None:
     # The warm-start object is canonical state.cfg.ic; SHUD reads <project>.cfg.ic.
     t_next = "2026-05-02T00:00:00Z"
@@ -701,33 +753,56 @@ def test_exact_warm_state_unavailable_never_falls_back_to_cold_or_older_state(tm
     assert manifest["runtime"]["init_mode"] == 3
 
 
-def test_consume_warm_continuity_blocks_on_three_way_run_start_mismatch(tmp_path: Path) -> None:
-    # PRODUCTION-PATH three-way enforcement: the snapshot is consumed as the exact
-    # successor (valid_time == run start_time == T_{N+1}, quality=fresh), but the
-    # native .cfg.ic header minute-time disagrees with both. Warm-continuity demands
-    # snapshot valid_time == header == run start; the mismatch must be a recorded
-    # WARM_START_TIME_MISMATCH blocker on the production consume path, not a silent
-    # restart. (Reverting the production wiring of _check_three_way_time_consistency
-    # makes this test red.)
+def test_consume_warm_continuity_time_mismatch_degrades_to_next_usable_state(tmp_path: Path) -> None:
+    # PRODUCTION-PATH three-way enforcement, #1431 terminal semantics. The selected
+    # snapshot is consumed as the exact successor (valid_time == run start_time ==
+    # T_{N+1}, quality=fresh) but its native .cfg.ic header minute-time disagrees with
+    # both, so warm-continuity rejects it. Until #1431 that rejection killed the whole
+    # forecast cycle; it is now a CANDIDATE-level blocker: the drifted snapshot is
+    # marked corrupted through the corrupted-state channel (with the greppable
+    # WARM_START_TIME_MISMATCH: token so it stays distinguishable from the
+    # header-shape channel) and the ladder moves to the healthy neighbour, which the
+    # run consumes warm. What must NOT happen -- then or now -- is consuming the
+    # drifted snapshot at the wrong time.
     t_next = "2026-05-02T00:00:00Z"
     header_wrong = "2026-05-02T06:00:00Z"  # header off by 6h from snapshot/run-start
-    ic_content = f"2 1 {_minute_time(header_wrong):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
-    state = _ic_state(t_next, ic_content)
-    state_manager = FakeStateManager([state])
+    drifted_content = _ic_bytes(header_wrong)
+    drifted = _ic_state(t_next, drifted_content)
+    # Healthy neighbour: an older state whose header equals its own valid_time, i.e. the
+    # legitimate stale-reuse geometry the ladder is allowed to fall back to.
+    healthy_valid = "2026-05-01T00:00:00Z"
+    healthy_content = _ic_bytes(healthy_valid)
+    healthy = _ic_state(healthy_valid, healthy_content)
+    state_manager = MarkRecordingStateManager([drifted, healthy])
     runtime, object_root, workspace = _runtime(tmp_path, state_manager)
-    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
-    (object_root / state.state_uri).write_bytes(ic_content)
+    _publish_state(object_root, drifted, drifted_content)
+    _publish_state(object_root, healthy, healthy_content)
 
     # valid_time == start_time == T_{N+1} -> warm-continuity (exact successor).
-    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest = _consume_manifest(drifted, start_time=t_next, valid_time=t_next, quality="fresh")
     input_dir = workspace / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    with pytest.raises(Exception) as excinfo:
-        runtime._stage_initial_state(manifest, input_dir)
-    assert "WARM_START_TIME_MISMATCH" in str(getattr(excinfo.value, "error_code", "")) or "mismatch" in str(
-        excinfo.value
-    )
+    # No raise: one drifted snapshot no longer takes the cycle down with it.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] == healthy.state_id
+    assert manifest["runtime"]["init_mode"] == 3
+    project_ic = input_dir / "demo.cfg.ic"
+    assert project_ic.exists()
+    # The neighbour's header is re-stamped to the run start; the drifted 06:00Z header
+    # was never consumed.
+    assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(t_next))
+    assert round(_read_cfg_ic_header_minute(project_ic)) != round(_minute_time(header_wrong))
+    # The rejection is recorded on the drifted candidate only, with the greppable token.
+    assert state_manager.corrupted == [drifted.state_id]
+    marked_id, marked_message = state_manager.mark_messages[0]
+    assert marked_id == drifted.state_id
+    assert marked_message.startswith("WARM_START_TIME_MISMATCH: ")
+    assert "mismatch" in marked_message
+    # The deferred mark is flushed on the warm exit: the QC record is not lost.
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert state_manager.snapshots[healthy.state_id].usable_flag is True
 
 
 def test_consume_degraded_reuse_of_older_state_is_not_three_way_blocked(tmp_path: Path) -> None:
@@ -758,26 +833,323 @@ def test_consume_degraded_reuse_of_older_state_is_not_three_way_blocked(tmp_path
     assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(run_start))
 
 
-def test_consume_blocks_on_native_header_snapshot_mismatch(tmp_path: Path) -> None:
-    # Native IC header time disagrees with the recorded snapshot valid_time: blocker.
+def test_consume_lone_native_header_mismatch_degrades_to_labeled_cold_start(tmp_path: Path) -> None:
+    # Native IC header time disagrees with the recorded snapshot valid_time: still a
+    # blocker for THIS candidate, but with no other usable state the run degrades to the
+    # labeled cold start instead of failing (#1431 AC-2). Before #1431 this geometry
+    # failed the whole run; the invariant that survives is that the drifted artifact is
+    # never consumed at the wrong time.
     snapshot_valid = "2026-05-02T00:00:00Z"
     header_wrong = "2026-04-15T00:00:00Z"
-    ic_content = f"2 1 {_minute_time(header_wrong):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+    ic_content = _ic_bytes(header_wrong)
     state = _ic_state(snapshot_valid, ic_content)
-    state_manager = FakeStateManager([state])
+    state_manager = MarkRecordingStateManager([state])
     runtime, object_root, workspace = _runtime(tmp_path, state_manager)
-    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
-    (object_root / state.state_uri).write_bytes(ic_content)
+    _publish_state(object_root, state, ic_content)
 
     manifest = _consume_manifest(state, start_time=snapshot_valid, valid_time=snapshot_valid, quality="fresh")
     input_dir = workspace / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    with pytest.raises(Exception) as excinfo:
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # A single rejection is not a systemic signal: it is marked and flushed as one more
+    # corrupt snapshot.
+    assert state_manager.corrupted == [state.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[state.state_id].usable_flag is False
+    # Workspace hygiene: the materialized drifted IC is gone, so nothing downstream can
+    # pick it up as this run's initial condition.
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_unanimous_plural_time_mismatch_escalates_and_keeps_snapshots_usable(tmp_path: Path) -> None:
+    # #1431 AC-3: when EVERY candidate on the ladder (>= 2) is rejected for a time
+    # mismatch, the drift is systematic (a bad re-key batch), not one corrupt snapshot --
+    # the run fails loudly with the dedicated code instead of quietly cold-starting.
+    t_run = "2026-05-02T00:00:00Z"
+    first_content = _ic_bytes("2026-05-02T06:00:00Z")  # warm-continuity three-way drift
+    first = _ic_state(t_run, first_content)
+    second_content = _ic_bytes("2026-04-20T00:00:00Z")  # stale-reuse identity drift
+    second = _ic_state("2026-05-01T00:00:00Z", second_content)
+    state_manager = MarkRecordingStateManager([first, second])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, first, first_content)
+    _publish_state(object_root, second, second_content)
+
+    manifest = _consume_manifest(first, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
         runtime._stage_initial_state(manifest, input_dir)
-    assert "WARM_START_TIME_MISMATCH" in str(getattr(excinfo.value, "error_code", "")) or "mismatch" in str(
-        excinfo.value
+
+    error = excinfo.value
+    assert error.error_code == WARM_START_TIME_MISMATCH_SYSTEMIC
+    # Greppable from run evidence and carrying both counts plus the last rejection.
+    assert "2 of 2 rejections" in error.message
+    assert "WARM_START_TIME_MISMATCH: " in error.message
+    # No staged initial state is left behind on the escalate exit.
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+    # The marks are deliberately NOT persisted here: the snapshots stay usable so the
+    # next cycle walks the same ladder and rings the same alarm, instead of finding
+    # everything unusable and silently cold-starting.
+    assert state_manager.corrupted == []
+    assert state_manager.mark_messages == []
+    assert state_manager.snapshots[first.state_id].usable_flag is True
+    assert state_manager.snapshots[second.state_id].usable_flag is True
+
+
+def test_uri_only_declaration_of_one_drifted_snapshot_is_not_a_systemic_batch(tmp_path: Path) -> None:
+    # #1431 escalate accounting is per CANDIDATE, not per loop iteration. A manifest that
+    # declares only an ``ic_file_uri`` walks the SAME physical snapshot twice: round 1
+    # under the URI (no state_id, so it never enters ``rejected_state_ids``), round 2
+    # after ``_next_usable_state`` serves that very object back with its index id. Counted
+    # per iteration this ONE drifted snapshot fakes "2 of 2" unanimity and raises the
+    # systemic alarm every cycle, with nothing ever marked. It must degrade like the lone
+    # drifted snapshot it is.
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")  # header off by 6h from valid_time
+    drifted = _ic_state(t_run, drifted_content)
+    state_manager = MarkRecordingStateManager([drifted])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    manifest["initial_state"]["state_id"] = None  # URI-only declaration
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No raise: one snapshot cannot be a systematic batch, however many times it is walked.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # Exactly one mark: the URI-only round has no id to mark, the id-bearing round defers
+    # one, and the cold-start exit flushes it -- no duplicate for the same snapshot.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert [state_id for state_id, _ in state_manager.mark_messages] == [drifted.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_rekeyed_away_state_id_over_one_drifted_snapshot_is_not_a_systemic_batch(tmp_path: Path) -> None:
+    # #1431: the second geometry that walks one snapshot twice -- the manifest names a
+    # state_id the index no longer carries (re-keyed away) while its ``ic_file_uri`` still
+    # points at the one indexed object. Round 1 rejects it under the stale id, round 2
+    # under the index's own id; per-iteration counting would again fake plural unanimity.
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")
+    drifted = _ic_state(t_run, drifted_content)
+    state_manager = MarkRecordingStateManager([drifted])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    manifest["initial_state"]["state_id"] = "state_demo_model_rekeyed_away"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    # The only snapshot the index actually carries is marked (the stale id names no row,
+    # so marking it changes nothing), and the flush happened on the cold-start exit.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    tokened = {state_id for state_id, message in state_manager.mark_messages if "WARM_START_TIME_MISMATCH" in message}
+    assert drifted.state_id in tokened
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+@pytest.mark.parametrize("order", ["mismatch_first", "checksum_first"])
+def test_mixed_rejection_causes_keep_the_cold_start_fallback(tmp_path: Path, order: str) -> None:
+    # #1431: escalation requires UNANIMITY. A ladder exhausted by a mixture of checksum
+    # and time-mismatch rejections falls back to the labeled cold start exactly as it did
+    # before. Both orders are pinned: with the per-candidate mismatch flag reset in the
+    # wrong place, the mismatch_first case would leak a stale True into the checksum
+    # rejection and fake the unanimity that escalates.
+    t_run = "2026-05-02T00:00:00Z"
+    older_valid = "2026-05-01T00:00:00Z"
+    corrupt_bytes = b"not-a-cfg-ic"
+    if order == "mismatch_first":
+        first_content = _ic_bytes("2026-05-02T06:00:00Z")  # time mismatch
+        first = _ic_state(t_run, first_content)
+        second = _ic_state(older_valid, _ic_bytes(older_valid))  # checksum will not match
+        published = {first.state_id: first_content, second.state_id: corrupt_bytes}
+        mismatched_id = first.state_id
+    else:
+        first = _ic_state(t_run, _ic_bytes(t_run))  # checksum will not match
+        second_content = _ic_bytes("2026-04-20T00:00:00Z")  # time mismatch
+        second = _ic_state(older_valid, second_content)
+        published = {first.state_id: corrupt_bytes, second.state_id: second_content}
+        mismatched_id = second.state_id
+    state_manager = MarkRecordingStateManager([first, second])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, first, published[first.state_id])
+    _publish_state(object_root, second, published[second.state_id])
+
+    manifest = _consume_manifest(first, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No escalation: not every rejection was a time mismatch.
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["state_id"] is None
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert manifest["runtime"]["init_mode"] == 1
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+    # Both rejections are recorded on the cold-start exit (the deferred mismatch mark is
+    # flushed there), and only the mismatch carries the token.
+    assert {state_id for state_id, _ in state_manager.mark_messages} == {first.state_id, second.state_id}
+    tokened = [state_id for state_id, message in state_manager.mark_messages if "WARM_START_TIME_MISMATCH" in message]
+    assert tokened == [mismatched_id]
+    assert state_manager.snapshots[first.state_id].usable_flag is False
+    assert state_manager.snapshots[second.state_id].usable_flag is False
+
+
+def _over_policy_residual_ic_bytes(header_time: str) -> bytes:
+    """A 2-cell sectioned IC whose unsat domain-mean repair exceeds the policy cap.
+
+    One cell carries -0.01 m (inside the 0.05 m per-value repair ceiling, so it IS
+    projected), which makes the domain mean 0.005 m -- far above
+    ``MAX_UNSAT_MEAN_CORRECTION_M`` (2e-4 m) -- so normalization refuses with
+    ``WARM_START_STATE_RESIDUALS_EXCEED_POLICY``.
+    """
+
+    return (
+        f"2\t1\t{_minute_time(header_time):.6f}\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0\t0\t0\t-0.010000\t0\n"
+        "2\t0\t0\t0\t0.100000\t0\n"
+        "Index\tStage\n"
+        "1\t0\n"
+    ).encode()
+
+
+def test_deferred_mismatch_mark_is_flushed_when_a_later_candidate_raises_another_code(tmp_path: Path) -> None:
+    # #1431 deferred-mark invariant: only the systemic escalate may withhold the pending
+    # marks. Here candidate 1 is rejected for a time mismatch (mark deferred) and
+    # candidate 2 fails with a THIRD code that leaves the ladder through the
+    # unexpected-error arm -- that code must still propagate, and candidate 1's earned QC
+    # record must not leave with it (otherwise the drifted snapshot stays usable with
+    # nothing recorded against it and every later cycle repeats the same wasted ladder).
+    t_run = "2026-05-02T00:00:00Z"
+    drifted_content = _ic_bytes("2026-05-02T06:00:00Z")
+    drifted = _ic_state(t_run, drifted_content)
+    older_valid = "2026-05-01T00:00:00Z"
+    # Header agrees with its own valid_time, so the time legs pass; the negative-residual
+    # policy is what refuses it.
+    residual_content = _over_policy_residual_ic_bytes(older_valid)
+    residual = _ic_state(older_valid, residual_content)
+    state_manager = MarkRecordingStateManager([drifted, residual])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, drifted, drifted_content)
+    _publish_state(object_root, residual, residual_content)
+
+    manifest = _consume_manifest(drifted, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+
+    # The third code is preserved verbatim: this exit is not the ladder's own terminal.
+    assert excinfo.value.error_code == "WARM_START_STATE_RESIDUALS_EXCEED_POLICY"
+    # ...and the deferred mark was flushed on the way out.
+    assert state_manager.corrupted == [drifted.state_id]
+    assert [state_id for state_id, _ in state_manager.mark_messages] == [drifted.state_id]
+    assert state_manager.mark_messages[0][1].startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.snapshots[drifted.state_id].usable_flag is False
+    assert state_manager.snapshots[residual.state_id].usable_flag is True
+
+
+def test_exact_warm_start_time_mismatch_keeps_original_error_and_clears_staged(tmp_path: Path) -> None:
+    # #1431 AC-4: under the exact-warm-start policy there is no ladder to walk, so the
+    # historical failure is preserved byte-for-byte -- the ORIGINAL
+    # WARM_START_TIME_MISMATCH error propagates (not WARM_START_UNAVAILABLE, not the new
+    # systemic code, and not the token-prefixed ladder message), with no corruption mark.
+    # The only change is workspace hygiene: the materialized IC is cleared first, as the
+    # checksum arm of the same policy already did.
+    t_next = "2026-05-02T00:00:00Z"
+    ic_content = _ic_bytes("2026-05-02T06:00:00Z")
+    state = _ic_state(t_next, ic_content)
+    state_manager = MarkRecordingStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, state, ic_content)
+
+    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    manifest["runtime"]["warm_start_policy"] = "exact_required"
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+
+    error = excinfo.value
+    assert error.error_code == "WARM_START_TIME_MISMATCH"
+    assert "mismatch" in error.message
+    # The message is the verification's own, not the ladder's token-prefixed variant.
+    assert not error.message.startswith("WARM_START_TIME_MISMATCH: ")
+    assert state_manager.corrupted == []
+    assert state_manager.mark_messages == []
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_header_shape_rejection_mark_stays_distinguishable_from_time_mismatch(tmp_path: Path) -> None:
+    # #1429 regression face: a header with no minute-time slot still degrades through its
+    # own channel, and its mark message must NOT carry the #1431 time-mismatch token --
+    # the two corrupt-snapshot causes stay tellable apart in the QC record.
+    t_run = "2026-05-02T00:00:00Z"
+    malformed_content = b"23106\n1 0.1\n2 0.2\n1 0.0\n"
+    state = _ic_state(t_run, malformed_content)
+    state_manager = MarkRecordingStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    _publish_state(object_root, state, malformed_content)
+
+    manifest = _consume_manifest(state, start_time=t_run, valid_time=t_run, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime._stage_initial_state(manifest, input_dir)
+
+    assert manifest["initial_state"]["quality"] == "cold_start_no_state"
+    assert state_manager.corrupted == [state.state_id]
+    assert "WARM_START_TIME_MISMATCH" not in state_manager.mark_messages[0][1]
+    assert list(input_dir.rglob("*.cfg.ic")) == []
+
+
+def test_systemic_time_mismatch_code_is_classified_exactly_like_the_original(tmp_path: Path) -> None:
+    # #1431 retry parity: the new terminal code is a permanent DATA defect, same as
+    # WARM_START_TIME_MISMATCH. Registering it as transient would open a retry loop that
+    # can only re-read the same drifted bytes.
+    del tmp_path
+    from services.orchestrator.retry import (
+        NON_TRANSIENT_ERROR_CODES,
+        TRANSIENT_ERROR_CODES,
+        classify_failure,
+        is_retryable_failure,
     )
+
+    assert WARM_START_TIME_MISMATCH_SYSTEMIC not in TRANSIENT_ERROR_CODES
+    assert WARM_START_TIME_MISMATCH_SYSTEMIC not in NON_TRANSIENT_ERROR_CODES
+    assert is_retryable_failure(WARM_START_TIME_MISMATCH_SYSTEMIC) is False
+
+    systemic = classify_failure(WARM_START_TIME_MISMATCH_SYSTEMIC, attempt=0, retry_limit=3)
+    original = classify_failure("WARM_START_TIME_MISMATCH", attempt=0, retry_limit=3)
+    assert {key: value for key, value in systemic.items() if key != "reason_code"} == {
+        key: value for key, value in original.items() if key != "reason_code"
+    }
+    assert systemic["retryable"] is False
+    assert systemic["permanent"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1770,6 +2142,8 @@ def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whiteli
         "retry_strict_warm_start_terminal_run_manifest_missing",
         "retry_strict_warm_start_retry_run_manifest_mismatch",
         "retry_terminal_run_manifest_missing",
+        # #1157: the §8.7 quarantine rerun joined both whitelists.
+        "retry_journal_predecessor_identity_mismatch",
     }
 
     def basin(decision: str) -> dict[str, Any]:
@@ -1811,6 +2185,436 @@ def test_budget_blocked_strict_warm_start_decision_is_outside_both_force_whiteli
         )
         is False
     )
+
+
+def _quarantine_whitelist_basin(decision: str) -> dict[str, Any]:
+    return {
+        "model_id": "demo_model",
+        "basin_id": "demo_basin",
+        "candidate_id": "GFS:2026-05-01T12:00:00Z:demo_model:forecast_gfs_deterministic",
+        "orchestration_run_id": "cycle_gfs_2026050112",
+        "state_evidence": {
+            "decision": decision,
+            "restart_stage": "forecast",
+            "restart_from_stage": "forecast",
+        },
+    }
+
+
+def test_quarantine_rerun_decision_forces_resubmission_on_both_whitelists() -> None:
+    """E5 (#1157): the quarantine rerun is a real replacement, its block is not.
+
+    Both whitelists match ``state_evidence["decision"]`` literally.  Without
+    membership the second quarantine of a cycle whose forecast job already
+    SUCCEEDED degrades to an idle resume that re-adopts the very run carrying
+    the stale lineage.  The breaker's blocked decision must stay outside both,
+    or the fail-stop would be revived into a submission on the next pass.
+    """
+    from types import SimpleNamespace
+
+    from services.orchestrator import chain_runtime_utils
+    from services.orchestrator.chain_forecast_orchestrator_cycle import (
+        _FORCE_TERMINAL_RESUBMIT_DECISIONS,
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    retry_decision = "retry_journal_predecessor_identity_mismatch"
+    blocked_decision = "blocked_journal_predecessor_identity_quarantine"
+    terminal_job = {
+        "job_id": "job_cycle_gfs_2026050112_forecast",
+        "status": "succeeded",
+        "stage": "forecast",
+        "job_type": "run_shud_forecast_array",
+    }
+
+    def needs_forced_resubmit(decision: str) -> bool:
+        return _terminal_stage_needs_forced_resubmit(
+            SimpleNamespace(
+                active_basins=[_quarantine_whitelist_basin(decision)],
+                restart_stage="forecast",
+            ),
+            terminal_job,
+        )
+
+    assert retry_decision in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert blocked_decision not in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert needs_forced_resubmit(retry_decision) is True
+    assert needs_forced_resubmit(blocked_decision) is False
+
+    # Sibling copy (``chain_runtime_utils.force_replacement_decisions``) is
+    # function-local, so it is pinned through its seam.
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin(retry_decision)]
+        )
+        is True
+    )
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin(blocked_decision)]
+        )
+        is False
+    )
+    # "Must preserve": the two copies keep their existing difference —
+    # ``retry_repair_missing_forcing`` belongs to the first one only.
+    assert "retry_repair_missing_forcing" in _FORCE_TERMINAL_RESUBMIT_DECISIONS
+    assert (
+        chain_runtime_utils._replacement_retry_scoped_cycle_execution(
+            [_quarantine_whitelist_basin("retry_repair_missing_forcing")]
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("quarantined", [True, False])
+def test_second_quarantine_submits_a_replacement_instead_of_resuming(
+    tmp_path: Path,
+    quarantined: bool,
+) -> None:
+    """E5 integration: the succeeded forecast job is replaced, not re-adopted.
+
+    The journal already holds a SUCCEEDED forecast job for this cycle — the
+    first quarantine rerun's own run, which re-recorded the stale lineage.
+    Under the quarantine decision the orchestrator must submit a replacement
+    with a NEW run identity; under a non-whitelisted decision the same fixture
+    resumes that succeeded job and submits nothing (the pre-change behaviour
+    the whitelist membership fixes).
+    """
+    from tests.test_orchestration_chain import (
+        FakeCycleRepository,
+        FakeCycleSlurmClient,
+        _basins,
+        _orchestrator,
+    )
+
+    run_id = "cycle_gfs_2026050100_forecast_model_0"
+    base_job_id = f"job_{run_id}_forecast"
+    repository = FakeCycleRepository()
+    repository.jobs[base_job_id] = {
+        "job_id": base_job_id,
+        "run_id": run_id,
+        "cycle_id": "gfs_2026050100",
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_0",
+        "stage": "forecast",
+        "status": "succeeded",
+        "slurm_job_id": "7001",
+        "idempotency_key": f"{run_id}:forecast",
+        "retry_count": 0,
+        "submitted_at": "2026-05-01T00:00:00Z",
+        "finished_at": "2026-05-01T00:30:00Z",
+        # Already advertised, so the resume leg does not re-publish logs for a
+        # Slurm job this fake client never ran.
+        "log_uri": f"s3://nhms/runs/{run_id}/logs/forecast.log",
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["orchestration_run_id"] = run_id
+    basins[0]["restart_stage"] = "forecast"
+    basins[0]["state_evidence"] = {
+        "decision": (
+            "retry_journal_predecessor_identity_mismatch" if quarantined else "skip_terminal"
+        ),
+        "restart_stage": "forecast",
+        "restart_from_stage": "forecast",
+    }
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    forecast_submissions = [
+        submission for submission in client.submissions if submission.get("stage") == "forecast"
+    ]
+    replacement_job_id = f"{base_job_id}_retry_1"
+    if quarantined:
+        assert len(forecast_submissions) == 1
+        assert replacement_job_id in repository.jobs
+        assert repository.jobs[replacement_job_id]["idempotency_key"] == (
+            f"{run_id}:forecast:retry_1"
+        )
+        # The replacement is a NEW run identity; the stale row is left intact.
+        assert repository.jobs[base_job_id]["status"] == "succeeded"
+        assert repository.jobs[base_job_id]["slurm_job_id"] == "7001"
+    else:
+        # No whitelist match: the succeeded row is resumed in place (and then
+        # judged on its own durable output) instead of being replaced.
+        assert forecast_submissions == []
+        assert replacement_job_id not in repository.jobs
+
+
+# ---------------------------------------------------------------------------
+# §8.7 quarantine rerun convergence (#1157 D2): the env=false exact lookup
+# PREFERS the expected predecessor lineage, and falls back byte-identically
+# when that preference yields no usable snapshot.
+#
+# Cadence `0,6,12` for cycle T=2026-05-21T12:00Z: the expected predecessor is
+# T-6h, so the expected token ends `_gfs_2026052106_f006` while the stale one
+# ends `_gfs_2026052100_f012`.  The stale id sorts STRICTLY BEFORE the expected
+# one under plain string ordering, so the file index's `min(state_id)` tie-break
+# picks the WRONG entry — an unimplemented preference cannot pass by luck.
+# ---------------------------------------------------------------------------
+
+_QUARANTINE_CYCLE_TIME = "2026-05-21T12:00:00Z"
+_QUARANTINE_MODEL_ID = "demo_model"
+_QUARANTINE_PACKAGE_URI = "s3://nhms/models/demo_model/package/"
+_QUARANTINE_REQUIRED_LEAD_HOURS = 6
+
+
+def _quarantine_state_id(*, lead_hours: int) -> str:
+    """Compose the token the write side would produce for this lineage."""
+    from packages.common.state_manager import state_snapshot_id
+    from workers.data_adapters.base import cycle_id_for
+
+    valid_time = _dt(_QUARANTINE_CYCLE_TIME)
+    return state_snapshot_id(
+        _QUARANTINE_MODEL_ID,
+        valid_time,
+        source_id="gfs",
+        cycle_id=cycle_id_for("gfs", valid_time - timedelta(hours=lead_hours)),
+        lead_hours=lead_hours,
+    )
+
+
+def _quarantine_state_index_orchestrator(
+    tmp_path: Path,
+    *,
+    entries: list[tuple[int, bool]],
+    drifted_package_lead_hours: int | None = None,
+) -> ForecastOrchestrator:
+    """Orchestrator over a REAL file state index holding one entry per lineage.
+
+    ``entries`` is ``(lead_hours, usable_flag)`` per index row, all at valid
+    time T.  The real repository is what makes the ``min(state_id)`` tie-break
+    (and the absent earlier-valid-time fallback) genuine rather than mocked.
+
+    ``drifted_package_lead_hours`` records that entry under a DIFFERENT model
+    package version, which is what a registry upgrade leaves behind: the entry
+    is perfectly usable at the provider, and ``_validate_state_lineage`` in the
+    caller's loop then rejects it.
+    """
+    from packages.common.state_manager import (
+        FileStateSnapshotIndexRepository,
+        StateManager,
+        StateSnapshot,
+    )
+    from workers.data_adapters.base import cycle_id_for
+
+    valid_time = _dt(_QUARANTINE_CYCLE_TIME)
+    state_object_root = tmp_path / "state-object-store"
+    store = LocalObjectStore(state_object_root, "s3://nhms-state")
+    repository = FileStateSnapshotIndexRepository(
+        str(tmp_path / "state-index.json"),
+        object_store_root=state_object_root,
+        object_store_prefix="s3://nhms-state",
+        published_artifact_root=state_object_root,
+        create_missing=True,
+    )
+    for lead_hours, usable_flag in entries:
+        producer_cycle_time = valid_time - timedelta(hours=lead_hours)
+        content = f"state-f{lead_hours:03d}\n".encode()
+        state_uri = store.write_bytes_atomic(
+            f"states/gfs/{_QUARANTINE_MODEL_ID}/f{lead_hours:03d}/state.cfg.ic",
+            content,
+        )
+        repository.upsert_state_snapshot(
+            StateSnapshot(
+                state_id=_quarantine_state_id(lead_hours=lead_hours),
+                model_id=_QUARANTINE_MODEL_ID,
+                run_id=f"fcst_gfs_{lead_hours:03d}_{_QUARANTINE_MODEL_ID}",
+                valid_time=valid_time,
+                state_uri=state_uri,
+                checksum=f"sha256:{sha256_bytes(content)}",
+                usable_flag=usable_flag,
+                source_id="gfs",
+                cycle_id=cycle_id_for("gfs", producer_cycle_time),
+                lead_hours=lead_hours,
+                model_package_version=(
+                    f"{_QUARANTINE_PACKAGE_URI}v-previous/"
+                    if lead_hours == drifted_package_lead_hours
+                    else _QUARANTINE_PACKAGE_URI
+                ),
+            )
+        )
+
+    object_root = tmp_path / "object-store"
+    return ForecastOrchestrator(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            poll_interval_seconds=0,
+            job_timeout_seconds=5,
+            require_forecast_warm_start=False,
+        ),
+        repository=FakeOrchestratorRepository(),
+        state_manager=StateManager(
+            repository=repository,
+            object_store=LocalObjectStore(state_object_root, "s3://nhms-state"),
+        ),
+        slurm_client=FakeSlurmClient(),
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+
+
+def _quarantine_basin(*, quarantined: bool) -> dict[str, Any]:
+    basin: dict[str, Any] = {
+        "model_id": _QUARANTINE_MODEL_ID,
+        "basin_id": _QUARANTINE_MODEL_ID,
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": _QUARANTINE_PACKAGE_URI,
+        "source_id": "gfs",
+    }
+    if quarantined:
+        basin["state_evidence"] = {
+            "decision": "retry_journal_predecessor_identity_mismatch",
+            "reason": "journal_predecessor_identity_mismatch",
+            "restart_stage": "forecast",
+            "journal_predecessor_identity": {
+                "recorded_init_state_id": _quarantine_state_id(lead_hours=12),
+                "expected_init_state_id": _quarantine_state_id(
+                    lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS
+                ),
+                "required_lead_hours": _QUARANTINE_REQUIRED_LEAD_HOURS,
+                "quarantined_skip_reason": "terminal_hydro_success",
+            },
+        }
+    return basin
+
+
+def _quarantine_selected_basin(
+    orchestrator: ForecastOrchestrator,
+    *,
+    quarantined: bool,
+) -> dict[str, Any]:
+    cycle_time = _dt(_QUARANTINE_CYCLE_TIME)
+    basins = orchestrator._normalize_cycle_basins(
+        [_quarantine_basin(quarantined=quarantined)], "gfs", cycle_time
+    )
+    orchestrator._apply_cohort_warm_start(basins, "gfs", cycle_time)
+    return basins[0]
+
+
+def _quarantine_selected_state_id(
+    orchestrator: ForecastOrchestrator,
+    *,
+    quarantined: bool,
+) -> str | None:
+    return _quarantine_selected_basin(orchestrator, quarantined=quarantined).get("init_state_id")
+
+
+def test_quarantine_rerun_converges_on_the_expected_lineage_entry(tmp_path: Path) -> None:
+    """E1: one rerun converges when the expected-lineage entry exists.
+
+    The stale entry sorts first, so the unfiltered lookup that today's code
+    performs still picks it — the control leg below pins exactly that.  Only
+    the lineage preference reaches the expected entry, and the token it selects
+    is the one the §8.7 filter computes as expected, so the next scoring pass
+    makes no quarantine judgement.
+    """
+    from services.orchestrator import scheduler_generation as generation
+
+    stale_state_id = _quarantine_state_id(lead_hours=12)
+    expected_state_id = _quarantine_state_id(lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS)
+    # Adversarial pin: `min(state_id)` alone would answer with the STALE entry.
+    assert stale_state_id < expected_state_id
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+    )
+
+    assert _quarantine_selected_state_id(orchestrator, quarantined=True) == expected_state_id
+    # Next scoring pass: the recorded token now matches, so no judgement.
+    assert (
+        generation.journal_init_state_lineage_matches_expected(
+            expected_state_id,
+            source_id="gfs",
+            model_id=_QUARANTINE_MODEL_ID,
+            candidate_valid_time=_dt(_QUARANTINE_CYCLE_TIME),
+            required_lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS,
+        )
+        is True
+    )
+
+
+def test_non_quarantine_selection_ignores_the_expected_lineage(tmp_path: Path) -> None:
+    """E1 control: a basin without quarantine evidence selects exactly as before.
+
+    Same two-entry index; with no evidence no lineage arguments are passed and
+    the file index's `min(state_id)` tie-break still answers with the stale
+    entry — the byte-identical pre-change selection.
+    """
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+    )
+
+    assert _quarantine_selected_state_id(orchestrator, quarantined=False) == (
+        _quarantine_state_id(lead_hours=12)
+    )
+
+
+@pytest.mark.parametrize("leg", ["expected_entry_absent", "expected_entry_unusable"])
+def test_quarantine_rerun_falls_back_instead_of_cold_starting(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """E2: the lineage is a PREFERENCE, not a filter.
+
+    When the preferred lookup yields no USABLE snapshot — the entry is missing,
+    or present with ``usable_flag`` false — the rerun must repeat today's
+    unfiltered selection and pick the same stale-lineage entry.  Hard-filtering
+    would hand the rerun a zeroed cold start (the file index offers no
+    earlier-valid-time fallback), which is physically worse than the wrong
+    warm start; that non-convergent shape belongs to the breaker instead.
+    """
+    entries = (
+        [(12, True)]
+        if leg == "expected_entry_absent"
+        else [(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, False)]
+    )
+    orchestrator = _quarantine_state_index_orchestrator(tmp_path, entries=entries)
+
+    selected_state_id = _quarantine_selected_state_id(orchestrator, quarantined=True)
+
+    assert selected_state_id == _quarantine_state_id(lead_hours=12)
+    # Same answer as a non-quarantine basin: the fallback is byte-identical.
+    assert selected_state_id == _quarantine_selected_state_id(orchestrator, quarantined=False)
+
+
+def test_quarantine_rerun_resets_the_preference_when_the_preferred_entry_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """E2 (R1 / Class A): a usable preferred entry rejected DOWNSTREAM must not cold-start.
+
+    The provider's usability gate is not the last word — the caller's loop
+    still runs ``_validate_state_lineage`` and the QC hook, and on rejection it
+    advances the cursor past T, which makes the exact branch unreachable for
+    the rest of the loop.  With no earlier-valid-time fallback in the file
+    index that is a zeroed cold start, i.e. the preference silently behaving as
+    a hard filter.  Here a registry upgrade left the expected-lineage entry on
+    the previous package version — an ordinary event, not a corner case.
+
+    The one-shot reset must therefore land on exactly what a non-quarantine
+    basin selects from the same index.
+    """
+    orchestrator = _quarantine_state_index_orchestrator(
+        tmp_path,
+        entries=[(12, True), (_QUARANTINE_REQUIRED_LEAD_HOURS, True)],
+        drifted_package_lead_hours=_QUARANTINE_REQUIRED_LEAD_HOURS,
+    )
+
+    quarantined = _quarantine_selected_basin(orchestrator, quarantined=True)
+    control = _quarantine_selected_basin(orchestrator, quarantined=False)
+
+    assert quarantined["init_state_id"] == _quarantine_state_id(lead_hours=12)
+    assert quarantined["init_state_id"] == control["init_state_id"]
+    assert quarantined["init_state_quality"] == control["init_state_quality"]
+    assert quarantined["init_state_quality"] != "cold_start_no_state"
+    # The reset is one-shot, so it cannot loop: the rejected preferred entry is
+    # never re-offered and the selection terminates on the fallback.
+    assert quarantined.get("init_state_rejection_code") is None
 
 
 def _released_identity_blocked_master(
@@ -1994,6 +2798,102 @@ def test_cohort_reservation_records_each_models_warm_start_identity(tmp_path: Pa
     assert [member["model_id"] for member in master["cohort_members"]] == [
         f"model_{index}" for index in range(3)
     ]
+
+
+def test_cohort_reservation_stamps_quarantine_rerun_provenance(tmp_path: Path) -> None:
+    """E11 (#1157): the master row books WHICH models this submission reruns under §8.7.
+
+    The stamp is written at reservation — the only point that still sees each
+    basin's scheduler decision — and read back by the breaker accessor, so the
+    write and read sides are pinned as one round trip here rather than as two
+    fixtures that could drift apart.  Without this leg both halves of the write
+    side (the canonical list builder and the closed constructor's member) are
+    mutable without a single unit test noticing.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _basins, _orchestrator
+
+    cycle = "2026050100"
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = _basins(3)
+    quarantined_model_id = "model_1"
+    for index, basin in enumerate(basins):
+        state_evidence: dict[str, Any] = {"restart_stage": "forecast"}
+        if f"model_{index}" == quarantined_model_id:
+            state_evidence["decision"] = "retry_journal_predecessor_identity_mismatch"
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
+                "restart_stage": "forecast",
+                "state_evidence": state_evidence,
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "init_state_id": f"state_gfs_model_{index}_2026050100_gfs_2026043012_f012",
+                "init_state_uri": f"s3://nhms/states/gfs/model_{index}/2026050100/state.cfg.ic",
+                "init_state_checksum": f"sha256:state-{index}",
+                "init_state_valid_time": "2026-05-01T00:00:00Z",
+            }
+        )
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+
+    assert result.status == "complete"
+    reopened = FileOrchestrationJournalRepository(repository.root)
+    master = next(
+        row
+        for row in reopened.query_pipeline_jobs_by_cycle("gfs_2026050100")
+        if row.get("stage") == "forecast" and row.get("model_id") is None
+    )
+    # Only the quarantined basin's model is stamped: an unrelated resubmit of
+    # the two others must never look like a failed convergence attempt.
+    assert master["journal_predecessor_quarantine_rerun_model_ids"] == [quarantined_model_id]
+
+    # The stamp is capture-once, like the identity map beside it: a divergent
+    # value must be REJECTED, never merged away, or the breaker could be armed
+    # retroactively on a submission that was never a quarantine rerun.
+    durable = repository.get_pipeline_job(str(master["job_id"]))
+    # Public reads hand back placeholder object URIs (top level and nested in
+    # the identity map); replaying those into a write would trip the frozen
+    # check on those fields first, so omit every field that carries one — an
+    # absent field keeps its persisted value.
+    replayed = {
+        key: value
+        for key, value in durable.items()
+        if "[object-uri]" not in json.dumps(value) and "[uri]" not in json.dumps(value)
+    }
+    with pytest.raises(FileOrchestrationJournalError) as forged_error:
+        repository.upsert_pipeline_job(
+            {**replayed, "journal_predecessor_quarantine_rerun_model_ids": ["model_0"]}
+        )
+    assert forged_error.value.reason == "file_journal_evidence_invariant_invalid"
+    assert forged_error.value.field == "journal_predecessor_quarantine_rerun_model_ids"
+    assert repository.get_pipeline_job(str(master["job_id"])) == durable
+
+    # write -> read round trip: the breaker accessor counts THIS submission for
+    # the stamped model only.
+    def _occurrences(model_id: str, init_state_id: str) -> int:
+        return reopened.completed_pipeline_init_state_id_occurrences(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id=model_id,
+            init_state_id=init_state_id,
+        )
+
+    quarantined_token = f"state_gfs_{quarantined_model_id}_2026050100_gfs_2026043012_f012"
+    assert _occurrences(quarantined_model_id, quarantined_token) == 1
+    assert _occurrences("model_0", "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
+    # Stamped model, but the row's identity map books a DIFFERENT token for it:
+    # the model and the token must BOTH match, or a stale-token count could be
+    # satisfied by any other lineage the same submission recorded.
+    assert _occurrences(quarantined_model_id, "state_gfs_model_0_2026050100_gfs_2026043012_f012") == 0
 
 
 def test_cold_seeded_cohort_basins_book_no_init_state_identity(tmp_path: Path) -> None:

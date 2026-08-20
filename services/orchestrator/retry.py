@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -17,13 +18,17 @@ from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineEvent, PipelineJob, PipelineStore
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
 from services.slurm_gateway.models import SubmitJobRequest
 
+LOGGER = logging.getLogger(__name__)
+
 TRANSIENT_ERROR_CODES: set[str] = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",
+    "SLURM_DEADLINE",
     "NODE_FAILURE",
     "PREEMPTED",
     "STORAGE_WRITE_FAILED",
@@ -34,6 +39,13 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
 }
+# The `{STAGE}_FAILED` members are derived from the canonical downstream stage domain
+# (openspec change retry-stage-failure-classification, #1462) so that adding a stage to
+# `DOWNSTREAM_RESTART_STAGES` classifies its minted failure code here too, instead of
+# leaving a production-mainline code on neither list.  Deliberately a closed-domain
+# derivation and NOT an `endswith("_FAILED")` predicate: a suffix rule would swallow
+# `SLURM_JOB_FAILED`, which openspec change slurm-error-code-transient-coverage pins onto
+# NEITHER list, as well as the transient `SBATCH_SUBMISSION_FAILED` / `STORAGE_WRITE_FAILED`.
 NON_TRANSIENT_ERROR_CODES: set[str] = {
     "INVALID_MANIFEST",
     "MALFORMED_INPUT",
@@ -44,13 +56,29 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
     "TEMPLATE_NOT_ALLOWED",
     "MANIFEST_SCHEMA_INVALID",
     "WARM_START_CHECKPOINT_RETRY",
-}
+    # SHUD runtime family (classifier `shud_runtime_failure`): rerunning the same
+    # configuration does not converge.
+    "SHUD_FAILED",
+    "FAILED_RUN",
+    "RUNTIME_FAILED",
+    # Task-level codes minted alongside the stage family by the scheduler-state reader.
+    "STATE_SAVE_QC_TASK_FAILED",
+    "PARSE_TASK_FAILED",
+    "PUBLISH_TASK_FAILED",
+} | {f"{stage.upper()}_FAILED" for stage in DOWNSTREAM_RESTART_STAGES}
+AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON = "non_transient_error"
+AUTO_RETRY_SKIPPED_UNKNOWN_REASON = "unknown_error_code_defaulted_non_transient"
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
 ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
-DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
+# Manual-retry refusal predicate: a durable hydro run in one of these statuses makes the run
+# non-retryable by hand (RetryNotFoundError). Deliberately NOT the same set as
+# scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES, which additionally holds "complete":
+# that set answers "is the pipeline durably done?" for scheduler decisions, this one answers
+# "may an operator retry this run?". Do not merge the two (see change durable-status-name-split).
+MANUAL_RETRY_DURABLE_SUCCESS_STATUSES = {"succeeded", "parsed", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
 DOWNLOAD_SOURCE_CYCLE_JOB_TYPE = "download_source_cycle"
@@ -125,6 +153,43 @@ def is_transient_error(error_code: str | None) -> bool:
     return error_code in TRANSIENT_ERROR_CODES
 
 
+def auto_retry_skipped_details(error_code: str | None) -> dict[str, Any] | None:
+    """Payload for a job whose RECORDED error code is blocked by classification.
+
+    Returns ``None`` whenever the block is not classification-caused: a
+    transient code (its permanent failure means the retry budget ran out) and a
+    job with no recorded code (nothing to audit-classify) both stay keyless and
+    are told apart by the event's existing ``failure`` sub-dict.
+    """
+
+    if error_code is None or str(error_code) == "":
+        return None
+    code = str(error_code)
+    if code in TRANSIENT_ERROR_CODES:
+        return None
+    reason = (
+        AUTO_RETRY_SKIPPED_NON_TRANSIENT_REASON
+        if code in NON_TRANSIENT_ERROR_CODES
+        else AUTO_RETRY_SKIPPED_UNKNOWN_REASON
+    )
+    return {"auto_retry_skipped": True, "reason": reason, "error_code": code}
+
+
+def warn_unknown_error_code(auto_retry_skipped: Mapping[str, Any] | None) -> None:
+    """Emit the spec-required warning once per APPENDED permanently_failed event.
+
+    Call sites invoke this only after the event is known to have landed, so a
+    repository outcome that skips the append leaves no orphan warning behind.
+    """
+
+    if not auto_retry_skipped or auto_retry_skipped.get("reason") != AUTO_RETRY_SKIPPED_UNKNOWN_REASON:
+        return
+    LOGGER.warning(
+        "unknown error_code '%s' defaulted to non-transient — add to classification list",
+        auto_retry_skipped.get("error_code"),
+    )
+
+
 def classify_failure(
     error_code: str | None,
     *,
@@ -164,6 +229,7 @@ def failure_classifier(error_code: str | None) -> str:
     if code in {
         "SLURM_TIMEOUT",
         "SLURM_JOB_TIMEOUT",
+        "SLURM_DEADLINE",
         "NODE_FAILURE",
         "PREEMPTED",
         "SLURM_UNAVAILABLE",
@@ -182,6 +248,14 @@ def failure_classifier(error_code: str | None) -> str:
         return "malformed_input"
     if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:
         return "policy_blocked"
+    if code == "SLURM_JOB_FAILED":
+        # The gateway's catch-all for terminal Slurm states with no specific
+        # mapping.  It is deliberately registered on no classification surface, so
+        # it defaults to non-transient and downstream resume refuses it until an
+        # operator adjudicates.  Spelled out rather than left to fall through, so a
+        # later branch cannot adopt it by accident (openspec change
+        # slurm-error-code-transient-coverage).
+        return "unknown_failure"
     return "unknown_failure"
 
 
@@ -417,6 +491,7 @@ class RetryService:
             attempt=job.retry_count,
             retry_limit=self.config.max_retries,
         )
+        auto_retry_skipped = auto_retry_skipped_details(last_error)
         job.status = "permanently_failed"
         job.updated_at = datetime.now(UTC)
         self.store.session.add(job)
@@ -432,8 +507,10 @@ class RetryService:
                 "last_error": last_error,
                 "failure": classification,
                 "automatic_retry_stopped": True,
+                **(auto_retry_skipped or {}),
             },
         )
+        warn_unknown_error_code(auto_retry_skipped)
         return job
 
     def attempt_manual_retry(
@@ -488,7 +565,7 @@ class RetryService:
                 raise RetryNotFoundError(run_id)
 
             durable_run_status = _hydro_run_status(self.store, run_id) if has_hydro_run_table else None
-            if durable_run_status in DURABLE_HYDRO_SUCCESS_STATUSES:
+            if durable_run_status in MANUAL_RETRY_DURABLE_SUCCESS_STATUSES:
                 raise RetryNotFoundError(run_id)
 
             jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
@@ -1554,7 +1631,11 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_uri", text)
             )
             continue
-        root = Path(text).expanduser()
+        # os.path.expanduser (not Path.expanduser), same reason as
+        # _local_runtime_root_safety above: an undeterminable home directory
+        # leaves the value verbatim so it falls closed through the non-absolute
+        # arm below instead of raising RuntimeError out of the adjudicator.
+        root = Path(os.path.expanduser(text))
         if not root.is_absolute():
             rejected.append(
                 _runtime_root_rejection("scheduler_allowed_roots", source, "db_free_allowed_root_relative", text)
@@ -1564,18 +1645,47 @@ def _db_free_selector_allowed_roots(source: str, value: str) -> tuple[tuple[Path
         # on symlink loops in CPython 3.13+ and strict Path.resolve() raises an
         # errno-less RuntimeError on <=3.12, so this rejection only becomes
         # reachable through os.path.realpath(..., strict=True). ENOENT is not
-        # unresolvable -- a merely missing root keeps the admitted semantics.
+        # unresolvable -- a merely missing root keeps the admitted semantics --
+        # but that admission is loop-filtered, exactly as in
+        # _local_runtime_root_safety above: strict resolution stops at the first
+        # missing component, so a "<missing>/../<loop>" phantom fails with
+        # ENOENT while its non-strict fallback still lands on a symlink loop.
+        # Re-resolving the fallback strictly is what keeps that phantom out of
+        # the containment bases; without it one physical target draws two
+        # opposite verdicts (rejected as "<loop>", admitted as
+        # "<missing>/../<loop>"). Only a second ENOENT (the root genuinely does
+        # not exist yet) or a clean re-resolution ("<missing>/../<real>") keeps
+        # the admitted verdict. ValueError -- an unrepresentable path string,
+        # which no resolution primitive can canonicalise -- folds into the same
+        # rejection instead of escaping the adjudicator.
+        #
+        # Deliberately NOT the local artifact leg's posture, which keeps phantom
+        # roots admitted as a recorded residual (issue #1402 / PR #1422): these
+        # roots are the containment baseline that
+        # _db_free_selector_path_rejection below judges selector paths against,
+        # so admitting a phantom loop here would reproduce at the path level the
+        # very fail-open the root level rejects.
         try:
             resolved = Path(os.path.realpath(root, strict=True))
-        except OSError as error:
+        except (OSError, ValueError) as error:
+            unresolvable = _runtime_root_rejection(
+                "scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text
+            )
             if getattr(error, "errno", None) != ENOENT:
-                rejected.append(
-                    _runtime_root_rejection(
-                        "scheduler_allowed_roots", source, "db_free_allowed_root_unresolvable", text
-                    )
-                )
+                rejected.append(unresolvable)
                 continue
-            resolved = Path(os.path.realpath(root))
+            try:
+                fallback = os.path.realpath(root)
+            except (OSError, ValueError):
+                rejected.append(unresolvable)
+                continue
+            try:
+                os.path.realpath(fallback, strict=True)
+            except (OSError, ValueError) as recheck_error:
+                if getattr(recheck_error, "errno", None) != ENOENT:
+                    rejected.append(unresolvable)
+                    continue
+            resolved = Path(fallback)
         if resolved not in roots:
             roots.append(resolved)
     return tuple(roots), rejected
@@ -1592,13 +1702,39 @@ def _db_free_selector_path_rejection(
         return _runtime_root_rejection(selector_field, source, "db_free_allowed_roots_missing", value)
     if _URI_STYLE_RE.match(value):
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_uri", value)
-    path = Path(value).expanduser()
+    # os.path.expanduser (not Path.expanduser): see _local_runtime_root_safety --
+    # an undeterminable home directory leaves the value verbatim and it falls
+    # closed through the non-absolute arm below.
+    path = Path(os.path.expanduser(value))
     if not path.is_absolute():
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_relative", value)
+    # Same paradigm as _db_free_selector_allowed_roots above, because this leg
+    # consumes that leg's product: strict os.path.realpath is the only loop
+    # predicate that behaves the same on every supported CPython, and the ENOENT
+    # admission is loop-filtered rather than errno-scoped alone. Submission-time
+    # adjudication performs no existence check, so a not-yet-created selector
+    # path must stay admitted with a byte-identical normalized value; a fallback
+    # that still carries a loop must not. Any other errno (ELOOP, ENOTDIR,
+    # EACCES, ESTALE) and an unrepresentable path string (ValueError) take the
+    # existing rejection. Resolution now precedes the containment comparison
+    # below, so a value that is both unresolvable and out of root reports the
+    # resolution reason -- an unresolvable value has no trustworthy location to
+    # compare against.
     try:
-        resolved = path.resolve(strict=False)
-    except OSError:
-        return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        resolved = Path(os.path.realpath(path, strict=True))
+    except (OSError, ValueError) as error:
+        if getattr(error, "errno", None) != ENOENT:
+            return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        try:
+            fallback = os.path.realpath(path)
+        except (OSError, ValueError):
+            return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        try:
+            os.path.realpath(fallback, strict=True)
+        except (OSError, ValueError) as recheck_error:
+            if getattr(recheck_error, "errno", None) != ENOENT:
+                return _runtime_root_rejection(selector_field, source, "db_free_selector_path_unresolvable", value)
+        resolved = Path(fallback)
     if not any(_path_is_relative_to(resolved, root) for root in allowed_roots):
         return _runtime_root_rejection(selector_field, source, "db_free_selector_path_outside_allowed_roots", value)
     return None

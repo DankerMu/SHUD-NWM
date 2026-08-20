@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import errno
 import fcntl
 import inspect
@@ -20,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from apps.api.main import app
 from apps.api.routes.state_snapshots import get_state_manager
 from packages.common import provider_atomic as provider_atomic_module
+from packages.common import safe_fs as safe_fs_module
 from packages.common import state_cli
 from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
@@ -41,6 +43,7 @@ from packages.common.state_manager import (
     state_snapshot_id,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 
 
 class FakeStateSnapshotRepository:
@@ -838,7 +841,7 @@ def test_file_state_snapshot_index_published_uri_publish_refuses_symlink_target(
     content = _valid_ic_bytes(b"published-symlink")
     state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
     symlink_path = published_root / "manifests" / "scheduler" / "state-index.json"
-    symlink_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(symlink_path.parent)  # lock parent, #1513
     target = tmp_path / "target-state-index.json"
     target.write_text("do-not-overwrite\n", encoding="utf-8")
     symlink_path.symlink_to(target)
@@ -2209,6 +2212,305 @@ def test_state_save_checkpoint_normalizes_bounded_unsat_residual_before_upload(t
     assert run_state_variable_qc(normalized_path).passed is True
 
 
+# #1430 checkpoint IC header shape gate. The runtime rule "LAST numeric token is
+# the minute-time" degenerates on the #1197 two-token header ``23106\t6``: index 1
+# is the mesh-state COLUMN COUNT, not a minute. These fixtures pin both consumption
+# faces in ``state_cli`` -- the normalization overwrite face and the rekey read face.
+_INCIDENT_CHECKPOINT_HEADER = "23106\t6"
+_CHECKPOINT_BODY_LINES = ("1\t0.1\t0.1\t0.1\t0.1\t0.1", "2\t0.1\t0.1\t0.1\t0.1\t0.1", "1\t0.5")
+
+
+def _write_checkpoint_ic(path: Path, header: str) -> Path:
+    path.write_text("\n".join((header, *_CHECKPOINT_BODY_LINES)) + "\n", encoding="utf-8")
+    return path
+
+
+def _checkpoint_for(path: Path, valid_time: datetime, *, lead_hours: int | None = 6) -> state_cli.StateCheckpoint:
+    return state_cli.StateCheckpoint(
+        valid_time=valid_time,
+        ic_file=path,
+        original_shud_filename=path.name,
+        lead_hours=lead_hours,
+    )
+
+
+def _normalized_sibling(path: Path) -> Path:
+    return path.with_name(f".{path.name}.normalized")
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("two_token_incident", _INCIDENT_CHECKPOINT_HEADER),
+        ("five_numeric_tokens", "23106\t6\t3\t2\t29070720.000000"),
+    ],
+)
+def test_checkpoint_ic_normalization_refuses_headers_whose_minute_index_is_unsafe(
+    tmp_path: Path,
+    case: str,
+    header: str,
+) -> None:
+    """AC-1: the overwrite face refuses instead of writing a #1197-shaped poisoned IC."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "lh-gl.cfg.ic.update", header)
+    before = checkpoint_path.read_bytes()
+
+    with pytest.raises(StateManagerError, match=state_cli.STATE_SAVE_CHECKPOINT_IC_HEADER_SHAPE_INVALID):
+        state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert checkpoint_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("case", "header", "expects_rewrite"),
+    [
+        ("native_three_token_noop", None, False),
+        ("native_three_token_rekey", "2\t1\t720.000000", True),
+        ("compat_four_token_rekey", "2\t1\t0\t720.000000", True),
+    ],
+)
+def test_checkpoint_ic_normalization_keeps_valid_shapes_byte_for_byte(
+    tmp_path: Path,
+    case: str,
+    header: str | None,
+    expects_rewrite: bool,
+) -> None:
+    """AC-3: three- and four-token headers keep today's normalization behavior."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    expected_minute = valid_time.timestamp() / 60.0
+    header_line = header if header is not None else f"2\t1\t{expected_minute:.6f}"
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.cfg.ic.update", header_line)
+
+    normalized_path, evidence = state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert evidence["normalized_value_count"] == 0
+    if not expects_rewrite:
+        assert normalized_path == checkpoint_path
+        assert not _normalized_sibling(checkpoint_path).exists()
+        return
+    assert normalized_path == _normalized_sibling(checkpoint_path)
+    rewritten_header = header_line.split()
+    rewritten_header[-1] = f"{expected_minute:.6f}"
+    assert normalized_path.read_text(encoding="utf-8") == (
+        "\n".join(("\t".join(rewritten_header), *_CHECKPOINT_BODY_LINES)) + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("empty_header_line", "   "),
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_ic_normalization_keeps_the_tolerant_no_minute_index_branch(
+    tmp_path: Path,
+    case: str,
+    header: str,
+) -> None:
+    """The gate never widens the refuse set to headers the code never consumes."""
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.cfg.ic.update", header)
+    before = checkpoint_path.read_bytes()
+
+    normalized_path, _evidence = state_cli._normalized_checkpoint_ic_file(_checkpoint_for(checkpoint_path, valid_time))
+
+    assert normalized_path == checkpoint_path
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert checkpoint_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_ic_normalization_clamps_nothing_without_a_minute_index(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    """Residual clamping needs the same two numeric header tokens the minute index does.
+
+    ``normalize_state_negative_residuals`` bails out at ``_header_counts is None``
+    on exactly the headers that yield no minute index, so a clampable negative
+    residual under such a header is left alone and no ``.normalized`` is written:
+    the tolerant branch's ``normalized_value_count != 0`` arm is unreachable from
+    here (reported on #1430, not repaired in a tests-only change).
+    """
+
+    del case
+    valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = tmp_path / "demo.cfg.ic.update"
+    body = ("1\t0.1\t0.1\t0.1\t-0.001000\t0.1", "2\t0.1\t0.1\t0.1\t0.1\t0.1", "1\t0.5")
+    checkpoint_path.write_text("\n".join((header, *body)) + "\n", encoding="utf-8")
+    before = checkpoint_path.read_bytes()
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        normalized_path, evidence = state_cli._normalized_checkpoint_ic_file(
+            _checkpoint_for(checkpoint_path, valid_time)
+        )
+
+    assert normalized_path == checkpoint_path
+    assert not _normalized_sibling(checkpoint_path).exists()
+    assert evidence["normalized_value_count"] == 0
+    assert checkpoint_path.read_bytes() == before
+    assert checkpoint_path.read_text(encoding="utf-8").splitlines()[0] == header
+    assert caplog.records == []
+
+
+def _rekey_run_context() -> state_cli.StateRunContext:
+    return state_cli.StateRunContext(
+        run_id="fcst_gfs_2026080100_demo_model",
+        model_id="demo_model",
+        end_time=_dt("2026-08-01T06:00:00Z"),
+        output_uri=None,
+        source_id="GFS",
+        cycle_time=_dt("2026-08-01T00:00:00Z"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("two_token_incident", _INCIDENT_CHECKPOINT_HEADER),
+        ("five_numeric_tokens", "23106\t6\t3\t2\t29070720.000000"),
+    ],
+)
+def test_checkpoint_header_time_does_not_rekey_on_unsafe_header_shapes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    """AC-2: the read face keeps the manifest-declared valid time (06:00 stays 06:00)."""
+
+    del case
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header)
+    checkpoint = _checkpoint_for(checkpoint_path, _dt("2026-08-01T06:00:00Z"))
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        assert state_cli._checkpoint_header_minute(checkpoint_path) is None
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed.valid_time == _dt("2026-08-01T06:00:00Z")
+    assert rekeyed.lead_hours == 6
+    assert any(
+        state_cli.STATE_CHECKPOINT_IC_HEADER_SHAPE_REKEY_SKIPPED in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "header", "expected_valid_time", "expected_lead_hours"),
+    [
+        ("native_three_token_rekey", "2\t1\t120.000000", "2026-08-01T02:00:00Z", 2),
+        ("compat_four_token_rekey", "2\t1\t0\t120.000000", "2026-08-01T02:00:00Z", 2),
+        ("native_three_token_noop", None, "2026-08-01T06:00:00Z", 6),
+    ],
+)
+def test_checkpoint_header_time_keeps_rekey_behavior_for_valid_shapes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str | None,
+    expected_valid_time: str,
+    expected_lead_hours: int,
+) -> None:
+    """AC-3 on the read face: valid shapes still rekey, and the no-op stays a no-op."""
+
+    del case
+    declared_valid_time = _dt("2026-08-01T06:00:00Z")
+    header_line = header if header is not None else f"2\t1\t{declared_valid_time.timestamp() / 60.0:.6f}"
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header_line)
+    checkpoint = _checkpoint_for(checkpoint_path, declared_valid_time)
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed.valid_time == _dt(expected_valid_time)
+    assert rekeyed.lead_hours == expected_lead_hours
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("case", "header"),
+    [
+        ("empty_header_line", "   "),
+        ("single_token", "23106"),
+        ("non_numeric_tail", "Index\tCanopy"),
+    ],
+)
+def test_checkpoint_header_time_keeps_the_tolerant_no_minute_index_branch(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    header: str,
+) -> None:
+    del case
+    declared_valid_time = _dt("2026-08-01T06:00:00Z")
+    checkpoint_path = _write_checkpoint_ic(tmp_path / "demo.f006.cfg.ic.update", header)
+    checkpoint = _checkpoint_for(checkpoint_path, declared_valid_time)
+
+    with caplog.at_level("WARNING", logger="packages.common.state_cli"):
+        assert state_cli._checkpoint_header_minute(checkpoint_path) is None
+        rekeyed = state_cli._checkpoint_with_header_time(checkpoint, _rekey_run_context())
+
+    assert rekeyed is checkpoint
+    # No minute index was ever consumed, so there is nothing to warn about.
+    assert caplog.records == []
+
+
+def test_state_cli_takes_ic_header_shape_verdicts_only_from_the_shared_helper() -> None:
+    """AC-4: one shape rule in the tree -- ``state_qc.cfg_ic_header_shape``."""
+
+    tree = ast.parse(Path(state_cli.__file__).read_text(encoding="utf-8"))
+
+    imported_from_state_qc = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "packages.common.state_qc"
+        for alias in node.names
+    }
+    assert "cfg_ic_header_shape" in imported_from_state_qc
+
+    shape_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "cfg_ic_header_shape"
+    ]
+    # Exactly the two consumption faces: normalization overwrite and header read.
+    assert len(shape_calls) == 2
+
+    # No second token-counting rule: state_cli never measures the header itself...
+    assert [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and ("header" in ast.unparse(node).lower() or "token" in ast.unparse(node).lower())
+    ] == []
+    # ...nor keeps its own copy of the accepted token counts.
+    assert [
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and "TOKEN" in target.id.upper()
+    ] == []
+
+
 def test_state_checkpoint_manifest_reader_ignores_runtime_diagnostic_keys(tmp_path: Path) -> None:
     """#1315 consumer tolerance: the new runtime manifest keys change nothing here.
 
@@ -3123,7 +3425,7 @@ def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_in
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
     )
-    destination_index.parent.mkdir(parents=True, exist_ok=True)
+    make_directory_with_explicit_mode(destination_index.parent)  # lock parent, #1513
     destination_index.write_text("[]\n", encoding="utf-8")
 
     with pytest.raises(StateManagerError) as error_info:
@@ -3253,7 +3555,7 @@ def test_provider_lock_release_failure_never_masks_the_body_precommit_error(
     # the compare-and-swap is stale, and the self-lock branch of
     # atomic_replace_provider_bytes is the lock under test.
     destination = tmp_path / "provider" / "manifest.json"
-    destination.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(destination.parent)  # lock parent, #1513
     stale_preimage = atomic_replace_provider_bytes(
         destination,
         b"generation-1\n",
@@ -3283,6 +3585,393 @@ def test_provider_lock_release_failure_never_masks_the_body_precommit_error(
     # The release really did fail; it was suppressed, not skipped.
     assert seam.failed_releases == 1
     assert destination.read_bytes() == b"generation-2\n"
+
+
+def _merge_without_hanging(call: Any) -> Any:
+    """Run `call` on a daemon thread and fail if it has not returned in 5s.
+
+    Unlike #1192's same-root net, this tripwire has real discriminating power on
+    the hardlink construction below: before this change the merge takes the
+    source provider lock, then asks for the destination one, and both names
+    reach one inode, so `fcntl.flock` blocks with no `LOCK_NB` and never comes
+    back.  Round-0 measured exactly that with `subprocess.run(..., timeout=25)`:
+    `same lock inode: True` / `abspath keys differ: True` / `TIMEOUT -> deadlock
+    confirmed`.  A bare call would therefore wedge the whole pytest process, so
+    calling the merge directly in these tests is not an option.
+
+    `daemon=True` is not optional -- a non-daemon thread keeps the interpreter
+    alive at exit waiting for exactly the thread that never finishes.  A thread
+    stuck here goes on holding the provider lock it took for the rest of this
+    pytest session, which is why the tripwire message is distinctive: a mutant
+    run has to be able to prove its red came from the hang and not from some
+    incidental refusal on the way in.
+    """
+
+    outcome: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # noqa: BLE001 -- re-raised on the caller's thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5.0)
+    if thread.is_alive():
+        pytest.fail("JOIN-TIMEOUT TRIPWIRE: the copyback merge did not return within 5s (self-deadlock)")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _record_provider_lock_requests(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every `provider_destination_lock` request, delegating to the real one.
+
+    Delegation is load-bearing: under the mutant that deletes a guard branch the
+    merge must still reach the real `fcntl.flock` and hang into the tripwire.  A
+    stub that never locks would make the mutant red for the wrong reason and the
+    discrimination proof would be worthless.
+    """
+
+    requested: list[str] = []
+    real_lock = state_manager_module.provider_destination_lock
+
+    @contextmanager
+    def recording(path: Path, **kwargs: Any) -> Iterator[None]:
+        requested.append(str(path))
+        with real_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(state_manager_module, "provider_destination_lock", recording)
+    return requested
+
+
+def _inject_lock_parent_alias(monkeypatch: pytest.MonkeyPatch, *parents: Path) -> None:
+    """Make `parents` report one filesystem identity through the guard's own probe.
+
+    Patched on the state_manager namespace, which is where the guard resolves the
+    name -- patching `packages.common.safe_fs` instead would leave the production
+    call point untouched.  A real bind mount needs root and has no portable
+    construction (see tests/test_safe_fs.py), so branch A is exercised at this
+    seam; branch B below needs no injection at all.
+    """
+
+    resolved = {parent.resolve() for parent in parents}
+    real_probe = safe_fs_module.directory_identity_no_follow
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() in resolved:
+            return (0x1609, 0x1609)
+        return real_probe(path)
+
+    monkeypatch.setattr(state_manager_module, "directory_identity_no_follow", probe)
+
+
+def test_state_index_copyback_refuses_hardlinked_provider_lockfiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1609: two genuinely distinct directories, but their provider lockfiles are
+    # one inode.  #1192's root-level identity guard sees two distinct roots and
+    # passes; the merge then takes the source lock and asks for the destination
+    # lock, which is the same file, and `provider_destination_lock` is blocking
+    # and not reentrant.  Before this change that is a permanent hang.
+    # The umask no longer decides the lock parents: `_CopybackRoots` creates both
+    # of them only through `publish_state_snapshot_index` ->
+    # `ensure_directory_no_follow`, and #1513 pinned that `os.mkdir` to an explicit
+    # 0o755 (safe_fs.py:68), so `provider_lock_parent_unsafe`
+    # (provider_atomic.py:209-210) passes under any ambient umask and this wrapper
+    # is no longer load-bearing for that gate (measured: the suite is green with the
+    # wrapper neutralized).  It is kept because it is behavior-neutral --
+    # `0o755 & ~0o077 == 0o700`, the same private mode it always produced -- and
+    # because it keeps this test's private-mode posture explicit rather than
+    # implicit in safe_fs's pin.  The construction is inside the `try` so a
+    # mid-construction raise cannot leak 0o077 into the rest of the session.
+    previous_umask = os.umask(0o077)
+    try:
+        roots = _CopybackRoots(tmp_path)
+        source_lock = provider_lock_path(roots.source_index)
+        destination_lock = provider_lock_path(roots.destination_index)
+        # Both lock parents must be private, or `provider_lock_parent_unsafe` fires
+        # on the *source* acquisition and the mutant would red for the wrong reason.
+        source_lock.parent.chmod(0o700)
+        destination_lock.parent.chmod(0o700)
+        # Publishing each index already took its provider lock, so both lockfiles
+        # exist; hardlinking the destination one onto the source inode is the whole
+        # construction -- no injection, no root, portable.
+        assert source_lock.exists()
+        assert destination_lock.exists()
+        destination_lock.unlink()
+        os.link(source_lock, destination_lock)
+        assert source_lock.stat().st_ino == destination_lock.stat().st_ino
+        assert os.path.abspath(source_lock) != os.path.abspath(destination_lock)
+
+        requested_locks = _record_provider_lock_requests(monkeypatch)
+        source_before = roots.source_index.read_bytes()
+        destination_before = roots.destination_index.read_bytes()
+
+        with pytest.raises(StateManagerError) as error_info:
+            _merge_without_hanging(roots.merge)
+    finally:
+        os.umask(previous_umask)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identical"
+    # No phase, by contract: nothing was read, written or locked, so both callers
+    # must bucket this pre-commit.
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.evidence == {
+        "branch": "lockfile_identity",
+        "lock_name": ".index-last.json.lock",
+        "source_lock": "[local-path]",
+        "destination_lock": "[local-path]",
+    }
+    assert requested_locks == []
+    assert roots.source_index.read_bytes() == source_before
+    assert roots.destination_index.read_bytes() == destination_before
+    assert not roots.shared_fresh_object.exists()
+
+
+def test_state_index_copyback_refuses_aliased_lock_parents_before_the_lockfiles_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Branch A: the real threat shape is an export aliased *below* two distinct
+    # roots, which branch B cannot see on a first merge because neither lockfile
+    # has been created yet -- `provider_destination_lock` is what creates them.
+    roots = _CopybackRoots(tmp_path)
+    source_lock = provider_lock_path(roots.source_index)
+    destination_lock = provider_lock_path(roots.destination_index)
+    # Publishing left both lockfiles behind; remove them so branch B is
+    # inapplicable on both sides and branch A is provably what refuses.
+    source_lock.unlink()
+    destination_lock.unlink()
+    assert not source_lock.exists()
+    assert not destination_lock.exists()
+    _inject_lock_parent_alias(monkeypatch, roots.source_index.parent, roots.destination_index.parent)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identical"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.evidence["branch"] == "lock_parent_identity"
+    assert requested_locks == []
+    assert not source_lock.exists()
+    assert not destination_lock.exists()
+
+
+def test_state_index_copyback_lock_identity_probe_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A probe that cannot answer must not degrade into "judge it distinct and
+    # carry on" -- carrying on is exactly what deadlocks.
+    roots = _CopybackRoots(tmp_path)
+    real_probe = safe_fs_module.directory_identity_no_follow
+    target = roots.source_index.parent.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(state_manager_module, "directory_identity_no_follow", probe)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+    destination_before = roots.destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identity_unavailable"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.field == "copyback_source"
+    assert error_info.value.evidence == {
+        "probe": "lock_parent",
+        "path": "[local-path]",
+        "error_type": "OSError",
+    }
+    assert requested_locks == []
+    assert roots.destination_index.read_bytes() == destination_before
+
+
+def _fail_lockfile_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make branch B's own probe fail on `target`, leaving every other stat real.
+
+    Patched on the state_manager namespace for the same reason
+    `_inject_lock_parent_alias` is: that is where the guard resolves the name.
+    Scoping the failure to one path keeps the other operand's probe genuine, so
+    which operand the error names is decided by the guard and not by the seam.
+    """
+
+    real_stat = safe_fs_module.stat_no_follow
+    resolved = target.resolve()
+
+    def failing_stat(path: Path, **kwargs: Any) -> os.stat_result:
+        if Path(path).resolve() == resolved:
+            raise OSError("probe blocked")
+        return real_stat(path, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "stat_no_follow", failing_stat)
+
+
+def test_state_index_copyback_lockfile_probe_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Branch B's own probe, sibling of the branch-A case above.  Nothing made
+    # `_copyback_lockfile_identity`'s `stat_no_follow` fail, so a probe that
+    # degraded into "absent, therefore inapplicable" would have shipped green --
+    # and "inapplicable" is exactly the verdict that lets the merge walk into the
+    # deadlock the guard exists to prevent.  Branch A is inapplicable here on its
+    # own terms: the two lock parents are genuinely distinct directories.
+    roots = _CopybackRoots(tmp_path)
+    source_lock = provider_lock_path(roots.source_index)
+    assert source_lock.exists()
+    _fail_lockfile_stat(monkeypatch, source_lock)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+    source_before = roots.source_index.read_bytes()
+    destination_before = roots.destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identity_unavailable"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.field == "copyback_source"
+    assert error_info.value.evidence == {
+        "probe": "lockfile",
+        "path": "[local-path]",
+        "error_type": "OSError",
+    }
+    assert requested_locks == []
+    assert roots.source_index.read_bytes() == source_before
+    assert roots.destination_index.read_bytes() == destination_before
+    assert not roots.shared_fresh_object.exists()
+
+
+def test_state_index_copyback_lockfile_probe_failure_names_the_destination_operand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The operand string is not decoration: an operator reading
+    # `copyback_source` goes and looks at the private export.  The source probe
+    # answers normally here and only the destination one fails, so collapsing the
+    # two `field=` call sites into one constant has to red.
+    roots = _CopybackRoots(tmp_path)
+    destination_lock = provider_lock_path(roots.destination_index)
+    assert destination_lock.exists()
+    _fail_lockfile_stat(monkeypatch, destination_lock)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+    destination_before = roots.destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identity_unavailable"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.field == "copyback_destination"
+    assert error_info.value.evidence == {
+        "probe": "lockfile",
+        "path": "[local-path]",
+        "error_type": "OSError",
+    }
+    assert requested_locks == []
+    assert roots.destination_index.read_bytes() == destination_before
+    assert not roots.shared_fresh_object.exists()
+
+
+def test_state_index_copyback_guard_treats_the_absent_bootstrap_parent_as_inapplicable(
+    tmp_path: Path,
+) -> None:
+    # The bootstrap copyback: `<copyback_root>/scheduler/state-index/` is created
+    # by the lock acquisition itself, so it does not exist when the guard runs.
+    # An absent path has no inode and cannot alias one that exists, so both
+    # branches are inapplicable -- treating the absence as a probe failure would
+    # refuse the first-ever copyback into a fresh shared root.
+    roots = _CopybackRoots(tmp_path)
+    roots.destination_index.unlink()
+    provider_lock_path(roots.destination_index).unlink()
+    roots.destination_index.parent.rmdir()
+    (roots.shared_root / "scheduler").rmdir()
+    assert not roots.destination_index.parent.exists()
+
+    previous_umask = os.umask(0o077)
+    try:
+        summary = _merge_without_hanging(roots.merge)
+    finally:
+        os.umask(previous_umask)
+
+    assert summary["merged_entry_count"] == 1
+    published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["fresh-state"]
+
+
+def test_state_index_copyback_merges_when_neither_lockfile_exists_yet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Branch B's `is not None` clause.  With neither lockfile present both probes
+    # answer `None`, and `None == None` is true, so dropping that clause refuses
+    # two genuinely distinct parents: a false refusal of a legitimate merge,
+    # reachable whenever a source object store is restored or rsync'd without its
+    # dotfiles into a fresh copyback root.  The branch-A test above also unlinks
+    # both lockfiles, but there branch A raises first and branch B is never
+    # reached, so only this shape -- distinct parents *and* both lockfiles absent
+    # -- pins the clause.  The destination-only-absent shape needs no case of its
+    # own: `tuple == None` is always false, so the clause is symmetric in its two
+    # operands, and that shape is already merged green by the bootstrap test.
+    previous_umask = os.umask(0o077)
+    try:
+        roots = _CopybackRoots(tmp_path)
+        source_lock = provider_lock_path(roots.source_index)
+        destination_lock = provider_lock_path(roots.destination_index)
+        # Publishing left both lockfiles behind; removing them is the whole
+        # construction -- no injection, no root, portable.
+        source_lock.unlink()
+        destination_lock.unlink()
+        assert not source_lock.exists()
+        assert not destination_lock.exists()
+        # Branch A is inapplicable on its own terms: the parents really are two
+        # directories, so it cannot be what lets this merge through.
+        source_parent = roots.source_index.parent.stat()
+        destination_parent = roots.destination_index.parent.stat()
+        assert (source_parent.st_dev, source_parent.st_ino) != (
+            destination_parent.st_dev,
+            destination_parent.st_ino,
+        )
+        requested_locks = _record_provider_lock_requests(monkeypatch)
+
+        summary = _merge_without_hanging(roots.merge)
+    finally:
+        os.umask(previous_umask)
+
+    assert summary["merged_entry_count"] == 2
+    published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert requested_locks == [str(roots.source_index), str(roots.destination_index)]
+    assert roots.shared_fresh_object.read_bytes() == roots.fresh_content
+
+
+def test_state_index_copyback_keeps_todays_behavior_for_distinct_lockfiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Non-regression for the only shape that reaches production today: distinct
+    # parents, distinct (or absent) lockfiles.  Both provider locks are still
+    # taken, in the same order, with the same blocking semantics.
+    roots = _CopybackRoots(tmp_path)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+
+    previous_umask = os.umask(0o077)
+    try:
+        summary = _merge_without_hanging(roots.merge)
+    finally:
+        os.umask(previous_umask)
+
+    assert summary["merged_entry_count"] == 2
+    assert requested_locks == [str(roots.source_index), str(roots.destination_index)]
 
 
 def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path: Path) -> None:
@@ -3506,7 +4195,10 @@ def _write_state_index_payload(path: Path, entries: list[dict[str, Any]], *, gen
         "entries": entries,
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+    # SHARED_PROVIDER_MODE, not the ambient umask (#1513): this seeds a provider
+    # DESTINATION, and a later publish over it refuses any other mode. A bare
+    # write_text lands 0o664 under umask 0002.
+    write_provider_destination(path, json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n")
 
 
 def _payload_checksum(payload: Mapping[str, Any]) -> str:

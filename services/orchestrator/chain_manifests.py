@@ -66,6 +66,7 @@ __all__ = (
     "ManifestValidationError",
     "PRODUCTION_CONTRACT_ID",
     "PRODUCTION_CONTRACT_SCHEMA_VERSION",
+    "STATE_CHECKPOINT_HOURS_UNREACHABLE",
     "build_analysis_run_manifest",
     "build_cycle_stage_manifest",
     "build_forecast_run_manifest",
@@ -114,6 +115,8 @@ __all__ = (
     "_station_metadata_for_basin",
     "_tri_state",
 )
+
+STATE_CHECKPOINT_HOURS_UNREACHABLE = "STATE_CHECKPOINT_HOURS_UNREACHABLE"
 
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
 DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
@@ -396,6 +399,58 @@ def prepare_forecast_runtime_manifests(
         raise
 
 
+def _require_reachable_state_checkpoint_hours(
+    checkpoint_hours: Sequence[int],
+    update_ic_step_minutes: int,
+    *,
+    run_id: str,
+    forecast_horizon_hours: Any,
+) -> None:
+    """Refuse checkpoint hours the configured restart cadence can never produce (#1317).
+
+    SHUD writes a restart file only when the elapsed model time divides
+    ``Update_IC_STEP`` (``SHUD/src/ModelData/MD_update.cpp:226-229``), and reaching
+    END goes through the same ``PrintInit``, so "the run finishes, therefore the
+    state lands" does not hold.  The cadence here is ``min(checkpoint_hours) * 60``
+    and the hours come from the gaps between
+    ``NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC``, which for a non-evenly-spaced
+    configuration are mutually indivisible: ``"0,5"`` yields hours ``[5, 19]`` and
+    step 300, so f019 is structurally impossible.  Emitting that manifest turns a
+    configuration error into a ``STATE_CHECKPOINTS_MISSING`` hard failure that is
+    indistinguishable, from run evidence alone, from a broken solver — plus one
+    wasted recovery rerun per cycle (#1316).
+
+    Fail-closed by design: automatically lowering the cadence to the hours' gcd
+    was considered and rejected, because it silently changes the solver's restart
+    write frequency (an unrequested runtime behaviour change smuggled in as
+    validation).
+
+    Both forecast manifest production sites call this; ``build_analysis_run_manifest``
+    deliberately does not, because analysis manifests declare no
+    ``state_checkpoint_hours`` and are outside this requirement.
+    """
+
+    unreachable = [hour for hour in checkpoint_hours if (hour * 60) % update_ic_step_minutes != 0]
+    if not unreachable:
+        return
+    raise OrchestratorError(
+        STATE_CHECKPOINT_HOURS_UNREACHABLE,
+        "Forecast state checkpoint hours are not reachable under the derived restart cadence: "
+        f"{unreachable} (update_ic_step_minutes={update_ic_step_minutes}). SHUD only writes a "
+        "restart state when the elapsed model minutes divide Update_IC_STEP, so these hours can "
+        "never be produced. Configure NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC so the cycle gaps "
+        "are mutually divisible (evenly spaced cycles satisfy this).",
+        {
+            "run_id": run_id,
+            "state_checkpoint_hours": list(checkpoint_hours),
+            "update_ic_step_minutes": update_ic_step_minutes,
+            "unreachable_hours": unreachable,
+            "forecast_horizon_hours": forecast_horizon_hours,
+            "allowed_cycle_hours_utc": os.getenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,12"),
+        },
+    )
+
+
 def build_forecast_runtime_manifest(
     orchestrator: ChainManifestOrchestrator,
     context: CycleOrchestrationContext,
@@ -482,8 +537,15 @@ def build_forecast_runtime_manifest(
         manifest["runtime"]["warm_start_policy"] = "exact_required"
     checkpoint_hours = forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
     if checkpoint_hours:
+        update_ic_step_minutes = min(checkpoint_hours) * 60
+        _require_reachable_state_checkpoint_hours(
+            checkpoint_hours,
+            update_ic_step_minutes,
+            run_id=run_id,
+            forecast_horizon_hours=manifest["forecast_horizon_hours"],
+        )
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
-        manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
+        manifest["runtime"]["update_ic_step_minutes"] = update_ic_step_minutes
     return manifest
 
 
@@ -639,8 +701,15 @@ def build_forecast_run_manifest(
         manifest["initial_state"]["lineage"] = dict(context.init_state_lineage)
     checkpoint_hours = forecast_state_checkpoint_hours(context.forecast_horizon_hours)
     if checkpoint_hours:
+        update_ic_step_minutes = min(checkpoint_hours) * 60
+        _require_reachable_state_checkpoint_hours(
+            checkpoint_hours,
+            update_ic_step_minutes,
+            run_id=context.run_id,
+            forecast_horizon_hours=context.forecast_horizon_hours,
+        )
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
-        manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
+        manifest["runtime"]["update_ic_step_minutes"] = update_ic_step_minutes
     return manifest
 
 

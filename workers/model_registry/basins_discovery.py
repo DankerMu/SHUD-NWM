@@ -225,7 +225,9 @@ def _inventory_for_model(
     gis_dir = input_dir / "gis"
     required_files, missing_required_files = _match_required_files(input_dir, gis_dir, resolved_root, warnings)
     invalid_required_files = _invalid_required_files(input_dir, required_files, resolved_root, warnings)
-    checksums = _checksums_for_required_files(input_dir, required_files, resolved_root, warnings)
+    checksums, unreadable_required_files = _checksums_for_required_files(
+        input_dir, required_files, resolved_root, warnings
+    )
     calibration_count = _count_files(
         model_dir / "CALIB",
         resolved_root,
@@ -251,9 +253,14 @@ def _inventory_for_model(
         quirks.append("unsafe_symlink_outside_root")
     if invalid_required_files:
         quirks.append("invalid_required_file_content")
+    if unreadable_required_files:
+        quirks.append("unreadable_required_file")
     status = (
         "valid"
-        if not missing_required_files and not invalid_required_files and not unsafe_descendant
+        if not missing_required_files
+        and not invalid_required_files
+        and not unreadable_required_files
+        and not unsafe_descendant
         else "partial"
     )
     suggested_ids = {
@@ -278,6 +285,7 @@ def _inventory_for_model(
         "quirks": sorted(set(quirks)),
         "missing_required_files": missing_required_files,
         "invalid_required_files": invalid_required_files,
+        "unreadable_required_files": unreadable_required_files,
         "required_files": required_files,
         "calibration_count": calibration_count,
         "forcing_csv_count": forcing_count,
@@ -424,20 +432,41 @@ def _checksums_for_required_files(
     required_files: dict[str, list[str]],
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
-) -> dict[str, str]:
+) -> tuple[dict[str, str], list[str]]:
+    """Return the required-file checksums plus the files that could not be read.
+
+    A matched required file whose stat/hash raises OSError (EACCES, EIO, an ENOENT
+    race) used to be skipped silently: no checksum entry, no quirk, no warning, so
+    "present but unreadable" registered as a healthy model. It is now a third state
+    of its own, returned as a locatable reason list the caller feeds into ``status``
+    the way ``invalid_required_files`` is fed -- quirks alone do not drive status.
+    ``missing_required_files`` is untouched (the file WAS matched), and the
+    unsafe-symlink skip keeps its own pre-existing ``BASINS_SYMLINK_*`` channel
+    rather than being folded in here. Files above ``CHECKSUM_LIMIT_BYTES`` keep
+    today's deliberate no-checksum-no-verdict behavior.
+    """
+
     checksums: dict[str, str] = {}
+    unreadable: list[str] = []
     for matches in required_files.values():
         for relative_name in matches:
             path = input_dir / relative_name
+            if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+                continue
             try:
-                if (
-                    _safe_resolve_under_root(path, resolved_root, warnings) is not None
-                    and path.stat().st_size <= CHECKSUM_LIMIT_BYTES
-                ):
+                if path.stat().st_size <= CHECKSUM_LIMIT_BYTES:
                     checksums[relative_name] = _sha256(path)
             except OSError:
-                continue
-    return checksums
+                unreadable.append(f"{relative_name}: required file could not be read for checksum")
+                _append_warning_once(
+                    warnings,
+                    DiscoveryWarning(
+                        "BASINS_REQUIRED_FILE_UNREADABLE",
+                        "Required file was matched but could not be read for checksum.",
+                        path=str(path),
+                    ),
+                )
+    return checksums, unreadable
 
 
 def _forcing_info(

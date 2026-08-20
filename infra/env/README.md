@@ -52,6 +52,18 @@ Compute role, node 22:
   the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
   `compute.env` only for `compute-api` or an explicit archived rollback drill;
   node-22 `:55433` is stopped/archived and is not scheduler runtime env.
+- The node-22 DB-free scheduler live env
+  (`compute.scheduler-dbfree.env`, referenced by systemd `EnvironmentFile=`)
+  has exactly one tracked source: `compute.scheduler-dbfree.env.example`.
+  Its required key set is the union of two layers, both carried by that
+  single template — do not source `compute.example` into the scheduler env
+  (it carries `DATABASE_URL`, which violates the DB-free gate):
+  - scheduler keys: lock/state/registry/journal/evidence/allow-list and
+    business-scope variables (`NHMS_SCHEDULER_*`);
+  - pipeline runtime roots: `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`,
+    `OBJECT_STORE_PREFIX`, `NHMS_BASINS_ROOT` — dereferenced by the runbook
+    provision/publisher shell and required by `plan-production` preflight;
+    the two local roots must stay inside `NHMS_SCHEDULER_ALLOWED_ROOTS`.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS
   node-22 topology path. Runtime preflight requires both
   `NHMS_OBJECT_STORE_COPYBACK_ROOT` and

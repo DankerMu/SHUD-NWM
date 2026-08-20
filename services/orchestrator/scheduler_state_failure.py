@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.object_store import (
+    OBJECT_KIND_DIRECTORY,
+    OBJECT_KIND_OTHER,
+    LocalObjectStore,
+    ObjectStoreError,
+    normalize_object_key,
+)
 from packages.common.source_identity import normalize_source_id
 from packages.common.storage import validate_object_path
 from services.orchestrator.retry import classify_failure
@@ -21,7 +28,9 @@ from services.orchestrator.scheduler_state_common import (
     _first_state_datetime,
     _forecast_cycle_manifest_uri,
     _is_raw_manifest_object_uri,
+    _local_object_store_for,
     _object_manifest_is_missing,
+    _object_store_prefix_for,
 )
 from services.orchestrator.scheduler_state_manual_retry import (
     _event_is_manual_retry_marker,
@@ -33,6 +42,7 @@ from services.orchestrator.scheduler_state_rows import (
     _canonical_downstream_stage,
     _event_has_failure_signal,
     _is_source_cycle_download_stage,
+    _job_is_cycle_scope_row,
     _pipeline_job_is_repaired_stage_evidence,
     _state_events,
     _state_has_only_unsubmitted_auto_retry_placeholders,
@@ -53,20 +63,78 @@ from services.orchestrator.scheduler_state_types import (
 from workers.data_adapters.base import format_cycle_time
 
 _COPYBACK_REQUIRED_RESTART_STAGES = {"copyback"}
-#: ``unsafe_reason`` for a probe the object store refused to run (#1365 round-1):
-#: a symlinked/non-regular probe target, a stale or unreadable filesystem handle,
+#: ``unsafe_reason`` for a probe the object store RAISED on (#1365 round-1): a
+#: symlinked probe target or ancestor, a stale or unreadable filesystem handle,
 #: an unsafe store root.  Compared against by the sidecar tier, so it is a
-#: cross-site contract rather than a local literal.
+#: cross-site contract rather than a local literal.  It does NOT cover a
+#: non-regular target the store answers about without raising -- ``stat_no_follow``
+#: refuses only symlinks, so a directory/FIFO/socket never reaches this reason;
+#: that case is the determination below (#1394).
 _ARTIFACT_PROBE_ERROR_REASON = "artifact_probe_error"
+#: ``unsafe_reason`` for a probe target that EXISTS but is not a regular file --
+#: a directory squatting on a file key, or any other non-regular entry (#1394).
+#: Non-null on purpose: the authorized repair channel refuses it, because a
+#: rebuild cannot write the file where the directory stands.  Distinguishable
+#: from ``artifact_probe_error`` ("the filesystem misbehaved") and from the null
+#: "probed, determined absent".
+_ARTIFACT_TARGET_NOT_A_FILE_REASON = "artifact_target_not_a_file"
+#: The ``LocalObjectStore.object_kind`` answers that mean "exists, but not a
+#: regular file".  ``absent`` is deliberately NOT here: the file-kind check is a
+#: positive determination only and must never convert a present verdict.
+_NON_REGULAR_OBJECT_KINDS = frozenset({OBJECT_KIND_DIRECTORY, OBJECT_KIND_OTHER})
 
 
 def _failed_stage(state: Mapping[str, Any]) -> str | None:
+    """Which stage of this CYCLE failed, scope-blind on purpose.
+
+    The restart router and the downstream-evidence channels want exactly that: a model-less
+    cohort row may legitimately name the stage a restart resumes from.  Consumers that spend
+    the answer as the candidate's own ATTEMPT budget read ``_candidate_failed_stage`` below.
+    """
+
+    return _resolve_failed_stage(state, candidate_scope=False)
+
+def _candidate_failed_stage(state: Mapping[str, Any]) -> str | None:
+    """The failed stage as an ATTEMPT axis: the candidate's own, never the cohort's (#1300).
+
+    ``pipeline_jobs`` is the unfiltered cycle-wide list, so the scope-blind row scan can name
+    a multi-basin cycle's model-less cohort row.  Feeding that stage to
+    ``_state_retry_attempt`` inverts the derivation's own cross-scope protection: the cohort's
+    durably persisted counter is counted while the candidate's own row is zeroed for "not
+    matching the stage", so the cohort's 7th retry became the candidate's attempt (a manual
+    retry jumping 3 -> 8) and its retry-limit budget (a first-failure candidate demoted to
+    ``retry_limit_exhausted``) — silently, with no evidence of whose counter it was.
+
+    Resolving nothing is the honest answer for a cohort-only geometry: the consumers then fall
+    back to the flat and restarted-stage-family paths, which are candidate-scoped by
+    construction.  A layered "cycle stage, but not yours" return value would have no
+    consumer — the ones that want the cycle's stage stayed on ``_failed_stage``.
+    """
+
+    return _resolve_failed_stage(state, candidate_scope=True)
+
+def _resolve_failed_stage(state: Mapping[str, Any], *, candidate_scope: bool) -> str | None:
+    """The one failed-stage resolution, with the cycle-scope subtraction as its only axis.
+
+    The two public spellings differ in exactly one conjunct, so they share a body rather than
+    mirroring one: a change to the explicit-key order or the repaired-evidence skip must not
+    be applicable to one and forgotten on the other.
+
+    The EXPLICIT-key branch is common on purpose.  A top-level ``failed_stage``/``stage`` is
+    not always candidate scope — ``chain_repository_state`` can cast it from an
+    ``active_source_cycle_failure``, i.e. a cycle-scope source-cycle download row — but that
+    geometry is exactly the one #1287's download AC depends on, so #1300 narrows the ROW SCAN
+    only.
+    """
+
     for key in ("failed_stage", "stage", "restart_stage"):
         value = state.get(key)
         if value not in (None, ""):
             return str(value)
     for job in reversed(_state_jobs(state)):
         if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
+        if candidate_scope and _job_is_cycle_scope_row(job):
             continue
         status = str(job.get("status") or "")
         if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
@@ -184,7 +252,10 @@ def _failure_policy_payload(
     manual: bool = False,
 ) -> dict[str, Any]:
     error_code = _state_error_code(state) or default_error_code or "UNKNOWN_FAILURE"
-    stage = _failed_stage(state)
+    # This payload classifies THIS candidate against THIS candidate's budget, so its stage
+    # axis is the candidate-scoped resolver (#1300).  The restart router keeps reading the
+    # scope-blind ``_failed_stage`` for its own ``stage``/``restart_stage`` keys.
+    stage = _candidate_failed_stage(state)
     attempt = _state_retry_attempt(state, stage=stage)
     retry_limit = _state_retry_limit(state)
     classification = classify_failure(error_code, attempt=attempt, retry_limit=retry_limit, manual=manual)
@@ -231,6 +302,77 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
             value = details.get("error_code") or details.get("last_error") or details.get("previous_error")
             if value not in (None, ""):
                 return str(value)
+    return None
+
+#: The three keys that carry a failure's OWN recorded code.  ``last_error`` /
+#: ``previous_error`` are deliberately absent: every real writer of those two is
+#: a retry-history event detail (retry.py:448/:485/:582,
+#: file_orchestration_journal.py:6917/:6963/:6995/:7061/:7190), and
+#: ``previous_error`` means, by definition, the error of the PREVIOUS attempt.
+_RECORDED_FAILURE_CODE_KEYS = ("error_code", "reason_code", "failure_reason")
+#: The ``hydro_run`` statuses whose journal write CLEARS the row's error code
+#: (file_orchestration_journal.py:1507-1513 is the source of this set -- it is
+#: NOT the durable-output success set, which answers a different question).  The
+#: SQL backend's ``update_hydro_run_status`` only assigns when the incoming value
+#: is not None, so a successful transition there leaves an older code in place:
+#: a code sitting on a run row in one of these statuses is stale residue rather
+#: than the current failure's own record.
+_HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
+
+
+def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
+    """The error code the CURRENT downstream failure recorded for itself (#1420).
+
+    The downstream-resume domain split asks whether THIS failure has a genuinely
+    recorded code -- the placeholder domain exists precisely because the failing
+    stage recorded none.  ``_state_error_code``'s broad scan answers a different
+    question ("is there any code anywhere in the state"), which routes a
+    code-less failure into the recorded domain whenever the state still carries a
+    stale one: a recovered stage's leftover ``error_code``, or an auto-retry
+    event's ``previous_error`` (which every once-retried candidate has).
+
+    Carriers, in order: the candidate/cycle row's own failure fields, the
+    ``hydro_run`` row when its status is not one the journal clears codes for,
+    then the failed stage's own failed job row.  Events never participate: an
+    event-only code has no production shape, because ``candidate_state_from_rows``
+    projects a ``failed_task`` event to the top-level ``error_code``
+    (chain_repository_state.py:845-847) with a ``NODE_FAILURE`` fallback
+    (chain_source_cycle.py:685,693), so a failed_task always leaves a non-empty
+    top-level code for the first carrier above to find.
+
+    Never raises; the broad-scan ``_state_error_code`` contract is unchanged and
+    still serves the reason-code text surface.
+    """
+
+    for key in _RECORDED_FAILURE_CODE_KEYS:
+        value = state.get(key)
+        if value not in (None, ""):
+            return str(value)
+    hydro_run = state.get("hydro_run")
+    if isinstance(hydro_run, Mapping):
+        status = hydro_run.get("status")
+        # A missing status is trusted: with nothing to judge staleness by, keeping
+        # the code in the recorded domain leaves the #1313 permanence gate in
+        # force rather than opening a resume on a guess.
+        if status in (None, "") or str(status) not in _HYDRO_RUN_CODE_CLEARING_STATUSES:
+            for key in _RECORDED_FAILURE_CODE_KEYS:
+                value = hydro_run.get(key)
+                if value not in (None, ""):
+                    return str(value)
+    failed_stage = _canonical_downstream_stage(_failed_stage(state))
+    if failed_stage is None:
+        return None
+    for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
+        if str(job.get("status") or "") not in FAILED_PIPELINE_STATUSES:
+            continue
+        if _canonical_downstream_stage(str(job.get("stage") or job.get("job_type") or "")) != failed_stage:
+            continue
+        # The newest failed row of the failed stage IS the current failure: if it
+        # recorded no code there is none, and an older attempt's code is not it.
+        value = job.get("error_code") or job.get("reason_code")
+        return str(value) if value not in (None, "") else None
     return None
 
 def _state_error_message(state: Mapping[str, Any]) -> str | None:
@@ -335,8 +477,15 @@ def _downstream_retry_evidence(
     # fabricated here when the state records no error code at all, and is therefore
     # not evidence under the spec's unknown-code clause.  Whether the code the
     # classification rests on was genuinely recorded decides which domain the
-    # downstream-resume judgement applies.
-    recorded_error_code = _state_error_code(state)
+    # downstream-resume judgement applies.  #1420 scopes THAT DOMAIN -- not the
+    # fabrication condition, which stays the broad scan -- to the current failure's
+    # own carriers: a stale code left elsewhere in the state (a recovered stage's
+    # row, a retry-history key) describes a different failure and is no evidence for
+    # the split, yet ``_failure_policy_payload`` still finds it for the reason-code
+    # text.  The two conditions therefore name different sets: a candidate can sit in
+    # the placeholder domain with a classification resting on that stale code rather
+    # than on a fabricated default.
+    recorded_error_code = _downstream_recorded_error_code(state)
     failure = _failure_policy_payload(state, default_error_code=f"{failed_stage.upper()}_FAILED")
     if _cold_start_quarantined_failure(failure):
         return None
@@ -584,7 +733,7 @@ def _missing_upstream_forecast_artifact_evidence(
             # ``artifact_uri`` (the derived key is evidence, never the reference).
             forcing_probe_uri = (
                 _package_manifest_probe_uri(forcing_uri)
-                if _needs_package_manifest_witness(forcing_uri)
+                if _needs_package_manifest_witness(candidate, forcing_uri)
                 else forcing_uri
             )
             if forcing_provenance is not None:
@@ -625,6 +774,53 @@ def _missing_upstream_forecast_artifact_evidence(
         ),
     )
     copyback_required = restart_stage in _COPYBACK_REQUIRED_RESTART_STAGES or _copyback_source_required(state)
+    if _is_withheld_uri_placeholder(copyback_uri):
+        # Same withheld-reference ruling the forcing leg got in #1203, now on the
+        # leg that has no recovery tier (#1367).  A placeholder is a WITHHELD
+        # reference, not a copyback source: probing it would report "missing" for a
+        # source nobody looked for, and ``missing_copyback_source`` would then claim
+        # a probe witnessed absence -- a claim that is false AND unfixable, since
+        # the placeholder never exists in the store.  Existence is "cannot
+        # determine" here, so the REQUIREMENT decides: required fail-closes with the
+        # distinct withheld reason, not required emits no blocker at all (exactly
+        # like an absent reference).  The probe is never taught about placeholders
+        # and the redaction boundary is never bypassed.
+        #
+        # The ruling applies to the reference the alias resolution RETURNED: a
+        # placeholder is non-empty, so it wins ``_first_artifact_uri`` and shadows
+        # any lower-priority alias.  We do not continue scanning for a probeable
+        # substitute -- a surviving unredacted echo is of unknown provenance, and
+        # probing it would bypass this ruling on the authoritative reference.
+        #
+        # The DB-free public-read plane re-redacts the reference on every pass (the
+        # write side strips placeholders back to ``None`` and the unredacted
+        # DB-backed read is pinned off), so nothing an operator does CLEARS the
+        # withheld reference.  Whether they can BYPASS the blocker is per call site:
+        # manual retry (``scheduler_state_decision.py:269``) pre-empts the
+        # failure-state call sites (``:277``/``:298``/``:355``), so a marker there
+        # flips the candidate to ``manual_retry_requested`` -- the blocker recurs on
+        # a renewed failure, but the operator is not stuck.  Only the completed-stage
+        # resume arm (``:237``, reachable solely with NO failure signal) runs before
+        # that return and stays blocked despite a marker; that arm has no operator
+        # path at all.  Naming the blocker truthfully is what this change delivers;
+        # a durable clearing mechanism depends on a copyback write side that does not
+        # exist yet and is tracked in issue #1464.
+        if copyback_required:
+            return (
+                _artifact_blocker_evidence(
+                    candidate,
+                    base_evidence,
+                    planned_retry,
+                    reason="copyback_source_withheld",
+                    error_code="COPYBACK_SOURCE_WITHHELD",
+                    artifact_type="copyback_source",
+                    artifact_uri=copyback_uri,
+                    artifact_exists=False,
+                    forcing_provenance=forcing_provenance,
+                ),
+                forcing_provenance,
+            )
+        return None, forcing_provenance
     if copyback_uri not in (None, ""):
         # #1365 D3: the copyback leg shares the probe, so the object branch's
         # root-unconfigured fail-closed ruling
@@ -637,10 +833,13 @@ def _missing_upstream_forecast_artifact_evidence(
         #
         # Exact consequence (round-1 cand-03): a copyback uri at the pattern's own
         # depth (``runs/<run_id>/output/``) is refused by the validator and stays
-        # fail-closed via the probe's ``ValueError`` leg, but a DEEPER directory
-        # uri (``runs/<run_id>/output/<basin>/``) is admitted as a key and stats the
-        # directory itself as present.  That deeper-directory fail-open predates
-        # #1365 and is unchanged here -- it is routed as a separate follow-up.
+        # fail-closed via the probe's ``ValueError`` leg, while a DEEPER directory
+        # uri (``runs/<run_id>/output/<basin>/``) IS admitted as a key.  That
+        # deeper-directory case used to stat the directory itself and report it
+        # present -- the fail-open this leg inherited from the shared probe.  Since
+        # #1394 the probe's file-kind verdict reports it missing with
+        # ``artifact_target_not_a_file`` instead, so this leg is covered without a
+        # witness derivation of its own.
         copyback_missing, copyback_unsafe_reason = _artifact_uri_missing_status(candidate, copyback_uri)
     else:
         copyback_missing, copyback_unsafe_reason = True, None
@@ -839,7 +1038,7 @@ def _sidecar_manifest_probe_key(sidecar_key_dir: str) -> str:
     unusable as a probe object (#1203 round-1 V2-C2):
 
     * a producer/scheduler ``OBJECT_STORE_PREFIX`` drift (``s3://nhms-prod`` vs
-      ``s3://nhms``) makes ``_normalize_s3_uri`` raise, which the probe swallows
+      ``s3://nhms``) makes ``normalize_object_key`` raise, which the probe swallows
       into a false "missing" for a physically present package;
     * a sidecar copied or restored from elsewhere can name a FOREIGN manifest,
       which would then stand in as this candidate's witness and fail open.
@@ -871,7 +1070,7 @@ def _package_manifest_probe_uri(package_uri: str) -> str:
     return f"{package_uri.strip().rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
 
 
-def _needs_package_manifest_witness(value: str) -> bool:
+def _needs_package_manifest_witness(candidate: SchedulerCandidateLike, value: str) -> bool:
     """True when a recorded package reference must be probed via its witness (#1365).
 
     The trigger is VALIDATOR ADMISSIBILITY, not a decorative trailing ``/``
@@ -888,10 +1087,35 @@ def _needs_package_manifest_witness(value: str) -> bool:
 
     A reference the validator DOES admit as a file key is probed as-is and never
     double-derived.  Local paths are excluded: the local leg stats the path itself
-    and needs no witness object.  (The validator is consulted without the
-    deployment's ``OBJECT_STORE_PREFIX``, which is an ``s3://`` uri in every
-    tracked config and is therefore already stripped by the validator's own
-    ``urlparse``.)
+    and needs no witness object.
+
+    The validator is consulted about THE SAME KEY THE PROBE WILL RESOLVE (#1397):
+    the recorded value is first put through ``normalize_object_key``, the very
+    derivation ``LocalObjectStore.normalize_key`` delegates to.  The older comment
+    here claimed the deployment's ``OBJECT_STORE_PREFIX`` needed no consulting
+    because it "is an ``s3://`` uri in every tracked config and is therefore
+    already stripped by the validator's own ``urlparse``".  That holds only for a
+    BARE-BUCKET prefix.  With a path segment (``s3://nhms/nwm``) -- a shape
+    deliberately supported elsewhere
+    (``services/production_closure/object_store_validation.py`` ``_operational_prefix``
+    keeps ``parsed.path``) -- the validator saw the leftover prefix segment,
+    rejected a physically present FILE key as prefix-shaped, and a witness was
+    fabricated BENEATH the file (``<file>.nc/forcing_package.json``); the kernel's
+    ``ENOTDIR`` came back as an ``ObjectStoreError`` (``stat_no_follow`` raises
+    ``SafeFilesystemError``, which the store wraps -- the bare
+    ``NotADirectoryError`` never reaches the probe), so the probe contained it as
+    ``artifact_probe_error`` and the candidate was refused repair as
+    ``forcing_artifact_reference_unsafe``.  The distinction is load-bearing: an
+    ``OSError`` would have been folded by the ``except (OSError, ValueError)``
+    leg into the null-reason repair-ELIGIBLE residual instead.  Percent-encoded
+    ``s3://`` references had the same framing mismatch.
+
+    The prefix is read through the store-free ``_object_store_prefix_for`` rather
+    than a bare ``candidate.resource_profile.get(...)``, and no store is
+    constructed here at all: ``LocalObjectStore.__post_init__`` touches the
+    filesystem and raises ``ObjectStoreError`` (a ``RuntimeError``) that the
+    ``except ValueError`` below cannot fold, and a bare ``.get`` raises
+    ``AttributeError``/``TypeError`` which it cannot fold either.
 
     The validator is itself a RAISING surface: it calls ``urlparse``, which
     rejects a recorded uri whose authority holds a ``[`` with ``ValueError:
@@ -910,7 +1134,8 @@ def _needs_package_manifest_witness(value: str) -> bool:
     if not stripped or _looks_like_local_uri_or_path(stripped):
         return False
     try:
-        return not validate_object_path(stripped).valid
+        normalized = normalize_object_key(stripped, _object_store_prefix_for(candidate))
+        return not validate_object_path(normalized).valid
     except ValueError:
         return False
 
@@ -1007,10 +1232,6 @@ def _artifact_state_containers(state: Mapping[str, Any]) -> list[Mapping[str, An
     return containers
 
 
-def _artifact_uri_is_missing(candidate: SchedulerCandidateLike, artifact_uri: str) -> bool:
-    return _artifact_uri_missing_status(candidate, artifact_uri)[0]
-
-
 def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri: str) -> tuple[bool, str | None]:
     value = artifact_uri.strip()
     if not value:
@@ -1023,12 +1244,31 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
             # Fail closed instead, with a reason that keeps "no probe ran"
             # distinguishable from "probed, determined absent"
             # (``unsafe_reason=None``); same doctrine as the sidecar tier's
-            # ``store_unconfigured``.  ``_object_manifest_is_missing`` itself is
-            # left untouched: its raw-manifest repair-lane callers have different
-            # fail-open consequences and are out of scope.
+            # ``store_unconfigured``.  ``_object_manifest_is_missing`` keeps its
+            # ``(candidate, uri) -> bool`` signature and its patchability: it is
+            # re-exported by the compat shim, imported by ``scheduler.py`` and
+            # ``scheduler_state.py``, and used as a monkeypatchable seam by the
+            # tests, so it is a contract rather than "one caller".  The file-kind
+            # question is asked by the SIBLING probe below instead of by widening
+            # it.
             return True, "object_store_root_unconfigured"
         try:
-            return _object_manifest_is_missing(candidate, value), None
+            missing = _object_manifest_is_missing(candidate, value)
+            if not missing and _object_artifact_target_is_not_a_file(candidate, value):
+                # #1394: "present" from the existence probe only means the store
+                # could stat something there.  A directory squatting on a file key
+                # stats fine and is unreadable as an artifact, so the three legs
+                # that BLOCK on this probe -- sidecar (``:669``), forcing
+                # (``:749``), copyback (``:843``) -- used to lose the blocker they
+                # owed: the fail-OPEN mirror image of the #1365 fail-closed
+                # ruling.  Neither raw-manifest leg ever owed one, and they are
+                # named here so the enumeration cannot be read as covering them:
+                # the repair leg (``:1657``) abstains on a directory both before
+                # and after this change, and the downstream-retry leg (``:1725``)
+                # merely stops VOUCHING (``manifest_exists: true``) for a target
+                # it never probed as a file.
+                return True, _ARTIFACT_TARGET_NOT_A_FILE_REASON
+            return missing, None
         except ObjectStoreError:
             # #1365 round-1 (cand-01): ``LocalObjectStore.exists`` turns a
             # ``SafeFilesystemError`` (a symlinked probe target or ancestor, an NFS
@@ -1058,9 +1298,77 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
         allowed, containment_reason = _local_artifact_path_is_allowed(candidate, path)
         if not allowed:
             return True, containment_reason
-        return not path.exists(), None
+        if not path.exists():
+            return True, None
+        if _local_artifact_target_is_not_a_file(path):
+            # Same verdict and same reason as the object leg (#1394): ``exists()``
+            # is True for a directory here too, so the local leg had the identical
+            # fail-open.
+            return True, _ARTIFACT_TARGET_NOT_A_FILE_REASON
+        return False, None
     except (OSError, ValueError):
         return True, "local_artifact_path_unresolvable"
+
+
+def _local_artifact_target_is_not_a_file(path: Path) -> bool:
+    """Whether an already-existing local artifact path is something other than a regular file.
+
+    Measured on the FOLLOWED target (``Path.stat``), matching this leg's own
+    containment, which ``_realpath_or_none`` computes on the fully resolved path
+    -- so a symlink resolving to a regular file inside an allowed root stays
+    present, as it does today (design.md D3: the object leg's blanket symlink
+    refusal comes from ``stat_no_follow``'s containment posture, not from a kind
+    verdict, and aligning the two would start refusing artifacts that are
+    currently readable).
+
+    Positive determination ONLY: the caller has already seen ``exists()`` say
+    True, and any failure to read the mode afterwards (a race that unlinked the
+    target, an EACCES on the parent) falls back to "do not flip" rather than
+    converting a present verdict into a missing one.  ``Path.resolve()`` is
+    deliberately absent here as everywhere else in this lane (#1402).
+    """
+
+    try:
+        mode = path.stat().st_mode
+    except (OSError, ValueError):
+        return False
+    return not stat.S_ISREG(mode)
+
+
+def _object_artifact_target_is_not_a_file(candidate: SchedulerCandidateLike, artifact_uri: str) -> bool:
+    """Whether an object key the existence probe called PRESENT holds a non-regular entry.
+
+    Sibling of ``_object_manifest_is_missing`` rather than a widening of it: that
+    helper's ``(candidate, uri) -> bool`` signature is a monkeypatchable seam
+    across the compat shim and the test suite, so the file-kind question gets its
+    own function (#1394 D1).
+
+    It only ever ADDS the ``artifact_target_not_a_file`` verdict.  It is consulted
+    exclusively when the existence probe already answered "present", and every
+    outcome other than a positive non-regular determination answers ``False`` so
+    the probe's ``(False, None)`` survives byte for byte:
+
+    * ``absent`` (the target went away between the two stats) -- which is why the
+      store reports four states rather than a boolean ``is_regular_file``, whose
+      False would be indistinguishable from a directory;
+    * an unresolvable key: ``resolve_path`` raises ``ValueError`` from
+      ``normalize_key``/``validate_object_path``, and letting it reach the probe's
+      ``except (OSError, ValueError)`` leg would silently flip present into
+      "missing with a null reason".
+
+    ``ObjectStoreError`` is the one exception that deliberately escapes: it is the
+    same container ``exists`` uses for a ``SafeFilesystemError``, and the probe's
+    existing ``except ObjectStoreError`` arm turns it into ``artifact_probe_error``.
+    This sibling therefore owns no error vocabulary of its own.
+    """
+
+    store = _local_object_store_for(candidate)
+    if store is None:
+        return False
+    try:
+        return store.object_kind(artifact_uri) in _NON_REGULAR_OBJECT_KINDS
+    except (OSError, ValueError):
+        return False
 
 
 def _object_store_root_configured(candidate: SchedulerCandidateLike) -> bool:
@@ -1270,8 +1578,11 @@ def _downstream_failure_restartable(failure: Mapping[str, Any], *, code_recorded
     ``code_recorded`` splits the judgement by EVIDENCE SOURCE (#1313 D4).  A
     genuinely recorded code is governed by the spec's permanence clause -- a
     permanent or unknown-default-non-transient code refuses the resume, a
-    transient code keeps it.  A reader-synthesized ``{STAGE}_FAILED`` placeholder
-    is not evidence under that clause and keeps its pre-#1313 behaviour.
+    transient code keeps it.  ``code_recorded=False`` means the failing stage
+    recorded no code of its own (#1420) -- the ``failure`` payload may still carry
+    a reader-synthesized ``{STAGE}_FAILED`` default OR a stale code the broad
+    reason-code scan found elsewhere; neither is evidence under that clause, so
+    both keep the pre-#1313 behaviour.
     """
 
     if failure.get("limit_exhausted") is True:
@@ -1343,7 +1654,15 @@ def _missing_raw_manifest_repair_evidence(
         return None
     if not _has_successful_download_stage(state):
         return None
-    if not _object_manifest_is_missing(candidate, str(manifest_uri)):
+    manifest_missing, probe_unsafe_reason = _artifact_uri_missing_status(candidate, str(manifest_uri))
+    # #1393: this leg used to call ``_object_manifest_is_missing`` bare, so an
+    # unconfigured store fail-OPENED ("present") and an ``ObjectStoreError`` from a
+    # symlinked/stale probe target escaped the whole scheduling pass.  Routing
+    # through the unified probe inherits both containments; a non-null unsafe
+    # reason means NO probe verdict was reached, so the leg ABSTAINS rather than
+    # claiming the candidate -- the ladder below still offers it the generic retry
+    # (transient) or the permanent/cancelled/forcing terminals it already had.
+    if probe_unsafe_reason is not None or not manifest_missing:
         return None
     failure = _failure_policy_payload(state)
     # #1313 D3: consulted AFTER the structural gates above (so healthy/running
@@ -1403,7 +1722,13 @@ def _repaired_raw_manifest_downstream_retry_evidence(
         return None
     if not _is_raw_manifest_object_uri(str(manifest_uri)):
         return None
-    if _object_manifest_is_missing(candidate, str(manifest_uri)):
+    manifest_missing, probe_unsafe_reason = _artifact_uri_missing_status(candidate, str(manifest_uri))
+    # #1393, mirror of the repair leg above: a non-null unsafe reason means the
+    # probe never ran, so this leg must NOT vouch for the manifest.  Claiming here
+    # was the sharper half of the defect -- an unconfigured store emitted
+    # ``manifest_exists: true`` plus ``automatic_retry_allowed: true`` from a probe
+    # that had never executed.  Abstain instead; the ladder decides.
+    if probe_unsafe_reason is not None or manifest_missing:
         return None
     repair_download = _latest_successful_download_stage(state)
     if repair_download is None:
@@ -1758,7 +2083,9 @@ def _cancelled_state_evidence(
         "retry_policy": {
             "automatic_retry_allowed": False,
             "manual_retry_required": True,
-            "attempt": _state_retry_attempt(state, stage=_failed_stage(state)),
+            # Candidate-scoped stage axis: a cohort row's counter is not this candidate's
+            # attempt (#1300).
+            "attempt": _state_retry_attempt(state, stage=_candidate_failed_stage(state)),
             "retry_limit": _state_retry_limit(state),
         },
         "identity": {
@@ -1775,7 +2102,9 @@ def _manual_retry_state_evidence(
     failure = _failure_policy_payload(state, manual=True)
     manual = _manual_retry_payload(state)
     prior_failure = _prior_failure_reason(state) or failure["reason_code"]
-    previous_attempt = _state_retry_attempt(state, stage=_failed_stage(state))
+    # Candidate-scoped stage axis (#1300): with a cohort-only geometry this resolves nothing
+    # and the derivation falls through to the flat and restarted-stage-family paths.
+    previous_attempt = _state_retry_attempt(state, stage=_candidate_failed_stage(state))
     new_attempt = _manual_retry_new_attempt(state, previous_attempt=previous_attempt)
     evidence = {
         **base_evidence,
