@@ -7,6 +7,8 @@ import stat
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -820,32 +822,188 @@ def test_provider_destination_lock_serializes_threads_when_flock_is_process_scop
     assert not provider_atomic_module._PROCESS_LOCKS
 
 
+SPIN_WAIT_HANG_BACKSTOP_SECONDS = 30.0
+"""Hang backstop for `run_spin_wait_writer_harness` -- NOT a performance bound.
+
+The writer below makes 40 real `atomic_replace_provider_bytes` calls, each of
+which fsyncs, and a loaded CI runner must never trip this: the value only has
+to be shorter than a human's patience, not close to the expected runtime (well
+under a second locally). A tight value would turn the harness's own
+`assert not thread.is_alive()` into a fresh flake source.
+"""
+
+
+def run_spin_wait_writer_harness(
+    writer_body: Callable[[], None],
+    observe: Callable[[], None],
+    *,
+    deadline_seconds: float = SPIN_WAIT_HANG_BACKSTOP_SECONDS,
+    started_threads: list[threading.Thread] | None = None,
+) -> None:
+    """Run `writer_body` in a thread while the caller spin-waits, and FAIL on trouble.
+
+    The ONE shared harness for the spin-wait writer tests in this module
+    (#1633). It is shared on purpose: a copied harness drifts, and once it has,
+    deleting the `finally` or the `assert not errors` from the real test leaves
+    the failure-injection tests green -- the guard stops guarding the thing it
+    exists to guard.
+
+    Three exit paths are covered, and none of them is a hang:
+
+    * the writer returns  -> the `finally` sets the sentinel, the loop ends;
+    * the writer raises   -> the catch-all records it, the `finally` STILL sets
+      the sentinel, and `assert not errors` names the exception;
+    * the writer blocks   -> the `finally` is never reached, so the loop
+      deadline is the only backstop and it fails on the sentinel assertion.
+
+    The assertion order is load-bearing: the worker exception is reported
+    before any assertion the CALLER makes on what `observe` collected, because
+    a worker that dies on iteration 0 leaves that collection empty and the
+    symptom would then mask the cause.
+
+    `started_threads`, when given, receives the worker thread before it starts,
+    so a caller that deliberately blocks the worker can release and join it.
+    """
+
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            writer_body()
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+        finally:
+            # Unconditional: a writer that raised must still release the
+            # spin-loop, or its failure surfaces as a hang instead.
+            finished.set()
+
+    thread = threading.Thread(target=worker)
+    if started_threads is not None:
+        started_threads.append(thread)
+    thread.start()
+    deadline = time.monotonic() + deadline_seconds
+    while not finished.is_set() and time.monotonic() < deadline:
+        observe()
+    thread.join(timeout=deadline_seconds)
+
+    assert not errors, errors
+    assert finished.is_set(), f"spin-wait deadline of {deadline_seconds}s exceeded before the writer finished"
+    assert not thread.is_alive()
+
+
 def test_provider_atomic_readers_observe_only_complete_old_or_new_json(tmp_path: Path) -> None:
     destination = tmp_path / "manifest-last.json"
     old = json.dumps({"generation": "old", "rows": list(range(50))}).encode()
     new = json.dumps({"generation": "new", "rows": list(range(100))}).encode()
-    # SHARED_PROVIDER_MODE, not the umask (#1513). This one HANGS rather than
-    # fails when it is wrong: a 0o664 seed makes the writer thread raise
-    # provider_destination_access_invalid before `finished.set()`, and the
-    # reader loop below then spins forever.
+    # The seed pins SHARED_PROVIDER_MODE, not the umask (#1513): a 0o664 seed
+    # makes the writer thread raise provider_destination_access_invalid. That
+    # used to HANG the whole pytest session rather than fail it -- the writer
+    # skipped `finished.set()` and the reader loop spun forever. It cannot
+    # any more: the harness is fail-fast (#1633), setting the sentinel from a
+    # `finally`, bounding both the spin-loop and the join, and asserting the
+    # captured writer exception before anything about `observed`.
     write_provider_destination(destination, old)
-    finished = threading.Event()
     observed: list[bytes] = []
 
     def writer() -> None:
         for index in range(40):
             atomic_replace_provider_bytes(destination, new if index % 2 else old, max_bytes=4096)
-        finished.set()
 
-    thread = threading.Thread(target=writer)
-    thread.start()
-    while not finished.is_set():
-        observed.append(destination.read_bytes())
-    thread.join()
+    run_spin_wait_writer_harness(writer, lambda: observed.append(destination.read_bytes()))
 
     assert observed
     assert set(observed) <= {old, new}
     assert all(json.loads(content)["generation"] in {"old", "new"} for content in observed)
+
+
+class InjectedWriterFailure(RuntimeError):
+    """A writer failure with an identity of its own, so attribution is checkable."""
+
+
+def test_spin_wait_harness_reports_the_writer_exception_not_the_empty_observation_symptom() -> None:
+    """A raising writer must produce a bounded failure naming the cause (#1633).
+
+    Pre-fix this shape hung forever; the `finally` alone would have made it
+    PASS carrying only a PytestUnhandledThreadExceptionWarning, because
+    `threading.Thread` swallows exceptions and this repo declares no
+    `filterwarnings`. Both halves are needed, so both are asserted here.
+
+    The seam is the harness's own writer-body parameter -- deliberately NOT a
+    monkeypatch. Patching `atomic_replace_provider_bytes` on
+    `provider_atomic_module` would be INERT, because this module bound that name
+    directly at import; and patching an inner call instead would have
+    `atomic_replace_provider_bytes` convert the injected failure into a
+    `ProviderAtomicError` (see `provider_restored_previous` above), erasing the
+    identity this test exists to follow through the harness.
+    """
+
+    observed: list[bytes] = []
+
+    def writer() -> None:
+        # Fails where iteration 0 would be, i.e. before the reader loop has had
+        # any chance to collect an observation: the D3 ordering case.
+        raise InjectedWriterFailure("injected writer failure")
+
+    def observe() -> None:
+        """Collect nothing, so `observed` is deterministically empty here."""
+
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as error_info:
+        run_spin_wait_writer_harness(writer, observe)
+        # Mirrors the real test's first substantive assertion. It must never be
+        # reached: if the harness reported this instead, the failure would name
+        # the downstream symptom rather than the writer's own exception.
+        assert observed, "downstream empty-observation symptom"
+    elapsed = time.monotonic() - started
+
+    assert elapsed < SPIN_WAIT_HANG_BACKSTOP_SECONDS
+    assert "InjectedWriterFailure" in str(error_info.value)
+    assert "injected writer failure" in str(error_info.value)
+    assert "downstream empty-observation symptom" not in str(error_info.value)
+    assert not observed
+
+
+def test_spin_wait_harness_deadline_catches_a_writer_that_blocks_instead_of_raising() -> None:
+    """The loop deadline is the ONLY backstop for a blocked writer (#1633).
+
+    The injection test above cannot reach this path: raising runs the `finally`,
+    which sets the sentinel, so the deadline never fires there. A writer that
+    blocks never reaches its `finally` at all.
+    """
+
+    release = threading.Event()
+    threads: list[threading.Thread] = []
+
+    def blocked_writer() -> None:
+        # Bounded even if the release below were somehow skipped, so a failure
+        # in this test cannot leak a live thread into the rest of the session.
+        release.wait(timeout=SPIN_WAIT_HANG_BACKSTOP_SECONDS)
+
+    def observe() -> None:
+        """Collect nothing: this case is about the loop, not about the data."""
+
+    # Explicitly short, not the 30s production backstop: the deadline is the
+    # thing under test here, so waiting it out would just make the suite slow.
+    deadline_seconds = 0.25
+    started = time.monotonic()
+    try:
+        with pytest.raises(AssertionError) as error_info:
+            run_spin_wait_writer_harness(
+                blocked_writer,
+                observe,
+                deadline_seconds=deadline_seconds,
+                started_threads=threads,
+            )
+        elapsed = time.monotonic() - started
+        assert "spin-wait deadline" in str(error_info.value)
+        assert deadline_seconds <= elapsed < SPIN_WAIT_HANG_BACKSTOP_SECONDS
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=SPIN_WAIT_HANG_BACKSTOP_SECONDS)
+
+    assert threads and all(not thread.is_alive() for thread in threads)
 
 
 def test_provider_atomic_publishes_shared_mode_under_private_umask(tmp_path: Path) -> None:
