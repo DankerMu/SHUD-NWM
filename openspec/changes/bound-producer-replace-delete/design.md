@@ -24,13 +24,16 @@
   the transaction rolls back
   (`tests/test_timescale_write_guard_wired.py:376-394`).
 - **MP3** — the AST meta-guard
-  `tests/test_timescale_write_guard_wire_site_invariant.py:404-470` stays
-  green **unmodified**: `store.py` must define `replace_forcing_timeseries`;
-  it must contain **exactly one** `self._replace_values(...)` call; that
-  call must bind `pre_write_cursor_hook=` to an `ast.Name` referring to a
-  locally-defined function (not `None`). This test is the write-guard's
-  own tamper detector — weakening it to fit the fix is an oracle
-  weakening and is forbidden.
+  `tests/test_timescale_write_guard_wire_site_invariant.py:401-487` stays
+  green **unmodified**. Its four assertions: `store.py` must define
+  `replace_forcing_timeseries`; that function must contain **exactly one**
+  `self._replace_values(...)` call; that call must bind
+  `pre_write_cursor_hook=` to an `ast.Name` naming a function defined
+  locally inside `replace_forcing_timeseries` (not `None`, not a
+  module-level name); and that local hook function must itself call
+  `check_batch_targets_uncompressed` (`:483-487`). This test is the
+  write-guard's own tamper detector — weakening it to fit the fix is an
+  oracle weakening and is forbidden.
 - **MP4** — `store.py:311`, `:386`, `:716` (`replace_*` for stations,
   interpolation weights, components) keep their exact current SQL and
   parameters.
@@ -39,15 +42,36 @@
 
 ## Decisions
 
-### D1 — the meta-guard fixes the shape of the solution
+### D1 — two shapes satisfy the meta-guard; we choose the honest one
 
-MP3 forbids every design that bypasses `_replace_values` or opens its own
-connection: exactly one call, and the cursor reaches user code only through
-`pre_write_cursor_hook`. The union window is cursor-derived; the DELETE
-runs inside `_replace_values`. Therefore the window **must** travel from
-the hook into `_replace_values`, and `_replace_values` must be extended.
-This is not one option among several — it is the only shape that satisfies
-MP3.
+MP3 rules out bypassing `_replace_values` or opening a second connection.
+It does **not**, however, force the choice made here. Two shapes pass all
+four of its assertions:
+
+- **Shape a (rejected)** — move the whole sequence, *including the bounded
+  DELETE*, inside `_guard(cursor)`, and pass `delete_statement=None` to
+  `_replace_values` (a `None` delete statement is already an established
+  pattern at `store.py:386-390`). This passes MP3 — still one
+  `_replace_values` call, still a local hook Name, still a guard call
+  inside it — and also passes the co-location invariant
+  `_delete_site_has_guard_in_same_function`
+  (`tests/test_timescale_write_guard_wire_site_invariant.py:197-233`),
+  because `_guard` would contain both the DELETE literal and the guard
+  call. Its blast radius on `_replace_values` is zero.
+- **Shape b (selected)** — keep the DELETE inside `_replace_values` and
+  let the cursor-derived parameters travel to it (D3).
+
+Shape a is rejected on a contract argument, not a mechanical one: it makes
+a hook named `pre_write_cursor_hook` perform the destructive write, which
+directly contradicts D7's insistence that the hook stays
+`Callable[[Any], None]` and read-only. It also dissolves the structural
+"guard strictly before any write" property that `_replace_values`
+currently enforces for **every** caller (`store.py:926-932`) into
+statement ordering inside one private closure. On a fail-closed
+write-guard seam that is the wrong direction, and the blast radius it
+saves is close to zero anyway — see D3.
+
+**This is a preference argument. Do not restate it as necessity.**
 
 ### D2 — one cell, computed once, read by both guard and DELETE
 
@@ -80,6 +104,15 @@ The `None` return is how the empty-window case (no existing rows, empty
 batch) skips the DELETE, mirroring the reference's
 `if valid_time_min is not None:` at
 `forcing_domain_handoff_apply.py:792`.
+
+Measured blast radius of this keyword: the three other callers do not pass
+it and are untouched (MP4). The two test doubles that hand-copy
+`_replace_values`'s signature — `tests/test_forcing_producer.py:5805` and
+`tests/test_direct_grid_variant_registration.py:1730` — do not accept
+`pre_write_cursor_hook` either, so they are only ever driven by the
+interp-weight / met-station / component paths, never by
+`replace_forcing_timeseries`. A keyword that only
+`replace_forcing_timeseries` passes cannot reach them.
 
 ### D4 — the probe shape is load-bearing; copy it, do not "simplify" it
 
@@ -137,19 +170,50 @@ no concurrent writer. Recorded as accepted, not as an open question.
 for the existing window must be comparable to it before `min`/`max` — the
 reference coerces via `_coerce_valid_time`
 (`forcing_domain_handoff_apply.py:733-741`), which parses ISO strings and
-attaches UTC when naive. `store.py` must handle the same shapes; test
-doubles in `tests/test_timescale_write_guard_wired.py` are free to return
-either. A comparison between naive and aware datetimes raises `TypeError`,
-so this is a real failure mode, not defensive padding.
+attaches UTC when naive.
+
+Coercion must be applied to **both** sides, as the reference does
+(`forcing_domain_handoff_apply.py:754` for the batch, `:779-780` for the
+cursor values). Coercing only the cursor side would be a no-op in
+production: `db/migrations/000005_met.sql` declares `valid_time` as
+`TIMESTAMPTZ`, so psycopg2 always returns aware datetimes. The side that
+can actually be naive is the **batch** — `ForcingTimeseriesRow.valid_time`
+is annotated `datetime` with no tz constraint. A naive/aware comparison
+raises `TypeError`, so the batch-side coercion is the one carrying real
+weight; the cursor-side coercion exists so test doubles may return ISO
+strings.
 
 ## Expected collateral (not scope creep)
 
-The fix inserts two probe queries into the statement sequence, so the
-mock-cursor tests at `tests/test_timescale_write_guard_wired.py:358`,
-`:376`, `:397` will see a longer `connection.executions` list and their
-fake cursors must answer the two new queries. **Setup-only repair there is
-legitimate and expected**; changing or relaxing their assertions is an
-oracle weakening and is not. Say which happened in the deviation record.
+Two distinct effects on `tests/test_timescale_write_guard_wired.py`, and
+they point in opposite directions. Getting this backwards is the single
+easiest way to mis-deliver this change.
+
+**(1) One assertion MUST be tightened.** `:413` currently asserts
+`delete_calls[0][1] == ("fv_a",)`. Once the DELETE is bounded, that tuple
+becomes `("fv_a", batch_min, batch_max)`. This assertion **has to
+change**, and the change is positive evidence that the fix landed — it is
+not an oracle weakening. An implementer who refuses to touch it can only
+satisfy it by leaving the DELETE unbounded.
+
+**(2) No setup repair is needed for the three existing tests.**
+`_RecordingCursor.execute` (`:80-95`) special-cases only the
+`hydro.river_timeseries` probes; every other statement falls through to
+`self._last_fetchone = None`. For the met-side probes that fall-through
+*is* the correct answer — "no existing rows". The proof is in the same
+file: the handoff tests (`:444`, `:470`, `:498`) already drive the
+identical two probes in `forcing_domain_handoff_apply.py:763-777` through
+this same cursor with zero special-casing. So `:358` and `:376` keep
+passing untouched.
+
+Setup **extension** is still required, but only for the new tests: a
+met-side `existing_forcing_window` knob on `_RecordingConnection` plus the
+two matching probe branches in `_RecordingCursor`, mirroring the existing
+`existing_river_window` pair. Adding a knob for new tests is not a repair
+of the old ones.
+
+The deviation record must state which of these actually happened, and must
+flag any assertion change *other* than `:413` for scrutiny.
 
 ## Seams under test
 

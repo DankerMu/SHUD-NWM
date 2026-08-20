@@ -19,7 +19,7 @@ compressed`); `731eb2a7` fixed that path and left this copy untouched.
 The second, quieter defect is the one that makes the fail-closed contract
 hollow: the pre-write guard `check_batch_targets_uncompressed` is handed a
 window computed **only from the incoming batch**
-(`store.py:748-749`), while the DELETE it protects targets **every row of
+(`store.py:750-751`), while the DELETE it protects targets **every row of
 that `forcing_version_id`**. Existing rows outside the batch window are
 deleted without ever having been certified uncompressed. The guard can
 therefore return PASS on a target set it never inspected — the guard window
@@ -57,6 +57,6 @@ out of this issue entirely and MUST NOT be taken during implementation.
   for this wire site is the mock cursor in
   `tests/test_timescale_write_guard_wired.py`.
 - No change to the handoff path (`731eb2a7`, already bounded), the parser
-  path (`workers/output_parser/parser.py:690-728`, already bounded), or
+  path (`workers/output_parser/parser.py:792-898`, already bounded), or
   `replace_forcing_components` (`store.py:716`, targets the plain table
   `met.forcing_version_component`, not a hypertable).

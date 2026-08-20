@@ -20,6 +20,15 @@ rows match.
   bound to that same union
 - **AND** the guard's SQL is executed before the DELETE
 
+#### Scenario: An empty batch with stored rows still purges within the stored window
+
+- **WHEN** the same replace runs with an empty incoming batch for a
+  `forcing_version_id` that has stored rows
+- **THEN** the guard receives the stored rows' `valid_time` range
+- **AND** a DELETE bounded to that range is executed, preserving the
+  replace path's existing purge semantics
+- **AND** no INSERT is executed
+
 #### Scenario: No stored rows and an empty batch skip the DELETE
 
 - **WHEN** the same replace runs for a `forcing_version_id` with no stored
@@ -28,7 +37,9 @@ rows match.
 
 #### Scenario: A guard refusal still precedes every write
 
-- **WHEN** the guard reports a compressed chunk inside the union window
+- **WHEN** the guard reports a compressed chunk that lies inside the union
+  window but outside the incoming batch's own range — the case that
+  previously returned PASS while the unbounded DELETE still targeted it
 - **THEN** `CompressedChunkWriteError` is raised, no DELETE and no INSERT
   are executed, and the transaction is rolled back
 
