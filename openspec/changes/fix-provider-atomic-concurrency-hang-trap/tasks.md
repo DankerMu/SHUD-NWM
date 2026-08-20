@@ -2,14 +2,14 @@
 
 ## 1. Implementation
 
-- [ ] 1.1 Rewrite the writer thread in
+- [x] 1.1 Rewrite the writer thread in
   `tests/test_scheduler_file_provider_refresh.py::test_provider_atomic_readers_observe_only_complete_old_or_new_json`
   as follows. **From the house pattern** at `:796-818` and `:1929-1943`: an
   `errors: list[BaseException]` list, the 40-iteration loop inside `try`, and an
   `except BaseException as error: errors.append(error)`. **New, not house
   pattern** — neither house instance has a completion sentinel at all, both
   simply gate on a `Barrier` and join: a `finally: finished.set()`.
-- [ ] 1.2 Bound the main-thread busy-loop with a deadline
+- [x] 1.2 Bound the main-thread busy-loop with a deadline
   (`time.monotonic()` based, per the `tests/test_file_orchestration_journal.py:7894`
   precedent) so the loop cannot spin unbounded even if `finished` is never set.
   **Pin the value at >= 30s.** The semantics are a *hang backstop*, not a
@@ -19,25 +19,25 @@
   fsync, and a loaded CI runner must never trip this. A tight value would make
   the new `assert not thread.is_alive()` (1.4) a fresh flake source — this fix
   must not introduce one.
-- [ ] 1.3 Replace the bare `thread.join()` with a bounded
+- [x] 1.3 Replace the bare `thread.join()` with a bounded
   `thread.join(timeout=...)`, using the same >= 30s hang-backstop value as 1.2.
-- [ ] 1.4 Add `assert not errors, errors` and `assert not thread.is_alive()`,
+- [x] 1.4 Add `assert not errors, errors` and `assert not thread.is_alive()`,
   **before** the three existing substantive assertions (design D3).
-- [ ] 1.5 Update the `:827-830` comment: after this change the test fails
+- [x] 1.5 Update the `:827-830` comment: after this change the test fails
   rather than hangs, so the existing text is false. State what the seed pins
   (`SHARED_PROVIDER_MODE`, #1513) and that the harness is now fail-fast.
-- [ ] 1.6 **Prohibition:** do not weaken the oracle. The 40 iterations, the real
+- [x] 1.6 **Prohibition:** do not weaken the oracle. The 40 iterations, the real
   `atomic_replace_provider_bytes` call, the `write_provider_destination` seed,
   and all three substantive assertions stay as they are (MP1/MP2/MP3).
-- [ ] 1.7 **Prohibition:** do not edit any production module, any other test
+- [x] 1.7 **Prohibition:** do not edit any production module, any other test
   file, `pyproject.toml`, or CI config (design D4, MP4).
 
 ## 2. Tests
 
-- [ ] 2.1 The rewritten
+- [x] 2.1 The rewritten
   `test_provider_atomic_readers_observe_only_complete_old_or_new_json` still
   passes, with its three substantive assertions unchanged.
-- [ ] 2.2 New failure-injection test: with `atomic_replace_provider_bytes`
+- [x] 2.2 New failure-injection test: with `atomic_replace_provider_bytes`
   patched to raise, the same harness shape surfaces a **clean, bounded
   failure** — the assertion fires, the exception identity is visible in the
   failure, and the call returns within the deadline rather than hanging.
@@ -54,10 +54,10 @@
   injected exception into `ProviderAtomicError` (see `:725`), defeating 2.3.
   Pass the worker body to the shared helper as a callable. If any case is
   nevertheless patch-based, it MUST assert the injected callable actually ran.
-- [ ] 2.3 The failure-injection test must prove the *ordering* of D3: when the
+- [x] 2.3 The failure-injection test must prove the *ordering* of D3: when the
   writer raises on the first iteration, the surfaced failure names the writer
   exception, not an empty-`observed` symptom.
-- [ ] 2.3c **Blocked-worker deadline test** (covers the spec's "A blocked worker
+- [x] 2.3c **Blocked-worker deadline test** (covers the spec's "A blocked worker
   is caught by the loop deadline" scenario, which 2.2/2.3 do NOT reach). 2.2/2.3
   inject an *exception*, which runs the `finally` and sets the sentinel — so the
   deadline never fires and 1.2 would be untested. Add a case where the worker
@@ -67,9 +67,9 @@
   The test must release the blocking Event and join the worker before returning
   so no thread outlives it. Use a short, explicitly-passed deadline for this
   case rather than the 30s production value, so the test stays fast.
-- [ ] 2.3b **Anti-vacuity:** demonstrate the injection test FAILS when the
+- [x] 2.3b **Anti-vacuity:** demonstrate the injection test FAILS when the
   harness fix is absent, not merely that it passes when present (design D6).
-- [ ] 2.4 Whole-file green: `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`.
+- [x] 2.4 Whole-file green: `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`.
 
 ## 3. Verification matrix
 
