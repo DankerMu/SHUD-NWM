@@ -1,5 +1,9 @@
 # Proposal: artifact-probe-file-kind-and-key-framing
 
+> **坐标取景**：与 tasks.md / design.md 同框——本文件所有 `:NNNN` 均为**规划期坐标**（基线
+> `aafb50f9`），刻意不随实现漂移，因为 Why 一节描述的就是**改动前**的状态，其中两处
+> （`:1196-1198`、`:811-816`）指的注释在终态已不再是那个形。定位终态代码请按符号名 grep。
+
 ## Why
 
 Batch P1 合并交付两个缺口。两者同族：都落在 `services/orchestrator/scheduler_state_failure.py`
@@ -12,7 +16,7 @@ issue #1365 那轮「fail-closed + 可区分 reason」治理**没覆盖到的反
      `runs/r1/output/basin_a/` 这类 4 段 key 满足 `len(parts) > len(pattern.segments)`
      即被当 FILE key 收下；随后 `LocalObjectStore.exists`
      （`packages/common/object_store.py:68-78`）走 `stat_no_follow`，而该函数
-     （`packages/common/safe_fs.py:270-288`）**只拒 symlink**（`:277-278`），**不拒目录**
+     （`packages/common/safe_fs.py:270-288`）**只拒 symlink**（`:278-279`），**不拒目录**
      （`S_ISREG` 检查只写在 `open_file_no_follow` 的 `:247`/`:257`，stat 路径没有）。
      于是一个占位目录 → `exists()==True` → `missing=False`。
    - local 腿（`:1231`）：`Path.exists()` 对目录同样为 True。

@@ -83,7 +83,7 @@ sibling **不入** compat re-export 名单（`SCHEDULER_STATE_COMPAT_REEXPORT_NA
 **为何是新 token 而不是复用 `artifact_probe_error`**（round-1 F13 修正了初稿的论证）：
 现行 spec `openspec/specs/job-retry-mechanism/spec.md:1181-1183` 那句的**规范性动词是"异常收容"**
 ——「SHALL be contained fail-closed and SHALL never escape … as an exception」。而
-`stat_no_follow`（`packages/common/safe_fs.py:270-288`）**只拒 `S_ISLNK`**（`:277-278`），
+`stat_no_follow`（`packages/common/safe_fs.py:270-288`）**只拒 `S_ISLNK`**（`:278-279`），
 目录/FIFO/socket/设备**从不抛**。所以那句括号里的「non-regular」**自始就是对实现的描述性误述**，
 对一个什么都不抛的目标**没有任何规范性内容**——本次是**更正**它，不是推翻一条既有裁定。
 
@@ -108,7 +108,7 @@ sibling **不入** compat re-export 名单（`SCHEDULER_STATE_COMPAT_REEXPORT_NA
 → **删除该缺陷登记，不开 issue**（初稿的 task 4.2 已删）。
 
 **真正的、且成立的分歧**是另一件事：object 腿的 `stat_no_follow` 把**任何 symlink 都当收容问题
-硬拒**（`safe_fs.py:277-278`）→ `artifact_probe_error`；local 腿的收容是**在解析后的目标上**算的，
+硬拒**（`safe_fs.py:278-279`）→ `artifact_probe_error`；local 腿的收容是**在解析后的目标上**算的，
 因而**接受**一个收容之内的 symlink-to-file。两侧对 symlink 的处置源于**不同机制**（安全收容 vs
 解析后收容），不是种类判定的不一致。#1394 只问目录，把 local 腿改成拒 symlink 会让**当下可读的**
 产物开始被拒——本 issue 之外的 fail-close 风险，故不动。
@@ -187,7 +187,7 @@ Batch J 的教训：一条负向腿能否证死自己那道守卫，取决于**�
 | O7 | `relative_to(root)` 逃逸 | `object_store.py:177-180` | `(True, None)` | 否（O5 之后不可达） |
 | O8 | key 链上**祖先目录缺失** → `FileNotFoundError` | `safe_fs.py:646-649` → `exists` | `(True, None)` | **否** |
 | O9 | 祖先是非目录/symlink → `SafeFilesystemError` | `safe_fs.py:650-653` → `:1202` | `(True,"artifact_probe_error")` | **否** |
-| O10 | 叶子是 symlink | `safe_fs.py:277-278` → `:1202` | `(True,"artifact_probe_error")` | 隐含（D3） |
+| O10 | 叶子是 symlink | `safe_fs.py:278-279` → `:1202` | `(True,"artifact_probe_error")` | 隐含（D3） |
 | O11 | **新** 种类判定 | 待加 | `(True,"artifact_target_not_a_file")` | 目标 |
 
 - **O8 是测试作者最先踩的坑**：目录必须**连同整条父链**建（`mkdir -p`），否则结局是 `(True, None)`。
@@ -344,5 +344,5 @@ Review focus:
 | `object_store.py:157-186`（`normalize_key`） | `resolve_path` `:169-181`；`normalize_key` `:183-196`；`_normalize_s3_uri` `:204-223` |
 | `open_regular_file_no_follow` | 函数名是 `open_file_no_follow`（`safe_fs.py:232`）；`:247`/`:257` 行号本身正确 |
 | `safe_fs.py:417`（目录措辞先例） | 消息在 `:418`（`:417` 是 `S_ISDIR` 判断） |
-| `safe_fs.py:270-284`（`stat_no_follow`） | `:270-288`；symlink-only 拒绝在 `:277-278` |
+| `safe_fs.py:270-284`（`stat_no_follow`） | `:270-288`；symlink-only 拒绝在 `:278-279` |
 | `object_store_validation.py:2574-2585`（路径段前缀先例） | `_operational_prefix` 起于 `:2586`（`:2572` 是 percent-decode 轮次） |
