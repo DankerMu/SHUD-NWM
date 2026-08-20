@@ -37,7 +37,7 @@ All in `tests/test_timescale_write_guard_wired.py`, mock-cursor oracle.
 - [x] 2.1 Setup extension: add a met-side `existing_forcing_window` knob to
       `_RecordingConnection` and the two matching probe branches to
       `_RecordingCursor.execute`, mirroring the existing
-      `existing_river_window` pair at `:85-95`. **For the new tests only** —
+      `existing_river_window` pair at `:96-104`. **For the new tests only** —
       the three existing tests need no setup change (design § Expected
       collateral (2)).
 - [x] 2.2 New: existing rows extend beyond the incoming batch → guard
@@ -53,9 +53,10 @@ All in `tests/test_timescale_write_guard_wired.py`, mock-cursor oracle.
       the incoming batch alone would have been clean → `CompressedChunkWriteError`,
       no DELETE, no INSERT, rollback. This is the end-to-end discriminator
       for issue #1119's core complaint ("guard PASSes while the DELETE
-      still fails"); the existing `:376` test cannot see it because its
+      still fails"); the existing `:418` test cannot see it because its
       fixture has no existing rows.
-- [x] 2.6 Tighten `:413`: `assert delete_calls[0][1] == ("fv_a",)` becomes
+- [x] 2.6 Tighten the DELETE-parameter assertion (`:413` before this
+      change, `:457` after): `assert delete_calls[0][1] == ("fv_a",)` becomes
       the bounded triple. **Required** — see design § Expected collateral (1).
       No other assertion in this file may change.
 - [x] 2.7 `tests/test_timescale_write_guard_wire_site_invariant.py` passes
@@ -88,7 +89,8 @@ Known members to include explicitly:
 - E3 — `git diff --stat tests/test_timescale_write_guard_wire_site_invariant.py`
   is empty.
 - E4 — the `tests/test_timescale_write_guard_wired.py` diff is quoted in
-  full, with each hunk classified as (a) the required `:413` tightening,
+  full, with each hunk classified as (a) the required DELETE-parameter
+  tightening,
   (b) setup extension for new tests, or (c) new test bodies. **Any hunk
   that fits none of those three is a finding.**
 - E5 — blast-radius closure list and its pytest result.

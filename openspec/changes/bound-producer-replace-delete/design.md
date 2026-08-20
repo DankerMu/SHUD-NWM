@@ -18,11 +18,11 @@
 
 - **MP1** — the guard runs **before** any DELETE. Enforced today by
   `_replace_values` calling `pre_write_cursor_hook` first
-  (`store.py:926-932`) and asserted by
-  `tests/test_timescale_write_guard_wired.py:358-373`.
+  (`store.py:994-995`) and asserted by
+  `tests/test_timescale_write_guard_wired.py:400-415`.
 - **MP2** — when the guard raises, **no** DELETE and **no** INSERT fire and
   the transaction rolls back
-  (`tests/test_timescale_write_guard_wired.py:376-394`).
+  (`tests/test_timescale_write_guard_wired.py:418-436`).
 - **MP3** — the AST meta-guard
   `tests/test_timescale_write_guard_wire_site_invariant.py:401-487` stays
   green **unmodified**. Its four assertions: `store.py` must define
@@ -66,7 +66,7 @@ a hook named `pre_write_cursor_hook` perform the destructive write, which
 directly contradicts D7's insistence that the hook stays
 `Callable[[Any], None]` and read-only. It also dissolves the structural
 "guard strictly before any write" property that `_replace_values`
-currently enforces for **every** caller (`store.py:926-932`) into
+currently enforces for **every** caller (`store.py:994-995`) into
 statement ordering inside one private closure. On a fail-closed
 write-guard seam that is the wrong direction, and the blast radius it
 saves is close to zero anyway — see D3.
@@ -189,7 +189,7 @@ Two distinct effects on `tests/test_timescale_write_guard_wired.py`, and
 they point in opposite directions. Getting this backwards is the single
 easiest way to mis-deliver this change.
 
-**(1) One assertion MUST be tightened.** `:413` currently asserts
+**(1) One assertion MUST be tightened.** `:457` (`:413` before this change) asserts
 `delete_calls[0][1] == ("fv_a",)`. Once the DELETE is bounded, that tuple
 becomes `("fv_a", batch_min, batch_max)`. This assertion **has to
 change**, and the change is positive evidence that the fix landed — it is
@@ -200,7 +200,7 @@ satisfy it by leaving the DELETE unbounded.
 `_RecordingCursor.execute` special-cases only the `hydro.river_timeseries`
 probes; every other statement falls through to
 `self._last_fetchone = None`. For the met-side probes that fall-through
-*is* the correct answer — "no existing rows". So `:358` and `:376` keep
+*is* the correct answer — "no existing rows". So `:400` and `:418` keep
 passing untouched.
 
 *Post-implementation correction (kept, not silently edited, because the
@@ -222,7 +222,7 @@ two matching probe branches in `_RecordingCursor`, mirroring the existing
 of the old ones.
 
 The deviation record must state which of these actually happened, and must
-flag any assertion change *other* than `:413` for scrutiny.
+flag any assertion change *other* than that one for scrutiny.
 
 ## Seams under test
 
