@@ -51,9 +51,9 @@
 ## 3. #1589 实现（D3 / D4 / D5）
 
 - [ ] 3.1 D3（**两条腿，共 7 处**）：入参先过 `_strip_redaction_placeholders` 再判 `is not None`。
-      - 投影腿 `project_forecast_cohort_tasks` `:3377-3383` 的 4 个条件字段
+      - 投影腿 `project_forecast_cohort_tasks` `:3377-3384` 的 4 个条件字段
         （`finished_at`/`exit_code`/`master_error_message`/`log_uri`）
-      - **defer 腿 `_defer_forecast_cohort_projection_unlocked` `:3562-3568` 的 3 个条件字段**
+      - **defer 腿 `_defer_forecast_cohort_projection_unlocked` `:3563-3568` 的 3 个条件字段**
         （`finished_at`/`exit_code`/`log_uri`）—— fixture review P1，漏了它本单就在这条腿上
         交付 design 判定为"比现状更糟"的终值
       同腿内字段**一致处理**，不得只改 `log_uri`。两条腿的 `error_code`/`error_message` 是

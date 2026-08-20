@@ -57,7 +57,7 @@
 - **不改** `_PERSISTED_REDACTION_PLACEHOLDERS` 集合内容（`{"[object-uri]", "[uri]"}`），
   不动 `[local-path]` / `[redacted]` 的「有意持久化」语义，不动 pipeline_event 的公共 sanitization。
 - **不改** `_defer_forecast_cohort_projection_unlocked:3539` 的整行短路语义（它已是正确形态）；
-  该腿只改 `:3562-3568` 的三个条件覆写谓词。
+  该腿只改 `:3563-3568` 的三个条件覆写谓词。
 - **不做**任何 migration / 历史行回填：已被洗白进 durable 的字面量占位符行保持原样。
 - **不修** `_write_pipeline_job_unlocked` 的**返回值** `_public_scheduler_row(row)`
   （`:6183`）走的是未 strip 的 `row`——该值不是 durable 态，仅是给调用方的返回；作为

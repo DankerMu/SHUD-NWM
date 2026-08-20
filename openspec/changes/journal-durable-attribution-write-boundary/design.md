@@ -100,8 +100,8 @@ inventory（`:5711-5728`）只写 `schema_version / job_id / source_id / cycle_t
 
 ## D3（咬合）：覆写谓词必须看得懂占位符——否则本 PR 比现状更糟
 
-**适用范围：两条腿，不是一条**（fixture review P1 更正）。投影腿 `:3377-3383` 与 defer 腿
-`:3562-3568` 的条件覆写谓词**形状完全相同**，且 defer 腿 `:3583` 直通同一个咽喉。
+**适用范围：两条腿，不是一条**（fixture review P1 更正）。投影腿 `:3377-3384` 与 defer 腿
+`:3563-3568` 的条件覆写谓词**形状完全相同**，且 defer 腿 `:3583` 直通同一个咽喉。
 初版 D3 只写了投影腿，那会让本单**亲手在 defer 腿上交付本节判定为"比现状更糟"的终值**。
 
 defer 腿的可达链（评审实测，记录备查）：第 1 趟 defer 写
@@ -120,7 +120,7 @@ defer 腿的可达链（评审实测，记录备查）：第 1 趟 defer 写
 | | 无条件写（无谓词可修，占位符交咽喉兜底） | 条件谓词（D3 的落点） |
 |---|---|---|
 | 投影腿 | `error_code`（`:3373`，在 `cohort_row.update` 内） | **4 个**：`finished_at:3377` / `exit_code:3379` / `master_error_message:3381` / `log_uri:3383` |
-| defer 腿 | `error_code` + `error_message`（`:3558-3559`，在 `row.update` 内） | **3 个**：`finished_at:3562` / `exit_code:3564` / `log_uri:3566` |
+| defer 腿 | `error_code` + `error_message`（`:3558-3559`，在 `row.update` 内） | **3 个**：`finished_at:3563` / `exit_code:3565` / `log_uri:3567` |
 
 共 **7 处**。注意投影腿的 `error_message` 是**条件**写（`:3381`）、defer 腿的是**无条件**写，
 两腿不对称，不可照抄。
@@ -152,7 +152,7 @@ still refreshes its evidence fields**"。所以"全部字段一起冻"违背既�
 | **归因** | `error_code`、`error_message` | **随 `status` 粘** | 它们回答"为什么判死"。status 被钉在 `permanently_failed` 而归因被派生投影改写 = 自相矛盾的行，且每趟再漂一次 |
 | **观测** | `finished_at`、`exit_code`、`log_uri` | **继续刷新** | 它们是关于 master Slurm 作业的客观事实，刷新它们正是注释所说的 "refreshes its evidence fields"，与 status 无矛盾 |
 
-**被拒方案 A：只粘 `error_code`（issue 标题的字面范围）。** 拒因：`error_message`（`:3382`）
+**被拒方案 A：只粘 `error_code`（issue 标题的字面范围）。** 拒因：`error_message`（谓词 `:3381`，赋值 `:3382`）
 同源同病，留着它就是留半个 bug，且下一个人会照 `error_code` 的新形状去问"为什么 message 不粘"。
 
 ### D4 的诚实成本（fixture review P3-4，必须写明，不得过诺）
