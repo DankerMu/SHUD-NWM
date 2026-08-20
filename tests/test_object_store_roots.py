@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ import pytest
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.state_manager import StateManager, StateSnapshot
 from services.artifacts import ArtifactLogError, ArtifactReader, ArtifactReaderConfig
 from workers.data_adapters.era5_adapter import ERA5Adapter, ERA5AdapterConfig
@@ -88,6 +89,48 @@ def test_object_store_rejects_path_traversal_in_s3_uri(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must not contain '..'"):
         store.normalize_key("s3://bucket/prefix/raw/gfs/%2E%2E/manifest.json")
+
+
+def test_object_kind_reports_all_four_states_while_exists_stays_unchanged(tmp_path: Path) -> None:
+    # #1394: ``exists`` is deliberately untouched -- it answers True for a
+    # directory squatting on a file key, which is why the failure-state probe
+    # needs the sharper question.  Four states, not a boolean: ``absent`` must stay
+    # distinguishable from ``directory``/``other``, because the probe's file-kind
+    # check is a positive determination only.
+    store = LocalObjectStore(tmp_path / "object-store")
+    store.write_bytes_atomic("raw/gfs/2026050700/manifest.json", b"{}")
+    directory_key = "raw/gfs/2026050700/squatter.json"
+    (Path(store.root) / directory_key).mkdir(parents=True)
+    fifo_key = "raw/gfs/2026050700/pipe.json"
+    os.mkfifo(Path(store.root) / fifo_key)
+
+    assert store.object_kind("raw/gfs/2026050700/manifest.json") == "file"
+    assert store.object_kind(directory_key) == "directory"
+    assert store.object_kind(fifo_key) == "other"
+    assert store.object_kind("raw/gfs/2026050700/absent.json") == "absent"
+    # The existence answer for every non-absent kind is unchanged.
+    assert store.exists(directory_key) is True
+    assert store.exists(fifo_key) is True
+    assert store.exists("raw/gfs/2026050700/absent.json") is False
+
+
+def test_object_kind_contains_a_symlinked_target_as_a_store_error(tmp_path: Path) -> None:
+    # Same container as ``exists``: ``stat_no_follow`` refuses to follow a symlink
+    # and the store turns that ``SafeFilesystemError`` into ``ObjectStoreError``,
+    # so the probe's existing containment arm covers the kind query too and the new
+    # query introduces no error vocabulary of its own.
+    store = LocalObjectStore(tmp_path / "object-store")
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(b"{}")
+    link_key = "raw/gfs/2026050700/linked.json"
+    link_path = Path(store.root) / link_key
+    link_path.parent.mkdir(parents=True)
+    link_path.symlink_to(elsewhere)
+
+    with pytest.raises(ObjectStoreError):
+        store.object_kind(link_key)
+    with pytest.raises(ObjectStoreError):
+        store.exists(link_key)
 
 
 def test_split_root_forcing_uses_object_store_root(tmp_path: Path) -> None:
