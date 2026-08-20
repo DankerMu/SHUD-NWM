@@ -386,3 +386,11 @@ Phase 4 round 2 抓到的最贵一条是**round 1 的修复自己制造的假红
 (2) core 集合不能取 fixture 轮，应取"首个交叉评审轮"的镜集；
 (3) 轮次角色镜（`final-review` / `phase7-*` / `fixture-review*`）从 core/rotated 二分里剔出，
 单独成类——它们是轮次属性，不是轮换选择。
+
+## Revisit 2026-08-20（post PR #1643 / issue #1378）
+
+审计口径：89 个多轮 merged PR，later-round catches core=46 / rotated=228。**决定：keep 不变**，
+且三条口径修复前置条件仍未排期（见上一节）。本 PR 的经验数据继续支持"轮次角色镜单列"：
+全场唯一致命 P1（ride-along ANALYZE 清零 TimescaleDB 保留的 origin relstats）出自 Phase 7
+终审读上游源码，三轮常规透镜全部漏过——终审不是"轮换进来的透镜"，而是有独立方法论
+（外部权威源交叉验证）的轮次角色，佐证把它从 core/rotated 二分里剔出的必要性。
