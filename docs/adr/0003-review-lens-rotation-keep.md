@@ -100,3 +100,30 @@ materially changed attribution ratio.
   本 PR 自身的数据点与该趋势一致：round-2 三透镜全部 CLEAN（0 条 P0/P1），
   唯一的 P1 级发现（G6 真空腿）出自 **round-1**，而 round-2 轮换进来的透镜只
   产出 P2/P3 级产物精度问题。Phase 7 独立终审同样零阻塞。
+
+- 2026-08-20（PR #1618 / issues #1394+#1397 合并后 audit 再次 DECIDABLE）：样本扩至 82 个
+  多轮 merged PR，later-round catches **core=40 vs rotated=197**。本 PR 边际为
+  **core +6 / rotated +0**。
+
+  **上一条自己写下的触发条件在数值上触发了**（「若下次审计边际上 core ≥ rotated，keep 的
+  原始理由就不再由数据支撑」）。但**据此下结论会是错的，本条明确不这样用**：
+
+  本 PR 的 `rotated = 0` **不是"轮换进来的透镜没抓到东西"，而是"根本没有轮换"**——
+  round-2 我用的是与 round-1 **同一组三透镜**（correctness / discriminative-power /
+  artifact-accuracy），只换了 agent 实例、没换透镜类型。所以这个数据点**不检验轮换**，
+  它只反映编排者的选择。把它读成"轮换不再买到 recall"是把**未施加的处理**当成**无效的处理**。
+
+  故：**维持 keep**，且**不认为**触发条件已被有效满足；上一条设的那道闸**仍然悬着**，
+  要等一个**真正做了轮换**的多轮 PR 来检验。
+
+  **同时登记一条工具缺口（本条的主要价值）**：`loop_log_audit.py` 的
+  `rotation_attribution()` 把「round-2 透镜 ∉ round-1 透镜集」判为 rotated，于是
+  **"没轮换"与"轮换了但没抓到"在指标上不可区分**——前者会持续把 core 推高、稀释
+  rotated 占比，让这条 DECIDABLE 逐次逼近一个**由编排习惯而非由证据驱动**的翻转。
+  该指标要可信，须能分辨这两种情形（例如让 `round_lenses` 相同时不计入分母，或单列
+  `rotation_applied: false`）。在修好之前，**任何基于该比值的 keep/cut 翻转都应视为
+  需要 maintainer 复核的人的裁定**，不得走 autonomous default。
+
+  附：本 PR 自身的证据分布与"轮换未被检验"一致——round-2 的 6 条 later-round catches
+  全部出自与 round-1 相同的三个透镜（其中 discriminative-power 镜 round-2 为 CLEAN），
+  唯一的 P1 级发现出自 round-1，Phase 7 独立终审零阻塞。

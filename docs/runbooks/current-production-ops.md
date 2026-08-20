@@ -1742,22 +1742,36 @@ Exact-cycle missing-forcing regeneration (node-22 only):
      `artifact_guard.unsafe_reason` is `object_store_root_unconfigured` or
      `artifact_probe_error`, that key was **not** probed at all —
      `unsafe_reason` is the authoritative verdict, not `probe_key`.
-   - `artifact_exists` says whether that probed manifest object was found;
-     `false` on an `object_store_sidecar` source is a genuinely absent package,
-     not a read failure.
+     Do **not** generalize that to "a non-null `unsafe_reason` means nothing was
+     probed": `artifact_target_not_a_file` is the opposite case — the probe ran,
+     reached `probe_key`, and *determined* that something other than a regular
+     file stands there.
+   - `artifact_exists` says whether that probed manifest object was found *as a
+     regular file*. `false` on an `object_store_sidecar` source is still never a
+     read failure — a read fault leaves that tier as `source = absent` with a
+     read-fault `tier_status` instead — but since #1394 it covers two different
+     determinations, so read it together with `unsafe_reason`: a genuinely absent
+     package (`unsafe_reason` is `null`), or something other than a regular file
+     standing on the derived witness key (`artifact_target_not_a_file`). Only the
+     first one is a missing package.
    - `artifact_guard.unsafe_reason` says why the probe refused or could not use
      the reference; `null` usually means the reference was probeable and simply
      not found ("probed, determined absent"), but read it together with
      `forcing_provenance.tier_status` — on the `object_store_sidecar` tier a
      read fault surfaces as `forcing_version_row_absent` with a read-fault
      `tier_status` and a **null** `unsafe_reason`, and there the rebuild is
-     ineffective. Route by this table:
+     ineffective. That null-reason shape covers the tier's *read faults* only:
+     a non-regular witness target is a determination, so on that tier it surfaces
+     as the ordinary `missing_forcing_package_uri` blocker carrying a **non-null**
+     `artifact_target_not_a_file`, the same as on the journal and direct tiers.
+     Route by this table:
 
    | `unsafe_reason` | Fault | Does an exact-cycle forcing rebuild fix it? |
    |---|---|---|
    | `null` | The probe ran and the package is genuinely absent — **unless** `forcing_provenance.tier_status` is a read-fault status (see below), or the recorded reference is malformed enough that no probe could resolve it | Usually yes — that is exactly what the rebuild repairs. A malformed unresolvable reference is also repairable (the rebuild re-records it). **But** if `tier_status` is a read-fault status, no: on the `object_store_sidecar` tier `tier_status`, not `unsafe_reason`, is the authoritative verdict |
    | `object_store_root_unconfigured` | Neither the candidate's `object_store_root` nor `OBJECT_STORE_ROOT` is set, so no probe ran | No — the remedy is configuration; fix it and let the next pass re-probe |
    | `artifact_probe_error` | The object store refused the stat (symlinked witness leaf or ancestor, stale NFS handle, permissions) | No — a rebuild cannot clear a filesystem fault; fix the object/mount/permissions first |
+   | `artifact_target_not_a_file` | The probe **did** run and found something at `probe_key` that is not a regular file — almost always a directory squatting on a file key (a leftover placeholder, an interrupted writer, a rsync that created the path as a directory); a FIFO, socket or device node is judged the same way. Applies to the object leg and the local leg alike — but the two name their target differently, so inspect per leg | No — the rebuild would have to write a file where a directory stands (`IsADirectoryError`). Inspect it first. **Object leg**: `probe_key` is the *recorded reference* with the manifest filename appended — it is store-relative only when the recording was. The `object_store_sidecar` tier derives a bare key, so `ls -ld "$OBJECT_STORE_ROOT/$PROBE_KEY"` works there directly; the journal/direct tier stamps the producer's recorded uri verbatim, which under every tracked config carries an `s3://<bucket>[/<prefix path>]` head (`OBJECT_STORE_PREFIX`). Strip that head before joining — `ls -ld "$OBJECT_STORE_ROOT/${PROBE_KEY#"$OBJECT_STORE_PREFIX"/}"` — exactly as `normalize_object_key` does, and percent-decode as well if the recorded value carries `%XX`. **Local leg**: `probe_key` is already an absolute local path (or a `file://` uri) — `ls -ld` it directly with any `file://` stripped, and do **not** prefix the store root; also note this leg stamps `forcing_provenance` only for a journal/direct `forcing_version` that names the same uri, so it can be `null` entirely and then there is no `probe_key` at all. **Copyback leg**: never stamps a `probe_key` of its own — so check `artifact_guard.artifact_type` FIRST: when it is `copyback_source`, use `artifact_guard.artifact_uri` even if a `probe_key` is present, because that `probe_key` was stamped by the forcing leg earlier in the same pass and names the forcing manifest, not the squatted copyback path. Whenever `probe_key` is missing, the reference is `artifact_guard.artifact_uri`. Remove the placeholder once you are sure it holds no wanted data, then let the next pass re-probe or re-run the rebuild |
    | `invalid_local_artifact_path` / `local_artifact_path_outside_allowed_roots` / `local_artifact_path_unresolvable` | A local-path reference is unresolvable or outside the allowed roots | No — fix the path, or the roots this probe actually consults: resource-profile keys `object_store_root` / `object_store_copyback_root` / `copyback_root` / `published_artifact_root` plus env `OBJECT_STORE_ROOT` / `NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_PUBLISHED_ARTIFACT_ROOT` (**not** `NHMS_SCHEDULER_ALLOWED_ROOTS`, which feeds a different mechanism and is never read here) |
    | `local_artifact_root_unresolvable` | **A configured artifact ROOT itself could not be canonicalized**, and no remaining resolvable root contains the artifact. Investigate the root, **not** the artifact's placement: a symlink loop in the root chain, a directory the scheduler user cannot traverse (EACCES), a stale NFS handle (ESTALE) or an unmounted/half-mounted share, a non-directory component (ENOTDIR). Not only symlink loops — **every** errno other than `ENOENT` lands on this reason; `ENOENT` alone (a root that simply does not exist yet — including forms like `<missing>/../<loop>` where a missing component is hit before the loop) stays admitted and never produces this reason. Same root list as the row above | No — a rebuild cannot clear a filesystem or mount fault. Fix or unmount/remount the offending root (`readlink -f "$ROOT"` and `ls -ld` on each component reproduce the kernel's verdict), then let the next pass re-probe |
 
@@ -1976,7 +1990,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 | exit | stderr `status` | 含义 | 处置 |
 |---|---|---|---|
 | 0 | —（stdout 是 receipt） | 成功 | 存档 receipt |
-| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁**获取**类（`provider_lock_unavailable`/`provider_lock_changed` 等，**不含**释放期的 `provider_lock_release_failed`——那是 exit 3）/校验类/`state_snapshot_index_copyback_conflict` 等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外（含未来新增 reason）工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`，**不会**出现在 exit 2 里 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
+| 2 | `refused` | 只用于**可证明未提交**的拒绝（`destination_index_missing`、`cycles_absent_from_source_index`、`run_ids_empty`、`roots_identical`/`roots_overlap`、`receipt_root_*`、`index_*`，以及 `merge_failed`）。`merge_failed` **仅当** merge 抛出的 `error_reason` 属工具内的 pre-commit allowlist（`scripts/scheduler_state_index_copyback_replay.py` 的 `MERGE_PRE_COMMIT_REFUSAL_REASONS`：`provider_preimage_changed`/锁**获取**类（`provider_lock_unavailable`/`provider_lock_changed` 等，**不含**释放期的 `provider_lock_release_failed`——那是 exit 3）/校验类/`state_snapshot_index_copyback_conflict`/取锁**之前**的 lockfile 身份守卫两条（`state_snapshot_index_copyback_lock_identical`、`state_snapshot_index_copyback_lock_identity_unavailable`，#1609）等，raise 点均在 destination CAS 之前）——此时 shared index **未改**，但胜出 entry 的对象可能已拷到 shared root，幂等重跑安全。allowlist 之外的 reason 工具已归为 commit-uncertain，走 exit 3 `merge_commit_uncertain`；给 merge 加新 reason 时**必须同步**这份 allowlist，否则一个什么都没碰的前置拒绝会被报成「可能已提交」 | 按 reason 修根/修输入/修 receipt 目录后重跑 |
 | 3 | `merge_committed_incomplete` | merge **已提交或不能证明未提交**，尾段没跑干净。stdout 一定带已知部分的 merge 摘要 | 先留存 stdout 摘要作 4.1 证据，再按下表分支 |
 
 exit 3 的五个 reason（逐字与代码一致）。一次运行可能同时命中多个，stderr 的 `reason`

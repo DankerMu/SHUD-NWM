@@ -765,7 +765,35 @@ def _anchor_for(path: Path, *, containment_root: Path | None) -> tuple[Path, tup
 
 
 def _expand_path(path: Path) -> Path:
-    expanded = Path(path).expanduser()
+    """Expand a leading ``~`` and anchor the result at the current directory.
+
+    ``Path.expanduser()`` throws a bare, errno-less ``RuntimeError`` when no home
+    directory can be determined -- ``~<unknown user>``, or no passwd entry with
+    ``HOME`` unset.  This prelude is shared by every public entry point of this
+    module, so letting that throw out would defeat the module's advertised
+    contract on all of them at once; it is converted here into the module's own
+    structured error instead.
+
+    Mind the direction: ``SafeFilesystemError`` **is** a ``RuntimeError``
+    subclass, not the reverse.  Callers that already write
+    ``except SafeFilesystemError`` therefore catch this with no change of their
+    own, while the bare throw sailed past them -- and past every caller reading
+    ``error.kind``, which a bare ``RuntimeError`` does not carry.
+
+    The failure reuses the existing ``unsafe`` classification rather than adding
+    a new one, so callers branching on the existing values keep a total set of
+    branches.  Degrading to a permissive pass that keeps the literal ``~``
+    component is not an option: the write-side primitives would then create or
+    delete a path the operator never named.
+    """
+
+    try:
+        expanded = Path(path).expanduser()
+    except RuntimeError as error:
+        raise SafeFilesystemError(
+            f"Cannot determine the home directory for path: {path}",
+            kind="unsafe",
+        ) from error
     return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 

@@ -1141,3 +1141,131 @@ def test_backfill_absent_copyback_root_keeps_the_lenient_pre_check(
     assert report["status"] == "completed"
     assert report["copyable_package_count"] == 1
     assert not copyback_root.exists()
+
+
+def test_backfill_dry_run_probe_failure_is_diagnosed_as_an_unsafe_copyback_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1610: the dry-run pre-check keeps its strict posture on a probe failure.
+
+    This branch deliberately sits in its own `try`, *after* the root was verified
+    to exist, so every failure here -- `FileNotFoundError` included -- is a real
+    fault and must stay `COPYBACK_ROOT_UNSAFE` rather than degrade into "target
+    absent" and let a dry run preview a copy across an alias.
+    """
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    copyback_root.mkdir()
+    real_probe = safe_fs_module.directory_identity_no_follow
+    target = copyback_root.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        # The object-store side (`_verify_object_store_root`) probes first and
+        # must succeed, so the diagnosis cannot be blamed on the wrong root.
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(backfill_module, "directory_identity_no_follow", probe)
+
+    with pytest.raises(backfill_module.BackfillError) as error:
+        run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+                apply=False,
+            )
+        )
+
+    assert error.value.error_code == "COPYBACK_ROOT_UNSAFE"
+    assert error.value.details["copyback_root"] == str(copyback_root)
+    assert "probe blocked" in error.value.details["error"]
+    assert not list(copyback_root.rglob("*"))
+
+
+def test_backfill_object_store_probe_failure_is_diagnosed_on_the_object_store_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1610: an object-store-root probe failure names the object-store root.
+
+    `_verify_object_store_root` exists so no same-root call site re-probes that
+    side; the SHALL it carries ("An object-store-root probe failure is diagnosed
+    on the object-store side") was archived into the baseline with #1192 and had
+    zero enforcement -- moving the probe out of this `try` kept CI green.
+    """
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    real_probe = safe_fs_module.directory_identity_no_follow
+    target = object_store_root.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(backfill_module, "directory_identity_no_follow", probe)
+
+    with pytest.raises(backfill_module.BackfillError) as error:
+        run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+                apply=True,
+            )
+        )
+
+    assert error.value.error_code == "OBJECT_STORE_ROOT_UNSAFE"
+    assert error.value.error_code != "COPYBACK_ROOT_UNSAFE"
+    # The details point at the object-store root, not the copyback root: an
+    # operator sent to the wrong mount debugs the wrong thing.
+    assert error.value.details["object_store_root"] == str(object_store_root)
+    assert "copyback_root" not in error.value.details
+    assert not copyback_root.exists()
+
+
+def test_backfill_lenient_pre_check_returns_silently_when_the_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1610: posture conservation for the lenient existing-root pre-check.
+
+    That probe sits *inside* the pre-check's existing `try` on purpose: the
+    pre-check already returns silently when the copyback root is absent or
+    unreadable, and the strict guards downstream (dry-run, apply) are what
+    diagnose the fault.  A probe that escaped here would turn a lenient
+    pre-check into a hard failure on a path that used to be tolerated.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir()
+    resolved_object_store_root = object_store_root.resolve()
+    object_store_identity = safe_fs_module.directory_identity_no_follow(resolved_object_store_root)
+    probed: list[Path] = []
+    real_probe = safe_fs_module.directory_identity_no_follow
+    target = copyback_root.resolve()
+
+    def probe(path: Path) -> tuple[int, int]:
+        if Path(path).resolve() == target:
+            probed.append(Path(path))
+            raise OSError("probe blocked")
+        return real_probe(path)
+
+    monkeypatch.setattr(backfill_module, "directory_identity_no_follow", probe)
+
+    outcome = backfill_module._reject_existing_same_copyback_root(
+        copyback_root_raw=copyback_root,
+        object_store_root_raw=object_store_root,
+        object_store_root=resolved_object_store_root,
+        object_store_identity=object_store_identity,
+    )
+
+    assert outcome is None
+    # The probe really ran: the silence is the handler's, not a path that
+    # returned before ever reaching it.
+    assert probed == [target]

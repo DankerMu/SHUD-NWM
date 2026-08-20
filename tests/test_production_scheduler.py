@@ -7772,9 +7772,11 @@ def test_projected_rowless_candidate_gap_shape_takes_the_cohort_restart_stage(
     assert state["restart_from_stage"] == "parse"
 
     # (b) the cohort-derived attempt values, as absolutes, read through the COMBINATION production
-    # uses (``scheduler_state_failure.py:1950,1969``): the stage axis is the derived failed stage,
-    # never a literal, so the counter that reaches ``retry_policy.attempt`` /
-    # ``manual_retry.previous_attempt`` is the cohort ``parse`` row's, not the flat 1.
+    # uses (``scheduler_state_failure.py:2088`` in ``_cancelled_state_evidence`` and ``:2107`` in
+    # ``_manual_retry_state_evidence`` -- names given because line numbers go stale): the stage axis
+    # is the derived failed stage, never a literal, so the counter that reaches
+    # ``retry_policy.attempt`` / ``manual_retry.previous_attempt`` is the cohort ``parse`` row's,
+    # not the flat 1.
     derived_stage = scheduler_state_failure_module._candidate_failed_stage(state)
     assert derived_stage == "parse"
     previous_attempt = scheduler_state_rows_module._state_retry_attempt(state, stage=derived_stage)
@@ -12257,12 +12259,604 @@ def test_journal_tier_probe_store_error_blocks_fail_closed_and_the_pass_survives
     assert orchestrator.calls == []
 
 
+# ---------------------------------------------------------------------------
+# #1394 -- the probe's file-kind verdict.  ``LocalObjectStore.exists`` goes
+# through ``stat_no_follow``, which refuses only SYMLINKS: a directory squatting
+# on a file key stats fine, so both probe legs used to call an unreadable
+# artifact "present" -- the fail-OPEN mirror image of the #1365 ruling.
+# ---------------------------------------------------------------------------
+
+#: A forcing witness key: 6 segments against the ``forcing/...`` pattern's 5, so
+#: the closed-world validator admits it as a FILE key and the object leg really
+#: reaches the store (gate O6 does not pre-empt).
+_SQUATTED_OBJECT_FILE_KEY = "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+
+#: Both non-regular kinds the two legs must refuse alike.  The store answers
+#: ``directory`` for one and ``other`` for the FIFO, and the spec delta says "a
+#: directory squatting on a file key, or any other non-regular entry" -- so a
+#: parametrization over directories alone would let ``other`` be dropped from
+#: ``_NON_REGULAR_OBJECT_KINDS`` (object leg) or the local leg's ``S_ISREG``
+#: narrowed to ``S_ISDIR`` without a single case turning red (round-1 F-COV-2).
+#: The predicate is carried alongside so each case pins the kind it actually
+#: created rather than trusting the parameter name.
+_NON_REGULAR_SQUATTER_KINDS = (
+    pytest.param("directory", stat.S_ISDIR, id="directory"),
+    pytest.param("other", stat.S_ISFIFO, id="fifo"),
+)
+
+
+def _create_non_regular_squatter(path: Path, kind: str) -> None:
+    """Create the named non-regular entry at ``path``, WHOLE parent chain included.
+
+    The parent chain matters for both kinds (gate O8 on the object leg): a
+    missing ancestor is a ``FileNotFoundError``, which the store reports as
+    ``absent`` and the probe as ``(True, None)`` -- a different tuple that would
+    make the case prove nothing.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        path.mkdir()
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
+def test_object_leg_reports_a_non_regular_entry_on_a_file_key_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    squatter_kind: str,
+    is_expected_kind: Any,
+) -> None:
+    # #1394 AC-1, object leg.  Every pre-emption gate ahead of the file-kind check
+    # is disarmed on purpose and pinned below, because each of them produces a
+    # DIFFERENT tuple and would make this case prove nothing: the root is
+    # configured (O3), ``tmp_path`` is already realpath-canonical so the store root
+    # is not itself an unsafe path (O4/O9 -- a bare ``tempfile.mkdtemp()`` on macOS
+    # carries ``/var -> /private/var`` and turns every object-leg case into
+    # ``artifact_probe_error``), the key is deep enough for the validator (O6), and
+    # the squatter is created with its WHOLE parent chain (O8 -- a missing ancestor
+    # is ``FileNotFoundError`` and yields ``(True, None)``).
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    assert Path(os.path.realpath(object_store_root)) == object_store_root
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    squatter = object_store_root / _SQUATTED_OBJECT_FILE_KEY
+    _create_non_regular_squatter(squatter, squatter_kind)
+
+    # Independent oracles for the three gates the verdict actually depends on: the
+    # validator admits the key, the entry really is the kind this case claims, and
+    # the existence probe alone still says "present".
+    from packages.common.storage import validate_object_path
+
+    assert validate_object_path(_SQUATTED_OBJECT_FILE_KEY).valid is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
+    assert LocalObjectStore(object_store_root, "").object_kind(_SQUATTED_OBJECT_FILE_KEY) == squatter_kind
+    assert (
+        scheduler_state_failure_module._object_manifest_is_missing(candidate, _SQUATTED_OBJECT_FILE_KEY) is False
+    )
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(
+        candidate,
+        _SQUATTED_OBJECT_FILE_KEY,
+    ) == (True, "artifact_target_not_a_file")
+    # Distinguishable from every other verdict this branch can reach, which is the
+    # whole point of a new token: a rebuild cannot clear a squatting entry.  Read
+    # off the module's own constants, so collapsing two of them into one literal
+    # is caught here rather than silently satisfying the tuple above.
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON == "artifact_target_not_a_file"
+    assert scheduler_state_failure_module._ARTIFACT_TARGET_NOT_A_FILE_REASON not in {
+        None,
+        "object_store_root_unconfigured",
+        scheduler_state_failure_module._ARTIFACT_PROBE_ERROR_REASON,
+    }
+
+
+@pytest.mark.parametrize(("squatter_kind", "is_expected_kind"), _NON_REGULAR_SQUATTER_KINDS)
+@pytest.mark.parametrize("as_file_uri", [False, True])
+def test_local_leg_reports_a_contained_non_regular_entry_with_the_same_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    as_file_uri: bool,
+    squatter_kind: str,
+    is_expected_kind: Any,
+) -> None:
+    # #1394 AC-1, local leg: ``Path.exists()`` is True for a directory (and for a
+    # FIFO) too.  The entry must sit INSIDE an allowed containment root or gate L5
+    # pre-empts with ``local_artifact_path_outside_allowed_roots``, so the root is
+    # configured and the containment verdict is pinned independently first.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    squatter = object_store_root / "runs" / "run_a" / "output" / "basin_a"
+    _create_non_regular_squatter(squatter, squatter_kind)
+    value = f"file://{squatter}" if as_file_uri else str(squatter)
+
+    assert scheduler_state_failure_module._local_artifact_path_is_allowed(candidate, squatter) == (True, None)
+    assert squatter.exists() is True
+    assert is_expected_kind(squatter.lstat().st_mode) is True
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, value) == (
+        True,
+        "artifact_target_not_a_file",
+    )
+
+
+def test_local_leg_keeps_a_contained_symlink_to_a_regular_file_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D3: the two legs are aligned on DIRECTORIES only.  The object leg
+    # refuses every symlink because ``stat_no_follow`` treats following one as a
+    # containment problem; the local leg computes containment on the FULLY resolved
+    # path (``_realpath_or_none`` is ``realpath(strict=True)``), so a symlink
+    # resolving to a regular file inside its allowed root is readable and stays
+    # present.  Refusing it here would fail-close artifacts that work today, which
+    # is outside #1394 -- this pin exists so the divergence cannot be "fixed" by
+    # accident.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    candidate = _scheduler_candidate_fixture()
+    target = object_store_root / "real-artifact.json"
+    target.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
+    link = object_store_root / "linked-artifact.json"
+    link.symlink_to(target)
+
+    assert link.is_symlink() is True
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, str(link)) == (False, None)
+
+
+@pytest.mark.parametrize(
+    "artifact_uri",
+    [
+        # The validator admits this one, so the kind query resolves a real path and
+        # the store answers "absent".
+        _SQUATTED_OBJECT_FILE_KEY,
+        # The validator refuses this one, so the kind query's ``resolve_path``
+        # raises ``ValueError``.  Letting that reach the probe's
+        # ``except (OSError, ValueError)`` leg would silently turn "present" into
+        # "missing with a null reason" -- the defect this case guards.
+        "unrecognized-prefix/whatever.json",
+    ],
+)
+def test_file_kind_check_never_converts_a_present_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact_uri: str,
+) -> None:
+    # #1394 D1 constraint 2: the file-kind check may only ADD the non-regular
+    # verdict.  Patched present + physically absent is exactly the geometry the
+    # existing raw-manifest helper family relies on, so a check that flipped
+    # absent-or-unresolvable would ripple far beyond this test.
+    #
+    # The patch goes on ``scheduler_state_failure_module`` itself, NOT on the
+    # facade: compat propagates a facade patch into these modules only FOR THE
+    # DURATION of a call entered through a compat-wrapped facade function, and this
+    # test calls the probe directly.  A facade patch here would silently degrade
+    # into "the probe ran against the real store".
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    monkeypatch.setattr(
+        scheduler_state_failure_module,
+        "_object_manifest_is_missing",
+        lambda _candidate, _uri: False,
+    )
+    assert not (object_store_root / artifact_uri).exists()
+
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, artifact_uri) == (False, None)
+
+
+#: A deployment prefix carrying a PATH SEGMENT rather than a bare bucket -- the
+#: #1397 trigger, and a shape supported elsewhere in the repo
+#: (``object_store_validation.py`` ``_operational_prefix`` keeps ``parsed.path``).
+_PATH_SEGMENT_OBJECT_STORE_PREFIX = "s3://nhms/nwm"
+
+#: A deployment prefix with NO ``s3://`` scheme at all.  Every tracked config sets
+#: an ``s3://`` prefix (``.env.example``, ``infra/env/*.example``), so the bare-key
+#: arm of ``normalize_object_key`` -- the ``candidate.startswith(prefix.rstrip("/")
+#: + "/")`` branch, which exists only for this shape -- is exercised nowhere else.
+#: Two leftover segments rather than one, so a fix that special-cased a single
+#: stray segment would not satisfy it.
+_NON_S3_OBJECT_STORE_PREFIX = "nhms-prod/m10"
+
+
+@pytest.mark.parametrize(
+    "object_store_prefix",
+    ["s3://nhms", _PATH_SEGMENT_OBJECT_STORE_PREFIX, _NON_S3_OBJECT_STORE_PREFIX],
+)
+def test_present_file_key_is_probed_as_recorded_under_any_prefix_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_store_prefix: str,
+) -> None:
+    # #1397 regression: the classifier is consulted on the NORMALIZED key, so a
+    # deployment whose prefix carries a path segment -- or carries no ``s3://``
+    # scheme at all (#1397 AC-4) -- is served identically to a bare-bucket one.
+    # Before the fix the leftover ``nwm/`` (resp. ``nhms-prod/m10/``) segments made
+    # the validator reject a physically present FILE key as prefix-shaped.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", object_store_prefix)
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, object_store_prefix)
+    recorded = store.uri_for_key(_SQUATTED_OBJECT_FILE_KEY)
+    store.write_bytes_atomic(_SQUATTED_OBJECT_FILE_KEY, b'{"schema_version": "nhms.forcing_package.v1"}')
+    assert recorded.startswith(f"{object_store_prefix}/")
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+    # The production expression at the journal/direct call site, spelled out so the
+    # classifier and the probe are exercised as one framing decision.
+    probe_uri = (
+        scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+        if scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded)
+        else recorded
+    )
+    assert probe_uri == recorded
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, probe_uri) == (False, None)
+
+
+def test_path_segment_prefix_no_longer_fabricates_a_witness_beneath_a_present_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397, the fault the framing mismatch produced.  Kept as an explicit pin so
+    # the regression above cannot be satisfied by a classifier that merely answers
+    # False for the wrong reason: the RAW framing really does reject this key, the
+    # fabricated witness really does sit beneath a regular file, and probing it
+    # really does raise into ``artifact_probe_error`` -- which
+    # ``scheduler_candidates`` then refuses as ``forcing_artifact_reference_unsafe``.
+    from packages.common.storage import validate_object_path
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    recorded = store.uri_for_key(_SQUATTED_OBJECT_FILE_KEY)
+    store.write_bytes_atomic(_SQUATTED_OBJECT_FILE_KEY, b'{"schema_version": "nhms.forcing_package.v1"}')
+
+    assert validate_object_path(recorded).valid is False
+    fabricated = scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+    assert fabricated == f"{recorded}/forcing_package.json"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, fabricated) == (
+        True,
+        "artifact_probe_error",
+    )
+
+
+def test_directory_shaped_package_still_derives_its_witness_under_a_path_segment_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 must-preserve: normalize-first must not cost #1365 its witness
+    # derivation.  A 5-segment package PREFIX stays prefix-shaped after the
+    # deployment prefix is stripped, so the derived manifest file key is still what
+    # gets probed -- end to end, on a physically present package.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _PATH_SEGMENT_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(
+        object_store_root,
+        candidate=candidate,
+        object_store_prefix=_PATH_SEGMENT_OBJECT_STORE_PREFIX,
+    )
+    package["store"].write_bytes_atomic(package["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    package_uri = package["package_uri"]
+    # Independent oracle for the production shape: 5 path segments BELOW the
+    # deployment prefix, path segment included.
+    assert package_uri.removeprefix(_PATH_SEGMENT_OBJECT_STORE_PREFIX).strip("/").count("/") == 4
+
+    for recorded in (package_uri, package_uri.rstrip("/")):
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is True
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, package_uri),
+    )
+
+    assert decision is not None
+    assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    assert decision.evidence["forcing_provenance"]["probe_key"] == f"{package_uri.rstrip('/')}/forcing_package.json"
+
+
+def test_foreign_bucket_reference_keeps_its_repair_eligible_null_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D4 tail: a reference naming another bucket makes the shared pure
+    # normalizer raise, the classifier folds that into "probe it as recorded", and
+    # the probe's own ``ValueError`` leg yields the repair-eligible null-reason
+    # residual -- exactly the routing this reference had before normalize-first.
+    from packages.common.object_store import normalize_object_key
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    candidate = _scheduler_candidate_fixture()
+    recorded = f"s3://other-bucket/{_SQUATTED_OBJECT_FILE_KEY}"
+
+    with pytest.raises(ValueError, match="bucket does not match"):
+        normalize_object_key(recorded, "s3://nhms")
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, recorded) == (True, None)
+
+
+#: The package PREFIX the witness derivation is built for: the same five canonical
+#: segments as ``_SQUATTED_OBJECT_FILE_KEY``'s parent, trailing ``/`` included, so
+#: the closed-world validator refuses it as a file key and the classifier must
+#: answer True.
+_PACKAGE_PREFIX_URI = f"{_SQUATTED_OBJECT_FILE_KEY.rsplit('/', 1)[0]}/"
+
+
+def test_non_s3_prefix_keeps_the_witness_derivation_and_the_unnormalizable_residual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4, the two NON-file-key routings a scheme-less deployment prefix must
+    # keep.  The present-file-key half is the ``_NON_S3_OBJECT_STORE_PREFIX``
+    # parametrization above; without this negative half that half could be satisfied
+    # by a classifier that answered False for everything.
+    from packages.common.object_store import normalize_object_key
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", _NON_S3_OBJECT_STORE_PREFIX)
+    candidate = _scheduler_candidate_fixture()
+
+    # #1365 preserved: normalizing first must not cost a DIRECTORY-shaped package its
+    # witness.  The prefix segments come off, the five canonical segments stay
+    # prefix-shaped, and the manifest FILE key derived from the recorded value is
+    # what the probe resolves -- resolvable (no ``artifact_probe_error``) and absent,
+    # i.e. the ordinary repair-eligible missing-package verdict.
+    package_uri = f"{_NON_S3_OBJECT_STORE_PREFIX}/{_PACKAGE_PREFIX_URI}"
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == f"{_NON_S3_OBJECT_STORE_PREFIX}/{_SQUATTED_OBJECT_FILE_KEY}"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
+
+    # An ``s3://`` reference recorded under a scheme-less prefix makes the shared
+    # pure normalizer raise (it has no bucket to compare against), the classifier
+    # folds that into "probe it as recorded", and the probe's own ``ValueError`` leg
+    # yields the D4 repair-ELIGIBLE null-reason residual -- the same routing this
+    # reference had before normalize-first, and the same one the foreign-bucket case
+    # above documents.
+    unnormalizable = f"s3://nhms/{_SQUATTED_OBJECT_FILE_KEY}"
+    with pytest.raises(ValueError, match="must be an S3 URI"):
+        normalize_object_key(unnormalizable, _NON_S3_OBJECT_STORE_PREFIX)
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, unnormalizable) is False
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, unnormalizable) == (True, None)
+
+
+#: Percent-encoded recorded FILE keys under a bare-bucket prefix (#1397 AC-4).  Only
+#: the ``s3://`` arm of ``normalize_object_key`` unquotes; the closed-world
+#: validator's own ``_normalize_object_path`` never does, which is how the two
+#: framings can disagree about one recorded reference.
+_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS = (
+    # ``%20`` inside a path segment -- the realistic shape, and the one the
+    # store-level pin ``test_normalize_key_percent_decodes_only_the_s3_arm`` uses.
+    # Segment COUNT is unchanged by decoding, so the validator answers the same
+    # either way: this row pins classifier/probe AGREEMENT and that the probe
+    # resolves the DECODED path, not the framing fix itself.
+    "s3://nhms/forcing/gfs/2026%2005%2021/basin_a_v1/model_a/forcing_package.json",
+    # ``%2F`` -- encoded SEPARATORS.  The raw framing sees one segment and rejects a
+    # physically present file key as prefix-shaped; the normalized framing sees six
+    # and admits it.  This is the row that actually discriminates the two framings.
+    "s3://nhms/forcing%2Fgfs%2F2026052106%2Fbasin_a_v1%2Fmodel_a%2Fforcing_package.json",
+)
+
+#: The decoded key ``_PERCENT_ENCODED_RECORDED_FILE_KEY_URIS[0]`` resolves to.
+_PERCENT_DECODED_OBJECT_FILE_KEY = "forcing/gfs/2026 05 21/basin_a_v1/model_a/forcing_package.json"
+
+
+def test_percent_encoded_recorded_value_is_framed_alike_by_classifier_and_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 AC-4: a percent-encoded recorded reference must reach the classifier and
+    # the probe as the SAME key.  Before normalize-first the classifier asked the
+    # validator about the still-encoded value while the probe asked the store about
+    # the decoded one, so a present package could have a witness fabricated beneath
+    # its own file key.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    candidate = _scheduler_candidate_fixture()
+    store = LocalObjectStore(object_store_root, "s3://nhms")
+    for key in (_PERCENT_DECODED_OBJECT_FILE_KEY, _SQUATTED_OBJECT_FILE_KEY):
+        store.write_bytes_atomic(key, b'{"schema_version": "nhms.forcing_package.v1"}')
+
+    for recorded in _PERCENT_ENCODED_RECORDED_FILE_KEY_URIS:
+        # Independent oracle: the store really does resolve this encoded reference to
+        # a physically present object, so a "missing" verdict below would be false.
+        assert store.exists(recorded) is True
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded) is False
+        # The production expression at the journal/direct call site, spelled out so
+        # the classifier and the probe are exercised as one framing decision.
+        probe_uri = (
+            scheduler_state_failure_module._package_manifest_probe_uri(recorded)
+            if scheduler_state_failure_module._needs_package_manifest_witness(candidate, recorded)
+            else recorded
+        )
+        assert probe_uri == recorded
+        assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, probe_uri) == (False, None)
+
+    # #1365 preserved, the negative half: a percent-encoded DIRECTORY-shaped package
+    # still needs its witness, and the derived manifest FILE key is resolvable and
+    # absent -- the ordinary repair-eligible missing-package verdict, not a probe
+    # error.  A distinct cycle so no seeded object above can answer for it.
+    package_uri = "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/"
+
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, package_uri) is True
+    witness = scheduler_state_failure_module._package_manifest_probe_uri(package_uri)
+    assert witness == "s3://nhms/forcing/gfs/2026%2005%2022/basin_a_v1/model_a/forcing_package.json"
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, witness) == (True, None)
+
+
+def test_classifier_answers_store_free_when_the_object_store_root_is_a_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # design.md D4 / spec: the shape classifier must never construct a store and
+    # must never raise.  A SYMLINKED store ROOT is the non-tautological oracle for
+    # it: ``LocalObjectStore.__post_init__`` runs ``ensure_directory_no_follow`` on
+    # the root, and the resulting ``SafeFilesystemError`` becomes an
+    # ``ObjectStoreError`` -- a ``RuntimeError``, which the classifier's
+    # ``except ValueError`` cannot fold.  A classifier that asked the store instead
+    # of the pure normalizer would therefore ESCAPE from here, and because this
+    # classification runs OUTSIDE the probe's containment it would abort the whole
+    # scheduler pass for every remaining candidate -- the exact #1365 fault.
+    #
+    # tasks.md 4.1 originally recorded this SHALL as deliberately prose-only on the
+    # grounds that any scenario "could only be a tautology".  That rationale is
+    # wrong, and this case is the counterexample: nothing here asserts "no store was
+    # constructed", it asserts an OBSERVABLE that only the store-free derivation can
+    # produce under a root no store can be built on.
+    real_root = tmp_path / "real-object-store"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-object-store"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(linked_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+
+    # Independent oracle: the store really cannot be built on this root, and the
+    # fault really is outside every ``except ValueError`` the classifier owns.
+    with pytest.raises(ObjectStoreError):
+        LocalObjectStore(linked_root, "")
+
+    # Both classifier answers, exactly as under a healthy root: a package prefix
+    # needs its witness, an admissible file key does not.
+    assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, _PACKAGE_PREFIX_URI) is True
+    assert (
+        scheduler_state_failure_module._needs_package_manifest_witness(candidate, _SQUATTED_OBJECT_FILE_KEY)
+        is False
+    )
+
+    # End to end: the PROBE does construct a store, so the same unsafe root surfaces
+    # as this candidate's contained ``artifact_probe_error`` blocker -- one blocked
+    # candidate with evidence, not an aborted pass.
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, _PACKAGE_PREFIX_URI),
+    )
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=_PACKAGE_PREFIX_URI,
+        unsafe_reason="artifact_probe_error",
+    )
+    # The witness really was derived (``probe = manifest``), which is what proves
+    # the classifier's True answer above reached production framing.
+    assert decision.evidence["forcing_provenance"]["probe"] == "manifest"
+    assert decision.evidence["forcing_provenance"]["probe_key"] == (
+        f"{_PACKAGE_PREFIX_URI.rstrip('/')}/forcing_package.json"
+    )
+
+
+def test_normalize_key_follows_the_shared_pure_normalizer_at_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1397 requires ONE normalization derivation, not two that can drift.  A
+    # byte-for-byte copy would satisfy any equality assertion, so the oracle is
+    # runtime delegation: perturb the pure function and ``normalize_key`` must move
+    # with it.  (Delegation vs duplication is otherwise a code-review property.)
+    from packages.common import object_store as object_store_module
+
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    recorded = "s3://nhms/raw/gfs/2026052106/manifest.json"
+    assert store.normalize_key(recorded) == "raw/gfs/2026052106/manifest.json"
+
+    monkeypatch.setattr(
+        object_store_module,
+        "normalize_object_key",
+        lambda key_or_uri, object_store_prefix="": f"perturbed/{object_store_prefix}/{key_or_uri}",
+    )
+
+    assert store.normalize_key(recorded) == f"perturbed/s3://nhms/{recorded}"
+
+
+def test_normalize_key_percent_decodes_only_the_s3_arm(tmp_path: Path) -> None:
+    # must-preserve: the ``s3://`` arm has always unquoted and the bare-key arm has
+    # always not.  Extracting the pure normalizer must not "align" the two under
+    # cover of #1397's normalize-first change.
+    store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+
+    assert store.normalize_key("raw/gfs/2026%2005%2021/manifest.json") == "raw/gfs/2026%2005%2021/manifest.json"
+    assert store.normalize_key("s3://nhms/raw/gfs/2026%2005%2021/manifest.json") == (
+        "raw/gfs/2026 05 21/manifest.json"
+    )
+
+
+def test_sidecar_tier_directory_witness_raises_the_ordinary_missing_package_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # #1394 AC-2 / design.md D6: on the sidecar tier the derived witness key
+    # standing on a DIRECTORY emitted NO blocker at all before this change (the
+    # probe called it present).  It must now land on that tier's ordinary
+    # missing-package blocker CARRYING the new reason -- not on the #1203
+    # read-fault carve-out, which is keyed on exact equality with
+    # ``artifact_probe_error`` and is deliberately repair-ELIGIBLE (it never passes
+    # an ``unsafe_reason`` at all).  A directory is a determination, not an
+    # inability to determine.
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    sidecar = _seed_producer_forcing_sidecar(object_store_root, candidate=candidate, write_manifest=False)
+    squatter = object_store_root / sidecar["manifest_key"]
+    squatter.mkdir(parents=True)
+    state = _forecast_failure_state(candidate)
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    _assert_stable_missing_forcing_blocker(
+        decision,
+        artifact_uri=sidecar["package_uri"],
+        unsafe_reason="artifact_target_not_a_file",
+    )
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "object_store_sidecar",
+        "probe": "manifest",
+        "package_uri": sidecar["package_uri"],
+        "manifest_uri": sidecar["manifest_uri"],
+        "probe_key": sidecar["manifest_key"],
+        "forcing_version_id": candidate.forcing_version_id,
+        "artifact_exists": False,
+    }
+    # NOT the #1203 read-fault route, whose whole shape is a different blocker.
+    assert "tier_status" not in decision.evidence["forcing_provenance"]
+    # The repair channel's own predicate (``scheduler_candidates`` :1616): a
+    # non-null unsafe reason is refused as ``forcing_artifact_reference_unsafe``.
+    assert decision.evidence["artifact_guard"]["unsafe_reason"] not in (None, "")
+
+
 # A recorded reference whose authority holds a "[": ``urlparse`` rejects it with
 # ``ValueError: Invalid IPv6 URL``, which is the shape-classification fault leg.
 _MALFORMED_RECORDED_PACKAGE_URI = "s3://[/forcing/gfs/2026052106/basin_a_v1/model_a/"
 
 
-def test_malformed_recorded_package_uri_shape_classification_never_raises() -> None:
+def test_malformed_recorded_package_uri_shape_classification_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # #1365 round-1b unit seam: the witness-derivation trigger runs OUTSIDE the
     # probe's own containment (it decides WHAT to probe), and the closed-world
     # validator it consults is itself a RAISING surface.  Independent oracle
@@ -12273,10 +12867,25 @@ def test_malformed_recorded_package_uri_shape_classification_never_raises() -> N
     with pytest.raises(ValueError):
         validate_object_path(_MALFORMED_RECORDED_PACKAGE_URI)
 
+    # #1397: the normalizer the classifier now consults first raises on this shape
+    # too (``urlparse`` again), and that ``ValueError`` must fold into the same
+    # containment rather than opening a second escape route out of a helper that
+    # runs OUTSIDE the probe.
+    from packages.common.object_store import normalize_object_key
+
+    with pytest.raises(ValueError):
+        normalize_object_key(_MALFORMED_RECORDED_PACKAGE_URI, "s3://nhms")
+
     # An unparseable reference is not a package prefix a witness can be derived
     # for, so classification answers "probe it as recorded" instead of raising.
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
     assert (
-        scheduler_state_failure_module._needs_package_manifest_witness(_MALFORMED_RECORDED_PACKAGE_URI) is False
+        scheduler_state_failure_module._needs_package_manifest_witness(
+            candidate,
+            _MALFORMED_RECORDED_PACKAGE_URI,
+        )
+        is False
     )
 
 
@@ -12422,17 +13031,37 @@ def test_package_manifest_probe_uri_is_the_single_producer_isomorphic_derivation
         ("", False),
     ],
 )
-def test_package_manifest_witness_trigger_is_validator_admissibility(value: str, expected: bool) -> None:
-    assert scheduler_state_failure_module._needs_package_manifest_witness(value) is expected
+def test_package_manifest_witness_trigger_is_validator_admissibility(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: bool,
+) -> None:
+    # #1397 task 3.5 must-preserve: under a bare-bucket prefix (every tracked
+    # deployment) and with no percent-encoding, normalize-first leaves EVERY answer
+    # in this table byte-for-byte where it was before the classifier started
+    # normalizing.  Both prefix shapes are exercised, including the empty one.
+    monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    candidate = _scheduler_candidate_fixture()
+    for bare_bucket_prefix in ("", "s3://nhms"):
+        monkeypatch.setenv("OBJECT_STORE_PREFIX", bare_bucket_prefix)
+        assert scheduler_state_failure_module._needs_package_manifest_witness(candidate, value) is expected
     # Independent oracle: the trigger is exactly "the closed-world validator does
     # not admit this non-local reference as a FILE key", re-derived here from
-    # ``validate_object_path`` itself rather than restated from the helper.
+    # ``validate_object_path`` itself rather than restated from the helper.  The
+    # question is now asked about the key the probe will resolve, so the oracle
+    # normalizes first with the store's own derivation.
+    from packages.common.object_store import normalize_object_key
     from packages.common.storage import validate_object_path
 
     stripped = value.strip()
     is_local = stripped.startswith(("file://", "/", "~"))
     expected_from_validator = bool(stripped) and not is_local and not validate_object_path(stripped).valid
     assert expected is expected_from_validator
+    if stripped and not is_local:
+        # ... and normalization under a bare bucket is a no-op for the validator's
+        # answer, which is what makes the two oracles agree.
+        normalized_answer = not validate_object_path(normalize_object_key(stripped, "s3://nhms")).valid
+        assert normalized_answer is expected
 
 
 def test_forcing_sidecar_key_and_manifest_derivation_match_the_producer_write_side() -> None:
@@ -12738,7 +13367,7 @@ def test_sanitized_journal_uri_recovers_through_the_sidecar_tier_end_to_end(
 def test_sidecar_probe_survives_a_producer_scheduler_prefix_drift(tmp_path: Path) -> None:
     # B10(a) (round-1 V2-C2): the record's manifest uri was written under a
     # DIFFERENT object-store prefix than the scheduler reads with.  Probing that
-    # uri verbatim raises inside ``_normalize_s3_uri`` and the probe swallows it
+    # uri verbatim raises inside ``normalize_object_key`` and the probe swallows it
     # into a false "missing" for a physically present package; the derived key has
     # no such leg.
     object_store_root = tmp_path / "object-store"
@@ -13969,6 +14598,16 @@ def test_exact_cycle_missing_forcing_repair_rejects_non_direct_grid_candidate(
         # (symlinked witness leaf, stale NFS handle) -- a rebuild cannot clear a
         # filesystem fault either, and the reason names which fault it was.
         ("probe_error", "rejected", "forcing_artifact_reference_unsafe", "artifact_probe_error"),
+        # #1394: a DIRECTORY standing on the derived witness key is a determination
+        # rather than a fault, but the routing is the same and for the same reason
+        # -- a rebuild cannot write the manifest file where the directory stands,
+        # so the reason is non-null and the channel refuses it.
+        (
+            "target_not_a_file",
+            "rejected",
+            "forcing_artifact_reference_unsafe",
+            "artifact_target_not_a_file",
+        ),
         # Paired positive: a probe that actually RAN and determined the package
         # absent stays repair-eligible, exactly as before #1365.
         ("configured_absent", "authorized", "exact_cycle_direct_grid_raw_manifest_ready", None),
@@ -14006,6 +14645,15 @@ def test_missing_forcing_repair_gate_separates_unprobed_from_probed_absent_block
             witness_path.symlink_to(relocated)
             with pytest.raises(ObjectStoreError):
                 LocalObjectStore(object_store_root, "").exists(f"{package_uri.rstrip('/')}/forcing_package.json")
+        elif store_mode == "target_not_a_file":
+            # ... or unless a DIRECTORY stands on the derived witness key, which
+            # the store stats happily (``stat_no_follow`` refuses only symlinks)
+            # and used to report as a present package.
+            witness_path = object_store_root / "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+            witness_path.mkdir(parents=True)
+            assert LocalObjectStore(object_store_root, "").exists(
+                f"{package_uri.rstrip('/')}/forcing_package.json"
+            )
     state = _missing_forcing_retry_state(
         candidate,
         raw_manifest=readiness,
@@ -15293,6 +15941,7 @@ _ARTIFACT_GUARD_LANE_FUNCTIONS = (
     "_local_artifact_path",
     "_local_artifact_path_is_allowed",
     "_local_artifact_allowed_roots",
+    "_local_artifact_target_is_not_a_file",
     "_path_is_relative_to",
     "_realpath_or_none",
 )
@@ -16112,11 +16761,21 @@ def test_resolve_residue_confined_path_keeps_non_loop_containment_refusal(tmp_pa
     ("root_env", "expected_message"),
     [
         # WORKSPACE_ROOT reaches the evidence directory's safety check, which
-        # reads the kernel's ELOOP off lstat().  The field name it reports is
-        # `evidence_dir` even though the loop sits on WORKSPACE_ROOT; that
-        # attribution quirk predates this change and is a declared non-goal, so
-        # it is pinned here rather than corrected.
-        ("WORKSPACE_ROOT", "production scheduler evidence_dir must be a safe directory"),
+        # reads the kernel's ELOOP off lstat().  The refusal still names
+        # `evidence_dir` -- that is the field under the guard -- but it now also
+        # carries the offending path and names workspace_root, because
+        # evidence_dir is only DERIVED from workspace_root and the operator set
+        # no evidence root at all.  #1520 declared that misattribution a
+        # non-goal and pinned it here; #1545 is the follow-up that corrects it,
+        # so the expectation is rewritten rather than pinned.  Templated because
+        # the message now embeds real paths; the lock-root row below has no
+        # placeholders and is compared byte-for-byte verbatim.
+        (
+            "WORKSPACE_ROOT",
+            "production scheduler evidence_dir must not resolve through a symlink loop: "
+            "{path} (the loop lies above the final component; check evidence_dir "
+            "and workspace_root {workspace_root})",
+        ),
         ("NHMS_SCHEDULER_LOCK_ROOT", "production scheduler lock_path must be under workspace_root"),
     ],
 )
@@ -16135,11 +16794,398 @@ def test_resolve_residue_config_final_segment_loop_converges_to_structured_refus
     loop = _symlink_loop_dir(tmp_path, "final-segment-loop")
     _resolve_residue_env(monkeypatch, workspace_root)
     monkeypatch.setenv(root_env, str(loop))
+    resolved_workspace_root = Path(os.path.realpath(loop))
+    offending_path = resolved_workspace_root / "scheduler" / "evidence"
 
     with pytest.raises(ValueError) as excinfo:
         ProductionSchedulerConfig()
 
-    assert str(excinfo.value) == expected_message
+    assert str(excinfo.value) == expected_message.format(
+        path=offending_path,
+        workspace_root=resolved_workspace_root,
+    )
+    if root_env == "WORKSPACE_ROOT":
+        # #1545's two acceptance points, asserted independently of the exact
+        # sentence: the refusal carries the offending path, and it lets the
+        # operator reach the workspace_root knob instead of pointing only at a
+        # derived evidence directory they never configured.
+        assert str(offending_path) in str(excinfo.value)
+        assert f"workspace_root {resolved_workspace_root}" in str(excinfo.value)
+
+
+# --- Undeterminable home directory in config construction (#1549) ------------
+#
+# `Path.expanduser()` throws a bare, errno-less RuntimeError when no home
+# directory can be determined.  Two production fields reach this module's own
+# bare expansions -- allowed_storage_roots and log_root -- and used to abort
+# construction there, producing no structured blocker at all.  Every other root
+# field aborts earlier in `_expanduser_for_mode`'s deliberate re-raise, which is
+# a standing design ruling and out of scope here.
+
+_UNKNOWN_HOME_ROOTS = "~nosuchuser_zz/roots"
+_UNKNOWN_HOME_LOGS = "~nosuchuser_zz/logs"
+_UNKNOWN_HOME_WORKSPACE = "~nosuchuser_zz/workspace"
+
+
+def _unknown_home_config(workspace_root: Path, *, db_free_required: bool) -> Any:
+    return ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        scheduler_db_free_required=db_free_required,
+    )
+
+
+def test_expanduser_residue_config_constructs_identically_on_both_database_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The acceptance anchor is an EQUALITY of products, not the absence of an
+    # exception: "it stopped throwing" would stay green even if the throw were
+    # traded for a value anchored at the wrong base.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+
+    db_backed = _unknown_home_config(workspace_root, db_free_required=False)
+    db_free = _unknown_home_config(workspace_root, db_free_required=True)
+
+    assert db_backed.allowed_storage_roots == db_free.allowed_storage_roots
+    assert db_backed.log_root == db_free.log_root
+    # The db-free arm's own product, spelled out: the tilde segment is kept
+    # verbatim, the allowed root is anchored at the cwd and the log root at
+    # workspace_root, so a base mix-up cannot hide behind the equality above.
+    canonical_cwd = Path(os.path.realpath(tmp_path))
+    canonical_workspace = Path(os.path.realpath(workspace_root))
+    assert db_backed.allowed_storage_roots == (canonical_cwd / _UNKNOWN_HOME_ROOTS,)
+    assert db_backed.log_root == canonical_workspace / _UNKNOWN_HOME_LOGS
+
+
+def test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Compatibility-surface ledger item, not a live crash path: workspace_root
+    # re-raises earlier in `_expanduser_for_mode`, so this helper is asserted by
+    # calling it directly rather than through a field.
+    monkeypatch.chdir(tmp_path)
+
+    product = scheduler_module._config_path_preserve_final_component(_UNKNOWN_HOME_WORKSPACE)
+
+    assert product == scheduler_config_module._config_path_preserve_final_component_for_mode(
+        _UNKNOWN_HOME_WORKSPACE,
+        db_free_required=True,
+    )
+    assert product == Path(os.path.realpath(tmp_path)) / _UNKNOWN_HOME_WORKSPACE
+
+
+def test_expanduser_helpers_still_expand_a_determinable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The other half of the #1549 contract.  Every tilde above is deliberately
+    # UNEXPANDABLE, so all of it stays green even if the expansion is dropped
+    # altogether -- and master could leave that unpinned because it called
+    # stdlib expanduser() directly, while this change substitutes a hand-written
+    # wrapper whose happy branch is the one every real operator config takes.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    home = canonical_tmp / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._config_path_preserve_final_component("~/x") == home / "x"
+    assert scheduler_module._optional_config_path_relative_to("~/x", canonical_tmp) == home / "x"
+
+
+def test_expanduser_residue_preflight_classifies_structurally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The point of not throwing during construction: the value reaches the
+    # preflight, which owns classification and answers with a structured result.
+    # The codes below are what this geometry actually produces today -- the
+    # unresolvable root is admitted by the ENOENT tolerance arm and then fails
+    # to contain workspace_root, and neither missing lock nor evidence root
+    # exists yet.
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _resolve_residue_env(monkeypatch, workspace_root)
+    config = ProductionSchedulerConfig(
+        workspace_root=workspace_root,
+        allowed_storage_roots=(_UNKNOWN_HOME_ROOTS,),
+        log_root=_UNKNOWN_HOME_LOGS,
+        require_runtime_roots=True,
+    )
+
+    preflight = scheduler_module._scheduler_lock_evidence_root_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    assert [blocker["code"] for blocker in preflight["blockers"]] == [
+        "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
+        "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND",
+        "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND",
+    ]
+
+
+# --- Final-segment symlink verdicts (#1544) -----------------------------------
+#
+# The guard's final component used to be decided by a bare non-strict resolve,
+# which raises an errno-less RuntimeError on <=3.12 and silently ADOPTS a loop
+# on 3.13+.  Strict real-path plus an ELOOP split makes both interpreter arms
+# reach the same verdict; every other strict failure keeps the non-strict
+# product the arm has always used, so the accepting geometries below are
+# unchanged.  These assertions are about the converged behaviour and therefore
+# hold on every supported interpreter.
+
+
+def _guard_workspace(tmp_path: Path) -> tuple[Path, Path]:
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    outside = Path(os.path.realpath(tmp_path)) / "outside"
+    outside.mkdir()
+    return workspace_root, outside
+
+
+def test_final_segment_loop_inside_workspace_is_a_structured_refusal(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    loop = _symlink_loop_dir(workspace_root, "inner-loop")
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(loop, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+def test_final_segment_symlink_whose_target_traverses_a_loop_names_the_looping_link(tmp_path: Path) -> None:
+    # ELOOP does not mean "the final component loops": here the final component
+    # is an ordinary, non-looping symlink and the cycle sits in the path its
+    # TARGET traverses.  The refusal must send the operator to the link that
+    # actually loops, not to the innocent one they configured.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    midloop = workspace_root / "midloop"
+    midloop.symlink_to(midloop)
+    link = workspace_root / "via-midloop"
+    link.symlink_to(midloop / "tail", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {link} "
+        f"(the symlink loop is at {midloop})"
+    )
+
+
+def test_final_segment_healthy_directory_symlink_is_accepted(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_to_a_file_is_refused_as_not_a_directory(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+    target = workspace_root / "target"
+    target.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be a directory"
+
+
+def test_final_segment_symlink_escaping_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_absent_component_returns(tmp_path: Path) -> None:
+    workspace_root, _ = _guard_workspace(tmp_path)
+
+    assert (
+        scheduler_module._require_safe_directory_final_component(
+            workspace_root / "absent",
+            workspace_root,
+            "evidence_dir",
+        )
+        is None
+    )
+
+
+def test_dangling_final_segment_symlink_pointing_inside_the_workspace_is_accepted(tmp_path: Path) -> None:
+    # THE regression fence for this change.  Strict real-path raises ENOENT on a
+    # dangling link, so a strict-only implementation would turn today's
+    # acceptance into a refusal and silently break working configurations.  The
+    # target MUST be inside the workspace: an outside target is refused for a
+    # different reason (see the next test), which would make this case red for
+    # the wrong cause.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(workspace_root / "never-created", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_dangling_final_segment_symlink_pointing_outside_the_workspace_is_refused(tmp_path: Path) -> None:
+    workspace_root, outside = _guard_workspace(tmp_path)
+    link = workspace_root / "link"
+    link.symlink_to(outside / "never-created", target_is_directory=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+
+    assert str(excinfo.value) == "production scheduler evidence_dir must be under workspace_root"
+
+
+def test_final_segment_symlink_reached_through_a_file_keeps_its_acceptance(tmp_path: Path) -> None:
+    # Strict real-path fails with ENOTDIR here, not ENOENT, and the geometry is
+    # accepted today: the non-strict fallback therefore has to cover every
+    # non-loop errno rather than ENOENT alone.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "a-file"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "tail", target_is_directory=True)
+
+    assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
+
+
+def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(tmp_path: Path) -> None:
+    # Strict real-path fails with EACCES here -- a third non-loop errno the
+    # fallback has to carry.  HONEST LIMIT: the FINAL verdict on this geometry
+    # is not interpreter-independent, and that predates this change and lies
+    # outside it: `Path.exists()` swallows EACCES from 3.12 on but propagates
+    # PermissionError on 3.11, so master already accepts this on 3.14 and raises
+    # PermissionError on 3.11 at that later gate (tracked as #1623).  What this
+    # change owns is the real-path step, which must not turn EACCES into the
+    # loop refusal, and must not let it escape either.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "unreadable"
+    blocker.mkdir()
+    (blocker / "leaf").mkdir()
+    link = workspace_root / "link"
+    link.symlink_to(blocker / "leaf", target_is_directory=True)
+    blocker.chmod(0o600)
+    try:
+        if sys.version_info >= (3, 12):
+            # The CI interpreter gets NO tolerance: a blanket `except
+            # PermissionError` here would also swallow EACCES escaping the
+            # strict real-path step this change owns, i.e. it would stay green
+            # under exactly the regression it exists to fence.
+            verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+        else:
+            # 3.11 alone keeps the tolerance, for the later `Path.exists()`
+            # gate named above -- a divergence this change does not own.
+            try:
+                verdict = scheduler_module._require_safe_directory_final_component(
+                    link,
+                    workspace_root,
+                    "evidence_dir",
+                )
+            except PermissionError:
+                verdict = None
+    finally:
+        blocker.chmod(0o755)
+
+    assert verdict is None
+
+
+def test_final_segment_loop_refuses_on_the_database_backed_construction_route(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Every assertion above calls the guard directly, but the acceptance
+    # scenario is phrased about the CONFIGURATION being constructed.  The
+    # guard's only two call sites are both `evidence_dir` in scheduler_config,
+    # so this is the route an operator actually travels.
+    workspace_root = Path(os.path.realpath(tmp_path)) / "workspace"
+    workspace_root.mkdir()
+    loop = _symlink_loop_dir(workspace_root, "loop-evidence")
+    _resolve_residue_env(monkeypatch, workspace_root)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(loop))
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionSchedulerConfig()
+
+    assert str(excinfo.value) == (
+        f"production scheduler evidence_dir must not resolve through a symlink loop: {loop} "
+        f"(the symlink loop is at {loop})"
+    )
+
+
+# --- Compatibility-surface path helpers (#1546) --------------------------------
+
+
+def test_compatibility_surface_helpers_normalize_a_loop(tmp_path: Path) -> None:
+    # Exposed only through the runtime-roots forwarders, so this is a ledger
+    # item rather than a live crash path: <=3.12 raised an errno-less
+    # RuntimeError here while 3.13+ adopted the loop.  Both now normalise.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    loop = _symlink_loop_dir(canonical_tmp, "compat-loop")
+
+    assert scheduler_module._resolve_optional_config_path(loop) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop, canonical_tmp) == loop
+    assert scheduler_module._optional_config_path_relative_to(loop.name, canonical_tmp) == loop
+    # Normalisation itself, which the three equalities above cannot see: on an
+    # already-canonical input they are all satisfied by handing the value
+    # straight back.  This also pins the documented POSIX order -- symlinks
+    # first, `..` afterwards -- so the loop segment survives while the
+    # traversal through it collapses, which is what the old Path.resolve()
+    # produced on 3.13+ and what it refused to produce at all on <=3.12.
+    assert scheduler_module._resolve_optional_config_path(loop / "y" / ".." / "z") == loop / "z"
+    # The sibling helper carries its own copy of the paradigm, so it needs its
+    # own normalisation fence: fixing one of the two leaves the other handing
+    # the value back untouched.  Both spellings of the same value are pinned --
+    # absolute, and relative, where the base join is what goes through the
+    # canonicalisation.
+    assert scheduler_module._optional_config_path_relative_to(loop / "y" / ".." / "z", canonical_tmp) == loop / "z"
+    assert scheduler_module._optional_config_path_relative_to(f"{loop.name}/y/../z", canonical_tmp) == loop / "z"
+
+
+def test_compatibility_surface_helpers_keep_their_existing_contract(tmp_path: Path) -> None:
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    missing = canonical_tmp / "gone" / "leaf"
+
+    assert scheduler_module._resolve_optional_config_path(None) is None
+    assert scheduler_module._optional_config_path_relative_to(None, canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("", canonical_tmp) is None
+    assert scheduler_module._optional_config_path_relative_to("gone/leaf", canonical_tmp) == missing
+    assert scheduler_module._resolve_optional_config_path(missing) == missing
+    assert not missing.exists()
+
+
+def test_compatibility_surface_relative_helper_keeps_an_undeterminable_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # This one helper crosses both families: the bare expanduser belongs to the
+    # #1549 lane (keep the value, hand it down) and the bare resolve to the
+    # #1546 lane (normalise identically on every interpreter).  Fixing only one
+    # of the two leaves the other's throw in place.
+    canonical_tmp = Path(os.path.realpath(tmp_path))
+    monkeypatch.chdir(canonical_tmp)
+
+    assert scheduler_module._optional_config_path_relative_to(
+        _UNKNOWN_HOME_LOGS,
+        canonical_tmp,
+    ) == canonical_tmp / _UNKNOWN_HOME_LOGS
 
 
 def test_resolve_residue_config_parent_segment_loop_object_store_root_constructs(
@@ -25591,10 +26637,18 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
 # ---------------------------------------------------------------------------
 
 
-#: The two unsafe reasons ``_artifact_uri_missing_status`` can report on the
-#: object branch.  Both mean "no probe verdict was reached", so both must make
-#: the raw-manifest legs abstain -- neither is a licence to claim the candidate.
-_RAW_MANIFEST_ABSTENTION_REASONS = ("object_store_root_unconfigured", "artifact_probe_error")
+#: Every non-null unsafe reason ``_artifact_uri_missing_status`` can report on
+#: the object branch.  The first two mean "no probe verdict was reached"; the
+#: third (#1394) means the probe DID determine something -- that a non-regular
+#: entry stands on the manifest key -- which is equally not a licence to claim
+#: the candidate: neither leg may vouch for a manifest that cannot be read, and
+#: re-ingesting cannot write a file where a directory stands.  All three must
+#: make the raw-manifest legs abstain.
+_RAW_MANIFEST_ABSTENTION_REASONS = (
+    "object_store_root_unconfigured",
+    "artifact_probe_error",
+    "artifact_target_not_a_file",
+)
 
 #: A raw-manifest key whose closed-world validation raises ``ValueError`` inside
 #: ``LocalObjectStore.resolve_path``: the probe's ``(OSError, ValueError)``
@@ -25633,8 +26687,27 @@ def _apply_raw_manifest_unsafe_geometry(
         monkeypatch.delenv("OBJECT_STORE_ROOT", raising=False)
     elif unsafe_reason == "artifact_probe_error":
         _raw_manifest_probe_fault_root(monkeypatch, tmp_path)
+    elif unsafe_reason == "artifact_target_not_a_file":
+        _raw_manifest_directory_squatter_root(monkeypatch, tmp_path)
     else:  # pragma: no cover - guards the parametrization against silent drift
         raise AssertionError(f"unhandled unsafe reason: {unsafe_reason}")
+
+
+def _raw_manifest_directory_squatter_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a store whose raw-manifest key is a DIRECTORY.
+
+    ``stat_no_follow`` refuses only symlinks, so this target stats cleanly and
+    ``LocalObjectStore.exists`` still reports it present -- the #1394 fail-open
+    the probe's file-kind verdict now catches.  The whole parent chain is created
+    (``parents=True``): a missing ancestor is a plain ``FileNotFoundError`` and
+    would produce the null-reason "determined absent" verdict instead.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir(exist_ok=True)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    (object_store_root / _RECORDED_RAW_MANIFEST_URI).mkdir(parents=True)
+    return object_store_root
 
 
 def _healthy_raw_manifest_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -25656,12 +26729,14 @@ def _healthy_raw_manifest_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
 
 #: Whether the ladder's forcing rung can NAME the unsafe reason depends on which
-#: key was unsafe, and the two abstention reasons differ there.
+#: key was unsafe, and the abstention reasons differ there.
 #: ``object_store_root_unconfigured`` is a property of the process -- no root at
 #: all -- so every key reports it, including the forcing package manifest the rung
-#: probes.  ``artifact_probe_error`` is a property of ONE leaf (the symlinked raw
-#: manifest), so the forcing rung's own key still reaches a genuine "probed,
-#: determined absent" verdict and the guard records ``unsafe_reason: None``.
+#: probes.  ``artifact_probe_error`` and ``artifact_target_not_a_file`` are
+#: properties of ONE leaf (the symlinked raw manifest, the directory squatting on
+#: the raw manifest key), so the forcing rung's own key still reaches a genuine
+#: "probed, determined absent" verdict and the guard records
+#: ``unsafe_reason: None``.
 #:
 #: That NULL is the recorded AC-1 limitation made visible rather than a leak: an
 #: abstaining leg deposits no evidence, so the raw manifest's own reason never
@@ -25670,6 +26745,7 @@ def _healthy_raw_manifest_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 _FORCING_GUARD_UNSAFE_REASONS: dict[str, str | None] = {
     "object_store_root_unconfigured": "object_store_root_unconfigured",
     "artifact_probe_error": None,
+    "artifact_target_not_a_file": None,
 }
 
 
