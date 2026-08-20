@@ -197,18 +197,44 @@ only evidence that the bug is fixed, and it is local + (post-merge) node-27.
 - [x] ACL enumeration recorded (design D7): the three `default:user:nwm:rwx`
       subtrees, their directory creators, and the `find`-verified zero
       `nwm`-owned entries that make `forcing/`'s exposure inert today.
-- [ ] Follow-up issue filed for the latent `provider_atomic`-gate-vs-ACL
-      incompatibility and for `forcing/`/`runs/`'s clamped grant. **Phase 8.**
+- [x] Follow-up issue filed for the latent `provider_atomic`-gate-vs-ACL
+      incompatibility and for `forcing/`/`runs/`'s clamped grant: **#1631**.
+      Three further Phase-8 routings from §6: **#1632** (marked suites unmeasured
+      at umask 0002), **#1633** (the `finished.set()` hang trap), **#1634**
+      (large-file-guard unsatisfiable from a worktree).
 - [x] Cross-uid boundary recorded rather than tested: no pre-merge command
       exercises the two-uid NFS root, because D7 establishes the change is a
       no-op there (empty groups on `raw/`/`models/` children; unused ACL grant on
       `forcing/`/`runs/`/`states/`) and because the shared root cannot be
       exercised from the local dev host. This is an accepted limit, stated so it
       is not mistaken for coverage.
-- [ ] **node-27 terminal confirmation (post-merge, one time)**: default shell,
-      no umask override, `uv run pytest -q tests/test_production_scheduler.py`
-      -> 0 failed. This is issue #1513's acceptance criterion 2 and is stated
-      against `master`, so it is scheduled with the merge, not before it.
+- [x] **node-27 terminal confirmation (post-merge, one time)**: **DONE
+      2026-08-20**, against `master` `b2a9f0b4` (the merge commit of PR #1625).
+      Receipt:
+
+      ```
+      host    node-27 (210.77.77.27), user nwm
+      umask   0002   (default shell, no override -- printed by the run itself)
+      cmd     python -m pytest -q --tb=short -p no:cacheprovider \
+                tests/test_production_scheduler.py
+      result  1731 passed in 530.30s (0:08:50)   EXIT=0
+      ```
+
+      Pre-fix, the same file on a umask-0002 host was `76 failed, 1588 passed`.
+      This is issue #1513's acceptance criterion 2 and the only measurement with
+      discriminating power for this change — CI runs at umask `0022`, where the
+      file was green before and after.
+
+      Two deviations in how it was run, both deliberate and neither weakening
+      the result:
+      - node-27's working tree was on another session's in-flight branch
+        (`feat/issue-1341-...`, clean). It was **not** switched — that would have
+        disrupted work in progress. The run used an isolated `git archive` export
+        of `origin/master` in a temp dir, removed afterwards.
+      - `uv` is not on `PATH` in a non-interactive ssh session, so the repo's own
+        `.venv/bin/python -m pytest` was invoked directly rather than `uv run`.
+        Same interpreter and same dependency set; this is not a system-python
+        fallback.
 
 ## 5. Non-goals
 
