@@ -236,6 +236,33 @@ so **after the fix the tree conforms with zero exceptions**. That is the point:
 a spec with no exceptions is worth more than a broader spec carrying a list of
 things it silently tolerates.
 
+### Conformance sweep behind the "zero exceptions" claim
+
+The claim that exactly one site in the tree is governed is evidenced, not
+asserted. Spin-waits were enumerated by every form they take here, not just the
+obvious one:
+
+- `is_set()` busy-loops — 3 total. `tests/test_scheduler_file_provider_refresh.py:842`
+  is the target. The other two are **worker** bodies, not main-thread waits:
+  `tests/test_file_orchestration_journal.py:7894` (inside `_hammer_until`, which
+  already satisfies (a)(b)(c) — deadline-bounded, `except BaseException` into a
+  `failures` list, then `stop.set()`), and `tests/test_gateway_reconcile.py:5238`
+  (inside a daemon's `_write`).
+- Predicate spin-waits not using `is_set()` — `tests/test_shud_runtime.py:6006`,
+  `tests/test_node27_timeseries_compression_supervisor.py:974`,
+  `tests/test_production_scheduler.py:21748`, `:21766`, `:44149`. All carry
+  `and time.monotonic() < deadline`, so all satisfy (b); most spin on a
+  subprocess-written file rather than a worker-thread sentinel, placing them
+  outside the trigger regardless.
+- `while True:` loops — 3 total, none relevant.
+  `tests/test_node27_timeseries_compression_benchmark.py:553` is a deliberate
+  infinite block inside a fake `close()` whose *bounding* is the test's subject;
+  `tests/test_select_ci_tests.py:682` is a fixed-point set iteration with no
+  threads; the third is inside a `python -c` string run as a subprocess.
+
+Result: one governed site, which this change fixes. After it, the tree conforms
+with no exceptions.
+
 The two `tests/test_gateway_reconcile.py` Barrier strands are real hangs of the
 same family but are not spin-waits, so rather than grandfather them the spec
 names them as an adjacent hazard routed to #1645, expected to come under a
