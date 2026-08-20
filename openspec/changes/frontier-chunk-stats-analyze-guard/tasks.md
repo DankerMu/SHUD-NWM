@@ -7,7 +7,9 @@
       触发查询 + 每 tick 上限 3 个（降序取前 3、其余记 `deferred`）+ 逐条
       `statement_timeout = 120s` + ANALYZE 后回读 `last_analyze` 自检），
       summary 增加 `stats_guard` 块；`NODE27_AUTOPIPE_STATS_GUARD=off` 跳过；
-      失败 `status:"failed"` + `error`，不改 tick rc。
+      失败两级——单 chunk ANALYZE 失败逐 chunk 隔离（条目记 `status:"failed"` +
+      `error`，剩余照常尝试），guard 级失败（连接/候选查询）记
+      `stats_guard.status:"failed"` + `error`；两级都不改 tick rc。
 - [x] 1.2 `scripts/node27_timeseries_compression.py`：全部压缩完成后、receipt
       发布前，对本次 run 记账中到达 compressed 状态的每个 chunk（正常/测量失败后/
       lost-ack 对账三路径）ANALYZE；每条前检查剩余墙钟（`wrapper_wall_seconds -
@@ -38,7 +40,8 @@
 - [x] E2 `uv run ruff check .` PASS
 - [x] E3 `openspec validate frontier-chunk-stats-analyze-guard --strict --no-interactive` PASS
 - [ ] E4 **硬门**，node-27 实机，须观测到一个**实际触发** guard 的 tick：
-      (i) tick summary JSON 含 `stats_guard.analyzed` 非空；
+      (i) tick summary JSON 的 `stats_guard.analyzed` 含至少一条
+      `status: "ok"` 条目（`analyzed` 记录的是尝试，failed/warning 不算数）；
       (ii) `pg_stat_user_tables.last_analyze` 实刷（SQL 复核，防 PG15 非 owner
       静默跳过）；
       (iii) guard 后重跑 issue 验收项 2 的 Q2（当前键形态）EXPLAIN ANALYZE：

@@ -489,9 +489,11 @@ class _FakeCursor:
         last_analyze: dict[str, datetime | None],
         analyze_error: Exception | None,
         analyze_errors: Mapping[str, Exception],
+        candidates_error: Exception | None = None,
     ) -> None:
         self._statements = statements
         self._candidates = candidates
+        self._candidates_error = candidates_error
         self._last_analyze = last_analyze
         self._analyze_error = analyze_error
         self._analyze_errors = analyze_errors
@@ -507,6 +509,8 @@ class _FakeCursor:
         self._statements.append((sql, params))
         if "timescaledb_information.chunks" in sql:
             assert params == (autopipe.STATS_GUARD_MIN_MODS,)
+            if self._candidates_error is not None:
+                raise self._candidates_error
             self._result = list(self._candidates)
         elif sql.startswith("ANALYZE"):
             if self._analyze_error is not None:
@@ -546,6 +550,7 @@ def _install_fake_db(
     last_analyze: dict[str, datetime | None] | None = None,
     analyze_error: Exception | None = None,
     analyze_errors: Mapping[str, Exception] | None = None,
+    candidates_error: Exception | None = None,
 ) -> tuple[list[tuple[str, Any]], list[str], list[_FakeConnection]]:
     statements: list[tuple[str, Any]] = []
     dsns: list[str] = []
@@ -555,7 +560,16 @@ def _install_fake_db(
 
     def connect(database_url: str) -> _FakeConnection:
         dsns.append(database_url)
-        connection = _FakeConnection(_FakeCursor(statements, candidates, reads, analyze_error, per_chunk_errors))
+        connection = _FakeConnection(
+            _FakeCursor(
+                statements,
+                candidates,
+                reads,
+                analyze_error,
+                per_chunk_errors,
+                candidates_error=candidates_error,
+            )
+        )
         connections.append(connection)
         return connection
 
@@ -766,6 +780,68 @@ def test_stats_guard_one_failed_chunk_does_not_swallow_the_rest_of_the_batch(
     assert rc == 0
     assert summary["status"] == "completed"
     assert [entry["status"] for entry in summary["stats_guard"]["analyzed"]] == ["failed", "ok", "ok"]
+
+
+def test_stats_guard_connect_failure_is_reported_without_the_dsn_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard-level handler is the only thing between a libpq connect error
+    and the JSON summary: libpq echoes the whole conninfo (password included)
+    into its message, so the handler has to redact, not merely record."""
+
+    def explode(_database_url: str) -> object:
+        raise RuntimeError("could not connect to server: password=hunter2secret host=127.0.0.1 port=55432")
+
+    monkeypatch.setattr(autopipe.psycopg2, "connect", explode)
+
+    guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
+
+    assert guard["status"] == "failed"
+    assert guard["error"]
+    assert "could not connect to server" in guard["error"]
+    assert "hunter2secret" not in guard["error"]
+    assert "password=[redacted]" in guard["error"]
+    # Nothing was attempted, and the skeleton stays uniformly shaped.
+    assert guard["analyzed"] == []
+    assert guard["deferred"] == []
+
+
+def test_stats_guard_candidate_query_failure_fails_the_guard_not_the_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The other guard-level leg: the candidate query itself blowing up (catalog
+    permissions, a TimescaleDB version without the view) is the guard's own
+    verdict -- and still not the ingest tick's."""
+
+    real_guard = autopipe._analyze_frontier_chunks
+    _statements, _dsns, connections = _install_fake_db(
+        monkeypatch,
+        candidates=[(CHUNK_SCHEMA, "_hyper_1_58_chunk", 6_800_000, _BEFORE)],
+        candidates_error=RuntimeError("permission denied for view timescaledb_information.chunks"),
+    )
+
+    guard = real_guard(NODE27_DATABASE_URL)
+
+    assert guard["status"] == "failed"
+    assert "permission denied for view" in guard["error"]
+    assert guard["analyzed"] == []
+    assert guard["deferred"] == []
+    # The connection is released even on the failing path.
+    assert connections[0].closed is True
+
+    # ... and the tick that ran it still reports its own success.
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", real_guard)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["runs"]["ingested"] == 1
+    assert summary["stats_guard"]["status"] == "failed"
+    assert "permission denied for view" in summary["stats_guard"]["error"]
 
 
 def test_stats_guard_switch_off_skips_the_guard(

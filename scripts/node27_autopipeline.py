@@ -1987,8 +1987,12 @@ def main(argv: list[str] | None = None) -> int:
         env=env,
     )
     if args.progress and stats_guard["status"] not in ("skipped", "not_triggered"):
+        # Per-status, never a bare count: ``analyzed`` records every attempt, so
+        # an all-failed tick would otherwise read like a success.
+        statuses = [entry["status"] for entry in stats_guard["analyzed"]]
         print(
-            f"[stats-guard] {stats_guard['status']}: analyzed {len(stats_guard['analyzed'])}"
+            f"[stats-guard] {stats_guard['status']}: ok {statuses.count('ok')}"
+            f", warning {statuses.count('warning')}, failed {statuses.count('failed')}"
             f", deferred {len(stats_guard['deferred'])}",
             file=sys.stderr,
             flush=True,

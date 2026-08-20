@@ -1784,10 +1784,10 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
          receipt.get("budget"), receipt.get("per_tick_bound"))
 
    # (1) is there a post-#1351 receipt here at all? Not a budget verdict.
-   # Every version that carries `budget` counts — "2.1" (#1351) and "2.2"
-   # (#1378 ride-along ANALYZE) alike; pinning one version would fail this
-   # check on the next bump for a reason that has nothing to do with budgets.
-   assert version in {"2.1", "2.2"}, (
+   # Every version that carries `budget` counts — "2.1" (#1351) onwards;
+   # an ordered lower bound survives future bumps ("2.2" #1378, …) that
+   # have nothing to do with budgets.
+   assert tuple(map(int, version.split("."))) >= (2, 1), (
        f"no post-#1351 default tick at this path yet (schema_version={version})"
    )
 
@@ -2164,8 +2164,10 @@ WHERE (c.hypertable_schema, c.hypertable_name) IN (
 ORDER BY s.n_mod_since_analyze DESC;
 ```
 
-一个真跑过 guard 的 tick，其 summary JSON 的 `stats_guard.analyzed` 非空，且上面
-SQL 里对应 chunk 的 `last_analyze` 应刷到该 tick 时刻。
+一个真跑过 guard 的 tick，其 summary JSON 的 `stats_guard.analyzed` 非空（逐**尝试**
+一条，`status` 为 `ok`/`warning`/`failed`）；只有 `status: "ok"` 的条目承诺上面 SQL
+里对应 chunk 的 `last_analyze` 刷到该 tick 时刻——`warning` 正是"发了 ANALYZE 但
+`last_analyze` 未刷"（见下节陷阱），`failed` 是没执行成。
 
 #### 陷阱：PG15 非 owner 的 ANALYZE 是静默跳过
 
