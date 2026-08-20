@@ -180,6 +180,13 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # comparison runs on `outer_predicates` — key-resolution sub-selects
     # stripped (hence the `= )` tails), comments removed, whitespace collapsed —
     # so re-indenting the CTE does not break it.
+    #
+    # These verbatim pins are the ONLY structural defense for the fold-away
+    # shape: the computed adjacency invariant
+    # (tests/test_sql_shape_helpers.py::assert_aid_is_conjoined_with_its_counterpart)
+    # deliberately does not parse parentheses, OR branches or NOT, so it cannot
+    # see a guard whose escape branch has drifted. Do not simplify these
+    # substrings on the grounds that the adjacency check covers them.
     river_outer = outer_predicates(river_cte)
     assert "AND (%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in river_outer
     assert (

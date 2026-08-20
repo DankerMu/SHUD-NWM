@@ -136,6 +136,13 @@ RIVER_TABLE = "hydro.river_timeseries"
 # making an explanatory paragraph red the census is noise nobody would keep.
 # Counted per OCCURRENCE, so two statements inside one constant both register.
 #
+# Known limitation: it counts the LITERAL text "hydro.river_timeseries" inside
+# string constants. A statement that builds the table name through a variable or
+# an f-string placeholder, or that splits it into a ("hydro", "river_timeseries")
+# tuple, is invisible to the census and would land without moving any number
+# here. The census is a cheap tripwire for the ordinary case, not a guarantee;
+# the per-surface shape pins remain the primary defense.
+#
 # The breakdown, so an intentional change can be re-derived rather than guessed:
 #
 # * forecast_store.py 10 = the eight segment blocks + the latest-product
@@ -639,6 +646,13 @@ def test_latest_product_fallback_scan_guards_still_fold_away_on_a_null_binding()
     ``outer_predicates`` (sub-selects stripped, comments removed, whitespace
     collapsed) so re-indenting the CTE cannot break the pin, which is what makes
     the verbatim form maintainable (#1341 idiom).
+
+    These verbatim pins are the ONLY structural defense for the guards' shape:
+    the computed adjacency invariant deliberately does not parse parentheses,
+    ``OR`` branches or ``NOT`` (see
+    :func:`tests.test_sql_shape_helpers.assert_aid_is_conjoined_with_its_counterpart`),
+    so it cannot see a guard whose escape branch has drifted. Do not simplify or
+    delete these substrings on the grounds that the adjacency check covers them.
     """
     sql = _latest_product_fallback_statement()
     river_cte = sql[sql.index("river_sample_rows AS") : sql.index("river_identity_coverage AS")]

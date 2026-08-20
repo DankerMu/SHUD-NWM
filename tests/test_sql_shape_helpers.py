@@ -423,43 +423,82 @@ def assert_text_fact_columns(
 
 
 def assert_aid_is_conjoined_with_its_counterpart(sql: str, alias: str, aid: str, label: str) -> None:
-    """The adjacency invariant: ``alias.aid`` is AND-ed directly to its key/enum twin.
+    """The adjacency invariant: EVERY ``alias.aid`` comparison is AND-ed to its twin.
 
     A retained text predicate is sanctioned only as a REDUNDANT pushdown aid. It
     is redundant precisely when the key (or enum) predicate that supersedes it is
-    in the same conjunction — then the aid can only narrow, and #1342 can delete
-    it without changing the result set. An aid that drifts into a different
-    conjunct (a separate ``OR`` branch, a different guard, or simply somewhere
-    else in the ``WHERE``) becomes load-bearing, and dropping its counterpart
-    turns the surface back into a text-identity consumer while every "is the
-    text column still there" pin stays green.
+    AND-ed to it — then the aid can only narrow, and #1342 can delete it without
+    changing the result set. An aid that drifts away from its counterpart becomes
+    load-bearing, and dropping the counterpart turns the surface back into a
+    text-identity consumer while every "is the text column still there" pin
+    stays green.
 
-    #1341 pinned this per surface as hand-written verbatim substrings (see
+    What is actually checked, exactly
+    ---------------------------------
+
+    On :func:`outer_predicates` output (key-resolution sub-selects stripped, so
+    ``rt.run_key = (SELECT ...)`` reads as ``rt.run_key =``, which is all this
+    needs; comments removed; whitespace collapsed to a single folded line, so
+    re-indenting the SQL cannot change the verdict):
+
+    * every occurrence of ``alias.aid`` **in comparison position** (followed by
+      ``=`` / ``<>`` / ``!=``) must have ``alias.counterpart`` separated from it
+      by exactly one ``AND`` — no other `` AND ``-separated conjunct in between.
+      Either order counts: ``aid AND counterpart`` and ``counterpart AND aid``
+      are the same conjunction.
+    * a bare projection reference (``SELECT rt.variable``, ``GROUP BY
+      rt.run_id``) is NOT an occurrence: it binds nothing, so there is nothing
+      for it to be redundant to. Same operator-anchored discipline as
+      ``_assert_aids_are_marked``.
+
+    Universal, not existential (#1442 round-2, P3): the first conjoined pair used
+    to satisfy the whole statement, so a surface could grow a SECOND, bare
+    predicate on the same text column and stay green.
+
+    What is NOT checked
+    -------------------
+
+    Parenthesis structure, ``OR`` branches and ``NOT`` are not analyzed — this
+    operates on the flat folded text, so it cannot tell an aid inside a guard's
+    ``OR`` branch from one outside it, and it cannot see that a guard's
+    parentheses still close where they used to. The scan-guard fold-away shape
+    is protected instead by the whole-guard verbatim pins (#1442 round-2, F5) in
+    ``tests/test_river_ts_text_identity_cleanup.py`` and
+    ``tests/test_qhh_latest_fallback_pushdown.py``; this invariant does not
+    subsume them.
+
+    #1341 pinned adjacency per surface as hand-written verbatim substrings (see
     ``tests/test_river_ts_read_path_surrogate_keys.py``'s coverage-scan pins).
     This is the same statement, computed instead of transcribed, so every
     surface a register renders inherits it.
-
-    Checked on :func:`outer_predicates` output: key-resolution sub-selects are
-    stripped (so ``rt.run_key = (SELECT ...)`` reads as ``rt.run_key =``, which
-    is all this needs) and whitespace is collapsed, so re-indenting the SQL
-    cannot change the verdict. Either order counts — ``aid AND counterpart`` and
-    ``counterpart AND aid`` are the same conjunction.
     """
     counterpart = TEXT_AID_COUNTERPARTS[aid]
     outer = outer_predicates(sql)
-    for first, second in ((aid, counterpart), (counterpart, aid)):
-        pattern = (
-            rf"\b{re.escape(alias)}\.{re.escape(first)}\b\s*(?:=|<>|!=)\s*"
-            rf"(.*?)\s+AND\s+{re.escape(alias)}\.{re.escape(second)}\b"
+    aid_reference = rf"\b{re.escape(alias)}\.{re.escape(aid)}\b"
+    counterpart_reference = rf"\b{re.escape(alias)}\.{re.escape(counterpart)}\b"
+    comparison = r"\s*(?:=|<>|!=)\s*"
+    # A compared value that itself spans an ``AND`` means another conjunct sits
+    # between the pair, so they are adjacent only by accident of text order.
+    # `%(scan_run_id)s` contains parentheses, so "no parens" is not usable as the
+    # separator test; the gap is written AND-free instead, which also keeps the
+    # leftmost-match rule from picking a far counterpart over a near one.
+    gap = r"(?:(?!\sAND\s).)*?"
+    forward = re.compile(rf"{aid_reference}{comparison}{gap}\s+AND\s+{counterpart_reference}")
+    # Anchored at the end of the text preceding the occurrence, so the
+    # counterpart must be the conjunct immediately before this very aid.
+    backward = re.compile(rf"{counterpart_reference}{comparison}{gap}\s+AND\s+$")
+
+    occurrences = [match.start() for match in re.finditer(rf"{aid_reference}{comparison}", outer)]
+    assert occurrences, f"{label}: text aid {alias}.{aid} is not compared anywhere"
+    for position in occurrences:
+        if forward.match(outer, position) is not None:
+            continue
+        if backward.search(outer[:position]) is not None:
+            continue
+        raise AssertionError(
+            f"{label}: text aid {alias}.{aid} is not AND-ed with {alias}.{counterpart} "
+            f"at offset {position}: ...{outer[max(0, position - 60) : position + 60]}..."
         )
-        for match in re.finditer(pattern, outer):
-            # A value that itself spans an ``AND`` means another conjunct sits
-            # between the pair, so they are adjacent only by accident of text
-            # order. `%(scan_run_id)s` contains parentheses, so "no parens" is
-            # not usable as the separator test here.
-            if " AND " not in match.group(1):
-                return
-    raise AssertionError(f"{label}: text aid {alias}.{aid} is not AND-ed with {alias}.{counterpart}")
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +814,29 @@ def test_adjacency_is_red_when_another_conjunct_separates_the_pair() -> None:
         assert "separated pair" in str(error)
     else:  # pragma: no cover - the assertion above is the contract
         raise AssertionError("adjacency accepted a pair split across conjuncts")
+
+
+def test_adjacency_is_red_when_a_SECOND_occurrence_of_the_aid_is_bare() -> None:
+    """Universal, not existential (#1442 round-2, P3).
+
+    One conjoined pair used to satisfy the whole statement, so a surface could
+    grow a SECOND text predicate on the same column — load-bearing, with no key
+    counterpart to make it redundant — and #1342 would delete a predicate that
+    was narrowing the result set. Every comparison occurrence is checked, so the
+    green first pair no longer covers the bare second one.
+    """
+    sql = (
+        "WHERE rt.variable = 'q_down' AND rt.variable_e = 'q_down' "
+        "AND rt.valid_time >= %s AND rt.variable <> 'q_up'"
+    )
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "bare second occurrence")
+    except AssertionError as error:
+        assert "bare second occurrence" in str(error)
+        assert "not AND-ed with rt.variable_e" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a second, unconjoined occurrence of the aid")
 
 
 def test_adjacency_is_alias_scoped() -> None:

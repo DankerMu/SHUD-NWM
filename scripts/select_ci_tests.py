@@ -869,7 +869,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # river_timeseries statement and had no rule at all, so they fell
         # through to the core-smoke fallback — which imports neither and asserts
         # nothing about their SQL. One narrow rule each, one target each: the
-        # oracle is the only suite that reads these files.
+        # cleanup oracle is the suite that pins these files' SQL shapes. The
+        # wire-site invariant suite also scans them, but is not PR-selected for
+        # scripts/** — see issue #1656.
         "scripts/summarize_qhh_smoke_results.py",
         ("tests/test_river_ts_text_identity_cleanup.py",),
     ),
