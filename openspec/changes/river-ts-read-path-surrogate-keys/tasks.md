@@ -16,15 +16,15 @@
 - [x] 0.2a **强制前置**：stop 压缩 timer（runbook §4.5 user-scope；
       起止时刻进 receipt）——design D3 死线推导：55 已入候选窗，
       08-17 12:25 CST tick 即可能压死 266.1M NULL 行
-- [ ] 0.2b 回填战役：chunk 55 `--enforce` nohup 循环（terminal，不经
+- [x] 0.2b 回填战役：chunk 55 `--enforce` nohup 循环（terminal，不经
       静默闸，安全性=lag 判据+写守卫）；chunk 58/62 `--final-sweep`
       排 12h cycle 间歇窗口（安全闸=runner 每 chunk 写计数静默断言；
       不覆写 lag）；receipt 路径固定兼 resume cursor
-- [ ] 0.2c 收敛核验后恢复压缩 timer（起止进 receipt）
-- [ ] 0.3 收敛判据：直连 SQL 每 chunk NULL COUNT——可回填 chunk 集合
+- [x] 0.2c 收敛核验后恢复压缩 timer（起止进 receipt）
+- [x] 0.3 收敛判据：直连 SQL 每 chunk NULL COUNT——可回填 chunk 集合
       全零（不采 receipt totals，#1408 在案）；等值审计（回填域定向
       SQL 口径）零背离
-- [ ] 0.4 000051 在 node-27 应用：cycle 间歇窗口裸 CREATE INDEX，起止
+- [x] 0.4 000051 在 node-27 应用：cycle 间歇窗口裸 CREATE INDEX，起止
       时刻/时长/索引大小进 receipt
 
 ## 1. 实现（implementer）
@@ -96,16 +96,16 @@
 
 ## 2. 验证（Evidence Floor）
 
-- [ ] 2.1 `uv run pytest -q` 定向全绿；`uv run ruff check .` 通过
-- [ ] 2.2 `openspec validate river-ts-read-path-surrogate-keys --strict
+- [x] 2.1 `uv run pytest -q` 定向全绿；`uv run ruff check .` 通过
+- [x] 2.2 `openspec validate river-ts-read-path-surrogate-keys --strict
       --no-interactive` 通过
-- [ ] 2.3 diff 自证：写路径/回填 runner/forecast_store/tile_publisher/
+- [x] 2.3 diff 自证：写路径/回填 runner/forecast_store/tile_publisher/
       autopipeline 零触碰；OpenAPI 零变更；文本索引零删除
-- [ ] 2.4 node-27：pre/post 快照逐字段等价（JSON 字节等；MVT 解码
+- [x] 2.4 node-27：pre/post 快照逐字段等价（JSON 字节等；MVT 解码
       feature 集合等，采样 ≥2 流域 ×2 tile + national ≥2 zoom）；
       **快照间清空 `map.tile_cache` + `NHMS_MVT_FILE_CACHE_DIR`
       （两图层），清理动作进 receipt**（AC-2，design D4 旁路程序）
-- [ ] 2.5 node-27：EXPLAIN (ANALYZE, BUFFERS) **六形态** before/after
+- [x] 2.5 node-27：EXPLAIN (ANALYZE, BUFFERS) **六形态** before/after
       （design D4 集合：tile 点查、valid_times named-identity、
       coverage run 域扫描、存在性探针、national identity-stats、
       national typed/untyped 腿）——走 000051 索引、无 Seq Scan、
@@ -126,7 +126,7 @@
       `source_identity_stats` CTE 的 pre-existing 残余（~26-33s，
       #1596 追踪，切换前同在），扣除后两腿贡献 ≤5s——整块进秒级的
       闸属于 #1596 验收，不属本 change（AC-1）
-- [ ] 2.6 node-27：`/` 与 `/ops` 浏览器 e2e + MVT 渲染正常（AC-4）；
+- [x] 2.6 node-27：`/` 与 `/ops` 浏览器 e2e + MVT 渲染正常（AC-4）；
       deny-write 校验通过（AC-5）；定向真实 DB pytest（integration 子集）
 - [x] 2.7 issue-scribe 立"边界外 river_timeseries 文本读者改造"跟踪单，
       标注为 #1342 blocker（forecast_store.py / tile_publisher /
@@ -136,10 +136,10 @@
 
 ## 3. 交付记录
 
-- [ ] 3.1 PR body：偏离记录（000051 vs Boundary 字面、production_closure
+- [x] 3.1 PR body：偏离记录（000051 vs Boundary 字面、production_closure
       逐文件处置、MVT tile 等价口径为解码集合、压缩 chunk 32/51 影响面
       与 retention 收敛时间线）+ AC 逐条覆盖声明
-- [ ] 3.2 PR body/评论：回填战役 receipt 摘要（per-chunk 计数前后、
+- [x] 3.2 PR body/评论：回填战役 receipt 摘要（per-chunk 计数前后、
       final-sweep 窗口）、000051 构建 receipt、快照/EXPLAIN 摘要
 
 ## Risk packs considered（core + domain）
