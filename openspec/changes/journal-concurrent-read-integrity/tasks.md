@@ -198,8 +198,13 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
   该 issue **必须把 design D2 的第 1 条作为硬约束写进正文**：
   **入口 clear（`:6950-6951`）是 owner 快路径的正确性前提，不得以「纯性能」为由收窄**。
   漏掉这句，执行 follow-up 的人会在假前提上动入口 clear——那才是真会出事的地方。
-- [ ] 4.5 **不立 issue**（原拟的 `_cycle_rows_by_model_unlocked` 死缓存项经复核不成立，见 design D10.5）。
-  本项保留只为记录该撤销：若实现中有人重新「发现」它，**不要立单**，回读 D10.5。
+- [ ] 4.5 立 issue：`_cycle_rows_by_model_unlocked` 的 `include_direct_jobs=True` 分支
+  **全仓不可达**——`:4233-4237` 的 `_cache_cycle_rows` 被 `:4232` 守住，
+  6 个调用点（生产 5 + `tests/test_gateway_reconcile.py:4764`）全部显式传 `False`，
+  默认值 `True`（`:4170`）无人使用。**立单文本必须用这个口径**（死分支 / 从不写入），
+  **不得**写成「永远命不中」或「窗外也存」——那是我先后写错的前两版，
+  按错版本立单会让后来者去改一个不存在的缓存命中问题（design D10.5）。
+  本 change 不动该分支。
 
 ## 5. 验证（Evidence Floor）
 
