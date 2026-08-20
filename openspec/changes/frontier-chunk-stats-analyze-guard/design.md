@@ -15,9 +15,13 @@
 
 output_parser 每 run 写入一次；一个 tick 可能 ingest 多个 run。tick 末尾一次
 判定 + ANALYZE 是幂等且最少执行次数的位置（phase 3 publish 之后，summary 之前）。
-失败语义与 coverage refresh 一致：**看护失败不判 tick 失败**，记入 summary
-（`stats_guard.status = "failed"` + `error` 字符串——in-process psycopg2 调用，
-无子进程 rc 可引用），tick rc 不变——统计漂移是渐进病，下个 tick 重试。
+失败语义与 coverage refresh 一致：**看护失败不判 tick 失败**，tick rc 不变——
+统计漂移是渐进病，下个 tick 重试。失败分两级（cross-review C2 修正）：单 chunk
+`ANALYZE` 失败**逐 chunk 隔离**（try 在循环体内，条目记 `status:"failed"`+`error`，
+继续尝试剩余 chunk——否则被压缩锁挡住或已消失的 chunk 会吞掉整批，且因失败不清
+`n_mod_since_analyze` 而每 tick 置顶复发、饿死 frontier chunk）；guard 级失败
+（连接/候选查询）记 `stats_guard.status = "failed"` + `error` 字符串（in-process
+psycopg2 调用，无子进程 rc 可引用）。
 
 ## D2: 触发条件——机制匹配，不是体量阈值
 

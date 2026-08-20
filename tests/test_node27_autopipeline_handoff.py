@@ -488,11 +488,13 @@ class _FakeCursor:
         candidates: list[tuple[str, str, int, datetime | None]],
         last_analyze: dict[str, datetime | None],
         analyze_error: Exception | None,
+        analyze_errors: Mapping[str, Exception],
     ) -> None:
         self._statements = statements
         self._candidates = candidates
         self._last_analyze = last_analyze
         self._analyze_error = analyze_error
+        self._analyze_errors = analyze_errors
         self._result: list[tuple[Any, ...]] = []
 
     def __enter__(self) -> _FakeCursor:
@@ -509,6 +511,11 @@ class _FakeCursor:
         elif sql.startswith("ANALYZE"):
             if self._analyze_error is not None:
                 raise self._analyze_error
+            # ``ANALYZE "schema"."chunk"`` -> the quoted identifiers.
+            quoted = sql.split('"')[1::2]
+            per_chunk = self._analyze_errors.get(".".join(quoted))
+            if per_chunk is not None:
+                raise per_chunk
         elif "pg_stat_user_tables" in sql:
             self._result = [(self._last_analyze[f"{params[0]}.{params[1]}"],)]
 
@@ -538,15 +545,17 @@ def _install_fake_db(
     candidates: list[tuple[str, str, int, datetime | None]],
     last_analyze: dict[str, datetime | None] | None = None,
     analyze_error: Exception | None = None,
+    analyze_errors: Mapping[str, Exception] | None = None,
 ) -> tuple[list[tuple[str, Any]], list[str], list[_FakeConnection]]:
     statements: list[tuple[str, Any]] = []
     dsns: list[str] = []
     connections: list[_FakeConnection] = []
     reads = dict(last_analyze or {f"{row[0]}.{row[1]}": _AFTER for row in candidates})
+    per_chunk_errors = dict(analyze_errors or {})
 
     def connect(database_url: str) -> _FakeConnection:
         dsns.append(database_url)
-        connection = _FakeConnection(_FakeCursor(statements, candidates, reads, analyze_error))
+        connection = _FakeConnection(_FakeCursor(statements, candidates, reads, analyze_error, per_chunk_errors))
         connections.append(connection)
         return connection
 
@@ -683,9 +692,16 @@ def test_stats_guard_analyze_failure_is_recorded_without_failing_the_tick(
 
     guard = autopipe._analyze_frontier_chunks(NODE27_DATABASE_URL)
 
-    assert guard["status"] == "failed"
-    assert "statement timeout" in guard["error"]
-    assert guard["analyzed"] == []
+    # A chunk-level failure is that chunk's entry, not the guard's verdict:
+    # ``stats_guard.status = "failed"`` is reserved for connect / candidate
+    # query failures (the main() leg below).
+    assert guard["status"] == "completed"
+    assert "error" not in guard
+    (entry,) = guard["analyzed"]
+    assert entry["status"] == "failed"
+    assert "statement timeout" in entry["error"]
+    assert entry["seconds"] is None
+    assert entry["last_analyze"] is None
 
     # ... and the same failure reaching main() leaves the tick's own verdict alone.
     object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
@@ -702,6 +718,54 @@ def test_stats_guard_analyze_failure_is_recorded_without_failing_the_tick(
     assert summary["runs"]["ingested"] == 1
     assert summary["stats_guard"]["status"] == "failed"
     assert "guard exploded" in summary["stats_guard"]["error"]
+
+
+def test_stats_guard_one_failed_chunk_does_not_swallow_the_rest_of_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A locked or vanished chunk must not starve the batch queued behind it.
+
+    A failed ANALYZE leaves ``n_mod_since_analyze`` untouched, so the offender
+    stays on top of the next tick's descending candidate list: aborting the
+    batch would re-lose the very same chunks every single tick.
+    """
+
+    real_guard = autopipe._analyze_frontier_chunks
+    candidates = [(CHUNK_SCHEMA, f"_hyper_1_{index}_chunk", 900_000 - index, _BEFORE) for index in range(3)]
+    statements, _dsns, _connections = _install_fake_db(
+        monkeypatch,
+        candidates=candidates,
+        analyze_errors={
+            f"{CHUNK_SCHEMA}._hyper_1_0_chunk": RuntimeError("canceling statement due to lock timeout"),
+        },
+    )
+
+    guard = real_guard(NODE27_DATABASE_URL)
+
+    # Attempted, not merely recorded: chunks 2 and 3 reached the database.
+    assert [sql for sql, _params in statements if sql.startswith("ANALYZE")] == [
+        f'ANALYZE "{CHUNK_SCHEMA}"."_hyper_1_{index}_chunk"' for index in range(3)
+    ]
+    assert guard["status"] == "completed"
+    assert "error" not in guard
+    assert [(entry["chunk"], entry["status"]) for entry in guard["analyzed"]] == [
+        (f"{CHUNK_SCHEMA}._hyper_1_0_chunk", "failed"),
+        (f"{CHUNK_SCHEMA}._hyper_1_1_chunk", "ok"),
+        (f"{CHUNK_SCHEMA}._hyper_1_2_chunk", "ok"),
+    ]
+    assert "lock timeout" in guard["analyzed"][0]["error"]
+
+    # ... and the tick carrying that batch still returns 0.
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", real_guard)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert [entry["status"] for entry in summary["stats_guard"]["analyzed"]] == ["failed", "ok", "ok"]
 
 
 def test_stats_guard_switch_off_skips_the_guard(
@@ -725,3 +789,28 @@ def test_stats_guard_switch_off_skips_the_guard(
     assert analyze_calls == []
     assert summary["stats_guard"]["status"] == "skipped"
     assert summary["stats_guard"]["reason"] == "NODE27_AUTOPIPE_STATS_GUARD=off"
+
+
+def test_stats_guard_candidate_query_pins_the_selection_contract() -> None:
+    """The candidate SQL is only ever executed against a fake cursor here, so
+    the clauses that decide *which* chunks the guard touches need their own
+    oracle (same precedent as the compression runner's ``_CHUNK_QUERY`` pins)."""
+
+    sql = autopipe._STATS_GUARD_CANDIDATES_SQL
+    # Drifty chunks are the ones ABOVE the floor -- a flipped comparison would
+    # analyze exactly the chunks that need nothing.
+    assert "n_mod_since_analyze >= %s" in sql
+    # Compressed chunks belong to the compression runner's ride-along.
+    assert "is_compressed = false" in sql
+    assert "('hydro', 'river_timeseries')" in sql
+    assert "('met', 'forcing_station_timeseries')" in sql
+    # "First 3" only means "the 3 driftiest" while the ordering holds.
+    assert "ORDER BY s.n_mod_since_analyze DESC" in sql
+
+
+def test_stats_guard_constants_match_the_agreed_budget() -> None:
+    """Literal integers on the right-hand side: the tests above spend the
+    constants on both sides, so only this pins the values themselves."""
+
+    assert autopipe.STATS_GUARD_MIN_MODS == 10_000
+    assert autopipe.STATS_GUARD_TIMEOUT_MS == 120_000

@@ -1161,6 +1161,54 @@ def _stats_guard_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {redact_text(str(exc))}".rstrip(": ")
 
 
+def _analyze_one_frontier_chunk(
+    cur: Any,
+    chunk_schema: str,
+    chunk_name: str,
+    n_mod: int,
+    last_analyze_before: Any,
+) -> dict[str, Any]:
+    """ANALYZE one chunk and read its statistics back -- failures stay local.
+
+    Per-chunk isolation (design D1): a chunk held by the compression lock or
+    dropped between the candidate query and the ANALYZE must not swallow the
+    rest of the batch. A failed ANALYZE leaves ``n_mod_since_analyze``
+    untouched, so that same chunk stays on top of the next tick's descending
+    candidate list and would starve every other frontier chunk forever.
+
+    Safe because the caller's connection is autocommit: an error leaves no
+    aborted transaction for the remaining chunks to trip over.
+
+    The returned entry always carries the same keys; a failure is
+    ``status: "failed"`` plus a non-empty ``error`` string, so the summary's
+    ``analyzed`` list is one flat, uniformly shaped record of every attempt.
+    """
+    entry: dict[str, Any] = {
+        "chunk": f"{chunk_schema}.{chunk_name}",
+        "n_mod_since_analyze": int(n_mod),
+    }
+    try:
+        if not (_STATS_GUARD_IDENT_RE.match(chunk_schema) and _STATS_GUARD_IDENT_RE.match(chunk_name)):
+            raise ValueError(f"refusing to ANALYZE non-identifier chunk name: {chunk_schema}.{chunk_name}")
+        cur.execute(f"SET statement_timeout = {STATS_GUARD_TIMEOUT_MS}")
+        started = time.monotonic()
+        cur.execute(f'ANALYZE "{chunk_schema}"."{chunk_name}"')
+        seconds = round(time.monotonic() - started, 3)
+        cur.execute(_STATS_GUARD_LAST_ANALYZE_SQL, (chunk_schema, chunk_name))
+        row = cur.fetchone()
+        last_analyze = row[0] if row else None
+        refreshed = last_analyze is not None and (last_analyze_before is None or last_analyze > last_analyze_before)
+        entry["seconds"] = seconds
+        entry["last_analyze"] = last_analyze.isoformat() if last_analyze is not None else None
+        entry["status"] = "ok" if refreshed else "warning"
+    except Exception as exc:  # noqa: BLE001 - deliberate per-chunk isolation
+        entry["seconds"] = None
+        entry["last_analyze"] = None
+        entry["status"] = "failed"
+        entry["error"] = _stats_guard_error(exc)
+    return entry
+
+
 def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
     """ANALYZE the uncompressed frontier chunks this tick's ingest touched.
 
@@ -1170,6 +1218,12 @@ def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
     previous value and fake a PG15 non-owner silent skip. The read-back is the
     only evidence that the ANALYZE did anything at all -- PG15 has no MAINTAIN
     privilege bit, so a non-owner gets a WARNING and a successful return.
+
+    Two failure levels: a single chunk's ANALYZE or read-back is isolated to
+    its own ``analyzed`` entry (``status: "failed"`` + ``error``) and the
+    remaining selected chunks are still attempted; only a guard-level failure
+    (connect, candidate query) sets ``status: "failed"`` on the summary itself.
+    Neither changes the tick's return code.
     """
     summary: dict[str, Any] = {
         "status": "completed",
@@ -1190,30 +1244,13 @@ def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
             # next tick picks up (statistics drift is progressive, not acute).
             summary["deferred"] = [f"{row[0]}.{row[1]}" for row in candidates[STATS_GUARD_MAX_CHUNKS:]]
             for chunk_schema, chunk_name, n_mod, last_analyze_before in selected:
-                if not (_STATS_GUARD_IDENT_RE.match(chunk_schema) and _STATS_GUARD_IDENT_RE.match(chunk_name)):
-                    raise ValueError(f"refusing to ANALYZE non-identifier chunk name: {chunk_schema}.{chunk_name}")
-                cur.execute(f"SET statement_timeout = {STATS_GUARD_TIMEOUT_MS}")
-                started = time.monotonic()
-                cur.execute(f'ANALYZE "{chunk_schema}"."{chunk_name}"')
-                seconds = round(time.monotonic() - started, 3)
-                cur.execute(_STATS_GUARD_LAST_ANALYZE_SQL, (chunk_schema, chunk_name))
-                row = cur.fetchone()
-                last_analyze = row[0] if row else None
-                refreshed = last_analyze is not None and (
-                    last_analyze_before is None or last_analyze > last_analyze_before
-                )
                 summary["analyzed"].append(
-                    {
-                        "chunk": f"{chunk_schema}.{chunk_name}",
-                        "n_mod_since_analyze": int(n_mod),
-                        "seconds": seconds,
-                        "last_analyze": last_analyze.isoformat() if last_analyze is not None else None,
-                        "status": "ok" if refreshed else "warning",
-                    }
+                    _analyze_one_frontier_chunk(cur, chunk_schema, chunk_name, n_mod, last_analyze_before)
                 )
-    # Statistics drift is a progressive illness, not an acute one: report the
-    # failure honestly, keep whatever was refreshed, and let the next tick
-    # retry rather than failing an otherwise successful ingest tick.
+    # Guard-level failure only (connect / candidate query); per-chunk failures
+    # never reach here. Statistics drift is a progressive illness, not an acute
+    # one: report the failure honestly, keep whatever was refreshed, and let the
+    # next tick retry rather than failing an otherwise successful ingest tick.
     except Exception as exc:  # noqa: BLE001 - deliberate blanket isolation
         summary["status"] = "failed"
         summary["error"] = _stats_guard_error(exc)

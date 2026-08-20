@@ -1593,7 +1593,7 @@ violated, and the wrapper refuses to launch on a non-positive-integer wall.
 Both refusals are structured JSON on stderr.
 
 **Every tick's receipt records the configuration that tick resolved** (issue
-`#1351`, receipt `schema_version` `"2.1"`): the `budget` object plus
+`#1351`, receipt `schema_version` `"2.1"` onwards — currently `"2.2"`): the `budget` object plus
 `per_tick_bound` are the record of the four values above, so a catch-up tick
 and a default tick are distinguishable after the fact — read them, do not
 reconstruct them from the env file, which may already have been rolled back.
@@ -1784,7 +1784,10 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
          receipt.get("budget"), receipt.get("per_tick_bound"))
 
    # (1) is there a post-#1351 receipt here at all? Not a budget verdict.
-   assert version == "2.1", (
+   # Every version that carries `budget` counts — "2.1" (#1351) and "2.2"
+   # (#1378 ride-along ANALYZE) alike; pinning one version would fail this
+   # check on the next bump for a reason that has nothing to do with budgets.
+   assert version in {"2.1", "2.2"}, (
        f"no post-#1351 default tick at this path yet (schema_version={version})"
    )
 
@@ -2137,8 +2140,10 @@ autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_ana
 `10_000` 的下限不是"攒够才刷"：一个真实 run 写入的行数 = 段数 × 时步 ≫ 10⁴，被本 tick
 触及的 chunk 必然过槛；下限只用来跳过仅有零星迟到写入、本 tick 根本没碰的 chunk。
 
-两处**都不改各自的成败判定**：autopipe 的 guard 失败只写
-`stats_guard.status = "failed"` + `error`，tick 返回码不变；压缩 runner 的 ANALYZE
+两处**都不改各自的成败判定**：autopipe 侧失败分两级——单 chunk 的 ANALYZE
+失败逐 chunk 隔离（该条目在 `stats_guard.analyzed` 里记 `status: "failed"` +
+`error`，剩余 chunk 照常尝试），guard 级失败（连接/候选查询）才写
+`stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码。压缩 runner 的 ANALYZE
 失败/跳过不置 `any_errors`、不改 receipt 顶层 `outcome`、不改进程 rc——压缩是主目的，
 搭车的统计步骤没有资格把每日 unit 染红。停用开关：
 `NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。

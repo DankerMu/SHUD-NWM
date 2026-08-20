@@ -1307,8 +1307,15 @@ def test_schema_rejects_per_table_totals_missing_forcing_key() -> None:
 def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     receipt = _example_receipt()
     # The example is a mutating tick since "2.2" (issue #1378), so the refusal
-    # outcome this test is about has to be set explicitly.
+    # outcome this test is about has to be set explicitly -- and its totals have
+    # to be taken back down to the refused shape, or they would be a second
+    # violation and this test would pass without ever exercising ``selected``.
     receipt["outcome"] = "refused_lock"
+    receipt["per_table_totals"]["hydro.river_timeseries"] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
     receipt["selected"] = [
         {
             "hypertable_schema": "hydro",
@@ -1323,6 +1330,12 @@ def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     ]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
+    # The sole surviving violation names this test's target.
+    errors = list(jsonschema.Draft202012Validator(_load_schema()).iter_errors(receipt))
+    assert errors
+    assert all(list(error.absolute_path)[:1] == ["selected"] for error in errors), [
+        list(error.absolute_path) for error in errors
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1440,7 +1453,15 @@ def test_config_stage_label_belongs_to_the_tombstone_call_site_only() -> None:
 
 
 def _budget_receipt(**overrides: object) -> dict:
+    """A budget-bearing receipt with the "2.2"-only ride-along fields removed.
+
+    The aged variants below are about ``budget`` alone: leaving ``analyze_*`` on
+    the entries would make every pre-2.2 receipt illegal for a second,
+    unrelated reason.
+    """
+
     receipt = _example_receipt()
+    receipt["selected"] = [_without_analyze_fields(entry) for entry in receipt["selected"]]
     receipt.update(overrides)
     return receipt
 
@@ -1471,6 +1492,15 @@ def test_schema_rejects_budget_on_a_legacy_receipt(legacy_version: str) -> None:
         del receipt["head_sha"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
+    # The prohibition this test is about lives on the receipt root, not on an
+    # entry -- so ``['selected', 0]`` errors would mean it passed for the
+    # wrong reason.
+    errors = list(jsonschema.Draft202012Validator(_load_schema()).iter_errors(receipt))
+    assert errors
+    assert all(list(error.absolute_path) == [] for error in errors), [
+        list(error.absolute_path) for error in errors
+    ]
+    assert all("budget" in error.message for error in errors), [error.message for error in errors]
 
 
 @pytest.mark.parametrize("legacy_version", ["1.0", "2.0"])
@@ -2239,6 +2269,77 @@ def test_analyze_statement_timeout_shrinks_to_the_remaining_wall(tmp_path: Path)
     )
 
     assert seen == [("tight", 80_000)]
+
+
+def test_analyze_skips_when_the_remaining_wall_is_under_the_floor(tmp_path: Path) -> None:
+    """Between 0 s and the 30 s floor: there IS wall left, and it is still a skip.
+
+    The reserve-breach case above (negative remaining) would keep passing with
+    no floor at all; only this band says the floor exists.
+    """
+
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    assert config.wrapper_wall_seconds == 3_900
+    chunk = _chunk("hydro", "river_timeseries", "too-tight", delta_days=10)
+    seen, analyze = _analyze_recorder()
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
+        compress_chunk=lambda _dsn, _chunk: None,
+        analyze_chunk=analyze,
+        # 3900 - 3770 - 120 = 10 s remaining: positive, but under the floor.
+        elapsed_seconds=lambda: 3_770.0,
+        head_sha="a" * 40,
+    )
+
+    assert seen == []
+    descriptor = receipt["selected"][0]
+    assert descriptor["mutation_state"] == "committed"
+    assert descriptor["analyze_seconds"] is None
+    assert descriptor["analyze_error"] == "wall_budget_exhausted"
+    assert receipt["outcome"] == "clean"
+    jsonschema.validate(receipt, _load_schema())
+    # Last, so the behaviour above is what reports first when the floor moves.
+    assert compression._ANALYZE_MIN_BUDGET_SECONDS == 30
+
+
+def test_analyze_runs_as_one_batch_after_every_compression(tmp_path: Path) -> None:
+    """Compression is the purpose; the statistics passenger waits for all of it.
+
+    One shared ordered log: inlining the ANALYZE per chunk would interleave the
+    two verbs and lose the guarantee that a slow ANALYZE can never delay (or,
+    on a wall overrun, cancel) a compression that has not started yet.
+    """
+
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    chunks = [
+        _chunk("hydro", "river_timeseries", "c1", delta_days=10),
+        _chunk("met", "forcing_station_timeseries", "c2", delta_days=11),
+    ]
+    log: list[tuple[str, str]] = []
+
+    def fake_compress(_dsn: str, chunk: compression.ChunkRow) -> None:
+        log.append(("compress", chunk.chunk_name))
+
+    def analyze(_dsn: str, chunk: compression.ChunkRow, *, statement_timeout_ms: int) -> None:
+        log.append(("analyze", chunk.chunk_name))
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: list(chunks),
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
+        compress_chunk=fake_compress,
+        analyze_chunk=analyze,
+        elapsed_seconds=lambda: 0.0,
+        head_sha="a" * 40,
+    )
+
+    assert log == [("compress", "c1"), ("compress", "c2"), ("analyze", "c1"), ("analyze", "c2")]
+    assert [descriptor["mutation_state"] for descriptor in receipt["selected"]] == ["committed", "committed"]
 
 
 def test_analyze_fields_are_illegal_before_schema_version_2_2() -> None:
