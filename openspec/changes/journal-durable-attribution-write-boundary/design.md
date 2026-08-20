@@ -715,3 +715,70 @@ round-1 已修的腿上不误报**。
 审计，得到**逐字段相同**的唯一门控发现
 （`production-topology-node22-local-postgres` @ `openspec/specs/production-scheduler-orchestration/spec.md:103`，
 `hard_gate_failing_count=1`）；该 spec 文件本单一个字节都没动。
+
+## D10（round-2 评审处置）
+
+### P2：spec delta 与代码分叉——已修
+
+`openspec validate --strict` 判绿，但它只查结构不查内容。三处分叉，均已在本轮修正：
+
+| 分叉 | 修法 |
+|---|---|
+| spec「stripped placeholder SHALL be persisted as `None`」 | 漏了第三种终值。改为按写路径能否拒绝分三档：能拒绝 → 保持原值不动；无条件写 → 解析成行上已持久化的值；行上本来无值 → `None`。并点明**统一规则只有一条：withheld 永不改变 durable 状态** |
+| withheld-means-keep 被限定在「every **cohort** write path」 | 8 条修好的腿里 6 条不是 cohort（`upsert_pipeline_job`、`commit_pipeline_job_submit_attempt`、两条 `transition_*`、`complete_pipeline_job_cancellation`、`update_pipeline_job_status`）。改为「**每一条**接受调用方证据的 durable 写路径」 |
+| round-2 真正交付的性质无任何 requirement | 新增第三条 Requirement：「被比较的值必须等于被持久化的值，故同参重放必须收敛」，含两条场景（重放收敛不再追加记录/不烧序列号；取消回执重放仍判 committed，caller 不丢后续事件） |
+
+**这条不可 defer。** P2 一般可以批量延后，但本条的对象是**本单自己要归档进 `openspec/specs/` 的产物**
+——归档一份与代码不符的 spec，比不归档更糟。
+
+### P3：master-state 闸从「大声拒绝」变成「静默 no-op」——裁定为**有意，且更正确**
+
+resolve 现在跑在 master-state 闸之前，于是一次**原样** round-trip 的公共 master 行比较后相等，
+走 `:1766-1768` 的精确重放读路径退出，不再抛 `file_journal_evidence_invariant_invalid`。
+评审实测两臂：shipped 无抛出、durable `log_uri` 仍是 `s3://…`、记录数 3→3；
+模拟 round-1 头则抛出。**两臂 durable 状态完全相同。**
+
+**裁定：接受，因为原先那次抛出是误报。** 调用方原样回写了一行没有任何实质分歧的记录，
+分歧只存在于**展示投影**与 durable 文本之间。resolve 恰恰揭示了"这是一次精确重放"，
+静默 no-op 才是对该事实的正确回答。
+
+**没有因此放走任何洗白**：不可变身份字段仍在合并**之前**按**原始值**检查（`:1689-1714`），
+仍然大声拒绝；实测 `tests/test_file_orchestration_journal.py:9068` 与 master 臂探针
+（携带 map 内嵌套占位符）都仍抛 `file_journal_evidence_invariant_invalid` 且 durable 逐字节不变。
+失去大声拒绝的只有 `MASTER_ORDINARY_UPSERT` 那组标量（`log_uri` / `error_message` / `exit_code` …），
+而对它们，"原样重放"本就不该报错。
+
+### 类守卫的完备性缺口（orchestrator 自查，非评审提出）
+
+`_LOG_URI_WRITE_LEGS` 是硬编码 6-tuple，而签名内省显示**实际有 7 个**公共方法接受 `log_uri`
+（缺 `commit_pipeline_job_submit_attempt`——它**代码上已修**，`:2166-2171` 四个字段都带 `durable=`，
+只是不在表里）。用例 docstring 自称钉的是"the class property, not six instances of it"，
+在加上完备性断言之前**名不副实**。已要求补：内省 `log_uri` 参数集合，断言它等于
+表内腿名 ∪ 显式排除表；新增腿必须让测试转红，逼人二选一。
+
+### 类守卫完备性的落地，以及一处对 round-2 评审的**证伪**
+
+补齐后：`_LOG_URI_WRITE_LEGS` **7 条臂** + 新增 `test_log_uri_write_leg_table_covers_every_log_uri_taking_method`
+——内省 `FileOrchestrationJournalRepository` 全部公共方法的 `log_uri` 参数，断言该集合 ==
+表内腿名 ∪ `_LOG_URI_WRITE_LEG_EXCLUSIONS`（当前为空，按"名→理由"存放将来无法重放的腿）。
+两个方向**分开断言**，报错直接指出是"新腿未覆盖"还是"排除项已过期"。
+双向都证明会咬：加一个 throwaway 的 `log_uri` 方法 → 前一条红；把 `upsert_pipeline_job`
+塞进排除表 → 后一条红。两次探针均已还原并经 sha256 核对。
+
+**证伪 round-2 评审的一条前提（记录在案）**：评审判定
+`commit_pipeline_job_submit_attempt` 的 `durable=` 是**空转**，理由是
+`reserve_pipeline_job:1825-1841` 会把整个证据族置 null，故该腿"不可达而非未测"。
+**该前提为假**——`reserve` 不是 `reserved` + unbound 行的唯一产地：
+`reclaim_pipeline_job_reservation:1959-1977` 置 null 的是
+`slurm_job_id`/`array_task_id`/`submitted_at`/`started_at`/`finished_at`/`exit_code`/`error_code`/`error_message`，
+**唯独不含 `log_uri`**；被 reclaim 的预约因此把上一次 attempt 的 URI 直接带进该腿要绑定的状态。
+另有第二条形状：`transition_pipeline_job_submit_evidence`
+（`expected_statuses=("reserved",)` + `require_unbound=True`）本就会把 `log_uri` 写到一行仍为
+`reserved`/unbound 的记录上。
+**实证**：把 `:2171` 临时改回裸 `"log_uri": log_uri`，**恰好只有第 7 条臂转红**
+（`assert None == 's3://nhms/logs/...'`），其余六臂不动——该腿是承重的，不是空转。
+implementer 没有照单全收评审结论而是回源码核实，这条纠正因此留在记录里。
+
+`upsert_pipeline_job` / `reserve_pipeline_job` 是**收 row 的写方**，不出现在参数内省集合里，
+故**不被该守卫覆盖**（覆盖它们的是 AST 单一构造点守卫）——这条边界写进了完备性用例的 docstring，
+且排除机制无法被用来伪装成覆盖（上面那次 stale-exclusion 探针就是证明）。

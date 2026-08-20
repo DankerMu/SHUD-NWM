@@ -100,8 +100,9 @@
 
 ## Impact
 
-- Affected specs: `pipeline-job-persistence`（ADDED 两条 Requirement：durable 写边界反洗白；
-  终态归因族粘性）
+- Affected specs: `pipeline-job-persistence`（ADDED **三条** Requirement：durable 写边界反洗白；
+  终态归因族粘性；**「被比较的值必须等于被持久化的值，故同参重放必须收敛」**——第三条是 round-1
+  评审 P1 的规格化，round-2 评审 P2 指出它缺失后补上）
 - Affected code: `services/orchestrator/file_orchestration_journal.py`
   （`_journal_record_for_write`、新增 `_resolved_caller_evidence`、
   `project_forecast_cohort_tasks` 的合并段、`_defer_forecast_cohort_projection_unlocked`

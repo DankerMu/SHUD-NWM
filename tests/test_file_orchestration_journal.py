@@ -11567,6 +11567,52 @@ def _project_cohort(repository: Any, record: Mapping[str, Any], *, log_uri: str 
     return _reproject_cohort(repository, record, log_uri=log_uri)
 
 
+def _reserved_master_with_real_log_uri(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """One still-reserved, still-unbound master already carrying a real log URI.
+
+    ``reserve_pipeline_job`` nulls the whole evidence family, so a *fresh*
+    reservation cannot be displaced.  It is not the only producer of a
+    ``reserved`` row that ``commit_pipeline_job_submit_attempt`` will bind:
+    an unbound submit-evidence transition writes ``log_uri`` onto a row that
+    stays ``reserved``, and ``reclaim_pipeline_job_reservation`` nulls
+    ``exit_code`` / ``error_code`` / ``error_message`` but NOT ``log_uri``, so a
+    reclaimed reservation carries the previous attempt's URI forward.  This
+    seeds the first of those two shapes -- the state the commit leg's
+    ``_resolved_caller_evidence`` actually has to defend.
+    """
+
+    repository, record = _reserved_unbound_master(tmp_path)
+    _defer_submit_evidence(repository, record, log_uri=_REAL_MASTER_LOG_URI)
+    assert _durable_log_uri(repository, str(record["job_id"])) == _REAL_MASTER_LOG_URI
+    return repository, record
+
+
+def _commit_submit_attempt(repository: Any, record: Mapping[str, Any], *, log_uri: str | None) -> Any:
+    """Bind the reserved master, asserting the write leg was actually reached.
+
+    The shared convergence assertions only read durable state, so a call that
+    declined at a CAS gate would look identical to a call that wrote and kept
+    the real URI.  Pinning the outcome here keeps this arm from passing
+    vacuously: the first pass must apply, the replay must settle as idempotent.
+    """
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+
+    result = repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=int(record.get("submission_attempt") or 1),
+        slurm_job_id=_COMMIT_ATTEMPT_SLURM_JOB_ID,
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+        log_uri=log_uri,
+    )
+    assert result.outcome in ("applied", "idempotent"), result.outcome
+    return result
+
+
+_COMMIT_ATTEMPT_SLURM_JOB_ID = "17667"
+
+
 _LOG_URI_WRITE_LEGS: tuple[tuple[str, Any, Any, bool], ...] = (
     (
         "transition_pipeline_job_submit_evidence",
@@ -11608,7 +11654,23 @@ _LOG_URI_WRITE_LEGS: tuple[tuple[str, Any, Any, bool], ...] = (
         _project_cohort,
         False,
     ),
+    (
+        "commit_pipeline_job_submit_attempt",
+        _reserved_master_with_real_log_uri,
+        _commit_submit_attempt,
+        False,
+    ),
 )
+
+
+_LOG_URI_WRITE_LEG_EXCLUSIONS: dict[str, str] = {}
+"""Public ``log_uri``-taking methods deliberately outside the replay table.
+
+Empty by intent: every method the scan finds is currently held to the
+convergence contract.  A new leg that genuinely cannot be replayed goes here
+with its reason as the value, which is a reviewable decision rather than a
+silent omission from the table.
+"""
 
 
 def _seeded(
@@ -11635,7 +11697,7 @@ def test_log_uri_write_legs_converge_on_a_replayed_placeholder(
     write: Any,
     appends_on_replay: bool,
 ) -> None:
-    """#1589 J20: the class property, not six instances of it.
+    """#1589 J20: the same contract on every leg in the table.
 
     Every durable write leg that accepts a caller ``log_uri`` gets the same
     contract: replaying the same display placeholder converges -- the durable
@@ -11644,8 +11706,11 @@ def test_log_uri_write_legs_converge_on_a_replayed_placeholder(
     equality gate (it appends on every call by design, unchanged here), so it
     carries ``appends_on_replay`` and is held only to value convergence.
 
-    A new write leg added later has to be added here too; that is the point of
-    parametrizing rather than writing the same assertion six times.
+    This test alone proves the contract for the legs listed in
+    ``_LOG_URI_WRITE_LEGS`` and nothing more.  What lifts it to a class property
+    is ``test_log_uri_write_leg_table_covers_every_log_uri_taking_method``,
+    which pins that list against the repository's actual public surface, so a
+    leg added later cannot stay silently untested.
     """
 
     repository, record = prepare(tmp_path)
@@ -11662,6 +11727,50 @@ def test_log_uri_write_legs_converge_on_a_replayed_placeholder(
         assert _durable_write_count(repository, job_id) == count_after_first + 1, leg
     else:
         assert _durable_write_count(repository, job_id) == count_after_first, leg
+
+
+def test_log_uri_write_leg_table_covers_every_log_uri_taking_method() -> None:
+    """#1589 J20 completeness: bind the leg table to the real public surface.
+
+    ``_LOG_URI_WRITE_LEGS`` is hand written, so on its own it is N instances of
+    the convergence contract, not the contract.  This introspects every public
+    method of ``FileOrchestrationJournalRepository`` for a ``log_uri``
+    parameter and requires that set to equal the table plus the named
+    exclusions -- so a new caller-``log_uri`` write leg turns this RED until
+    someone either parametrizes it or records why it is excluded.  The two
+    directions are asserted separately so the failure says which happened.
+
+    Mechanism boundary, stated rather than implied: this scans for a ``log_uri``
+    PARAMETER.  Row-taking writers such as ``upsert_pipeline_job`` and
+    ``reserve_pipeline_job`` carry ``log_uri`` inside a record mapping, are
+    invisible to this scan, and are therefore neither covered by it nor
+    listable as exclusions -- listing one would itself turn this RED.  Their
+    anti-laundering guarantee comes from the single record-construction site
+    pinned by ``test_journal_records_have_exactly_one_construction_site``.
+    """
+
+    import inspect
+
+    taking_log_uri = set()
+    for name in dir(FileOrchestrationJournalRepository):
+        if name.startswith("_"):
+            continue
+        if not callable(inspect.getattr_static(FileOrchestrationJournalRepository, name)):
+            continue
+        signature = inspect.signature(getattr(FileOrchestrationJournalRepository, name))
+        if "log_uri" in signature.parameters:
+            taking_log_uri.add(name)
+
+    tabled = [leg for leg, _prepare, _write, _appends in _LOG_URI_WRITE_LEGS]
+    assert len(tabled) == len(set(tabled)), tabled
+    assert not set(tabled) & set(_LOG_URI_WRITE_LEG_EXCLUSIONS), "a leg cannot be both tabled and excluded"
+
+    assert not taking_log_uri - set(tabled) - set(_LOG_URI_WRITE_LEG_EXCLUSIONS), (
+        "new caller-log_uri write leg is neither in _LOG_URI_WRITE_LEGS nor excluded"
+    )
+    assert not (set(tabled) | set(_LOG_URI_WRITE_LEG_EXCLUSIONS)) - taking_log_uri, (
+        "_LOG_URI_WRITE_LEGS / exclusions name something that no longer takes a caller log_uri"
+    )
 
 
 def test_journal_records_have_exactly_one_construction_site() -> None:

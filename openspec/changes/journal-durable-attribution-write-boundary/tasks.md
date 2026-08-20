@@ -89,6 +89,15 @@
 
 - [x] 4.1 `openspec validate journal-durable-attribution-write-boundary --strict --no-interactive` 通过。
 - [x] 4.2 proposal 的 Non-Goals 与实现终态一致（尤其 D2 尾的已知边界、F-b 的边界）。
+- [x] 4.3 **spec delta 与代码同步**（round-2 评审 P2；见 design D10）：`openspec validate --strict`
+      只查结构不查内容，三处分叉只有人能查——(a)「stripped placeholder SHALL be persisted as
+      `None`」漏掉第三种终值（解析成 durable 真值）；(b) withheld-means-keep 被限定在
+      「every **cohort** write path」，而 8 条修好的腿里 6 条不是 cohort；(c) round-2 真正交付的
+      性质（compared == persisted / 重放收敛 / 取消回执不被丢）**一条 requirement 都没有**。
+      归档一份与代码不符的 spec 比不归档更糟，故本条不可 defer。
+- [x] 4.4 **类守卫完备性断言**（orchestrator 自查）：`_LOG_URI_WRITE_LEGS` 是硬编码 6-tuple，
+      而签名内省显示实际有 7 个公共方法接受 `log_uri`。补内省断言（`log_uri` 参数集合 ==
+      表内腿名 ∪ 显式排除表），并证明它会咬。
 
 ## 5. 验证与证据（档位见 design D6：本地闭环，不买 node-27，不碰 node-22）
 
