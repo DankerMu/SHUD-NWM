@@ -31,8 +31,8 @@ The failure is **umask-conditional, not host-conditional**. node-22 (`0022`),
 local macOS (`022`), and GitHub runners (`022`) all happen to sit on the safe
 side of the gate, which is why this survived undetected: the repository's only
 umask tests pin the **strict** side (`os.umask(0o077)` at
-`tests/test_scheduler_file_provider_refresh.py:823`/`:920` and
-`tests/test_run_tree_copyback.py:212`). The permissive side has zero coverage.
+`tests/test_scheduler_file_provider_refresh.py:853`/`:967` and
+`tests/test_run_tree_copyback.py:213`). The permissive side has zero coverage.
 
 ## What Changes
 

@@ -46,10 +46,17 @@ umask, while `fchmod` would additionally turn the umask-`0077` case from `0o700`
 into `0o755` — silently widening private directories on the strictest hosts.
 
 Note the widening would have landed **silently**: no test in the repository pins
-a *directory* mode under `0o077`. The three `0o077` sites assert file modes
-(`tests/test_scheduler_file_provider_refresh.py:829`, `:927`) or no mode at all
-(`tests/test_run_tree_copyback.py:212-230`). That absence is the reason task 2.2
-exists — it is new coverage, not a guard that already existed.
+a *directory* mode under `0o077`. Re-counted on the merged head there are **ten**
+pre-existing `os.umask(0o077)` sites across four files —
+`tests/test_scheduler_file_provider_refresh.py:853`, `:967`;
+`tests/test_state_manager.py:3688`, `:3897`, `:3922`, `:3964`;
+`tests/test_run_tree_copyback.py:213`, `:1359`;
+`tests/test_scheduler_state_index_copyback_replay.py:1177`, `:1210` — and every
+one of them asserts a *file* mode or no mode at all. (An earlier revision of this
+section said "three"; that count predated the `origin/master f087f08d` merge,
+which added the `#1609`/`#1610` sites. The conclusion is unchanged and was
+re-verified across all ten.) That absence is the reason task 2.2 exists — it is
+new coverage, not a guard that already existed.
 
 Governing rule to encode: **the umask may further restrict a safe_fs directory;
 it may never loosen it.**
@@ -93,12 +100,12 @@ follow: create, and chmod only what this call created.
 
 The new test helper must **not** live in `tests/conftest.py` or
 `tests/integration_helpers.py`. Both are an explicit issue-#1487 carve-out in
-`scripts/select_ci_tests.py:232-234`, mapped at `:918` to the selector meta-guard
+`scripts/select_ci_tests.py:232-234`, mapped at `:936` to the selector meta-guard
 suite.
 
 Precision, because the naive version of this rationale is wrong: the mapping is
 *additive*, and collapse requires the final selection to be **exactly** the
-meta-guard (`scripts/select_ci_tests.py:1030`). This PR also changes
+meta-guard (`scripts/select_ci_tests.py:1048`). This PR also changes
 `packages/common/safe_fs.py` and `tests/test_production_scheduler.py`, both of
 which select real suites, so **this** PR would not collapse either way. The rule
 is kept because it costs nothing and because a later helper-only follow-up PR
@@ -272,7 +279,7 @@ Regression rows:
   `provider_lock_parent_unsafe` in `precommit` (fail-closed preserved).
 - `_ensure_copyback_state_parent` under umask `0022` -> copied checkpoint parent
   is still `0o775` and the file still `0o664`
-  (`tests/test_run_tree_copyback.py:301-302` stays green). Note this test asserts
+  (`tests/test_run_tree_copyback.py:302-303` stays green). Note this test asserts
   the **leaf** only; its ancestors `states/gfs/model_a/` are created by
   `LocalObjectStore.write_bytes_atomic` (safe_fs) at
   `tests/test_run_tree_copyback.py:245-247` and are *not* covered by the chmod —

@@ -70,7 +70,7 @@ OpenSpec change: fix-permissive-umask-dir-mode (generated)
 ## 2. Tests
 
 Target files are named because CI selection depends on them: `safe_fs.py` routes
-to `tests/test_safe_fs.py` (`scripts/select_ci_tests.py:187`, `:339-346`), and it
+to `tests/test_safe_fs.py` (`scripts/select_ci_tests.py:187`, `:355-366`), and it
 does **not** route to `tests/test_scheduler_file_provider_refresh.py`. Put the
 safe_fs-mode tests in `tests/test_safe_fs.py` so this PR's diff selects them.
 There is no `tests/test_provider_atomic.py`; provider_atomic coverage lives in
@@ -88,7 +88,7 @@ There is no `tests/test_provider_atomic.py`; provider_atomic coverage lives in
       permissive-side twin of
       `test_provider_atomic_publishes_shared_mode_under_private_umask`.
 - [x] 2.4 Extend the existing
-      `tests/test_scheduler_file_provider_refresh.py:832-847`
+      `tests/test_scheduler_file_provider_refresh.py:863-877`
       (`test_provider_lock_rejects_writable_parent_and_preserves_body_errors`),
       which already pins `0o777` parent -> refused and `0o755` parent -> acquired,
       with the `0o775` case. Do **not** add a third near-twin test.
@@ -158,7 +158,7 @@ count exists to record. Post-fix it runs in 6.7 s.
 
 | Other surface | Command | Result |
 |---|---|---|
-| Strict-side non-regression | `(umask 077; uv run pytest -q tests/test_safe_fs.py)` | 11 passed — `0o700` preserved, no `fchmod` widening |
+| Strict-side non-regression | `(umask 077; uv run pytest -q tests/test_safe_fs.py)` | 17 passed — `0o700` preserved, no `fchmod` widening. (An earlier revision said `11`: that was the pre-merge count, before `origin/master f087f08d` added the `#1547` undeterminable-home cases to this same file.) |
 | Selector routing guard | `uv run pytest -q tests/test_select_ci_tests.py` | 151 passed |
 | Lint | `uv run ruff check .` | clean |
 | Spec | `openspec validate fix-permissive-umask-dir-mode --strict --no-interactive` | strict-valid |
