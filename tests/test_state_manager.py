@@ -1437,7 +1437,7 @@ def test_file_state_snapshot_index_destination_upsert_and_usable_update_do_not_r
 def test_same_checksum_save_rewrites_missing_existing_state_object(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     state_file = tmp_path / "model_a.cfg.ic.update"
     content = _valid_ic_bytes(b"same-checksum-missing-object-repair")
     state_file.write_bytes(content)
@@ -1492,7 +1492,7 @@ def test_same_checksum_save_rewrites_missing_existing_state_object(tmp_path: Pat
 def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     repository = FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,
@@ -1560,7 +1560,7 @@ def test_same_checksum_save_repairs_base_entry_missing_cycle_lead_without_rewrit
 ) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     object_store = LocalObjectStore(object_root, "s3://nhms")
     state_file = tmp_path / "model_a.cfg.ic.update"
     content = _valid_ic_bytes(b"same-checksum-base-lineage-repair")
@@ -1636,7 +1636,7 @@ def test_same_checksum_save_repairs_base_entry_missing_cycle_lead_without_rewrit
 def test_file_state_snapshot_index_preserves_overlapping_valid_time_leads(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     repository = FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,
@@ -1713,7 +1713,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1790,7 +1790,7 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1849,7 +1849,7 @@ def test_state_save_cli_exits_nonzero_with_typed_source_reason(
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1963,7 +1963,7 @@ def test_db_free_state_save_env_requires_lineage_before_upload(
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
+    index_path.parent.mkdir(parents=True)
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
