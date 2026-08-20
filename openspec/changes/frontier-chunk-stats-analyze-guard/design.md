@@ -5,11 +5,11 @@
 - 级别：**standard**（ops 脚本 + 文档；无 API 契约、无迁移、无前端）。
   Issue #1378 为 needs-triage 自裁定——诊断轮已完成，修法即本 change。
 - must-preserve：autopipeline tick 的现有 summary schema 消费者（`node27_autopipe_cron.sh`
-  只透传 JSON；无 schema 校验器）；压缩 receipt 的
-  `schemas/timeseries_compression_receipt.schema.json` 校验（closed schema，须 bump
-  版本——见 D3）；两个 timer 的墙钟预算（D2/D3 各自给出最坏情形算术）。
+  只透传 JSON；无 schema 校验器）；压缩 runner 与 receipt schema **零改动**
+  （初稿的 ride-along 已被终审否决撤除——见 D3）；autopipe timer 的墙钟预算
+  （D2 给出最坏情形算术）；压缩 chunk 的 origin `pg_class` 统计不受触碰。
 - seams under test：`_analyze_frontier_chunks(database_url) -> dict`
-  纯函数化查询+执行+自检；压缩 runner 内 `_analyze_after_compress(cursor, chunk) -> dict`。
+  纯函数化查询+执行+自检。
 
 ## D1: 看护放在 autopipeline tick 末尾，而不是 output_parser 行写入路径
 
@@ -38,7 +38,7 @@ psycopg2 调用，无子进程 rc 可引用）。
   所以任何被本 tick ingest 触及的 chunk 必然过槛；下限的唯一作用是跳过仅有零星
   迟到写入、本 tick 未触及的 chunk。无 ingest 的 tick 不查询不执行。
 - **目标集合**：`hydro.river_timeseries` + `met.forcing_station_timeseries` 的
-  未压缩 chunk（同病同治；压缩 chunk 由 ride-along 覆盖）。
+  未压缩 chunk（压缩 chunk 不做——见 D3 否决记录；其统计属 #1596/#1468 家族）。
 - **预算护栏**：每 tick 至多 ANALYZE `STATS_GUARD_MAX_CHUNKS = 3` 个 chunk（按
   `n_mod_since_analyze` 降序取前 3），被裁掉的 chunk 名单记入
   `stats_guard.deferred`（不允许静默截断；渐进病下个 tick 补上）。每条 ANALYZE
@@ -52,36 +52,29 @@ psycopg2 调用，无子进程 rc 可引用）。
 - 环境开关：`NODE27_AUTOPIPE_STATS_GUARD=off` 可停用（与现有 autopipe 开关风格
   一致），默认开启。
 
-## D3: 压缩 runner ride-along 的 receipt 形状
+## D3: 压缩侧 ride-along ANALYZE——设计过、终审否决、撤除（决策记录）
 
-- **触发路径**：凡本次 run 的记账里**到达 compressed 状态**的 chunk 条目都 ANALYZE
-  ——覆盖三条内部路径：正常成功、测量失败后成功、`compress_chunk` 抛错但事后对账
-  确认 commit 已落地（lost-ack reconciled）。以最终逐 chunk 记账为准，不以
-  `compress_chunk` 的返回值为准。
-- **receipt 字段**：`{"analyze_seconds": <float>}` 并入该 chunk 条目；失败记
-  `{"analyze_seconds": null, "analyze_error": "..."}`。
-- **失败语义（收严到 outcome/rc 层）**：ANALYZE 失败 MUST NOT 置 `any_errors`、
-  MUST NOT 改变 receipt 顶层 `outcome`（clean/partial 判定）、MUST NOT 改变进程
-  返回码——压缩全部成功而 ride-along ANALYZE 失败的 run 仍是 `clean`/rc 0，
-  否则每日压缩 systemd unit 会因搭车步骤误报红。
-- **schema**：`$defs/selected_descriptor` 是 closed（`additionalProperties: false`），
-  新字段会被拒——**无条件**扩 schema，并按 budget 字段先例
-  （archive/2026-08-15-compression-receipt-budget-audit：2.0→2.1）bump
-  `schema_version` 2.1→**2.2**、加 per-version `not:{required:[...]}` 分支使新字段
-  仅在 2.2 合法、同步更新 `schemas/examples/timeseries_compression_receipt.example.json`。
-- **执行时序**：全部压缩完成后再批量 ANALYZE、最后发布 receipt——压缩是主目的，
-  绝不因搭车统计被牺牲；ANALYZE 结果写入同一 receipt。
-- **超时与墙钟护栏**：最坏情形 `PER_TICK_BOUND(4) × 300 s = 1200 s`，而 leg-1
-  不变式只保证 `ceil(compress_timeout_ms/1000)+60 ≤ wrapper_wall`（默认
-  3660 ≤ 3900），富余段已留给 reconciliation/receipt 发布——无护栏时越墙 TERM 会
-  以 rc 124 染红每日 unit，正是上面三条 MUST NOT 管不到的通道。因此每条 ANALYZE
-  前先算剩余墙钟 `wrapper_wall_seconds - elapsed - 120 s`（120 s 为 receipt
-  发布保留段）：不足 30 s 则跳过剩余 chunk，各记
-  `{"analyze_seconds": null, "analyze_error": "wall_budget_exhausted"}`（不静默）；
-  足够则 `SET statement_timeout = min(300 s, 剩余)`（300 s 为压缩态 chunk 的
-  ANALYZE 上限，实测未压缩 ~20 s/250M 行）。超时/失败即 `analyze_error`，
-  不影响压缩记账。该护栏保证 ANALYZE 批永不侵入发布保留段，rc 中立在
-  `PER_TICK_BOUND=4` 默认下仍成立。
+初稿含 change item 2：`compress_chunk` 成功后对该 chunk ANALYZE（"同病同治"）。
+Phase 7 终审以 TimescaleDB 2.10.2 上游源码证明这是**纯伤害**并否决：
+
+- 压缩时 TimescaleDB **特意保存** origin chunk 的 `pg_class`
+  行数统计（`tsl/src/compression/compression.c` `capture_pgclass_stats` →
+  `restore_pgclass_stats`）；`ANALYZE <裸 chunk 名>` 不走 hypertable 重定向
+  （`src/process_utility.c` `process_vacuum` 只在目标是 hypertable 时改道
+  compressed 兄弟表），落在空堆上把 `reltuples/relpages` 清零。
+- planner 对压缩 chunk 的成本估算读的是 **compressed 兄弟表** 的统计
+  （`decompress_chunk.c` `set_baserel_size_estimates(root, compressed_rel)`），
+  origin 的 ANALYZE 零收益；被清零的 origin 行数还会经
+  `hypertable_rel->rows += (new - chunk_rel->rows)` 逐 chunk 上偏 hypertable 估行。
+- **node-27 实证**（2026-08-20）：chunk 55（本 campaign 压缩）heap 0 bytes 而
+  `reltuples = 266,888,192`——保存不变式在场；chunk 32/51 的 `reltuples = 0`
+  正是该统计历史上被清掉后的形态。压缩 chunk 无 DML，autoanalyze 永不触发，
+  清零后只有显式 `ANALYZE <hypertable>` 能修（`update_compressed_chunk_relstats`）。
+
+撤除范围：runner 无 ANALYZE 改动、receipt schema 维持 2.1（无 2.2 bump、无
+`analyze_*` 字段）、hypertable-compression spec 无 MODIFIED delta。压缩 chunk
+统计属 #1596/#1468 家族，不在本 change。runbook §4.7 记录该陷阱
+（"不要对裸 chunk 名 ANALYZE"）。
 
 ## D4: 为什么不是 autovacuum 参数 / 物化表
 
@@ -94,11 +87,12 @@ psycopg2 调用，无子进程 rc 可引用）。
 
 - autopipeline：mock psycopg2 connection，(i) ingested=0 时不触发；(ii) 过槛 chunk
   被 ANALYZE 且 summary 含清单与回读的 last_analyze；(iii) 超过 MAX_CHUNKS 时按
-  n_mod 降序取前 3、其余进 deferred；(iv) ANALYZE 抛错时 tick rc 不变、summary 记
-  `status:"failed"`；(v) last_analyze 未刷新时条目记 warning；(vi) 开关 off 时跳过。
-- 压缩 runner：现有测试夹具内 (i) compress 成功后发出 `ANALYZE`；(ii) ANALYZE 失败
-  不改变压缩记账、receipt `outcome` 与进程 rc；(iii) 2.2 receipt 含 analyze 字段且
-  过 schema 校验（含 example 文件与 live_evidence 测试的 schema 加载路径）。
+  n_mod 降序取前 3、其余进 deferred；(iv) 单 chunk ANALYZE 抛错逐 chunk 隔离、
+  剩余照常尝试、tick rc 不变；(v) guard 级失败（connect/候选查询）记
+  `status:"failed"`（含 DSN 脱敏钉）；(vi) last_analyze 未刷新时条目记 warning；
+  (vii) 开关 off 时跳过；(viii) 候选 SQL 与两常量的 source-text/字面量 pin。
+- 压缩 runner：**无行为改动**；既有回归套件维持原样（ride-along 撤除后其新增
+  用例一并移除，schema/example 回到 2.1 原状）。
 - 真实 DB 验证在 node-27（Evidence Floor E4，**硬门**）：一个真实**触发了 guard**
   的 tick 的 summary 含 stats_guard 块；`pg_stat_user_tables.last_analyze` 实刷；
   guard 后重跑 issue 验收项 2 的 Q2（当前键形态）EXPLAIN ANALYZE——

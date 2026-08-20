@@ -10,16 +10,12 @@
       失败两级——单 chunk ANALYZE 失败逐 chunk 隔离（条目记 `status:"failed"` +
       `error`，剩余照常尝试），guard 级失败（连接/候选查询）记
       `stats_guard.status:"failed"` + `error`；两级都不改 tick rc。
-- [x] 1.2 `scripts/node27_timeseries_compression.py`：全部压缩完成后、receipt
-      发布前，对本次 run 记账中到达 compressed 状态的每个 chunk（正常/测量失败后/
-      lost-ack 对账三路径）ANALYZE；每条前检查剩余墙钟（`wrapper_wall_seconds -
-      elapsed - 120s` 发布保留段，不足 30s 跳过剩余并记
-      `analyze_error:"wall_budget_exhausted"`），`statement_timeout = min(300s, 剩余)`；
-      receipt 条目增 `analyze_seconds` / `analyze_error`；失败/跳过不置
-      `any_errors`、不改 `outcome` 与进程 rc。
-      **无条件**扩 closed schema：`schemas/timeseries_compression_receipt.schema.json`
-      `schema_version` 2.1→2.2（per-version 分支，新字段仅 2.2 合法），
-      同步更新 `schemas/examples/timeseries_compression_receipt.example.json`。
+- [x] 1.2 **撤除压缩侧 ride-along**（终审 P1 否决，见 design D3）：
+      `scripts/node27_timeseries_compression.py` 恢复无 ANALYZE 改动；
+      `schemas/timeseries_compression_receipt.schema.json` 与
+      `schemas/examples/timeseries_compression_receipt.example.json` 回到 2.1
+      原状；相关新增用例移除，round-1.5 对既有负向 schema 测试的**加强**
+      （error-path 断言）保留且须对 2.1 原状 example 仍成立。
 - [x] 1.3 `docs/runbooks/tier-node27-timeseries-storage.md`：新增"ingest 前沿 chunk
       统计漂移"小节（新值不可见机制、看护位置与触发条件、`pg_stat_user_tables`
       复核 SQL、PG15 非 owner ANALYZE 静默跳过陷阱）。
@@ -28,9 +24,8 @@
 
 - [x] 2.1 autopipeline 六场景：触发 / 不触发（无 ingest 或低于下限）/ 超上限记
       deferred / 失败不拖垮 tick / last_analyze 未刷新记 warning / 开关 off。
-- [x] 2.2 压缩 runner 四场景：记账到达 compressed 即 ANALYZE / ANALYZE 失败不
-      改记账、`outcome` 与 rc / 剩余墙钟不足时跳过并记 wall_budget_exhausted、
-      receipt 照常发布 / 2.2 receipt（含新字段）过 schema 校验且 example 有效。
+- [x] 2.2 压缩 runner：ride-along 撤除后其新增用例一并移除；既有回归套件
+      （含 round-1.5 加强的负向 schema 测试）在 2.1 原状 schema/example 上全绿。
 
 ## Evidence Floor
 

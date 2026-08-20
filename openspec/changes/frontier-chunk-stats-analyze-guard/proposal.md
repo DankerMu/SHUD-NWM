@@ -28,13 +28,10 @@ ANALYZE 步骤，前沿 chunk 的 planner 统计完全依赖 autovacuum 的 10% 
    触发：任何被本 tick 触及的 chunk 必然过槛，下限只为跳过未触及者；每 tick
    上限 3 个、逐条 120 s statement_timeout、裁掉者记 deferred），结果（清单 +
    耗时 + 回读的 `last_analyze` 自检）写入 tick summary JSON。
-2. **压缩 runner 顺带 ANALYZE**（ride-along）：`scripts/node27_timeseries_compression.py`
-   对本次 run 记账中到达 compressed 状态的每个 chunk 执行 `ANALYZE`，结果记入
-   receipt（schema_version 2.1→2.2，closed schema 同步扩展 + example 更新）；
-   失败不改变压缩记账、`outcome` 与进程 rc。
-3. **runbook 记录**：`docs/runbooks/tier-node27-timeseries-storage.md` 新增
-   "ingest 前沿 chunk 统计漂移"小节（成因、机制、看护、复核手段）。
-4. **回归看护测试**：单测钉住 (1)(2) 的存在与触发条件（mock DB，不需真实 TimescaleDB）。
+2. **runbook 记录**：`docs/runbooks/tier-node27-timeseries-storage.md` 新增
+   "ingest 前沿 chunk 统计漂移"小节（成因、机制、看护、复核手段），并记录
+   "不要对裸压缩 chunk 名 ANALYZE"陷阱（见 design D3）。
+3. **回归看护测试**：单测钉住 (1) 的存在与触发条件（mock DB，不需真实 TimescaleDB）。
 
 ## Non-Goals
 
@@ -42,18 +39,20 @@ ANALYZE 步骤，前沿 chunk 的 planner 统计完全依赖 autovacuum 的 10% 
 - 不做 valid-time discovery 物化表（issue 备选方案；当前无必要，YAGNI）。
 - 不调 autovacuum 全局/表级参数（TimescaleDB chunk 不继承 hypertable reloptions，
   逐 chunk 设置是持续追赶游戏；显式 ANALYZE 步骤更可审计）。
+- **不做压缩侧 ride-along ANALYZE**（初稿 change item 2，终审以 TimescaleDB
+  2.10.2 上游源码 + node-27 实证否决：对裸 origin chunk 名 ANALYZE 会清掉
+  TimescaleDB 压缩时特意保存的 `pg_class` 统计，且 planner 成本估的是
+  compressed 兄弟表——零收益纯伤害；见 design D3）。压缩 chunk 统计属
+  #1596/#1468 家族。
 - 不处理 ingest 突发窗内的实例级 I/O/锁竞争尖峰（同刻 EXPLAIN 执行仍 ~1-3 ms，
   是载荷耦合非计划退化；按纪律另行报告）。
 
 ## Impact
 
-- Affected specs: 新增 capability `frontier-chunk-statistics-freshness`；
-  MODIFIED `hypertable-compression`（budget receipt requirement 的版本文案随
-  2.2 发射版本更新，场景字面量 2.1→2.2）。
+- Affected specs: 新增 capability `frontier-chunk-statistics-freshness`
+  （仅 autopipe 守护一条 requirement）。
 - Affected code: `scripts/node27_autopipeline.py`、
-  `scripts/node27_timeseries_compression.py`、
-  `schemas/timeseries_compression_receipt.schema.json`（2.2 bump）、
-  `schemas/examples/timeseries_compression_receipt.example.json`、
   `docs/runbooks/tier-node27-timeseries-storage.md`、新增/扩展对应单测。
+  压缩 runner、receipt schema、example **零改动**（ride-along 撤除，见 D3）。
 - 部署面：node-27 两个 systemd timer（autopipe 10min、compression 每日）无需改动；
   代码随 git pull 生效。

@@ -7184,36 +7184,6 @@ def test_load_receipt_accepts_a_2_1_receipt_carrying_budget(tmp_path: Path) -> N
         evidence._load_receipt(_json_ref(tmp_path, "receipt-half.json", half), "dry-run receipt", RECEIPT_SCHEMA)
 
 
-def test_load_receipt_accepts_a_2_2_receipt_carrying_analyze_evidence(tmp_path: Path) -> None:
-    """Issue #1378's ride-along fields ride the same tolerated-shape path as budget.
-
-    Same deliberate scope as the 2.1 case above: `_load_receipt` alone, because
-    `verify_bundle`'s "2.0" pin belongs to the frozen #1069 bundle.
-    """
-
-    base = _receipt(enforce=True)
-    receipt = {
-        **base,
-        "schema_version": "2.2",
-        "budget": {
-            "compress_timeout_ms": 3_600_000,
-            "wrapper_wall_seconds": 3_900,
-            "systemd_wall_seconds": 3_940,
-        },
-        "selected": [{**base["selected"][0], "analyze_seconds": 21.418}],
-    }
-    ref = _json_ref(tmp_path, "receipt-2.2.json", receipt)
-
-    _loaded_ref, loaded = evidence._load_receipt(ref, "enforce receipt", RECEIPT_SCHEMA)
-
-    assert loaded["schema_version"] == "2.2"
-    assert loaded["selected"][0]["analyze_seconds"] == 21.418
-
-    aged = {**receipt, "schema_version": "2.1"}
-    with pytest.raises(evidence.EvidenceError):
-        evidence._load_receipt(_json_ref(tmp_path, "receipt-aged.json", aged), "enforce receipt", RECEIPT_SCHEMA)
-
-
 def test_expected_timeout_seconds_stays_a_frozen_literal() -> None:
     """#1351 added the wall to the receipt; this expectation must NOT follow it.
 

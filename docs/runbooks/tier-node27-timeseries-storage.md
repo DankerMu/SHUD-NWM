@@ -312,11 +312,8 @@ template/live drift is resolved.
 2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~380 s ≤
    NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`, the live
    default from `#1156`/`#1352`, no override installed). That wall bounds the
-   **whole tick**, not one chunk, and the **compression legs have no in-loop
-   elapsed guard**: overrunning it means the wrapper's `timeout` sends `TERM`
-   mid-DDL. (The one guarded leg is the post-compression ANALYZE batch added by
-   `#1378`, which measures the remaining wall itself and skips rather than
-   overrun — see §4.7. It never lends budget back to compression.)
+   **whole tick**, not one chunk, and the runner has no in-loop elapsed guard:
+   overrunning it means the wrapper's `timeout` sends `TERM` mid-DDL.
 
    The `380 s` is the **measured 2026-08-14 non-compress residual**: the
    observed 1836 s tick minus the 1456 s the §4.5 estimator gives for that
@@ -1593,7 +1590,7 @@ violated, and the wrapper refuses to launch on a non-positive-integer wall.
 Both refusals are structured JSON on stderr.
 
 **Every tick's receipt records the configuration that tick resolved** (issue
-`#1351`, receipt `schema_version` `"2.1"` onwards — currently `"2.2"`): the `budget` object plus
+`#1351`, receipt `schema_version` `"2.1"`): the `budget` object plus
 `per_tick_bound` are the record of the four values above, so a catch-up tick
 and a default tick are distinguishable after the fact — read them, do not
 reconstruct them from the env file, which may already have been rolled back.
@@ -1785,8 +1782,8 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
 
    # (1) is there a post-#1351 receipt here at all? Not a budget verdict.
    # Every version that carries `budget` counts — "2.1" (#1351) onwards;
-   # an ordered lower bound survives future bumps ("2.2" #1378, …) that
-   # have nothing to do with budgets.
+   # an ordered lower bound survives any future bump that has nothing to do
+   # with budgets, without needing an edit here.
    assert tuple(map(int, version.split("."))) >= (2, 1), (
        f"no post-#1351 default tick at this path yet (schema_version={version})"
    )
@@ -2130,22 +2127,22 @@ autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_ana
 （2.7%/5.5%），远不到线。所以**不能用体量阈值治**：任何高阈值都会在每次刷新后留下
 一段"新 cycle 已进、统计未见"的必然复发窗口。
 
-#### 看护：两处显式 ANALYZE
+#### 看护：一处显式 ANALYZE
 
 | 位置 | 触发 | 目标 | 上限 / 超时 |
 |---|---|---|---|
 | autopipe tick phase 3.5（publish 之后、summary 之前） | 本 tick **实际 ingest ≥ 1 个 run**（`already_ingested` 不算——那种 tick 没写行） | 两张 hypertable 的**未压缩** chunk 中 `n_mod_since_analyze >= 10_000` 者 | 每 tick 至多 3 个（按 `n_mod` 降序），逐条 `statement_timeout = 120 s`；被裁掉的进 `stats_guard.deferred`，下个 tick 补 |
-| 压缩 runner（全部压缩完成后、receipt 发布前） | 本次 run 记账中**到达 compressed 状态**的每个 chunk（正常 / 测量失败后 / lost-ack 对账三路径） | 该 chunk 本体 | 每条前算剩余墙钟 `wrapper_wall_seconds − elapsed − 120 s`（发布保留段），不足 30 s 则跳过剩余并记 `analyze_error: "wall_budget_exhausted"`；否则 `statement_timeout = min(300 s, 剩余)` |
 
 `10_000` 的下限不是"攒够才刷"：一个真实 run 写入的行数 = 段数 × 时步 ≫ 10⁴，被本 tick
 触及的 chunk 必然过槛；下限只用来跳过仅有零星迟到写入、本 tick 根本没碰的 chunk。
+压缩 chunk **不在**目标集合内——初稿曾在压缩 runner 里搭车 ANALYZE，终审否决撤除，
+理由见下面的陷阱一节。
 
-两处**都不改各自的成败判定**：autopipe 侧失败分两级——单 chunk 的 ANALYZE
+看护**不改 tick 的成败判定**：失败分两级——单 chunk 的 ANALYZE
 失败逐 chunk 隔离（该条目在 `stats_guard.analyzed` 里记 `status: "failed"` +
 `error`，剩余 chunk 照常尝试），guard 级失败（连接/候选查询）才写
-`stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码。压缩 runner 的 ANALYZE
-失败/跳过不置 `any_errors`、不改 receipt 顶层 `outcome`、不改进程 rc——压缩是主目的，
-搭车的统计步骤没有资格把每日 unit 染红。停用开关：
+`stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码——统计漂移是渐进病，
+下个 tick 重试即可，没资格把 unit 染红。停用开关：
 `NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。
 
 #### 复核（`pg_stat_user_tables`）
@@ -2178,6 +2175,18 @@ owner）执行 `ANALYZE` **只发一条 WARNING 然后"成功"返回**——rc �
 一律按"权限问题"查，别按"ANALYZE 没跑"查。回读走 autocommit 连接：ANALYZE 的累计
 统计要到事务提交后才对后续事务可见，同事务内回读只会读到旧值。统计上报还可能有
 亚秒级延迟，所以极快的 ANALYZE 偶发一次 warning 属正常——**连续**出现才是权限问题。
+
+#### 陷阱：不要对裸压缩 chunk 名 ANALYZE
+
+TimescaleDB 压缩时**特意保存** origin chunk 的 `pg_class` 统计
+（`capture_pgclass_stats` → `restore_pgclass_stats`）：heap 被清空但 `reltuples`
+保留——node-27 chunk 55 实证 heap 0 bytes 而 `reltuples = 266,888,192`。而
+`ANALYZE <裸 chunk 名>` **绕过 hypertable 重定向**（`process_vacuum` 只在目标是
+hypertable 时改道 compressed 兄弟表），落在那个空堆上把保留的统计清零。收益是零：
+planner 对压缩 chunk 的成本估算读的是 **compressed 兄弟表**的统计。所以对压缩
+chunk 只有一种正确写法——`ANALYZE <hypertable>`（走
+`update_compressed_chunk_relstats`）。压缩 chunk 无 DML，autoanalyze 永不触发，
+一旦清零就只能靠这条语句修回来。
 
 ## 8. Gated DB retention (`timeseries-db-retention`)
 

@@ -237,20 +237,6 @@ class _FakeConnection:
         self.closed = True
 
 
-@pytest.fixture(autouse=True)
-def _no_ambient_database_socket(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the non-injected default DB helpers off a real socket.
-
-    Since #1378 ``build_receipt`` also drives ``_default_analyze_chunk``, which
-    every enforce test that injects only compress/measure now reaches. Without
-    this, those tests would dial ``DATABASE_URL`` for real — on node-27 that is
-    the live production port. Tests that assert on statements install their own
-    double over this one.
-    """
-
-    _install_fake_psycopg2(monkeypatch)
-
-
 def _install_fake_psycopg2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[list[tuple[tuple, dict]], list[tuple[str, object]]]:
@@ -309,16 +295,11 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     )
 
     assert code == 0
-    # The trailing two statements are #1378's ride-along ANALYZE on the chunk
-    # that just reached the compressed state — same non-injected assembly point
-    # this test exists to exercise, on its own 300 s ceiling.
     assert [sql for sql, _params in statements] == [
         "SET statement_timeout = 1800000",
         "SELECT compress_chunk(%s::regclass)",
-        "SET statement_timeout = 300000",
-        f"ANALYZE {chunk.qualified_chunk}",
     ]
-    assert len(connect_calls) == 2
+    assert len(connect_calls) == 1
     receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
     assert receipt["outcome"] == "clean"
 
@@ -489,7 +470,7 @@ def test_invalid_config_replaces_disjoint_known_safe_receipt(tmp_path: Path, mon
 
     assert compression.main([]) == 1
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == "2.2"
+    assert receipt["schema_version"] == "2.1"
     assert receipt["outcome"] == "failed"
     assert receipt["failure"] == {
         "stage": "config",
@@ -1162,7 +1143,7 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
         compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
-    assert receipt["schema_version"] == "2.2"
+    assert receipt["schema_version"] == "2.1"
     assert receipt["head_sha"] == compression._current_head_sha()
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
@@ -1229,12 +1210,10 @@ def test_schema_keeps_v1_read_compatibility_but_v2_requires_head_sha() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(receipt, _load_schema())
     receipt["schema_version"] = "1.0"
-    # ``budget`` arrived with "2.1" (issue #1351) and the per-chunk ``analyze_*``
-    # fields with "2.2" (issue #1378); both are forbidden on a 1.0 receipt, so
-    # the downgrade drops them. The compatibility claim under test — 1.0
-    # receipts stay readable without ``head_sha`` — is unchanged.
+    # ``budget`` arrived with "2.1" (issue #1351) and is forbidden on a 1.0
+    # receipt, so the downgrade drops it. The compatibility claim under test —
+    # 1.0 receipts stay readable without ``head_sha`` — is unchanged.
     receipt.pop("budget")
-    receipt["selected"] = [_without_analyze_fields(entry) for entry in receipt["selected"]]
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -1248,12 +1227,6 @@ def _example_receipt() -> dict:
     return json.loads(
         (_ROOT / "schemas/examples/timeseries_compression_receipt.example.json").read_text(encoding="utf-8")
     )
-
-
-def _without_analyze_fields(entry: dict) -> dict:
-    """Strip the "2.2"-only ride-along fields so an entry can be aged backwards."""
-
-    return {key: value for key, value in entry.items() if key not in ("analyze_seconds", "analyze_error")}
 
 
 def test_schema_rejects_selected_entry_without_chunk_name() -> None:
@@ -1306,10 +1279,10 @@ def test_schema_rejects_per_table_totals_missing_forcing_key() -> None:
 
 def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
     receipt = _example_receipt()
-    # The example is a mutating tick since "2.2" (issue #1378), so the refusal
-    # outcome this test is about has to be set explicitly -- and its totals have
-    # to be taken back down to the refused shape, or they would be a second
-    # violation and this test would pass without ever exercising ``selected``.
+    # Pin the refusal outcome and its zeroed totals explicitly rather than
+    # inheriting them from the example: an example that ever becomes a mutating
+    # tick would otherwise make the totals a second, unrelated violation, and
+    # this test would pass without ever exercising ``selected``.
     receipt["outcome"] = "refused_lock"
     receipt["per_table_totals"]["hydro.river_timeseries"] = {
         "before_bytes": 0,
@@ -1395,7 +1368,7 @@ def test_receipts_record_the_non_default_budget_actually_in_force(
     receipts = _three_config_receipts(monkeypatch, env)
     assert len(receipts) == 3
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.2"
+        assert receipt["schema_version"] == "2.1"
         assert receipt["budget"] == _NON_DEFAULT_BUDGET
         assert receipt["budget"] != _DEFAULT_BUDGET
         jsonschema.validate(receipt, _load_schema())
@@ -1409,7 +1382,7 @@ def test_receipts_record_the_default_budget_when_nothing_is_overridden(
     env = _base_env(tmp_path)
     receipts = _three_config_receipts(monkeypatch, env)
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.2"
+        assert receipt["schema_version"] == "2.1"
         assert receipt["budget"] == _DEFAULT_BUDGET
         jsonschema.validate(receipt, _load_schema())
 
@@ -1428,7 +1401,7 @@ def test_config_tombstone_carries_no_budget_and_still_validates(
     assert compression.main([]) == 1
 
     tombstone = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert tombstone["schema_version"] == "2.2"
+    assert tombstone["schema_version"] == "2.1"
     assert tombstone["outcome"] == "failed"
     assert tombstone["failure"]["stage"] == "config"
     assert "budget" not in tombstone
@@ -1453,15 +1426,7 @@ def test_config_stage_label_belongs_to_the_tombstone_call_site_only() -> None:
 
 
 def _budget_receipt(**overrides: object) -> dict:
-    """A budget-bearing receipt with the "2.2"-only ride-along fields removed.
-
-    The aged variants below are about ``budget`` alone: leaving ``analyze_*`` on
-    the entries would make every pre-2.2 receipt illegal for a second,
-    unrelated reason.
-    """
-
     receipt = _example_receipt()
-    receipt["selected"] = [_without_analyze_fields(entry) for entry in receipt["selected"]]
     receipt.update(overrides)
     return receipt
 
@@ -1509,7 +1474,6 @@ def test_schema_accepts_a_legacy_receipt_without_budget(legacy_version: str) -> 
 
     receipt = _budget_receipt(schema_version=legacy_version)
     del receipt["budget"]
-    receipt["selected"] = [_without_analyze_fields(entry) for entry in receipt["selected"]]
     if legacy_version == "1.0":
         del receipt["head_sha"]
     jsonschema.validate(receipt, _load_schema())
@@ -2096,282 +2060,3 @@ def test_early_failure_publisher_lock_is_deadline_bounded(
         os.close(lock_fd)
     assert time.monotonic() - started < 0.5
     assert receipt.read_bytes() == raw
-
-
-# ---------------------------------------------------------------------------
-# Issue #1378: ride-along ANALYZE on every chunk whose FINAL accounting reached
-# the compressed state — including the paths where ``compress_chunk`` itself
-# raised or the after-measurement failed.
-# ---------------------------------------------------------------------------
-
-
-def _analyze_recorder() -> tuple[list[tuple[str, int]], object]:
-    seen: list[tuple[str, int]] = []
-
-    def analyze(_dsn: str, chunk: compression.ChunkRow, *, statement_timeout_ms: int) -> None:
-        seen.append((chunk.chunk_name, statement_timeout_ms))
-
-    return seen, analyze
-
-
-def test_analyze_covers_every_path_that_reached_the_compressed_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Normal success, after-measure failure and lost-ack reconciliation alike.
-
-    ``compress_chunk`` raises for two of the four chunks; only the one the
-    catalog reconciliation disowns must stay out of the ANALYZE batch.
-    """
-
-    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
-    normal = _chunk("hydro", "river_timeseries", "normal", delta_days=10)
-    after_failed = _chunk("hydro", "river_timeseries", "after-failed", delta_days=11)
-    lost_ack = _chunk("met", "forcing_station_timeseries", "lost-ack", delta_days=12)
-    never = _chunk("met", "forcing_station_timeseries", "never", delta_days=13)
-
-    def fake_measure(_dsn: str, chunk: compression.ChunkRow, *, after: bool = False) -> int:
-        if after and chunk.chunk_name == "after-failed":
-            raise RuntimeError("compressed sibling not visible")
-        return 40 if after else 100
-
-    def fake_compress(_dsn: str, chunk: compression.ChunkRow) -> None:
-        if chunk.chunk_name in ("lost-ack", "never"):
-            raise RuntimeError("lost ack")
-
-    seen, analyze = _analyze_recorder()
-    receipt = compression.build_receipt(
-        config,
-        now_utc=_NOW,
-        fetch_chunks=lambda _dsn: [normal, after_failed, lost_ack, never],
-        measure_chunk_bytes=fake_measure,
-        compress_chunk=fake_compress,
-        reconcile_chunk_state=lambda _dsn, chunk: chunk.chunk_name != "never",
-        analyze_chunk=analyze,
-        elapsed_seconds=lambda: 0.0,
-    )
-
-    assert [name for name, _timeout in seen] == ["normal", "after-failed", "lost-ack"]
-    assert {timeout for _name, timeout in seen} == {compression._ANALYZE_MAX_TIMEOUT_MS}
-    by_name = {descriptor["chunk_name"]: descriptor for descriptor in receipt["selected"]}
-    for name in ("normal", "after-failed", "lost-ack"):
-        assert isinstance(by_name[name]["analyze_seconds"], float)
-        assert "analyze_error" not in by_name[name]
-    assert "analyze_seconds" not in by_name["never"]
-    assert receipt["schema_version"] == "2.2"
-    jsonschema.validate(receipt, _load_schema())
-    jsonschema.Draft7Validator(_load_schema()).validate(receipt)
-
-
-def test_analyze_failure_changes_neither_accounting_nor_outcome_nor_rc(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The ride-along passenger may not redden a tick that compressed cleanly."""
-
-    env = _base_env(tmp_path)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
-    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
-    chunk = _chunk("hydro", "river_timeseries", "clean-compress", delta_days=10)
-
-    def exploding_analyze(_dsn: str, _chunk: compression.ChunkRow, *, statement_timeout_ms: int) -> None:
-        raise RuntimeError("canceling statement due to statement timeout")
-
-    code = compression.main(
-        ["--enforce"],
-        fetch_chunks=lambda _dsn: [chunk],
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
-        compress_chunk=lambda _dsn, _chunk: None,
-        analyze_chunk=exploding_analyze,
-    )
-
-    assert code == 0
-    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text(encoding="utf-8"))
-    assert receipt["outcome"] == "clean"
-    assert receipt["per_table_totals"]["hydro.river_timeseries"] == {
-        "before_bytes": 100,
-        "after_bytes": 40,
-        "chunks_compressed": 1,
-    }
-    selected = receipt["selected"][0]
-    assert selected["mutation_state"] == "committed"
-    assert selected["analyze_seconds"] is None
-    assert selected["analyze_error"] == "ANALYZE failed (RuntimeError)"
-    # The failure text is a class name, never the exception's own (possibly
-    # credential-bearing) message.
-    assert "canceling statement" not in json.dumps(receipt)
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_analyze_stops_at_the_publication_reserve_and_still_publishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Overrunning the wrapper wall is the one channel rc-neutrality cannot cover."""
-
-    env = _base_env(tmp_path)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
-    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
-    chunks = [
-        _chunk("hydro", "river_timeseries", "first", delta_days=10),
-        _chunk("hydro", "river_timeseries", "second", delta_days=11),
-        _chunk("met", "forcing_station_timeseries", "third", delta_days=12),
-    ]
-    # 3900 - 3810 - 120 = -30 s left after the first chunk: the reserve is
-    # already breached, so chunks two and three must not even start.
-    elapsed = iter([100.0, 3_810.0, 3_810.0])
-    seen, analyze = _analyze_recorder()
-
-    code = compression.main(
-        ["--enforce"],
-        fetch_chunks=lambda _dsn: list(chunks),
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
-        compress_chunk=lambda _dsn, _chunk: None,
-        analyze_chunk=analyze,
-        elapsed_seconds=lambda: next(elapsed),
-    )
-
-    assert code == 0
-    assert [name for name, _timeout in seen] == ["first"]
-    # 3900 - 100 - 120 = 3680 s of headroom, capped at the 300 s ANALYZE ceiling.
-    assert seen[0][1] == compression._ANALYZE_MAX_TIMEOUT_MS
-    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text(encoding="utf-8"))
-    assert receipt["outcome"] == "clean"
-    by_name = {descriptor["chunk_name"]: descriptor for descriptor in receipt["selected"]}
-    assert isinstance(by_name["first"]["analyze_seconds"], float)
-    for name in ("second", "third"):
-        assert by_name[name]["analyze_seconds"] is None
-        assert by_name[name]["analyze_error"] == "wall_budget_exhausted"
-        assert by_name[name]["mutation_state"] == "committed"
-    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 2
-    jsonschema.validate(receipt, _load_schema())
-
-
-def test_analyze_statement_timeout_shrinks_to_the_remaining_wall(tmp_path: Path) -> None:
-    """Between the 30 s floor and the 300 s ceiling the wall itself is the cap."""
-
-    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
-    chunk = _chunk("hydro", "river_timeseries", "tight", delta_days=10)
-    seen, analyze = _analyze_recorder()
-
-    compression.build_receipt(
-        config,
-        now_utc=_NOW,
-        fetch_chunks=lambda _dsn: [chunk],
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
-        compress_chunk=lambda _dsn, _chunk: None,
-        analyze_chunk=analyze,
-        # 3900 - 3700 - 120 = 80 s remaining: above the 30 s floor, below the
-        # 300 s ceiling.
-        elapsed_seconds=lambda: 3_700.0,
-        head_sha="a" * 40,
-    )
-
-    assert seen == [("tight", 80_000)]
-
-
-def test_analyze_skips_when_the_remaining_wall_is_under_the_floor(tmp_path: Path) -> None:
-    """Between 0 s and the 30 s floor: there IS wall left, and it is still a skip.
-
-    The reserve-breach case above (negative remaining) would keep passing with
-    no floor at all; only this band says the floor exists.
-    """
-
-    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
-    assert config.wrapper_wall_seconds == 3_900
-    chunk = _chunk("hydro", "river_timeseries", "too-tight", delta_days=10)
-    seen, analyze = _analyze_recorder()
-
-    receipt = compression.build_receipt(
-        config,
-        now_utc=_NOW,
-        fetch_chunks=lambda _dsn: [chunk],
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
-        compress_chunk=lambda _dsn, _chunk: None,
-        analyze_chunk=analyze,
-        # 3900 - 3770 - 120 = 10 s remaining: positive, but under the floor.
-        elapsed_seconds=lambda: 3_770.0,
-        head_sha="a" * 40,
-    )
-
-    assert seen == []
-    descriptor = receipt["selected"][0]
-    assert descriptor["mutation_state"] == "committed"
-    assert descriptor["analyze_seconds"] is None
-    assert descriptor["analyze_error"] == "wall_budget_exhausted"
-    assert receipt["outcome"] == "clean"
-    jsonschema.validate(receipt, _load_schema())
-    # Last, so the behaviour above is what reports first when the floor moves.
-    assert compression._ANALYZE_MIN_BUDGET_SECONDS == 30
-
-
-def test_analyze_runs_as_one_batch_after_every_compression(tmp_path: Path) -> None:
-    """Compression is the purpose; the statistics passenger waits for all of it.
-
-    One shared ordered log: inlining the ANALYZE per chunk would interleave the
-    two verbs and lose the guarantee that a slow ANALYZE can never delay (or,
-    on a wall overrun, cancel) a compression that has not started yet.
-    """
-
-    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
-    chunks = [
-        _chunk("hydro", "river_timeseries", "c1", delta_days=10),
-        _chunk("met", "forcing_station_timeseries", "c2", delta_days=11),
-    ]
-    log: list[tuple[str, str]] = []
-
-    def fake_compress(_dsn: str, chunk: compression.ChunkRow) -> None:
-        log.append(("compress", chunk.chunk_name))
-
-    def analyze(_dsn: str, chunk: compression.ChunkRow, *, statement_timeout_ms: int) -> None:
-        log.append(("analyze", chunk.chunk_name))
-
-    receipt = compression.build_receipt(
-        config,
-        now_utc=_NOW,
-        fetch_chunks=lambda _dsn: list(chunks),
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 40 if _kwargs.get("after") else 100,
-        compress_chunk=fake_compress,
-        analyze_chunk=analyze,
-        elapsed_seconds=lambda: 0.0,
-        head_sha="a" * 40,
-    )
-
-    assert log == [("compress", "c1"), ("compress", "c2"), ("analyze", "c1"), ("analyze", "c2")]
-    assert [descriptor["mutation_state"] for descriptor in receipt["selected"]] == ["committed", "committed"]
-
-
-def test_analyze_fields_are_illegal_before_schema_version_2_2() -> None:
-    """The closed schema gates the new evidence per version, both dialects."""
-
-    receipt = _example_receipt()
-    aged = {
-        **receipt,
-        "schema_version": "2.1",
-        "selected": [{**receipt["selected"][0], "analyze_error": "wall_budget_exhausted"}],
-    }
-    for validator in (jsonschema.Draft7Validator(_load_schema()), jsonschema.Draft202012Validator(_load_schema())):
-        with pytest.raises(jsonschema.ValidationError):
-            validator.validate(aged)
-        validator.validate({**aged, "schema_version": "2.2"})
-
-
-def test_dry_run_never_analyzes(tmp_path: Path) -> None:
-    """No chunk reached the compressed state, so there is nothing to refresh."""
-
-    config = compression.config_from_args(_args(enforce=False), _base_env(tmp_path))
-    seen, analyze = _analyze_recorder()
-
-    receipt = compression.build_receipt(
-        config,
-        now_utc=_NOW,
-        fetch_chunks=lambda _dsn: [_chunk("hydro", "river_timeseries", "old", delta_days=10)],
-        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
-        compress_chunk=lambda _dsn, _chunk: None,
-        analyze_chunk=analyze,
-        head_sha="a" * 40,
-    )
-
-    assert seen == []
-    assert "analyze_seconds" not in receipt["selected"][0]

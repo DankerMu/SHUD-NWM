@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.2",
+  "schema_version": "2.1",
   "head_sha": "0123456789abcdef0123456789abcdef01234567",
   "generated_at": "2026-07-15T12:00:00Z",
   "now_utc": "2026-07-15T12:00:00Z",
@@ -11,28 +11,15 @@
     "systemd_wall_seconds": 3940
   },
   "mode": "enforce",
-  "outcome": "clean",
-  "selected": [
-    {
-      "hypertable_schema": "hydro",
-      "hypertable_name": "river_timeseries",
-      "chunk_schema": "_timescaledb_internal",
-      "chunk_name": "_hyper_1_42_chunk",
-      "range_start": "2026-07-01T00:00:00Z",
-      "range_end": "2026-07-08T00:00:00Z",
-      "before_bytes": 246960619520,
-      "after_bytes": 19756849561,
-      "mutation_state": "committed",
-      "analyze_seconds": 21.418
-    }
-  ],
+  "outcome": "refused_lock",
+  "selected": [],
   "deferred": [],
   "skipped": [],
   "per_table_totals": {
     "hydro.river_timeseries": {
-      "before_bytes": 246960619520,
-      "after_bytes": 19756849561,
-      "chunks_compressed": 1
+      "before_bytes": 0,
+      "after_bytes": null,
+      "chunks_compressed": 0
     },
     "met.forcing_station_timeseries": {
       "before_bytes": 0,

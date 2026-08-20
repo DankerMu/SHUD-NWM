@@ -49,14 +49,9 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 
-SCHEMA_VERSION = "2.2"
+SCHEMA_VERSION = "2.1"
 TOOL_VERSION = "node27-timeseries-compression/2"
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
-
-# Monotonic origin for the ride-along ANALYZE wall guard. The wrapper's
-# ``timeout`` wall started at process launch, so the budget already spent is
-# measured from here, not from the start of the ANALYZE batch.
-_PROCESS_START_MONOTONIC = time.monotonic()
 
 # The two detail hypertables gated by D3. Ordering here is the tie-break in
 # chunk selection and per-table totals — do not reorder without matching the
@@ -129,16 +124,6 @@ _CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CATALOG_ROWS = 50_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _MAX_CANDIDATES = 10_000
-
-# Ride-along ANALYZE budget (issue #1378). The three MUST NOTs that keep this
-# step from reddening the daily unit (no any_errors, no outcome change, no rc
-# change) cannot reach one channel: overrunning the wrapper wall makes
-# ``timeout`` TERM the process, which exits 124 regardless of the receipt. So
-# the batch measures the wall itself, reserves the publication segment, and
-# refuses to start an ANALYZE it cannot afford.
-_ANALYZE_MAX_TIMEOUT_MS = 300_000
-_ANALYZE_PUBLISH_RESERVE_SECONDS = 120
-_ANALYZE_MIN_BUDGET_SECONDS = 30
 
 
 class CompressionConfigError(RuntimeError):
@@ -485,7 +470,6 @@ FetchChunks = Callable[[str], list[ChunkRow]]
 MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], None]
 ReconcileChunkState = Callable[[str, ChunkRow], bool]
-AnalyzeChunk = Callable[..., None]
 
 
 def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
@@ -600,31 +584,6 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_time
         connection.close()
 
 
-def _default_analyze_chunk(database_url: str, chunk: ChunkRow, *, statement_timeout_ms: int) -> None:
-    """Refresh planner statistics on a chunk that just reached compressed state.
-
-    The origin chunk relation is the ANALYZE target even though its rows now
-    live in the compressed sibling: the origin is what the planner costs when a
-    query touches this chunk. ``statement_timeout_ms`` is derived from the
-    remaining wrapper wall by the caller and is an int, so the interpolation has
-    no injection surface (same convention as ``_default_compress_chunk``).
-    """
-    import psycopg2  # type: ignore[import-untyped]
-
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
-    try:
-        with connection:
-            with connection.cursor() as cursor:
-                cursor.execute(f"SET statement_timeout = {statement_timeout_ms}")
-                cursor.execute(f"ANALYZE {chunk.qualified_chunk}")
-    finally:
-        connection.close()
-
-
-def _process_elapsed_seconds() -> float:
-    return time.monotonic() - _PROCESS_START_MONOTONIC
-
-
 def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
     """Read the exact target through a fresh catalog connection after uncertainty."""
 
@@ -734,41 +693,6 @@ def _budget(config: CompressionConfig) -> dict[str, int]:
     }
 
 
-def _analyze_compressed_chunks(
-    targets: Sequence[tuple[ChunkRow, dict[str, Any]]],
-    *,
-    config: CompressionConfig,
-    analyze_chunk: AnalyzeChunk,
-    elapsed_seconds: Callable[[], float],
-) -> None:
-    """Ride-along statistics refresh, recorded in place on each descriptor.
-
-    Runs only after every compression is done: compression is the purpose of
-    this unit and is never sacrificed to the statistics passenger (issue
-    #1378). Nothing here may raise -- every failure and skip stays a per-chunk
-    receipt annotation, so ``any_errors``, ``outcome`` and the process return
-    code are untouched.
-    """
-    for chunk, descriptor in targets:
-        remaining = config.wrapper_wall_seconds - elapsed_seconds() - _ANALYZE_PUBLISH_RESERVE_SECONDS
-        if remaining < _ANALYZE_MIN_BUDGET_SECONDS:
-            descriptor["analyze_seconds"] = None
-            descriptor["analyze_error"] = "wall_budget_exhausted"
-            continue
-        started = time.monotonic()
-        try:
-            analyze_chunk(
-                config.database_url,
-                chunk,
-                statement_timeout_ms=min(_ANALYZE_MAX_TIMEOUT_MS, int(remaining * 1000)),
-            )
-        except Exception as error:
-            descriptor["analyze_seconds"] = None
-            descriptor["analyze_error"] = _safe_failure("ANALYZE", error)
-            continue
-        descriptor["analyze_seconds"] = round(time.monotonic() - started, 3)
-
-
 def build_receipt(
     config: CompressionConfig,
     *,
@@ -777,8 +701,6 @@ def build_receipt(
     measure_chunk_bytes: MeasureChunkBytes,
     compress_chunk: CompressChunk,
     reconcile_chunk_state: ReconcileChunkState = _default_reconcile_chunk_state,
-    analyze_chunk: AnalyzeChunk = _default_analyze_chunk,
-    elapsed_seconds: Callable[[], float] = _process_elapsed_seconds,
     head_sha: str | None = None,
 ) -> dict[str, Any]:
     """Perform the selection + (optionally) compression and return the receipt."""
@@ -908,21 +830,6 @@ def build_receipt(
         totals[chunk.hypertable_key]["before_bytes"] += before
         selected_descriptors.append(descriptor)
 
-    # Final per-chunk accounting -- not ``compress_chunk``'s return value -- is
-    # what says a chunk reached the compressed state, so the lost-acknowledgement
-    # reconciliation path and the after-measurement failure path are covered by
-    # the same predicate as the normal one.
-    _analyze_compressed_chunks(
-        [
-            (chunk, descriptor)
-            for chunk, descriptor in zip(selected_rows, selected_descriptors, strict=True)
-            if descriptor.get("mutation_state") == "committed"
-        ],
-        config=config,
-        analyze_chunk=analyze_chunk,
-        elapsed_seconds=elapsed_seconds,
-    )
-
     # Nullify after_bytes for tables where nothing was compressed (matches
     # dry-run convention: absence of measurement, not zero-size) OR where ANY
     # chunk in the table hit ANY failure (before-fail, compress-fail, or
@@ -1026,7 +933,7 @@ def build_failed_receipt(
     """Build a non-secret terminal failure that replaces any stale success."""
 
     receipt: dict[str, Any] = {
-        "schema_version": "2.2",
+        "schema_version": "2.1",
         "provenance_state": "bound" if head_sha is not None else "unavailable",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
@@ -1127,7 +1034,7 @@ def _replace_early_stale_with_failure(
     """
 
     payload = {
-        "schema_version": "2.2",
+        "schema_version": "2.1",
         "generated_at": _iso(datetime.now(UTC)),
         "now_utc": _iso(now_utc),
         "mode": "enforce" if enforce else "dry-run",
@@ -1205,8 +1112,6 @@ def main(
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     compress_chunk: CompressChunk | None = None,
     reconcile_chunk_state: ReconcileChunkState | None = None,
-    analyze_chunk: AnalyzeChunk | None = None,
-    elapsed_seconds: Callable[[], float] | None = None,
 ) -> int:
     wall_time = datetime.now(UTC)
     now = now_utc or wall_time
@@ -1296,8 +1201,6 @@ def main(
                     compress_timeout_ms=config.compress_timeout_ms,
                 ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
-                analyze_chunk=analyze_chunk or _default_analyze_chunk,
-                elapsed_seconds=elapsed_seconds or _process_elapsed_seconds,
                 head_sha=frozen_head_sha,
             )
         except CompressionConfigError as error:
