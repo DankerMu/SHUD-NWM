@@ -860,3 +860,19 @@ implementer 没有留下一个带着假注释的空转补丁，而是回退并�
 却报告完备**——比没有守卫更糟。故不加，改为在完备性用例的 docstring 里写明它只钉
 `log_uri` 族、错误族受同一 D3 契约但对本机制不可见、错误族的覆盖是逐腿的（并点名
 `mark_pipeline_job_permanently_failed` 是已知未覆盖腿，#1630）。
+
+### D11 尾：R2 的最后一处「声明跑在代码前面」
+
+终审判 HOLDS 后留了一条不阻塞的残留：R2 写「**every** durable write path」，而代码此时已在
+`_resolved_caller_evidence` 的 docstring 里记了**四条有意不 resolve 的腿**。一个从句的差距，
+但正是本单已经犯过两次的同一类错（D3 的作用域、R2 的全称句）。**已补**：R2 现在明写
+豁免只在「规则本就不适用」时成立（从不读持久行 / 结果比较不看该字段 / 调用方值按契约即权威），
+且每条豁免**必须连同理由列在 resolution helper 处**——让豁免集合在一个地方可读，
+而不是从「哪些腿没被提到」里反推。
+
+终审对该单的最后判读：**Phase 7 在 `2e38a87a` HOLDS，可合并**；census 未因 delta 改变
+（仍 8 腿 / 5 闸，defer 腿从 3/5 参数 resolve 变成 5/5，两种 regime）；`durable=` 现 4 处，
+布放仍正确；frozen 红线与 D10-P3 在该 head 重新探针复核，均不受影响。
+它并**接受**了 implementer 对其 `reject_pipeline_job_submit_attempt` 理由的更正
+（原判「无前值可毁」为假），并自证 `_durable_error_message` 幂等，从而回溯确认
+`complete_pipeline_job_cancellation` 的同序包裹也是安全的而不只是「一致」。
