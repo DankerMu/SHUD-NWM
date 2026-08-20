@@ -9,8 +9,10 @@
       `normalize_key`（`:183-196`）改为**委托**给它。
       **不得顺手改语义**：unquote 只发生在 `s3://` 支（`_normalize_s3_uri` `:204-223`），
       裸 key 支（`:190-191`）**不 unquote**，本次不动。
-      （委托 vs 复制是**代码评审属性、不是测试属性**——3.8 能证的只是"扰动纯函数时
-      `normalize_key` 随之变动"，见 design.md 变异节 M5。）
+      （round-1 lens B 实测更正：**该站点的委托是测试属性**——3.8 钉住的是
+      「`normalize_key` 在调用时解析模块级名字并转发」，对这一个站点等价于"无私有副本"，
+      逐字节内联副本死在 3.8 且只死在那里。仍属代码评审属性的是**跨仓库**的单一推导：
+      第三处再长一份内联归一化会让 3.8 保持绿。）
 - [x] 1.2 新增**四态**种类分类器方法（`file|directory|other|absent`），
       复用 `resolve_path`（`:169-181`）+ `stat_no_follow`，用 `stat.S_ISREG`/`S_ISDIR` 判定；
       错误容器与 `exists`（`:68-78`）**逐字一致**：`SafeFilesystemError` → `ObjectStoreError`，
@@ -62,7 +64,9 @@
       真实 store 里**无任何物理对象**，断言探针仍返回 `(False, None)`。
       **须参数化覆盖两类 key**：validator 可收的与不可收的（后者证明 sibling 的
       `resolve_path` 失败不会把 present 翻成 `(True, None)`）。
-      注：本用例**单独存在时是空腿**（sibling 没接进探针也照样绿），其判别力来自与 3.1/3.2 成对。
+      注（round-1 lens B 实测更正）：本用例在**接线轴**上确实盲——M1 删掉接线产生 13 红，
+      本例不在其中；但它在**「只加不改」轴**上是**唯一** oracle（M3/M3b 只经它被杀，
+      对 3.1/3.2 完全不可见）。依赖是非对称的，**不是空腿**。详见 design.md。
 - [x] 3.4 #1397 回归：`OBJECT_STORE_PREFIX` **带路径段**、forcing FILE key **物理存在**，
       断言分类器答 False 且探针答 `(False, None)`（今日会答 `artifact_probe_error`）。
 - [x] 3.5 裸桶前缀 + 无 percent-encoding 下，分类器答案与改动前**逐字一致**（must-preserve）。

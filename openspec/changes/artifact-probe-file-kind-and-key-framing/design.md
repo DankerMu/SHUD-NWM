@@ -217,8 +217,23 @@ L5 的根集不是任意的：resource-profile 的 `object_store_root`、`object
 初稿说被抢先的腿"钉不住任何东西"。**不确切**：本 fixture 强制断言**整个元组**，而上表每一个抢先门
 都产出**互不相同**的元组，所以被抢先的用例在**编写期就会响亮地红**，不是静默空腿。
 
-**本 change 真正的空腿风险在 task 3.3**：它断言 `(False, None)`，因此**即使 sibling 根本没接进探针
-也照样绿**。3.3 在同一接缝上**没有正向对照**——必须与 3.1/3.2 成对存在才有判别力。
+**关于 task 3.3 —— 初稿前提对、结论过强**（round-1 lens B 实测更正，非事后辩解）。
+
+初稿写：3.3 断言 `(False, None)`，即使 sibling 根本没接进探针也照样绿，故"必须与 3.1/3.2 成对
+才有判别力"。**前半实测为真**：M1 删掉接线产生 13 红，3.3 **不在其中**——它在**接线轴**上确实盲。
+**后半是错的**：M3（sibling 对 absent 也翻）与 M3b（删掉 sibling 自己的
+`except (OSError, ValueError)`）**只经 3.3 被杀**，对 3.1/3.2 **完全不可见**。
+
+真相是**依赖非对称，而初稿只记了一个方向**：
+
+| 轴 | 谁钉得住 |
+|---|---|
+| sibling 有没有接进探针（wiring） | 3.1 / 3.2；**3.3 盲** |
+| sibling 是否"只加不改"（D1 约束 2） | **仅 3.3**（两个参数各钉一条子腿）；3.1 / 3.2 盲 |
+
+故 3.3 **不是空腿**，而是 sibling 契约四条子守卫中**两条的唯一 oracle**——尤其 M3b 那条
+（sibling 的 `ValueError` 漏进探针 `:1218`，把 present 悄悄翻成 `(True, None)`），
+全仓**只有** 3.3 的第二个参数能抓住。
 
 ## 变异配方（逐守卫具名，实现期须逐条实测转红）
 
@@ -244,7 +259,9 @@ L5 的根集不是任意的：resource-profile 的 `object_store_root`、`object
 - **M5 初稿写的是"复制而非委托"，不成立**：逐字复制能通过任何等价性测试；而扰动
   `normalize_key` 那份副本又会连带 `tests/test_object_store_roots.py` 转红（无判别力）。
   正确形态是**扰动纯函数、断言 `normalize_key` 随之变动**——这才是 3.8 能证的东西。
-  **委托 vs 复制是代码评审属性，不是测试属性**；tasks.md 1.1 的相应措辞已改。
+  **边界（round-1 lens B 实测）**：`normalize_key` **这一个站点**的委托确实是**测试属性**
+  ——3.8 钉住"调用时解析模块级名字并转发"，逐字节内联副本死在 3.8 且只死在那里。
+  仍属代码评审属性的是**跨仓库**的单一推导（第三处再长一份内联副本，3.8 保持绿）。
 
 ## 风险三元组
 
@@ -296,7 +313,11 @@ Risk packs considered (core):
 - Schema / columns / units / field names: not selected - 无 schema/列/单位改动；unsafe_reason 无枚举约束（已 grep 复核）
 - Auth / permissions / secrets: not selected - 不涉凭据或权限
 - Concurrency / shared state / ordering: not selected - 纯读探针，无共享可变状态（stat 与后续读之间的 TOCTOU 本就存在且不由本 change 引入）
-- Resource limits / large input / discovery: not selected - 每 candidate 至多多一次 stat
+- Resource limits / large input / discovery: not selected - 实测（round-1 verifier）：present 对象产物
+  多付一次 store 构造（~66 µs，随 root 路径段数约 7 µs/段）+ 一次 resolve_path + 一次 stat ≈ 0.2 ms；
+  absent 零额外。初稿写的「至多多一次 stat」低估了成本，但量级仍在亚毫秒，不构成取舍改变。
+  注：「构造一次传下去」不是自由选项——它要改 `_object_manifest_is_missing` 的签名或绕过它，
+  而该 monkeypatch 接缝实测有 **5** 处（D1 表记的 4 处 + 本 PR 新增的 3.3 契约测试）
 - Legacy compatibility / examples: selected - 见上
 - Error handling / rollback / partial outputs: selected - 见上
 - Release / packaging / dependency compatibility: not selected - 无依赖变更
