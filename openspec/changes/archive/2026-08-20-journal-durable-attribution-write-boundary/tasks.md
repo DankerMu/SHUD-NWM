@@ -124,7 +124,7 @@
 
 ## 6. 偏离记录
 
-- [ ] 6.1 每一处与本 tasks/design 的departure 写入 PR 的 `偏离记录` 段（what/why/impact）；
+- [x] 6.1 每一处与本 tasks/design 的departure 写入 PR 的 `偏离记录` 段（what/why/impact）；
       无偏离须**显式写"无偏离"**。
 
 ## 7. Round-2 修复轮（D3 射程被证伪后的补齐；裁定见 design D9）
