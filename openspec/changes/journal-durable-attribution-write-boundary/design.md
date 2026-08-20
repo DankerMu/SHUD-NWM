@@ -839,9 +839,11 @@ update_hydro_run_status(run_id,"failed", error_message="s3://nhms/logs/run.log")
 update_hydro_run_status(run_id,"failed")   # 完全不带错误参数           -> durable None
 ```
 
-**这是既存缺陷，不是本 PR 引入**：在咽喉 strip 之前，同一个读写环把值洗成字面量
-`"[object-uri]"`；之后变成抹成 `None`。同样的信息损失，换了个表现形式——本 PR 改的是它的
-**样貌**，不是它的存在。修法在**读路径**（从 durable 行合并，而不是公共投影），是另一件事。
+**这是既存缺陷，不是本 PR 引入。归因已按 issue #1652 的复验更正**：我起初写「strip 之前洗成
+字面量、之后抹成 `None`，本 PR 改的是它的样貌」——**锚点安错了 commit**。`update_hydro_run_status`
+走 `_append_validated_record_unlocked`，那条腿的 strip 在 `:6280`，是 **`707cd338`** 就落到 master
+的既有调用点（`git merge-base --is-ancestor` 已核）。**抹成 `None` 本来就是今天 master 的行为**；
+本 PR 在这条腿上的 diff 是**纯注释**，零行为改动。修法在**读路径**（从 durable 行合并，而不是公共投影），是另一件事。
 implementer 没有留下一个带着假注释的空转补丁，而是回退并上报——这是对的。已另立 issue 跟踪。
 
 ### 三处被本 PR 自己的发现证伪的注释，已改
