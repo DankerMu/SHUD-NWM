@@ -38,7 +38,7 @@ out of this issue entirely and MUST NOT be taken during implementation.
 - `PsycopgForcingRepository._replace_values` gains one optional keyword,
   `delete_parameters_factory`, invoked after the pre-write cursor hook, so
   cursor-derived DELETE parameters can reach the DELETE. Default `None`
-  leaves the three other call sites (`store.py:311`, `:386`, `:716`)
+  leaves the three other call sites (`store.py:322`, `:397`, `:727`)
   behaviourally identical.
 - Unit tests (mock cursor, the established oracle for this wire site) cover
   the union window, the empty-window skip, and unchanged incoming-only
@@ -58,5 +58,5 @@ out of this issue entirely and MUST NOT be taken during implementation.
   `tests/test_timescale_write_guard_wired.py`.
 - No change to the handoff path (`731eb2a7`, already bounded), the parser
   path (`workers/output_parser/parser.py:792-898`, already bounded), or
-  `replace_forcing_components` (`store.py:716`, targets the plain table
+  `replace_forcing_components` (`store.py:727`, targets the plain table
   `met.forcing_version_component`, not a hypertable).

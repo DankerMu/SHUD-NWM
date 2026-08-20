@@ -97,7 +97,7 @@ Known members to include explicitly:
 
 ## 5. Report, don't fix (out of scope)
 
-- [x] 5.1 `replace_forcing_components` (`store.py:716`) has the same
+- [x] 5.1 `replace_forcing_components` (`store.py:727`) has the same
       unbounded-DELETE shape; its target `met.forcing_version_component` is
       a plain table (`db/migrations/000005_met.sql:112,126` create
       hypertables for `forcing_station_timeseries` and

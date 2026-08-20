@@ -34,7 +34,7 @@
   `check_batch_targets_uncompressed` (`:483-487`). This test is the
   write-guard's own tamper detector — weakening it to fit the fix is an
   oracle weakening and is forbidden.
-- **MP4** — `store.py:311`, `:386`, `:716` (`replace_*` for stations,
+- **MP4** — `store.py:322`, `:397`, `:727` (`replace_*` for stations,
   interpolation weights, components) keep their exact current SQL and
   parameters.
 - **MP5** — the INSERT statement, `execute_values` template, page size, and
@@ -51,7 +51,7 @@ four of its assertions:
 - **Shape a (rejected)** — move the whole sequence, *including the bounded
   DELETE*, inside `_guard(cursor)`, and pass `delete_statement=None` to
   `_replace_values` (a `None` delete statement is already an established
-  pattern at `store.py:386-390`). This passes MP3 — still one
+  pattern at `store.py:397-401`). This passes MP3 — still one
   `_replace_values` call, still a local hook Name, still a guard call
   inside it — and also passes the co-location invariant
   `_delete_site_has_guard_in_same_function`
