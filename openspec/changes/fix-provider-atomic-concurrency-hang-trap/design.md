@@ -1,0 +1,221 @@
+# Design: provider_atomic concurrency hang trap
+
+## Risk triage
+
+- **Fixture tier: `compact`.** Test-only, single file, one function rewritten
+  plus one added test, no production module touched, no schema/API/migration
+  surface. Size S.
+- **Upstream contract note:** #1633 was filed by `issue-scribe` as an
+  out-of-scope finding from #1513 / PR #1625. It carries no
+  `Suggested fixture level` and no `Minimal mergeable slice` field, so there is
+  no upstream triage to start from or diverge from; `compact` is this
+  workflow's own triage, recorded here as the baseline.
+- **Selected risk packs:** `correctness` (the fix must not make the test pass
+  vacuously), `test-oracle-integrity` (the test's job is to catch a real
+  concurrency invariant; the fix must not weaken it).
+- **Not selected:** `security`, `performance`, `data-migration`,
+  `api-compatibility`, `frontend` — no such surface is in reach of a change
+  confined to one test function.
+
+## Must-preserve behavior
+
+- **MP1** The test's substantive oracle is unchanged: readers observe only
+  complete `old` or `new` JSON, never a torn write. All three original
+  assertions (`observed` non-empty, `set(observed) <= {old, new}`, every
+  observation parses with a `generation` in `{old, new}`) survive verbatim.
+- **MP2** The writer still performs 40 real `atomic_replace_provider_bytes`
+  calls alternating `old`/`new`. Reducing the iteration count or replacing the
+  real call with a double would weaken the race window and is prohibited.
+- **MP3** The seed still goes through `write_provider_destination`, not bare
+  `write_text` — that is #1513's fix and must not regress.
+- **MP4** No production module is edited.
+
+## Seams under test
+
+- `atomic_replace_provider_bytes` (raising vs. succeeding) — the failure
+  injection seam for D3.
+- `threading.Event` / `Thread.join(timeout=)` — the completion-signalling seam.
+
+## D1 — Conform to the house pattern; do not invent a new one
+
+`tests/test_scheduler_file_provider_refresh.py` already contains the correct
+shape, twice:
+
+```python
+errors: list[BaseException] = []
+
+def contender() -> None:
+    try:
+        ...
+    except BaseException as error:  # pragma: no cover - asserted below
+        errors.append(error)
+
+for thread in threads:
+    thread.join(timeout=5)
+
+assert not errors
+assert all(not thread.is_alive() for thread in threads)
+```
+
+(`:796-818`, and again at `:1929-1941`.) The target test at `:823-848` is the
+odd one out in its own file. The fix is to conform it, which is why this change
+adds no new vocabulary, no helper module, and no fixture.
+
+## D2 — The issue's proposed fix is insufficient; recorded, not silently absorbed
+
+#1633 proposes `finally: finished.set()` and claims this "把任何未来的失败从挂死
+转成干净的失败" (turns any future failure from a hang into a clean failure).
+**That claim is false**, and the correction is load-bearing for this design.
+
+`threading.Thread` swallows exceptions raised in the thread body. pytest reports
+them only as `PytestUnhandledThreadExceptionWarning`, and `pyproject.toml`
+`[tool.pytest.ini_options]` declares no `filterwarnings`, so the warning is
+non-fatal. A bare `try/finally` therefore converts the hang into a **silent
+pass** — arguably worse than the hang, because a hang at least stops the run.
+
+Verified empirically before designing, with a standalone probe reproducing the
+proposed fix exactly (writer raises, `finally: finished.set()`, nothing else):
+
+```
+1 passed, 1 warning in 0.00s
+  PytestUnhandledThreadExceptionWarning: Exception in thread Thread-1 (writer)
+  RuntimeError: provider_destination_access_invalid
+```
+
+So the `finally` is necessary but not sufficient. The `errors` list plus
+`assert not errors` is what actually produces the clean failure the issue asked
+for. Implementation must include both halves.
+
+## D3 — Assertion ordering is load-bearing
+
+`assert not errors, errors` MUST come **before** `assert observed`. If the
+writer raises on iteration 0, `observed` may be empty, and an `observed`-first
+ordering reports `assert observed` — the downstream symptom — instead of the
+actual `ProviderAtomicError`. This is precisely the diagnostic-quality failure
+that made #1633 expensive in the first place, so it is pinned as a requirement
+rather than left to taste.
+
+## D4 — Systemic guards are out of scope (considered and routed)
+
+The issue's "顺带值得考虑" raises two repo-wide options. Both are rejected *for
+this change* and routed to a follow-up issue:
+
+- **`pytest-timeout`**: adds a dependency and a global time bound over every
+  suite, including the node-27 real-DB and `grib`/`e2e` marker lanes whose
+  legitimate runtimes are long and not measured here (that measurement is
+  #1632's job). A global timeout tuned without those numbers risks killing
+  healthy slow tests — breaking working suites to fix a test-hygiene bug.
+- **`filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]`**:
+  strictly cheaper — zero dependencies — and would kill the silent-pass half of
+  this class repo-wide. But it makes every currently-warning thread exception in
+  the tree fail, across all 18 thread-using test files, which requires a
+  full-suite validation to adopt safely. That is its own change, not a rider.
+
+Filing a decision satisfies "worth considering"; scope creep on a size-S fix
+does not.
+
+## D5 — Blast radius
+
+Three legs, per the discipline banked in #1119:
+
+1. **Reverse-import closure:** none. `tests/test_scheduler_file_provider_refresh.py`
+   is a leaf test module; nothing imports it.
+2. **Content-coupling (files read as data, invisible to an import graph)** —
+   swept, result below. Every consumer found is keyed on *paths and selector
+   rules*, never on this file's body, so a test-body edit is inert to all of
+   them:
+   - `.large-file-guard.json:35` — this file is **already** in the exclude
+     list. No hook block is expected (contrast #1119, where the missing entry
+     blocked the commit).
+   - `scripts/select_ci_tests.py:290`, `:574`, `:847`, `:851` — routing rules
+     naming this file, keyed on *other* paths (`tests/provider_mode_helpers.py`
+     and friends).
+   - `tests/test_select_ci_tests.py:243`, `:376`, `:389`, `:402` — assert this
+     file gets selected; again keyed on selector rules, not on its body.
+   - `openspec/specs/ci-contract-baseline/spec.md:547` — names the file as
+     expected selector output.
+   - `tests/test_safe_fs.py:23`, `:177`, `tests/test_readonly_db_validation.py:90`,
+     `tests/test_publish_scheduler_file_registry.py:1601` — prose comments
+     referencing this file. The last one names a *specific* test
+     (`::test_full_runner_refresh_lock_is_held_during_precommit_gate`), which is
+     NOT the test being changed.
+   - `tests/test_timescale_write_guard_wire_site_invariant.py` — the tree's only
+     AST meta-guard; it targets `workers/forcing_producer/store.py`, not this
+     file.
+   **Derived constraint:** do not rename the target test function, and do not
+   touch selector rules.
+3. **Config/collection coupling:** `pyproject.toml` testpaths, CI path filters.
+   Unchanged by a test-body edit, but the `backend` filter does match
+   `tests/**`, so CI's targeted lane will select this file.
+
+## D6 — The failure-injection seam, and the vacuity trap in it
+
+`tests/test_scheduler_file_provider_refresh.py:23` imports the symbol directly:
+
+```python
+from packages.common.provider_atomic import (
+    atomic_replace_provider_bytes,
+    ...
+)
+```
+
+The name is therefore **bound into the test module at import time**. A
+`monkeypatch.setattr(provider_atomic_module, "atomic_replace_provider_bytes", raiser)`
+would rebind the attribute on the package module while the test keeps calling
+its own already-bound reference — the patch is **inert**, no exception is
+raised, the harness is never exercised, and tasks 2.2/2.3 pass **vacuously**.
+A green test that proves nothing is a worse outcome than the bug.
+
+Two valid seams:
+
+- **(a) Patch an inner dependency** that the real `atomic_replace_provider_bytes`
+  resolves at call time. Precedent in this same file: `:713-721` patches
+  `provider_atomic_module.atomic_write_bytes_no_follow`, and `:689-699` patches
+  `provider_atomic_module.read_bytes_limited_no_follow`. This exercises the real
+  code path and is preferred.
+- **(b) Drive the harness with an explicitly raising callable**, no monkeypatch
+  at all — acceptable when the test's subject is the harness shape itself.
+
+**Prohibited:** patching the module attribute for the directly-imported name and
+assuming it takes effect.
+
+**Required anti-vacuity evidence:** the injection test must be demonstrated to
+**fail** when the harness fix is absent, not merely to pass when it is present.
+Absent that demonstration, vacuity is undetectable.
+
+Incidental: `time` is **not** currently imported in this file (imports at
+`:1-23`). The D-1 deadline needs it added in isort order — `ruff check .` is the
+gate.
+
+## D7 — Scope of the spec requirement, and why it is narrowed
+
+An earlier draft of the spec delta governed any test that "hands work to a
+thread and waits on a completion sentinel". Sweeping the tree showed that is
+**overreach**: the population is 12 `threading.Barrier(` sites and roughly 20
+`threading.Event()` sites, and a broad requirement would be false against the
+tree the moment it merged — including against the two sites this change
+deliberately does not fix.
+
+The requirement is therefore scoped to **blocking dependence**: the main thread
+cannot progress until a worker reaches a synchronization point (`Event` it must
+set, `Barrier` it must reach). This correctly **excludes** a bare
+`thread.join()`, where a raising worker simply dies and the join returns, so no
+hang is possible — which is why `tests/test_scheduler_generation.py:1196` is out
+of scope rather than a violation.
+
+Under that scoping the non-conforming set is exactly two sites
+(`tests/test_gateway_reconcile.py:3574` and `:10028`), both named in the spec as
+tracked known exceptions against #1645. A spec with two named exceptions is
+honest; a spec silently false in ~2 places is not.
+
+## Expected collateral
+
+- **Required positive evidence, not a repair:** the rewritten test body changes.
+  There is no existing assertion that must go red — the three substantive
+  assertions (MP1) are preserved verbatim and must stay green throughout. If
+  any of them goes red, the fix is wrong, not the test.
+- **The one line that must change meaning:** the comment at `:827-830` states
+  "This one HANGS rather than fails when it is wrong". After this change that
+  is false. Leaving it is a stale anchor, so updating it is required, not
+  optional.
+- No other test file, and no production file, should appear in the diff.
