@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -593,7 +594,10 @@ def test_frontier_exempt_entries_carry_no_size_bytes_and_are_never_size_scanned(
     exempt = [entry for entry in result.skipped if entry["reason"] == PIPELINE_FRONTIER_EXEMPT_REASON]
     assert {entry["key"] for entry in exempt} == set(in_flight_keys.values())
     for entry in exempt:
-        assert set(entry) == {"key", "path", "cycle_time", "reason"}
+        # ``root`` joined the shape in #1318 (identically named runs/<run_id>
+        # on different roots must be distinguishable); it is a string already
+        # held in memory, so the #1307 protection below is unaffected.
+        assert set(entry) == {"key", "path", "cycle_time", "reason", "root"}
         assert "size_bytes" not in entry
         # the protected directory was never walked ...
         assert entry["path"] not in scanned
@@ -1143,3 +1147,649 @@ def test_canonical_run_workspaces_keep_the_two_skip_tiers(tmp_path: Path) -> Non
     assert reasons[f"runs/fcst_gfs_{_AGED}_model_a"] == PIPELINE_FRONTIER_EXEMPT_REASON
     assert reasons[f"runs/fcst_gfs_{in_window}_model_a"] == "within_retention_window"
     assert result.planned == []
+
+
+# ===========================================================================
+# Issue #1318 -- additional ``runs/``-only roots
+#
+# The governing invariant: retention only ever deletes a directory that lives
+# under ``<configured root>/runs``, is named like a canonical run id, has a
+# cycle older than *that root's* cutoff, and sits below the frontier. Nothing
+# else -- above all the cycle-scoped prefixes on an additional root -- may
+# enter the plan under any configuration.
+# ===========================================================================
+
+EXTRA_CONFIG = RetentionConfig(
+    enabled=True,
+    dry_run=True,
+    retention_days=14,
+    extra_roots_enabled=True,
+    extra_roots_retention_days=30,
+)
+
+
+def _run_id(cycle_time: datetime) -> str:
+    return f"fcst_gfs_{_cycle_name(cycle_time)}_model_a"
+
+
+def _seed_run_workspace(root: Path, cycle_time: datetime) -> str:
+    """Seed a full run workspace under ``<root>/runs``; return its key."""
+    run_id = _run_id(cycle_time)
+    for rel in (
+        "input/manifest.json",
+        "output/out.nc",
+        "logs/shud.log",
+        "state_checkpoint_recovery/checkpoint.json",
+    ):
+        _write(root, f"runs/{run_id}/{rel}", b"run-bytes")
+    return f"runs/{run_id}"
+
+
+def _entries_for(entries: list[dict], root: Path) -> set[str]:
+    resolved = str(root.resolve())
+    return {entry["key"] for entry in entries if entry["root"] == resolved}
+
+
+# --- 2.1 -------------------------------------------------------------------
+def test_extra_root_run_workspace_is_reclaimed_and_attributed(tmp_path: Path) -> None:
+    """[2.1] An aged run workspace on the workspace root is deleted, and the
+    receipt entry names that root."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    aged = NOW - timedelta(days=40)
+    key = _seed_run_workspace(workspace, aged)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(workspace,),
+    )
+
+    assert _entries_for(result.planned, workspace) == {key}
+    assert _entries_for(result.deleted, workspace) == {key}
+    assert result.freed_bytes > 0
+    assert not (workspace / key).exists()
+    assert (workspace / "runs").is_dir()
+
+
+# --- 2.2 -------------------------------------------------------------------
+def test_extra_root_cycle_scoped_prefixes_are_never_selected(tmp_path: Path) -> None:
+    """[2.2] runs-only, pinned. The copyback root's forcing/ tree is node-27's
+    live display serving surface; sweeping it is a silent feature regression."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    copyback = tmp_path / "copyback"
+    ancient = NOW - timedelta(days=400)
+    seeded = _seed_cycle(copyback, ancient)  # raw/ + canonical/ + forcing/
+    run_key = _seed_run_workspace(copyback, ancient)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(copyback,),
+    )
+
+    # Only the run workspace is ever touched, in plan and on disk.
+    assert _entries_for(result.planned, copyback) == {run_key}
+    for prefix in ("raw", "canonical", "forcing"):
+        assert (copyback / seeded[prefix]).exists()
+        assert not any(
+            entry["key"].startswith(f"{prefix}/")
+            for entry in [*result.planned, *result.deleted, *result.skipped, *result.failed]
+            if entry["root"] == str(copyback.resolve())
+        )
+
+
+# --- 2.3 -------------------------------------------------------------------
+def test_the_two_retention_windows_are_independent(tmp_path: Path) -> None:
+    """[2.3] Same cycle, both roots: past the 14d object-store cutoff, inside
+    the 30d additional window."""
+    store = tmp_path / "object-store"
+    workspace = tmp_path / "workspace"
+    cycle = NOW - timedelta(days=20)
+    store_key = _seed_run_workspace(store, cycle)
+    workspace_key = _seed_run_workspace(workspace, cycle)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=EXTRA_CONFIG,
+        runs_only_roots=(workspace,),
+    )
+
+    assert _entries_for(result.planned, store) == {store_key}
+    assert _entries_for(result.planned, workspace) == set()
+    workspace_skips = {
+        entry["key"]: entry["reason"]
+        for entry in result.skipped
+        if entry["root"] == str(workspace.resolve())
+    }
+    assert workspace_skips == {workspace_key: "within_retention_window"}
+
+
+# --- 2.4 -------------------------------------------------------------------
+def test_closed_gate_reproduces_the_previous_plan_key_for_key(tmp_path: Path) -> None:
+    """[2.4] With the gate closed the additional roots are not scanned at all,
+    and the plan matches the no-extra-roots call byte for byte."""
+    store = tmp_path / "object-store"
+    _seed_cycle(store, NOW - timedelta(days=20), run=True)
+    workspace = tmp_path / "workspace"
+    for age in (40, 60, 90):
+        _seed_run_workspace(workspace, NOW - timedelta(days=age))
+
+    gated = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, extra_roots_enabled=False),
+        runs_only_roots=(workspace, tmp_path / "copyback"),
+    )
+    baseline = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, extra_roots_enabled=False),
+    )
+
+    assert gated.planned == baseline.planned
+    assert gated.deleted == baseline.deleted
+    assert gated.skipped == baseline.skipped
+    assert gated.freed_bytes == baseline.freed_bytes
+    # nothing from the additional root was scanned, in any bucket
+    assert str(workspace.resolve()) not in {
+        entry["root"] for entry in [*gated.planned, *gated.skipped, *gated.failed]
+    }
+    # ... and the receipt still discloses what opening the gate would use
+    assert gated.to_dict()["extra_roots"] == {
+        "enabled": False,
+        "retention_days": 30,
+        "cutoff": (NOW - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "roots": [],
+    }
+
+
+# --- 2.5 -------------------------------------------------------------------
+def test_roots_resolving_to_the_same_path_are_swept_once(tmp_path: Path) -> None:
+    """[2.5] Historical single-root deployments must see no plan drift and no
+    double-counted freed bytes."""
+    store = tmp_path / "object-store"
+    key = _seed_run_workspace(store, NOW - timedelta(days=40))
+    alias = tmp_path / "alias"
+    alias.symlink_to(store, target_is_directory=True)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(store, alias, str(store) + "/"),
+    )
+
+    assert [entry["key"] for entry in result.planned] == [key]
+    assert [entry["key"] for entry in result.deleted] == [key]
+    assert result.to_dict()["extra_roots"]["roots"] == []
+
+    solo = run_retention(
+        object_store_root=tmp_path / "solo",
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+    )
+    assert solo.freed_bytes == 0
+    assert result.freed_bytes == _dir_bytes_of(result.planned)
+
+
+def _dir_bytes_of(entries: list[dict]) -> int:
+    return sum(int(entry["size_bytes"]) for entry in entries)
+
+
+# --- 2.6 -------------------------------------------------------------------
+def test_missing_extra_root_and_root_without_runs_are_silent_no_ops(tmp_path: Path) -> None:
+    """[2.6] Absent root / root without runs/: no entries, no exception."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    missing = tmp_path / "does-not-exist"
+    no_runs = tmp_path / "no-runs"
+    _write(no_runs, "raw/gfs/2026010100/payload.nc")
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(missing, no_runs),
+    )
+
+    assert result.planned == []
+    assert result.skipped == []
+    assert result.failed == []
+    # Both survive hygiene + dedup, so the receipt still discloses them: a
+    # mistyped root must be visible, not silently absent.
+    assert result.to_dict()["extra_roots"]["roots"] == [str(missing), str(no_runs.resolve())]
+
+
+# --- 2.6b ------------------------------------------------------------------
+def test_blank_extra_root_never_resolves_to_the_working_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """[2.6b] ``Path("").expanduser().resolve()`` is the CWD, so a blank root
+    would drag ``<cwd>/runs`` into the deletion surface."""
+    cwd = tmp_path / "cwd"
+    cwd_key = _seed_run_workspace(cwd, NOW - timedelta(days=90))
+    monkeypatch.chdir(cwd)
+    store = tmp_path / "object-store"
+    store.mkdir()
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(None, "", "   "),
+    )
+
+    assert result.planned == []
+    assert (cwd / cwd_key).exists()
+    assert result.to_dict()["extra_roots"]["roots"] == []
+    assert str(cwd.resolve()) not in result.to_dict()["extra_roots"]["roots"]
+
+
+def test_extra_roots_are_swept_even_when_the_object_store_root_is_unset(tmp_path: Path) -> None:
+    """[2.6b, task 1.2d] The object-store root's early return must not make the
+    additional roots silently dead -- the CLI reads it from a bare getenv."""
+    unset_workspace = tmp_path / "workspace-unset"
+    absent_workspace = tmp_path / "workspace-absent"
+    unset_key = _seed_run_workspace(unset_workspace, NOW - timedelta(days=40))
+    absent_key = _seed_run_workspace(absent_workspace, NOW - timedelta(days=40))
+
+    unset = run_retention(
+        object_store_root=None,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(unset_workspace,),
+    )
+    absent = run_retention(
+        object_store_root=tmp_path / "nope",
+        now=NOW,
+        config=EXTRA_CONFIG,
+        runs_only_roots=(absent_workspace,),
+    )
+
+    assert _entries_for(unset.deleted, unset_workspace) == {unset_key}
+    assert not (unset_workspace / unset_key).exists()
+    assert _entries_for(absent.planned, absent_workspace) == {absent_key}
+
+
+# --- 2.7 -------------------------------------------------------------------
+def test_non_canonical_names_on_an_extra_root_are_never_deleted(tmp_path: Path) -> None:
+    """[2.7] Only names the pipeline actually mints are admitted."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    _write(workspace, "runs/not-a-run-id/output/out.nc")
+    _write(workspace, "runs/2026010100/output/out.nc")
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(workspace,),
+    )
+
+    assert result.planned == []
+    assert {
+        entry["key"]: entry["reason"]
+        for entry in result.skipped
+        if entry["root"] == str(workspace.resolve())
+    } == {
+        "runs/not-a-run-id": "unparseable_run_cycle",
+        "runs/2026010100": "unparseable_run_cycle",
+    }
+    assert (workspace / "runs/not-a-run-id").exists()
+
+
+# --- 2.8 -------------------------------------------------------------------
+def test_frontier_exemption_applies_to_extra_roots(tmp_path: Path) -> None:
+    """[2.8] Catch-up/replay pulls the active lower bound far below wall clock;
+    the exemption must gate the additional roots too."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    in_flight = NOW - timedelta(days=45)
+    collectable = NOW - timedelta(days=60)
+    exempt_key = _seed_run_workspace(workspace, in_flight)
+    collectable_key = _seed_run_workspace(workspace, collectable)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=EXTRA_CONFIG,
+        runs_only_roots=(workspace,),
+        active_lower_bound=in_flight,
+        active_lower_bound_source="candidates",
+    )
+
+    exempt = [
+        entry for entry in result.skipped if entry["reason"] == PIPELINE_FRONTIER_EXEMPT_REASON
+    ]
+    assert [entry["key"] for entry in exempt] == [exempt_key]
+    assert exempt[0]["root"] == str(workspace.resolve())
+    assert "size_bytes" not in exempt[0]
+    assert _entries_for(result.planned, workspace) == {collectable_key}
+
+
+# --- 2.9 -------------------------------------------------------------------
+def test_published_artifact_protection_applies_to_extra_roots(tmp_path: Path) -> None:
+    """[2.9] The published-artifact root protects every root, not just the
+    object-store one."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        published_artifact_root=workspace / "runs",
+        runs_only_roots=(workspace,),
+    )
+
+    assert result.planned == []
+    assert {
+        entry["key"]: entry["reason"]
+        for entry in result.skipped
+        if entry["root"] == str(workspace.resolve())
+    } == {key: "protected_path"}
+    assert (workspace / key).exists()
+
+
+# --- 2.9b ------------------------------------------------------------------
+def test_symlinked_runs_directory_does_not_extend_the_deletion_surface(tmp_path: Path) -> None:
+    """[2.9b] ``Path.is_dir()`` follows symlinks: a swapped ``runs/`` would aim
+    the enumeration, and the deletion, outside the root."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    outside = tmp_path / "outside"
+    outside_run = f"runs/{_run_id(NOW - timedelta(days=90))}"
+    _write(outside, f"{outside_run}/output/out.nc")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "runs").symlink_to(outside / "runs", target_is_directory=True)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(workspace,),
+    )
+
+    assert result.planned == []
+    assert result.deleted == []
+    assert (outside / outside_run).exists()
+    assert not any(
+        str(outside.resolve()) in entry["path"]
+        for entry in [*result.planned, *result.skipped, *result.failed]
+        if "path" in entry
+    )
+    assert [
+        (entry["key"], entry["reason"])
+        for entry in result.skipped
+        if entry["root"] == str(workspace.resolve())
+    ] == [("runs", "runs_root_symlink_skipped")]
+
+
+# --- 2.9c ------------------------------------------------------------------
+def test_removal_on_an_extra_root_does_not_follow_symlinks_out_of_it(tmp_path: Path) -> None:
+    """[2.9c] Containment: a link inside a selected run workspace must not
+    become a deletion of the link's target."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    outside = tmp_path / "outside"
+    _write(outside, "precious/data.nc", b"precious")
+    workspace = tmp_path / "workspace"
+    linked_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+    plain_key = _seed_run_workspace(workspace, NOW - timedelta(days=50))
+    (workspace / linked_key / "escape").symlink_to(outside / "precious", target_is_directory=True)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(workspace,),
+    )
+
+    # The link target is untouched; ``rmtree_no_follow`` refuses the link
+    # rather than descending through it, so the entry lands in ``failed``.
+    assert (outside / "precious/data.nc").read_bytes() == b"precious"
+    assert _entries_for(result.failed, workspace) == {linked_key}
+    assert "symlink" in result.failed[0]["error"]
+    # ... and the sibling entry is still reclaimed.
+    assert _entries_for(result.deleted, workspace) == {plain_key}
+    assert not (workspace / plain_key).exists()
+
+
+# --- 2.9d ------------------------------------------------------------------
+def test_v2_receipt_still_carries_the_frontier_block_unchanged(tmp_path: Path) -> None:
+    """[2.9d] ``retention_frontier`` reads this block; its shape is unchanged."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    in_flight = NOW - timedelta(days=45)
+    _seed_run_workspace(workspace, in_flight)
+
+    payload = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=EXTRA_CONFIG,
+        runs_only_roots=(workspace,),
+        active_lower_bound=in_flight,
+        active_lower_bound_source="candidates",
+    ).to_dict()
+
+    assert payload["frontier"] == {
+        "active_lower_bound": in_flight.astimezone(UTC).isoformat(),
+        "source": "candidates",
+        "protected_count": 1,
+    }
+
+
+# --- 2.10 ------------------------------------------------------------------
+def test_receipt_is_v2_with_a_complete_extra_roots_block(tmp_path: Path) -> None:
+    """[2.10] Schema v2: the additional-root block and per-entry ``root``."""
+    store = tmp_path / "object-store"
+    store_key = _seed_run_workspace(store, NOW - timedelta(days=20))
+    workspace = tmp_path / "workspace"
+    workspace_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+
+    payload = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=EXTRA_CONFIG,
+        runs_only_roots=(workspace,),
+    ).to_dict()
+
+    assert payload["schema_version"] == "nhms.production_scheduler.retention.v2"
+    assert payload["extra_roots"] == {
+        "enabled": True,
+        "retention_days": 30,
+        "cutoff": (NOW - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "roots": [str(workspace.resolve())],
+    }
+    # the object-store window is untouched by the additional one
+    assert payload["retention_days"] == 14
+    assert payload["cutoff"] == (NOW - timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert {entry["key"]: entry["root"] for entry in payload["planned"]} == {
+        store_key: str(store.resolve()),
+        workspace_key: str(workspace.resolve()),
+    }
+
+
+# --- 2.12 ------------------------------------------------------------------
+@pytest.mark.parametrize("kind", ["unsafe", "io"])
+def test_failed_removal_on_an_extra_root_is_isolated(tmp_path: Path, monkeypatch, kind) -> None:
+    """[2.12] ``SafeFilesystemError`` is a ``RuntimeError``, not an ``OSError``:
+    an uncaught one collapses the pass receipt and aborts the CLI mid-sweep."""
+    import services.orchestrator.retention as retention_mod
+    from packages.common.safe_fs import SafeFilesystemError
+
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    doomed_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+    survivor_key = _seed_run_workspace(workspace, NOW - timedelta(days=50))
+    real_rmtree = retention_mod.rmtree_no_follow
+
+    def failing_rmtree(path, **kwargs):
+        if Path(path).name == Path(doomed_key).name:
+            raise SafeFilesystemError(f"boom on {path}", kind=kind)
+        return real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(retention_mod, "rmtree_no_follow", failing_rmtree)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(workspace,),
+    )
+
+    assert _entries_for(result.failed, workspace) == {doomed_key}
+    assert "boom on" in result.failed[0]["error"]
+    # the sweep continued, and only the successful removal is counted
+    assert _entries_for(result.deleted, workspace) == {survivor_key}
+    assert (workspace / doomed_key).exists()
+    assert not (workspace / survivor_key).exists()
+    assert result.freed_bytes == int(result.deleted[0]["size_bytes"])
+
+
+# ===========================================================================
+# Issue #1318 section 5 -- the additional roots the *pass* actually forwards.
+#
+# The module-level tests above drive ``run_retention`` directly, so they say
+# nothing about which roots ``ProductionScheduler._run_retention`` hands it.
+# That wiring is the deletion surface an operator gets, and it is the only
+# place where a root can come from a built-in default instead of from
+# configuration.
+# ===========================================================================
+
+
+def _seed_pass_env(monkeypatch) -> None:
+    """Enable real additional-root retention for a scheduler pass."""
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.setenv("NHMS_RETENTION_EXTRA_ROOTS_ENABLED", "true")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("NHMS_RETENTION_EXTRA_ROOTS_DAYS", raising=False)
+
+
+def _pass_scheduler(**config_kwargs):
+    from services.orchestrator.scheduler import (
+        ProductionScheduler,
+        ProductionSchedulerConfig,
+        _BlockedModelRegistry,
+    )
+
+    config = ProductionSchedulerConfig(dry_run=False, **config_kwargs)
+    return ProductionScheduler(
+        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
+    )
+
+
+# --- 5.3 -------------------------------------------------------------------
+def test_pass_forwards_both_configured_extra_roots(tmp_path: Path, monkeypatch) -> None:
+    """[5.3] The pass-side wiring itself: with the gate open and both roots
+    explicitly configured, both are swept and each entry names its own root.
+
+    Deleting the ``runs_only_roots`` argument from
+    ``scheduler_runtime._run_retention`` must make this test fail -- that
+    four-line block had no coverage at all before this test existed.
+    """
+    _seed_pass_env(monkeypatch)
+    store = tmp_path / "object-store"
+    store.mkdir()
+    workspace = tmp_path / "workspace"
+    copyback = tmp_path / "copyback"
+    workspace_key = _seed_run_workspace(workspace, NOW - timedelta(days=40))
+    copyback_key = _seed_run_workspace(copyback, NOW - timedelta(days=50))
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback))
+
+    scheduler = _pass_scheduler(workspace_root=str(workspace), object_store_root=str(store))
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "completed"
+    # (1) both configured roots reached retention
+    assert payload["extra_roots"]["roots"] == [str(workspace.resolve()), str(copyback.resolve())]
+    # (2) the aged run under each is selected and attributed to its own root
+    assert _entries_for(payload["planned"], workspace) == {workspace_key}
+    assert _entries_for(payload["planned"], copyback) == {copyback_key}
+    # (3) physical: both were really reclaimed
+    assert not (workspace / workspace_key).exists()
+    assert not (copyback / copyback_key).exists()
+
+
+# --- 5.4 -------------------------------------------------------------------
+def test_pass_does_not_sweep_a_defaulted_workspace_root(tmp_path: Path, monkeypatch) -> None:
+    """[5.4] ``WORKSPACE_ROOT`` unset means the workspace root is the built-in
+    relative default, which ``__post_init__`` anchors to the invocation working
+    directory. A default must never become a deletion surface, and the anchoring
+    means no absolute-path filter downstream can catch it."""
+    _seed_pass_env(monkeypatch)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", raising=False)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    store = tmp_path / "object-store"
+    store.mkdir()
+    defaulted = cwd / ".nhms-workspace"
+    defaulted_key = _seed_run_workspace(defaulted, NOW - timedelta(days=90))
+
+    scheduler = _pass_scheduler(object_store_root=str(store))
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "completed"
+    assert payload["extra_roots"]["roots"] == []
+    assert str(defaulted.resolve()) not in {entry["root"] for entry in payload["planned"]}
+    assert payload["planned"] == []
+    # physical: the defaulted root's aged run workspace is still on disk
+    assert (defaulted / defaulted_key).exists()
+    assert (defaulted / defaulted_key / "output/out.nc").exists()
+
+
+# --- 5.5 -------------------------------------------------------------------
+def test_relative_extra_root_is_discarded_with_a_recorded_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """[5.5] A configured-but-relative root resolves against the working
+    directory. It is discarded before ``resolve()`` and recorded, so the receipt
+    says why that root produced nothing. ``NHMS_OBJECT_STORE_COPYBACK_ROOT``
+    arrives as the bare env string, so the value is stripped before judging."""
+    from services.orchestrator.retention import EXTRA_ROOT_NOT_ABSOLUTE_REASON
+
+    cwd = tmp_path / "cwd"
+    cwd_key = _seed_run_workspace(cwd, NOW - timedelta(days=90))
+    nested = cwd / "relative/copyback"
+    nested_key = _seed_run_workspace(nested, NOW - timedelta(days=90))
+    monkeypatch.chdir(cwd)
+    store = tmp_path / "object-store"
+    store.mkdir()
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=False),
+        runs_only_roots=(".", "  relative/copyback  "),
+    )
+
+    assert result.to_dict()["extra_roots"]["roots"] == []
+    assert result.planned == []
+    assert [
+        (entry["key"], entry["root"], entry["reason"])
+        for entry in result.skipped
+        if entry["reason"] == EXTRA_ROOT_NOT_ABSOLUTE_REASON
+    ] == [
+        ("runs", ".", EXTRA_ROOT_NOT_ABSOLUTE_REASON),
+        ("runs", "relative/copyback", EXTRA_ROOT_NOT_ABSOLUTE_REASON),
+    ]
+    # physical: nothing under the working directory was touched
+    assert (cwd / cwd_key / "output/out.nc").exists()
+    assert (nested / nested_key / "output/out.nc").exists()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -1982,6 +1983,28 @@ def _run_retention(
     ``active_lower_bound`` (issue #1307) exempts cycles that are still in
     flight from wall-clock deletion; the default ``None`` keeps the previous
     behaviour for callers that have no pass context.
+
+    The scheduler workspace root and the object-store copyback root are
+    forwarded as additional ``runs/``-only roots (issue #1318), and only when
+    ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on.
+
+    Neither value arrives pre-validated, so neither is trusted here (task 5.6):
+    the db-free topology preflight returns ``not_required`` outside db-free /
+    repair-authority mode, and ``object_store_copyback_root`` is never
+    normalised in ``__post_init__`` -- it is the bare
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` string, whitespace included. Blank,
+    relative and duplicate roots are the business of
+    :func:`~services.orchestrator.retention._resolve_runs_only_roots`, which
+    discards them before any path resolution.
+
+    The workspace root is read from ``WORKSPACE_ROOT`` rather than from
+    ``self.config.workspace_root`` (task 5.2): that field falls back to the
+    built-in relative default ``.nhms-workspace``, which ``__post_init__``
+    anchors with ``Path.cwd()``. It therefore reaches retention already
+    absolute, so no path filter can tell it apart from a configured root -- and
+    an unconfigured deployment would sweep ``<invocation cwd>/.nhms-workspace``.
+    A default must never become a deletion surface; this matches what
+    ``cli.py::_run_cleanup`` already does with the same two roots.
     """
     retention_config = RetentionConfig.from_env()
     if not retention_config.enabled:
@@ -1999,6 +2022,10 @@ def _run_retention(
             published_artifact_root=self.config.published_artifact_root,
             active_lower_bound=active_lower_bound,
             active_lower_bound_source=active_lower_bound_source,
+            runs_only_roots=(
+                os.getenv("WORKSPACE_ROOT"),
+                self.config.object_store_copyback_root,
+            ),
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}

@@ -19290,7 +19290,7 @@ def test_bounded_evidence_preserves_timing_block_on_size_fallback() -> None:
 def test_retention_bounded_evidence_preserves_forced_dry_run_summary_without_paths() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_bounded")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": True,
@@ -19336,7 +19336,7 @@ def test_retention_bounded_evidence_preserves_frontier_block_while_stripping_ski
     survive the compaction that strips per-entry skipped detail."""
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_frontier")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": False,
@@ -19390,10 +19390,84 @@ def test_retention_bounded_evidence_preserves_frontier_block_while_stripping_ski
     assert "/private" not in rendered
 
 
+def test_retention_bounded_evidence_preserves_extra_roots_block_while_stripping_entries() -> None:
+    """[#1318 D3/2.10b] The additional-root block is bounded scalar evidence and
+    must survive the compaction that strips per-entry detail.
+
+    Without it a compacted receipt reports one ``retention_days`` and one
+    cross-root ``freed_bytes``, so a reader cannot tell which window governed
+    the additional roots -- and compaction is triggered by exactly the large
+    additional-root sweeps that most need to be read.
+    """
+    payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_extra_roots")
+    planned = [
+        {
+            "key": f"runs/fcst_gfs_20260{(index % 9) + 1:02d}0100_model_a",
+            "path": f"/private/workspace/runs/fcst_gfs_{index:06d}_model_a",
+            "cycle_time": "2026-05-01T00:00:00Z",
+            "reason": "run_cycle_aged_out",
+            "size_bytes": 4096,
+            "root": "/private/workspace",
+        }
+        for index in range(24_000)
+    ]
+    payload["retention"] = {
+        "schema_version": "nhms.production_scheduler.retention.v2",
+        "status": "completed",
+        "enabled": True,
+        "dry_run": True,
+        "retention_days": 14,
+        "cutoff": "2026-05-07T12:00:00Z",
+        "frontier": {
+            "active_lower_bound": "2026-05-07T06:00:00+00:00",
+            "source": "candidates",
+            "protected_count": 2,
+        },
+        "extra_roots": {
+            "enabled": True,
+            "retention_days": 30,
+            "cutoff": "2026-04-21T12:00:00Z",
+            "roots": ["/scratch/workspace", "/ghdc/data/nwm/object-store"],
+        },
+        "counts": {"planned": len(planned), "deleted": 0, "skipped": 0, "failed": 0},
+        "planned": planned,
+        "deleted": [],
+        "skipped": [],
+        "failed": [],
+        "freed_bytes": 0,
+    }
+
+    assert len(json.dumps(payload).encode("utf-8")) > scheduler_module.MAX_EVIDENCE_BYTES
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=scheduler_module.MAX_EVIDENCE_BYTES,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= scheduler_module.MAX_EVIDENCE_BYTES
+    retention = bounded["retention"]
+    assert retention["extra_roots"] == {
+        "enabled": True,
+        "retention_days": 30,
+        "cutoff": "2026-04-21T12:00:00Z",
+        "roots": ["/scratch/workspace", "/ghdc/data/nwm/object-store"],
+    }
+    assert retention["frontier"] == {
+        "active_lower_bound": "2026-05-07T06:00:00+00:00",
+        "source": "candidates",
+        "protected_count": 2,
+    }
+    # per-entry detail may collapse to counts, but the window attribution stays
+    assert "planned" not in retention
+    assert retention["planned_count"] == 24_000
+    assert "/private/workspace/runs" not in rendered
+
+
 def test_retention_bounded_evidence_compacts_paths_before_initial_fit() -> None:
     payload = _large_scheduler_evidence_payload("scheduler_20260521120000_retention_initial_fit")
     payload["retention"] = {
-        "schema_version": "nhms.production_scheduler.retention.v1",
+        "schema_version": "nhms.production_scheduler.retention.v2",
         "status": "completed",
         "enabled": True,
         "dry_run": True,
