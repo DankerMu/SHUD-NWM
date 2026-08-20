@@ -25,38 +25,55 @@
 | 单 | 站点（**按函数名锚定，行号会漂**） | 目标语义 |
 |---|---|---|
 | #1547 | `packages/common/safe_fs.py` `_expand_path` | **抛**：`SafeFilesystemError(kind="unsafe")` |
-| #1549 | `scheduler_runtime_roots.py` `_optional_config_path`、`_config_path_relative_to_preserve_final`、**`_config_path_preserve_final_component`** | **不抛**：db-backed 臂收敛到 db-free 臂，构造成功、产物逐字相等，分类仍留给 preflight |
+| #1549 | `scheduler_runtime_roots.py` `_optional_config_path`（活，`allowed_storage_roots`）、`_config_path_relative_to_preserve_final`（活，`log_root`）、`_config_path_preserve_final_component`（兼容面，见下） | **不抛**：db-backed 臂收敛到 db-free 臂，构造成功、产物逐字相等，分类仍留给 preflight |
 | #1544 | 同文件 `_require_safe_directory_final_component` 的 **S_ISLNK 臂** | strict-realpath 范式：ELOOP → 两个解释器同一结构化 `ValueError`；ENOENT → 非 strict 兜底，**保住今天的悬空 symlink 放行** |
 | #1546 | 同文件 `_resolve_optional_config_path`、`_optional_config_path_relative_to` | 两臂收敛为规范化 `Path` 返回（同文件 `_canonical_parent` 已有的定型范式） |
 | #1545 | 同文件 `_require_safe_directory_final_component` 的拒绝文案 | **只改消息内容**：类型仍 `ValueError`，`lock_path` 那条逐字不变 |
 
-### 对 issue 正文的两处口径更正（round-0 scope 前提核实所得）
+### 站点可达性口径（round-0 fixture 审实测所得；其中两条**推翻了我自己的初稿**）
 
-1. **#1549 漏数一处。** 它点名 `_optional_config_path` 与 `_config_path_relative_to_preserve_final`
-   两处，但同 lane 还有第三处同款裸 expanduser：`_config_path_preserve_final_component`，
-   经 `scheduler_config.py:273`（`workspace_root_preflight_path`）在 **db-backed 臂活跃可达**
-   （`_config_path_preserve_final_component_for_mode:896` 的 `if not db_free_required:` 直接转发）。
-   本单一并修；不修它会让「db-backed 臂对 `~` 的失败语义收敛」这条验收本意在 `workspace_root` 上落空。
+**只有两个生产字段真的走到本模块的裸 expanduser**：`allowed_storage_roots`（→ `_optional_config_path`）
+与 `log_root`（→ `_config_path_relative_to_preserve_final`）。其余九个 root 字段在更早的
+`_expanduser_for_mode` 上崩掉——那是 #1423/#1520 已裁定的「故意 re-raise」，本单 Non-Goal。
+
+1. **初稿写「#1549 漏数一处、`_config_path_preserve_final_component` 在 db-backed 臂活跃可达」——错的。**
+   `scheduler_config.py:269` 的 `_raw_config_path_preserve_components` 排在 `:273` **之前**，
+   对任何 tilde 输入都先经 `_expanduser_for_mode` re-raise。实测栈：
+   `__post_init__:269 → _raw_config_path_preserve_components:861 → _expanduser_for_mode:853 → RuntimeError`。
+   即 `workspace_root` 根本走不到 `:273`。**该站点仍修**（它确实是同款裸副本，值得结清），
+   但定性改为**兼容面 / 家族账目**项，与 #1546 那一对同级，**不是**「#1549 漏数」。
 2. **#1546 的「仓内零调用方」成立，但要说准。** `_resolve_optional_config_path` 在 `scheduler_config.py`
    有 7 处形似调用，但那些走的是 `_resolve_optional_config_path_for_mode` → `_resolve_config_path_for_mode`
-   （`scheduler_config.py:938-963`，两臂各自已有 `except (OSError, RuntimeError)`），
+   （`scheduler_config.py:939-961`，两臂各自已有 `except (OSError, RuntimeError)`），
    **不经过** `_scheduler._resolve_optional_config_path`。这一对只经
-   `scheduler_candidate_runtime.py` 的 forwarder 对外暴露，属兼容面，今天不是活的崩溃路径。
+   `scheduler_candidate_runtime.py:557-558` 的 forwarder 对外暴露，属兼容面，今天不是活的崩溃路径。
 
-### 另两处已核实**不在** scope 的站点（避免评审重复挖）
+### 已核实**不在** scope 的四处站点（避免评审重复挖）
 
-- `scheduler_runtime_roots.py:271` 的 `path.resolve(strict=False)`：**已双接**
-  （`except OSError` + `except RuntimeError`，`:284`），家族范式已到位。
-- `:332` 的 `Path(workspace_root).expanduser().resolve(strict=False)`：包在
-  `except (OSError, RuntimeError, ValueError)` 里，同上。
+| 站点 | 理由 |
+|---|---|
+| `:271` `path.resolve(strict=False)` | **已双接**：`except OSError`（`:272`）+ `except RuntimeError`（`:285`） |
+| `:332` `Path(workspace_root).expanduser().resolve(strict=False)` | 包在 `except (OSError, RuntimeError, ValueError)`（`:334`）里 |
+| `:504` `Path(value).expanduser()`（`_scheduler_allowed_roots_and_blockers`） | 裸，但 tilde **非活**：`config.allowed_storage_roots` 已在 `scheduler_config.py:418-423` 归一为绝对路径 |
+| `:578` `Path(value).expanduser()`（`_confined_path`） | 裸，但 tilde **非活**：全部生产路径（`:545 :565 :596 :622`）之前都有 `_raw_config_path_*`，在 `:555 / :612 / :887` 先 re-raise（探针确认） |
+
+后两处是 fixture 审补上的——初稿漏列，**属文档缺口不是 scope 缺口**（它们确实非活）。
+D.7 的机械 grep 表必须把这四处连同处置一并列出。
 
 ## Non-Goals
 
-- **不改 `_expanduser_for_mode`（`scheduler_config.py:842`）的「故意 re-raise」口径** ——
-  那是 #1423/#1520 已裁定的设计决策，9 个字段依赖它，本单不动。
+- **`services/orchestrator/scheduler_config.py` 零改动。** 具体两条：
+  - **不改 `_expanduser_for_mode`（`:850-857`）的「故意 re-raise」** —— #1423/#1520 已裁定，9 个字段依赖它。
+  - **不改 db-free 包裹层 `_require_safe_directory_final_component_for_mode`（`:1020-1024`）的一揽子吞异常**
+    （`except (OSError, RuntimeError, ValueError): if not db_free_required: raise`）。
+    fixture 审实测：db-free 臂今天就把**全部**拒绝吞掉（symlink 指向文件 / 逃出 workspace /
+    悬空且指向 workspace 外，三种几何 db-backed 报 `ValueError`、db-free 一律 ACCEPTED）。
+    **因此「两个 database 臂判定一致」在本单 allowlist 下不可实现**，初稿把它写进验收是错的；
+    已改成按**解释器臂**（3.11/3.12 vs 3.13+）表述。这个吞异常本身是独立缺陷，本单不治。
 - **不改 safe_fs 任何调用方的 `except` 元组**。#1547 走的是**纯收窄**：
-  抛型从裸 `RuntimeError` 变成其子类 `SafeFilesystemError`，26 处 `except SafeFilesystemError` 零改动即接住，
-  宽接 `RuntimeError` 的也不回退。
+  抛型从裸 `RuntimeError` 变成其子类 `SafeFilesystemError`，既有
+  **311 处 `except SafeFilesystemError`（46 个文件）** 零改动即接住，宽接 `RuntimeError` 的也不回退。
+  （初稿写「26 处」，差约 12 倍，fixture 审实测更正；纯收窄的论证不受影响，但这个数是用来估爆炸半径的。）
 - **不新增 `kind`**。复用 `kind="unsafe"`；新增会让所有 `error.kind == "io"` 的二分判据出现未覆盖分支。
 - **不改 `_optional_config_path` 注释里已定稿的 realpath 范式论证**（design D2），只补 tilde 那一句。
 - **不改 `scheduler_runtime_roots.py` 之外的同族副本**：`chain_runtime_utils.py` 的

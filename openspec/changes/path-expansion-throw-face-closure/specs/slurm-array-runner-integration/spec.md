@@ -4,7 +4,7 @@
 
 Scheduler configuration construction SHALL treat a configured path whose leading `~` component has no determinable home directory as a value to hand down to the storage preflight, not as a construction-time abort, on the database-backed arm exactly as on the database-free arm, because classification of unusable roots belongs to the preflight and a construction-time abort produces no structured blocker at all.
 
-The two arms SHALL produce byte-identical products for the same such input, so that the convergence is pinned by an equality of results rather than merely by the absence of an exception. This applies to every configuration helper in the module that expands a leading `~` outside its error boundary, including the helper reached through the workspace-root preflight path, not only the helpers reachable through the allowed-storage-roots and log-root fields.
+The two arms SHALL produce byte-identical products for the same such input, so that the convergence is pinned by an equality of results rather than merely by the absence of an exception. This applies to the two configuration fields that bypass the deliberate re-raise helper and reach the module's own bare expansions — the allowed storage roots and the log root. Every other root field aborts earlier in the deliberate re-raise, which is an existing design ruling and is out of scope; a third bare expansion in the module is reachable only through the compatibility forwarders and is closed as a ledger item, not because a production field reaches it.
 
 #### Scenario: An allowed storage root naming an unknown user constructs successfully on the database-backed arm
 
@@ -19,11 +19,12 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 - **WHEN** the scheduler configuration is constructed with the database-backed arm selected
 - **THEN** construction succeeds and the value is byte-identical to the database-free arm's value
 
-#### Scenario: A workspace root naming an unknown user constructs successfully on the database-backed arm
+#### Scenario: The compatibility-surface expansion helper stops throwing bare on the same input
 
-- **GIVEN** a workspace root configured as `~<unknown user>/workspace`
-- **WHEN** the scheduler configuration is constructed with the database-backed arm selected
-- **THEN** construction succeeds and the value is byte-identical to the database-free arm's value
+- **GIVEN** the module's preserve-final-component helper called directly with `~<unknown user>/workspace`
+- **WHEN** it expands the value
+- **THEN** it returns the same product the database-free arm would produce
+- **AND** it does not raise an errno-less `RuntimeError`
 
 #### Scenario: The storage preflight still classifies the unusable root structurally
 
@@ -35,27 +36,33 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 
 The safe-directory final-component guard SHALL decide a final-segment symlink by strict real-path resolution and SHALL refuse a resolution loop with the module's structured configuration error on every supported CPython, because non-strict resolution raises an errno-less `RuntimeError` on CPython 3.11 and 3.12 and silently adopts the loop as the field's value on 3.13 and later.
 
-A target that does not exist SHALL fall back to non-strict real-path resolution rather than being refused, preserving today's acceptance of a dangling final-segment symlink. Both database arms SHALL execute the same subsequent decision steps — the containment recheck and the directory check — rather than one arm skipping them because an intermediate wrapper swallowed the errno-less throw.
+A target that does not exist SHALL fall back to non-strict real-path resolution rather than being refused, preserving today's acceptance of a dangling final-segment symlink whose target lies inside the workspace root. The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer, because that number differs between the development platform and the deployment platform, and the guard's other real-path failures SHALL keep their existing refusal so that the non-loop geometries already pinned elsewhere stay green verbatim.
 
 #### Scenario: A final-segment loop inside the workspace is refused identically on both interpreter arms
 
 - **GIVEN** an evidence directory whose final segment is a symlink loop located inside the workspace root
-- **WHEN** the scheduler configuration is constructed
+- **WHEN** the scheduler configuration is constructed on the database-backed arm
 - **THEN** it raises the structured configuration error on CPython 3.11 and 3.12 and on 3.13 and later alike
 - **AND** the loop is never adopted as the field's value
 
-#### Scenario: Both database arms run the same decision steps on that geometry
+#### Scenario: The guard reaches the same verdict on both interpreter arms when called directly
 
 - **GIVEN** the same in-workspace final-segment loop
-- **WHEN** the configuration is constructed with the database-free arm and with the database-backed arm
-- **THEN** both arms reach the same verdict
-- **AND** neither arm skips the containment recheck or the directory check
+- **WHEN** the safe-directory guard is called directly on CPython 3.11 or 3.12 and on 3.13 or later
+- **THEN** both interpreters raise the same structured refusal
+- **AND** neither interpreter reaches the containment recheck or the directory check with an adopted loop value
 
-#### Scenario: A dangling final-segment symlink is still accepted
+#### Scenario: A dangling final-segment symlink pointing inside the workspace is still accepted
 
-- **GIVEN** a final-segment symlink whose target does not exist
+- **GIVEN** a final-segment symlink whose target does not exist and lies inside the workspace root
 - **WHEN** the guard runs
 - **THEN** it returns without raising, exactly as before this change
+
+#### Scenario: A dangling final-segment symlink pointing outside the workspace is still refused
+
+- **GIVEN** a final-segment symlink whose target does not exist and lies outside the workspace root
+- **WHEN** the guard runs
+- **THEN** it keeps today's containment refusal naming the workspace root
 
 #### Scenario: The four pre-existing final-segment verdicts are unchanged
 
@@ -67,7 +74,7 @@ A target that does not exist SHALL fall back to non-strict real-path resolution 
 
 The configuration refusal raised when the workspace root itself is a symlink loop SHALL carry the offending path under the module's existing redaction treatment and SHALL let an operator reach the workspace-root knob, because the refusal is currently attributed to a derived evidence-directory field the operator never configured and carries neither a path nor an environment variable name.
 
-The refusal SHALL remain a configuration `ValueError`, the message SHALL be identical on CPython 3.11 and 3.12 and on 3.13 and later, and the lock-root containment refusal SHALL keep its current wording verbatim.
+The refusal SHALL remain a configuration `ValueError`, the message SHALL be identical on CPython 3.11 and 3.12 and on 3.13 and later, and the lock-root containment refusal SHALL keep its current wording verbatim. The path SHALL be carried as the guard's sibling refusals carry their operands, because that guard receives no evidence-redaction flag and cannot reproduce the preflight lane's redaction treatment. The non-loop geometries that reach the same handler — a workspace root that is a regular file, and one whose mode denies traversal — SHALL keep their existing message verbatim, so the enriched wording is reached only by the loop.
 
 #### Scenario: The workspace-root loop refusal is attributable to the workspace root
 
@@ -87,6 +94,12 @@ The refusal SHALL remain a configuration `ValueError`, the message SHALL be iden
 - **GIVEN** a lock root configured as a symlink loop
 - **WHEN** the configuration is constructed
 - **THEN** the refusal keeps its existing containment wording verbatim
+
+#### Scenario: The non-loop workspace-root refusals are untouched
+
+- **GIVEN** in turn a workspace root that is a regular file and a workspace root whose mode denies traversal
+- **WHEN** the configuration is constructed
+- **THEN** each keeps its existing refusal message verbatim
 
 ### Requirement: The compatibility-surface path helpers SHALL converge on a normalized result instead of diverging by interpreter
 

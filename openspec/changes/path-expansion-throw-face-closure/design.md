@@ -1,5 +1,18 @@
 # Design — 路径展开/解析抛型面家族收口
 
+## D-1. 术语：「臂」有三种，本文档一律写全称
+
+初稿把「两臂」同时用于三件不同的事，fixture 审判定这**正是 P0-3 的直接成因**。此后一律写全称：
+
+| 术语 | 指 |
+|---|---|
+| **解释器臂** | CPython 3.11/3.12 vs 3.13+ |
+| **database 臂** | `db_free_required=True` vs `False` |
+| **代码臂** | 同一函数内的 `S_ISLNK` 分支 vs `except OSError` 分支 |
+
+**跨解释器臂一致**是本单的目标；**跨 database 臂一致**在本单 allowlist 下**不可实现**
+（db-free 包裹层 `scheduler_config.py:1020-1024` 一揽子吞异常，见 proposal Non-Goal）。
+
 ## D0. 四种语义，禁止统一
 
 五个站点长得像（都是「裸展开/解析 + 抛型不匹配」），**目标语义各不相同**。
@@ -45,8 +58,14 @@ not to config construction」。对 `~` 输入，这条设计意图恰恰被 `ex
 **验收锚点是 parity 断言，不是「不抛」**：同一输入下 db-backed 臂与 db-free 臂的产物必须逐字相等。
 只断言「没抛」会对「抛型改了但产物错了」恒绿。
 
-三处（**按函数名锚定**）：`_optional_config_path`、`_config_path_relative_to_preserve_final`、
-`_config_path_preserve_final_component`。第三处是 #1549 正文漏数的，可达链见 proposal。
+三处（**按函数名锚定**）：
+- `_optional_config_path` —— **活**，db-backed `allowed_storage_roots` 实测可达。
+- `_config_path_relative_to_preserve_final` —— **活**，db-backed `log_root` 实测可达。
+- `_config_path_preserve_final_component` —— **非活**（初稿说它「db-backed 臂活跃可达」是错的，
+  fixture 审 P0-2 推翻）：`scheduler_config.py:269` 的 `_raw_config_path_preserve_components`
+  排在 `:273` 之前，任何 tilde 输入都先在 `_expanduser_for_mode` re-raise，走不到这里。
+  仍修，但定性是**兼容面 / 家族账目**项（同 #1546 那一对），验收也只能按**直接调该函数**来写，
+  不能写成「`workspace_root` 构造成功」——那条在本单 allowlist 下不可实现。
 
 ### D0.3 #1544 S_ISLNK 臂裸 `resolve(strict=False)` —— strict-realpath 范式
 
@@ -63,8 +82,14 @@ if stat.S_ISLNK(path_stat.st_mode):
 #1520 的用例把环造在 workspace 之外，`:731` 的 containment 先拒，这一臂永不执行。
 
 **修法**：`os.path.realpath(strict=True)` 优先。
-- **ELOOP（errno 62）→ 结构化 `ValueError` 拒绝**，两个解释器同一类型同一文案。
+- **`errno.ELOOP` → 结构化 `ValueError` 拒绝**，两个**解释器臂**同类型同文案。
+  **必须写 `errno.ELOOP`，不得硬编码数字** —— 它在 **Darwin 是 62、Linux 是 40**。
+  照抄 62 会做出一条本机绿、在 CI 与 node-27 上**永远走不到**的死分支
+  （本模块 `:411` 已 import 了 `ELOOP`，照用）。
 - **ENOENT → 落非 strict `os.path.realpath` 兜底**，继续走 containment 复查与 `is_dir()` 裁决。
+- **其余 real-path 失败保持既有拒绝** —— 同一 `except OSError` 代码臂上还挂着两条**非环**几何的
+  既有精确等值 pin（见 D2 护栏），它们必须逐字保持绿，所以判据必须是 `errno == errno.ELOOP` 的**分流**，
+  不是把整个 `except OSError` 臂换掉。
 
 **这条 ENOENT 兜底是 load-bearing 的**：strict realpath 对**悬空 symlink**（指向不存在目标）
 抛 ENOENT，而今天的代码对悬空 symlink 是**放行**的（`resolved.exists()` 为 False ⇒ 不报
@@ -76,10 +101,16 @@ if stat.S_ISLNK(path_stat.st_mode):
 symlink 逃出 workspace → `must be under workspace_root`；末段不存在（`FileNotFoundError`）→ 直接 return。
 **外加第五条**：悬空 symlink → 放行（今天的行为，上面那条兜底存在的理由）。
 
-**两臂判定步数必须一致**：≤3.12 今天靠 `scheduler_config.py:1002-1013`
-`_require_safe_directory_final_component_for_mode` 的 `except (OSError, RuntimeError, ValueError)`
-把 `RuntimeError` 吞掉，于是**连带跳过**了后面的 containment 复查与 `is_dir()` 裁决；3.13+ 则两步都跑完。
-修完之后两臂必须执行同一批判定步骤。
+**判定步数一致只能按解释器臂表述（初稿写错了，fixture 审 P0-3 推翻）**：
+初稿说「≤3.12 靠包裹层吞掉 `RuntimeError` 而跳过后续两步，3.13+ 跑完，修完两臂要一致」——
+这把**吞异常的条件**说反了。`scheduler_config.py:1020-1024` 的
+`except (OSError, RuntimeError, ValueError): if not db_free_required: raise`
+是**按 database 臂**分流、**与解释器无关**：db-free 臂今天就把**全部**拒绝吞掉。
+fixture 审的 8 几何 × 2 database 臂实测：symlink 指向文件 / 逃出 workspace / 悬空且指向 workspace 外
+三种几何上，db-backed 报 `ValueError`、**db-free 一律 ACCEPTED**。
+⇒ 修完之后 db-free 臂**依然**会吞掉新的环路拒绝，**跨 database 臂一致在本单 allowlist 下不可实现**。
+故：一致性目标一律按**解释器臂**表述（3.11/3.12 vs 3.13+，都在 db-backed 臂上，或直接测被守卫函数本身）；
+db-free 包裹层的一揽子吞异常是独立缺陷，proposal 已列为 Non-Goal。
 
 ### D0.4 #1546 那一对 —— 收敛为规范化返回
 
@@ -121,10 +152,23 @@ ENOENT（路径不存在）仍返回非 strict 规范化结果而**不抛**。
 
 ## D1. #1544 与 #1545 共用一套消息格式（先设计，后实现）
 
-#1545 的加料消息（含出错路径，脱敏口径与 `_scheduler_root_blocker` 一致 + 指明 `workspace_root` 派生关系）
-与 #1544 新增的 ELOOP 拒绝，**落在同一个函数的相邻两臂**。
-必须**先把格式设计成一份、两臂共用**，否则无法同时满足
-#1545 的「两臂文案逐字一致」与 #1544 的「两个解释器同一文案」，会需要第二轮返工。
+#1545 的加料消息（含出错路径 + 指明 `workspace_root` 派生关系；
+**路径呈现口径按本守卫的兄弟拒绝来，不是 `_scheduler_root_blocker`** —— 初稿写「脱敏口径与
+`_scheduler_root_blocker` 一致」是错的，fixture 审 P1-3 推翻：那个函数**根本不做脱敏**，
+`[local-path]` 是调用侧按 `evidence_safe_paths` 标志决定的，而
+`_require_safe_directory_final_component(path, workspace_root, field_name)` 既没有该标志也拿不到 config
+句柄，复现不了那套口径；真去脱成 `[local-path]` 还会让「消息含路径」这条验收自相矛盾。
+故：直接带 `str(path)`，与本函数 `:740/:745/:748` 的兄弟拒绝一致，它们都不脱敏）
+与 #1544 新增的 ELOOP 拒绝，**落在同一个函数的相邻两个代码臂**。
+
+**初稿的理由是非因果的（fixture 审 P2-2），已更正。** 两条要求都只约束**解释器臂**之间一致，
+**没有**任何一条要求两个代码臂文案逐字相同。而且强行统一是**有害的**：S_ISLNK 代码臂上的环
+确实就在运维自己配的 `NHMS_SCHEDULER_EVIDENCE_ROOT` 里，把它的消息也指向 `workspace_root`
+就是**反方向重新制造归因错误**。
+
+降级为**推荐**：抽一个共用的消息构造 helper（同一句式、同一路径呈现），
+但**字段归因按各自代码臂各报各的** —— S_ISLNK 臂报运维实际配的那个字段，
+`except OSError` 臂的 workspace-root 环报 `workspace_root` 的派生关系。
 
 ## D2. #1545 是**经授权的 oracle 改写**（评审前置声明）
 
@@ -141,6 +185,14 @@ PR #1541 用 parametrize **精确等值**把错误的字段归因钉成了全版
 否则注释会与新断言自相矛盾。
 
 **不改断言的另一半**：`NHMS_SCHEDULER_LOCK_ROOT` 那一行逐字保留。
+
+**护栏（fixture 审补充，实现必须照做）**：同一条旧文案
+`"production scheduler evidence_dir must be a safe directory"` 在
+`tests/test_production_scheduler.py:30460` 与 `:30591` 还有**另外两处 pin**，
+那两处是**非环**几何（`workspace_root` 是普通文件 / mode 0600 不可遍历），
+它们经的是**同一个** `except OSError` 代码臂，且必须**逐字保持绿**。
+⇒ 实现只能在该臂内按 `errno == errno.ELOOP` **分流**出新文案，不得整臂改写。
+这同时也是 A.3(b) 那条「其余 real-path 失败保持既有拒绝」的落点。
 
 这条**必须在 PR body 显式预声明**，否则会撞上「不得削弱 oracle」的合并硬门，
 也会被评审当成偷改测试。
@@ -168,13 +220,15 @@ PR #1541 用 parametrize **精确等值**把错误的字段归因钉成了全版
 ## D5. Spec 归属
 
 - scheduler 四单 → `slurm-array-runner-integration`，沿用 #1520/PR #1541 的先例（同文件、同家族）。
-- #1547 的 safe_fs 共享底座契约 → `data-integrity-storage-contract`。
-  **这是一个judgment call，请评审挑战**：仓内没有任何 capability 拥有 `safe_fs`
-  （`grep -rl safe_fs openspec/specs/` 只命中 `hypertable-compression` 与 `prearm-error-model`，
-  两者都是别的 lane 顺带提及）。`prearm-error-model` 谈的正是 `SafeFilesystemError` 语义，
-  但它是 pre-arm nonmove 那条 lane 的错误模型，把共享原语契约塞进去是范畴错误。
-  `data-integrity-storage-contract` 是仓内的存储契约 capability，共享文件系统原语的对外失败契约
-  归它最不别扭。若评审认为应另立 capability，说明理由。
+- #1547 的 safe_fs 共享底座契约 → **新建 capability `safe-filesystem-primitive-contract`**。
+  初稿放 `data-integrity-storage-contract`、并标注「judgment call，请评审挑战」；
+  fixture 审挑战成立（P2-4），已改。理由：那个 capability 只有三条 requirement
+  （best-available 选择血缘 / 预报时效源校验 / S3 URI 前缀隔离），全是数据库与对象存储的行记录语义，
+  **零文件系统原语内容**，且其 `## Purpose` 至今是字面 `TBD - created by archiving change …`。
+  把共享文件系统原语的抛型契约塞进去，只会让一个本已不连贯的 capability 更不连贯。
+  `prearm-error-model` 在种类上更近（它正文就在讨论 `SafeFilesystemError` 不是 `OSError`），
+  但它是 pre-arm nonmove 那条 lane 的错误模型，仍是范畴错误。
+  故另立一个窄 capability，只装「共享安全文件系统原语的对外失败契约」这一件事。
 
 ## D6. 证据面：版本臂的跑法
 
