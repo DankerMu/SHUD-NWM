@@ -84,3 +84,19 @@ materially changed attribution ratio.
   75 个多轮 merged PR，later-round catches core=16 vs rotated=180。轮换收益
   比首次裁定（2:8）更悬殊，**维持 keep**，无行为变更。仍为 autonomous
   default-keep，maintainer 可覆盖。
+- 2026-08-20（PR #1602 / issues #1180+#1187+#1188 合并后 audit 再次 DECIDABLE）：
+  样本扩至 81 个多轮 merged PR，later-round catches **core=34 vs rotated=197**
+  （rotated 占比 85.3%）。**维持 keep**，但本次不照抄「方向不变且压倒性」——
+  增量本身变了：相对上一条（75 PR，core=16 / rotated=180），core **+18**、
+  rotated **+17**，即最近这批里两者边际收益基本持平，累计 rotated 占比自
+  98.8%（08-15）→ 91.8%（08-18）→ 85.3% 单调下滑。
+
+  累计证据仍明确支持 keep，故按 autonomous default-keep 维持，无行为变更；
+  但这是**连续第三次下滑**，属前几条自己写的「materially changed attribution
+  ratio」触发条件。**提请 maintainer 注意**：若下次审计边际上 core ≥ rotated，
+  keep 的原始理由（轮换在买真实的 union recall）就不再由数据支撑，届时应作为
+  真正的人的裁定而非 autonomous default 处理。本条只报趋势、不替 maintainer 定夺。
+
+  本 PR 自身的数据点与该趋势一致：round-2 三透镜全部 CLEAN（0 条 P0/P1），
+  唯一的 P1 级发现（G6 真空腿）出自 **round-1**，而 round-2 轮换进来的透镜只
+  产出 P2/P3 级产物精度问题。Phase 7 独立终审同样零阻塞。
