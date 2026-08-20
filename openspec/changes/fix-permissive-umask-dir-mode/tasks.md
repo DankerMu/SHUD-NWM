@@ -99,14 +99,32 @@ change.
 
 | File | master `29892932`, umask 002 | `(a)`-only, umask 002 | post-fix, umask 002 | post-fix, umask 022 |
 |---|---|---|---|---|
-| `tests/test_production_scheduler.py` | 76 failed, 1588 passed | 74 failed, 1590 passed | **1664 passed** | 1664 passed |
-| `tests/test_state_manager.py` | 19 failed | 7 failed | **129 passed** | 129 passed |
-| `tests/test_run_tree_copyback.py` | 16 failed, 5 passed | 2 failed, 19 passed | **21 passed** | 21 passed |
+| `tests/test_production_scheduler.py` | 76 failed, 1588 passed | 74 failed, 1590 passed | **1715 passed** | 1715 passed |
+| `tests/test_state_manager.py` | 19 failed | 7 failed | **137 passed** | 137 passed |
+| `tests/test_run_tree_copyback.py` | 16 failed, 5 passed | 2 failed, 19 passed | **24 passed** | 24 passed |
 | `tests/test_source_cycle_raw_manifest.py` | 5 failed | 1 failed | **30 passed** | 30 passed |
 | `tests/test_file_orchestration_journal.py` | 4 failed | 4 failed | **343 passed** | 343 passed |
-| `tests/test_scheduler_state_index_copyback_replay.py` | 26 errors | 26 passed | **26 passed** | 26 passed |
+| `tests/test_scheduler_state_index_copyback_replay.py` | 26 errors | 26 passed | **29 passed** | 29 passed |
 | `tests/test_scheduler_file_provider_refresh.py` | *hung* (see below) | not measured | **281 passed** | 281 passed |
-| `tests/test_safe_fs.py` | n/a (new cases) | n/a | **11 passed** | 11 passed |
+| `tests/test_safe_fs.py` | n/a (new cases) | n/a | **17 passed** | 17 passed |
+| `tests/test_object_store_roots.py` † | — | — | **21 passed** | 21 passed |
+| `tests/test_forcing_copyback_backfill.py` † | — | — | **42 passed** | 42 passed |
+| `tests/test_tile_publisher.py` † | — | — | **101 passed** | 101 passed |
+| `tests/test_select_ci_tests.py` | — | — | **151 passed** | 151 passed |
+
+The post-fix columns are measured on the **merged** head (`origin/master`
+`f087f08d` merged in), which is why they exceed the pre-fix totals: master's
+`#1609/#1610` and `#1547`-family work added cases to five of these files in the
+interim. † marks suites that master touched and this change does not, run as
+merge-regression controls.
+
+**Interaction with master `05fcc17d`.** That commit independently hit the same
+`safe_fs.py:68` root cause and worked around it by constructing its fixtures
+under `os.umask(0o077)` (`private_umask_fixture`), explicitly deferring the rest
+to this issue ("剩余 umask-002 敏感面是既有 #1513，只报不修"). D1 does not
+invalidate that workaround: the umask may still *restrict* a safe_fs directory,
+so those fixtures still land `0o700`. Verified — that suite is green at both
+umasks above.
 
 `tests/test_file_orchestration_journal.py` needed **no** edit: it imports
 `_set_db_free_scheduler_env` from `tests/test_production_scheduler.py`
