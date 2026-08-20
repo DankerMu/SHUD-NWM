@@ -1222,6 +1222,23 @@ def test_replay_state_index_lock_collision_is_a_refusal_not_an_uncertain_commit(
     assert not private_umask_fixture.new_shared_object.exists()
 
 
+def test_replay_allowlists_the_lock_identity_unavailable_refusal() -> None:
+    """#1610: the guard's *other* reason must classify as a refusal too.
+
+    `_refuse_identical_copyback_lockfiles` raises two reasons, both from the same
+    pre-commit point, and only one of them was pinned above.  A probe that cannot
+    answer takes no lock and touches nothing, so leaving
+    `state_snapshot_index_copyback_lock_identity_unavailable` off the allowlist
+    would fall through to commit-uncertain -- exit 3, the committed tail, a
+    receipt -- for a merge that provably never started.
+    """
+
+    assert (
+        "state_snapshot_index_copyback_lock_identity_unavailable"
+        in replay.MERGE_PRE_COMMIT_REFUSAL_REASONS
+    )
+
+
 def test_replay_root_identity_probe_failure_stays_root_unavailable(
     fixture: Fixture,
     monkeypatch: pytest.MonkeyPatch,

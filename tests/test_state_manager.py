@@ -3792,6 +3792,92 @@ def test_state_index_copyback_lock_identity_probe_failure_fails_closed(
     assert roots.destination_index.read_bytes() == destination_before
 
 
+def _fail_lockfile_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make branch B's own probe fail on `target`, leaving every other stat real.
+
+    Patched on the state_manager namespace for the same reason
+    `_inject_lock_parent_alias` is: that is where the guard resolves the name.
+    Scoping the failure to one path keeps the other operand's probe genuine, so
+    which operand the error names is decided by the guard and not by the seam.
+    """
+
+    real_stat = safe_fs_module.stat_no_follow
+    resolved = target.resolve()
+
+    def failing_stat(path: Path, **kwargs: Any) -> os.stat_result:
+        if Path(path).resolve() == resolved:
+            raise OSError("probe blocked")
+        return real_stat(path, **kwargs)
+
+    monkeypatch.setattr(state_manager_module, "stat_no_follow", failing_stat)
+
+
+def test_state_index_copyback_lockfile_probe_failure_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Branch B's own probe, sibling of the branch-A case above.  Nothing made
+    # `_copyback_lockfile_identity`'s `stat_no_follow` fail, so a probe that
+    # degraded into "absent, therefore inapplicable" would have shipped green --
+    # and "inapplicable" is exactly the verdict that lets the merge walk into the
+    # deadlock the guard exists to prevent.  Branch A is inapplicable here on its
+    # own terms: the two lock parents are genuinely distinct directories.
+    roots = _CopybackRoots(tmp_path)
+    source_lock = provider_lock_path(roots.source_index)
+    assert source_lock.exists()
+    _fail_lockfile_stat(monkeypatch, source_lock)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+    source_before = roots.source_index.read_bytes()
+    destination_before = roots.destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identity_unavailable"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.field == "copyback_source"
+    assert error_info.value.evidence == {
+        "probe": "lockfile",
+        "path": "[local-path]",
+        "error_type": "OSError",
+    }
+    assert requested_locks == []
+    assert roots.source_index.read_bytes() == source_before
+    assert roots.destination_index.read_bytes() == destination_before
+    assert not roots.shared_fresh_object.exists()
+
+
+def test_state_index_copyback_lockfile_probe_failure_names_the_destination_operand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The operand string is not decoration: an operator reading
+    # `copyback_source` goes and looks at the private export.  The source probe
+    # answers normally here and only the destination one fails, so collapsing the
+    # two `field=` call sites into one constant has to red.
+    roots = _CopybackRoots(tmp_path)
+    destination_lock = provider_lock_path(roots.destination_index)
+    assert destination_lock.exists()
+    _fail_lockfile_stat(monkeypatch, destination_lock)
+    requested_locks = _record_provider_lock_requests(monkeypatch)
+    destination_before = roots.destination_index.read_bytes()
+
+    with pytest.raises(StateManagerError) as error_info:
+        _merge_without_hanging(roots.merge)
+
+    assert error_info.value.reason == "state_snapshot_index_copyback_lock_identity_unavailable"
+    assert not hasattr(error_info.value, "phase")
+    assert error_info.value.field == "copyback_destination"
+    assert error_info.value.evidence == {
+        "probe": "lockfile",
+        "path": "[local-path]",
+        "error_type": "OSError",
+    }
+    assert requested_locks == []
+    assert roots.destination_index.read_bytes() == destination_before
+    assert not roots.shared_fresh_object.exists()
+
+
 def test_state_index_copyback_guard_treats_the_absent_bootstrap_parent_as_inapplicable(
     tmp_path: Path,
 ) -> None:
@@ -3816,6 +3902,52 @@ def test_state_index_copyback_guard_treats_the_absent_bootstrap_parent_as_inappl
     assert summary["merged_entry_count"] == 1
     published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
     assert [entry["state_id"] for entry in published] == ["fresh-state"]
+
+
+def test_state_index_copyback_merges_when_neither_lockfile_exists_yet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Branch B's `is not None` clause.  With neither lockfile present both probes
+    # answer `None`, and `None == None` is true, so dropping that clause refuses
+    # two genuinely distinct parents: a false refusal of a legitimate merge,
+    # reachable whenever a source object store is restored or rsync'd without its
+    # dotfiles into a fresh copyback root.  The branch-A test above also unlinks
+    # both lockfiles, but there branch A raises first and branch B is never
+    # reached, so only this shape -- distinct parents *and* both lockfiles absent
+    # -- pins the clause.  The destination-only-absent shape needs no case of its
+    # own: `tuple == None` is always false, so the clause is symmetric in its two
+    # operands, and that shape is already merged green by the bootstrap test.
+    previous_umask = os.umask(0o077)
+    try:
+        roots = _CopybackRoots(tmp_path)
+        source_lock = provider_lock_path(roots.source_index)
+        destination_lock = provider_lock_path(roots.destination_index)
+        # Publishing left both lockfiles behind; removing them is the whole
+        # construction -- no injection, no root, portable.
+        source_lock.unlink()
+        destination_lock.unlink()
+        assert not source_lock.exists()
+        assert not destination_lock.exists()
+        # Branch A is inapplicable on its own terms: the parents really are two
+        # directories, so it cannot be what lets this merge through.
+        source_parent = roots.source_index.parent.stat()
+        destination_parent = roots.destination_index.parent.stat()
+        assert (source_parent.st_dev, source_parent.st_ino) != (
+            destination_parent.st_dev,
+            destination_parent.st_ino,
+        )
+        requested_locks = _record_provider_lock_requests(monkeypatch)
+
+        summary = _merge_without_hanging(roots.merge)
+    finally:
+        os.umask(previous_umask)
+
+    assert summary["merged_entry_count"] == 2
+    published = json.loads(roots.destination_index.read_text(encoding="utf-8"))["entries"]
+    assert [entry["state_id"] for entry in published] == ["archived-state", "fresh-state"]
+    assert requested_locks == [str(roots.source_index), str(roots.destination_index)]
+    assert roots.shared_fresh_object.read_bytes() == roots.fresh_content
 
 
 def test_state_index_copyback_keeps_todays_behavior_for_distinct_lockfiles(

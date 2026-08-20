@@ -182,3 +182,18 @@ D 段是 #1610（纯证据面）。本稿已吸收 round-0 审的 2×P1 + 1×P2 
 - [x] E.9 **out-of-scope，只报不修**：三个测试文件在 `umask 002` 下仍有 `39 failed + 27 errors`，
       根因是 `safe_fs.ensure_directory_no_follow` 裸 `os.mkdir` 建 lock 父目录（`packages/common/safe_fs.py:68`）
       撞 `provider_lock_parent_unsafe` 闸——即既有 **#1513**（OPEN），不另开单，本单未触碰。
+- [x] E.10 **Phase-7 终审 CLEAN，但揪出两条覆盖缺口（存活 mutant），已在本 PR 内补齐**（纯增测，生产零改动）：
+      - **缺口 1（重要）**：`state_manager.py:1982` 的 `source_identity is not None` 无人钉——删掉它整套 190 前的
+        186 条**全绿**。而它的失效形状是**误拒合法 merge**：两侧 lockfile 都不存在时两个探针都返回 `None`，
+        `None == None` 成立 ⇒ 判成「同一 lockfile」拒绝。可达形状：source object store 被不带 dotfile 的
+        rsync/restore 出来（没有 `.index-last.json.lock`），往新 copyback root 合并。既有支 A 用例覆盖不到——
+        那里支 A 先抛，支 B 根本走不到。补 `test_state_index_copyback_merges_when_neither_lockfile_exists_yet`
+        （`tests/test_state_manager.py:3907`）：父目录身份**实测不等**（支 A 证明不适用）+ 两侧 lockfile 均已 unlink，
+        断言 merge **照常成功**（`merged_entry_count == 2`、state_ids、`requested_locks == [source, destination]`）。
+        mutant 下必红，红因就是那条误拒。
+      - **缺口 2**：支 B 探针失败路径（`_copyback_lockfile_identity` → `stat_no_follow`）、destination 侧
+        `field="copyback_destination"` 操作数串、以及第二个 reason 的白名单成员资格，三者均无断言。已补三条：
+        `tests/test_state_manager.py:3815` / `:3850` / `tests/test_scheduler_state_index_copyback_replay.py:1225`。
+        白名单那条断在公开并集 `MERGE_PRE_COMMIT_REFUSAL_REASONS` 上——即 `:407` 分类器真正读的那个集合。
+      四条 mutant 逐条判别力自证，红因均为目标断言，`git checkout --` 后 `git diff` 空。
+      三文件 `umask 022` 由 `186 passed` 增至 **`190 passed`**，`150 passed` 不变，ruff 清洁。
