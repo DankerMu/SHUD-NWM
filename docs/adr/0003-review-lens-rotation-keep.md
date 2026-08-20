@@ -217,3 +217,30 @@ materially changed attribution ratio.
   catch 是来自"新视角"还是来自"同视角 + 更强的枚举方法"。本 PR 提供的读法是后者权重
   更大，但**单个数据点不足以支持撤镜**，在工具缺口修好之前 keep/cut 翻转仍须
   maintainer 人的裁定，不走 autonomous default。
+
+## Revisit 2026-08-20 (post PR #1443 / issue #1341)
+
+审计在更大样本上再次 DECIDABLE：**86 个多轮 merged PR，后轮命中
+core=46 / rotated=211**（轮换占比 82%）。方向未变，**keep rotation 维持**
+（仍走 autonomous default-keep；翻转仍须 maintainer 裁定）。
+
+本 PR 的数据点对这条 ADR 的判别力有直接影响，且与上一条 revisit 的论点同向
+但更极端：
+
+- **本单唯一的 P1 不来自任何审查镜——来自 Evidence Floor 的实机 EXPLAIN 门。**
+  round-1/round-2 全绿、round-3 的 reviewer 也在 SQL 语义四轴上返回零候选；
+  真正抓到 45 倍性能退化（national z4 瓦片 0.77s → 34.7s，planner 丢失逐段
+  索引探针改走 1.98 亿行 join filter）的是 tasks 2.5 要求的 node-27
+  `EXPLAIN (ANALYZE, BUFFERS)` before/after 对照。**没有活库、没有生产规模
+  数据，任何镜都看不见它**——两种形态在 SQL 层面语义完全等价。
+- round-3 reviewer 产出的 1×P1 + 2×P2 全部落在规格/文档层（spec delta 与新
+  SQL 自相矛盾、时延闸在其自己强制的 pin 上不可满足、迁移头注释过期 +
+  #1342 顺序约束无处记账）。这些有价值且必须修，但**没有一条是行为缺陷**。
+
+**对 keep/cut 的实质启示**（延续上一条 revisit 的 thesis）：决定 later-round
+产出的变量，排序上可能是「(1) 是否有实机/生产规模 oracle 可跑 > (2) 该镜是否
+被要求给出可证伪的枚举 > (3) 镜本身是否新」。这条 ADR 目前只度量 (3)，因此
+其比值的判别力被 (1)(2) 稀释——与上一条记的度量方向缺口是同一个问题的两面。
+建议的度量修复不变，并追加一条：**区分 catch 来自"读代码/读规格"还是来自
+"在生产 oracle 上实测"**。在这三类被分开计数之前，比值只能支持"不撤镜"，
+不能支持"镜是主要功臣"。
