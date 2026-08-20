@@ -28,6 +28,8 @@ The refusal SHALL reuse the existing `unsafe` classification rather than introdu
 - **THEN** the lane reports its existing structured configuration rejection
 - **AND** no bare `RuntimeError` escapes to the operator as a traceback
 
+The evidence-root lane's own separate expansion, which sits outside the shared module, is not covered by this requirement and continues to throw bare; it is tracked on its own.
+
 #### Scenario: An evidence-root preparation lane converts the refusal into its own structured code
 
 - **GIVEN** an evidence root whose configured value has an undeterminable home directory

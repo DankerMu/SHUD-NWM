@@ -94,13 +94,26 @@ if stat.S_ISLNK(path_stat.st_mode):
   照抄 62 会做出一条本机绿、在 CI 与 node-27 上**永远走不到**的死分支
   （本模块 `:411` 已 import 了 `ELOOP`，照用）。
 - **ENOENT → 落非 strict `os.path.realpath` 兜底**，继续走 containment 复查与 `is_dir()` 裁决。
-- **其余 real-path 失败保持既有拒绝** —— 同一 `except OSError` 代码臂上还挂着两条**非环**几何的
-  既有精确等值 pin（见 D2 护栏），它们必须逐字保持绿，所以判据必须是 `errno == errno.ELOOP` 的**分流**，
-  不是把整个 `except OSError` 臂换掉。
+- **两个代码臂的分流形状不同**（round-1 裁定；初稿在此处把两臂混为一谈）：
+  - **lstat 臂**：`ELOOP` → 加料文案，**其余 errno 保持 `must be a safe directory` 逐字不变** ——
+    `:30460` / `:30591` 两条**非环**几何的 pin 就挂在这条臂上（它们是 `pytest.raises(match=...)`
+    正则匹配，**不是**精确等值），必须逐字保持绿，所以判据是 `errno == errno.ELOOP` 的**分流**，
+    不是把整个 `except OSError` 臂换掉。
+  - **S_ISLNK 臂**：`ELOOP` → 结构化拒绝，**其余 `OSError` 一律落非 strict 兜底**。
+    这条臂上**不存在**非环的既有拒绝——master 走 `path.resolve(strict=False)`，3.13+ 压根不抛，
+    所以「保持既有拒绝」在这里无物可保持，字面执行反而会**新造**拒绝。
 
-**这条 ENOENT 兜底是 load-bearing 的**：strict realpath 对**悬空 symlink**（指向不存在目标）
-抛 ENOENT，而今天的代码对悬空 symlink 是**放行**的（`resolved.exists()` 为 False ⇒ 不报
-`must be a directory` ⇒ return）。天真地换成 strict-only 会把悬空 symlink 从「放行」变成「拒绝」——
+**这条兜底是 load-bearing 的，而且面必须宽于 ENOENT**：strict realpath 在 S_ISLNK 臂上至少抛三种
+errno，**三种几何 master 今天全部放行**（orchestrator 独立实测，3.14.2）：
+
+| 几何 | strict realpath | master 今天 |
+|---|---|---|
+| 悬空 symlink（目标不存在） | `ENOENT(2)` | **ACCEPT** |
+| symlink 指向 0600 父目录下的项 | `EACCES(13)` | **ACCEPT** |
+| symlink 路径穿过普通文件 | `ENOTDIR(20)` | **ACCEPT** |
+
+放行机制是 `resolved.exists()` 为 False ⇒ 不报 `must be a directory` ⇒ return。
+换成 strict-only、或只兜 ENOENT，都会把其中若干从「放行」变成「拒绝」——
 **静默打断 userspace**，且既有用例未必逮得到。
 
 **六条既有语义必须逐条锁成 spec scenario**（回归栅栏，对应 B.3(b)–B.3(g)）：

@@ -36,7 +36,7 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 
 The safe-directory final-component guard SHALL decide a final-segment symlink by strict real-path resolution and SHALL refuse a resolution loop with the module's structured configuration error on every supported CPython, because non-strict resolution raises an errno-less `RuntimeError` on CPython 3.11 and 3.12 and silently adopts the loop as the field's value on 3.13 and later.
 
-A target that does not exist SHALL fall back to non-strict real-path resolution rather than being refused, preserving today's acceptance of a dangling final-segment symlink whose target lies inside the workspace root. The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer, because that number differs between the development platform and the deployment platform, and the guard's other real-path failures SHALL keep their existing refusal so that the non-loop geometries already pinned elsewhere stay green verbatim.
+Every strict real-path failure other than a loop SHALL fall back to non-strict real-path resolution rather than being refused, because the guard accepts all of them today — a target that does not exist, a target whose parent denies traversal, and a target reached through a regular file are each accepted on the current code — and refusing any of them would silently turn acceptance into rejection. The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer, because that number differs between the development platform and the deployment platform. The guard's separate metadata-lookup failure handler SHALL instead keep its existing refusal for every error number other than a loop, so that the non-loop geometries already pinned against that handler stay green verbatim.
 
 #### Scenario: A final-segment loop inside the workspace is refused identically on both interpreter arms
 
@@ -57,6 +57,12 @@ A target that does not exist SHALL fall back to non-strict real-path resolution 
 - **GIVEN** a final-segment symlink whose target does not exist and lies inside the workspace root
 - **WHEN** the guard runs
 - **THEN** it returns without raising, exactly as before this change
+
+#### Scenario: The other non-loop strict-resolution failures are still accepted
+
+- **GIVEN** in turn a final-segment symlink whose target sits under a parent that denies traversal, and one whose path is reached through a regular file
+- **WHEN** the guard runs
+- **THEN** each returns without raising, exactly as before this change
 
 #### Scenario: A dangling final-segment symlink pointing outside the workspace is still refused
 
