@@ -42,6 +42,7 @@ from packages.common.state_manager import (
     state_snapshot_id,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
+from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 
 
 class FakeStateSnapshotRepository:
@@ -839,7 +840,7 @@ def test_file_state_snapshot_index_published_uri_publish_refuses_symlink_target(
     content = _valid_ic_bytes(b"published-symlink")
     state_uri = object_store.write_bytes_atomic("states/gfs/model_a/2026052106/state.cfg.ic", content)
     symlink_path = published_root / "manifests" / "scheduler" / "state-index.json"
-    symlink_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(symlink_path.parent)  # lock parent, #1513
     target = tmp_path / "target-state-index.json"
     target.write_text("do-not-overwrite\n", encoding="utf-8")
     symlink_path.symlink_to(target)
@@ -1436,7 +1437,7 @@ def test_file_state_snapshot_index_destination_upsert_and_usable_update_do_not_r
 def test_same_checksum_save_rewrites_missing_existing_state_object(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     state_file = tmp_path / "model_a.cfg.ic.update"
     content = _valid_ic_bytes(b"same-checksum-missing-object-repair")
     state_file.write_bytes(content)
@@ -1491,7 +1492,7 @@ def test_same_checksum_save_rewrites_missing_existing_state_object(tmp_path: Pat
 def test_same_checksum_save_repairs_missing_lineage_metadata(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     repository = FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,
@@ -1559,7 +1560,7 @@ def test_same_checksum_save_repairs_base_entry_missing_cycle_lead_without_rewrit
 ) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     object_store = LocalObjectStore(object_root, "s3://nhms")
     state_file = tmp_path / "model_a.cfg.ic.update"
     content = _valid_ic_bytes(b"same-checksum-base-lineage-repair")
@@ -1635,7 +1636,7 @@ def test_same_checksum_save_repairs_base_entry_missing_cycle_lead_without_rewrit
 def test_file_state_snapshot_index_preserves_overlapping_valid_time_leads(tmp_path: Path) -> None:
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     repository = FileStateSnapshotIndexRepository(
         str(index_path),
         object_store_root=object_root,
@@ -1712,7 +1713,7 @@ def test_db_free_state_save_qc_writes_file_index_without_db_factories(monkeypatc
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1789,7 +1790,7 @@ def test_db_free_state_save_env_writes_usable_index(monkeypatch: Any, tmp_path: 
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1848,7 +1849,7 @@ def test_state_save_cli_exits_nonzero_with_typed_source_reason(
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -1962,7 +1963,7 @@ def test_db_free_state_save_env_requires_lineage_before_upload(
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "objects"
     index_path = object_root / "scheduler" / "state-index.json"
-    index_path.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(index_path.parent)  # lock parent, #1513
     run_id = "fcst_gfs_2026052106_model_a"
     output_dir = workspace / "runs" / run_id / "output"
     output_dir.mkdir(parents=True)
@@ -3423,7 +3424,7 @@ def test_state_index_copyback_merge_still_fails_closed_on_corrupt_destination_in
         object_store_prefix="s3://nhms",
         generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
     )
-    destination_index.parent.mkdir(parents=True, exist_ok=True)
+    make_directory_with_explicit_mode(destination_index.parent)  # lock parent, #1513
     destination_index.write_text("[]\n", encoding="utf-8")
 
     with pytest.raises(StateManagerError) as error_info:
@@ -3553,7 +3554,7 @@ def test_provider_lock_release_failure_never_masks_the_body_precommit_error(
     # the compare-and-swap is stale, and the self-lock branch of
     # atomic_replace_provider_bytes is the lock under test.
     destination = tmp_path / "provider" / "manifest.json"
-    destination.parent.mkdir(parents=True)
+    make_directory_with_explicit_mode(destination.parent)  # lock parent, #1513
     stale_preimage = atomic_replace_provider_bytes(
         destination,
         b"generation-1\n",
@@ -3806,7 +3807,10 @@ def _write_state_index_payload(path: Path, entries: list[dict[str, Any]], *, gen
         "entries": entries,
     }
     payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+    # SHARED_PROVIDER_MODE, not the ambient umask (#1513): this seeds a provider
+    # DESTINATION, and a later publish over it refuses any other mode. A bare
+    # write_text lands 0o664 under umask 0002.
+    write_provider_destination(path, json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n")
 
 
 def _payload_checksum(payload: Mapping[str, Any]) -> str:
