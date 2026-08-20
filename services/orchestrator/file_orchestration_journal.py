@@ -1723,9 +1723,20 @@ class FileOrchestrationJournalRepository:
                     # their pre-change behaviour.
                     persisted_candidate_evidence = _accepted_submit_candidate_evidence(existing)
                 row = dict(existing)
+                # #1589 (design D3/D8): the merge is an unconditional write of
+                # every explicitly carried field, so a caller that round-trips a
+                # public row hands in ``[object-uri]`` for anything the display
+                # projection redacted.  Resolving against the persisted value
+                # keeps the real URI instead of letting the write boundary erase
+                # it.  Frozen master evidence is unaffected: a mapping/list
+                # value never resolves (only a whole-value placeholder does), so
+                # a divergent ``init_state_identities`` map still REACHES the
+                # #1183/#1187 frozen check and is still loudly rejected.
                 for key in _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS:
                     if key in explicit_fields:
-                        row[key] = incoming[key]
+                        row[key] = _resolved_caller_evidence(
+                            incoming[key], durable=existing.get(key)
+                        )
                 row["updated_at"] = _format_utc(_utcnow())
                 model_id = _optional_safe_identity(row, "model_id")
             _validate_accepted_submit_evidence(row)
@@ -2141,16 +2152,23 @@ class FileOrchestrationJournalRepository:
             if str(existing.get("status") or "") != "reserved":
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = apply_accepted_submit_transition(existing, transition)
+            # #1589 (design D3): unconditional writes of caller evidence, so
+            # withheld resolves against the persisted row rather than erasing
+            # it.  A reservation carries no evidence today (``reserve`` nulls
+            # the whole family), so this is uniformity rather than a live
+            # displacement -- the rule holds without a per-leg exception.
             row.update(
                 {
                     "slurm_job_id": requested_id,
                     "submitted_at": _format_utc(submitted_at or _utcnow()),
                     "started_at": _format_utc(started_at) if started_at is not None else None,
                     "finished_at": _format_utc(finished_at) if finished_at is not None else None,
-                    "exit_code": exit_code,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                    "log_uri": log_uri,
+                    "exit_code": _resolved_caller_evidence(exit_code, durable=existing.get("exit_code")),
+                    "error_code": _resolved_caller_evidence(error_code, durable=existing.get("error_code")),
+                    "error_message": _resolved_caller_evidence(
+                        error_message, durable=existing.get("error_message")
+                    ),
+                    "log_uri": _resolved_caller_evidence(log_uri, durable=existing.get("log_uri")),
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -2250,6 +2268,18 @@ class FileOrchestrationJournalRepository:
             if require_unbound and existing.get("slurm_job_id") not in (None, ""):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = apply_accepted_submit_transition(existing, transition)
+            # #1589 (design D3): resolve BEFORE the guards, which puts it before
+            # the ``changed_fields`` equality gate below too -- that ordering is
+            # the whole fix.  The gate compares the row against durable state,
+            # and durable state has been stripped by the write boundary, so a
+            # raw placeholder here would make an identical replay differ from
+            # the row forever: every pass "applied", every pass another record.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if started_at is not None:
                 row["started_at"] = _format_utc(started_at)
             if finished_at is not None:
@@ -2333,6 +2363,17 @@ class FileOrchestrationJournalRepository:
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             row = dict(existing)
             row["status"] = status
+            # #1589 (design D3): same ordering requirement as the submit-evidence
+            # leg -- resolve before the guards and therefore before the equality
+            # gate.  ``running -> running`` is a legal self transition, so a raw
+            # placeholder here is an unbounded append loop: nothing else in this
+            # leg ever stops an identical poll from "changing" the row.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if started_at is not None:
                 row["started_at"] = _format_utc(started_at)
             if finished_at is not None:
@@ -2442,14 +2483,31 @@ class FileOrchestrationJournalRepository:
                 or not str(existing.get("slurm_job_id") or "").isdigit()
             ):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
-            desired_error_code = error_code or "SLURM_JOB_CANCELLED"
+            # #1589 (design D3): this leg writes its whole evidence family
+            # UNCONDITIONALLY, so a stripped placeholder does not decline the
+            # overwrite -- it destroys the value.  Withheld therefore resolves
+            # against the persisted row.  Resolved ONCE, above the comparator,
+            # so the value compared and the value persisted are literally the
+            # same expression: otherwise the second Gateway receipt compares a
+            # raw placeholder against erased durable state, answers ``stale``,
+            # and ``chain_forecast_control.cancel_active_cycle_jobs`` drops the
+            # cancellation event on an uncommitted result.
+            resolved_exit_code = _resolved_caller_evidence(exit_code, durable=existing.get("exit_code"))
+            resolved_error_message = _durable_error_message(
+                _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+            )
+            resolved_log_uri = _resolved_caller_evidence(log_uri, durable=existing.get("log_uri"))
+            desired_error_code = (
+                _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
+                or "SLURM_JOB_CANCELLED"
+            )
             if str(existing.get("status") or "") == "reconcile_unverified":
                 desired = {
                     "finished_at": _format_utc(finished_at),
-                    "exit_code": exit_code,
+                    "exit_code": resolved_exit_code,
                     "error_code": desired_error_code,
-                    "error_message": _durable_error_message(error_message),
-                    "log_uri": log_uri,
+                    "error_message": resolved_error_message,
+                    "log_uri": resolved_log_uri,
                     "cancellation_receipt_recorded": True,
                 }
                 if all(existing.get(field) == value for field, value in desired.items()):
@@ -2462,10 +2520,10 @@ class FileOrchestrationJournalRepository:
                 {
                     "status": "reconcile_unverified",
                     "finished_at": _format_utc(finished_at),
-                    "exit_code": exit_code,
+                    "exit_code": resolved_exit_code,
                     "error_code": desired_error_code,
-                    "error_message": _durable_error_message(error_message),
-                    "log_uri": log_uri,
+                    "error_message": resolved_error_message,
+                    "log_uri": resolved_log_uri,
                     "cancellation_receipt_recorded": True,
                     "updated_at": _format_utc(_utcnow()),
                 }
@@ -3396,17 +3454,17 @@ class FileOrchestrationJournalRepository:
                 }
             )
             # #1589 (design D3): a display placeholder is a withheld value, not
-            # an instruction to overwrite.  Running the caller's evidence
-            # through the same strip the write boundary applies restores what
-            # these ``is not None`` guards were meant to ask -- "did the caller
-            # supply a real value?" -- so a round-tripped public row can no
-            # longer displace a real durable value that the boundary would then
-            # withhold, which would lose the value outright.  Non-string
-            # evidence (datetime, int) passes through unchanged.
-            finished_at = _strip_redaction_placeholders(finished_at)
-            exit_code = _strip_redaction_placeholders(exit_code)
-            master_error_message = _strip_redaction_placeholders(master_error_message)
-            log_uri = _strip_redaction_placeholders(log_uri)
+            # an instruction to overwrite.  Resolving the caller's evidence
+            # restores what these ``is not None`` guards were meant to ask --
+            # "did the caller supply a real value?" -- so a round-tripped public
+            # row can no longer displace a real durable value that the write
+            # boundary would then withhold, losing it outright.  Resolved here,
+            # above the guards, which also puts it above the ``cohort_changed``
+            # comparison below.
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            master_error_message = _resolved_caller_evidence(master_error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             if finished_at is not None:
                 cohort_row["finished_at"] = _format_utc(finished_at)
             if exit_code is not None:
@@ -3598,9 +3656,11 @@ class FileOrchestrationJournalRepository:
         # is separately reachable: pass 1 parks the row on
         # ``reconcile_unverified``, which is not terminal, so the whole-row
         # short circuit above does not stop a pass 2 carrying a placeholder.
-        finished_at = _strip_redaction_placeholders(finished_at)
-        exit_code = _strip_redaction_placeholders(exit_code)
-        log_uri = _strip_redaction_placeholders(log_uri)
+        # Resolved above the guards and therefore above the ``changed_fields``
+        # equality gate below.
+        finished_at = _resolved_caller_evidence(finished_at)
+        exit_code = _resolved_caller_evidence(exit_code)
+        log_uri = _resolved_caller_evidence(log_uri)
         if finished_at is not None:
             row["finished_at"] = _format_utc(finished_at)
         if exit_code is not None:
@@ -3668,6 +3728,19 @@ class FileOrchestrationJournalRepository:
                 return previous_status, _public_scheduler_row(existing)
             row = dict(existing)
             row["status"] = status
+            # #1589 (design D3): resolve before the guards below.  No ``durable=``
+            # fallback and no equality gate is added here on purpose: ``row``
+            # starts as a copy of ``existing``, so a guard that declines already
+            # keeps the persisted value, and this leg appending on every call --
+            # gate-free -- is pre-existing behaviour that is not this fix's to
+            # change.  What the fix owes is value convergence, and the guards
+            # give exactly that.
+            started_at = _resolved_caller_evidence(started_at)
+            finished_at = _resolved_caller_evidence(finished_at)
+            exit_code = _resolved_caller_evidence(exit_code)
+            error_code = _resolved_caller_evidence(error_code)
+            error_message = _resolved_caller_evidence(error_message)
+            log_uri = _resolved_caller_evidence(log_uri)
             safe_error_message = _durable_error_message(error_message)
             for key, value in (
                 ("started_at", started_at),
@@ -8089,10 +8162,18 @@ def _journal_record_for_write(
     # and immediately before calling this function, so stripping events here
     # would erase deliberate evidence rather than laundering -- turning a
     # rendered "there was an object URI here" into "there was nothing here".
-    # The layering that follows is therefore: the event lane strips at the
-    # caller boundary, where its raw un-sanitized payload still exists; the job
-    # lane strips here, at the record constructor.  Anyone adding a second
-    # renderer must apply the same rule to it, not add another record_type here.
+    # The layering that follows is therefore: an event that goes through
+    # ``_append_validated_record_unlocked`` strips at that caller boundary,
+    # where its raw un-sanitized payload still exists; the job lane strips here,
+    # at the record constructor.  That is NOT a guarantee for every event -- the
+    # three inline payload loops (the submission-failed rejection, the
+    # permanent-failure mark, the reservation-lost release) build their event
+    # dict and call this function directly, so they get neither the
+    # caller-boundary strip nor ``_public_pipeline_event_payload``.  They are
+    # safe only because their ``details`` carry no URI-bearing field, audited
+    # field by field in design D1; that is the declared cost of the carve-out,
+    # not a structural property.  Anyone adding a second renderer must apply the
+    # same rule to it, not add another record_type here.
     if record_type != "pipeline_event":
         payload = _strip_redaction_placeholders(payload)
     payload = _redact_durable_error_message_fields(record_type, payload)
@@ -8895,6 +8976,38 @@ def _strip_redaction_placeholders(value: Any) -> Any:
     if isinstance(value, str) and value in _PERSISTED_REDACTION_PLACEHOLDERS:
         return None
     return value
+
+
+def _resolved_caller_evidence(value: Any, *, durable: Any = None) -> Any:
+    """Resolve one caller-supplied evidence field against durable state (#1589 D3).
+
+    THE ONE PLACE the "a display placeholder is a WITHHELD value" rule is
+    spelled out.  Every write leg that lets a caller hand in evidence must send
+    it through here BEFORE both its overwrite guard and its equality gate,
+    because the write boundary (``_journal_record_for_write``) strips
+    placeholders out of durable state: a leg that compares raw caller input
+    against already-stripped durable state can never converge, and its guard
+    reads a placeholder as "the caller supplied a real value" when the caller
+    supplied nothing of the sort.
+
+    Withheld means KEEP.  ``durable`` is the value the row already carries:
+
+    * placeholder in  -> ``durable`` out.  Pass ``durable=`` at legs whose write
+      is UNCONDITIONAL, where declining is not an option and ``None`` would
+      destroy the value.  Omit it at legs guarded by ``is not None``: there,
+      ``None`` makes the guard decline, and declining IS keeping.  Omitting it
+      is also what keeps ``datetime``-typed parameters safe -- resolving one to
+      the row's already-formatted string would then hit ``_format_utc``.
+    * genuine ``None`` in -> ``None`` out.  A caller that really passed ``None``
+      said "no value", and legs that persist that as a clear must keep doing so;
+      only a placeholder was ever withheld.
+    * anything else -> unchanged (non-string evidence included).
+    """
+
+    stripped = _strip_redaction_placeholders(value)
+    if stripped is None and value is not None:
+        return durable
+    return stripped
 
 
 def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:

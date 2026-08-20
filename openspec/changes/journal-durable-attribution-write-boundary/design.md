@@ -24,8 +24,15 @@
 - **#1592 是活体可达的**：两条旁路都是生产路径（cohort 终态投影 / defer 腿），只要调用方
   round-trip 一行公共查询结果就触发。`2026-08-20-accepted-submit-identity-write-semantics`
   的 proposal 已实证 `_record_manual_retry_submission_success`（`:7865` 旧坐标）**确实携带**
-  占位符化的整行做 round-trip。**但**：迄今仓内没有实测到一条把占位符喂进 cohort 投影
-  `log_uri` 参数的活调用方——所以"活体可达的是机理，不是已发生的故障"。措辞不得过诺。
+  占位符化的整行做 round-trip。
+  **round-2 更正：初版这里那句「迄今仓内没有实测到一条把占位符喂进 `log_uri` 参数的活调用方」
+  是假的，已删除，不得再出现。** 实证链：`query_pipeline_jobs_by_cycle:1126` 逐行返回
+  `_public_scheduler_row` 投影（`log_uri` 被渲染成 `[object-uri]`）；
+  `chain_forecast_control.py:256` 遍历这些投影；`:344`（`complete_pipeline_job_cancellation`）
+  与 `:359`（`update_pipeline_job_status`）**两处都**把 `log_uri=job.get("log_uri")`
+  直接喂回写路径。仓内早就知道这件事：`chain_stage_execution.py:905-915` 的注释写明
+  调用方快照可能携带一个「日志其实发布过」的 sanitized `[object-uri]`，而 `None` 才是唯一诚实的
+  "never published"。可达性档位因此从「机理可达」升为**实证可达**。
 - **#1589 是活体可达的**：`permanently_failed` 由 #1312 的终态标记写入，之后
   **"durable 投影不全 + 本趟带 `complete=True`"这一种几何**走 `project_forecast_cohort_tasks`
   会覆写 `error_code`（**不是"任一趟"**——resume/reconcile 两条腿各有闸门，
@@ -59,7 +66,7 @@ F-a 先行的额外机械理由：本单会挪动 8700+ 行文件的行号，F-b
 | `project_forecast_cohort_tasks` payloads 循环 `:3429` | **旁路 A** |
 | `_write_pipeline_job_unlocked:6154` | **旁路 B**（含 defer 腿；本身有 16 个调用方） |
 | `:2601` submission_failed 拒收 | event details，评审逐条读过，无 URI 类字段 |
-| `:2706` `mark_pipeline_job_permanently_failed` | `event_details` 来自 `:7236-7245`，全是计数/分类 |
+| `:2706` `mark_pipeline_job_permanently_failed` | **round-2 更正：该调用点是 `payloads` 循环，喂两条 payload**——`payloads[0]`（`:2660-2672`）是**整行 master pipeline_job**，`payloads[1]` 才是 event。初版只审了后者。前者受咽喉覆盖正是本单要的；后者的 `event_details` 来自 `:7236-7245`，全是计数/分类 |
 | `:2931` reservation_lost / absence | 同上，无 URI 类字段 |
 
 后三条与 16 个 `_write_pipeline_job_unlocked` 调用方**不各配用例**——全覆盖正是咽喉的意义所在；
@@ -104,6 +111,12 @@ inventory（`:5711-5728`）只写 `schema_version / job_id / source_id / cycle_t
 
 ## D3（咬合）：覆写谓词必须看得懂占位符——否则本 PR 比现状更糟
 
+> **round-2 重述（本节初版的适用范围为假，以 D9 为准）**：D3 的真实射程**不是两条腿**，
+> 而是**每一条既接受调用方证据又抵达 durable 写的腿**；并且**被比较的值必须等于被持久化的值**——
+> 只在 `is not None` 谓词之前 strip 是不够的，还必须在**相等闸门**之前。逐腿普查、逐腿裁定、
+> 唯一具名裁决点 `_resolved_caller_evidence` 全部见 **D9**。以下 D3 原文保留为病理与
+> 「只修 #1592 更糟」论证的出处，其"两条腿"计数已被 D9 取代。
+
 **适用范围：两条腿，不是一条**（fixture review P1 更正）。投影腿 `:3377-3384` 与 defer 腿
 `:3563-3568` 的条件覆写谓词**形状完全相同**，且 defer 腿 `:3583` 直通同一个咽喉。
 初版 D3 只写了投影腿，那会让本单**亲手在 defer 腿上交付本节判定为"比现状更糟"的终值**。
@@ -113,8 +126,10 @@ defer 腿的可达链（评审实测，记录备查）：第 1 趟 defer 写
 `reconcile_unverified` **不在** `TERMINAL_PIPELINE_STATUSES`，故 `:3539` 的整行短路
 **拦不住第 2 趟**；第 2 趟携带 `"[object-uri]"` → `:3567` 放行覆写 → 新 strip 抹成 `None`。
 第 2 趟入口存在（`chain_array_accounting.py:466` 的 `deferrer(..., log_uri=log_uri)`）。
-与投影腿同一诚实标注：**机理可达，仓内无活体喂占位符的调用方**——但这正是本单立项
-#1592 所用的同一条可达性标准，不能一边用它立项一边用它豁免。
+**round-2 更正**：初版这里的标注「机理可达，仓内无活体喂占位符的调用方」**为假，已删除**。
+喂占位符的活调用方是实测存在的（`chain_forecast_control.py:256` 遍历
+`query_pipeline_jobs_by_cycle` 的公共投影，`:344`/`:359` 两处回喂 `log_uri`），
+见上「可达性账」段。
 
 `:3377-3383` 的四个谓词形如 `if log_uri is not None: cohort_row["log_uri"] = log_uri`。
 它的**意图**是"调用方给了真值才覆写"。占位符 `"[object-uri]"` 非 `None`，谓词误判为真值。
@@ -285,6 +300,25 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 "the only honest 'never published'"，而字面量是个谎。
 因为它改变下游真值性判断，用 **J10** 在 durable 层钉住"这是有意的"，不留作偶然。
 
+> ### D8 被 round-2 裁定取代（**注意：这是对一条已评审、已钉死决定的翻案**）
+>
+> 上面这段的结论「durable 残值 = `None`」**作废**。`upsert_pipeline_job` 的合并环是一次
+> **无条件写**、且接受调用方证据，因此正是 round-2 ruling「withheld 意味着保留」
+> 所辖的同一类腿。同一个问题在同一个 PR 里给两种答案，就是本 design 自己反对的
+> 「把不变量散成 N 份拷贝」。
+>
+> **新终值**：`upsert_pipeline_job` 把占位符解析成**持久化行上的真值**，
+> `_record_manual_retry_submission_success` round-trip 之后 durable `log_uri`
+> **仍是 `s3://…`**。这比 D8 的 `None` 与改动前的字面量都严格更好——D8 之所以接受 `None`，
+> 理由是「真实 URI 今天就已被字面量顶掉」；有了 keep 语义，这个前提本身不再成立。
+>
+> **J10 相应重写**（`test_manual_retry_round_trip_keeps_the_real_log_uri`）：断言真值存活，
+> 不再断言 `None`。「单元构造、非流程可达」的标注保留不变。
+>
+> **must-preserve 11 未被削弱**：解析只对**整值占位符**生效，mapping/list 值永不解析，
+> 因此一份分歧的 `init_state_identities` 仍然抵达 #1183/#1187 的 frozen 检查并被大声拒绝
+> （`tests/test_file_orchestration_journal.py:9068` 实测仍绿）。
+
 ## Seams under test
 
 - `_journal_record_for_write` 直调——反洗白的隔离 oracle（不经任何写锁/落盘）。
@@ -323,8 +357,11 @@ F-b（#1600）会带并发/NFS 面，那一单再定它自己的档位。
 - **J9**：粘性触发且无其它字段变化时 `cohort_changed` 为 False，不产生空写（must-preserve 7）。
   该几何为**单元构造、生产不可达**（评审 P3-5：要求 `candidate_projections` 不变，
   而那意味着投影已全、行根本不会被扫到）——docstring 须标注，spec 场景亦然。
-- **J10（P2-1）**：手动重试 round-trip（`_record_manual_retry_submission_success`）后，
-  durable `log_uri` 为 `None` 而非字面量 `"[object-uri]"`——把 D8 的翻转钉成有意行为。
+- **J10（P2-1，round-2 重写）**：手动重试 round-trip（`_record_manual_retry_submission_success`）后，
+  durable `log_uri` **仍是真实 `s3://…`**。初版断言 `None`（D8 的翻转），已被 round-2 的
+  「withheld 意味着保留」裁定取代，见 D8 尾的取代块。
+- **J13-J20（round-2 修复轮）**：其余六条写腿的 idempotency-replay 与 displacement 对偶，
+  外加一条参数化的类守卫。逐条定义、逐腿裁定与新增变异行见 **D9**。
 - **J11**：`tests/test_file_orchestration_migration.py:263` 的子串存活 + `:9068` 的 master
   frozen 大声拒绝，两条既有用例改动后仍绿（must-preserve 10/11 的现状锁；
   若已被覆盖则直接引用，不重复造）。
@@ -471,3 +508,210 @@ durable AFTER  : 'sbatch stderr at [local-path] and [object-uri]'
 本单**不碰也不该碰**这条路径：strip 是整串相等匹配，must-preserve 10 明确要求嵌入子串存活，
 且该写路径（`:2706/:2722/:2727`）既不经 `:6280` 也不经 `_write_pipeline_job_unlocked`。
 只能在调用方侧（`:7234`）修 —— 归 #1630。
+
+## D9（round-2 修复轮）：D3 的真实射程 —— 全类普查 + 唯一裁决点
+
+> 坐标：本节引用**改动后**的实现坐标（`file_orchestration_journal.py`，HEAD `cfa88909` 之后）。
+> 本文件其余部分仍是 base `66e1c5e5` 坐标，见文件头。
+
+### D9.0 病理的第二半（round-1 漏掉的那半）
+
+round-1 只把「占位符不是真值」施加到 `is not None` **覆写谓词**上。真正的规则更强：
+
+> **被比较的值必须等于被持久化的值。**
+
+咽喉 strip 使 durable 态**已 strip**。一条腿若拿**未 strip 的调用方入参**去和 durable 态做
+相等判定，它**永远不可能收敛**——每一趟都判「变了」，每一趟追加一条记录、烧一个 sequence。
+defer 腿之所以在 round-1 就是对的，恰恰因为它的 strip 落在 `changed_fields` 相等判定**之前**，
+而不只是落在谓词之前。
+
+实测后果（评审在 HEAD 上量到，本轮复现为 J13/J17）：
+
+- `transition_pipeline_job_runtime_status` 用同一个 `log_uri="[object-uri]"` 连打三次 →
+  `['applied','applied','applied']`，durable payload 2 → 5。**无界增长**，走向
+  `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` / `MAX_FILE_JOURNAL_JSON_BYTES`。
+- `complete_pipeline_job_cancellation` 第 2 趟 → `stale` 而非 `idempotent` → `committed=False`
+  → `chain_forecast_control.py:346-347` `continue`，**取消事件与 `cancelled` 条目一起被丢掉**。
+
+### D9.1 唯一裁决点
+
+```python
+_resolved_caller_evidence(value, *, durable=None)   # :8899 附近
+```
+
+- 占位符进 → `durable` 出（**withheld 意味着保留**）。
+- **真正的 `None` 进 → `None` 出。** 这是对 lead 字面裁定「stripped 为 `None` 就取 existing」的
+  **收窄，须显式记录**：按字面执行会把「调用方确实传了 `None`（= 清空）」也翻成「保留」，
+  那是无关本 bug 的语义变更。withheld 的定义是**占位符**，不是 `None`。
+  在仓内唯一的活体喂食点上两者等价：`chain_forecast_control.py:344/:359` 喂的是**同一行**的
+  公共投影，故「真 `None` 而 durable 有真值」这种输入不可达。
+- 其余原样（非字符串证据不受影响）。
+- **谓词腿省略 `durable=`**：`None` 让谓词拒绝覆写，而**拒绝覆写就是保留**；这同时避开
+  `datetime` 型入参的陷阱（解析成行上已格式化的字符串会撞 `_format_utc`）。
+- **无条件写的腿必须传 `durable=`**：那里没有谓词可以拒绝，只 strip 会把真值抹成 `None`。
+
+**为什么是一个 helper 而不是 N 份显式写法**：design D1 的被拒方案理由（「把不变量散成 N 份拷贝，
+下一条新写路径照样会漏」）对**比较侧**同样成立；round-1 恰恰是把它散开才漏掉了 6 条腿。
+
+### D9.2 普查表：全部 16 个 `_write_pipeline_job_unlocked` 调用方 + 3 条不经它的 durable 写腿
+
+| # | 腿 | 收调用方证据？ | 谓词 / 无条件 / 相等闸门 | 裁定 |
+|---|---|---|---|---|
+| 1 | `upsert_pipeline_job` | **是**（整行 merge，`log_uri` 在 `_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`） | 无条件（`key in explicit_fields` 只是"带没带"）；无相等闸门 | **已修**：merge 环走 `durable=existing.get(key)`。**翻掉 D8/J10** |
+| 2 | `append_historical_pipeline_job` | 是 | 新建行；existing 存在即直接返回 | 不受累：无可位移的前值，第二趟根本不写 |
+| 3 | `reserve_pipeline_job` | 是 | 构造时把 `log_uri`/`error_*`/时间族全部强制 `None` | 不受累 |
+| 4 | `reclaim_pipeline_job_reservation` | 是（身份字段回填，`not in (None,"")` 守卫） | 有守卫；无相等闸门 | 不受累：回填集合内**无任何 URI 类字段**（已逐字段核） |
+| 5 | `bind_pipeline_job_reservation` | 是（`slurm_job_id`/`status`/`array_task_id`） | `is not None` 守卫 | 不受累：无 URI 类字段；第二趟被 `slurm_job_id` 已绑挡回 |
+| 6 | `commit_pipeline_job_submit_attempt` | **是**（`exit_code`/`error_code`/`error_message`/`log_uri`） | **无条件写**；有绑定后幂等闸（不含这些字段） | **已修（统一性）**：传 `durable=`。实际不可位移（reserved 行这一族恒为 `None`），但规则不留例外 |
+| 7 | `transition_pipeline_job_submit_evidence` | **是**（6 个证据参数） | 6 个 `is not None` 谓词 + `changed_fields` **相等闸门** | **已修**：谓词腿解析，落在闸门之前。J15/J16 |
+| 8 | `transition_pipeline_job_runtime_status` | **是**（6 个） | 同上 | **已修**。J13/J14 |
+| 9 | `request_pipeline_job_cancellation` | 是（`reason` → `error_message`） | 无条件写；`cancellation_pending` 状态闸**在写之前**答 idempotent | **不修，裁定见 D9.3** |
+| 10 | `complete_pipeline_job_cancellation` | **是**（5 个） | **无条件写**；`reconcile_unverified` 臂有 `desired` 比较器 | **已修**：`durable=` 解析，且**解析一次**供比较器与落盘共用。J17/J18 |
+| 11 | `record_pipeline_job_reconciliation` | 是（accounting + `candidate_projections`） | `is not None` 守卫；无相等闸门 | 不受累：`_bounded_candidate_projections` 白名单**无 URI 类字段**；accounting 全是枚举 |
+| 12 | `release_identity_blocked_reservation` | 否（只有 int/CAS 参数） | — | 不受累 |
+| 13 | `_defer_forecast_cohort_projection_unlocked` | **是**（3 个） | 3 谓词 + `changed_fields` 闸门 | round-1 已正确；本轮改用 helper（行为等价）。J4b/J20 |
+| 14 | `update_pipeline_job_status` | **是**（6 个） | 4-tuple 谓词环 + `error_*` 分支；**无相等闸门** | **已修**，裁定见 D9.3。J19 |
+| 15 | `_write_pipeline_job` | — | 全仓**零调用方**（死壳） | 不受累 |
+| 16 | `_create_pending_manual_retry_job` | **是**（`{**failed_job}`，而 `failed_job` 来自 `query_pipeline_jobs_by_run` 的**公共行**） | 新建行；`log_uri`/`error_*` 显式置 `None` | **报告不修**，见 D9.4 |
+| A | `project_forecast_cohort_tasks` payloads 循环 | **是**（4 个） | 4 谓词 + `cohort_changed` 比较 | round-1 已正确；本轮改用 helper。J5/J20 |
+| B | `reject_pipeline_job_submit_attempt` payloads 循环 | 是（`error_code`/`error_message`/`stage`/`job_type`） | 无条件；`rejected`+`submission_failed` 幂等闸在写之前 | 不受累：闸门先答 idempotent，且无 URI 类字段 |
+| C | `mark_pipeline_job_permanently_failed` payloads 循环 | 是（`error_code`/`error_message`/`finished_at`） | `not in (None,"")` / `is not None` 守卫；`permanently_failed` 幂等闸在写之前 | 不受累 |
+
+hydro_run 侧一并扫过：`create_hydro_run` / `create_hydro_run_from_basin` 的 URI 来自 run
+context/manifest（不是 journal round-trip）且都是新建行；`update_hydro_run_status` 不收任何 URI
+参数。三者都走 `_append_validated_record_unlocked`，**改动前就已在调用方边界被 strip**，
+本单没有给它们造出任何新的 interlock。
+
+### D9.3 两条被点名要求单独裁定的腿
+
+**`update_pipeline_job_status`：只解析，不加 `durable=`，不加相等闸门。**
+`row = dict(existing)`，所以谓词拒绝覆写时行上留着的就是持久值——**拒绝就是保留**，
+`durable=` 是多余的。它无条件追加一条记录、没有相等闸门，这是**既有行为**：本单欠的是
+「值收敛」，不欠「不写」；给它补闸门是未受邀的行为变更。J19 因此只钉值收敛，
+J20 用 `appends_on_replay=True` 显式承认它会多写一条。
+
+**`request_pipeline_job_cancellation`：不动。** `reason` 是操作者现场文本，不是 round-trip 的
+journal 证据；把占位符 reason 解析成「保留上一条不相干的 `error_message`」会配出一个更坏的谎
+（新 `error_code` + 旧 message）。且 `cancellation_pending` 状态闸在写之前就答 idempotent，
+不存在不收敛。
+
+### D9.4 次要发现的裁定（全部实测过）
+
+**1. durable JSONL 里的 `init_state_uri: null` —— 声明，不修。**
+`_bounded_init_state_identities`（`:8360-8388`）的 docstring 承诺「未记录的字段保持**缺席**，
+而不是变成 null 值的断言」，它跑在咽喉 strip **之前**，所以 strip 之后 durable 文件确实与该散文
+不变量相抵触。实测（`uv run python`，直调构造点）：
+
+```
+DURABLE JSONL payload: {"init_state_identities": [{"array_task_id": 0, "init_state_uri": null, "model_id": "m0"}, {"array_task_id": 1, "model_id": "m1"}], "job_id": "probe"}
+read-path normalization: [{'array_task_id': 0, 'model_id': 'm0'}, {'array_task_id': 1, 'model_id': 'm1'}]
+```
+
+两半都成立：durable 里确有 `null`；读路径把它**丢掉**，因此重写一次即恢复「缺席」，
+**自愈**。#1187 frozen 闸仍先触发（`:9068` 实测仍绿）。
+**不修的理由**：唯一的修法是让 strip 在 mapping 里**删键**而不是置 `null`，那会改变
+**每一个**被 strip 字段的 durable 形状（`log_uri: null` → 键缺席），远超本单射程且会动到读侧契约。
+**代价声明**：D9.2 第 1 行的 upsert keep 语义**不消除**这条通路——mapping/list 值永不整值解析，
+嵌套占位符照旧被咽喉置 `null`。
+
+**2. `_journal_record_for_write` 注释过诺 —— 已改（纯注释，行为逐字节不变）。**
+原文「the event lane strips at the caller boundary」对**全部** event 为假：三条 inline payload
+循环产生的 event（`reject_pipeline_job_submit_attempt` / `mark_pipeline_job_permanently_failed`
+/ reservation-lost）既不过 `:6280` 的调用方 strip，也不过 `_public_pipeline_event_payload`。
+它们今天安全只因为 `details` 里没有 URI 类字段（D1 逐条审计），那是**声明的代价、不是结构保证**。
+注释已改写成这个口径。
+
+**3. AST 守卫按函数名索引 —— 已收紧。** 原守卫只断言「唯一命中落在名为
+`_journal_record_for_write` 的函数里」，第二个同名函数即可满足它。现在**额外**断言模块内
+该名字的 `def` 恰好一个。其余已知边界（只看本模块、只看字面 dict）继续写在 docstring 里。
+
+**4. must-preserve 12（`latest/` 落盘对照）在 round-2 下仍成立 —— 声明，无新差异类。**
+round-2 的 keep 语义在 upsert 腿上把「durable 残留 = `None`」改成「真实 URI 存活」，
+表面上是 `latest/` 的第三种差异。实际不是：`latest/` 物化**派生自** journal record 与
+direct row 两者，而这两者的 keep 语义已被 J10 同时钉住（J10 两条断言分别打在
+`durable["log_uri"]` 与 direct row 上）。因此 `latest/` 唯一的新差异类就是
+**D8 已声明的那条 supersession**，不需要新增对照。
+
+**5. tuple → list 强转在 upsert 腿上提前了 —— 声明（must-preserve 13 类）。**
+`_resolved_caller_evidence` 在 `upsert_pipeline_job` 的合并环里跑在**内存 `row`** 上，
+其内部 `_strip_redaction_placeholders` 会把 tuple 值重建成 list。于是一个 tuple 值字段
+在 `_pipeline_job_conflicts_unlocked` / inventory 同步**之前**就已是 list，而不是像 round-1
+那样只在 record 构造点才转。两者在**相等语义**上不同（`(1,2) != [1,2]`），所以这是真实的
+时序变化，不是纯表示差异。证据：定向四套件 962 绿 + 全量 backstop 零回归（下方 D9.6 尾）——
+仓内没有依赖「合并期仍是 tuple」的比较点。
+
+### D9.5 J20：行为守卫，不是又一个 AST 守卫
+
+`test_log_uri_write_legs_converge_on_a_replayed_placeholder` 参数化覆盖**六条**接受
+`log_uri` 的公共写腿（submit_evidence / runtime_status / complete_cancellation /
+update_status / defer / project）：先用真值喂一趟，再用同一个占位符打两趟，断言
+durable 真值**两趟都不动**，且（除 `update_pipeline_job_status` 外）第二趟**不追加记录**。
+它约束的是**类**，不是七个实例；新增写腿必须进这张表。
+
+**两处显式排除，不假装覆盖**：`commit_pipeline_job_submit_attempt` 的前置行按预留契约
+恒无 `log_uri`，构造不出可位移的真值；`upsert_pipeline_job` 的证据是以**整行 record**
+而非 `log_uri=` 关键字进来的，由 J10 单独钉。
+
+### D9.6 变异证死（round-2 新增行）
+
+逐条单独施加、sha256 快照 + 拷回核验（每条均打印
+`restored ok (dc1c2b7a16c7)`，与施加前指纹逐字节一致）。**实测转红的用例名照抄**：
+
+| # | 变异 | 预期转红 | **实测转红** |
+|---|---|---|---|
+| M-R1 | `_resolved_caller_evidence` 改成恒等（`return value`） | J13-J20 全族 + round-1 的 J4b/J5/J10 | **16 red**：J4b、J5、J10、J13、J14、J15、J16、J17、J18、J19、J20 六臂全红。**一处施加打红全部 8 条腿**，正是「唯一裁决点」的判别力证据 |
+| M-R2 | `complete_pipeline_job_cancellation` 只 strip、不传 `durable=` | **J18**（J17 抓不到） | **2 red**：J18 + J20[complete_cancellation]。J17 **确实仍绿**——strip-only 下两趟都收敛到 `None`，收敛性不受损、被毁掉的是值。两条用例的分工由此实证不冗余 |
+| M-R3 | 比较器与落盘用两个不同表达式（`desired` 回退用原始入参） | **J17** | **1 red**：J17。J18 仍绿（落盘侧仍是 resolved）。「比较的值 = 持久化的值」这条要求由 J17 单独把守 |
+| M-R4 | `upsert_pipeline_job` merge 环退回 `row[key] = incoming[key]` | **J10** | **1 red**：J10 |
+| M-R5 | `update_pipeline_job_status` 六行解析删除 | **J19** + J20[update] | **2 red**：正如预期 |
+| M-R6 | `transition_pipeline_job_runtime_status` 六行解析删除 | J13、J14 + J20[runtime] | **3 red**：正如预期 |
+| M-R7 | `transition_pipeline_job_submit_evidence` 六行解析删除 | J15、J16 + J20[submit_evidence] | **3 red**：正如预期 |
+| — | helper 把真正的 `None` 也解析成 `durable` | 无 oracle —— **已知缺口，声明** | 该变异会让「调用方传 `None` 清空」失效；仓内无活体输入能区分（见 D9.1），**故不造假 oracle** |
+
+M-R2/M-R3 的分离结果是本表最有信息量的部分：它证明 replay 收敛与值保全是**两个**性质，
+一条用例杀不掉另一条的变异，所以每腿两条用例不是冗余。
+
+**红-绿实证**（选择表达式显式记录，便于复现）：
+
+```
+uv run pytest -p no:randomly tests/test_file_orchestration_journal.py \
+  -k "cannot_launder or does_not_displace or keeps_the_real_log_uri or replay_stops_appending \
+      or replay_is_idempotent or converge_on_a_replayed_placeholder or record_for_write"
+```
+
+共 21 条。把 HEAD `cfa88909` 的源文件按 sha256 快照换入（`163966c71399`）后跑同一选择 →
+**`12 failed, 9 passed`**；拷回修复版并核验（`restored ok (dc1c2b7a16c7)`）后 → **`21 passed`**。
+9 条在 HEAD 上就绿的是 J1/J2（构造点直测）、`per_model_row` round-trip、两条 round-1
+`cannot_launder`、两条投影位移用例，以及 **J20 的 defer / project 两臂**——即**类守卫在
+round-1 已修的腿上不误报**。
+
+**红-绿逐腿（12 条实测 FAILED@HEAD，逐条照抄）**
+
+| 腿 | 用例 | @HEAD | @fixed |
+|---|---|---|---|
+| upsert（#1） | `test_manual_retry_round_trip_keeps_the_real_log_uri` | FAILED | PASSED |
+| runtime_status（#8） | `test_runtime_status_placeholder_replay_stops_appending_records` | FAILED | PASSED |
+| runtime_status（#8） | `test_runtime_status_placeholder_does_not_displace_a_real_log_uri` | FAILED | PASSED |
+| submit_evidence（#7） | `test_submit_evidence_placeholder_replay_stops_appending_records` | FAILED | PASSED |
+| submit_evidence（#7） | `test_submit_evidence_placeholder_does_not_displace_a_real_log_uri` | FAILED | PASSED |
+| cancellation（#10） | `test_cancellation_completion_placeholder_replay_is_idempotent` | FAILED | PASSED |
+| cancellation（#10） | `test_cancellation_completion_placeholder_does_not_displace_a_real_log_uri` | FAILED | PASSED |
+| update_status（#14） | `test_update_pipeline_job_status_placeholder_does_not_displace_a_real_log_uri` | FAILED | PASSED |
+| 类守卫 | `…converge_on_a_replayed_placeholder[transition_pipeline_job_submit_evidence]` | FAILED | PASSED |
+| 类守卫 | `…converge_on_a_replayed_placeholder[transition_pipeline_job_runtime_status]` | FAILED | PASSED |
+| 类守卫 | `…converge_on_a_replayed_placeholder[complete_pipeline_job_cancellation]` | FAILED | PASSED |
+| 类守卫 | `…converge_on_a_replayed_placeholder[update_pipeline_job_status]` | FAILED | PASSED |
+
+`commit_pipeline_job_submit_attempt`（#6）无对应红——它按预留契约不可位移，J20 已显式排除，
+这条修改是**统一性**改动、没有 oracle，如实记账。
+
+定向四套件全量：改源前 `949 passed`，改源后 `962 passed`（+13 = 新增 7 条单腿用例 + 6 个参数臂），
+**零回归**。
+
+**全量 backstop**（`uv run pytest -q -p no:randomly -m "not e2e and not grib and not integration"`）：
+`1 failed, 12780 passed, 19 skipped, 152 deselected in 2310.59s`。唯一失败是
+`tests/test_entropy_audit_script.py::test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings`，
+**与本单无关**：把 HEAD `cfa88909` 用 `git archive` 展开成纯净树、对它跑同一个 hard-gate
+审计，得到**逐字段相同**的唯一门控发现
+（`production-topology-node22-local-postgres` @ `openspec/specs/production-scheduler-orchestration/spec.md:103`，
+`hard_gate_failing_count=1`）；该 spec 文件本单一个字节都没动。

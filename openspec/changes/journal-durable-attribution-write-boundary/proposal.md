@@ -31,6 +31,17 @@
    #1592 的 strip 在写边界把它变成 `None`。**真实 URI 就此丢失，比现状（至少还留着字面量）更糟。**
    只修 #1592 会造出这个新洞；只修 #1589 则只在终态行上碰巧躲开。正解是让谓词看得懂占位符
    （design D3）。
+   **咬合的真实射程（round-2 更正）**：不是两条腿，是**每一条既接受调用方证据又抵达
+   durable 写的腿**；而且**被比较的值与被持久化的值必须是同一个值**——咽喉 strip 让
+   durable 态变成已 strip 的，凡是拿**未 strip 的调用方入参**去和 durable 态做相等判定的闸门
+   （`transition_pipeline_job_submit_evidence` / `transition_pipeline_job_runtime_status` /
+   `complete_pipeline_job_cancellation`）**永远不可能收敛**：每一趟都判「变了」，每一趟再追加一条
+   记录、再烧一个 sequence，直到撞上 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` /
+   `MAX_FILE_JOURNAL_JSON_BYTES`；cancellation 那条更进一步答 `stale`，
+   `chain_forecast_control.py:346-347` 于是 `continue`，**整个取消事件被丢掉**。
+   可达性不再是「机理可达」而是**实证可达**：`query_pipeline_jobs_by_cycle:1126`
+   返回 `_public_scheduler_row` 投影，`chain_forecast_control.py:256` 遍历它，
+   `:344` 与 `:359` 两处都把 `log_uri=job.get("log_uri")` 喂回写路径。
 
 ## What Changes
 
@@ -49,11 +60,16 @@
   `error_code` / `error_message` 保持 existing 值；`finished_at` / `exit_code` / `log_uri`
   这一族**观测事实**继续照常刷新（裁定与理由见 design D4）。触发条件仍是
   `permanently_failed`，**不**扩到全 `TERMINAL_PIPELINE_STATUSES`（design D5）。
-- **咬合修复**：**两条腿**（投影腿 + defer 腿，共 7 处条件谓词）的证据字段覆写谓词改为
-  「占位符不算真值」——入参先过 strip 再判 `is not None`，于是被洗白的占位符不再顶掉
-  durable 真值（design D3）。fixture review P1 指出初版只写了投影腿，那会让本单**亲手在
-  defer 腿上交付比现状更糟的终值**。
-- 三项各配变异体证死（红-绿对照，design 变异表 11 条）。
+- **咬合修复（round-2 重述，射程为全类）**：新增**唯一**的具名裁决点
+  `_resolved_caller_evidence(value, *, durable=None)`——「占位符 = withheld，withheld 意味着
+  **保留**」这条不变量只写一遍、只能在一处改。它被布放在**每一条**接受调用方证据的 durable 写腿上，
+  且**跑在覆写谓词与相等闸门两者之前**：`upsert_pipeline_job` 的合并环、
+  `commit_pipeline_job_submit_attempt`、`transition_pipeline_job_submit_evidence`、
+  `transition_pipeline_job_runtime_status`、`complete_pipeline_job_cancellation`、
+  `update_pipeline_job_status`、投影腿、defer 腿。逐腿普查与逐腿裁定见 design **D9**。
+  无条件写的腿（cancellation / commit / upsert）额外传 `durable=`：那里没有谓词可以「拒绝覆写」，
+  只 strip 会把真值抹成 `None`。
+- 三项各配变异体证死（红-绿对照，design 变异表）。
 - **报告不修、已另立 issue 跟踪**：`cancelled` cohort master 完全无 status 粘性（既存缺口，
   非本单引入，见 design D5）；`_mark_master_permanently_failed:7234` 把公共行的
   `error_message` 回灌 durable（同类 laundering 的另一入口，`[redacted]` 不在 strip 集合内）。
@@ -64,7 +80,16 @@
   不动 `[local-path]` / `[redacted]` 的「有意持久化」语义，不动 pipeline_event 的公共 sanitization。
 - **不改** `_defer_forecast_cohort_projection_unlocked:3539` 的整行短路语义（它已是正确形态）；
   该腿只改 `:3563-3568` 的三个条件覆写谓词。
+- **不给 `update_pipeline_job_status` 加相等闸门**：它今天无条件追加一条记录，那是既有行为，
+  本单只欠「值收敛」，不欠「不写」（design D9 裁定）。
+- **不改** `request_pipeline_job_cancellation` 的 `reason → error_message` 无条件写：
+  `reason` 是操作者现场文本、不是 round-trip 的 journal 证据，把占位符 reason 解析成
+  「保留上一条不相干的 error_message」会配出一个更坏的谎（新 error_code + 旧 message），
+  且该腿的 `cancellation_pending` 状态闸在写之前就答 idempotent，不存在收敛问题（design D9）。
 - **不做**任何 migration / 历史行回填：已被洗白进 durable 的字面量占位符行保持原样。
+- **不修** `_create_pending_manual_retry_job` 从**公共行**派生 retry_record 造成的
+  `init_state_uri` 血缘退化（字面量 → 缺席）：那是**新建行**，没有可「保留」的 durable 前值，
+  且该退化在本单之前就已存在（字面量本身即谎）。报告不修（design D9 secondary）。
 - **不修** `_write_pipeline_job_unlocked` 的**返回值** `_public_scheduler_row(row)`
   （`:6183`）走的是未 strip 的 `row`——该值不是 durable 态，仅是给调用方的返回；作为
   **已声明的已知边界**记录（design D2 尾），不在本单修。
@@ -78,7 +103,11 @@
 - Affected specs: `pipeline-job-persistence`（ADDED 两条 Requirement：durable 写边界反洗白；
   终态归因族粘性）
 - Affected code: `services/orchestrator/file_orchestration_journal.py`
-  （`_journal_record_for_write`、`project_forecast_cohort_tasks` 的合并段、
-  `_defer_forecast_cohort_projection_unlocked` 的条件覆写段）
+  （`_journal_record_for_write`、新增 `_resolved_caller_evidence`、
+  `project_forecast_cohort_tasks` 的合并段、`_defer_forecast_cohort_projection_unlocked`
+  的条件覆写段，以及 round-2 补齐的 `upsert_pipeline_job` /
+  `commit_pipeline_job_submit_attempt` / `transition_pipeline_job_submit_evidence` /
+  `transition_pipeline_job_runtime_status` / `complete_pipeline_job_cancellation` /
+  `update_pipeline_job_status` 六条腿）
 - Affected tests: `tests/test_file_orchestration_journal.py`、`tests/test_gateway_reconcile.py`
 - Closes #1592, closes #1589。

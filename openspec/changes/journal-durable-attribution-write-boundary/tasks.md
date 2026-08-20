@@ -117,3 +117,20 @@
 
 - [ ] 6.1 每一处与本 tasks/design 的departure 写入 PR 的 `偏离记录` 段（what/why/impact）；
       无偏离须**显式写"无偏离"**。
+
+## 7. Round-2 修复轮（D3 射程被证伪后的补齐；裁定见 design D9）
+
+- [x] 7.1 **全类普查**：枚举全部 16 个 `_write_pipeline_job_unlocked` 调用方 + 3 条不经它的
+      durable 写腿 + hydro_run 侧，逐腿记录「收不收调用方证据 / 有无谓词 / 有无无条件写 /
+      有无相等闸门 / 裁定」。表见 design D9.2。**普查结果无论是否要改都必须留表。**
+- [x] 7.2 唯一具名裁决点 `_resolved_caller_evidence(value, *, durable=None)`，
+      「占位符 = withheld，withheld 意味着保留」只写一遍。
+- [x] 7.3 解析**跑在覆写谓词与相等闸门两者之前**（round-1 只做到前者，是本轮缺陷的成因）。
+- [x] 7.4 无条件写的腿传 `durable=`，且**比较器与落盘共用同一个表达式**
+      （`complete_pipeline_job_cancellation` 的 `desired` 与 `row.update`）。
+- [x] 7.5 `update_pipeline_job_status` 的单独裁定已写明（只解析、不加 `durable=`、不加闸门）。
+- [x] 7.6 每条被修的腿各有 idempotency-replay + displacement 一对用例（J13-J19），
+      并加一条参数化的**行为**类守卫（J20，六条腿）。
+- [x] 7.7 三条次要发现各有裁定并落档：`init_state_uri: null`（声明不修，实测双证）、
+      `_journal_record_for_write` 注释过诺（已改，纯注释）、AST 守卫按名索引（已收紧）。
+- [x] 7.8 D8/J10 的翻案已在 design D8 尾显式记录为**取代**，不是静默改写。
