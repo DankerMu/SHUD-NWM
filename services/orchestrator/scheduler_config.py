@@ -969,8 +969,11 @@ def _resolve_config_path_for_mode(path: Path, *, db_free_required: bool) -> Path
     #
     # The two arms are now TEXTUALLY IDENTICAL, and the split is retained
     # deliberately rather than collapsed into a single body: they rest on
-    # different written bases -- the db-backed arm on #1347 design D1, this one
-    # on this change's design D8 -- and either may be re-decided on its own.
+    # different written bases -- the db-backed arm on issue #1423 / PR #1522
+    # (whose own design D1 adopts the #1347 paradigm that was written for
+    # _optional_config_path in scheduler_runtime_roots.py, a different function
+    # in a different module), this one on this change's design D8 -- and either
+    # may be re-decided on its own.
     # Collapsing them would erase the seam at which one of the two lanes can
     # later take an errno split without disturbing the other.
     try:
@@ -1272,8 +1275,20 @@ def _db_free_path_check(
     # or the parent-lstat gate below, so a loop reports the errno-derived unsafe
     # reason instead of being folded lexically and then attributed as
     # "not found" (inside the bases) or "outside boundary" (outside them). Both
-    # of those were already rejections, so the reported reason changes within
-    # the rejected class only -- never a verdict.
+    # of those were already rejections, so for a PERSISTENT fault -- a loop, an
+    # unreadable parent -- the reported reason changes within the rejected class
+    # only, and the verdict does not move.
+    #
+    # A TRANSIENT non-ENOENT errno is the exception, and it is a deliberate
+    # fail-closed trade rather than an oversight. The pre-change form resolved
+    # through Path.resolve(strict=False), whose non-strict realpath swallows
+    # every errno internally, so no resolution-layer fault could produce a
+    # blocker at all; a one-shot ESTALE/EIO on an otherwise healthy NFS path was
+    # admitted here and then passed the later lstat/exists gates. It now blocks,
+    # and db_free_runtime_preflight is pass-level (scheduler_runtime.py:650),
+    # so the pass aborts with db_free_runtime_preflight_blocked before the lock
+    # is taken. Self-healing on the next pass, and evidence is written -- but on
+    # NFS-backed node-22 this is availability traded for containment safety.
     resolved, resolution_error = _db_free_loop_filtered_realpath(path)
     if resolution_error is not None:
         check.update({"absolute": True, "contained": False})

@@ -106,9 +106,10 @@ canonical form and the same subsequent verdict as 3.13+ instead of raising an
 errno-less RuntimeError. The db-free preserve-final arm
 (`_safe_preserve_final_component`) is outside this requirement: on 3.11/3.12
 it still swallows the loop and returns the raw path — that residue belongs to
-issue #1627, the family-level ruling on whether an ENOENT non-strict fallback
-must be loop-filtered (it was tracked by #1400 until that issue was closed
-without touching this arm)
+issue #1627, which adjudicates this surviving-`Path.resolve` sub-family
+alongside — and explicitly distinguished from — the ENOENT non-strict fallback
+family (#1400 tracked it previously; the PR that closes #1400 leaves this arm
+untouched and re-points it here)
 
 #### Scenario: ENOENT and non-loop containment semantics are unchanged
 

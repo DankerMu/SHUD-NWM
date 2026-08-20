@@ -65,9 +65,9 @@ PR #1426 落地）已定型的范式。
 loop-filtered admit 是**两套相反教条**。在本 change 里顺手改一个兄弟，等于用沉默替代
 那次显式裁决。
 
-**残留处置**：本 PR 合并即关闭 #1427，那条家族级教条冲突（约 8 处兄弟站点）随之失去
-open tracker。故 Phase 8 **必须**经 issue-scribe 路由一条家族级裁决 issue（tasks 5.2），
-不得随 close 一起消失。
+**残留处置（已办，非待办）**：本 PR 合并即关闭 #1427，那条家族级教条冲突（约 8 处兄弟站点）
+随之失去 open tracker。故该家族级裁决 issue 已**提前到合并前**由 issue-scribe 开出——
+**#1627**——而不是留到 Phase 8（tasks 5.2）。两条 live spec 的指针已改指它。
 
 **兄弟站点坐标（fixture review P2-6 更正后，已独立复量于 base）**——这批将成为 5.2 路由
 issue 的载荷，故必须准确，不得沿用 issue 原文坐标：
@@ -141,7 +141,9 @@ recheck；若 B1 的回退臂不装，则 A1 拒掉的那类环路会在**下一
 **字节兼容锚（实测）**：clean-prefix / missing-suffix 形态下
 `path.resolve(strict=False)` 与 `os.path.realpath(path)` 产出**逐字相等**（上表第 2 行）。
 仓库内已有同一断言的成文依据：`scheduler_config.py:939` non-db-free 臂的注释
-（#1347 change design D1）写明非 strict `os.path.realpath()`「reproduces the product of the
+（该注释与其 `design D1` 引用由 `ac80e341` = **issue #1423 / PR #1522** 写下；
+其 design D1 又转采 #1347 为**另一模块的另一个函数**所立的范式——round-2 lens C P2-2
+更正，初稿此处只写「#1347 change design D1」是错的）写明非 strict `os.path.realpath()`「reproduces the product of the
 old non-strict `Path.resolve()` verbatim -- POSIX order, symlinks first and `..` afterwards」。
 即便如此仍**独立钉一条等价测试**（tasks 3.4），不靠注释背书。
 
@@ -397,7 +399,10 @@ M9 在本地的证死由 **4.4 的违规者守卫独力承担**，6.6 已据此�
   瞎的只是**元组侧掉名**这一向，也就是「把函数从守卫里摘掉以绕过 `.resolve()` 禁令」。
   （既有 artifact 腿守卫同形失明——该守卫源自 **issue #1402 / PR #1422**（`015318d2` 立
   `_ARTIFACT_GUARD_LANE_FUNCTIONS`），后经 **#1424 / PR #1435**（`72b3892e`）与 **#1618**
-  （`8f386972` 加 `_local_artifact_target_is_not_a_file`）两次扩元组；失明是其**自诞生起**
+  （`8f386972` 加 `_local_artifact_target_is_not_a_file`）先后触及——**但只有 #1618 那次
+  真正改了成员**（实测成员数 `015318d2` 6 / `72b3892e` 6 / `8f386972` 7；`72b3892e` 加的是
+  断言而非成员。round-2 两个透镜独立发现：round-1 那次出处更正自己又写错了一处）；
+  失明是其**自诞生起**
   的既有缺口，非 #1618 引入。**只报不修**，随 5.2 路由。）
 - **round-1 给的补救（按命名谓词反查）经 round-2 实测不可写**：4.4 原定的那四个
   scheduler_config 函数**既无共同前缀也无共同后缀**——`_db_free_path*` 多圈一个

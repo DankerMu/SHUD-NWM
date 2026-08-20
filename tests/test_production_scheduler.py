@@ -17351,8 +17351,8 @@ def test_tilde_residue_preflight_allowed_roots_is_admitted_by_the_existing_enoen
     # the cwd.  That cwd-anchored phantom root is the ACCEPTED new state of this
     # change (issue #1436 acceptance 2's "or tolerated by the existing arm"
     # branch); its geometry is the #1427 adjacency and is recorded here, not
-    # changed.  Scope sync: #1400/#1427 have since landed and #1427 is closed by
-    # that PR, so "separately tracked" no longer names a live tracker.  The
+    # changed.  Scope sync: the PR carrying #1400/#1427 closes both, so
+    # "separately tracked" would stop naming a live tracker.  The
     # geometry itself is untouched -- this arm is ``scheduler_preflight``'s, and
     # that change treats only the ``retry`` leg -- and its live tracker is now
     # #1627, the family-level ruling on whether every ENOENT non-strict fallback
