@@ -30,5 +30,5 @@ Hand-computed coverage arithmetic (issue alternative) drifts on its own and does
 
 ## D5 Couplings recorded, not solved
 
-- #1442 already diverged the production fallback from the frozen text (surrogate-key river join; three extra candidate columns) — handled by D2's asserted projection, and stated in the fixture header.
+- #1442 already diverged the production fallback from the frozen text in two separate ways. (1) The surrogate-key river join plus three extra candidate columns — handled by D2's asserted projection, and stated in the fixture header. (2) The #1340/#1442 enum dual-write conjunct `rt.variable_e = 'q_down'::hydro.river_variable` (D1 (c)) — a column-set-invisible predicate divergence that the projection provably cannot absorb, since `_NEW_ONLY_COLUMNS` pops only the three key columns. It is bounded instead by the tests' dual-write seeding (`insert_river_timeseries_dual_written`) and by the recorded NULL-`variable_e` exclusion contract in `openspec/specs/river-identity-normalization/spec.md`.
 - #1342 (text identity retirement) will make the frozen statement fail to execute (`rt.run_id`, `rt.basin_version_id`, `rt.river_network_version_id` joins in `hydro_coverage`). Route: one comment on #1342 listing `tests/fixtures/legacy_qhh_fallback_pre_1413.sql` as a consumer to re-freeze/retire. No shim here.

@@ -18,6 +18,7 @@ Issue: #1414 (origin: PR #1413 / #1120 cross-review, verifier CONFIRMED, deferre
 - Strict-identity (`identity is not None`) parity; the sibling pushdown copy in `display_coverage.py` (its parity also rests on a one-off receipt — separate issue if wanted).
 - Performance baselines; FAST-path ≡ fallback equivalence (existing test keeps that).
 - Re-aligning the frozen text with #1442's surrogate-key join (the divergence is absorbed by the asserted projection, design D2).
+- Re-aligning the frozen text with production's `rt.variable_e` enum conjunct (#1340/#1442, design D1 (c)) — that divergence is bounded by dual-write seeding and the recorded NULL-`variable_e` exclusion contract, not by the projection.
 - Retiring the frozen statement when #1342 drops the text identity columns — the frozen text joins `hydro.river_timeseries` on text columns and WILL break then; routing comment on #1342 is part of this change's evidence, the retirement itself is #1342's.
 
 ## Must-preserve
