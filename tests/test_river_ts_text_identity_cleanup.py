@@ -856,6 +856,31 @@ def test_autopipeline_ingest_criterion_joins_by_key_with_no_aid() -> None:
     assert "ON rt.run_key = h.run_key" in sql
 
 
+def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
+    """#1674: 'published' is complete on its own; 'parsed' still needs key rows.
+
+    Sits beside the #1442 shape pin rather than in a new file because
+    ``scripts/select_ci_tests.py`` maps the autopipeline script to exactly this
+    oracle (``test_select_ci_tests.py`` asserts that set by equality), so a new
+    file would either never run on the PR that changes the script or redden the
+    selector's own guard.
+
+    The negatives are the load-bearing half. ``COALESCE`` would mean someone
+    gave ``parsed_at`` a fallback, and ``updated_at`` would mean that fallback
+    is ``hydro_run.updated_at`` -- which every tick's register upsert bumps, so
+    it is a false parse timestamp that would make recompute detection claim a
+    currency it does not have (design D1).
+    """
+    sql = _autopipeline_statement("_already_ingested_runs")
+
+    assert "LEFT JOIN hydro.river_timeseries rt" in sql
+    assert "ON rt.run_key = h.run_key" in sql
+    assert "HAVING h.status = 'published' OR COUNT(rt.run_key) > 0" in sql
+    assert "MAX(rt.created_at) AS parsed_at" in sql
+    assert "COALESCE" not in sql
+    assert "updated_at" not in sql
+
+
 def test_autopipeline_publish_criterion_correlates_by_key_with_no_aid() -> None:
     sql = _autopipeline_statement("_publish_display_runs")
 
