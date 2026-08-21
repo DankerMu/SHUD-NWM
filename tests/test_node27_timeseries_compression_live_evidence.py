@@ -7328,7 +7328,7 @@ def test_wellformed_invocation_reference_naming_a_symlink_fails_closed(
     The absent-path test above cannot tell "the file is not there" from "the file is
     there but is not a thing we are willing to read" -- both wrap into the same
     `artifact closure node is unavailable or unsafe` label
-    (`packages/common/evidence_io.py:141`).  So the slot here names a symlink whose
+    (`packages/common/evidence_io.py:361`).  So the slot here names a symlink whose
     target is a real regular file with the *matching* `sha256`/`bytes`: existence,
     metadata validity and declared identity all check out, and the run must still fail
     closed purely because `open_file_no_follow` refuses the symlink

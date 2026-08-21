@@ -70,11 +70,13 @@ What is genuinely never interpreted is the **invocation semantics** — argv, ex
 defensible claim, and it is the one `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`
 (`tests/test_node27_timeseries_compression_live_evidence.py:3240`) already pins.
 
-So the canonical sentence, used identically in every carrier:
+So the canonical sentence, carried in the two tiers set out below:
 
 > Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not itself a closure node, though any well-formed reference nested inside it still is, collected in its own right.
 
-Carriers, in two tiers — the split is deliberate and recorded in tasks.md E6, not an accident.
+Carriers, in two tiers — the split is deliberate and recorded in tasks.md E6, not an accident. E6 states the
+sweep as a criterion, not a procedure: it scopes to this change's own carriers, and it derives the refuted set
+from this section rather than keeping a parallel list that has to be edited in lockstep.
 
 **Tier 1, verbatim**: the five schema `description`s, the runbook narrative (modulo markdown line wrapping),
 this D2 blockquote, the proposal blockquote, and the PR body. Copy the sentence; do not paraphrase.
