@@ -457,6 +457,17 @@ suffixes, fixture/final-review roles, and non-rotation subset rounds can distort
 the core/rotated split. No policy change; a future reversal still requires the
 recorded metric fixes plus maintainer review.
 
+## Revisit 2026-08-21 (post PR #1670 / issue #1597)
+
+Audit re-flagged DECIDABLE at the same 94 multi-round merged PRs, later-round
+catches core=46 vs rotated=244 — #1597 was a single-round PR (compact fixture,
+two lenses, two CONFIRMED prose-only catches repaired as a local-repair), so it
+adds no multi-round sample and leaves the ratio untouched.
+
+**Keep rotation** remains the recorded decision; nothing in this sample bears
+on the attribution question, and the metric caveats recorded above still
+stand. No policy change.
+
 ## Revisit 2026-08-21 (post PR #1665 / issue #1650)
 
 Audit re-flagged DECIDABLE at 95 multi-round merged PRs, later-round catches

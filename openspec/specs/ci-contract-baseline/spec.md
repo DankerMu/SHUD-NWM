@@ -196,8 +196,8 @@ this collapse path.
 ### Requirement: Guarded-module selector rules MUST cover their non-gated importer closure
 
 The targeted-test selector SHALL, for each selector-guarded production
-module (initially `packages.common.display_coverage` and
-`services.slurm_gateway.real_backend`), via the rule
+module (currently `packages.common.display_coverage`,
+`services.slurm_gateway.real_backend`, and `services.tiles.mvt`), via the rule
 owning that module's path, select every tracked `tests/test_*.py`
 that imports the module at top level and carries no `integration`/`e2e`
 gating marker, and a mechanized selector test SHALL derive that importer
@@ -228,6 +228,17 @@ normative disposition rule for their direct-importer gaps.
   `tests/test_job_array.py`; for `display_coverage`:
   `tests/test_display_coverage_refresh.py`,
   `tests/test_display_coverage_parallel.py`, `tests/test_forecast_api.py`)
+- **WHEN** a PR changes only `services/tiles/mvt.py`
+- **THEN** the selector output includes every non-gated direct importer suite
+  of `services.tiles.mvt` (including `tests/test_hhe_mvt_binding.py`,
+  `tests/test_hydro_display_mvt_scaling.py`,
+  `tests/test_node27_timeseries_compression_benchmark.py`,
+  `tests/test_node27_timeseries_compression_live_evidence.py`) and every
+  one-hop suite contributed by `apps/api/routes/hydro_display.py` (including
+  `tests/test_direct_grid_display_cutover_flip.py`,
+  `tests/test_direct_grid_display_cutover_history.py`,
+  `tests/test_direct_grid_display_cutover_model_resolution.py`),
+  and no core-smoke-only fallback suite
 
 #### Scenario: closure completeness is mechanized
 
