@@ -500,3 +500,15 @@ closed the two known findings; zero new catches cannot identify whether lens
 rotation added recall. The existing attribution caveats remain decisive, so no
 policy change is made and any reversal still requires the recorded schema/role
 fixes plus maintainer review.
+
+## Revisit 2026-08-21 (post PR #1682 / issue #1644)
+
+Audit remains DECIDABLE at 96 multi-round merged PRs, with later-round catches
+core=46 vs rotated=244. PR #1682 is a single-round clean review: six Round 1
+lenses produced zero candidates and Phase 7 produced zero new findings. It
+therefore adds no multi-round sample and changes neither attribution count.
+
+**Keep rotation** remains the recorded decision, with no new evidence in either
+direction. A single-round zero-catch PR cannot test a follow-up-round rotation
+policy. The existing attribution caveats remain load-bearing, so any reversal
+still requires the recorded schema/round-role fixes plus maintainer review.

@@ -31,7 +31,7 @@ Must preserve: route/request/response behavior; auth/RBAC decisions and 401/403/
 - [x] 3.3 `cd apps/frontend && corepack pnpm run check:api-types && corepack pnpm test && corepack pnpm build` passes (326 frontend assertions and successful production build), and `src/api/types.ts` has no diff.
 - [x] 3.4 `uv run ruff check .`, `git diff --check`, and `openspec validate fix-openapi-31-schema-validity --strict --no-interactive` pass.
 - [x] 3.5 OpenAPI-only selector probe reports exactly three assertion suites; patch-owner probe reports five; required normalization/security/routing/generator mutants independently red and restore.
-- [ ] 3.6 Final-head PR CI shows OpenAPI Validate, targeted Unit Tests, Frontend Build, and Governance Audit at terminal success on the same SHA.
+- [x] 3.6 Final-head PR CI at `1f73c42d0e0e8e4108131a2d82a8782b3783fa71` shows OpenAPI Validate, targeted Unit Tests (six suites, 383 assertions), Frontend Build, and Governance Audit at terminal success: runs `32488414690` and `32488414591`.
 
 ## 4. Non-goals and routing
 
