@@ -33,6 +33,9 @@ from services.orchestrator import file_orchestration_journal as file_orchestrati
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_backfill_predecessor as scheduler_backfill_predecessor_module
+from services.orchestrator import (
+    scheduler_candidate_execution_evidence as scheduler_candidate_execution_evidence_module,
+)
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_config as scheduler_config_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
@@ -18877,6 +18880,7 @@ def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None
     assert production_stage_for("publish_tiles") == "q_down_publish"
     assert production_stage_for("unknown_stage") == "production_run"
     assert production_status_for("skipped") == "superseded"
+    assert production_status_for("skip") == "superseded"
     assert production_status_for("complete") == "succeeded"
     assert production_status_for("source_cycle_unavailable") == "unavailable"
     assert production_status_for("lock_contended") == "blocked"
@@ -18885,6 +18889,104 @@ def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None
     assert production_status_for("unexpected_status") == "failed"
     assert "q_down_publish" in PRODUCTION_STAGE_TAXONOMY
     assert "superseded" in PRODUCTION_STATUS_TAXONOMY
+
+
+def test_duplicate_submission_status_projects_to_blocked_in_taxonomy() -> None:
+    """#1324: a reserve-gate deferral is review-visible blocked, not failed.
+
+    The readiness plane already classifies ``skipped_duplicate_submission`` as
+    review-visible; the production translator must land on the same status so a
+    normal concurrency deferral never reads as failure evidence.
+    """
+
+    projected = production_status_for("skipped_duplicate_submission")
+    assert projected == "blocked"
+    assert projected in PRODUCTION_STATUS_TAXONOMY
+    # Deliberately distinct from the unknown-status fail-closed fallback.
+    assert projected != production_status_for("unexpected_status")
+    assert production_status_for("unexpected_status") == "failed"
+
+
+def test_stage_run_evidence_preserves_raw_status_and_projects_blocked() -> None:
+    """#1324: the stage-run projection follows the single translator.
+
+    The raw reserve-gate terminal must stay ``skipped_duplicate_submission`` in
+    the projected evidence while ``production_status`` reports ``blocked``; an
+    unrecognized status on the same seam keeps the fail-closed ``failed``
+    projection.
+    """
+
+    stage = StageRunResult(
+        stage="forecast",
+        job_type="run_shud_forecast",
+        pipeline_job_id="job_forecast",
+        slurm_job_id="",
+        status="skipped_duplicate_submission",
+        error_message="Skipped duplicate submission for idempotency_key=cycle:forecast.",
+    )
+    projected = scheduler_candidate_execution_evidence_module._stage_run_evidence(stage)
+
+    assert projected["status"] == "skipped_duplicate_submission"
+    assert projected["production_status"] == "blocked"
+    assert projected["production_status"] in PRODUCTION_STATUS_TAXONOMY
+
+    unknown = scheduler_candidate_execution_evidence_module._stage_run_evidence(
+        StageRunResult(
+            stage="forecast",
+            job_type="run_shud_forecast",
+            pipeline_job_id="job_forecast",
+            slurm_job_id="",
+            status="unexpected_status",
+        )
+    )
+    assert unknown["status"] == "unexpected_status"
+    assert unknown["production_status"] == "failed"
+
+    skipped = scheduler_candidate_execution_evidence_module._stage_run_evidence(
+        StageRunResult(
+            stage="convert",
+            job_type="convert_canonical",
+            pipeline_job_id="job_convert",
+            slurm_job_id="",
+            status="skipped",
+        )
+    )
+    assert skipped["status"] == "skipped"
+    assert skipped["production_status"] == "superseded"
+
+
+def test_candidate_stage_evidence_item_preserves_raw_status_and_projects_blocked() -> None:
+    """#1324: the candidate stage-evidence projection follows the translator.
+
+    Same raw-status preservation and ``blocked`` projection contract as
+    ``_stage_run_evidence``, exercised through the candidate-scoped seam.
+    """
+
+    stage = {
+        "stage": "forecast",
+        "job_type": "run_shud_forecast",
+        "pipeline_job_id": "job_forecast",
+        "slurm_job_id": "",
+        "status": "skipped_duplicate_submission",
+        "error_message": "Skipped duplicate submission for idempotency_key=cycle:forecast.",
+    }
+    projected = scheduler_candidate_execution_evidence_module._candidate_stage_evidence_item(
+        _scheduler_candidate_fixture(),
+        stage,
+        outcome=None,
+    )
+
+    assert projected["status"] == "skipped_duplicate_submission"
+    assert projected["production_status"] == "blocked"
+    assert projected["production_status"] in PRODUCTION_STATUS_TAXONOMY
+
+    unknown = scheduler_candidate_execution_evidence_module._candidate_stage_evidence_item(
+        _scheduler_candidate_fixture(),
+        {**stage, "status": "unexpected_status"},
+        outcome=None,
+    )
+    assert unknown["status"] == "unexpected_status"
+    assert unknown["production_status"] == "failed"
 
 
 def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_count(tmp_path: Path) -> None:

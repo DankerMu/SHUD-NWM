@@ -368,6 +368,7 @@ def production_status_for(value: Any) -> str:
         "parsed": "succeeded",
         "skipped": "superseded",
         "skip": "superseded",
+        "skipped_duplicate_submission": "blocked",
         "not_run": "unavailable",
         "planned": "pending",
         "lock_contended": "blocked",
