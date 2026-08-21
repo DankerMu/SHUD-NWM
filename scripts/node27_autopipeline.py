@@ -888,14 +888,29 @@ def _already_ingested_runs(
     *,
     object_store_root: Path | None = None,
 ) -> set[str]:
-    """Return the subset of run_ids already fully ingested: hydro_run at a
-    parser-advanced status AND carrying river_timeseries rows. Lets the cron
+    """Return the subset of run_ids already fully ingested. Lets the cron
     re-scan cheaply -- finished runs are skipped instead of re-applying their
     per-cycle forcing handoff every tick.
 
+    Completeness is decided by AUTHORITY STATE first (#1674). A run at status
+    'published' is complete whether or not its river_timeseries rows are
+    key-visible right now: publish only ever happens once rows exist, so a
+    later invisibility has exactly two sources -- NULL-key legacy rows the
+    backfill could not reach inside compressed chunks (a recorded, converging
+    exclusion contract), or a retention-dropped chunk (an intentional
+    deletion). Neither should re-trigger the per-cycle handoff. A run at status
+    'parsed' still requires at least one key-visible row: after dual-write a
+    parsed run always has one, so its absence means the parser chain did not
+    finish and retrying is correct.
+
     If the object-store run was rewritten after DB parse, do not skip it. That
     is the normal recovery path after a cold-start run is replaced by a
-    warm-start recompute with the same run_id.
+    warm-start recompute with the same run_id. Recorded residual: on a legacy
+    NULL-key run the aggregate yields parsed_at NULL, so recompute detection
+    degrades to the init_state comparison alone -- a rewrite carrying the SAME
+    initial state is not detected on that cohort. hydro_run.updated_at is NOT
+    used as a fallback: publish deliberately leaves it alone while every tick's
+    register upsert bumps it, so it is not a parse timestamp.
 
     Runs at status 'superseded' are retired: skipped unconditionally (no
     timeseries-row or manifest-currency check), even though their object-store
@@ -918,15 +933,20 @@ def _already_ingested_runs(
                        h.init_state_id,
                        MAX(rt.created_at) AS parsed_at
                 FROM hydro.hydro_run h
-                -- #1442: key-only join. The run's identity arrives from
-                -- hydro_run, never as a literal here, so there is no
-                -- transitional text aid to add — a text equality would only be
-                -- the forbidden text fact join, and it is not pushdown material.
-                JOIN hydro.river_timeseries rt
+                -- #1674: completeness is authority-state first. A published run
+                -- is complete whether or not its fact rows are key-visible
+                -- (NULL-key legacy rows in compressed chunks, or
+                -- retention-dropped chunks, must not re-trigger the per-cycle
+                -- handoff); a parsed run still needs at least one key-visible
+                -- row.
+                -- #1442: key-only join, no transitional text aid
+                -- (rt.run_id = h.run_id is the forbidden text fact join).
+                LEFT JOIN hydro.river_timeseries rt
                   ON rt.run_key = h.run_key
                 WHERE h.run_id = ANY(%s)
                   AND h.status IN ('parsed', 'published')
-                GROUP BY h.run_id, h.init_state_id
+                GROUP BY h.run_id, h.init_state_id, h.status
+                HAVING h.status = 'published' OR COUNT(rt.run_key) > 0
                 """,
                 (run_ids,),
             )
@@ -1109,8 +1129,12 @@ def _publish_display_runs(database_url: str) -> int:
     ``/api/v1/layers`` surfaces display-ready hydro runs. A display node
     publishes q_down products after parsed river_timeseries rows appear so the
     overlay registers without waiting for compute-side jobs. Idempotent
-    (published runs and runs without timeseries are left untouched), matching the
-    ``_already_ingested_runs`` completeness predicate.
+    (published runs and runs without timeseries are left untouched). The
+    parsed -> published transition keys on key-visible rows, which is right for
+    the population it acts on: only runs written after the dual-write cutover
+    can still be 'parsed'. Legacy NULL-key runs are already 'published' by
+    contract -- they finished publishing before the cutover -- so this
+    statement never has to reason about them (#1674 design D2).
 
     Status-only on purpose: ``updated_at`` means "run data changed" (register,
     mark_run_parsed), and display coverage staleness is

@@ -27,13 +27,17 @@ evidence, exactly as recorded in
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg2
 import pytest
 from psycopg2.extras import RealDictCursor
 
+import scripts.node27_autopipeline as autopipe
 from tests.integration_helpers import apply_migrations_from_zero
 
 pytestmark = pytest.mark.integration
@@ -809,3 +813,291 @@ def _catalog_snapshot(connection: Any) -> dict[str, Any]:
             (list(NORMALIZED_COLUMNS),),
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# #1674 — the autopipeline completeness predicate, on a real database
+# ---------------------------------------------------------------------------
+#
+# `_already_ingested_runs` decides, once per tick, which runs may be skipped.
+# Getting it wrong in either direction is expensive and invisible to unit tests:
+# too strict re-sends the per-cycle forcing handoff for hundreds of finished
+# runs (the #1674 production storm), too loose leaves a genuinely incomplete run
+# un-ingested. The predicate is pure SQL over two real tables with a real
+# GENERATED IDENTITY key and real NULLs, so the oracle is a database.
+
+_SUPERSEDED_RUN = "run-superseded"
+
+
+def _seed_run(
+    connection: Any,
+    run_id: str,
+    *,
+    status: str,
+    init_state_id: str | None = None,
+) -> None:
+    """One `hydro.hydro_run` row at ``status``.
+
+    ``run_key`` is `GENERATED ALWAYS AS IDENTITY` (migration 000050) and so must
+    never appear in the INSERT list; the database assigns it, and the fact rows
+    below read it back. ``_seed_authority`` covers the FK targets (model
+    instance, basin version) and hardcodes a single run at 'parsed', which is
+    why the multi-run, multi-status seeding here is its own helper.
+
+    ``init_state_id`` is nullable in the schema but has to be settable for the
+    recompute-detection scenario: `_ingested_run_is_current` compares it to the
+    manifest, and NULL on both sides would make that comparison vacuous.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO hydro.hydro_run
+                (run_id, run_type, scenario_id, model_id, basin_version_id,
+                 start_time, end_time, status, run_manifest_uri, init_state_id)
+            VALUES (%s, 'forecast', 'sc', 'm1', 'bv1', now(), now(), %s, 's3://m', %s);
+            """,
+            (run_id, status, init_state_id),
+        )
+
+
+def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
+    """A handful of `river_timeseries` rows for ``run_id``.
+
+    ``normalized=False`` reproduces the legacy population: text identity filled,
+    all seven surrogate/enum columns NULL, exactly like the rows the 000051
+    backfill runner had to skip inside already-compressed chunks. A few rows are
+    enough — the predicate is an existence test, not a volume test.
+    """
+    filled = """
+        (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s),
+        (SELECT river_network_version_key FROM core.river_network_version
+          WHERE river_network_version_id = 'rnv1'),
+        (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = 'bv1'),
+        (SELECT river_segment_key FROM core.river_segment
+          WHERE river_segment_id = 'seg-' || s AND river_network_version_id = 'rnv1'),
+        'q_down', 'm3/s', 'ok'
+    """
+    empty = "NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO hydro.river_timeseries
+                (run_id, basin_version_id, river_network_version_id, river_segment_id,
+                 valid_time, variable, value, unit, quality_flag,
+                 run_key, river_network_version_key, basin_version_key, river_segment_key,
+                 variable_e, unit_e, quality_flag_e)
+            SELECT %(run_id)s, 'bv1', 'rnv1', 'seg-' || s,
+                   %(base_time)s::timestamptz + (h * INTERVAL '1 hour'),
+                   'q_down', random() * 10, 'm3/s', 'ok',
+                   {filled if normalized else empty}
+            FROM generate_series(1, 3) s, generate_series(0, 2) h;
+            """,
+            {"run_id": run_id, "base_time": _BASE_TIME},
+        )
+
+
+def _compress_all_river_chunks(connection: Any) -> int:
+    """Compress every `river_timeseries` chunk; return how many were compressed."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT compress_chunk(format('%I.%I', chunk_schema, chunk_name)::regclass)
+            FROM timescaledb_information.chunks
+            WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
+              AND NOT is_compressed
+            """
+        )
+        return cursor.rowcount
+
+
+def test_already_ingested_counts_a_published_run_with_null_key_rows_in_a_compressed_chunk(
+    throwaway_database_url: str,
+) -> None:
+    """#1674 (i): the production failure condition, reproduced end to end.
+
+    Compression is fidelity to how the rows got this way, NOT what makes the
+    predicate fail: a NULL `run_key` misses a key join whether its chunk is
+    compressed or not. Compressed storage is why the 000051 backfill could not
+    fill those keys and why they are permanently NULL, which is the state this
+    test asserts against.
+
+    Before the fix this run was absent from the result — the inner join dropped
+    it — so every tick re-sent its per-cycle forcing handoff into a compressed
+    `met` chunk and was correctly rejected, 544 times per tick.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "legacy-published", status="published")
+        _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
+        _seed_run_facts(connection, "legacy-published", normalized=False)
+        assert _compress_all_river_chunks(connection) >= 1
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries "
+                "WHERE run_id = 'legacy-published' AND run_key IS NOT NULL",
+            )
+            == 0
+        )
+
+        ingested = autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["legacy-published", _SUPERSEDED_RUN],
+            object_store_root=None,
+        )
+
+        assert "legacy-published" in ingested
+        # The superseded run is retired by the first statement, unconditionally.
+        assert _SUPERSEDED_RUN in ingested
+    finally:
+        connection.close()
+
+
+def test_already_ingested_excludes_a_parsed_run_whose_only_rows_are_null_key(
+    throwaway_database_url: str,
+) -> None:
+    """#1674 (ii): authority state relaxes 'published' only.
+
+    A 'parsed' run with no key-visible row means the parser chain did not
+    finish; keeping it incomplete is what makes the pipeline retry it.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "half-parsed", status="parsed")
+        _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
+        _seed_run_facts(connection, "half-parsed", normalized=False)
+
+        ingested = autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["half-parsed", _SUPERSEDED_RUN],
+            object_store_root=None,
+        )
+
+        assert "half-parsed" not in ingested
+        assert _SUPERSEDED_RUN in ingested
+    finally:
+        connection.close()
+
+
+def test_already_ingested_counts_a_parsed_run_with_key_matched_rows(
+    throwaway_database_url: str,
+) -> None:
+    """#1674 (iii): the post-dual-write normal path is unchanged."""
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "fresh-parsed", status="parsed")
+        _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
+        _seed_run_facts(connection, "fresh-parsed", normalized=True)
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries rt "
+                "JOIN hydro.hydro_run h ON h.run_key = rt.run_key "
+                "WHERE h.run_id = 'fresh-parsed'",
+            )
+            > 0
+        )
+
+        ingested = autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["fresh-parsed", _SUPERSEDED_RUN],
+            object_store_root=None,
+        )
+
+        assert "fresh-parsed" in ingested
+        assert _SUPERSEDED_RUN in ingested
+    finally:
+        connection.close()
+
+
+def test_already_ingested_counts_a_published_run_with_no_fact_rows_at_all(
+    throwaway_database_url: str,
+) -> None:
+    """#1674 (iv): a retention-emptied published run is not re-ingested.
+
+    This is the deliberate behaviour change against pre-#1674 code, which would
+    have re-run the whole handoff for a run whose chunks retention dropped on
+    purpose. 'published' is the authority fact that the data was there.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "emptied-published", status="published")
+        _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
+
+        ingested = autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["emptied-published", _SUPERSEDED_RUN],
+            object_store_root=None,
+        )
+
+        assert "emptied-published" in ingested
+        assert _SUPERSEDED_RUN in ingested
+    finally:
+        connection.close()
+
+
+def _write_manifest(object_store_root: Path, run_id: str, state_id: str) -> None:
+    path = object_store_root / "runs" / run_id / "input" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"initial_state": {"state_id": state_id}}), encoding="utf-8")
+
+
+def test_already_ingested_recompute_detection_on_a_legacy_run_is_init_state_only(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """#1674 (v): the recorded residual of design D1, pinned so it cannot drift.
+
+    On a legacy NULL-key run `MAX(rt.created_at)` aggregates zero rows, so
+    `parsed_at` is NULL and the product-mtime comparison cannot run. What
+    survives is the init_state comparison: a warm-start recompute that changes
+    the initial state is still detected and re-ingested; a rewrite that keeps
+    the same initial state is not. That gap is bounded (the cohort ages out with
+    retention) and deliberate — `hydro_run.updated_at` is not an acceptable
+    stand-in for a parse timestamp, since every tick's register upsert bumps it.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "legacy-published", status="published", init_state_id="state-a")
+        _seed_run_facts(connection, "legacy-published", normalized=False)
+        assert _compress_all_river_chunks(connection) >= 1
+
+        # Manifest disagrees with the DB: a different initial state means the
+        # object store now holds a different run. Not complete, re-ingest it.
+        _write_manifest(tmp_path, "legacy-published", "state-b")
+        assert (
+            autopipe._already_ingested_runs(
+                throwaway_database_url,
+                ["legacy-published"],
+                object_store_root=tmp_path,
+            )
+            == set()
+        )
+
+        # Manifest agrees, and the products were rewritten after any plausible
+        # parse time. With parsed_at NULL there is nothing to compare the mtime
+        # against, so the run stays complete: the residual, made visible.
+        _write_manifest(tmp_path, "legacy-published", "state-a")
+        product = tmp_path / "runs" / "legacy-published" / "output" / "rivqdown.csv"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text("time,q\n", encoding="utf-8")
+        future = datetime.now(tz=UTC).timestamp() + 3600
+        os.utime(product, (future, future))
+        assert autopipe._run_product_mtime(tmp_path, "legacy-published") >= future
+
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["legacy-published"],
+            object_store_root=tmp_path,
+        ) == {"legacy-published"}
+    finally:
+        connection.close()
