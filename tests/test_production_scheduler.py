@@ -43706,7 +43706,12 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
 
     initial_result = initial_scheduler.run_once()
 
-    assert initial_result.status == "submitted", [
+    # #1326: the ambiguous forecast submit terminates the cycle as
+    # ``reconciling``, so every submitted candidate is now partial non-success
+    # evidence and the pass is ``submitted_partial`` (pre-change the reconciling
+    # terminal was unrecognized, partial_count read 0, and the pass reported a
+    # plain ``submitted``). The tuple keeps the per-candidate debug context.
+    assert initial_result.status == "submitted_partial", [
         (
             item.get("model_id"),
             item.get("status"),
@@ -47444,6 +47449,81 @@ def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_pat
     assert items["model_b"]["candidate_outcome"]["status"] == "active"
     assert items["model_b"]["candidate_outcome"].get("reason") is None
     assert items["model_b"]["error_code"] == "CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"
+
+
+# --- #1326: reconciliation-pending family on the evidence plane -------------
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["reconciling", "submit_result_ambiguous", "reconcile_unverified"],
+)
+def test_reconciliation_pending_statuses_are_non_success_but_not_failed(status: str) -> None:
+    """D1/D2 (#1326): one governed family shared by the candidate quality plane.
+
+    All three tokens reject final success through the single non-success
+    predicate while the failed classifier stays false — the evidence never
+    fabricates a failed candidate from a pending reconciliation outcome.
+    """
+
+    from services.orchestrator.scheduler_candidate_quality import (
+        _is_non_submitted_terminal_or_unavailable_status,
+    )
+    from services.orchestrator.scheduler_candidate_runtime import _is_failed_model_run_status
+
+    assert _is_non_submitted_terminal_or_unavailable_status(status) is True
+    assert _is_failed_model_run_status(status) is False
+
+
+def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: Path) -> None:
+    """D1 (#1326): an active candidate under a ``reconciling`` cycle terminal.
+
+    The cycle-derived item carries the reconciling status, contributes one
+    producer partial count (never a failed count), and reads as a non-success
+    candidate with the ``candidate_not_successful`` blocker — no fabricated
+    failure and no fabricated success.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+        ),
+        result_status="reconciling",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    # The pass status is producer-derived: the cycle submitted candidates and
+    # the reconciling candidate counts as partial, so the pass is a partial one.
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["failed_count"] == 0
+    assert result.evidence["counts"]["partial_count"] == 1
+    item = result.evidence["model_run_evidence"][0]
+    assert item["status"] == "reconciling"
+    assert item["submitted"] is True
+    assert item["execution_attempted"] is True
+    assert item["final_candidate_success"] is False
+    assert item["quality_states"]["candidate"]["quality_flag"] == "blocked"
+    assert [
+        blocker["code"]
+        for blocker in item["residual_blockers"]
+        if blocker.get("quality_flag") == "candidate_not_successful"
+    ] == ["CANDIDATE_RECONCILING"]
+    assert item["candidate_outcome"]["status"] == "active"
 
 
 def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:

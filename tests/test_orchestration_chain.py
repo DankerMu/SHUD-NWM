@@ -14035,19 +14035,141 @@ def test_nested_retry_deferred_stage_entry_carries_raw_skip_result(tmp_path: Pat
     ]
 
 
-def test_nested_retry_defer_status_set_is_skip_only(tmp_path: Path) -> None:
-    """A3 (iii) (#1322): the defer set stays skip-only until issue #1326 lands.
+def test_nested_retry_defer_status_set_is_exactly_the_governed_family(tmp_path: Path) -> None:
+    """A3 (iii) (#1326): the defer set is exactly the governed nested family.
 
-    The reconciliation-pending family shares the collapse defect but cannot be
-    deferred before its ``reconciling`` terminal is first-class on the
-    evidence/readiness planes. A silent widening lands red here even if the
-    behavioural arms below rot.
+    Duplicate skip plus the two reconciliation-pending stage terminals — and
+    nothing else. The set is DERIVED from the status -> terminal mapping, so a
+    silent set widening (e.g. ``submission_failed``) that does not also add a
+    mapping entry lands red here, as does a missing member.
     """
 
     del tmp_path
     from services.orchestrator import chain_forecast_execution
 
-    assert chain_forecast_execution.NESTED_RETRY_DEFER_STATUSES == {"skipped_duplicate_submission"}
+    assert chain_forecast_execution.NESTED_RETRY_DEFER_STATUSES == {
+        "skipped_duplicate_submission",
+        "submit_result_ambiguous",
+        "reconcile_unverified",
+    }
+
+
+def test_nested_defer_terminal_mapping_is_single_source_of_truth(tmp_path: Path) -> None:
+    """D3 (#1326): the public defer set and the mapping keys are one contract.
+
+    ``NESTED_RETRY_DEFER_STATUSES`` is derived from the mapping's keys, so no
+    membership can exist without a governed terminal — a future edit that adds
+    a status to the set without a mapping (or vice versa) breaks this
+    structural oracle. Every mapping value must be one of the two governed
+    cycle terminals, and both are present.
+    """
+
+    del tmp_path
+    from services.orchestrator import chain_forecast_execution
+
+    mapping = chain_forecast_execution._NESTED_RETRY_DEFER_TERMINALS
+    assert chain_forecast_execution.NESTED_RETRY_DEFER_STATUSES == frozenset(mapping)
+    assert set(mapping.values()) == {"skipped_duplicate_submission", "reconciling"}
+    assert mapping["skipped_duplicate_submission"] == "skipped_duplicate_submission"
+    assert mapping["submit_result_ambiguous"] == "reconciling"
+    assert mapping["reconcile_unverified"] == "reconciling"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_terminal"),
+    [
+        ("skipped_duplicate_submission", "skipped_duplicate_submission"),
+        ("submit_result_ambiguous", "reconciling"),
+        ("reconcile_unverified", "reconciling"),
+    ],
+)
+def test_nested_defer_terminal_mapping_is_closed_and_exact(
+    tmp_path: Path,
+    status: str,
+    expected_terminal: str,
+) -> None:
+    """D3 (#1326): the nested defer status -> cycle terminal mapping is explicit.
+
+    Duplicate skip keeps its dedicated skip terminal; the two
+    reconciliation-pending stage terminals both land the ``reconciling`` cycle
+    terminal. The mapping is a closed contract over exactly these three — a
+    future caller or defer-set widening must not silently collapse an
+    ungoverned status into either terminal.
+    """
+
+    from services.orchestrator import chain_forecast_execution
+    from services.orchestrator.chain import PipelineResult
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    stage_results: list[StageRunResult] = [
+        StageRunResult(
+            stage="forecast",
+            job_type=M3_STAGES[2].job_type,
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+            slurm_job_id="",
+            status=status,
+        )
+    ]
+
+    result = chain_forecast_execution._nested_defer_terminal_pipeline_result(
+        context, stage_results, status
+    )
+
+    assert isinstance(result, PipelineResult)
+    assert result.status == expected_terminal
+    assert result.stages == tuple(stage_results)
+    # The empty cohort yields no candidate outcomes; the terminal-status mapping
+    # is the load-bearing contract here.
+    assert result.candidate_outcomes == ()
+
+
+def test_nested_defer_terminal_mapping_fails_closed_for_unknown_status(
+    tmp_path: Path,
+) -> None:
+    """D3 (#1326): an ungoverned status never reaches either defer terminal.
+
+    ``submission_failed`` is deliberately NOT a governed defer status, and the
+    helper is a single mapping lookup — there is NO ``status in defer set ->
+    reconciling`` catch-all arm. If a future edit ever widens the mapping (or a
+    typo routes any ungoverned status here), the call fails closed with an
+    ``OrchestratorError`` instead of silently manufacturing a deferral the
+    contract does not govern.
+    """
+
+    del tmp_path
+    from services.orchestrator import chain_forecast_execution
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    stage_results: list[StageRunResult] = [
+        StageRunResult(
+            stage="forecast",
+            job_type=M3_STAGES[2].job_type,
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+            slurm_job_id="",
+            status="submission_failed",
+        )
+    ]
+
+    with pytest.raises(OrchestratorError) as excinfo:
+        chain_forecast_execution._nested_defer_terminal_pipeline_result(
+            context, stage_results, "submission_failed"
+        )
+    assert excinfo.value.error_code == "UNGOVERNED_NESTED_DEFER_STATUS"
+    assert "submission_failed" in str(excinfo.value)
 
 
 class AttemptScopedArraySubmitFailureClient(FakeCycleSlurmClient):
@@ -14156,15 +14278,13 @@ def _accepted_submit_forecast_basins() -> list[dict[str, Any]]:
     return basins
 
 
-def test_nested_retry_submit_result_ambiguous_keeps_collapse_semantics(tmp_path: Path) -> None:
-    """A3 (i) (#1322): nested ``submit_result_ambiguous`` is NOT deferred.
+def test_nested_retry_submit_result_ambiguous_defers_the_cycle(tmp_path: Path) -> None:
+    """A3 (i) (#1326): nested ``submit_result_ambiguous`` defers on ``reconciling``.
 
-    The reconciliation-pending family shares the collapse defect but cannot be
-    deferred before its ``reconciling`` terminal is first-class on the
-    evidence/readiness planes (issue #1326): ``reconciling`` appears in ZERO
-    recognizers today, so a defer would flip cohort rows from
-    partial-recognized to nothing-recognized. Green on both sides — this pins
-    the retained behaviour so a silent widening of the defer set lands red.
+    The reconciliation-pending family is now a governed defer member: the raw
+    ambiguous stage result is preserved (no pending task stamped failed), the
+    cycle terminates on ``reconciling``, no downstream stage runs, and no
+    further retry attempt is derived.
 
     Producer: a raise inside ``submit_job_array`` AFTER the gateway boundary,
     classified ambiguous by ``_submit_error_is_ambiguous`` under the
@@ -14190,27 +14310,45 @@ def test_nested_retry_submit_result_ambiguous_keeps_collapse_semantics(tmp_path:
 
     # The nested resubmission really happened and really came back ambiguous.
     assert client.array_submit_attempts.count("forecast") == 2
+    # Defer: the raw ambiguous result is preserved — the pending task is never
+    # rewritten as failed and the stage entry stays the raw stage terminal.
     forecast = next(stage for stage in result.stages if stage.stage == "forecast")
-    task_states = {task["task_id"]: (task["status"], task["error_code"]) for task in forecast.task_results}
-    assert task_states[1] == ("failed", "SBATCH_SUBMIT_RESULT_AMBIGUOUS")
-    # Collapse retained: the stage entry stays ``partially_failed`` and the cycle
-    # advances downstream — no dedicated ``reconciling`` terminal, no defer.
-    assert forecast.status == "partially_failed"
-    assert result.status not in {"reconciling", "skipped_duplicate_submission"}
-    assert [row["stage"] for row in client.submissions] == ["forecast", "parse", "state_save_qc", "publish"]
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert result.status == "reconciling"
+    # No downstream stage ran and no attempt N+1 was derived. The failed nested
+    # attempt raises before a submission row is recorded, so the attempts
+    # counter is the load-bearing submission-count oracle.
+    assert [row["stage"] for row in client.submissions] == ["forecast"]
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert client.array_submit_attempts.count("forecast") == 2
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    cohort_masters = sorted(
+        job["job_id"]
+        for job in jobs
+        if job["job_id"].startswith("job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast")
+    )
+    assert cohort_masters == [
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast",
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1",
+    ]
+    assert all(job["job_id"].count("_retry_") <= 1 for job in jobs)
 
 
-def test_nested_retry_reconcile_unverified_keeps_collapse_semantics(
+def test_nested_retry_reconcile_unverified_defers_the_cycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A3 (ii) (#1322): nested ``reconcile_unverified`` is NOT deferred either.
+    """A3 (ii) (#1326): nested ``reconcile_unverified`` defers on ``reconciling``.
 
-    Behaviourally distinct from arm (i) and needs its own pin: the collapse
-    additionally DEFEATS ``_after_cycle_stage_terminal``'s deliberate no-op for
-    ``reconcile_unverified`` (``chain_forecast_execution.py:598``) by re-entering
-    the hook with ``partially_failed``, which writes the partial cycle status.
-    That second partial write is the observable this arm holds still.
+    Behaviourally distinct from arm (i) and needs its own pin: the defer
+    preserves ``_after_cycle_stage_terminal``'s deliberate no-op for
+    ``reconcile_unverified`` (``chain_forecast_execution.py``). The collapse
+    re-entered the hook with ``partially_failed`` and wrote a second partial
+    cycle status; the defer must not. The nested call already emitted its own
+    ``reconcile_unverified`` event/row — no second partial or failed
+    cycle-status write lands, no task is stamped failed, no downstream stage
+    runs, and no attempt N+1 is derived.
 
     Quota is pinned to ONE nested attempt: on the accepted-submit class
     ``SLURM_JOB_TIMEOUT`` is transient, so a second nested submission would be
@@ -14258,19 +14396,31 @@ def test_nested_retry_reconcile_unverified_keeps_collapse_semantics(
     # The nested resubmission really timed out into ``reconcile_unverified``.
     assert [row["stage"] for row in client.submissions] == ["forecast", "forecast"]
     assert any(event["event_type"] == "reconcile_unverified" for event in events)
-    # Collapse retained: pending task stamped failed, stage entry partial.
+    # Defer: no pending task stamped failed, the raw unverified stage result is
+    # preserved, and the cycle terminates on ``reconciling``.
     forecast = next(stage for stage in result.stages if stage.stage == "forecast")
-    task_states = {task["task_id"]: (task["status"], task["error_code"]) for task in forecast.task_results}
-    assert task_states[1] == ("failed", "SLURM_JOB_TIMEOUT")
-    assert forecast.status == "partially_failed"
-    assert result.status not in {"reconciling", "skipped_duplicate_submission"}
-    # The `:598` no-op defeat: a SECOND partial cycle-status write lands after
-    # the nested reconcile_unverified, from the helper's own terminal call.
+    assert forecast.task_results == ()
+    assert forecast.status == "reconcile_unverified"
+    assert result.status == "reconciling"
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert sum(1 for row in client.submissions if row["stage"] == "forecast") == 2
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    cohort_masters = sorted(
+        job["job_id"]
+        for job in jobs
+        if job["job_id"].startswith("job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast")
+    )
+    assert cohort_masters == [
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast",
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1",
+    ]
+    assert all(job["job_id"].count("_retry_") <= 1 for job in jobs)
+    # The `:598` no-op is preserved: the nested reconcile_unverified emitted its
+    # own event/row, and the defer adds NO second partial/failed cycle write.
     assert repository.cycle_status_writes == [
         "forecast_running",
         "forcing_ready_partial",
         "forecast_running",
-        "forcing_ready_partial",
     ]
 
 

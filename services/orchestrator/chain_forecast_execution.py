@@ -39,22 +39,25 @@ _CANONICAL_TIMING_STAGES = frozenset(
     ("convert", "forcing", "forecast", "parse", "state_save_qc")
 )
 
-# #1322: nested statuses returned by ``_submit_and_wait_cycle_stage`` inside
-# ``_retry_partial_array_stage`` that mean "this pass did no work" rather than
-# "the tasks failed". They are DEFERRALS: the retry helper stops immediately
-# (no pending-task stamping, no duplicate durable failed write, no attempt
-# N+1) and the status propagates to the cycle loop, which terminates on the
-# dedicated non-success terminal the top-level path already has.
+# #1322/#1326: nested statuses returned by ``_submit_and_wait_cycle_stage``
+# inside ``_retry_partial_array_stage`` that mean "this pass did no work" rather
+# than "the tasks failed". They are DEFERRALS: the retry helper stops
+# immediately (no pending-task stamping, no duplicate durable failed write, no
+# attempt N+1) and the status propagates to the cycle loop, which terminates on
+# the governed non-success terminal the top-level path already has.
 #
-# Deliberately a set with one member today: the reconciliation-pending family
-# (``submit_result_ambiguous`` / ``reconcile_unverified``) shares the collapse
-# defect but cannot be deferred until its ``reconciling`` terminal is
-# first-class on the evidence/readiness planes (issue #1326). Widening
-# membership is NOT text-only: the call site below routes every member to the
-# hardcoded ``skipped_duplicate_submission`` terminal, while the top-level door
-# routes the reconciliation family to ``reconciling`` — so a second member also
-# needs a status -> terminal mapping at the call site (issue #1326).
-NESTED_RETRY_DEFER_STATUSES = {"skipped_duplicate_submission"}
+# The status -> cycle-terminal mapping is the SINGLE source of truth: the
+# public defer set is derived from its keys, so widening membership (or
+# changing a terminal) necessarily changes the mapping, and the helper below
+# has no catch-all arm that could silently map an ungoverned status. The
+# reconciliation-pending members land the ``reconciling`` terminal (the same
+# one the top-level door uses) instead of the duplicate-skip terminal.
+_NESTED_RETRY_DEFER_TERMINALS: dict[str, str] = {
+    "skipped_duplicate_submission": "skipped_duplicate_submission",
+    "submit_result_ambiguous": "reconciling",
+    "reconcile_unverified": "reconciling",
+}
+NESTED_RETRY_DEFER_STATUSES = frozenset(_NESTED_RETRY_DEFER_TERMINALS)
 
 AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
@@ -280,15 +283,21 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                             stage_results[-1] = result
                             result_slot = len(stage_results) - 1
                             if result.status in NESTED_RETRY_DEFER_STATUSES:
-                                # #1322: the NESTED resubmission was deferred by
-                                # the reserve gate — the same fact the top-level
-                                # branch above handles, arriving through the
-                                # retry helper's second door. Route it to the
-                                # identical terminal instead of letting the
-                                # allowlist tail treat it as an unrecognized
-                                # status. ``aggregation`` is ``None`` here and no
-                                # consumer that requires it is reached.
-                                pipeline_result = _skip_terminal_pipeline_result(context, stage_results)
+                                # #1322/#1326: the NESTED resubmission was
+                                # deferred — either the reserve gate proved
+                                # another pass owns this stage in flight, or the
+                                # nested submit result is pending
+                                # reconciliation. Both are the same fact the
+                                # top-level branches above handle, arriving
+                                # through the retry helper's second door. Route
+                                # each member to its governed terminal instead
+                                # of letting the allowlist tail treat it as an
+                                # unrecognized status. ``aggregation`` is
+                                # ``None`` here and no consumer that requires it
+                                # is reached.
+                                pipeline_result = _nested_defer_terminal_pipeline_result(
+                                    context, stage_results, result.status
+                                )
                                 break
 
                     # Fail-closed tail (#1202): advancement is an ALLOWLIST —
@@ -392,6 +401,46 @@ def _skip_terminal_pipeline_result(
         "skipped_duplicate_submission",
         tuple(stage_results),
         _candidate_outcomes(context, final_status="skipped_duplicate_submission"),
+    )
+
+
+def _nested_defer_terminal_pipeline_result(
+    context: CycleOrchestrationContext,
+    stage_results: list[StageRunResult],
+    status: str,
+) -> PipelineResult:
+    """Map a nested defer status to its governed cycle terminal.
+
+    The mapping is CLOSED over exactly the keys of
+    ``_NESTED_RETRY_DEFER_TERMINALS`` (which is also the public
+    ``NESTED_RETRY_DEFER_STATUSES``): ``skipped_duplicate_submission`` keeps
+    its dedicated skip terminal (the reservation-holding pass owns cycle
+    progress), and the reconciliation-pending family
+    (``submit_result_ambiguous`` / ``reconcile_unverified``) terminates the
+    cycle on ``reconciling`` — the same terminal and candidate-outcome
+    derivation the top-level door builds, so the raw ambiguous / unverified
+    stage result is preserved. ANY status absent from the mapping (a
+    ``submission_failed`` leak or a typo from a future defer-set widening)
+    fails closed instead of silently collapsing into ``reconciling`` or the
+    skip terminal.
+    """
+
+    try:
+        terminal = _NESTED_RETRY_DEFER_TERMINALS[status]
+    except KeyError:
+        raise _chain.OrchestratorError(
+            "UNGOVERNED_NESTED_DEFER_STATUS",
+            f"Nested defer status {status!r} has no governed cycle terminal mapping.",
+            {"status": status, "governed_statuses": sorted(NESTED_RETRY_DEFER_STATUSES)},
+        ) from None
+    if terminal == "skipped_duplicate_submission":
+        return _skip_terminal_pipeline_result(context, stage_results)
+    return PipelineResult(
+        context.run_id,
+        context.cycle_id,
+        terminal,
+        tuple(stage_results),
+        _candidate_outcomes(context, final_status=terminal),
     )
 
 
@@ -559,15 +608,18 @@ def _retry_partial_array_stage(
 
             if retry_aggregation is None:
                 if latest_result.status in NESTED_RETRY_DEFER_STATUSES:
-                    # #1322 defer: the nested resubmission did no work (the
-                    # reserve gate proved another pass holds this stage in
-                    # flight). Collapsing it to per-task ``failed`` would stamp
-                    # pending tasks, re-write durable run statuses the other
-                    # pass owns, and — under a permissive retry adjudicator —
-                    # derive attempt N+1 and really double-submit. Return the
-                    # raw nested result so the caller lands the dedicated skip
-                    # terminal. ``context.active_basins`` is restored by the
-                    # enclosing ``finally``.
+                    # #1322/#1326 defer: the nested resubmission did no work —
+                    # either the reserve gate proved another pass holds this
+                    # stage in flight, or the submit result is pending
+                    # reconciliation (``submit_result_ambiguous`` /
+                    # ``reconcile_unverified``). Collapsing it to per-task
+                    # ``failed`` would stamp pending tasks, re-write durable run
+                    # statuses another pass or reconciliation owns, and — under
+                    # a permissive retry adjudicator — derive attempt N+1 and
+                    # really double-submit. Return the raw nested result so the
+                    # caller lands the governed terminal (skip or
+                    # ``reconciling``). ``context.active_basins`` is restored by
+                    # the enclosing ``finally``.
                     return latest_result, None
                 retry_status = "succeeded" if latest_result.status == "succeeded" else "failed"
                 for task_id in pending_task_ids:

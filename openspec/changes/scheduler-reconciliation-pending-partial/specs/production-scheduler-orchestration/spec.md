@@ -1,0 +1,19 @@
+## ADDED Requirements
+
+### Requirement: Reconciliation-pending candidates are partial non-success evidence
+
+Scheduler candidate evidence SHALL treat cycle terminal `reconciling` and stage/candidate statuses `submit_result_ambiguous` and `reconcile_unverified` as incomplete reconciliation outcomes. Such evidence SHALL be partial and non-successful, but SHALL NOT manufacture a failed candidate.
+
+#### Scenario: Reconciling cycle candidate cannot report final success
+
+- **WHEN** a cycle-derived candidate remains active while its cycle terminal is `reconciling`
+- **THEN** the candidate status SHALL be `reconciling`
+- **THEN** `final_candidate_success` SHALL be false
+- **THEN** the candidate SHALL contribute to producer `partial_count`
+- **THEN** it SHALL NOT contribute to `failed_count`
+
+#### Scenario: Stage reconciliation statuses share the non-success classifier
+
+- **WHEN** candidate evidence carries `submit_result_ambiguous` or `reconcile_unverified`
+- **THEN** the same non-success predicate SHALL reject final success
+- **THEN** existing failed-status classification SHALL remain false for both statuses
