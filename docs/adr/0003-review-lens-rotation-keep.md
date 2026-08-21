@@ -416,3 +416,20 @@ non-daemon worker 会在 deadline assertion 之后继续卡住 `threading._shutd
 contract gap；Round 1 则由 test-evidence 镜 + 独立 verifier 抓到两条 exact-mutant 证据错误。
 它们支持保留多层门，而不是加强当前已知受污染的 core/rotated 比值。故维持 autonomous
 默认 keep；任何翻转仍须先修 ADR 已登记的归因 schema/轮次角色污染，再由 maintainer 裁定。
+
+## Revisit 2026-08-21 (post PR #1657 / issue #1596)
+
+Audit re-flagged DECIDABLE at 92 multi-round merged PRs, later-round
+catches core=46 vs rotated=242 (rotated share 84.0%, down from 98.8% on
+2026-08-15 — 43 of the 46 core catches come from PRs merged 2026-08-17
+to 08-20 (#1531, #1551, #1566, #1574, #1591, #1618, #1626, …) whose
+round-2+ catches carry round-1 lens names, i.e. re-review rounds re-ran
+the same lenses and the audit counts those as core; rotated-in lenses
+did not stop catching). Direction unchanged: **keep rotation** stands under
+the same autonomous default-keep rule. #1596 is a cautionary data point
+on the other axis: its rounds 3-5 catches all came from rotated-in
+delta-verification lenses, but every one was a fix-propagation miss
+across carriers of one narrative — rotation found them, it did not
+prevent them; the corrective lives in fix-brief carrier checklists, not
+in the lens mix. Next revisit on maintainer override or a materially
+changed attribution ratio.

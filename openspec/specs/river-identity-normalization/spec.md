@@ -193,7 +193,8 @@ neither side.
 ### Requirement: in-boundary river_timeseries readers SHALL filter by surrogate keys with field-identical external responses
 
 Display-boundary readers of `hydro.river_timeseries` SHALL filter by the surrogate key and enum columns as the row-selection authority, and SHALL additionally retain redundant text pushdown predicates on exactly `run_id`, `river_network_version_id`, and `variable` — each conjoined (AND) with its key or enum counterpart — in every fact query whose plan can reach compressed chunks, as declared transitional aids for compressed-chunk `segmentby`/`orderby` predicate pushdown while compression settings remain text-based (user-adjudicated remedy, issue #1341 comment thread; removed together with the text-column drop in #1342, where any missed removal fails loudly because the columns are gone). These pushdown predicates are strict no-ops for key-carrying rows and MUST NOT widen results: NULL-key rows stay excluded by the key predicates. No other text column may appear as a fact predicate, with one positional exception below. The aids apply where the identity arrives as a bound literal; identity that reaches the fact table through an authority-table join stays key-joined only — text-column fact joins remain forbidden outside the sanctioned probe bodies — so such query legs carry only the aids whose identity is bound (typically `variable` alone).
-Round-3 amendment (P1 EXPLAIN-gate interception, PR #1443: the set-based national legs lost the per-segment probe path and regressed 0.77s→34.7s): inside the two `hydro-national` `CROSS JOIN LATERAL` probe bodies in `services/tiles/mvt.py` — and only there — correlated text equalities on `run_id`, `river_network_version_id`, and `river_segment_id` are sanctioned as the same class of transitional pushdown aids: each is conjoined (AND) with its surrogate-key counterpart in the same probe, each is a strict no-op for key-carrying rows (all three are NOT NULL primary-key columns), and all are removed together with the text-column drop in #1342. This positionally widens the user-adjudicated three-column literal-aid set by `river_segment_id` for the lateral probe bodies only — recorded as a deviation in the PR 偏离记录 for user review, since the three-column set was a user-adjudicated remedy. Outside a lateral probe body the prohibition on text-column fact joins stands unchanged, and the shape oracle (`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` vs `FORBIDDEN_TEXT_FACT_COLUMNS`) enforces exactly this positional split.
+Round-3 amendment (P1 EXPLAIN-gate interception, PR #1443: the set-based national legs lost the per-segment probe path and regressed 0.77s→34.7s), extended by #1596 (the set-based `source_identity_stats` existence probe fully decompressed compressed chunks — 23-37s per probe, and 38s for an empty tile on uncovered compressed instants): inside the three `hydro-national` `CROSS JOIN LATERAL` probe bodies in `services/tiles/mvt.py` — the two per-segment data-leg probes and the per-identity existence probe of `source_identity_stats`, and only there — correlated text equalities are sanctioned as the same class of transitional pushdown aids: `run_id`, `river_network_version_id`, and `river_segment_id` in the data-leg probe bodies, and `run_id` and `river_network_version_id` only in the identity-existence probe body (it has no per-segment correlation). Each is conjoined (AND) with its surrogate-key counterpart in the same probe, each is a strict no-op for key-carrying rows (all are NOT NULL primary-key columns), and all are removed together with the text-column drop in #1342. The identity-existence probe's #1342 survival is split by chunk state: the cutover layout mirrors the text layout column-for-column (surrogate primary key `run_key, river_network_version_key, river_segment_key, variable_e, valid_time`; `compress_segmentby` on the first three key columns — migration 000050), so after the aids are removed with the text columns the probe binds the same positional subset (PK positions 1, 2, 4, 5; segmentby 2 of 3) through its surrogate-key predicates — on compressed chunks its segmentby plan therefore survives unchanged; on uncompressed chunks its pre-cutover index pick was measured, not presumed (PR #1657 E4 receipt): the text primary key's run-scoped prefix on the hit branch, and the retained single-column `river_timeseries_valid_time_idx` on the interior-gap miss branch — neither of which #1342 removes, since the former mirrors onto the surrogate primary key at the same positions and the latter indexes the time dimension the cutover does not touch; the post-cutover index set is owned by #1342. This positionally widens the user-adjudicated three-column literal-aid set for the lateral probe bodies only — each widening recorded as a deviation in the PR 偏离记录 for user review, since the three-column set was a user-adjudicated remedy. Outside a lateral probe body the prohibition on text-column fact joins stands unchanged, and the shape oracle (`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS` vs `FORBIDDEN_TEXT_FACT_COLUMNS`) enforces exactly this positional split.
+The `source_identity_stats` existence probe for `hydro-national` SHALL locate candidate identities through the same display-coverage-gated discovery shape as `latest_runs` (a `hydro.run_display_coverage` window filter joined through the run/network authority tables, selecting the surrogate keys alongside their text identities) and SHALL verify per-instant existence by touching `hydro.river_timeseries` per identity — answering existence from the coverage window alone is forbidden: the window is a MIN/MAX over complete instants, not a per-instant bitmap, so a coverage-only answer can flip the no-data branch (HTTP 424) into an empty-tile 200 on interior window gaps. The probe's zero branch (no display-ready run, or a covered window whose instant has no fact rows) SHALL remain byte-identical to the pre-change behavior.
 This covers `services/tiles/mvt.py`,
 `packages/common/display_coverage.py`, and
 `apps/api/routes/hydro_display.py`. It also governs any future
@@ -257,10 +258,12 @@ silent data loss.
   key or enum counterpart, and no text predicate on
   `basin_version_id` or `river_segment_id` (nor any text-column join
   into the fact table) exists in any in-boundary read shape — except
-  inside the two `hydro-national` `CROSS JOIN LATERAL` probe bodies,
-  where the round-3 amendment above additionally sanctions correlated
-  text equalities on `run_id`, `river_network_version_id`, and
-  `river_segment_id`, each key-paired, removed with #1342; no `ts.`
+  inside the three `hydro-national` `CROSS JOIN LATERAL` probe bodies,
+  where the amendments above additionally sanction correlated
+  text equalities (`run_id`, `river_network_version_id`, and
+  `river_segment_id` in the data-leg bodies; `run_id` and
+  `river_network_version_id` in the identity-existence probe body),
+  each key-paired, removed with #1342; no `ts.`
   fact reference may appear outside those probe bodies in the national
   legs
 
@@ -272,12 +275,20 @@ silent data loss.
   integer index with no sequential scan of `hydro.river_timeseries`
   and latency no worse than the text-index baseline, while retained
   text indexes keep serving out-of-boundary text readers unchanged;
-  shape carve-out (round 3): the two `hydro-national` lateral probe
-  legs instead plan as per-segment parameterized probes on the text
-  primary key (uncompressed chunks) and the compressed `segmentby`
-  index (compressed chunks) — the integer index remains the planned
-  path for every other switched shape, and #1342 owns the post-cutover
-  index set that replaces the text plans for these two legs
+  shape carve-out (round 3, extended by #1596): the three
+  `hydro-national` lateral probe legs instead plan as per-segment (data
+  legs) or per-identity (existence probe) parameterized probes — on
+  compressed chunks all three probe through the compressed `segmentby`
+  index; on uncompressed chunks the data legs plan on the text primary
+  key (measured in PR #1443) while the identity probe's pick is
+  recorded, not presumed, by the delivery receipt — measured in PR
+  #1657 as the text primary key's run-scoped prefix on the hit branch
+  and the retained single-column `river_timeseries_valid_time_idx` on
+  the interior-gap miss branch, with run / network / variable falling
+  to filters;
+  the integer index remains the planned path for every other switched
+  shape, and #1342 owns the post-cutover index set that replaces the
+  text plans for these legs
 
 #### Scenario: Compressed-chunk portions keep predicate pushdown via the transitional text predicates
 
@@ -288,6 +299,35 @@ silent data loss.
   filter condition on the compression-internal relation driven by the
   text `segmentby`/`orderby` columns, not a full-decompression
   sequential scan over all batches
+
+#### Scenario: The national existence probe answers interior coverage-window gaps with the no-data branch
+
+- **WHEN** a display-ready run's coverage window covers the requested
+  valid_time but `hydro.river_timeseries` holds no rows for that exact
+  instant (an interior window gap), and the `hydro-national` tile is
+  requested
+- **THEN** `source_identity_count` is 0 and the endpoint returns the
+  same HTTP 424 `MVT_LIVE_POSTGIS_UNAVAILABLE` the pre-change probe
+  produced — the probe touches the fact table per identity and never
+  answers existence from the coverage window alone
+
+#### Scenario: The national existence probe stays sub-second on compressed instants in both branches
+
+- **WHEN** the `hydro-national` tile is requested for a valid_time
+  pinned inside a compressed chunk, once for an instant with a
+  display-ready covered run and once for an instant with none
+- **THEN** the identity-existence probe plans as per-identity
+  parameterized probes: no full-decompression sequential scan over all
+  batches, the fact-side inner node's loop count equals the number of
+  identities probed before short-circuit (leading misses plus one when
+  the covered instant has rows; every candidate when the covered
+  instant is an interior gap; the uncovered request finds no candidates
+  and never touches the fact table), and shared buffer touches on the
+  compressed-chunk relations do not exceed the pre-change shape's on
+  the same instant in the same session; a covered instant with rows
+  serves the same tile bytes as before the change, a covered interior
+  gap returns the no-data branch of the preceding scenario, and the
+  uncovered request returns its empty response in under one second
 
 ### Requirement: Out-of-boundary river_timeseries consumers SHALL filter and emit identity by surrogate keys with per-group sanctioned transitional aids
 
