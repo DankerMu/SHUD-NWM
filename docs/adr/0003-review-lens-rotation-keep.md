@@ -484,3 +484,19 @@ remain load-bearing: fixture/final-review roles, lens-name variants, and rounds
 that shrink or reuse rather than rotate the core can all distort the split.
 No policy change; any future reversal still requires the recorded attribution
 schema/role fixes plus maintainer review.
+
+## Revisit 2026-08-21 (post PR #1667 / issues #1595 + #1600)
+
+Audit re-flagged DECIDABLE at 96 multi-round merged PRs, later-round catches
+core=46 vs rotated=244. #1667 adds one multi-round sample but no later-round
+catch: Round 1 produced two verified P2 fixes, while the post-fix Round 2 used
+an integration/cache full-scope lens plus a test-evidence delta lens and
+returned zero candidates; Phase 7 was also clean. The accumulated catch counts
+are therefore unchanged from the #1665 revisit.
+
+**Keep rotation** remains the recorded decision, again with no increase in
+evidentiary strength. This PR proves that the rotated/subset follow-up mix
+closed the two known findings; zero new catches cannot identify whether lens
+rotation added recall. The existing attribution caveats remain decisive, so no
+policy change is made and any reversal still requires the recorded schema/role
+fixes plus maintainer review.
