@@ -42,9 +42,10 @@
 --       those very authority tables, so no row can fail to match.
 --   (c) #1340/#1442 enum dual-write column: production's river scan carries an
 --       extra conjunct, rt.variable_e = 'q_down'::hydro.river_variable, beside
---       its rt.variable = 'q_down' text twin -- annotated in production as one
---       more member of the transitional "remove with #1342" family. This text
---       has only the text conjunct. Consequence: a row with variable =
+--       its rt.variable = 'q_down' text twin -- and it is that text twin, not
+--       the enum, that production annotates as a transitional "remove with
+--       #1342" pushdown aid; variable_e is the enum authority that outlives it.
+--       This text has only the text conjunct. Consequence: a row with variable =
 --       'q_down' and variable_e IS NULL is visible to this frozen statement
 --       and invisible to production. Those are the pre-#1340 text-only rows:
 --       000050 added variable_e nullable, and the SET NOT NULL that would

@@ -529,8 +529,9 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
     """The `scan_forcing_version_id IS NULL` branch of the pushdown guards.
 
     What this state pins is binding, not admission: with the candidate's
-    forcing_version_id NULL, the NULL scan scalars bind and execute through the
-    named-parameter path across both the station and the river guards.
+    forcing_version_id NULL, the one NULL scan scalar -- scan_forcing_version_id,
+    read only by the station guard -- binds and executes through the
+    named-parameter path, while the river guards bind non-NULL.
 
     It deliberately does not claim to catch a forcing-version guard that
     "degraded into NULL means match everything" -- that IS the guard's
