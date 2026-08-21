@@ -68,22 +68,34 @@ one.
 
 What is genuinely never interpreted is the **invocation semantics** — argv, exit code, timings. That is the
 defensible claim, and it is the one `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`
-(`tests/test_node27_timeseries_compression_live_evidence.py:3239`) already pins.
+(`tests/test_node27_timeseries_compression_live_evidence.py:3240`) already pins.
 
 So the canonical sentence, used identically in every carrier:
 
 > Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not itself a closure node, though any well-formed reference nested inside it still is, collected in its own right.
 
-Carriers that must agree: the five schema `description`s, the three verifier comments, the runbook
-narrative, the spec delta, this D2, and the PR body. Copy the sentence; do not paraphrase it per carrier.
-Its two load-bearing tokens for the guard test are `execution.ledger` and `re-derive`.
+Carriers, in two tiers — the split is deliberate and recorded in tasks.md E6, not an accident.
+
+**Tier 1, verbatim**: the five schema `description`s, the runbook narrative (modulo markdown line wrapping),
+this D2 blockquote, the proposal blockquote, and the PR body. Copy the sentence; do not paraphrase.
+
+**Tier 2, load-bearing assertion plus pointer**: the three verifier comments, which carry
+`execution.ledger` and a pointer to `scripts/node27_timeseries_compression_bundle_author.py:21-25` rather
+than the whole sentence — `pyproject.toml` sets `line-length = 120` with `E` selected and the sentence is
+1032 characters, so a single-line comment would trip E501 while the D5 fence forbids wrapping the verifier
+diff past three lines.
+
+The spec delta is in **neither** tier: it is a SHALL-form restatement by construction, and it is checked for
+semantic agreement, not byte identity.
+
+The sentence's two load-bearing tokens for the guard test are `execution.ledger` and `re-derive`.
 
 ## D3 — The oracles, and what each one actually pins
 
 A spec requirement without an oracle is the thing this issue is about. Round-1 cross-review caught this
 fixture claiming that the pre-existing sentinel
 `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`
-(`tests/test_node27_timeseries_compression_live_evidence.py:3238-3252`) pinned more than it does: it asserts
+(`tests/test_node27_timeseries_compression_live_evidence.py:3239-3253`) pinned more than it does: it asserts
 only `terminal["qualifies_task_4_5"] is True`, never reads a terminal `*_invocation` slot, and mutates two of
 the five. So each new scenario gets its own oracle, and no scenario borrows credit from that sentinel beyond
 the semantics half it genuinely covers.

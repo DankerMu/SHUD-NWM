@@ -25,6 +25,7 @@ import pytest
 from apps.api.routes.hydro_display import _postgis_tile_params
 from packages.common import compression_terminal_state as terminal_state
 from packages.common.evidence_io import BoundedEvidenceError, resolve_artifact_closure
+from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_timeseries_compression_benchmark as benchmark
 from scripts import node27_timeseries_compression_bundle_author as bundle_author
 from scripts import node27_timeseries_compression_live_evidence as evidence
@@ -7315,6 +7316,65 @@ def test_wellformed_invocation_reference_at_a_missing_path_fails_closed(
     bundle = _bundle(tmp_path)
     bundle[owner][key] = dict(_MISSING_INVOCATION_REF)
     with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_wellformed_invocation_reference_naming_a_symlink_fails_closed(
+    tmp_path: Path, owner: str, key: str
+) -> None:
+    """Second branch of the same clause: an *existing* path can still be unsafe.
+
+    The absent-path test above cannot tell "the file is not there" from "the file is
+    there but is not a thing we are willing to read" -- both wrap into the same
+    `artifact closure node is unavailable or unsafe` label
+    (`packages/common/evidence_io.py:141`).  So the slot here names a symlink whose
+    target is a real regular file with the *matching* `sha256`/`bytes`: existence,
+    metadata validity and declared identity all check out, and the run must still fail
+    closed purely because `open_file_no_follow` refuses the symlink
+    (`packages/common/safe_fs.py:290`).  The `__cause__` assertion is the load-bearing
+    half -- without it this test would pass even if the symlink had merely been absent.
+    """
+
+    bundle = _bundle(tmp_path)
+    authored = dict(bundle[owner][key])
+    link = tmp_path / f"{owner}-{key}-symlinked-invocation.json"
+    link.symlink_to(Path(authored["path"]))
+    bundle[owner][key] = {**authored, "path": str(link)}
+
+    with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe") as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    cause = raised.value.__cause__
+    assert isinstance(cause, SafeFilesystemError), f"expected the no-follow guard, got {cause!r}"
+    assert "must not be a symlink" in str(cause), cause
+
+
+@pytest.mark.parametrize("field", ("sha256", "bytes"))
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_wellformed_invocation_reference_whose_identity_disagrees_fails_closed(
+    tmp_path: Path, owner: str, key: str, field: str
+) -> None:
+    """Third branch: the path is a readable regular file, but the slot lies about it.
+
+    Deliberately aimed past `resolve_artifact_closure`'s *pre-read* metadata gate
+    (`packages/common/evidence_io.py:248`, "reference metadata is invalid"), which only
+    inspects the shape of the declared values: the mutated `sha256` stays 64 lowercase
+    hex and the mutated `bytes` stays a small non-negative int, so both clear that gate
+    and the failure can only come from the *post-read* comparison against the file the
+    verifier actually opened (`:253`).  The two failures are different verdicts and the
+    scenario means this one; matching the exact message is what keeps them apart.
+    """
+
+    bundle = _bundle(tmp_path)
+    authored = dict(bundle[owner][key])
+    if field == "sha256":
+        authored["sha256"] = "1" * 64
+    else:
+        authored["bytes"] = authored["bytes"] + 1
+    assert authored[field] != bundle[owner][key][field], "the mutation must actually disagree"
+    bundle[owner][key] = authored
+
+    with pytest.raises(BoundedEvidenceError, match="artifact closure reference identity differs"):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
