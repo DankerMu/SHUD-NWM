@@ -783,43 +783,130 @@ except ProviderAtomicError as error:
     assert result.stdout.strip() == "provider_already_running"
 
 
+class InjectedBarrierPeerFailure(RuntimeError):
+    """A pre-arrival Barrier failure with an identity of its own (#1645)."""
+
+
+def run_bounded_barrier_peer_harness(
+    worker: Callable[[int, threading.Barrier], None],
+    *,
+    parties: int,
+    barrier_timeout: float,
+    join_timeout: float,
+) -> tuple[list[tuple[int, BaseException]], list[threading.Thread]]:
+    """Run ``parties`` explicit peers through a bounded Barrier and collect errors.
+
+    The ONE module-local seam for the two Barrier harness families in this
+    module (#1645). Each worker is a non-daemon thread (daemon status is not a
+    cleanup substitute), the Barrier carries a timeout so a participant that
+    never arrives releases its peers as ``BrokenBarrierError``, and every peer
+    is joined before the caller inspects results. The worker receives the
+    Barrier so it can implement the harness's own release point. Returns
+    ``(errors, threads)`` so a caller can assert the error collection AND peer
+    liveness before any substantive state assertion.
+    """
+
+    barrier = threading.Barrier(parties, timeout=barrier_timeout)
+    errors: list[tuple[int, BaseException]] = []
+
+    def run(index: int) -> None:
+        try:
+            worker(index, barrier)
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append((index, error))
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(parties)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=join_timeout)
+    return errors, threads
+
+
 def test_provider_destination_lock_serializes_threads_when_flock_is_process_scoped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "manifest-last.json"
     monkeypatch.setattr(provider_atomic_module.fcntl, "flock", lambda *_args: None)
-    start = threading.Barrier(20)
     release_first = threading.Event()
     guard = threading.Lock()
     active = 0
     maximum_active = 0
-    errors: list[BaseException] = []
 
-    def contender() -> None:
+    def contender(index: int, barrier: threading.Barrier) -> None:
+        del index  # the release point is the shared barrier, not the index
         nonlocal active, maximum_active
-        try:
-            start.wait()
-            with provider_destination_lock(destination):
-                with guard:
-                    active += 1
-                    maximum_active = max(maximum_active, active)
-                    if active > 1:
-                        release_first.set()
-                release_first.wait(timeout=0.05)
-                with guard:
-                    active -= 1
-        except BaseException as error:  # pragma: no cover - asserted below
-            errors.append(error)
+        barrier.wait()
+        with provider_destination_lock(destination):
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                if active > 1:
+                    release_first.set()
+            release_first.wait(timeout=0.05)
+            with guard:
+                active -= 1
 
-    threads = [threading.Thread(target=contender) for _ in range(20)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
+    # The module-local bounded seam (design D1/D2): one timeout owner for BOTH
+    # scheduler Barrier families, keeping 20 real contenders, the flock-free
+    # double, the serialization oracle, and the lock-cleanup assertion. The
+    # join bound is strictly larger than the barrier bound (65 > 60) so a
+    # parent wait can never expire before the Barrier timeout.
+    errors, threads = run_bounded_barrier_peer_harness(
+        contender, parties=20, barrier_timeout=60, join_timeout=65
+    )
 
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
     assert maximum_active == 1
+    assert not provider_atomic_module._PROCESS_LOCKS
+
+
+def test_provider_lock_barrier_harness_fails_bounded_when_a_peer_raises_before_arrival(
+    tmp_path: Path,
+) -> None:
+    """A pre-arrival peer failure must break the 20-way lock harness bounded (#1645).
+
+    Pre-fix, this harness's Barrier had no bound and its peers were non-daemon:
+    a contender that raised before ``start.wait()`` left the other 19 waiting
+    forever, so the parent's bounded join/assertions fired while
+    ``threading._shutdown()`` still hung the whole run. The bound converts the
+    missing participant into ``BrokenBarrierError`` for every waiter, and no
+    started peer survives the test.
+    """
+
+    destination = tmp_path / "manifest-last.json"
+    maximum_active = 0
+    active = 0
+    guard = threading.Lock()
+
+    def contender(index: int, barrier: threading.Barrier) -> None:
+        nonlocal active, maximum_active
+        if index == 0:
+            raise InjectedBarrierPeerFailure("injected pre-arrival failure")
+        barrier.wait()
+        with provider_destination_lock(destination):
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.01)
+            with guard:
+                active -= 1
+
+    errors, threads = run_bounded_barrier_peer_harness(
+        contender, parties=20, barrier_timeout=2, join_timeout=5
+    )
+
+    assert len(errors) == 20
+    for index, error in errors:
+        if index == 0:
+            assert isinstance(error, InjectedBarrierPeerFailure)
+        else:
+            assert isinstance(error, threading.BrokenBarrierError), (
+                f"peer {index} should observe BrokenBarrierError, got {type(error).__name__}"
+            )
+    assert all(not thread.is_alive() for thread in threads)
+    assert maximum_active == 0
     assert not provider_atomic_module._PROCESS_LOCKS
 
 
@@ -2162,21 +2249,19 @@ def test_concurrent_receipt_publishers_keep_exact_newest_32(tmp_path: Path) -> N
         )
         for index in range(40)
     ]
-    barrier = threading.Barrier(len(receipts))
-    errors: list[BaseException] = []
 
-    def publish(receipt: dict[str, object]) -> None:
-        try:
-            barrier.wait()
-            refresh._publish_primary_receipt(root, receipt)
-        except BaseException as error:  # pragma: no cover - asserted below
-            errors.append(error)
+    def publish(index: int, barrier: threading.Barrier) -> None:
+        barrier.wait()
+        refresh._publish_primary_receipt(root, receipts[index])
 
-    threads = [threading.Thread(target=publish, args=(receipt,)) for receipt in receipts]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=10)
+    # The module-local bounded seam (design D1/D2): one timeout owner for BOTH
+    # scheduler Barrier families, keeping 40 real publishes, the exact
+    # newest-32 history, the latest-receipt oracle, and the liveness assertion.
+    # The join bound is strictly larger than the barrier bound (65 > 60) so a
+    # parent wait can never expire before the Barrier timeout.
+    errors, threads = run_bounded_barrier_peer_harness(
+        publish, parties=len(receipts), barrier_timeout=60, join_timeout=65
+    )
 
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
@@ -2184,6 +2269,410 @@ def test_concurrent_receipt_publishers_keep_exact_newest_32(tmp_path: Path) -> N
     assert {path.stem for path in (root / "history").iterdir()} == {
         f"refresh_{index:02d}" for index in range(8, 40)
     }
+
+
+def test_receipt_publisher_barrier_harness_fails_bounded_when_a_peer_raises_before_arrival(
+    tmp_path: Path,
+) -> None:
+    """A pre-arrival peer failure must break the 40-way receipt harness bounded (#1645).
+
+    Pre-fix, this harness's Barrier had no bound and its peers were non-daemon:
+    a publisher that raised before ``barrier.wait()`` left the other 39 waiting
+    forever, so the parent's bounded join/assertions fired while
+    ``threading._shutdown()`` still hung the whole run. The bound converts the
+    missing participant into ``BrokenBarrierError`` for every waiter, and no
+    started peer survives the test.
+    """
+
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+    receipts = [
+        refresh._receipt(
+            run_id=f"refresh_{index:02d}",
+            started=refresh.datetime(2026, 7, 14, index // 60, index % 60, tzinfo=refresh.UTC),
+            outcome="failed",
+            reason="provider_invalid",
+            phase="precommit",
+            providers=[],
+        )
+        for index in range(40)
+    ]
+
+    def publish(index: int, barrier: threading.Barrier) -> None:
+        if index == 0:
+            raise InjectedBarrierPeerFailure("injected pre-arrival failure")
+        barrier.wait()
+        refresh._publish_primary_receipt(root, receipts[index])
+
+    errors, threads = run_bounded_barrier_peer_harness(
+        publish, parties=len(receipts), barrier_timeout=2, join_timeout=5
+    )
+
+    assert len(errors) == len(receipts)
+    for index, error in errors:
+        if index == 0:
+            assert isinstance(error, InjectedBarrierPeerFailure)
+        else:
+            assert isinstance(error, threading.BrokenBarrierError), (
+                f"peer {index} should observe BrokenBarrierError, got {type(error).__name__}"
+            )
+    assert all(not thread.is_alive() for thread in threads)
+    assert not (root / "latest.json").exists()
+
+
+def _run_bounded_subprocess(probe: str, *, timeout_seconds: float) -> tuple[str, str]:
+    """Run ``probe`` in a fresh interpreter under an external bound and reap on timeout.
+
+    The module-local driver for whole-run terminability proofs (#1645): the
+    child runs with its own process group, and if it outlives the external
+    bound the whole group is SIGKILLed and reaped so a broken harness can never
+    leak a live process. Returns ``(stdout, stderr)``.
+    """
+
+    repository = Path(__file__).resolve().parents[1]
+    process = subprocess.Popen(
+        [sys.executable, "-c", probe],
+        cwd=repository,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                "child did not exit within the external bound: a non-daemon "
+                "harness peer strands threading._shutdown(). Killing the "
+                "process group."
+            ) from None
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    return stdout, stderr
+
+
+def test_receipt_barrier_harness_whole_run_is_terminable_and_the_unbounded_mutant_times_out(
+    tmp_path: Path,
+) -> None:
+    """Whole-run terminability of the real 40-way receipt harness (#1645, task 1.4).
+
+    The in-process injection tests release and join every peer, so they cannot
+    see what happens when the harness must FAIL while a missing participant is
+    still pending. This proof runs the REAL module-local seam in a bounded child
+    subprocess with the same pre-arrival failure injected: the repaired seam
+    must report the failure and exit before the external bound. An isolated
+    mutant that removes the Barrier timeout (restoring the unbounded non-daemon
+    strand shape) must hit the external bound instead, proving the bound is
+    load-bearing rather than a courtesy.
+    """
+
+    # External mutant bound has margin over the ~0.3s module import and the
+    # short repaired leg (task 1.4): just enough to prove the unbounded mutant
+    # cannot exit, not a minute-scale wait.
+    external_timeout_seconds = 10.0
+    barrier_bound_seconds = 2.0
+    join_bound_seconds = 5.0
+    root = tmp_path / "receipts"
+    root.mkdir(mode=0o700)
+
+    repaired_probe = f"""
+import sys, threading, time
+from pathlib import Path
+from tests.test_scheduler_file_provider_refresh import (
+    InjectedBarrierPeerFailure,
+    run_bounded_barrier_peer_harness,
+    refresh,
+)
+
+root = Path({str(root)!r})
+
+def worker(index, barrier):
+    if index == 0:
+        raise InjectedBarrierPeerFailure("injected pre-arrival failure")
+    barrier.wait()
+    refresh._publish_primary_receipt(root, refresh._receipt(
+        run_id=f"refresh_{{index:02d}}",
+        started=refresh.datetime(2026, 7, 14, index // 60, index % 60, tzinfo=refresh.UTC),
+        outcome="failed", reason="provider_invalid", phase="precommit", providers=[]))
+
+started = time.monotonic()
+errors, threads = run_bounded_barrier_peer_harness(
+    worker, parties=40, barrier_timeout={barrier_bound_seconds}, join_timeout={join_bound_seconds})
+elapsed = time.monotonic() - started
+assert len(errors) == 40, len(errors)
+assert isinstance(errors[0][1], InjectedBarrierPeerFailure), type(errors[0][1])
+assert all(isinstance(e, threading.BrokenBarrierError) for i, e in errors if i != 0)
+assert all(not t.is_alive() for t in threads)
+assert elapsed < {external_timeout_seconds}
+print("repaired-whole-run-exited")
+print(f"elapsed={{elapsed:.2f}}s")
+print("errors:", [type(e).__name__ for i, e in errors[:3]], "...")
+print("alive:", sum(t.is_alive() for t in threads))
+"""
+
+    stdout, stderr = _run_bounded_subprocess(repaired_probe, timeout_seconds=external_timeout_seconds)
+    assert "repaired-whole-run-exited" in stdout, f"child printed {stdout.strip()!r} / {stderr.strip()!r}"
+    assert "BrokenBarrierError" in stdout, f"child printed {stdout.strip()!r} / {stderr.strip()!r}"
+
+    mutant_probe = f"""
+import sys, threading, time
+from pathlib import Path
+from tests.test_scheduler_file_provider_refresh import refresh
+
+root = Path({str(root)!r})
+
+# Mutant: Barrier WITHOUT the timeout bound, restoring the pre-fix unbounded
+# non-daemon strand shape. The main thread prints and returns immediately,
+# exactly as the pre-fix harness's bare join/timeout would after the injected
+# failure; interpreter shutdown must then wait forever on the 39 stranded peers.
+barrier = threading.Barrier(40)
+errors = []
+def publish(receipt):
+    try:
+        barrier.wait()
+        refresh._publish_primary_receipt(root, receipt)
+    except BaseException as error:
+        errors.append(error)
+
+receipts = [
+    refresh._receipt(run_id=f"refresh_{{index:02d}}",
+        started=refresh.datetime(2026, 7, 14, index // 60, index % 60, tzinfo=refresh.UTC),
+        outcome="failed", reason="provider_invalid", phase="precommit", providers=[])
+    for index in range(40)
+]
+def injected(receipt):
+    if receipt["run_id"] == "refresh_00":
+        raise RuntimeError("injected pre-arrival failure")
+    publish(receipt)
+threads = [threading.Thread(target=injected, args=(r,)) for r in receipts]
+for t in threads:
+    t.start()
+print("mutant-threads-started-no-join")
+print("done")
+"""
+    # The unbounded mutant must NOT exit: it must hit the external bound and be
+    # killed/reaped. We therefore expect the timeout assertion to fire.
+    try:
+        _run_bounded_subprocess(mutant_probe, timeout_seconds=external_timeout_seconds)
+    except AssertionError as error:
+        assert "did not exit within the external bound" in str(error), error
+        return
+    raise AssertionError(
+        "unbounded mutant exited instead of hitting the external timeout: "
+        "the Barrier bound is not load-bearing"
+    )
+
+
+def test_barrier_seam_constructed_variants_execute_their_red_observables() -> None:
+    """Executable no-capture / no-join seam variants redden, then are cleaned up (#1645).
+
+    Unlike the string-comparison source pins, these CONSTRUCTED variants of the
+    real seam are executed in a bounded child subprocess so a no-capture or
+    no-join regression cannot hide: each variant must fail with its own
+    observable, and the child is killed/reaped if it ever hangs (a no-join
+    variant can strand the interpreter).
+    """
+
+    # Build variants by deleting the shipped lines from the real seam source.
+    no_capture = _seam_source("run_bounded_barrier_peer_harness").replace(
+        "            errors.append((index, error))",
+        "            del error  # no-capture mutant",
+    )
+    no_join = _seam_source("run_bounded_barrier_peer_harness").replace(
+        "    for thread in threads:\n        thread.join(timeout=join_timeout)",
+        "    del thread  # no-join mutant",
+    )
+    assert "errors.append((index, error))" not in no_capture
+    assert "thread.join(timeout=join_timeout)" not in no_join
+
+    # The seam body references the module-global barrier_timeout/join_timeout
+    # defaults only through parameters; wrap each variant in a driver that
+    # imports the same module the real seam uses.
+    repository = Path(__file__).resolve().parents[1]
+
+    def drive(variant_source: str, tag: str) -> tuple[str, str]:
+        probe = (
+            "import sys, threading\n"
+            "from collections.abc import Callable\n"
+            "from tests.test_scheduler_file_provider_refresh import InjectedBarrierPeerFailure\n"
+            + variant_source
+            + "\n\n"
+            + "def worker(index, barrier):\n"
+            + "    if index == 0:\n"
+            + "        raise InjectedBarrierPeerFailure('injected pre-arrival failure')\n"
+            + "    barrier.wait()\n"
+            + "    print('worker-arrived', index)\n"
+            + "\n"
+            + "errors, threads = run_bounded_barrier_peer_harness(\n"
+            + "    worker, parties=4, barrier_timeout=2, join_timeout=5)\n"
+            + "print('variant-returned')\n"
+            + "print('errors:', [type(e).__name__ for _, e in errors])\n"
+            + "print('alive:', sum(t.is_alive() for t in threads))\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", probe],
+            cwd=repository,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                raise AssertionError(f"{tag} variant hung: no-join/no-capture seam strand") from None
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        return stdout, stderr
+
+    # No-capture: the peer failure is swallowed, so `errors` stays empty and the
+    # injected cause is never reported.
+    no_capture_stdout, no_capture_stderr = drive(no_capture, "no-capture")
+    assert "variant-returned" in no_capture_stdout, (
+        f"no-capture variant printed {no_capture_stdout.strip()!r} / {no_capture_stderr.strip()!r}"
+    )
+    assert "errors: []" in no_capture_stdout, (
+        f"no-capture variant should swallow the error, got {no_capture_stdout.strip()!r}"
+    )
+
+    # No-join: peers may still be alive when the parent returns.
+    no_join_stdout, no_join_stderr = drive(no_join, "no-join")
+    assert "variant-returned" in no_join_stdout, (
+        f"no-join variant printed {no_join_stdout.strip()!r} / {no_join_stderr.strip()!r}"
+    )
+    assert "alive: 3" in no_join_stdout, (
+        f"no-join variant should leave peers alive, got {no_join_stdout.strip()!r}"
+    )
+
+
+def _seam_source(function_name: str) -> str:
+    """Read ``function_name``'s exact source from this file via AST.
+
+    ``inspect.getsource`` is unreliable under pytest's assertion rewriting when
+    the module is fully loaded (it can return a shifted/other block), so the
+    anti-vacuity mutants are derived from the AST segment of the exact live
+    seam instead of mutating the tracked working tree.
+    """
+
+    import ast
+
+    text = Path(__file__).read_text()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            segment = ast.get_source_segment(text, node)
+            assert segment is not None, function_name
+            return segment
+    raise AssertionError(f"function {function_name} not found in {__file__}")
+
+
+def test_barrier_seam_source_legs_each_fail_bounded_and_distinct() -> None:
+    """Source-mutation guards for the module-local Barrier seam (#1645).
+
+    These are STRING-COMPARISON guards, not executed semantic mutants: each
+    asserts that removing one shipped repair line actually changes the derived
+    seam source, so the removal target is real and not dead text. The
+    behavioral red observables (barrier bound, error capture, join) are
+    exercised by the failure-injection tests and the bounded subprocess mutant
+    proof, not here.
+    """
+
+    source = _seam_source("run_bounded_barrier_peer_harness")
+
+    # Leg 1: remove the barrier bound -> a missing participant strands peers.
+    unbounded = source.replace(
+        "threading.Barrier(parties, timeout=barrier_timeout)",
+        "threading.Barrier(parties)",
+    )
+    assert source != unbounded, "unbounded mutant must differ from source"
+    assert "timeout=barrier_timeout" not in unbounded
+
+    # Leg 2: remove the error capture -> a worker failure goes unreported.
+    no_capture = source.replace(
+        "errors.append((index, error))",
+        "del error  # error capture removed",
+    )
+    assert source != no_capture, "error-capture mutant must differ from source"
+    assert "errors.append((index, error))" not in no_capture
+
+    # Leg 3: remove the join -> a live peer goes undetected.
+    no_join = source.replace(
+        "thread.join(timeout=join_timeout)",
+        "del thread  # join removed",
+    )
+    assert source != no_join, "join-removed mutant must differ from source"
+    assert "thread.join(timeout=join_timeout)" not in no_join
+
+    # Leg 4: join the parent with the BARRIER bound instead of the caller's
+    # larger join bound -> a parent wait could expire before the Barrier
+    # timeout, leaving liveness briefly true or recording a parent TimeoutError.
+    no_margin = source.replace(
+        "thread.join(timeout=join_timeout)",
+        "thread.join(timeout=barrier_timeout)",
+    )
+    assert source != no_margin, "no-margin mutant must differ from source"
+    assert "thread.join(timeout=join_timeout)" in source
+    assert "thread.join(timeout=join_timeout)" not in no_margin
+
+    # Both harness families demonstrably consume the seam (task 1.3): the two
+    # failure-injection tests call it through the same helper.
+    assert len({source, unbounded, no_capture, no_join, no_margin}) == 5
+
+
+def test_scheduler_originals_pin_seam_call_and_assertion_ordering() -> None:
+    """Exact-site source pins for BOTH scheduler originals (#1645).
+
+    STRING-COMPARISON guards (not executed mutants): each original must call
+    the bounded seam with barrier 60 < join 65, and must assert worker errors
+    then liveness BEFORE its first substantive oracle. Deleting either the seam
+    call geometry or moving the assertions after the oracle reddens here.
+    """
+
+    cases = (
+        (
+            "test_provider_destination_lock_serializes_threads_when_flock_is_process_scoped",
+            "run_bounded_barrier_peer_harness(\n        contender, parties=20, barrier_timeout=60, join_timeout=65",
+            "assert maximum_active == 1",
+        ),
+        (
+            "test_concurrent_receipt_publishers_keep_exact_newest_32",
+            (
+                "run_bounded_barrier_peer_harness(\n"
+                "        publish, parties=len(receipts), barrier_timeout=60, join_timeout=65"
+            ),
+            'assert json.loads((root / "latest.json").read_text())["run_id"] == "refresh_39"',
+        ),
+    )
+    for function_name, seam_call, first_oracle in cases:
+        original = _seam_source(function_name)
+
+        # Exact seam call geometry: bounded seam with parent wait > barrier bound.
+        assert seam_call in original, f"{function_name} must call the seam with barrier 60 < join 65"
+        no_seam = original.replace(seam_call, "del seam_call  # seam call removed")
+        assert original != no_seam, f"{function_name} seam-call mutant must differ"
+
+        # Error assertion then liveness assertion, both BEFORE the first oracle.
+        assert "    assert not errors" in original
+        assert "    assert all(not thread.is_alive() for thread in threads)" in original
+        assert original.index("    assert not errors") < original.index(first_oracle)
+        assert original.index("    assert all(not thread.is_alive() for thread in threads)") < original.index(
+            first_oracle
+        )
+        moved_after_oracle = original.replace(
+            "    assert not errors\n    assert all(not thread.is_alive() for thread in threads)\n",
+            "",
+        )
+        assert original != moved_after_oracle, f"{function_name} ordering-mutant must differ"
 
 
 def test_emergency_slot_handles_short_writes_and_validates_complete_record(
