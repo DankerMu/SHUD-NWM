@@ -663,6 +663,35 @@ def _replacement_key_bindings(
     return (run_key, river_network_version_key, replacement_key[2])
 
 
+def _replacement_read_bindings(
+    replacement_key: tuple[str, str, str],
+    run_key: int,
+    river_network_version_key: int,
+) -> tuple[int, str, int, str]:
+    """Bindings for the two READ statements of one replacement group (#1681).
+
+    Same keys as :func:`_replacement_key_bindings` plus the transitional
+    ``run_id`` pushdown aid, and the tuple order mirrors the SQL conjunction
+    order exactly — ``run_key``, then the aid that sits immediately under it,
+    then the network key, then the variable. Keeping the two orders identical is
+    what makes the aid readable as "redundant with the conjunct above it" rather
+    than as a fourth independent filter.
+
+    The aid is a no-op on the RESULT set: ``hydro_run.run_key`` is
+    ``GENERATED ALWAYS AS IDENTITY UNIQUE`` (000050) and
+    ``river_timeseries.run_id`` is NOT NULL, both written from the same batch
+    context by the INSERT below, so ``run_key = K AND run_id <> text(K)`` is
+    unrepresentable. It exists only to give the compressed chunks an access
+    path; remove it with #1342, together with its marker line.
+    """
+    return (
+        run_key,
+        replacement_key[0],
+        river_network_version_key,
+        replacement_key[2],
+    )
+
+
 def _resolved_segment_keys(
     rows: tuple[RiverTimeseriesRow, ...],
     segment_keys: Mapping[str, int | None] | None,
@@ -859,27 +888,53 @@ class PsycopgOutputParserRepository:
                 # fallback blocks the same min/max transform, so the window read
                 # keeps its own index descent and touches only this key's rows.
                 #
-                # Which index (#1442): NOT the pkey any more. The pkey is
-                # (run_id, river_network_version_id, river_segment_id, variable,
-                # valid_time) (000006:56) and its leading column is unbound here
-                # — both statements bind run_key / river_network_version_key /
-                # variable_e. The descent is 000051's
-                # river_ts_selected_identity_key_valid_time_idx (run_key,
-                # basin_version_key, river_network_version_key, variable_e,
-                # valid_time DESC): `run_key` is the bound leading column, and
-                # the other two bound keys apply as index filters past the
-                # unbound basin_version_key. #1342 must keep that index (or an
-                # equivalent run_key-leading one) when it drops the text
-                # columns; the mitigation above is only as good as the descent.
+                # Which index (#1442, corrected by #1681): NOT the pkey any
+                # more. The pkey is (run_id, river_network_version_id,
+                # river_segment_id, variable, valid_time) (000006:56) and its
+                # leading column is unbound by the KEY predicates alone. The two
+                # statements have two legs, and they descend different indexes:
+                #
+                # * UNCOMPRESSED chunks — 000051's
+                #   river_ts_selected_identity_key_valid_time_idx (run_key,
+                #   basin_version_key, river_network_version_key, variable_e,
+                #   valid_time DESC): `run_key` is the bound leading column, and
+                #   the other two bound keys apply as index filters past the
+                #   unbound basin_version_key. #1342 must keep that index (or an
+                #   equivalent run_key-leading one) when it drops the text
+                #   columns; the mitigation above is only as good as the descent.
+                # * COMPRESSED chunks — no key access path exists at all. 000047
+                #   segments by (run_id, river_network_version_id,
+                #   river_segment_id), so the compressed chunks' only index
+                #   leads with the TEXT run_id and `run_key` cannot be pushed
+                #   into it. Neither read is valid_time bounded (that is their
+                #   job: find this key's rows OUTSIDE the incoming window), so
+                #   chunk exclusion cannot spare them either, and a key-only
+                #   probe for a NEW run has to decompress-scan every compressed
+                #   chunk to prove "no rows" — node-27 receipt 2026-08-21: every
+                #   run of the 2026082012 cycles hit the 60 s statement_timeout
+                #   and no forecast was ingested (#1681).
+                #
+                # Hence the bound `run_id` aid below: it reaches the segmentby
+                # index on compress_hyper_*, and it filters nothing (run_id and
+                # run_key are bijective and dual-written from this same batch
+                # context), so the result set — and therefore the replacement
+                # window handed to the guard — is unchanged. It is transitional:
+                # #1342 deletes the marker line and the aid line together, and
+                # must give the compressed layout a key-form segmentby first.
+                # The DELETE below deliberately does NOT carry it: it is
+                # valid_time bounded and runs only after the guard proved its
+                # target chunks uncompressed, so 000051's index is enough.
                 cursor.execute(
                     """
                     SELECT 1 FROM hydro.river_timeseries
                     WHERE run_key = %s
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND run_id = %s
                       AND river_network_version_key = %s
                       AND variable_e = %s
                     LIMIT 1
                     """,
-                    _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
+                    _replacement_read_bindings(replacement_key, run_key, river_network_version_key),
                 )
                 if cursor.fetchone() is None:
                     existing_window = (None, None)
@@ -890,6 +945,8 @@ class PsycopgOutputParserRepository:
                             SELECT valid_time
                             FROM hydro.river_timeseries
                             WHERE run_key = %s
+                              -- transitional compressed-chunk pushdown aid, remove with #1342
+                              AND run_id = %s
                               AND river_network_version_key = %s
                               AND variable_e = %s
                         )
@@ -897,7 +954,7 @@ class PsycopgOutputParserRepository:
                                MAX(valid_time) AS valid_time_max
                         FROM existing
                         """,
-                        _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
+                        _replacement_read_bindings(replacement_key, run_key, river_network_version_key),
                     )
                     existing_window = cursor.fetchone()
             incoming_min, incoming_max = incoming_windows[replacement_key]
