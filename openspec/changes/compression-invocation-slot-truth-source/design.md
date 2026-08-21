@@ -9,13 +9,13 @@ The issue's anchors were verified on master `c2439f62`. Re-checked here on `c16d
 | schema `required` pins | `:269` / `:271` / `:272` | `:269` / `:271` / `:272` | none |
 | schema property declarations | `:90` / `:128-129` / `:157-158` | `:90` / `:128-129` / `:157-158` | none |
 | runbook "may remain" | `:770-771` | `:770-771` | none |
-| verifier ledger overwrites | `:3523`, `:3554-3555`, `:3607-3608` | **`:3535`, `:3566-3567`, `:3619-3620`** | +12 |
-| terminal output sites | `:3992`, `:4011`, `:4015`, `:4043`, `:4045` | **`:4004`, `:4023`, `:4027`, `:4055`, `:4057`** | +12 |
-| recovery exact-key set | `:3463` | **`:3475`** | +12 |
+| verifier ledger overwrites | `:3523`, `:3554-3555`, `:3607-3608` | `:3535`, `:3566-3567`, `:3619-3620` pre-edit / **`:3536`, `:3568-3569`, `:3622-3623`** post-edit | +12, then +3 |
+| terminal output sites | `:3992`, `:4011`, `:4015`, `:4043`, `:4045` | `:4004`, `:4023`, `:4027`, `:4055`, `:4057` pre-edit / **`:4007`, `:4026`, `:4030`, `:4058`, `:4060`** post-edit | +12, then +3 |
+| recovery exact-key set | `:3463` | **`:3475`** (unshifted; above the first comment) | +12 |
 | closure call site | `:4159` (issue) | **`:4171`** pre-edit / **`:4174`** post-edit | +12, then +3 |
 | `#1261` ruling comment | `:1140-1149` | `:1148` (the `pinning argv[0]` line) | — |
 
-Use the located anchors, not the issue's. **And note the self-inflicted drift**: inserting `description` at `:90`, `:128-129`, `:157-158` shifts every schema line below it, so `:269` / `:271` / `:272` go stale *inside this PR*. No carrier may cite post-edit schema line numbers until the edit is final; the PR body re-derives them from the landed file.
+Use the located anchors, not the issue's. **Self-inflicted drift, and how it was avoided**: a multi-line `description` insertion at `:90`, `:128-129`, `:157-158` would have shifted every schema line below it, staling `:269` / `:271` / `:272` inside this PR. The implementation therefore used the same-line form `{"$ref": ..., "description": ...}`, and the schema is 510 lines before and after — **no schema anchor moved**. The three added verifier comment lines *did* shift downstream `.py` anchors by +3; every carrier's `.py` anchors are re-derived from the landed file, and pre-edit values are labelled as such wherever they are kept for provenance.
 
 ## D2 — The canonical formulation, and the two false statements it replaces
 
@@ -46,33 +46,70 @@ recursively resolves nested `{path, sha256, bytes}` references found inside
 arrived transitively. The issue's hermetic repro (its evidence item 7) used flat JSON with no nested refs,
 so it never exercised this and does not license the "only"/"never parsed" wording.
 
+**Wrong #3 — this fixture's second draft, refuted in round-1 cross-review.** Two clauses failed, both
+universally quantified and both false on the shape the repo's own bundle author emits:
+
+- *"this slot in the terminal document is never the authored reference."* `scripts/node27_timeseries_compression_bundle_author.py:237,247,249,258,260` writes `ledger_ref` into all five slots (its docstring `:21-25` says so outright), so on author-produced bundles the authored value and the terminal value are byte-identical. A verifier probe measured `slots(bundle) == slots(terminal)` → `True`.
+- *"enforced only as an artifact-closure node: the file must exist…"* Closure enforcement is gated on the value being exactly a three-key mapping — `packages/common/evidence_io.py:192`, `if set(current) == {"path", "sha256", "bytes"}`. A four-key value, a string, or `null` is never collected and receives **no** enforcement; a probe with all five slots set to a four-key value naming `/nonexistent/nope.json` still returned `qualifies_task_4_5 is True` and produced a schema-valid terminal document. **The evidence schema is never applied to the input bundle at all** — the only `jsonschema` application is `scripts/node27_timeseries_compression_live_evidence.py:4208`, over the *terminal* document, after `verify_bundle` returns.
+
+The lesson, recorded because it caught three drafts in a row: this contract has **two** live bundle shapes — the
+legacy hand-assembled one (five distinct `*-invocation.json` files; the committed example and the suite's
+`_bundle` fixture) and the production author one (all five slots literally the ledger ref). An unqualified
+sentence must be true of both. Every earlier draft was written against one shape and checked against the same
+one.
+
 What is genuinely never interpreted is the **invocation semantics** — argv, exit code, timings. That is the
 defensible claim, and it is the one `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`
 (`tests/test_node27_timeseries_compression_live_evidence.py:3239`) already pins.
 
 So the canonical sentence, used identically in every carrier:
 
-> Required, and enforced only as an artifact-closure node: the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively; its authored `path`/`sha256`/`bytes` is retained in the terminal `source_manifest`. The invocation semantics inside it (argv, exit code, timings) are never interpreted, and this slot in the terminal document is never the authored reference — the verifier re-derives it from `execution.ledger`.
+> Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not closure-checked at all.
 
 Carriers that must agree: the five schema `description`s, the three verifier comments, the runbook
 narrative, the spec delta, this D2, and the PR body. Copy the sentence; do not paraphrase it per carrier.
 Its two load-bearing tokens for the guard test are `execution.ledger` and `re-derive`.
 
-## D3 — Why a guard test, and what shape it takes
+## D3 — The oracles, and what each one actually pins
 
-A spec requirement without an oracle is the thing this issue is about. The test is the smallest possible oracle for the thing being claimed: that the five slots are annotated at all, and that the annotation names the real truth source.
+A spec requirement without an oracle is the thing this issue is about. Round-1 cross-review caught this
+fixture claiming that the pre-existing sentinel
+`test_legacy_authored_invocations_do_not_contribute_to_v3_truth`
+(`tests/test_node27_timeseries_compression_live_evidence.py:3238-3252`) pinned more than it does: it asserts
+only `terminal["qualifies_task_4_5"] is True`, never reads a terminal `*_invocation` slot, and mutates two of
+the five. So each new scenario gets its own oracle, and no scenario borrows credit from that sentinel beyond
+the semantics half it genuinely covers.
 
-Shape (mirrors the existing schema-shape guard `tests/test_node27_timeseries_compression_live_evidence.py:3745`, reusing the module-level schema already loaded at `:45`):
+**G1 — annotation guard.** Derive the slot list from the schema: every property declared under a `properties`
+map whose name ends in `invocation`. Assert the derived set is exactly the five known slots, then assert each
+carries a non-empty `description` containing `execution.ledger` and `re-derive`.
 
-- **Derive** the slot list from the schema rather than hardcoding it: scan every property whose name ends in `invocation` and whose subschema `$ref`s `#/$defs/artifact_ref`. Assert the derived set is exactly the five known slots (so the test fails loudly if a slot is added *or* removed rather than silently skipping it), then assert the annotation on each.
-- Assert each such property object has a non-empty `description`.
-- Assert the description contains `execution.ledger` and `re-derive` (substring, case-insensitive on the latter).
+The derivation is deliberately **declaration-style-independent**. The first draft additionally required
+`value.get("$ref") == "#/$defs/artifact_ref"` directly on the property object, which round-1 review
+demonstrated would stay green on a sixth undescribed slot written with an `allOf`, `anyOf`, or inline-object
+wrapper — i.e. it defended only against a slot written in the identical style, while the requirement says
+"every". Matching on the `properties` position instead survives all three wrappers. Verified safe: the plural
+`authorization.*_invocations` const integers end in `invocations`, not `invocation`, and the `required`
+entries at `:269`/`:271`/`:272` are list elements rather than property keys, so neither is swept in — a walk
+of the real schema returns exactly the five.
 
-Deriving rather than hardcoding is what makes the test match the requirement's own word "every". A hardcoded five-pair list would pass green on a future sixth undescribed slot while the spec says every slot must be annotated.
+**Substring, deliberately, not full-text equality.** A byte-pinned description turns any future wording
+improvement into red CI — a brittle test is its own kind of dead surface. The test pins the two load-bearing
+tokens, not the prose.
 
-**Substring, deliberately, not full-text equality.** A byte-pinned description turns any future wording improvement into red CI — a brittle test is its own kind of dead surface. The test pins the two load-bearing facts (annotated; names the ledger as the source), not the prose.
+**G2 — enforcement boundary.** Two halves, matching the scenario: a well-formed `{path, sha256, bytes}` slot
+naming a nonexistent path fails closed with `BoundedEvidenceError`; a four-key mapping (and a string, and
+`null`) naming the same nonexistent path is never closure-checked and still qualifies. This is the honest
+statement of the boundary, and it is the one the second draft got wrong.
 
-What the test does **not** claim: it does not prove the description is true. Truth of the canonical statement rests on the code facts recorded in D2, which the existing `test_legacy_authored_invocations_do_not_contribute_to_v3_truth` (`:3239`) already pins on the semantics side (authored content with `exit_code=1` / `timeout_seconds=901` / a reused invocation still yields `qualifies_task_4_5 is True`). That test stays untouched — it is the negative twin of this one.
+**G3 — manifest retention and dedup.** On a bundle whose five slots name five distinct well-formed
+references, all five authored paths appear in `source_manifest`, distinct from the ledger reference in the
+slots. On the bundle-author shape (all five slots = the ledger ref), that reference appears **once**, because
+`resolve_artifact_closure` skips `manifest.append` for a repeated identical normalized path
+(`packages/common/evidence_io.py`, the `if previous == identity: continue` branch).
+
+What no test claims: that the description is *true*. Truth rests on the code facts in D2, each of which was
+checked against the source and, for the contested clauses, against an executed probe.
 
 ## D4 — Runbook placement
 
@@ -89,5 +126,5 @@ The AC says name the five keys in `:755-771`. `:755-763` is the **top-level** bu
 ## D6 — Couplings recorded, not solved
 
 - The five slots stay duplicated in every terminal receipt (five byte-identical copies of `execution.ledger`). That is the accepted cost of 方案 a: readers still see the duplication, but the schema now tells them why. Removing it is 方案 b, ruled out by the user.
-- `description` is a JSON Schema annotation with no validation effect in any draft, so `packages/common/compression_terminal_state.py:44` (`validate_terminal_document`) and the three test modules that load this schema (`live_evidence.py:45`, `supervisor.py:754/:1111/:3213`, `capture.py:368`) are unaffected — but all are run as evidence, since "annotations are inert" is a claim, not an assumption.
+- `description` is a JSON Schema annotation with no validation effect in any draft, so `packages/common/compression_terminal_state.py` (`CANONICAL_SCHEMA` at `:44`, `validate_terminal_document` at `:285`) and the three test modules that load this schema (`live_evidence.py:45`, `supervisor.py:754/:1111/:3213`, `capture.py:368`) are unaffected — but all are run as evidence, since "annotations are inert" is a claim, not an assumption.
 - If #1398's slots are ever removed (方案 b, some future issue), this guard test and its requirement retire with them.

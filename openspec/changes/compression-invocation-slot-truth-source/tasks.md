@@ -3,9 +3,10 @@
 ## Implementation
 
 - [x] T1 Add the canonical `description` (design D2, verbatim) to the five schema properties: `recovery.invocation` (`:90`), `migration.first_invocation` / `second_invocation` (`:128-129`), `receipts.dry_run_invocation` / `enforce_invocation` (`:157-158`) in `schemas/timeseries_compression_live_evidence.schema.json`.
-- [x] T2 Add one comment line at each verifier overwrite point — `scripts/node27_timeseries_compression_live_evidence.py:3535`, `:3566-3567`, `:3619-3620` — pointing at `scripts/node27_timeseries_compression_bundle_author.py:21-25`. Comments only; no logic edits.
+- [x] T2 Add one comment line at each verifier overwrite point — `scripts/node27_timeseries_compression_live_evidence.py` — the comment lines landed at `:3535`, `:3567`, `:3621`, immediately above the overwrites now at `:3536`, `:3568-3569`, `:3622-3623` — pointing at `scripts/node27_timeseries_compression_bundle_author.py:21-25`. Comments only; no logic edits.
 - [x] T3 Rewrite `docs/runbooks/tier-node27-timeseries-storage.md:770-771` so the five keys read as mandatory, naming them, per design D4. The top-level key list at `:755-763` stays a top-level list.
-- [x] T4 Add the guard test (design D3) to `tests/test_node27_timeseries_compression_live_evidence.py`, reusing the schema already loaded at `:45`. The slot list is **derived** from the schema (properties named `*invocation` whose subschema `$ref`s `#/$defs/artifact_ref`) and asserted to equal the five known slots, not hardcoded.
+- [x] T4 Guard test G1 (design D3) in `tests/test_node27_timeseries_compression_live_evidence.py`, reusing the schema already loaded at `:45`. The slot list is **derived** from the schema — every property declared under a `properties` map whose name ends in `invocation`, with no dependence on how the artifact-ref shape is reached — and asserted to equal the five known slots.
+- [ ] T5 Oracles G2 and G3 (design D3) in the same module: the enforcement boundary (well-formed ref at a nonexistent path fails closed; four-key / string / `null` escapes closure and still qualifies) and manifest retention plus dedup (five distinct refs → five manifest nodes distinct from the ledger; five identical ledger refs → one node). Every new scenario in the spec delta has an oracle; none borrows credit from `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`, which pins only the semantics half.
 
 ## Evidence Floor
 
