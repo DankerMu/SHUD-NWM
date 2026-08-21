@@ -11,7 +11,11 @@ import copy
 import json
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -3536,6 +3540,109 @@ def test_idempotency_key_unique_constraint() -> None:
     assert len(rows) == 1
 
 
+def _join_all_deadline(threads: list[threading.Thread], *, deadline: float) -> None:
+    """Join every thread under one absolute deadline, never a full timeout each.
+
+    A per-thread ``join(timeout)`` multiplies the parent's wait by the peer
+    count, so a stranding peer could leave the parent waiting many times longer
+    than the barrier bound (task 5.2). The normal path uses the same single
+    deadline as the partial-launch cleanup path.
+    """
+
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+
+
+def _start_attempt_threads(
+    worker: Callable[[int], None],
+    parties: int,
+    barrier: threading.Barrier,
+    *,
+    join_timeout: float,
+) -> list[threading.Thread]:
+    """Start ``parties`` explicit peers transactionally and join them under one deadline.
+
+    The 8-party gateway harness's transactional launch seam (task 5.2): only
+    successfully started threads are tracked. If a later ``Thread.start()``
+    raises after a subset is running, the Barrier is aborted so the running
+    peers leave ``Barrier.wait()``, every tracked peer is joined against one
+    absolute cleanup deadline, and the ORIGINAL launch cause is re-raised.
+    Returns the successfully started threads (already joined on the normal
+    path), so the caller's liveness assertion stays on the real peer set.
+    """
+
+    started: list[threading.Thread] = []
+    try:
+        for index in range(parties):
+            thread = threading.Thread(target=worker, args=(index,))
+            thread.start()
+            started.append(thread)
+    except BaseException as launch_error:  # pragma: no cover - asserted below
+        barrier.abort()
+        _join_all_deadline(started, deadline=time.monotonic() + join_timeout)
+        raise launch_error
+
+    _join_all_deadline(started, deadline=time.monotonic() + join_timeout)
+    return started
+
+
+def _make_idempotency_attempt_worker(
+    *,
+    engine: Any,
+    barrier: threading.Barrier,
+    results: list[Any],
+    errors: list[tuple[int, BaseException]],
+    key: str,
+    common: dict[str, Any],
+    reserve: Callable[..., Any],
+    pre_body: Callable[[int], None] | None = None,
+    post_session: Callable[[int, Session], None] | None = None,
+) -> Callable[[int], None]:
+    """The ONE shipping worker body for the 8-party idempotency harness (#1645).
+
+    Session identity is tracked SEPARATELY from the wrappers so a successfully
+    created Session is closed even if ``PipelineStore``/``_StoreRepo``
+    construction fails afterwards (design D3), and a ``session.close()``
+    failure is captured into the indexed error channel ordered AFTER any body
+    error instead of escaping only as ``PytestUnhandledThreadExceptionWarning``
+    (task 5.3). ``pre_body`` and ``post_session`` are deterministic injection
+    hooks so the failure-injection tests execute THIS exact worker logic rather
+    than a copied twin (Phase 2 gaps 3/4).
+    """
+
+    def _attempt(index: int) -> None:
+        session: Session | None = None
+        try:
+            if pre_body is not None:
+                # A pre-arrival injected failure is captured by the SAME
+                # catch-all as the shipped worker's own failures.
+                pre_body(index)
+            session = Session(engine)
+            if post_session is not None:
+                post_session(index, session)
+            repo = _StoreRepo(PipelineStore(session))
+            barrier.wait()  # release all threads into reserve at once.
+            results[index] = reserve(
+                repo, idempotency_key=key, job_id=f"job_{index}", **common
+            )
+        except BaseException as error:
+            errors.append((index, error))
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except BaseException as cleanup_error:
+                    # A close failure after a body error must stay indexed and
+                    # ordered AFTER the body error, never escape only as a
+                    # PytestUnhandledThreadExceptionWarning (task 5.3).
+                    errors.append((index, cleanup_error))
+
+    return _attempt
+
+
 def test_idempotency_key_unique_constraint_concurrent(tmp_path: Any) -> None:
     """Concurrent reserve of the SAME key (each thread its own session against a
     shared SQLite file + unique index): exactly one wins (created=True), exactly
@@ -3572,7 +3679,7 @@ def test_idempotency_key_unique_constraint_concurrent(tmp_path: Any) -> None:
 
     n = 8
     # Generous hang backstop, NOT a performance SLA (design D2): its only job is
-    # to turn a participant that never arrives into BrokenBarrierError so peers
+    # to turn a pre-arrival worker exception into BrokenBarrierError so peers
     # release instead of stranding non-daemon threads at interpreter shutdown.
     # The parent join is STRICTLY LARGER (65 > 60) so a parent wait can never
     # expire before the Barrier bound, which would otherwise leave a peer
@@ -3582,35 +3689,29 @@ def test_idempotency_key_unique_constraint_concurrent(tmp_path: Any) -> None:
     results: list[Any] = [None] * n
     errors: list[tuple[int, BaseException]] = []
 
-    def _attempt(index: int) -> None:
-        # Session identity is tracked SEPARATELY from the wrappers so a
-        # successfully created Session is closed even if PipelineStore or
-        # _StoreRepo construction fails afterwards (design D3).
-        session: Session | None = None
-        try:
-            session = Session(engine)
-            repo = _StoreRepo(PipelineStore(session))
-            barrier.wait()  # release all threads into reserve at once.
-            results[index] = reserve_candidate(
-                repo, idempotency_key=key, job_id=f"job_{index}", **common
-            )
-        except BaseException as error:
-            errors.append((index, error))
-        finally:
-            if session is not None:
-                session.close()
+    # The ONE shipping worker body (Phase 2 gaps 3/4): injection tests reuse it.
+    _attempt = _make_idempotency_attempt_worker(
+        engine=engine,
+        barrier=barrier,
+        results=results,
+        errors=errors,
+        key=key,
+        common=common,
+        reserve=reserve_candidate,
+    )
 
-    threads = [threading.Thread(target=_attempt, args=(i,)) for i in range(n)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=65)
+    # Transactional launch (task 5.2): only successfully started threads are
+    # tracked; if a later start() raises, the Barrier is aborted so waiting
+    # peers release, every started peer is joined against one absolute cleanup
+    # deadline, and the ORIGINAL launch cause is re-raised rather than masked
+    # by a peer BrokenBarrierError.
+    started = _start_attempt_threads(_attempt, n, barrier, join_timeout=65)
 
     # Attribute worker failure/broken barrier BEFORE inspecting race results:
     # a worker that died before reserving leaves `results` missing and the
     # symptom would otherwise mask the cause (design D3).
     assert not errors, errors
-    assert all(not thread.is_alive() for thread in threads)
+    assert all(not thread.is_alive() for thread in started)
 
     created = [r for r in results if r is not None and r.created]
     assert len(created) == 1, f"exactly one creator expected, got {len(created)}"
@@ -3639,19 +3740,116 @@ def _test_function_source(function_name: str) -> str:
     the module is fully loaded (it can return a shifted/other block), so the
     anti-vacuity mutants are derived from the AST segment of the exact live
     test function instead of mutating the tracked working tree.
+
+    Only module-level definitions bind (task 5.5): ``ast.Module.body`` is
+    examined, exactly one top-level ``FunctionDef`` must match, and nested
+    same-name definitions are never selected. Zero or duplicate top-level
+    owners fail deterministically instead of first-match binding. The
+    uniqueness logic lives in ``_module_level_function_segment`` so the
+    synthetic decoy/zero/duplicate cases execute the exact code the shipping
+    extractor uses (Phase 2 gap 2).
     """
 
-    import ast
     from pathlib import Path
 
     text = Path(__file__).read_text()
+    return _module_level_function_segment(text, function_name)
+
+
+def _module_level_function_segment(text: str, function_name: str) -> str:
+    """Return the exact source of the single module-level ``function_name`` in ``text``.
+
+    The ONE uniqueness implementation (task 5.5): only ``ast.Module.body`` is
+    examined, exactly one module-level ``FunctionDef`` must match, and nested
+    same-name definitions are ignored. ``_test_function_source`` delegates here
+    so the synthetic nested/zero/duplicate cases exercise the shipping logic
+    (Phase 2 gap 2).
+    """
+
+    import ast
+
     tree = ast.parse(text)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == function_name:
-            segment = ast.get_source_segment(text, node)
-            assert segment is not None, function_name
-            return segment
-    raise AssertionError(f"function {function_name} not found in {__file__}")
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected exactly one module-level {function_name!r}, got {len(matches)}"
+        )
+    segment = ast.get_source_segment(text, matches[0])
+    assert segment is not None, function_name
+    return segment
+
+
+def test_ast_guards_require_exactly_one_module_level_function_definition() -> None:
+    """AST source extraction must bind one top-level owner, not a nested decoy (#1645, task 5.5).
+
+    A nested SAME-NAME function is the exact decoy shape: it must never be
+    selected, and the shipped original must still resolve to the single
+    module-level owner. A nested-only definition yields zero module-level
+    owners and must fail deterministically, as must duplicate top-level
+    owners.
+    """
+
+    # (a) Exactly one top-level owner containing a same-name nested decoy:
+    # the extractor must select the OUTER definition, not the inner one.
+    same_name_nested = (
+        "def target():\n"
+        "    def target():\n"
+        "        return 'inner'\n"
+        "    return 'outer'\n"
+    )
+    segment = _module_level_function_segment(same_name_nested, "target")
+    assert segment == (
+        "def target():\n"
+        "    def target():\n"
+        "        return 'inner'\n"
+        "    return 'outer'"
+    )
+    assert segment.count("def target()") == 2  # outer + the nested decoy
+    assert "return 'outer'" in segment
+
+    # (b) Nested-only definition -> zero module-level owners, deterministic
+    # failure (the nested target must not be selected).
+    nested_only = (
+        "def outer():\n"
+        "    def target():\n"
+        "        return 'nested'\n"
+        "    return target()\n"
+    )
+    try:
+        _module_level_function_segment(nested_only, "target")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("nested-only target must fail deterministically (zero module-level owners)")
+
+    # Zero module-level owners -> deterministic failure.
+    zero_owner = "def other():\n    return 1\n"
+    try:
+        _module_level_function_segment(zero_owner, "target")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("zero top-level owners must fail deterministically")
+
+    # Duplicate module-level owners -> deterministic failure, never first-match.
+    duplicate = (
+        "def target():\n    return 'first'\n"
+        "def target():\n    return 'second'\n"
+    )
+    try:
+        _module_level_function_segment(duplicate, "target")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("duplicate top-level owners must fail deterministically")
+
+    # The shipped extractor is exercised on the real module so the real guard
+    # target still resolves exactly once.
+    assert _test_function_source("test_idempotency_key_unique_constraint_concurrent")
 
 
 def test_idempotency_barrier_source_legs_each_fail_bounded_and_distinct() -> None:
@@ -3666,14 +3864,14 @@ def test_idempotency_barrier_source_legs_each_fail_bounded_and_distinct() -> Non
 
     source = _test_function_source("test_idempotency_key_unique_constraint_concurrent")
 
-    # Leg 1: remove the barrier bound -> a missing participant strands peers.
+    # Leg 1: remove the barrier bound -> a pre-arrival worker exception strands peers.
     unbounded = source.replace("threading.Barrier(n, timeout=60)", "threading.Barrier(n)")
     assert source != unbounded, "unbounded mutant must differ from source"
     assert "threading.Barrier(n)" in unbounded and "threading.Barrier(n, timeout=60)" not in unbounded
 
     # Leg 2: remove the liveness assertion -> a live peer goes undetected.
     no_liveness = source.replace(
-        "assert all(not thread.is_alive() for thread in threads)",
+        "assert all(not thread.is_alive() for thread in started)",
         "del thread  # liveness assertion removed",
     )
     assert source != no_liveness, "liveness-removed mutant must differ from source"
@@ -3684,73 +3882,134 @@ def test_idempotency_barrier_source_legs_each_fail_bounded_and_distinct() -> Non
     assert source != no_errors, "error-removed mutant must differ from source"
     assert "errors: list[tuple[int, BaseException]]" not in no_errors
 
+    # The worker-body legs (4, 5, 5b) target the SHIPPING worker factory, whose
+    # source the original and the injection tests both consume (Phase 2 gaps
+    # 3/4).
+    worker = _test_function_source("_make_idempotency_attempt_worker")
+
     # Leg 4: move session creation back OUTSIDE the catch-all scope, so a
     # constructor/session failure would escape attribution. This is the exact
     # issue trigger and must be load-bearing, not a raised-after-success shape.
-    outside_construction = source.replace(
-        "        try:\n            session = Session(engine)\n",
-        "        session = Session(engine)\n        try:\n",
+    outside_construction = worker.replace(
+        "        try:\n"
+        "            if pre_body is not None:\n"
+        "                # A pre-arrival injected failure is captured by the SAME\n"
+        "                # catch-all as the shipped worker's own failures.\n"
+        "                pre_body(index)\n"
+        "            session = Session(engine)\n",
+        "        session = Session(engine)\n"
+        "        try:\n"
+        "            if pre_body is not None:\n"
+        "                pre_body(index)\n",
     )
-    assert source != outside_construction, "outside-construction mutant must differ from source"
+    assert worker != outside_construction, "outside-construction mutant must differ from source"
     assert "session = Session(engine)" in outside_construction
-    assert "        try:\n            session = Session(engine)" in source
+    assert (
+        "        try:\n"
+        "            if pre_body is not None:\n"
+        "                # A pre-arrival injected failure is captured by the SAME\n"
+        "                # catch-all as the shipped worker's own failures.\n"
+        "                pre_body(index)\n"
+        "            session = Session(engine)"
+    ) in worker
 
     # Leg 5: collapse the session identity back into the wrapper close, so a
     # Session created successfully but followed by a PipelineStore/_StoreRepo
     # construction failure is NOT closed (resource leak on the failure path).
-    partial_cleanup = source.replace(
-        "        finally:\n            if session is not None:\n                session.close()",
+    partial_cleanup = worker.replace(
+        (
+            "        finally:\n"
+            "            if session is not None:\n"
+            "                try:\n"
+            "                    session.close()\n"
+            "                except BaseException as cleanup_error:"
+        ),
         "        finally:\n            if repo is not None:\n                repo.store.session.close()",
     )
-    assert source != partial_cleanup, "partial-cleanup mutant must differ from source"
-    assert "        finally:\n            if session is not None:\n                session.close()" in source
+    assert worker != partial_cleanup, "partial-cleanup mutant must differ from source"
+    assert (
+        "        finally:\n"
+        "            if session is not None:\n"
+        "                try:\n"
+        "                    session.close()"
+    ) in worker
 
-    # Leg 6: drop the parent-wait margin (join equal to the barrier bound) -> a
-    # parent wait could expire milliseconds before the Barrier timeout, leaving
-    # liveness briefly true or recording a parent TimeoutError first.
-    no_margin = source.replace("thread.join(timeout=65)", "thread.join(timeout=60)")
-    assert source != no_margin, "no-margin mutant must differ from source"
-    assert "thread.join(timeout=65)" in source
-    assert "thread.join(timeout=65)" not in no_margin
+    # Leg 5b: remove the cleanup error capture -> a close failure would escape
+    # only as a PytestUnhandledThreadExceptionWarning (task 5.3).
+    no_cleanup_capture = worker.replace(
+        "                except BaseException as cleanup_error:\n"
+        "                    # A close failure after a body error must stay indexed and\n"
+        "                    # ordered AFTER the body error, never escape only as a\n"
+        "                    # PytestUnhandledThreadExceptionWarning (task 5.3).\n"
+        "                    errors.append((index, cleanup_error))",
+        "                except BaseException as cleanup_error:\n"
+        "                    raise cleanup_error",
+    )
+    assert worker != no_cleanup_capture, "cleanup-capture-removed mutant must differ from source"
+    assert "errors.append((index, cleanup_error))" in worker
 
-    # Exact-site ordering pins: deleting the worker handler/error assertion or
-    # moving them after the substantive results must redden this tracked test.
-    assert "        except BaseException as error:\n            errors.append((index, error))" in source
+    # Leg 6: the launch must go through the transactional helper with an
+    # absolute-deadline join (task 5.2) -- an inline per-peer join loop would
+    # multiply the parent wait by the peer count.
+    assert (
+        "    started = _start_attempt_threads(_attempt, n, barrier, join_timeout=65)" in source
+    )
+    inline_join = source.replace(
+        "    started = _start_attempt_threads(_attempt, n, barrier, join_timeout=65)",
+        (
+            "    started = []\n"
+            "    for i in range(n):\n"
+            "        t = threading.Thread(target=_attempt, args=(i,))\n"
+            "        t.start()\n"
+            "        started.append(t)\n"
+            "    for t in started:\n"
+            "        t.join(timeout=65)"
+        ),
+    )
+    assert source != inline_join, "inline-join mutant must differ from source"
+    assert "_start_attempt_threads(_attempt, n, barrier, join_timeout=65)" in source
+
+    # Exact-site ordering pins: the worker error handler lives in the SHIPPING
+    # factory, and the error/liveness assertions must precede the substantive
+    # results in the original test.
+    assert "        except BaseException as error:\n            errors.append((index, error))" in worker
     assert "    assert not errors, errors" in source
 
-    no_handler = source.replace(
+    no_handler = worker.replace(
         "        except BaseException as error:\n            errors.append((index, error))",
         "        # handler removed",
     )
-    assert source != no_handler, "handler-removed mutant must differ from source"
+    assert worker != no_handler, "handler-removed mutant must differ from source"
 
     # The error and liveness assertions must precede the `created = ...`
     # substantive-result block. The direct index assertions catch an actual
     # move; the mutation below only demonstrates the removal target is real.
     assert source.index("assert not errors, errors") < source.index("created = [r for r in results")
-    assert source.index("assert all(not thread.is_alive() for thread in threads)") < source.index(
+    assert source.index("assert all(not thread.is_alive() for thread in started)") < source.index(
         "created = [r for r in results"
     )
     assertions_removed_before_results = source.replace(
-        "    assert not errors, errors\n    assert all(not thread.is_alive() for thread in threads)\n\n    created = [",
+        "    assert not errors, errors\n    assert all(not thread.is_alive() for thread in started)\n\n    created = [",
         "    created = [",
     )
     assert source != assertions_removed_before_results, "assertion-removal mutant must differ from source"
 
-    # The seven legs are pairwise distinct source mutations.
+    # The legs are pairwise distinct source mutations across both sources.
     assert len(
         {
             source,
+            worker,
             unbounded,
             no_liveness,
             no_errors,
             outside_construction,
             partial_cleanup,
-            no_margin,
+            no_cleanup_capture,
+            inline_join,
             no_handler,
             assertions_removed_before_results,
         }
-    ) == 9
+    ) == 11
 
 
 def test_array_stage_kill_before_bind_reconciles_by_comment() -> None:
@@ -3812,18 +4071,23 @@ class InjectedReservationFailure(RuntimeError):
 
 def test_idempotency_barrier_harness_fails_bounded_when_construction_raises_before_arrival(
     tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pre-arrival failure must break peers bounded and leave no live thread (#1645).
 
     The explicit-thread idempotency harness family runs non-daemon workers that
     release together at the Barrier. This test injects the EXACT issue trigger:
-    a repository/session CONSTRUCTOR failure BEFORE the barrier. Pre-fix, that
-    left the other 7 waiting inside an unbounded ``Barrier.wait()``: the
-    parent's bare join returns, its assertions can even pass, and the whole
-    pytest process then hangs at ``threading._shutdown()``. The barrier bound
-    converts the missing participant into ``BrokenBarrierError``, and the
-    construction-inside-catch-all scope attributes the constructor exception
-    before any result assertion.
+    a repository/session CONSTRUCTOR failure BEFORE the barrier. The failure
+    fires at the shipping worker's actual ``Session(engine)`` expression: the
+    module-global ``Session`` callable is patched so worker index 0 raises
+    ``InjectedReservationFailure`` while the other 7 construct real Sessions
+    and reach the Barrier. ``pre_body`` only records the worker identity; it
+    does not raise. Pre-fix, index 0's absence left the other 7 waiting inside
+    an unbounded ``Barrier.wait()``: the parent's bare join returns, its
+    assertions can even pass, and the whole pytest process then hangs at
+    ``threading._shutdown()``. The barrier bound converts the failing worker's
+    absence into ``BrokenBarrierError``, and the construction-inside-catch-all
+    scope attributes the constructor exception before any result assertion.
     """
 
     import threading
@@ -3854,33 +4118,56 @@ def test_idempotency_barrier_harness_fails_bounded_when_construction_raises_befo
     barrier = threading.Barrier(n, timeout=2)
     results: list[Any] = [None] * n
     errors: list[tuple[int, BaseException]] = []
+    thread_local = threading.local()
+    session_invoked: list[int] = []
 
-    def _attempt(index: int) -> None:
-        # Mirrors the shipped harness: session identity is tracked separately
-        # from the wrappers, so a constructor failure is attributed AND a
-        # successfully created Session is closed even if the wrapper
-        # construction fails afterwards.
-        session: Session | None = None
-        try:
-            if index == 0:
-                raise InjectedReservationFailure("injected constructor failure")
-            session = Session(engine)
-            repo = _StoreRepo(PipelineStore(session))
-            barrier.wait()
-            results[index] = reserve_candidate(
-                repo, idempotency_key=key, job_id=f"job_{index}", **common
-            )
-        except BaseException as error:
-            errors.append((index, error))
-        finally:
-            if session is not None:
-                session.close()
+    def pre_body(index: int) -> None:
+        # Selector/marker only (Phase 6.2 item 2): record the worker identity
+        # so the patched Session constructor knows which index is the failing
+        # one. It does NOT raise -- the failure is the Session constructor's.
+        thread_local.harness_index = index
 
-    threads = [threading.Thread(target=_attempt, args=(i,)) for i in range(n)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=5)
+    real_session = Session
+
+    def failing_session(*args: Any, **kwargs: Any) -> Session:
+        # The SHIPPING worker executes `Session(engine)` here. Index 0 fails
+        # with the injected identity at the real constructor expression; the
+        # other indices construct real Sessions and reach the Barrier.
+        index = getattr(thread_local, "harness_index", None)
+        if index is not None:
+            session_invoked.append(index)
+        if index == 0:
+            raise InjectedReservationFailure("injected constructor failure")
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr("tests.test_gateway_reconcile.Session", failing_session)
+
+    # The SHIPPING worker body -- the SAME factory the original uses. The
+    # injection copy uses the same transactional launch seam as the shipped
+    # harness (task 5.2), so the pre-arrival path and the peer set it joins are
+    # exactly the ones the original exercises.
+    _attempt = _make_idempotency_attempt_worker(
+        engine=engine,
+        barrier=barrier,
+        results=results,
+        errors=errors,
+        key=key,
+        common=common,
+        reserve=reserve_candidate,
+        pre_body=pre_body,
+    )
+    try:
+        started = _start_attempt_threads(_attempt, n, barrier, join_timeout=5)
+    finally:
+        monkeypatch.undo()
+
+    # The patched Session constructor must have been invoked EXACTLY ONCE for
+    # every worker, in any scheduling order -- callback append order across
+    # started threads is not a contract. The sorted equality already proves
+    # multiplicity given equal lengths, so the explicit length check keeps the
+    # failure message clear.
+    assert len(session_invoked) == n, session_invoked
+    assert sorted(session_invoked) == list(range(n)), session_invoked
 
     # The injected constructor exception and the peer broken-barrier outcome
     # must be reported before any missing-result/state assertion (design D3).
@@ -3892,8 +4179,320 @@ def test_idempotency_barrier_harness_fails_bounded_when_construction_raises_befo
             assert isinstance(error, threading.BrokenBarrierError), (
                 f"peer {index} should observe BrokenBarrierError, got {type(error).__name__}"
             )
-    assert all(not thread.is_alive() for thread in threads)
+    assert all(not thread.is_alive() for thread in started)
     assert results == [None] * n
+
+
+class InjectedGatewayThreadStartFailure(RuntimeError):
+    """A deterministic second ``Thread.start()`` failure with an identity of its own (#1645)."""
+
+
+def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserves_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second ``Thread.start()`` failure must abort, clean up, and re-raise (#1645, task 5.2).
+
+    The 8-party gateway harness starts its explicit peers in a loop. If the
+    second ``start()`` raises while the first peer is running, that peer would
+    otherwise wait forever inside ``Barrier.wait()`` (the exact strand). The
+    transactional launch must abort the Barrier, join every successfully
+    started peer against one absolute cleanup deadline, and re-raise the
+    ORIGINAL launch cause -- never a peer ``BrokenBarrierError`` or an
+    ``abort()`` side effect.
+    """
+
+    barrier = threading.Barrier(8, timeout=2)
+    barrier_aborted = threading.Event()
+    first_started = threading.Event()
+
+    real_start = threading.Thread.start
+    start_attempts = 0
+
+    def failing_start(thread: threading.Thread) -> None:
+        nonlocal start_attempts
+        start_attempts += 1
+        if start_attempts == 2:
+            raise InjectedGatewayThreadStartFailure("injected second start failure")
+        real_start(thread)
+        if start_attempts == 1:
+            first_started.set()
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+
+    real_abort = threading.Barrier.abort
+
+    def tracked_abort(barrier: threading.Barrier) -> None:
+        barrier_aborted.set()
+        real_abort(barrier)
+
+    monkeypatch.setattr(threading.Barrier, "abort", tracked_abort)
+
+    peer_errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            first_started.wait(timeout=5)
+            barrier.wait()
+        except BaseException as error:
+            # The peer leaves the aborted barrier as BrokenBarrierError; the
+            # real harness records it, so this test records it too instead of
+            # letting it escape as an unhandled thread exception.
+            peer_errors.append(error)
+
+    started = time.monotonic()
+    with pytest.raises(InjectedGatewayThreadStartFailure, match="injected second start failure"):
+        _start_attempt_threads(worker, 8, barrier, join_timeout=5)
+    elapsed = time.monotonic() - started
+
+    assert barrier_aborted.is_set(), "partial launch must abort the Barrier"
+    assert elapsed < 5, f"cleanup must respect one absolute deadline, took {elapsed:.2f}s"
+    assert first_started.is_set(), "the first peer must have started"
+    assert peer_errors and all(
+        isinstance(error, threading.BrokenBarrierError) for error in peer_errors
+    ), f"started peer must observe BrokenBarrierError, got {peer_errors}"
+
+
+def test_gateway_session_created_wrapper_failed_close_exactly_once(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw Session created + wrapper construction fails -> close exactly once (#1645, task 5.4).
+
+    The harness tracks Session identity separately from the wrappers, so a
+    successfully created raw ``Session`` must be closed exactly once even when
+    ``PipelineStore``/``_StoreRepo`` construction fails afterwards. This proof
+    executes the SHIPPING worker body (``_make_idempotency_attempt_worker``)
+    and fails index 1 at the ACTUAL ``_StoreRepo(PipelineStore(session))``
+    expression: the module-global ``_StoreRepo`` constructor is patched so only
+    index 1 raises ``WrapperConstructionFailure``, while indices 0 and 2..7
+    construct real wrappers, reach the Barrier, and break with
+    ``BrokenBarrierError`` -- the peer population really reaches the barrier,
+    so the close count and the peer break are both non-vacuous. ``post_session``
+    only tags the raw Session as a selector; it does not raise. The injected
+    wrapper failure identity must be preserved, peers break bounded, and no
+    started thread remains alive.
+    """
+
+    import threading
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    class WrapperConstructionFailure(RuntimeError):
+        pass
+
+    db_path = tmp_path / "reserve_race.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _attach_schemas(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute(f"ATTACH DATABASE '{db_path}' AS ops")
+
+    Base.metadata.create_all(engine)
+
+    key = "gfs:cyc:basin:forcing"
+    common = dict(
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    n = 8
+    barrier = threading.Barrier(n, timeout=2)
+    results: list[Any] = [None] * n
+    errors: list[tuple[int, BaseException]] = []
+    close_counts: dict[int, int] = {}
+    thread_local = threading.local()
+    wrapper_invoked: list[int] = []
+
+    def pre_body(index: int) -> None:
+        # Selector/marker only (Phase 6.2 item 3): the patched _StoreRepo
+        # constructor uses this to pick index 1 as the failing worker.
+        thread_local.harness_index = index
+
+    def post_session(index: int, session: Session) -> None:
+        # Tag ONLY index 1's raw Session so the injected close is attributable
+        # and the close count stays exactly {1: 1}; peers 0 and 2..7 create and
+        # close their own raw Sessions on the BrokenBarrierError path but are
+        # deliberately not counted. No raise here.
+        if index == 1:
+            session.info["_harness_index"] = index
+
+    real_store_repo = _StoreRepo
+
+    def failing_store_repo(store: PipelineStore) -> _StoreRepo:
+        # The SHIPPING worker executes `_StoreRepo(PipelineStore(session))`
+        # here. Index 1 fails with the injected wrapper identity; the other
+        # indices construct real wrappers and reach the Barrier.
+        index = getattr(thread_local, "harness_index", None)
+        if index is not None:
+            wrapper_invoked.append(index)
+        if index == 1:
+            raise WrapperConstructionFailure("injected wrapper construction failure")
+        return real_store_repo(store)
+
+    monkeypatch.setattr("tests.test_gateway_reconcile._StoreRepo", failing_store_repo)
+
+    # The shipping worker body -- the SAME factory the original uses. No
+    # pre_body failure: every peer reaches Session creation, and only index 1
+    # fails at the real wrapper-construction expression.
+    _attempt = _make_idempotency_attempt_worker(
+        engine=engine,
+        barrier=barrier,
+        results=results,
+        errors=errors,
+        key=key,
+        common=common,
+        reserve=reserve_candidate,
+        pre_body=pre_body,
+        post_session=post_session,
+    )
+    real_close = Session.close
+
+    def counting_close(self: Session) -> None:
+        idx = self.info.get("_harness_index")
+        if idx is not None:
+            close_counts[idx] = close_counts.get(idx, 0) + 1
+        real_close(self)
+
+    monkeypatch.setattr(Session, "close", counting_close)
+    try:
+        started = _start_attempt_threads(_attempt, n, barrier, join_timeout=5)
+    finally:
+        monkeypatch.undo()
+
+    assert all(not thread.is_alive() for thread in started)
+    # The patched wrapper constructor ran EXACTLY ONCE for every worker (index
+    # 1 raised), in any scheduling order -- callback append order across
+    # started threads is not a contract. Sorted equality plus matching length
+    # proves multiplicity without depending on append order.
+    assert len(wrapper_invoked) == n, wrapper_invoked
+    assert sorted(wrapper_invoked) == list(range(n)), wrapper_invoked
+    # Only index 1's raw Session is tagged (only index 1 reached wrapper
+    # construction after Session creation), and it was closed exactly once.
+    assert close_counts == {1: 1}, f"expected exactly one close at index 1, got {close_counts}"
+    by_index = {index: error for index, error in errors}
+    assert isinstance(by_index[1], WrapperConstructionFailure), type(by_index[1]).__name__
+    for index in range(n):
+        if index == 1:
+            continue
+        assert isinstance(by_index[index], threading.BrokenBarrierError), (
+            f"peer {index} should observe BrokenBarrierError, "
+            f"got {type(by_index[index]).__name__}"
+        )
+    assert results == [None] * n
+
+
+def test_gateway_worker_cleanup_failure_is_indexed_after_the_body_error(
+    tmp_path: Any,
+) -> None:
+    """A worker ``Session.close()`` failure must be parent-visible, after the body error (#1645, task 5.3).
+
+    ``session.close()`` runs in the shipping worker's ``finally``. If it
+    raises, the exception would otherwise escape the worker and be reported
+    only as ``PytestUnhandledThreadExceptionWarning`` -- the parent sees no
+    indexed record. This proof executes the SHIPPING worker body
+    (``_make_idempotency_attempt_worker``) so the cleanup capture itself is
+    what is under test, keeping an earlier body error FIRST in stable
+    body-before-cleanup order. Worker 1 carries BOTH a body failure and a
+    cleanup failure, so its two indexed errors must appear in stable order.
+    """
+
+    import threading
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    class SessionCloseFailure(RuntimeError):
+        pass
+
+    db_path = tmp_path / "reserve_race.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _attach_schemas(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute(f"ATTACH DATABASE '{db_path}' AS ops")
+
+    Base.metadata.create_all(engine)
+
+    key = "gfs:cyc:basin:forcing"
+    common = dict(
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    n = 8
+    barrier = threading.Barrier(n, timeout=2)
+    results: list[Any] = [None] * n
+    errors: list[tuple[int, BaseException]] = []
+
+    def pre_body(index: int) -> None:
+        if index == 0:
+            raise InjectedReservationFailure("injected body failure")
+
+    def post_session(index: int, session: Session) -> None:
+        # Tag the session so the injected close failure is attributed to
+        # exactly this peer's cleanup, independent of scheduling.
+        session.info["_harness_index"] = index
+        if index == 1:
+            # Body failure AFTER the raw Session exists: the double-failure
+            # seam under test (body + cleanup both fail for this worker).
+            raise InjectedReservationFailure("injected body failure")
+
+    # The shipping worker body -- the SAME factory the original uses.
+    _attempt = _make_idempotency_attempt_worker(
+        engine=engine,
+        barrier=barrier,
+        results=results,
+        errors=errors,
+        key=key,
+        common=common,
+        reserve=reserve_candidate,
+        pre_body=pre_body,
+        post_session=post_session,
+    )
+
+    close_attempts = 0
+    real_close = Session.close
+
+    def failing_close(self: Session) -> None:
+        nonlocal close_attempts
+        close_attempts += 1
+        if self.info.get("_harness_index") == 1:
+            raise SessionCloseFailure("injected session close failure")
+        real_close(self)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(Session, "close", failing_close)
+    try:
+        started = _start_attempt_threads(_attempt, n, barrier, join_timeout=5)
+    finally:
+        monkeypatch.undo()
+
+    assert all(not thread.is_alive() for thread in started)
+    assert close_attempts == n - 1, f"expected {n - 1} closes, got {close_attempts}"
+    # Worker 1: body error FIRST, cleanup error SECOND -- stable
+    # body-before-cleanup order in the parent-visible channel.
+    index_one_errors = [error for i, error in errors if i == 1]
+    assert len(index_one_errors) == 2, index_one_errors
+    assert isinstance(index_one_errors[0], InjectedReservationFailure), (
+        type(index_one_errors[0]).__name__
+    )
+    assert isinstance(index_one_errors[1], SessionCloseFailure), (
+        type(index_one_errors[1]).__name__
+    )
+    # Worker 0: body failure only (no Session to close).
+    zero_errors = [error for i, error in errors if i == 0]
+    assert len(zero_errors) == 1 and isinstance(zero_errors[0], InjectedReservationFailure)
+    # Peers 2..n-1: body BrokenBarrierError, close succeeds.
+    for index in range(2, n):
+        peer_errors = [error for i, error in errors if i == index]
+        assert len(peer_errors) == 1 and isinstance(peer_errors[0], threading.BrokenBarrierError), (
+            f"peer {index} should observe one BrokenBarrierError, got {peer_errors}"
+        )
 
 
 def test_reservation_written_before_submit_and_queryable() -> None:
@@ -10252,8 +10851,80 @@ def test_cycle_cancel_persists_typed_intent_before_gateway_and_reopens_safely(
     assert [job.job_id for job in reopened.query_inflight_jobs()] == [job_id]
 
 
+def _consume_futures_deadline(
+    futures: list[Any], *, deadline: float, outcomes: list[str]
+) -> list[BaseException]:
+    """Consume every returned Future under one absolute deadline.
+
+    The 2-party executor harness's consumption seam (task 5.2): every Future is
+    drained within a single absolute deadline -- never one full result bound
+    per future -- so a peer that breaks late cannot multiply the parent's wait
+    by the peer count. ``concurrent.futures.wait`` waits ONCE for the remaining
+    deadline and returns every completed Future regardless of list order, so a
+    later completed error can never hide behind an earlier pending Future
+    (Phase 2 gap 6). Every completed Future is inspected; every Future still
+    pending when the deadline expires is recorded as a ``TimeoutError`` so no
+    returned Future is silently unobserved. Every exception (injected launch
+    cause, peer ``BrokenBarrierError``, code-under-test failure) is returned
+    for the caller to assert; successful outcomes are appended to ``outcomes``.
+    """
+
+    errors: list[BaseException] = []
+    pending = set(futures)
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.extend(FutureTimeoutError() for _ in pending)
+            break
+        done, still_pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+        for future in done:
+            try:
+                outcomes.append(future.result())
+            except BaseException as error:
+                errors.append(error)
+        pending = still_pending
+    return errors
+
+
+def _run_executor_barrier(
+    barrier: threading.Barrier,
+    fn: Callable[[Any], str],
+    args: list[Any],
+    *,
+    result_timeout: float,
+) -> tuple[list[str], list[BaseException]]:
+    """Submit ``fn`` for every ``args`` entry transactionally and drain every Future.
+
+    The 2-party gateway executor harness's transactional launch seam (task
+    5.2): every returned Future is retained. If a later ``pool.submit`` (or the
+    executor's underlying worker ``Thread.start()``) raises after at least one
+    Future is running, the Barrier is aborted so that running peer leaves
+    ``Barrier.wait()``, every returned Future is drained under one absolute
+    deadline, and the ORIGINAL launch cause is re-raised instead of being
+    masked by a peer ``BrokenBarrierError`` or a result symptom. On the normal
+    path every returned Future is consumed the same way before the context
+    exits.
+    """
+
+    outcomes: list[str] = []
+    submitted: list[Any] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            for arg in args:
+                submitted.append(pool.submit(fn, arg))
+        except BaseException as launch_error:  # pragma: no cover - asserted below
+            barrier.abort()
+            errors = _consume_futures_deadline(
+                submitted, deadline=time.monotonic() + result_timeout, outcomes=outcomes
+            )
+            raise launch_error
+        errors = _consume_futures_deadline(
+            submitted, deadline=time.monotonic() + result_timeout, outcomes=outcomes
+        )
+    return outcomes, errors
+
+
 def test_file_submit_attempt_barrier_race_commits_only_one_slurm_id(tmp_path: Any) -> None:
-    from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
     from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
@@ -10261,7 +10932,7 @@ def test_file_submit_attempt_barrier_race_commits_only_one_slurm_id(tmp_path: An
 
     repository = _file_cohort_repository(tmp_path, member_count=18)
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
-    # Generous hang backstop (design D2): turns a participant that never arrives
+    # Generous hang backstop (design D2): turns a pre-arrival worker exception
     # into BrokenBarrierError so the peer releases instead of stranding the
     # executor's non-daemon worker at interpreter shutdown. The parent
     # future.result bound is STRICTLY LARGER (65 > 60) so a parent wait can
@@ -10282,16 +10953,12 @@ def test_file_submit_attempt_barrier_race_commits_only_one_slurm_id(tmp_path: An
     # consumed so a first failure cannot leave a peer's BrokenBarrierError
     # unobserved, and the barrier bound (not a context-manager shutdown) is what
     # releases a peer when the other worker fails before/at the barrier. The
-    # result bound (65) is strictly larger than the barrier bound (60).
-    outcomes: list[str] = []
-    errors: list[BaseException] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(commit, slurm_job_id) for slurm_job_id in ("17667", "17668")]
-        for future in futures:
-            try:
-                outcomes.append(future.result(timeout=65))
-            except BaseException as error:
-                errors.append(error)
+    # result bound (65) is strictly larger than the barrier bound (60). The
+    # transactional helper aborts the barrier and preserves the launch cause on
+    # a partial submission failure (task 5.2).
+    outcomes, errors = _run_executor_barrier(
+        barrier, commit, ["17667", "17668"], result_timeout=65
+    )
 
     assert not errors, errors
     assert sorted(outcomes) == ["applied", "collision"]
@@ -10305,6 +10972,7 @@ def test_file_submit_attempt_barrier_race_commits_only_one_slurm_id(tmp_path: An
 
 def test_file_submit_barrier_harness_fails_bounded_when_the_repository_constructor_raises_before_arrival(
     tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-arrival constructor failure must propagate, not strand the executor (#1645).
 
@@ -10317,21 +10985,21 @@ def test_file_submit_barrier_harness_fails_bounded_when_the_repository_construct
     consumption of every future re-raises BOTH the injected constructor
     exception and the peer's ``BrokenBarrierError``.
 
-    The failure injection is DETERMINISTIC via a handshake Event: the surviving
-    peer sets ``peer_waiting`` immediately before ``Barrier.wait()``, and the
-    failing peer asserts that Event before raising its constructor failure.
+    The failure injection is DETERMINISTIC via a handshake Event AND fires at
+    the ACTUAL ``FileOrchestrationJournalRepository(repository.root)``
+    expression: the module-global constructor is patched so the failing worker
+    raises ``ConstructorFailure`` there, while the peer invokes the real
+    constructor, reaches the pre-wait line (handshake), and enters the Barrier.
     Submission order alone is not enough — the Event proves the surviving
     Future is already RUNNING and has reached the line immediately before
     ``barrier.wait()``, so it cannot be canceled when the first Future raises.
-    It will proceed into the wait absent an unrelated unexpected exception;
-    this does not claim it is already inside.
     """
 
-    from concurrent.futures import ThreadPoolExecutor
+    import threading as _threading
     from threading import Barrier, BrokenBarrierError, Event
 
+    from services.orchestrator import file_orchestration_journal as journal_module
     from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
-    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
     repository = _file_cohort_repository(tmp_path, member_count=18)
     key = "cycle_gfs_2026071200_forecast_fixture:forecast"
@@ -10339,20 +11007,47 @@ def test_file_submit_barrier_harness_fails_bounded_when_the_repository_construct
     # BrokenBarrierError propagates instead of the parent timing out first.
     barrier = Barrier(2, timeout=2)
     peer_waiting = Event()
+    constructor_invoked: list[str] = []
+    thread_local = _threading.local()
 
     class ConstructorFailure(RuntimeError):
         pass
 
+    real_constructor = journal_module.FileOrchestrationJournalRepository
+
+    def failing_constructor(root: Any, *args: Any, **kwargs: Any) -> Any:
+        # The shipping worker executes `FileOrchestrationJournalRepository(
+        # repository.root)` here. The failing Future (17667) raises with the
+        # injected identity; the peer constructs a real contender. Thread-local
+        # identity selects the failing invocation, independent of scheduling.
+        invoked_by = getattr(thread_local, "slurm_job_id", None)
+        if invoked_by is not None:
+            constructor_invoked.append(invoked_by)
+        if invoked_by == "17667":
+            raise ConstructorFailure("injected constructor failure")
+        return real_constructor(root, *args, **kwargs)
+
+    monkeypatch.setattr(
+        journal_module,
+        "FileOrchestrationJournalRepository",
+        failing_constructor,
+    )
+
     def commit(slurm_job_id: str) -> str:
+        thread_local.slurm_job_id = slurm_job_id
+        # The failing Future waits for the peer at the pre-wait line BEFORE
+        # invoking the (patched) constructor, proving the peer is running and
+        # past the cancellation boundary.
         if slurm_job_id == "17667":
             assert peer_waiting.wait(timeout=5), "peer never reached the pre-wait line"
-            raise ConstructorFailure("injected constructor failure")
-        contender = FileOrchestrationJournalRepository(repository.root)
-        # The surviving Future is already RUNNING and has reached the line
-        # immediately before barrier.wait(), so it cannot be canceled when the
-        # first Future raises; it will proceed into the wait absent an
-        # unrelated unexpected exception (not claimed to be already inside).
-        peer_waiting.set()
+        contender = journal_module.FileOrchestrationJournalRepository(repository.root)
+        if slurm_job_id == "17668":
+            # The surviving Future is already RUNNING and has reached the line
+            # immediately before barrier.wait() before the first Future's
+            # constructor raises, so it cannot be canceled when the first
+            # Future raises; it will proceed into the wait absent an unrelated
+            # unexpected exception (not claimed to be already inside).
+            peer_waiting.set()
         barrier.wait()
         return contender.commit_pipeline_job_submit_attempt(
             key,
@@ -10361,23 +11056,121 @@ def test_file_submit_barrier_harness_fails_bounded_when_the_repository_construct
             transition=AcceptedSubmitTransition.accepted(status="submitted"),
         ).outcome
 
-    failures: list[BaseException] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(commit, slurm_job_id) for slurm_job_id in ("17667", "17668")]
-        for future in futures:
-            try:
-                future.result(timeout=5)
-            except BaseException as error:
-                failures.append(error)
+    try:
+        # The injection copy uses the same transactional submit/drain seam as
+        # the shipped harness (task 5.2).
+        outcomes, failures = _run_executor_barrier(
+            barrier, commit, ["17667", "17668"], result_timeout=5
+        )
+    finally:
+        monkeypatch.undo()
 
+    # The patched constructor ran for the failing worker (raised) and the peer,
+    # in either scheduling order.
+    assert sorted(constructor_invoked) == ["17667", "17668"], constructor_invoked
     # The handshake Event must be set: the peer task crossed the cancellation
     # boundary and reached the pre-wait line, so the BrokenBarrierError below
     # is not a vacuously-absent peer.
     assert peer_waiting.is_set(), "peer never reached the pre-wait line"
+    assert outcomes == []
     assert any(isinstance(error, ConstructorFailure) for error in failures), failures
     assert any(isinstance(error, BrokenBarrierError) for error in failures), (
         f"peer should observe BrokenBarrierError, got {[type(e).__name__ for e in failures]}"
     )
+
+
+class InjectedExecutorStartupFailure(RuntimeError):
+    """A deterministic partial executor startup failure with an identity of its own (#1645)."""
+
+
+def test_executor_partial_startup_aborts_barrier_drains_futures_and_preserves_cause(
+    tmp_path: Any,
+) -> None:
+    """Partial executor startup failure after the first Future runs must abort and preserve the cause (#1645, task 5.2).
+
+    The 2-party harness submits both callables into a ``ThreadPoolExecutor``.
+    If the executor's underlying worker ``Thread.start()`` raises while the
+    first Future is already running, the submission/startup loop breaks early
+    and the running peer would otherwise wait forever inside
+    ``Barrier.wait()``. The transactional seam must abort the Barrier, drain
+    every returned Future under one absolute deadline, exit the executor
+    without waiting indefinitely, and surface the ORIGINAL startup cause --
+    not a peer ``BrokenBarrierError`` or a result symptom.
+
+    The injection is DETERMINISTIC: the first Future reaches the line
+    immediately before ``barrier.wait()`` (handshake Event) before the second
+    worker's ``Thread.start()`` raises, so the running peer really is past the
+    cancellation boundary.
+    """
+
+    from threading import Barrier, Event
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = _file_cohort_repository(tmp_path, member_count=18)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    barrier = Barrier(2, timeout=2)
+    peer_waiting = Event()
+    peer_done = Event()
+    barrier_aborted = Event()
+    start_attempts = 0
+
+    real_start = threading.Thread.start
+
+    def failing_start(thread: threading.Thread) -> None:
+        nonlocal start_attempts
+        start_attempts += 1
+        if start_attempts == 2:
+            # Deterministic partial startup (Phase 2 gap 5): the second worker
+            # start raises only AFTER the first Future is already RUNNING and
+            # has crossed the pre-wait boundary -- the peer is past the
+            # cancellation point, so the injection cannot fire early.
+            assert peer_waiting.wait(timeout=5), "peer never reached the pre-wait line"
+            raise InjectedExecutorStartupFailure("injected second worker start failure")
+        real_start(thread)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+
+    real_abort = Barrier.abort
+
+    def tracked_abort(barrier: Barrier) -> None:
+        barrier_aborted.set()
+        real_abort(barrier)
+
+    monkeypatch.setattr(Barrier, "abort", tracked_abort)
+
+    def commit(slurm_job_id: str) -> str:
+        contender = FileOrchestrationJournalRepository(repository.root)
+        # The first Future is already RUNNING and has reached the line
+        # immediately before barrier.wait() before the second worker's start
+        # raises, so it cannot be canceled when startup fails (task 5.2).
+        peer_waiting.set()
+        try:
+            barrier.wait()
+            return contender.commit_pipeline_job_submit_attempt(
+                key,
+                expected_submission_attempt=1,
+                slurm_job_id=slurm_job_id,
+                transition=AcceptedSubmitTransition.accepted(status="submitted"),
+            ).outcome
+        finally:
+            # The peer finishes (with BrokenBarrierError after the abort); the
+            # parent must prove it completed before the helper re-raises.
+            peer_done.set()
+
+    try:
+        with pytest.raises(InjectedExecutorStartupFailure, match="injected second worker start failure"):
+            _run_executor_barrier(
+                barrier, commit, ["17667", "17668"], result_timeout=5
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert peer_waiting.is_set(), "the first Future must have reached the pre-wait line"
+    assert peer_done.is_set(), "the running peer must have finished before the helper re-raised"
+    assert barrier_aborted.is_set(), "partial startup must abort the Barrier"
 
 
 def test_file_submit_barrier_source_legs_each_fail_bounded_and_distinct() -> None:
@@ -10392,28 +11185,32 @@ def test_file_submit_barrier_source_legs_each_fail_bounded_and_distinct() -> Non
 
     source = _test_function_source("test_file_submit_attempt_barrier_race_commits_only_one_slurm_id")
 
-    # Leg 1: remove the barrier bound -> a missing participant strands the
+    # Leg 1: remove the barrier bound -> a pre-arrival worker exception strands the
     # executor's non-daemon worker and the context exit hangs.
     unbounded = source.replace("Barrier(2, timeout=60)", "Barrier(2)")
     assert source != unbounded, "unbounded mutant must differ from source"
     assert "Barrier(2)" in unbounded and "Barrier(2, timeout=60)" not in unbounded
 
-    # Leg 2: stop consuming every future -> the first exception ends the loop,
-    # so the peer's BrokenBarrierError can remain unobserved.
-    full_consumption_loop = (
+    # Leg 2: the launch must go through the transactional helper with
+    # absolute-deadline future consumption (task 5.2) -- an inline per-future
+    # result loop would multiply the parent wait by the future count.
+    assert (
+        "    outcomes, errors = _run_executor_barrier(\n"
+        "        barrier, commit, [\"17667\", \"17668\"], result_timeout=65\n"
+        "    )" in source
+    )
+    inline_consume = source.replace(
+        "    outcomes, errors = _run_executor_barrier(\n"
+        "        barrier, commit, [\"17667\", \"17668\"], result_timeout=65\n"
+        "    )",
+        "    outcomes, errors = [], []\n"
+        "    with ThreadPoolExecutor(max_workers=2) as pool:\n"
+        "        futures = [pool.submit(commit, s) for s in (\"17667\", \"17668\")]\n"
         "        for future in futures:\n"
-        "            try:\n"
-        "                outcomes.append(future.result(timeout=65))\n"
-        "            except BaseException as error:\n"
-        "                errors.append(error)"
+        "            outcomes.append(future.result(timeout=65))",
     )
-    partial_consumption = source.replace(
-        full_consumption_loop,
-        "        outcomes = tuple(future.result(timeout=65) for future in futures)",
-    )
-    assert source != partial_consumption, "partial-consumption mutant must differ from source"
-    assert "for future in futures:\n            try:" in source
-    assert "for future in futures:\n            try:" not in partial_consumption
+    assert source != inline_consume, "inline-consume mutant must differ from source"
+    assert "result_timeout=65" in source
 
     # Leg 3: remove the error assertion before substantive output -> a worker
     # failure could be masked by the downstream outcome check.
@@ -10427,10 +11224,10 @@ def test_file_submit_barrier_source_legs_each_fail_bounded_and_distinct() -> Non
     # Leg 4: drop the parent-wait margin (result bound equal to the barrier
     # bound) -> a parent wait could expire milliseconds before the Barrier
     # timeout, recording a parent TimeoutError before the peer's BrokenBarrierError.
-    no_margin = source.replace("future.result(timeout=65)", "future.result(timeout=60)")
+    no_margin = source.replace("result_timeout=65", "result_timeout=60")
     assert source != no_margin, "no-margin mutant must differ from source"
-    assert "future.result(timeout=65)" in source
-    assert "future.result(timeout=65)" not in no_margin
+    assert "result_timeout=65" in source
+    assert "result_timeout=65" not in no_margin
 
     # Exact-site ordering pin: `assert not errors` must precede the substantive
     # `assert sorted(outcomes)` output check (order, not just adjacency removal).
@@ -10445,7 +11242,7 @@ def test_file_submit_barrier_source_legs_each_fail_bounded_and_distinct() -> Non
     assert "    assert not errors, errors\n    assert sorted(outcomes)" in source
 
     # The five legs are pairwise distinct source mutations.
-    assert len({source, unbounded, partial_consumption, no_error_assert, no_margin, reordered}) == 6
+    assert len({source, unbounded, inline_consume, no_error_assert, no_margin, reordered}) == 6
 
 
 def test_comment_sacct_global_zero_is_unavailable_without_visibility_proof(

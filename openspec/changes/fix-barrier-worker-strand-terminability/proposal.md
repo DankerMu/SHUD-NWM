@@ -6,7 +6,7 @@ Four Barrier-based pytest concurrency harnesses can strand non-daemon peer threa
 
 - Bound the Barrier protocol at the two affected `tests/test_gateway_reconcile.py` sites and the two affected `tests/test_scheduler_file_provider_refresh.py` sites.
 - Surface pre-arrival worker failures and broken-barrier outcomes before substantive race assertions.
-- Prove every started peer exits and the whole pytest process remains terminable, including a bounded subprocess/mutant proof.
+- Prove pre-arrival exceptions and partial worker-launch failures release every successfully started peer, and prove whole-process terminability with a bounded subprocess/mutant oracle.
 - Preserve all four existing concurrency oracles, participant counts, real code-under-test calls, and deterministic winner/state assertions.
 
 ## Capabilities

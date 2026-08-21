@@ -8,8 +8,8 @@ Fixture level: **expanded**. Repair intensity: **high** because a failed harness
 
 **Goals:**
 
-- Make all four issue-owned Barrier protocols bounded and guarantee every started peer exits before a test returns.
-- Preserve worker exception identity and report it before result/state assertions.
+- Make all four issue-owned Barrier protocols fail bounded after a pre-arrival worker exception or partial worker-launch failure, with every successfully started peer in those governed paths terminated before failure propagation.
+- Preserve worker, launch, and cleanup exception identity and report failures before result/state assertions.
 - Preserve the original race windows and substantive concurrency oracles.
 - Prove whole-process terminability with bounded external evidence rather than waiting for a hang.
 
@@ -23,11 +23,11 @@ Fixture level: **expanded**. Repair intensity: **high** because a failed harness
 
 ### D1 — Specify outcomes, not one shared helper shape
 
-Each Barrier SHALL carry an intrinsic timeout or every wait SHALL carry the same explicit bounded timeout. A pre-arrival failure SHALL break/release peers within that bound, every worker result/exception SHALL be observed by the parent, and no started peer may remain alive when the test returns. The two modules may use their idiomatic local mechanism: explicit threads with error capture/join assertions, or futures whose `result()` re-raises. A cross-test-module helper is rejected because it creates a new import/selector ownership surface merely to share a few synchronization lines.
+Each Barrier SHALL carry an intrinsic timeout or every wait SHALL carry the same explicit bounded timeout. A worker exception before Barrier arrival SHALL break/release peers within that bound. A partial explicit-thread launch or executor submission SHALL abort the Barrier, then join or drain every successfully started peer or returned Future under one cleanup deadline before the original launch cause propagates. Every worker, launch, and cleanup exception visible to the harness SHALL be observed by the parent. The two modules may use their idiomatic local mechanism: explicit threads with indexed error capture/join assertions, or futures whose `result()` is fully consumed. A cross-test-module helper is rejected because it creates a new import/selector ownership surface merely to share a few synchronization lines.
 
-### D2 — Barrier timeout is the whole-run release primitive
+### D2 — Barrier timeout and abort are the governed release primitives
 
-A bounded main-thread join alone does not satisfy the contract: if a participant never arrives, its non-daemon peers remain inside `Barrier.wait()` and `threading._shutdown()` joins them indefinitely. Giving the Barrier protocol a timeout converts the missing participant into `BrokenBarrierError`, releasing all waiters. Threads remain non-daemon by default; unlike the #1633 spin-wait helper, these workers are finite once the barrier breaks and must be fully joined rather than abandoned.
+A bounded main-thread join alone does not satisfy the contract: when a worker raises before Barrier arrival, its non-daemon peers remain inside `Barrier.wait()` and `threading._shutdown()` joins them indefinitely. Giving the Barrier protocol a timeout converts that failed participant's absence into `BrokenBarrierError`, releasing all waiters; explicitly aborting it closes the earlier partial-launch window. Threads remain non-daemon by default; unlike the #1633 spin-wait helper, these workers are finite once the Barrier breaks and must be fully joined rather than abandoned. Python threads cannot be safely cancelled, so an already-started worker that instead blocks indefinitely outside the Barrier is not covered by this in-process release mechanism and remains under #1646's repository-wide whole-run timeout policy.
 
 ### D3 — Preserve and order diagnostic truth
 
@@ -58,19 +58,21 @@ The 8-way SQL idempotency race, 2-way file submit collision, 20-way process-lock
 
 ## Invariant Matrix
 
-- Governing invariant: every issue-owned Barrier harness SHALL turn a missing/failed participant into a bounded, attributed test failure and SHALL leave no live worker that can strand interpreter shutdown, while preserving its original race oracle.
+- Governing invariant: every issue-owned Barrier harness SHALL turn a pre-arrival worker exception or partial worker-launch failure into a bounded, attributed failure, release and reap every successfully started peer in that governed path, and preserve its original race oracle.
 - Source of truth: the four named test functions and their Barrier participant counts/results.
 - Producers: explicit worker functions and `ThreadPoolExecutor` callables in the two target modules.
 - Validators/preflight: Barrier timeout, worker/future exception propagation, bounded join/result consumption, liveness assertions, failure-injection tests and subprocess mutant.
 - Storage/cache/query: temporary SQLite and file journal/provider artifacts under pytest `tmp_path`; unchanged production storage.
 - Public routes/entrypoints: pytest collection/execution of the four named tests; no shipped entrypoint.
 - Frontend/downstream consumers: CI targeted selector executes changed test files; no frontend consumer.
-- Failure/cleanup/stale state: pre-arrival constructor failure, peer `BrokenBarrierError`, code-under-test failure, executor/context cleanup, non-daemon interpreter shutdown and process-group reap.
+- Failure/cleanup/stale state: pre-arrival constructor failure, partial `Thread.start()`/executor submission, peer `BrokenBarrierError`, worker/session cleanup failure, code-under-test failure, executor/context cleanup, non-daemon interpreter shutdown and process-group reap.
 - Evidence/audit/readiness: focused tests, whole-file tests, Ruff, strict OpenSpec, bounded subprocess/mutants, selector probe and final-head PR CI.
 - Regression rows:
   - all participants arrive -> original four concurrency outcomes and participant counts remain unchanged;
   - one participant raises before arrival -> peers leave the barrier within the bound, the injected cause plus peer break are visible, and no worker remains alive;
-  - one participant never arrives / timeout leg removed -> shipped harness fails bounded; unbounded mutant externally times out and is reaped;
+  - one worker raises before arrival -> peers break bounded, indexed body/cleanup errors are attributed, and no successfully started peer remains alive;
+  - explicit-thread launch or executor submission fails after partial success -> Barrier abort releases peers, accessible work is drained under one deadline, and the launch cause propagates;
+  - timeout leg removed after deterministic pre-arrival failure -> the child flushes its progress checkpoint, externally times out, and is killed/reaped;
   - changed test files -> CI selects and executes both assertion suites rather than collect-only.
 
 ## Boundary Surface Checklist
@@ -79,7 +81,7 @@ The 8-way SQL idempotency race, 2-way file submit collision, 20-way process-lock
 - Public entrypoints: four pytest test functions.
 - Read/write surfaces: existing SQLite/file-provider tmp artifacts remain unchanged.
 - Producer/consumer evidence: worker/future outcome -> parent assertion -> pytest process exit.
-- Stale/lifetime boundary: every started worker/future is joined/consumed; no peer outlives the test.
+- Stale/lifetime boundary: every successfully started worker/returned Future in the governed exception or launch-failure paths is joined/consumed; an arbitrary already-started worker blocked forever outside the Barrier is #1646 scope.
 - Unchanged downstream consumers: selector behavior, production code and substantive race assertions.
 
 ## Risks / Trade-offs

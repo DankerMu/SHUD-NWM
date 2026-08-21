@@ -38,3 +38,14 @@ Must preserve: the four named tests, Barrier participant counts (8, 2, 20, 40), 
 - [x] 4.1 Do not adopt global warning-as-error or pytest-timeout policy; #1646 remains the owner.
 - [x] 4.2 Do not modify production-state polling diagnostics; #1648 remains the owner.
 - [x] 4.3 Re-scan current Barrier sites after implementation and report newly discovered matching hazards; do not silently expand this PR beyond the four issue-owned sites.
+
+## 5. Round 1 verified-finding closure
+
+- [x] 5.1 Narrow the accidental `never arrives` universal to the issue-owned pre-arrival exception and partial launch/submit failure paths; leave an already-started worker that blocks indefinitely outside the Barrier to #1646's repository-wide whole-run timeout policy.
+- [x] 5.2 Make explicit-thread launch and executor submission transactional: on partial failure, break the Barrier, join or drain every successfully started peer/returned Future under one cleanup deadline, then surface the original launch cause.
+- [x] 5.3 Attribute worker cleanup failures through the parent-visible indexed error channel without masking an earlier body error, including a semantic close-failure regression.
+- [x] 5.4 Execute the raw-Session-created/wrapper-construction-failed path and prove the raw Session is closed exactly once while injected error identity and peer termination remain intact.
+- [x] 5.5 Bind AST guards to exactly one module-level function definition, and reject duplicate or nested same-name decoys in tracked tests.
+- [x] 5.6 Make whole-process evidence non-vacuous: require a flushed post-readiness/injection checkpoint before accepting an expected child timeout, retain partial timeout output, and kill/reap the process group.
+- [x] 5.7 Remove scheduler-order assumptions by attributing errors by participant index and using synchronized positive liveness evidence instead of an incidental exact alive count.
+- [ ] 5.8 Re-run the focused injections, four original race node IDs, both full target files, selector tests, Ruff, diff check, strict OpenSpec validation, Phase 6.2 invariant audit, and final-head assertion-executing PR CI.
