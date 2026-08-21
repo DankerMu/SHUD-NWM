@@ -94,8 +94,8 @@ equality lookup without that predicate cannot select it structurally (measured:
 `met_station_pkey`, 1.8 ms / 500 lookups) — but an equality join that carries the
 predicate is exposed to the same pg_trgm `=` mechanism, and the planner's choice
 flipped with statistics within one day: 2026-08-21 ~05:50Z it chose
-`met_station_active_basin_station_idx` via a Hash Join (22 ms / 500); at the PR
-#1666 E4 receipt (~08:32Z, after autovacuum refreshed the table's statistics,
+`met_station_active_basin_station_idx` via a Hash Join (22 ms / 500); at the
+PR #1666 E4 receipt (~08:32Z, after autovacuum refreshed the table's statistics,
 no schema change) it chose a Bitmap Index Scan on `met_station_id_trgm_idx`
 (0.33 ms per lookup, 174 ms / 500, 29.6k buffers) — ~8x, not 2900x, because
 station ids share shorter prefixes, but statistics-dependent exactly as this
