@@ -512,3 +512,19 @@ therefore adds no multi-round sample and changes neither attribution count.
 direction. A single-round zero-catch PR cannot test a follow-up-round rotation
 policy. The existing attribution caveats remain load-bearing, so any reversal
 still requires the recorded schema/round-role fixes plus maintainer review.
+
+## Revisit 2026-08-21 (post PR #1676 / issue #1674 and PR #1683 / issue #1681)
+
+`loop_log_audit` re-flagged DECIDABLE lens-rotation after these two lines:
+98 multi-round merged PRs, later-round catches core=46, rotated=245 (both
+PRs add one multi-round sample each, neither changes the attribution
+counts). Both ran the same shape: round 1 comprehensive with two lenses
+(correctness/data- or plan-semantics + spec-conformance/oracle-integrity),
+round 2 a focused fix-delta pass. #1676's single verified catch and #1681's
+three came in round 1 from the round-1 mix itself; the round-2 focused passes
+caught one documentation-truthfulness repeat (#1683) and nothing for #1676.
+Neither round-2 pass rotated a new lens in, so these samples say nothing
+about rotation either way.
+
+**Keep rotation** remains the recorded decision; no new evidence in either
+direction. The attribution caveats above stay load-bearing.
