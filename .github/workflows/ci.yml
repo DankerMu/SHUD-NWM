@@ -9,10 +9,14 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same PR/branch — stop stacked re-runs when you push repeatedly.
+# PR runs share one group per PR number and cancel superseded runs when you push
+# repeatedly. Push-to-master and manual workflow_dispatch runs get a unique
+# github.run_id group instead: they must never cancel each other or replace a
+# same-group pending run, because the master full pytest is the only whole-repo
+# regression after the PR targeted lane (#1650).
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Path scoping: each job below runs only when its area changed, so a frontend-only or docs-only PR
@@ -49,6 +53,7 @@ jobs:
               - 'db/**'
               - 'scripts/validate_*.py'
               - 'scripts/**/*.sh'
+              - '.github/workflows/ci.yml'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
