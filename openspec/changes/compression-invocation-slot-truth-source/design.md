@@ -74,9 +74,10 @@ So the canonical sentence, carried in the two tiers set out below:
 
 > Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not itself a closure node, though any well-formed reference nested inside it still is, collected in its own right.
 
-Carriers, in two tiers — the split is deliberate and recorded in tasks.md E6, not an accident. E6 states the
-sweep as a criterion, not a procedure: it scopes to this change's own carriers, and it derives the refuted set
-from this section rather than keeping a parallel list that has to be edited in lockstep.
+Carriers, in two tiers — the split is deliberate and recorded in tasks.md E6, not an accident. E6 states the sweep as a criterion, not a
+procedure: it scopes to this change's own carriers and takes the refuted set from this section rather than
+keeping a parallel list edited in lockstep. It is run **by reading** — see D7 for why the executable form
+was withdrawn.
 
 **Tier 1, verbatim**: the five schema `description`s, the runbook narrative (modulo markdown line wrapping),
 this D2 blockquote, the proposal blockquote, and the PR body. Copy the sentence; do not paraphrase.
@@ -153,6 +154,27 @@ The AC says name the five keys in `:755-771`. `:755-763` is the **top-level** bu
 
 ## D6 — Couplings recorded, not solved
 
-- The five slots stay duplicated in every terminal receipt (five byte-identical copies of `execution.ledger`). That is the accepted cost of 方案 a: readers still see the duplication, but the schema now tells them why. Removing it is 方案 b, ruled out by the user.
+- The five slots stay duplicated in every **qualifying** terminal receipt (five byte-identical copies of `execution.ledger`). That is the accepted cost of 方案 a: readers still see the duplication, but the schema now tells them why. Removing it is 方案 b, ruled out by the user.
 - `description` is a JSON Schema annotation with no validation effect in any draft, so `packages/common/compression_terminal_state.py` (`CANONICAL_SCHEMA` at `:44`, `validate_terminal_document` at `:285`) and the three test modules that load this schema (`live_evidence.py:45`, `supervisor.py:754/:1111/:3213`, `capture.py:368`) are unaffected — but all are run as evidence, since "annotations are inert" is a claim, not an assumption.
 - If #1398's slots are ever removed (方案 b, some future issue), this guard test and its requirement retire with them.
+
+## D7 — why E6 is run by reading, not by a script
+
+A change-local executable form of E6 (`carrier_sweep.py`) was written as the round-4 corrective action and
+**withdrawn at the round ceiling by user decision**. Round-5 cross-review found two defects in it: a P1 — it
+silently dropped the PR body, a declared Tier-1 carrier, whenever `argv[1]` was absent, a typo, or a
+directory, and still exited 0, so E6's literal pass condition ("the script exits 0") reported PASS with its
+own stated scope unmet, aggravated by its own Usage docstring teaching the argv-less form; and a P2 — its
+"docstring position" exemption was a naive triple-quote scanner that exempted any triple-quoted literal,
+opened phantom exempt regions from a `"""` inside a comment, and failed to exempt single-line docstrings.
+
+The ceiling closed the ordinary loop, so no review round remained to verify a fix, and an Evidence Floor
+oracle that had just shipped a P1 is worse than no oracle at all. The honest resolution was to remove the
+machinery rather than merge an unverified fix to it.
+
+What that machinery could ever have bought is also smaller than it looked: it pinned *archived strings*, and
+the defects it was built to catch were paraphrases. `design.md:124`'s "is never closure-checked" does not
+contain the archived "not closure-checked at all", and `proposal.md`'s "no code interprets their content"
+does not contain "content never interpreted" — both were found by a reviewer reading, and neither would have
+reddened any string-matching sweep. Carrier truth is a reading obligation; E6 now says so plainly.
+
