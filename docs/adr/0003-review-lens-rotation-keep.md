@@ -528,3 +528,37 @@ about rotation either way.
 
 **Keep rotation** remains the recorded decision; no new evidence in either
 direction. The attribution caveats above stay load-bearing.
+
+## Revisit 2026-08-21 (after #1414 / PR #1687)
+
+99 multi-round merged PRs, later-round catches core=46, rotated=250 (+5 from
+this one PR alone — its rounds 2 and 3 were both focused fix-delta passes,
+which the auditor counts as rotated-in).
+
+This is the first sample in a while that says something. #1687 ran three
+rounds: round 1 comprehensive (correctness/test-design +
+spec-conformance/oracle-integrity, 4 verified catches), then two focused
+fix-delta rounds that between them caught 5 more — 4 in round 2, 1 in round
+3. Every one of those 5 was the *same* failure class: a claim corrected in
+one artifact that never propagated to its upstream design section or to the
+published PR body. Round 1's comprehensive mix produced the corrections;
+round 1's mix would never have caught the incomplete propagation of its own
+fixes, because at round 1 those fixes did not exist yet.
+
+That is the rotation argument in its cleanest form so far: the rotated-in
+lens was not looking at a *different part of the change*, it was looking at
+*the change made in response to the previous round*. Note the caveat that
+keeps this from being decisive — the attribution counts a focused fix-delta
+pass as "rotated", and one could argue a fix-delta pass is not a lens
+rotation at all but a mandatory re-check that any review loop would run.
+Under that stricter reading these 5 catches say nothing about rotating
+*subject-matter* lenses.
+
+Also note the diminishing return within the PR: P2 → P2 → P3 across rounds
+1/2/3, with round 3 substantively clean. The loop converged rather than
+grinding, which is the behavior the ceiling exists to protect.
+
+**Keep rotation** remains the recorded decision, now with one genuinely
+supporting sample under the auditor's own attribution rule, and the stricter
+reading noted so a future revisit can re-litigate the rule rather than the
+decision.
