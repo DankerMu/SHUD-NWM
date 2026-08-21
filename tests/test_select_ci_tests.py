@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from scripts.select_ci_tests import (
+    BACKEND_PYTHON_SOURCE_PREFIXES,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
@@ -636,57 +637,209 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
-def test_select_tests_same_name_derivation_is_scoped_to_scripts_paths() -> None:
-    # packages/common/state_qc.py has a same-name tests/test_state_qc.py, but the
-    # derivation is scripts/-only: this path must keep today's fallback behavior.
+def test_select_tests_same_name_derivation_covers_all_backend_prefixes() -> None:
+    # Every backend Python prefix gets the basename-derived mapping now, not just
+    # scripts/. packages/common/state_qc.py selects its same-name suite and does
+    # NOT fall back to unknown-backend core smoke; a backend source with no
+    # same-name suite (packages/common/auth_policy.py) keeps the fallback.
     assert Path("tests/test_state_qc.py").is_file()
+    assert not Path("tests/test_auth_policy.py").exists()
 
     selected = select_tests(["packages/common/state_qc.py"], repo_root=Path("."))
 
-    assert "tests/test_state_qc.py" not in selected
+    assert "tests/test_state_qc.py" in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+    fallback = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
+
     for test_path in CORE_SMOKE_TESTS:
-        assert test_path in selected
+        assert test_path in fallback
 
 
-def _tracked_script_same_name_pairs() -> list[tuple[str, str]]:
-    listing = subprocess.run(
-        ["git", "ls-files", "--", "scripts"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
+    # The explicit-rule AND same-name scenario (spec "explicit and derived
+    # mappings form a union"): apps/api/runtime_mode.py matches the broad
+    # `apps/api/**` rule AND has a same-name tests/test_runtime_mode.py, so the
+    # selection must be the union — the explicit targets surviving alongside
+    # the derived suite, never replaced by it. The explicit side is read from
+    # the one matching live rule (rather than a frozen list) so the two target
+    # sets cannot drift from the rule table.
+    path = "apps/api/runtime_mode.py"
+    same_name_target = "tests/test_runtime_mode.py"
+    assert Path(same_name_target).is_file()
+    matching = [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(path, rule.pattern)]
+    assert len(matching) == 1, f"expected exactly one explicit rule for {path}, got {matching}"
+
+    selected = select_tests([path], repo_root=Path("."))
+
+    # SET union, mirroring the caller's deduplicating semantics: the derived
+    # target must not replace the explicit ones, and an explicit rule that later
+    # also names it must not false-red the pin.
+    assert selected == sorted({*matching[0].tests, same_name_target})
+
+
+# The `git ls-files` pathspecs for the same-name derivation are derived from the
+# selector's OWN backend-prefix authority (`BACKEND_PYTHON_SOURCE_PREFIXES`,
+# imported from scripts/select_ci_tests.py) by stripping the trailing `/` — not
+# a second five-prefix tuple. A prefix added or removed on the production side
+# moves the tracked-tree derivation with it.
+_SAME_NAME_LS_FILES_PATHSPECS: tuple[str, ...] = tuple(
+    prefix.removesuffix("/") for prefix in BACKEND_PYTHON_SOURCE_PREFIXES
+)
+
+
+def _tracked_same_name_pairs() -> list[tuple[str, str]]:
+    """Tracked (source, existing same-name suite) pairs under the five prefixes.
+
+    Derived from `git ls-files`, never frozen: a source/suite pair added to any
+    backend prefix is covered the moment it lands.
+    """
     pairs: list[tuple[str, str]] = []
-    for line in listing.stdout.splitlines():
-        script_path = line.strip()
-        if not script_path.endswith(".py"):
-            continue
-        same_name_test = f"tests/test_{PurePosixPath(script_path).stem}.py"
-        if Path(same_name_test).is_file():
-            pairs.append((script_path, same_name_test))
+    for pathspec in _SAME_NAME_LS_FILES_PATHSPECS:
+        for source_path in _tracked_python_files(pathspec):
+            same_name_test = f"tests/test_{PurePosixPath(source_path).stem}.py"
+            if Path(same_name_test).is_file():
+                pairs.append((source_path, same_name_test))
     return pairs
 
 
-def test_every_tracked_script_with_a_same_name_suite_selects_it_without_core_smoke() -> None:
+def _same_name_test_is_independently_owned(path: str, target: str) -> bool:
+    """Whether an explicit rule selects ``target`` for ``path``.
+
+    The completeness guard's smoke clause must distinguish unknown-fallback
+    leakage from a target an explicit rule independently owns: the broad
+    `apps/api/**` rule legitimately selects `tests/test_api.py`, which is also
+    a CORE_SMOKE_TESTS member, and the `services/orchestrator/**` /
+    `workers/data_adapters/**` rules carry `tests/test_production_scheduler.py`
+    on orchestrator/adapter PRs. A target that appears in the owning rules of
+    ``path`` is not evidence the fallback armed.
+    """
+    return any(target in rule.tests for rule in PATH_TEST_RULES if fnmatch.fnmatch(path, rule.pattern))
+
+
+def test_every_tracked_backend_source_with_a_same_name_suite_selects_it_without_core_smoke() -> None:
     # Mechanized completeness guard: the pair list is derived from the tracked
-    # tree, never frozen here, so a newly added script/test pair is covered the
-    # moment it lands instead of silently falling into the core-smoke fallback.
-    pairs = _tracked_script_same_name_pairs()
-    assert pairs, "expected tracked scripts/<name>.py <-> tests/test_<name>.py pairs"
+    # tree, never frozen here, so a newly added source/test pair under any of
+    # the five backend prefixes is covered the moment it lands instead of
+    # silently falling into the core-smoke fallback.
+    pairs = _tracked_same_name_pairs()
+    assert pairs, "expected tracked backend-prefix source/test same-name pairs"
 
     offenders: list[str] = []
-    for script_path, same_name_test in pairs:
-        selected = select_tests([script_path], repo_root=Path("."))
+    for source_path, same_name_test in pairs:
+        selected = select_tests([source_path], repo_root=Path("."))
         if same_name_test not in selected:
-            offenders.append(f"{script_path}: {same_name_test} not selected (got {selected})")
+            offenders.append(f"{source_path}: {same_name_test} not selected (got {selected})")
             continue
         if same_name_test in CORE_SMOKE_TESTS:
             # Exemption: a same-name test that IS a core-smoke file makes the
             # no-smoke clause meaningless. No such pair exists today.
             continue
-        smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
+        smoke_overlap = sorted(
+            {
+                target
+                for target in set(CORE_SMOKE_TESTS) & set(selected)
+                if not _same_name_test_is_independently_owned(source_path, target)
+            }
+        )
         if smoke_overlap:
-            offenders.append(f"{script_path}: still drags core smoke {smoke_overlap}")
-    assert not offenders, "script/test same-name mapping incomplete: " + "; ".join(offenders)
+            offenders.append(f"{source_path}: still drags unowned core smoke {smoke_overlap}")
+    assert not offenders, "backend same-name mapping incomplete: " + "; ".join(offenders)
+
+
+def _collision_stem_map() -> dict[str, list[str]]:
+    """Mapped stems whose same-name suite is shared by more than one source.
+
+    Keyed by basename stem, values are the colliding source paths. Reuses the
+    tree-derived pair list, so a new cross-prefix collision is picked up the
+    moment it lands.
+    """
+    stems: dict[str, list[str]] = {}
+    for source_path, _ in _tracked_same_name_pairs():
+        stems.setdefault(PurePosixPath(source_path).stem, []).append(source_path)
+    return {stem: sources for stem, sources in stems.items() if len(sources) > 1}
+
+
+def _collision_missing_imports(
+    collisions: dict[str, list[str]],
+    *,
+    imported: Callable[[str], set[str]] | None = None,
+) -> list[str]:
+    """Colliding source modules a shared same-name suite fails to import.
+
+    A basename collision routes every colliding source to ONE suite, so that
+    suite must actually exercise each of them: requiring it to import every
+    colliding module at top level makes convergence a checked compatibility
+    boundary instead of a silent unrelated-basename match. The dotted module
+    name reuses `_dotted_module_name`, the same top-level-import semantics the
+    importer-closure guards use — no second parser. ``imported`` is the seam for
+    constructed red evidence (default: the real suite's top-level imports).
+    """
+    resolve = imported if imported is not None else lambda suite: _top_level_imported_module_names(
+        suite, _parse_tracked(suite)
+    )
+    missing: list[str] = []
+    for stem, sources in collisions.items():
+        suite = f"tests/test_{stem}.py"
+        imported_names = resolve(suite)
+        for source in sources:
+            if _dotted_module_name(source) not in imported_names:
+                missing.append(f"{source} -> {suite}")
+    return missing
+
+
+def test_cross_prefix_stem_collisions_require_their_shared_suite_to_import_every_source() -> None:
+    # Two backend sources can map to one basename suite. The derivation is
+    # tree-derived, never name-locked: a current collision must be semantically
+    # bound (its shared suite imports every colliding source), a new collision
+    # reddens by naming the missing source, and a tree with NO collision at all
+    # is a legal state that must not red. Hard-coding `best_available` or banning
+    # collisions is less faithful.
+    collisions = _collision_stem_map()
+
+    missing = _collision_missing_imports(collisions)
+
+    assert not missing, "colliding same-name suite must import every colliding source: " + "; ".join(missing)
+
+
+@pytest.mark.parametrize(
+    ("collision", "imported_by_suite", "expected_missing"),
+    [
+        # Two sources, the shared suite imports neither -> both named.
+        (
+            {"probe": ["packages/common/probe.py", "apps/api/routes/probe.py"]},
+            {"tests/test_probe.py": set()},
+            ["apps/api/routes/probe.py -> tests/test_probe.py", "packages/common/probe.py -> tests/test_probe.py"],
+        ),
+        # Three sources, the shared suite imports exactly one -> only the other
+        # two named. Exercises the collision-not-name-locked property: the suite
+        # is free to cover multiple sources.
+        (
+            {
+                "probe": [
+                    "packages/common/probe.py",
+                    "apps/api/routes/probe.py",
+                    "workers/probe.py",
+                ]
+            },
+            {"tests/test_probe.py": {"packages.common.probe"}},
+            ["apps/api/routes/probe.py -> tests/test_probe.py", "workers/probe.py -> tests/test_probe.py"],
+        ),
+    ],
+)
+def test_collision_guard_reds_when_a_colliding_source_import_is_missing(
+    collision: dict[str, list[str]],
+    imported_by_suite: dict[str, set[str]],
+    expected_missing: list[str],
+) -> None:
+    # The red arm, fully synthetic so the tracked tree and the real collision
+    # suite are untouched: the import resolution is injected as a mapping, so
+    # the derivation is exercised on constructed stem/source/import sets and
+    # names exactly the sources whose top-level import is absent. Guards the
+    # derivation against rotting into always-empty.
+    missing = _collision_missing_imports(collision, imported=imported_by_suite.get)
+
+    assert sorted(missing) == sorted(expected_missing)
 
 
 CONTRACT_SOURCE_PATH = "packages/common/node27_container_contract.py"

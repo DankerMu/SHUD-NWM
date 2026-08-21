@@ -1121,7 +1121,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                 if rule.stop_on_match:
                     break
 
-        same_name_test = _same_name_script_test(path)
+        same_name_test = _same_name_backend_python_test(path)
         if same_name_test is not None and _test_target_exists(same_name_test, repo_root=repo_root):
             selected.add(same_name_test)
             matched = True
@@ -1172,8 +1172,22 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
     return result.stdout.splitlines()
 
 
+# The single authority for which tree prefixes count as backend Python surface.
+# It feeds BOTH backend classification (`_is_backend_python_path`) and the
+# same-name suite derivation (`_same_name_backend_python_test`), so the two
+# cannot drift apart: a path classified as backend gets same-name routing, and
+# only those paths do.
+BACKEND_PYTHON_SOURCE_PREFIXES: tuple[str, ...] = (
+    "apps/api/",
+    "packages/",
+    "services/",
+    "workers/",
+    "scripts/",
+)
+
+
 def _is_backend_python_path(path: str) -> bool:
-    return path.endswith(".py") and path.startswith(("apps/api/", "packages/", "services/", "workers/", "scripts/"))
+    return path.endswith(".py") and path.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
 
 
 def _is_backend_shell_path(path: str) -> bool:
@@ -1185,15 +1199,15 @@ def _is_backend_shell_path(path: str) -> bool:
     return path.endswith(".sh") and path.startswith("scripts/")
 
 
-def _same_name_script_test(path: str) -> str | None:
-    """Derive the same-name test file for a changed ``scripts/**/*.py`` path.
+def _same_name_backend_python_test(path: str) -> str | None:
+    """Derive the same-name test file for a changed backend Python path.
 
-    Scoped to ``scripts/`` on purpose: other backend prefixes keep their
-    explicit-rule / core-smoke-fallback behavior even when a same-name test
-    exists. Returns the candidate target only; the caller must confirm it
-    exists before treating the path as a known mapping.
+    Applies to every backend Python prefix (`BACKEND_PYTHON_SOURCE_PREFIXES`):
+    a tracked `tests/test_<stem>.py` under any of them is the path's own suite.
+    Returns the candidate target only; the caller must confirm it exists before
+    treating the path as a known mapping.
     """
-    if not (path.startswith("scripts/") and path.endswith(".py")):
+    if not _is_backend_python_path(path):
         return None
     return f"tests/test_{PurePosixPath(path).stem}.py"
 
