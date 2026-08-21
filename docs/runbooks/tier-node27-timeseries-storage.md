@@ -767,8 +767,19 @@ Referenced JSON contracts are:
 - `execution.run_plan` is the immutable concrete command/checkpoint plan and
   `execution.ledger` is the append-only producer truth. The verifier recomputes
   the plan hash, exact event state machine, cursor continuity and every
-  produced artifact association from ledger events. Legacy authored invocation
-  JSON may remain in a historical input envelope but contributes no v3 fact.
+  produced artifact association from ledger events. The five `*_invocation`
+  keys are mandatory v3 bundle contents, not optional legacy leftovers:
+  `recovery.invocation`, `migration.first_invocation`,
+  `migration.second_invocation`, `receipts.dry_run_invocation` and
+  `receipts.enforce_invocation`. Each carries the contract its schema
+  `description` states. Required, and enforced only as an artifact-closure
+  node: the file must exist as a regular non-symlink whose `sha256`/`bytes`
+  match, and if it parses as JSON it is complexity-bounded and its own nested
+  artifact references are resolved transitively; its authored
+  `path`/`sha256`/`bytes` is retained in the terminal `source_manifest`. The
+  invocation semantics inside it (argv, exit code, timings) are never
+  interpreted, and this slot in the terminal document is never the authored
+  reference — the verifier re-derives it from `execution.ledger`.
 - `recovery.preflight`: separately authorized replay preflight with capture
   time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
   `before_compressed=true`, positive row count, and the exact six-field target

@@ -7208,3 +7208,51 @@ def test_verify_bundle_keeps_the_frozen_2_0_semantic_pin() -> None:
     source = (ROOT / "scripts/node27_timeseries_compression_live_evidence.py").read_text(encoding="utf-8")
     assert 'dry["schema_version"] != "2.0"' in source
     assert 'enforce["schema_version"] != "2.0"' in source
+
+
+def test_evidence_schema_annotates_every_invocation_slot_with_its_truth_source() -> None:
+    """Every surviving `*_invocation` artifact slot must name `execution.ledger` as its source.
+
+    #1398 (方案 a): the five v3-required invocation slots stay, so the schema has to
+    say what they actually are -- the verifier overwrites all five with the ledger
+    reference, and a reader who sees five separately named "invocation" fields would
+    otherwise infer five distinct launch records.  The slot list is DERIVED from the
+    schema rather than hardcoded so a future sixth slot cannot be added undescribed
+    (a hardcoded pair list would stay green on it), and the derived set is asserted
+    against the five known slots so a removed slot fails loudly instead of silently
+    shrinking the oracle to nothing.  The two load-bearing tokens are pinned as
+    substrings, not full text, so the prose can still be improved without red CI.
+    """
+
+    def _invocation_slots(node: object, path: tuple[str, ...]) -> dict[str, dict]:
+        slots: dict[str, dict] = {}
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if (
+                    key.endswith("invocation")
+                    and isinstance(value, dict)
+                    and value.get("$ref") == "#/$defs/artifact_ref"
+                ):
+                    owner = [part for part in path if part != "properties"][-1:]
+                    slots[".".join([*owner, key])] = value
+                slots.update(_invocation_slots(value, (*path, key)))
+        elif isinstance(node, list):
+            for item in node:
+                slots.update(_invocation_slots(item, path))
+        return slots
+
+    slots = _invocation_slots(EVIDENCE_SCHEMA, ())
+    # The plural `authorization.*_invocations` const integers are not artifact refs and
+    # must not be swept in; the `required` entries are list items, not property keys.
+    assert set(slots) == {
+        "recovery.invocation",
+        "migration.first_invocation",
+        "migration.second_invocation",
+        "receipts.dry_run_invocation",
+        "receipts.enforce_invocation",
+    }
+    for name, slot in slots.items():
+        description = slot.get("description", "")
+        assert isinstance(description, str) and description.strip(), f"{name} has no description"
+        assert "execution.ledger" in description, f"{name} does not name execution.ledger"
+        assert "re-derive" in description.lower(), f"{name} does not say the verifier re-derives it"
