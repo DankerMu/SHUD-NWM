@@ -105,7 +105,9 @@
 - [x] E2 `uv run ruff check .` PASS
 - [x] E3 `openspec validate river-ts-consumer-identity-migration --strict
       --no-interactive` PASS
-- [ ] E4 **硬门**，node-27 实机：
+- [x] E4 **硬门**，node-27 实机（五项全过，receipt 目录 `/home/nwm/nwm-1442-e4/`，
+      证据包 = PR #1655 issuecomment-5363867043；(ii) 两项残余量化并裁定接受，
+      解药路由 #1342）：
       (0) **preflight**：未压缩 chunk 七键 `IS NULL` 计数为 0 的直连 SQL
       receipt（design D7，F 组合并硬前提；不满足先补 sweep）；
       (i) **before 取样**：pull 新码前对选定键收敛 run 跑曲线端点 +

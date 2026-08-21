@@ -394,3 +394,12 @@ Phase 4 round 2 抓到的最贵一条是**round 1 的修复自己制造的假红
 全场唯一致命 P1（ride-along ANALYZE 清零 TimescaleDB 保留的 origin relstats）出自 Phase 7
 终审读上游源码，三轮常规透镜全部漏过——终审不是"轮换进来的透镜"，而是有独立方法论
 （外部权威源交叉验证）的轮次角色，佐证把它从 core/rotated 二分里剔出的必要性。
+
+## Revisit 2026-08-21（post PR #1655 / issue #1442）
+
+审计口径：90 个多轮 merged PR，later-round catches core=46 / rotated=231。**决定：keep 不变**，
+三条口径修复前置条件仍未排期。本役再添一例轮次角色镜的独立价值：round 2 clean 之后，
+Phase 7 终审用索引 DDL 清单法从结构推出"segment 谓词清零丢失全部逐 segment 索引路径"的
+P1（与 E4 live EXPLAIN 独立收敛），终审重跑又以 receipt 的 BUFFERS 逐字段比对证伪了
+修复自身的机理文本——连续第三个 issue 的最重发现均出自终审的独立方法学而非轮换透镜，
+"轮次角色镜单列"的口径修复必要性进一步坐实。
