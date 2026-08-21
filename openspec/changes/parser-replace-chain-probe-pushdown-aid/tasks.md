@@ -20,6 +20,6 @@
 
 - [x] E1 本地：2.1/2.2/2.3 输出 + oracle 红→绿。
 - [x] E2 node-27 throwaway DB：`NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=<superuser throwaway DSN> uv run pytest -q <integration file> -k <new tests>`：EXPLAIN 正向（压缩侧 `run_id` 索引）+ 内置阴性对照（去辅助 → `Seq Scan on compress_hyper`）；端到端写入 + 重放幂等 + 守卫闭合三项绿；非零 passed。
-- [ ] E3 node-27 live（design D5）：34 个 `2026082012` run parse 成功并 publish；连续 ≥2 tick `rc=0`、分钟级；`hydro_run` 中 `failed` 的 2026082012 计数归零。
-- [ ] E4 CI：PR Unit Tests 绿（含 SQL Migration Dry Run 若 `database` filter 点亮）。
+- [x] E3 node-27 live（design D5）：34 个 `2026082012` run parse 成功并 publish；连续 ≥2 tick `rc=0`、分钟级；`hydro_run` 中 `failed` 的 2026082012 计数归零。
+- [x] E4 CI：PR Unit Tests 绿（含 SQL Migration Dry Run 若 `database` filter 点亮）。
 - [x] E5 PR body 偏离记录：#1442 D1 组 F 裁定被本单修订的范围（仅探针/取窗），#1342 删列清单需纳入该辅助；要求中保留的"node-27 键收敛 preflight receipt"为 #1442 已满足的继承条款（PR #1655 E4 receipt），本单不重取。
