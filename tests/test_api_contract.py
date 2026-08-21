@@ -42,6 +42,10 @@ from tests.test_monitoring_api import (
 from workers.data_adapters.base import cycle_id_for
 
 PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
+# The exact pinned openapi-typescript package for the generated-type byte
+# comparison. Runs via `npx --yes <exact-pin>` so the hosted targeted Unit Tests
+# job (no pnpm install) can resolve it without a local node_modules.
+OPENAPI_TYPESCRIPT_PACKAGE = "openapi-typescript@7.13.0"
 STATION_SERIES_MISSING_REQUIRED_FILTER_MESSAGE = (
     "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
 )
@@ -1090,7 +1094,8 @@ def test_generated_frontend_types_match_openapi(tmp_path: Path) -> None:
     subprocess.run(
         [
             "npx",
-            "openapi-typescript",
+            "--yes",
+            OPENAPI_TYPESCRIPT_PACKAGE,
             "../../openapi/nhms.v1.yaml",
             "--output",
             str(generated),
@@ -1197,7 +1202,7 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
     }
     assert schemas["ErrorResponse"]["properties"]["error"]["properties"]["details"] == {
         "oneOf": [
-            {"type": "object", "nullable": True, "additionalProperties": True},
+            {"type": ["object", "null"], "additionalProperties": True},
             {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/ValidationErrorDetail"},
@@ -1211,7 +1216,7 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
             "field": {"type": "string"},
             "rejected_value": {
                 "oneOf": [
-                    {"type": "string", "nullable": True},
+                    {"type": ["string", "null"]},
                     {"type": "number"},
                     {"type": "boolean"},
                     {"type": "object", "additionalProperties": True},
@@ -1348,10 +1353,16 @@ def test_layer_metadata_contract_preserves_nullable_generated_type() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
 
+    # OpenAPI 3.1 expresses the nullable Layer.metadata as composition-or-null
+    # so the generated type stays a union rather than an erroneous intersection.
     assert spec["components"]["schemas"]["Layer"]["properties"]["metadata"] == {
-        "type": "object",
-        "nullable": True,
-        "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
+        "anyOf": [
+            {
+                "type": "object",
+                "allOf": [{"$ref": "#/components/schemas/LayerMetadata"}],
+            },
+            {"type": "null"},
+        ]
     }
 
     generated_types = (

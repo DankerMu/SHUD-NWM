@@ -31,6 +31,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
     get:
       tags:
       - models
@@ -111,6 +117,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
     get:
       tags:
       - models
@@ -183,6 +195,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/basin-versions/{basin_version_id}/river-segments:
     get:
       tags:
@@ -344,6 +362,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/models:
     post:
       tags:
@@ -371,6 +395,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
     get:
       tags:
       - models
@@ -466,6 +496,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/models/{model_id}/preflight:
     post:
       tags:
@@ -501,6 +537,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/models/{model_id}/lifecycle:
     post:
       tags:
@@ -536,6 +578,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/models/{model_id}:
     get:
       tags:
@@ -592,6 +640,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series:
     get:
       tags:
@@ -1657,6 +1711,12 @@ paths:
           $ref: '#/components/responses/Error'
         5XX:
           $ref: '#/components/responses/Error'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/runs/{run_id}/cancel:
     post:
       tags:
@@ -1687,6 +1747,12 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
         '409':
           $ref: '#/components/responses/ControlPlaneManualActionRequired'
+      security:
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/metrics/stage-duration:
     get:
       tags:
@@ -3109,8 +3175,9 @@ components:
               example: Requested resource was not found.
             details:
               oneOf:
-              - type: object
-                nullable: true
+              - type:
+                - object
+                - 'null'
                 additionalProperties: true
               - type: array
                 items:
@@ -3125,8 +3192,9 @@ components:
           type: string
         rejected_value:
           oneOf:
-          - type: string
-            nullable: true
+          - type:
+            - string
+            - 'null'
           - type: number
           - type: boolean
           - type: object
@@ -3149,11 +3217,13 @@ components:
         value:
           type: number
         quality_flag:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
     StationSeriesStation:
       type: object
       required:
@@ -3165,37 +3235,47 @@ components:
         basin_version_id:
           type: string
         station_name:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         name:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         longitude:
-          type: number
-          nullable: true
+          type:
+          - number
+          - 'null'
         latitude:
-          type: number
-          nullable: true
+          type:
+          - number
+          - 'null'
         elevation_m:
-          type: number
-          nullable: true
+          type:
+          - number
+          - 'null'
         elevation:
-          type: number
-          nullable: true
+          type:
+          - number
+          - 'null'
         station_role:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         active_flag:
-          type: boolean
-          nullable: true
+          type:
+          - boolean
+          - 'null'
         properties_json:
-          type: object
-          nullable: true
+          type:
+          - object
+          - 'null'
           additionalProperties: true
         created_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
     StationSeriesMetadata:
       type: object
       required:
@@ -3214,21 +3294,25 @@ components:
           type: integer
           minimum: 0
         requested_from:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         requested_to:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         returned_from:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         returned_to:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         truncated:
           type: boolean
     StationSeries:
@@ -3250,18 +3334,22 @@ components:
           - wind
           - Rn
         unit:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         native_resolution:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cycle_time:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         points:
           type: array
           items:
@@ -3287,33 +3375,39 @@ components:
         forcing_version_id:
           type: string
         model_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_id:
           type: string
         cycle_time:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         valid_time_start:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         valid_time_end:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         limit:
           type: integer
           minimum: 1
         requested_from:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         requested_to:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         series:
           type: array
           items:
@@ -3329,11 +3423,13 @@ components:
         message:
           type: string
         run_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
       additionalProperties: true
     QhhLatestQualityNote:
       type: object
@@ -3346,15 +3442,18 @@ components:
         message:
           type: string
         expected_horizon_hours:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         available_horizon_hours:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         available_end_time:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
       additionalProperties: true
     QhhLatestStationVariableCoverage:
       type: object
@@ -3397,13 +3496,15 @@ components:
           type: integer
           minimum: 0
         valid_time_start:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         valid_time_end:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
     QhhLatestQueryIndex:
       type: object
       required:
@@ -3423,8 +3524,9 @@ components:
           items:
             type: string
         predicate:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
       additionalProperties: true
     QhhLatestAvailability:
       type: object
@@ -3554,16 +3656,18 @@ components:
           type: integer
           minimum: 0
         expected_station_count:
-          type: integer
+          type:
+          - integer
+          - 'null'
           minimum: 0
-          nullable: true
         segment_count:
           type: integer
           minimum: 0
         expected_segment_count:
-          type: integer
+          type:
+          - integer
+          - 'null'
           minimum: 0
-          nullable: true
         status:
           type: string
           enum:
@@ -3572,32 +3676,39 @@ components:
         run_status:
           type: string
         valid_time_start:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         valid_time_end:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         river_valid_time_start:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         river_valid_time_end:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         forcing_valid_time_start:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         forcing_valid_time_end:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         available_horizon_hours:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         expected_horizon_hours:
           type: integer
         shorter_horizon:
@@ -3625,10 +3736,11 @@ components:
           items:
             type: string
         metadata:
-          type: object
-          nullable: true
-          allOf:
-          - $ref: '#/components/schemas/LayerMetadata'
+          anyOf:
+          - allOf:
+            - $ref: '#/components/schemas/LayerMetadata'
+            type: object
+          - type: 'null'
     LayerMetadata:
       type: object
       required:
@@ -3645,52 +3757,66 @@ components:
           - mvt
           - geojson_compatibility
         url_template:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         tile_url_template:
-          type: string
-          nullable: true
-        required_placeholders: &id002
+          type:
+          - string
+          - 'null'
+        required_placeholders:
           type: array
           items:
             type: string
         maplibre_source_layer:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         source_layer:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         property_schema_version:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         schema_version:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         encoder_version:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         property_schema:
-          type: object
+          type:
+          - object
+          - 'null'
           additionalProperties: true
-          nullable: true
         min_zoom:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         max_zoom:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         bounds_crs:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         bounds:
-          type: array
-          items: &id001
+          type:
+          - array
+          - 'null'
+          items:
             type: number
-          nullable: true
         wgs84_bounds:
-          type: array
-          items: *id001
-          nullable: true
+          type:
+          - array
+          - 'null'
+          items:
+            type: number
         valid_times:
           type: array
           items:
@@ -3703,47 +3829,61 @@ components:
         valid_times_truncated:
           type: boolean
         source_refs:
-          type: object
+          type:
+          - object
+          - 'null'
           description: Concrete source identity used to resolve non-XYZ route placeholders,
             including run_id, basin_version_id, river_network_version_id, and bounded
             source_version/run revision when advertised by required_placeholders.
           additionalProperties: true
-          nullable: true
         source_generation:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cache_layer_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         route_variable:
-          type: string
-          nullable: true
-        legacy_layer_ids: *id002
+          type:
+          - string
+          - 'null'
+        legacy_layer_ids:
+          type: array
+          items:
+            type: string
         alias_of:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         alias_semantic:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         canonical_route_layer_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cache_etag:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cache_version:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         fallback_available:
           type: boolean
         fallback_endpoint:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         release_blocking:
           type: boolean
         production_mvt_readiness_claimed:
-          type: boolean
-          nullable: true
+          type:
+          - boolean
+          - 'null'
     LayerValidTimes:
       type: object
       required:
@@ -3803,22 +3943,26 @@ components:
         cycle_id:
           type: string
         source:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cycle_time:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         current_state:
           type: string
         started_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         updated_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         job_counts:
           $ref: '#/components/schemas/JobStatusCounts'
     BasinProgress:
@@ -3861,22 +4005,27 @@ components:
         job_id:
           type: string
         run_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cycle_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         job_type:
           type: string
         slurm_job_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         model_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         basin_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         status:
           type: string
           enum:
@@ -3892,35 +4041,43 @@ components:
           - cancelled
           - skipped
         stage:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         submitted_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         started_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         finished_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         duration_seconds:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         retry_count:
           type: integer
           minimum: 0
         error_code:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         error_message:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         log_uri:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
           maxLength: 512
     PipelineStage:
       type: object
@@ -3939,7 +4096,7 @@ components:
           type: string
         display_status:
           type: string
-          enum: &id003
+          enum:
           - pending
           - running
           - succeeded
@@ -3948,11 +4105,18 @@ components:
           - skipped
         status:
           type: string
-          enum: *id003
+          enum:
+          - pending
+          - running
+          - succeeded
+          - partially_failed
+          - failed
+          - skipped
           description: Backward-compatible alias of display_status.
         duration_seconds:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         basin_progress:
           $ref: '#/components/schemas/BasinProgress'
         basin_results_limit:
@@ -3999,25 +4163,31 @@ components:
         job_id:
           type: string
         run_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         cycle_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         run_type:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         scenario:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         job_type:
           type: string
         slurm_job_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         model_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         status:
           type: string
           enum:
@@ -4033,39 +4203,48 @@ components:
           - cancelled
           - skipped
         stage:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         submitted_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         started_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         finished_at:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date-time
-          nullable: true
         exit_code:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         retry_count:
           type: integer
           minimum: 0
         error_code:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         error_message:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         log_uri:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
           maxLength: 512
         duration_seconds:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
     PipelineJobPage:
       type: object
       required:
@@ -4119,8 +4298,9 @@ components:
           type: string
           description: Alias of job_id for pipeline-control clients.
         run_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         retry_count:
           type: integer
           minimum: 0
@@ -4129,8 +4309,9 @@ components:
           enum:
           - submitted
         slurm_job_id:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         execution_status:
           type: string
           enum:
@@ -4193,8 +4374,9 @@ components:
                   message:
                     type: string
                   details:
-                    type: object
-                    nullable: true
+                    type:
+                    - object
+                    - 'null'
                     additionalProperties: true
     Error:
       description: Error response
@@ -4234,8 +4416,9 @@ components:
                   message:
                     type: string
                   details:
-                    type: object
-                    nullable: true
+                    type:
+                    - object
+                    - 'null'
                     additionalProperties: true
     ControlPlaneQueueUnavailable:
       description: Queue depth is unavailable from a display_readonly API node; the
@@ -4268,8 +4451,9 @@ components:
                   message:
                     type: string
                   details:
-                    type: object
-                    nullable: true
+                    type:
+                    - object
+                    - 'null'
                     additionalProperties: true
     JobLogError:
       description: Pipeline job log retrieval failed using the canonical error envelope.
@@ -4304,6 +4488,50 @@ components:
                   message:
                     type: string
                   details:
-                    type: object
-                    nullable: true
+                    type:
+                    - object
+                    - 'null'
                     additionalProperties: true
+  securitySchemes:
+    DevRoleHeader:
+      type: apiKey
+      in: header
+      name: X-User-Role
+      description: Non-production development role header. Accepted only when AUTH_BACKEND
+        is not live/live_idp/oidc/saml, ALLOW_DEV_ROLE_HEADER is enabled, and NHMS_AUTH_MODE
+        is not production/live/live_idp; grants roles directly without a token.
+    DevBearerToken:
+      type: http
+      scheme: bearer
+      description: Non-production bearer token matching the configured NHMS_DEV_AUTH_TOKEN,
+        accepted only when AUTH_BACKEND is not live/live_idp/oidc/saml, that token
+        is configured, and NHMS_AUTH_MODE is not production/live/live_idp.
+    InternalLiveProof:
+      type: apiKey
+      in: header
+      name: X-NHMS-Internal-Live-Proof
+      description: Non-production internal live-proof token for the test_internal
+        trusted live-proof mode. Required together with X-Live-User-ID and X-Live-User-Roles
+        when AUTH_BACKEND is live/live_idp/oidc/saml, NHMS_TRUSTED_LIVE_PROOF_MODE
+        is test_internal, the NHMS_INTERNAL_LIVE_PROOF_TOKEN is configured, and NHMS_AUTH_MODE
+        is not production/live/live_idp. When NHMS_AUTH_MODE is live/live_idp the
+        internal proof is not accepted and requests remain release-blocked; this is
+        a test-mode credential, not a production identity-provider token. The configured
+        token value is never embedded in this document.
+    LiveUserID:
+      type: apiKey
+      in: header
+      name: X-Live-User-ID
+      description: Non-production live identity actor id. Supplied together with X-NHMS-Internal-Live-Proof
+        and X-Live-User-Roles under the same test_internal live-proof conditions.
+    LiveUserRoles:
+      type: apiKey
+      in: header
+      name: X-Live-User-Roles
+      description: Non-production live identity role list. Supplied together with
+        X-NHMS-Internal-Live-Proof and X-Live-User-ID under the same test_internal
+        live-proof conditions.
+servers:
+- url: /
+  description: Same-origin API endpoint.
+security: []

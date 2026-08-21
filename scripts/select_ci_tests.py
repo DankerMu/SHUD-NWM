@@ -47,6 +47,16 @@ CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py",
 )
 
+# #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
+# opens the backend gate via ci.yml's paths-filter and must reach real drift/type
+# assertions, not the collect-only smoke; the runtime patch owner carries the
+# drift suite as well as its existing API contract consumers.
+OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_api_contract.py",
+    "tests/test_openapi_31_contract.py",
+    "tests/test_openapi_drift.py",
+)
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -698,17 +708,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # here; an mvt.py diff that quietly drops a predicate pairing must
             # not reach CI green without them.
             "tests/test_river_ts_read_path_surrogate_keys.py",
-            # #1597: the seven below are DERIVED by the #1455 importer-closure
+            # #1597: the eight below are DERIVED by the #1455 importer-closure
             # guard in tests/test_select_ci_tests.py
             # (test_guarded_module_rules_cover_their_non_gated_importer_closure,
             # now covering services.tiles.mvt), not hand-curated — the guard
             # owns the required set, so a future importer reds it here
-            # instead of silently falling out of the PR lane. Of the seven
+            # instead of silently falling out of the PR lane. Of the eight
             # added entries, four are direct non-gated importers that assert
             # the postgis_tile_sql() output shape (hhe_mvt_binding,
             # hydro_display_mvt_scaling, the two node27_timeseries_compression
-            # suites); the three direct_grid_display_cutover_* suites are the
-            # one-hop additions via apps/api/routes/hydro_display.py. The two
+            # suites); the three direct_grid_display_cutover_* suites plus
+            # test_openapi_31_contract.py are the one-hop additions via
+            # apps/api/routes/hydro_display.py and
+            # apps/api/openapi_patching.py respectively. The two
             # `integration`-marked importers stay out per the #1447 ruling:
             # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
             # so requiring them buys constant skips and zero assertions.
@@ -719,6 +731,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_openapi_31_contract.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -834,6 +847,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_external_contract_snapshot.json",
         ("tests/test_node27_external_contract_snapshot.py",),
+    ),
+    PathTestRule(
+        # #1644: the committed OpenAPI snapshot is the drift oracle's subject, so
+        # an OpenAPI-only PR must run the drift + API-contract + 3.1-contract
+        # suites. Exact set, no core-smoke fallback, no other suites.
+        "openapi/**",
+        OPENAPI_CONTRACT_TESTS,
+    ),
+    PathTestRule(
+        # #1644: the runtime schema owner injects every nullable node and the
+        # security metadata, so a patch-owner PR must reach the drift + 3.1
+        # contract suites in addition to the broad API consumers it already
+        # carried.
+        "apps/api/openapi_patching.py",
+        (
+            "tests/test_api.py",
+            "tests/test_api_contract.py",
+            "tests/test_monitoring_api.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_drift.py",
+        ),
     ),
     PathTestRule(
         "apps/api/**",
