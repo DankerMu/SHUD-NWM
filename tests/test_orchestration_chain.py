@@ -14475,22 +14475,26 @@ def test_nested_retry_submit_result_ambiguous_preserves_prior_confirmed_master_i
 
 
 @pytest.mark.parametrize(
-    ("prior_id", "raw_status", "raw_id", "expected_id"),
+    ("prior_id", "raw_status", "raw_id", "expected_id", "raw_stage"),
     [
         # Empty raw pending inherits the prior confirmed master id.
-        ("2001", "submit_result_ambiguous", "", "2001"),
-        ("2001", "submit_result_ambiguous", "   ", "2001"),
+        ("2001", "submit_result_ambiguous", "", "2001", "forecast"),
+        ("2001", "submit_result_ambiguous", "   ", "2001", "forecast"),
         # A non-empty raw retry master always wins over the prior id.
-        ("2001", "reconcile_unverified", "2002", "2002"),
-        ("2001", "submit_result_ambiguous", "2002", "2002"),
+        ("2001", "reconcile_unverified", "2002", "2002", "forecast"),
+        ("2001", "submit_result_ambiguous", "2002", "2002", "forecast"),
         # Bare pending with no prior and no raw id stays empty.
-        ("", "reconcile_unverified", "", ""),
+        ("", "reconcile_unverified", "", "", "forecast"),
         # Non-pending raw never inherits.
-        ("2001", "skipped_duplicate_submission", "", ""),
-        ("2001", "submission_failed", "", ""),
+        ("2001", "skipped_duplicate_submission", "", "", "forecast"),
+        ("2001", "submission_failed", "", "", "forecast"),
         # Unknown status fails closed even with an empty raw id and a prior id:
         # only statuses the mapping routes to ``reconciling`` inherit.
-        ("2001", "mystery_status", "", ""),
+        ("2001", "mystery_status", "", "", "forecast"),
+        # CROSS-STAGE raw pending never inherits: the replacement contract is
+        # same-stage, so a governed empty-ID raw result must not take a prior
+        # id from a different stage (topology-drift guard on the indexed seam).
+        ("2001", "submit_result_ambiguous", "", "", "forcing"),
     ],
 )
 def test_preserve_prior_confirmed_master_id_boundary(
@@ -14498,13 +14502,15 @@ def test_preserve_prior_confirmed_master_id_boundary(
     raw_status: str,
     raw_id: str,
     expected_id: str,
+    raw_stage: str,
 ) -> None:
     """D6 (#1326 Round 1): helper boundary — inherit prior ONLY when raw is empty.
 
     The rule is: inherit prior only for a reconciliation-pending status whose
-    raw identity is empty/whitespace. A non-empty raw identity (a retry master
-    the submit returned) is retained; bare pending with neither id stays empty;
-    non-pending statuses (duplicate skip, submission_failed) never inherit.
+    raw identity is empty/whitespace AND whose stage matches the prior slot. A
+    non-empty raw identity (a retry master the submit returned) is retained;
+    bare pending with neither id stays empty; non-pending statuses (duplicate
+    skip, submission_failed) and a cross-stage pending result never inherit.
     """
 
     from services.orchestrator import chain_forecast_execution
@@ -14517,7 +14523,7 @@ def test_preserve_prior_confirmed_master_id_boundary(
         status="partially_failed",
     )
     raw = StageRunResult(
-        stage="forecast",
+        stage=raw_stage,
         job_type=M3_STAGES[2].job_type,
         pipeline_job_id="job_cycle_gfs_2026050100_forecast_retry_1",
         slurm_job_id=raw_id,
@@ -14593,6 +14599,98 @@ def test_nested_retry_reconcile_unverified_retains_raw_retry_master_id(
         "forecast_running",
         "forcing_ready_partial",
         "forecast_running",
+    ]
+
+
+def test_outer_retry_submit_result_ambiguous_preserves_prior_confirmed_master_id(
+    tmp_path: Path,
+) -> None:
+    """#1326 Round 2: the OUTER same-stage retry keeps the confirmed dispatch.
+
+    The whole-array forecast first submit is confirmed (master ``2001``) but
+    all tasks fail transiently, so the outer retry is scheduled. The retry
+    crosses the gateway boundary and returns a raw empty-ID
+    ``submit_result_ambiguous``. The outer same-stage replacement must NOT
+    erase the confirmed ``2001``: the raw retry keeps its pipeline id / status /
+    error code / empty task rows, but inherits ``2001`` because the raw id is
+    empty. The cycle lands ``reconciling`` with no downstream stage and no
+    retry N+1, and no stale task outcomes are reconstructed.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    # The outer retry really happened: two forecast array submissions, the
+    # first all-failed and the retry (attempt 1) raising ambiguous.
+    assert client.array_submit_attempts.count("forecast") == 2
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    # Raw retry preserved: ambiguous status, empty task rows, retry error code
+    # AND message, and the retry pipeline id — but the confirmed full-array
+    # master id 2001 is inherited because the raw id is empty.
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert forecast.error_message == "Submit result is ambiguous; exact-comment reconciliation pending."
+    assert forecast.pipeline_job_id.endswith("_retry_1")
+    assert forecast.slurm_job_id == "2001"
+    assert result.status == "reconciling"
+    # No downstream stage, no retry N+1, no stale task outcomes reconstructed.
+    assert [row["stage"] for row in client.submissions] == ["forecast"]
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert client.array_submit_attempts.count("forecast") == 2
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    cohort_masters = sorted(
+        job["job_id"]
+        for job in jobs
+        if job["job_id"].startswith("job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast")
+    )
+    assert cohort_masters == [
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast",
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1",
+    ]
+    assert all(job["job_id"].count("_retry_") <= 1 for job in jobs)
+    # The durable FIRST master row actually carries the confirmed dispatch and
+    # its accepted/bound submission evidence — not merely that the job id exists.
+    first_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+    )
+    assert first_master is not None
+    assert first_master["slurm_job_id"] == "2001"
+    assert first_master["status"] == "failed"
+    assert first_master["submit_outcome"] == "accepted"
+    assert first_master["reconciliation_source"] == "slurm_exact_comment"
+    assert first_master["reconciliation_decision"] == "matched_bound"
+    assert first_master["matched_slurm_job_id"] == "2001"
+    assert first_master["submission_attempt"] == 1
+    assert str(first_master["slurm_comment"]).startswith("nhms_idem:")
+    # The raw retry master row is bound to the retry pipeline id and carries the
+    # pending submission outcome, never the confirmed dispatch's success facts.
+    retry_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1"
+    )
+    assert retry_master is not None
+    assert retry_master["status"] == "reserved"
+    assert retry_master["slurm_job_id"] is None
+    assert retry_master["submit_outcome"] == "submit_result_ambiguous"
+    # No stale per-task outcomes: every cohort candidate stays active with no
+    # exclusion reason (the retry helper's raw return never reached
+    # ``_apply_array_progress``).
+    assert [(outcome["status"], outcome.get("reason")) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
     ]
 
 

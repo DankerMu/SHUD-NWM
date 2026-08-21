@@ -7,7 +7,7 @@ A cycle whose submission result is still being reconciled can currently appear a
 - Classify `reconciling`, `submit_result_ambiguous`, and `reconcile_unverified` as non-successful partial evidence, never failed or successful evidence.
 - Make readiness recognize the family in both partial recount predicates and accept the `reconciling` pass status as review-blocked.
 - Defer nested reconciliation-pending submissions without stamping pending tasks failed, minting another attempt, or running downstream stages.
-- Preserve an already-confirmed first dispatch when a raw nested pending result replaces the prior stage; a bare pending token still does not imply submission.
+- Preserve an already-confirmed first dispatch when a raw nested or outer same-cycle pending result replaces the prior stage; a bare pending token still does not imply submission.
 - Attribute the final reconciliation defer span as neither submitted nor failed, while retaining the confirmed dispatch in scheduler evidence.
 - Map nested stage statuses explicitly to the `reconciling` cycle terminal while preserving the existing duplicate-skip terminal.
 - Preserve `submission_failed`, generic partial-retry, duplicate-skip, and durable reconciliation semantics outside this family.

@@ -24,18 +24,21 @@
 - [x] 3.7 When nested reconciliation replaces a stage with a raw pending result, preserve an already-confirmed non-empty Slurm master identity without restoring stale task outcomes or inferring submission from the pending token itself.
 - [x] 3.8 Attribute both nested reconciliation defer terminals as `basin_count=N`, `submitted_count=0`, `failed_count=0` in the final stage span while retaining real-failure timing.
 - [x] 3.9 Add scheduler-produced artifact oracles proving the confirmed first dispatch remains submitted/called/not-proven-absent through compaction; bare pending remains non-submitted.
+- [x] 3.10 Apply the same governed empty-raw-only identity preservation to the outer same-stage retry replacement without changing raw retry fields, task rows, retry quota, or non-pending behavior.
+- [x] 3.11 Add an outer whole-array failure -> ambiguous retry produced-artifact oracle covering returned, persisted, and bounded submission proofs.
 
 ## 4. Red Proof and Evidence Floor
 
 - [x] 4.1 Produce one batched pre-change red run for the Part A truth table/artifact tests and Part B nested defer tests; leave no `red-proof` stash.
 - [x] 4.2 Run new Round 1 invariant tests red on `56e17cbacb31a0040797f839a6528d1a0e987b9c` and green after the fix; record the exact command and outcomes.
-- [x] 4.3 The existing focused #1326 bundle passes.
-- [x] 4.4 `uv run pytest -q tests/test_orchestration_chain.py tests/test_production_readiness_validation.py tests/test_production_scheduler.py` passes.
-- [x] 4.5 `uv run ruff check .` passes.
-- [x] 4.6 `openspec validate scheduler-reconciliation-pending-partial --strict --no-interactive` passes.
+- [x] 4.3 Run the Phase 6.2 outer-retry invariant tests red on `ab0ad599cda2990376569378cfe3950118b641ff` and green after the fix; record the exact command and outcomes.
+- [x] 4.4 The existing focused #1326 bundle passes.
+- [x] 4.5 `uv run pytest -q tests/test_orchestration_chain.py tests/test_production_readiness_validation.py tests/test_production_scheduler.py` passes.
+- [x] 4.6 `uv run ruff check .` passes.
+- [x] 4.7 `openspec validate scheduler-reconciliation-pending-partial --strict --no-interactive` passes.
 
 ## 5. Scope and Oracle Integrity
 
 - [x] 5.1 Confirm no production-status alias, DB schema, Slurm gateway, reserve-gate, forcing-ready-partial, or public API change entered the diff.
 - [x] 5.2 Confirm no existing test/spec/CI oracle was weakened; former collapse tests are replaced only because the governed contract explicitly changes.
-- [x] 5.3 Record inspected unchanged sibling surfaces and implementation deviations, including the original red-proof chronology deviation and Round 1 contract closure.
+- [x] 5.3 Record inspected unchanged sibling surfaces and implementation deviations, including the original red-proof chronology deviation, Round 1 contract closure, and Phase 6.2 outer-retry invariant miss.

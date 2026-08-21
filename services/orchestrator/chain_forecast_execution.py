@@ -208,10 +208,21 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
                     if stage_results and len(stage_results) > stage_index:
-                        stage_results[stage_index] = result
+                        # #1326 Round 2 (outer retry): an outer same-stage retry
+                        # may return a raw reconciliation-pending result whose
+                        # empty Slurm identity would erase the confirmed
+                        # full-array dispatch recorded on the prior slot. Keep
+                        # the raw pending terminal/errors while inheriting the
+                        # prior confirmed master id via the shared helper.
+                        stage_results[stage_index] = _preserve_prior_confirmed_master_id(
+                            stage_results[stage_index], result
+                        )
                         result_slot = stage_index
                     elif stage_results and stage_results[-1].stage == result.stage:
-                        stage_results[-1] = result
+                        # Same rule for the trailing same-stage replacement form.
+                        stage_results[-1] = _preserve_prior_confirmed_master_id(
+                            stage_results[-1], result
+                        )
                         result_slot = len(stage_results) - 1
                     else:
                         stage_results.append(result)
@@ -429,13 +440,19 @@ def _preserve_prior_confirmed_master_id(
     identity keeps that identity: submit returned it, only its terminal outcome
     is unknown, and dropping a returned identity is itself non-monotone. So the
     rule is inherit prior ONLY when the mapped ``reconciling`` status has an
-    empty/whitespace ``raw.slurm_job_id``. Everything else — the raw pending
-    status, the empty task outcomes, and the rest of the raw result — is
-    preserved; no task rows are reconstructed and no submission is inferred
-    from the pending token itself.
+    empty/whitespace ``raw.slurm_job_id`` AND the replacement is SAME-STAGE (a
+    raw pending result never inherits identity from a different stage). The raw
+    pending status, the empty task outcomes, and the rest of the raw result are
+    always preserved; no task rows are reconstructed and no submission is
+    inferred from the pending token itself.
     """
 
     if _NESTED_RETRY_DEFER_TERMINALS.get(raw.status) != "reconciling":
+        return raw
+    if prior.stage != raw.stage:
+        # The replacement contract is SAME-STAGE: a raw pending result may only
+        # inherit identity from the prior slot for the same stage. A different
+        # stage is a topology drift the indexed seam must never bridge.
         return raw
     if not _nonempty_master_id(prior.slurm_job_id) or _nonempty_master_id(raw.slurm_job_id):
         return raw

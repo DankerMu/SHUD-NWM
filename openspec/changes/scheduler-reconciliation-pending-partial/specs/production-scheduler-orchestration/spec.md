@@ -18,10 +18,10 @@ Scheduler candidate evidence SHALL treat cycle terminal `reconciling` and stage/
 - **THEN** the same non-success predicate SHALL reject final success
 - **THEN** existing failed-status classification SHALL remain false for both statuses
 
-#### Scenario: Confirmed first dispatch survives nested pending projection
+#### Scenario: Confirmed first dispatch survives same-cycle pending projection
 
 - **GIVEN** a scheduler candidate's initial full-array stage has a confirmed Slurm master job identity
-- **WHEN** a nested retry ends reconciliation-pending and the pass artifact is produced
+- **WHEN** either a nested partial retry or an outer whole-array retry ends reconciliation-pending and the pass artifact is produced
 - **THEN** the candidate model-run evidence SHALL retain `submitted=true` and `slurm_submit_called=true`
 - **THEN** execution proof SHALL retain a positive `submitted_count` and `slurm_submit_count`
 - **THEN** `slurm_submit_proven_absent` SHALL be false and no-mutation proof SHALL NOT claim `slurm_submit_called=false`

@@ -27,6 +27,15 @@ The partial-array retry helper SHALL preserve a nested `submit_result_ambiguous`
 - **THEN** it SHALL retain the raw pending terminal and empty task outcomes
 - **THEN** it SHALL NOT reconstruct stale per-task outcomes or infer any additional submission
 
+#### Scenario: Outer retry pending replacement preserves confirmed dispatch identity
+
+- **GIVEN** the current cycle's prior whole-array stage contains a non-empty Slurm master job identity
+- **WHEN** a same-stage outer retry returns a raw reconciliation-pending result with no Slurm identity or task outcomes
+- **THEN** the replacement stage SHALL retain the prior non-empty Slurm master job identity
+- **THEN** it SHALL retain the raw retry pipeline identity, pending terminal, error fields, and empty task outcomes
+- **THEN** a non-empty raw retry master identity SHALL remain authoritative instead of being overwritten
+- **THEN** no further retry or downstream stage SHALL be derived from the pending result
+
 #### Scenario: Bare pending result does not manufacture dispatch identity
 
 - **GIVEN** no prior stage contains confirmed Slurm submission identity
