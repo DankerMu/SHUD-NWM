@@ -433,3 +433,13 @@ across carriers of one narrative — rotation found them, it did not
 prevent them; the corrective lives in fix-brief carrier checklists, not
 in the lens mix. Next revisit on maintainer override or a materially
 changed attribution ratio.
+
+## Revisit 2026-08-21 (post PR #1666 / issue #1468)
+
+Audit re-flagged DECIDABLE at 93 multi-round merged PRs, later-round
+catches core=46 vs rotated=244 (rotated share 84.1%, unchanged from the
+same-day revisit above). #1468's two later-round catches both came from the
+rotated-in fix-correctness lens (fixture residue; an oracle setup-proof gap).
+Direction unchanged: **keep rotation** stands; no new analysis warranted for a
+one-PR delta. Next revisit on maintainer override or a materially changed
+attribution ratio.
