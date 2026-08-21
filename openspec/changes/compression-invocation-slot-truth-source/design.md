@@ -31,7 +31,7 @@ or hash-mismatched path with `BoundedEvidenceError`.
 **Wrong #2 — this fixture's own first draft, "the authored value never reaches the terminal state."** Also
 false, and worse because it would have shipped into normative SHALL text. The closure's manifest is emitted
 as the terminal document's `source_manifest` (`:4093`, fed from `closure.manifest` at `:4205`; both post-edit, +3 from the three added comment lines), and
-`artifact_references` (`packages/common/evidence_io.py:178-186`) collects every `{path, sha256, bytes}`
+`artifact_references` (`packages/common/evidence_io.py:179`, collection logic `:187-198`) collects every `{path, sha256, bytes}`
 mapping in the raw input bundle — the five authored slots included. Empirically, the repo's own canonical v3
 example carries all five authored invocation paths in `source_manifest`
 (`/home/nwm/NWM/.nhms-issue1069-live/{recovery,migration-first,migration-second,dry,enforce}-invocation.json`,
@@ -120,9 +120,15 @@ improvement into red CI — a brittle test is its own kind of dead surface. The 
 tokens, not the prose.
 
 **G2 — enforcement boundary.** Two halves, matching the scenario: a well-formed `{path, sha256, bytes}` slot
-naming a nonexistent path fails closed with `BoundedEvidenceError`; a four-key mapping (and a string, and
-`null`) naming the same nonexistent path is never closure-checked and still qualifies. This is the honest
-statement of the boundary, and it is the one the second draft got wrong.
+naming a nonexistent path fails closed with `BoundedEvidenceError` — the half the second draft got wrong when
+it claimed enforcement applies unconditionally; and a four-key-**with-scalar** mapping (and a string, and
+`null`) naming the same nonexistent path escapes closure and still qualifies. The `with-scalar` qualifier is
+load-bearing, and dropping it is exactly what Wrong #4 did: the shapes that genuinely escape are those
+carrying **no nested reference**. A fourth key takes the value out of `artifact_references`' exact-key set so
+the mapping is not itself collected (`packages/common/evidence_io.py:192`), but the same branch then descends
+into its values (`:195`), so a wrapper whose extra key holds a well-formed reference does **not** escape and is
+pinned separately by `test_invocation_shape_wrapping_a_reference_is_still_closure_checked`. That is the honest
+statement of the boundary.
 
 **G3 — manifest retention and dedup.** On a bundle whose five slots name five distinct well-formed
 references, all five authored paths appear in `source_manifest`, distinct from the ledger reference in the
@@ -135,7 +141,7 @@ checked against the source and, for the contested clauses, against an executed p
 
 ## D4 — Runbook placement
 
-The AC says name the five keys in `:755-771`. `:755-763` is the **top-level** bundle key list; the five slots are nested (`recovery.invocation`, `migration.first_invocation` / `second_invocation`, `receipts.dry_run_invocation` / `enforce_invocation`). Grafting nested keys into a top-level list would make that list wrong. They are named in the referenced-contracts narrative at `:768-771`, where the "may remain" sentence lives and where `execution.ledger` is already the subject.
+The AC says name the five keys in `:755-771`. `:755-763` is the **top-level** bundle key list; the five slots are nested (`recovery.invocation`, `migration.first_invocation` / `second_invocation`, `receipts.dry_run_invocation` / `enforce_invocation`). Grafting nested keys into a top-level list would make that list wrong. They are named in the referenced-contracts narrative at `:770-774`, where the "may remain" sentence lives and where `execution.ledger` is already the subject.
 
 ## D5 — Fences (each is an acceptance criterion with diff self-evidence)
 
