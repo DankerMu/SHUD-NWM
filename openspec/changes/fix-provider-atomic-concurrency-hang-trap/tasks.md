@@ -164,14 +164,22 @@ run-manifest/QC, or published-display identity behavior changes.
     deadline. Correct code returns successfully; the mutant must FAIL on
     `spin-wait deadline`. The existing blocked-worker test cannot prove this —
     it expects that same deadline failure with or without the `finally`.
-  - **Attribution mutant:** remove the catch-all/errors assertion but keep
-    `finally` and both bounds. Run the shipped raising-writer injection test.
-    It must report `1 failed, 1 warning`: the failure names the downstream
-    empty-observation symptom while `InjectedWriterFailure` appears only in
-    `PytestUnhandledThreadExceptionWarning`. A standalone minimal probe can be
-    `1 passed, 1 warning`, but that is not the shipped test's observable.
-  - **Deadline mutant:** remove the spin-loop deadline. The blocked-worker case
-    must hit an external process timeout instead of a pytest assertion.
+  - **Attribution mutant:** remove all three parts of worker-exception capture —
+    the `errors` list, the worker's `except BaseException` handler, and
+    `assert not errors` — while retaining the surrounding `try/finally` and both
+    bounds. Run the shipped raising-writer injection test. It must report
+    `1 failed, 1 warning`: the failure names the downstream empty-observation
+    symptom while `InjectedWriterFailure` appears only in
+    `PytestUnhandledThreadExceptionWarning`. Removing only the assertion is a
+    different mutant: the catch still consumes the exception, so it produces the
+    symptom failure without an unhandled-thread warning.
+  - **Deadline mutant:** remove only the spin-loop deadline. Two observables are
+    required and must not be conflated: the direct controlled-blocker test waits
+    for its writer's own 30s Event bound and then fails `DID NOT RAISE`; the
+    permanent-block subprocess test hits its parent's external 30s
+    `communicate(timeout=...)` bound, kills the process group, and fails. An
+    independently chosen shorter wrapper bound is acceptable supplementary
+    evidence only when its exact command and value are recorded.
   - **Run-termination mutant:** change the harness worker from daemon to
     non-daemon. The permanent-block subprocess must catch/print the deadline
     assertion and still hit the parent's external timeout during interpreter
