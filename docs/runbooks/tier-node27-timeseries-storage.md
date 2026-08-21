@@ -2188,6 +2188,185 @@ chunk 只有一种正确写法——`ANALYZE <hypertable>`（走
 `update_compressed_chunk_relstats`）。压缩 chunk 无 DML，autoanalyze 永不触发，
 一旦清零就只能靠这条语句修回来。
 
+### 4.8 权威表统计清零与标识列 trigram 等值陷阱 (`#1468`)
+
+§4.7 治的是**前沿 chunk 的统计漂移**（有 churn、阈值太高）。本节治的是两件不同的
+事：统计被**整体清零**后再也没有任何阈值能把它救回来；以及**统计新鲜也救不了**的
+索引选择陷阱。两者在 #1341 回填战役里叠加，单次等值查找劣化 ~2,900x。
+
+#### 成因一：崩溃恢复清零累计统计（清零型）
+
+2026-08-21 只读诊断（node-27 生产 `nhms`，PG 15.2 / TSDB 2.10.2）：
+
+| 证据 | 值 |
+|---|---|
+| `pg_stat_database.stats_reset` | NULL —— 从未显式 reset |
+| autovacuum / scale_factor / threshold / track_counts | on / 0.1 / 50 / on（全默认） |
+| `core.river_segment_crosswalk` | `reltuples` 154,630，`n_live_tup` 0，`last_analyze`/`last_autoanalyze` **双 NULL**，计数器全 0 |
+| `met.canonical_grid_cell` | `reltuples` 296,100，同上 |
+| `docker logs nhms-db` 第 12 行 | `2026-08-07 05:49:17 UTC … database system was not properly shut down; automatic recovery in progress`（容器 created 2026-08-07T05:49:16Z） |
+
+`pg_class.reltuples` 保有旧值而 `pg_stat_*` 计数器归零，只有"累计统计被整体丢弃"
+能解释：**PG15 在崩溃恢复时丢弃全部累计统计，且不写 `stats_reset`**。容器按
+ADR 0002 是裸 `docker run` 创建的，重建时走了崩溃恢复。
+
+关键后果：此后**零 churn 的表 `n_mod_since_analyze` 恒为 0**，默认阈值
+（50 + 10%）也好、per-table 阈值也好，**永远不会再触发** autoanalyze。所以
+per-table scale factor 只能覆盖 churn 型失效（新增 network、单行版本变更），
+救不了清零型——两个机制缺一不可。
+
+#### 修复腿：autopipe stats guard 的第二条腿
+
+| 位置 | 触发 | 目标 | 上限 / 超时 |
+|---|---|---|---|
+| autopipe tick phase 3.5（与 §4.7 前沿腿同一处） | **每个 tick，不论本 tick 是否 ingest**——它的触发条件是统计缺席，不是前沿移动 | `core`/`met`/`hydro` 下 `relkind='r'` 且**非 hypertable** 的表中 `relpages > 0 AND last_analyze IS NULL AND last_autoanalyze IS NULL` 者 | 与前沿腿**共享**上限（每 tick 至多 3 张，按 `relpages` 降序）与 `statement_timeout = 120 s` |
+
+hypertable 根表与 `_timescaledb_internal` 下的 chunk **明确排除**（根表 ANALYZE
+会递归到 chunk；裸压缩 chunk 名 ANALYZE 会清零 TimescaleDB 保留的 origin 统计，
+见 §4.7 陷阱一节）。回读自检、单表失败隔离、guard 级失败如实记录、**不改 tick
+返回码**——全部与前沿腿同语义。停用开关 `NODE27_AUTOPIPE_STATS_GUARD=off`
+**一并关闭两腿**（summary 两处都记 `skipped`）。
+
+**怎么读**：tick summary JSON 打到 stdout，落在
+`/home/nwm/autopipe-logs/autopipe.log`。修复腿在 `stats_guard.authority`：
+
+```jsonc
+"stats_guard": {
+  "status": "not_triggered", "reason": "no_run_ingested",   // 前沿腿：本 tick 没 ingest
+  "analyzed": [], "deferred": [],
+  "authority": {                                            // 修复腿：照常跑
+    "status": "completed",
+    "analyzed": [
+      {"table": "core.river_segment_crosswalk", "relpages": 2180,
+       "seconds": 0.42, "last_analyze": "2026-08-21T…Z", "status": "ok"}
+    ],
+    "deferred": []
+  }
+}
+```
+
+条目语义与前沿腿一致：`analyzed` 逐**尝试**一条；只有 `status: "ok"` 承诺
+`last_analyze` 真刷到了；`warning` 是"发了 ANALYZE 但回读没刷新"（PG15 非 owner
+静默跳过，见 §4.7），`failed` 是没执行成。
+
+**生产上的权威读法就是上面这段 summary JSON，不是 `[stats-guard]` 进度行。**
+`scripts/node27_autopipe_cron.sh` **不传** `--progress`，所以定时 tick 根本不打那
+一行；它只在人工 `--progress` 跑时出现，形态与前沿段同构（腿级 status + 四个计数）：
+
+```
+[stats-guard] not_triggered: ok 0, warning 0, failed 0, deferred 0, authority completed: ok 1, warning 1, failed 1, deferred 1
+```
+
+`authority` 后面的 status 是**腿级**的：guard 级失败（连不上 / 候选查询炸）时
+`analyzed` 为空、四个计数全 0，与"这一腿没活干"长得一模一样，只有 status 分得开
+（`authority failed: ok 0, warning 0, failed 0, deferred 0`）。该行现在只要**任一
+腿**有动作就打印——旧条件在 `not_triggered` 时整行抑制，恰好吞掉修复腿唯一干活的
+那种 tick。
+
+#### 复核 SQL（双 NULL 候选，期望 0 行）
+
+```sql
+-- 还有哪些普通表的累计统计是空的（修复腿的候选集，与代码同口径）
+SELECT s.schemaname, s.relname, c.relpages, s.last_analyze, s.last_autoanalyze
+FROM pg_stat_user_tables s
+JOIN pg_class c ON c.oid = s.relid
+WHERE s.schemaname IN ('core', 'met', 'hydro')
+  AND c.relkind = 'r'
+  AND c.relpages > 0
+  AND s.last_analyze IS NULL
+  AND s.last_autoanalyze IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM timescaledb_information.hypertables h
+      WHERE h.hypertable_schema = s.schemaname AND h.hypertable_name = s.relname
+  )
+ORDER BY c.relpages DESC, 1, 2;
+```
+
+一个跑过修复腿的 tick 之后这条应返回 **0 行**。持续非空 = 修复腿没跑（开关 off /
+guard 级失败）或每条都 `failed`/`warning`——先看 summary，别先怀疑 SQL。
+
+这条 SQL 的**取/舍口径由真库用例钉住**，不是靠字符串比对：
+`tests/test_real_database_integration.py::test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypertables`
+在 throwaway 库里把 `core`/`met`/`public` 三张普通表与一个 hypertable chunk 做成
+同样的候选形态（先 ANALYZE 让 `relpages > 0`，再
+`pg_stat_reset_single_table_counters` 造双 NULL），直接调修复腿并断言：`core`/`met`
+两张被 ANALYZE 且 `status: "ok"`，`public.*`、hypertable 根表、
+`_timescaledb_internal.*` chunk **一个都不入选**。
+
+hypertable 根表还多一道：ANALYZE 不给继承父表写 `pg_class.relpages`，根表本来就被
+`relpages > 0` 挡在外面，`NOT EXISTS` 删掉也没人发现。用例因此**直接改写根表的
+`relpages`**（一次 catalog 写，只在 per-test throwaway 库里做）把它凑成除
+`NOT EXISTS` 外每条谓词都满足的候选，再证明该子句是**唯一**排除者：出厂 SQL 不返回
+根表、仅删掉 `NOT EXISTS` 块的变异 SQL 返回根表、且修复腿的入选集仍恰好是
+`core`/`met` 两张。改这段 SQL 先跑它。
+
+#### per-table autovacuum 参数（覆盖 churn 型）
+
+000052 给四张 core 身份表加了参数，复核：
+
+```sql
+SELECT relname, reloptions FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'core'
+  AND relname IN ('river_segment', 'river_segment_crosswalk',
+                  'river_network_version', 'basin_version');
+```
+
+| 表 | 参数 | 为什么 |
+|---|---|---|
+| `river_segment`、`river_segment_crosswalk` | `autovacuum_analyze_scale_factor=0.01`、`autovacuum_analyze_threshold=500` | 新增一个 ~5k 段的 network 远不到默认 209k×10%，1% + 500 能过槛 |
+| `river_network_version`、`basin_version` | `autovacuum_analyze_scale_factor=0`、`autovacuum_analyze_threshold=1` | 20 行的表，单行变更也远不到默认的 flat 50 |
+
+#### 成因二：标识列上的 trigram GIN 等值陷阱（统计新鲜也不管用）
+
+pg_trgm 1.6 起 `gin_trgm_ops` 支持 `=`，planner 因此把 trigram GIN 也算作**等值
+查找**的候选。`river_segment_id` 是共享 ~34 字符前缀的长 slug
+（`basins_jialingjiang_shud_shud_riv_` 14,673 条、`basins_zhaochen_*` ~9k 条），
+这些前缀三元组的 posting list 几乎覆盖全表，GIN 成本模型严重低估。08-19 手工
+ANALYZE **之后**实测 2,000 次等值查找：
+
+| | 计划 | wall | buffers | 估算成本 |
+|---|---|---|---|---|
+| 默认 | Bitmap Index Scan `river_segment_id_trgm_idx` | **51,029 ms** | 2,560,171 | 0.72 |
+| `enable_bitmapscan=off` | Index Only Scan `river_segment_pkey` | **17 ms** | 9,718 | 2.28 |
+
+修法是**结构性**的：000052 把该索引改建在表达式 `lower(river_segment_id)` 上，
+等值谓词在结构上无法匹配表达式索引，与统计新鲜度和成本估计都无关；search 侧
+（`packages/common/model_registry.py` 列表路径 id 臂）改写成
+`lower(rs.river_segment_id) LIKE <小写 pattern> ESCAPE '\'`，命中集合不变、
+计划仍走该索引。完整机制、备选方案与约定见
+[ADR 0004](../adr/0004-identifier-trgm-gin-equality-trap.md)。
+
+**施加 000052 的运维口径**：首遍用 `uv run python -m packages.common.migrate`（autocommit 逐语句执行且写 `public.schema_migrations` 账本；`psql -f` 不写账本，会让下一次 bring-up/`run_qhh_cycle.sh` 静默重放）；重跑验证可 `psql -v ON_ERROR_STOP=1 -f` 直接跑，重跑幂等，**全文
+没有任何对 `core.river_segment` 取 ACCESS EXCLUSIVE 的语句**——旧索引与上一次
+`CREATE INDEX CONCURRENTLY` 中断留下的 INVALID 残骸都只 **RENAME**（`_legacy` /
+`_invalid`，SHARE UPDATE EXCLUSIVE，不阻塞 MVT 读），新索引并发建成后再
+`DROP INDEX CONCURRENTLY` 删掉这两个名字。非并发 `DROP INDEX` 即使删的是没有读者
+的 INVALID 索引，也会锁**表**、在读流量下排队并被文件里的 `lock_timeout = '2s'`
+打断（round-1 审查 C1）。所以中断后的恢复动作只有一个：**重跑该文件**；不要手工
+`DROP INDEX`（要手工清也必须带 `CONCURRENTLY`）。看恢复是否干净：
+`\di core.river_segment_id_trgm_idx*` 应只剩一个名字，且
+`pg_index.indisvalid = true`。
+
+`met.met_station` 的 `met_station_id_trgm_idx` 是 partial（`WHERE active_flag =
+true`）：不带该谓词的等值查找结构上不可选它（实测走 `met_station_pkey`，
+1.8 ms/500）；**带谓词的等值 join 会中招且随统计翻转**——2026-08-21 05:50Z 实测走
+`met_station_active_basin_station_idx` Hash Join（22 ms/500），同日 08:32Z（PR #1666
+E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Index Scan
+`met_station_id_trgm_idx`（0.33 ms/次，174 ms/500，29.6k buffers，~8×）。本 change
+不改 met 侧，按 ADR 0004 约定对齐（表达式索引 + `forecast_store` search 臂改写）
+路由到 #1669；复核 SQL：`EXPLAIN` 上述两种形态，带谓词形态出现
+`met_station_id_trgm_idx` 即为陷阱复现。
+
+#### 两项既有缓解的作用域（都不要再依赖）
+
+- **2026-08-16 / 08-19 的手工 `ANALYZE`**：一次性的，只覆盖当时那三张权威表；
+  crosswalk 与 `met.canonical_grid_cell` 当时并未修复。修复腿上线后不需要再手工做。
+- **`PGOPTIONS='-c enable_bitmapscan=off'`**：只存在于 node-27 本地
+  `run-campaign-v3.sh` 的**会话级**设置（该脚本不在本仓库内），随 #1341 战役结束
+  消亡。000052 之后**不再需要**——不要把它固化进任何回填脚本，那只救一个消费者
+  并掩盖根因。
+
 ## 8. Gated DB retention (`timeseries-db-retention`)
 
 The retention runner

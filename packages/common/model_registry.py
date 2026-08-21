@@ -1021,18 +1021,28 @@ class PsycopgModelRegistryStore:
             filters.append("rnv.river_network_version_id = %s")
             params.append(river_network_version_id)
 
-        # search: parameterised ILIKE over the segment identifier and the human
-        # readable name stored in properties_json. Escapes %/_ so caller input is
-        # treated literally and never widens the LIKE pattern (no injection face).
+        # search: parameterised LIKE/ILIKE over the segment identifier and the
+        # human readable name stored in properties_json. Escapes %/_ so caller
+        # input is treated literally and never widens the LIKE pattern (no
+        # injection face).
+        #
+        # The id arm spells `lower(rs.river_segment_id)` and lowercases the
+        # pattern instead of using ILIKE: migration 000052 rebuilt
+        # `river_segment_id_trgm_idx` on that expression so equality lookups can
+        # no longer select it (issue #1468 / ADR 0004), and only a query using
+        # the same expression still gets the index. Semantically identical to
+        # ILIKE on these ASCII slug ids, and `_escape_like` runs first so the
+        # `\`/`%`/`_` escapes are untouched by `lower()`. The two name arms are
+        # served by bare-column trigram indexes and stay on ILIKE.
         normalized_search = search.strip() if search is not None else ""
         if normalized_search:
             like_pattern = f"%{_escape_like(normalized_search)}%"
             filters.append(
-                "(rs.river_segment_id ILIKE %s ESCAPE '\\' "
+                "(lower(rs.river_segment_id) LIKE %s ESCAPE '\\' "
                 "OR COALESCE(rs.properties_json->>'name', '') ILIKE %s ESCAPE '\\' "
                 "OR COALESCE(rs.properties_json->>'segment_name', '') ILIKE %s ESCAPE '\\')"
             )
-            params.extend([like_pattern, like_pattern, like_pattern])
+            params.extend([like_pattern.lower(), like_pattern, like_pattern])
 
         # stream_order filter lands on core.river_segment.segment_order. The column
         # is nullable, so rows without a populated order are excluded from a filtered

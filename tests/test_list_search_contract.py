@@ -97,17 +97,32 @@ def test_river_segment_search_emits_ilike_predicate_and_paginates(monkeypatch: p
     store.list_river_segments(
         basin_version_id="basin_v01",
         river_network_version_id="rivnet_v01",
-        search="trib-7",
+        search="TRIB-7",
         limit=25,
         offset=50,
     )
 
+    count_statement = cursor.statements[0]
     page_statement = cursor.statements[1]
     page_params = cursor.parameters[1]
-    # search predicate is present and parameter-bound (no literal value spliced in).
-    assert "ILIKE %s ESCAPE" in page_statement
-    assert "trib-7" not in page_statement
-    assert "%trib-7%" in page_params
+    # The id arm spells the expression migration 000052 built the trigram index
+    # on (issue #1468): a bare-column ILIKE would no longer be index-servable,
+    # and an equality lookup must stay structurally unable to match it.
+    assert "lower(rs.river_segment_id) LIKE %s ESCAPE" in page_statement
+    assert "rs.river_segment_id ILIKE" not in page_statement
+    # The two name arms are served by bare-column trigram indexes: still ILIKE.
+    assert page_statement.count("ILIKE %s ESCAPE") == 2
+    assert "COALESCE(rs.properties_json->>'name', '') ILIKE %s ESCAPE" in page_statement
+    assert "COALESCE(rs.properties_json->>'segment_name', '') ILIKE %s ESCAPE" in page_statement
+    # search predicate is parameter-bound (no literal value spliced in), and the
+    # id arm's pattern is lowercased in Python so `lower(col) LIKE` keeps the
+    # case-insensitive hit set ILIKE used to produce.
+    assert "TRIB-7" not in page_statement
+    # params[0:2] are the basin-version / river-network-version scope binds.
+    assert page_params[2:5] == ("%trib-7%", "%TRIB-7%", "%TRIB-7%")
+    # COUNT and page statements share one filter list, so both carry it.
+    assert "lower(rs.river_segment_id) LIKE %s ESCAPE" in count_statement
+    assert cursor.parameters[0][2:5] == ("%trib-7%", "%TRIB-7%", "%TRIB-7%")
     # pagination retained: filter first, then LIMIT/OFFSET (not full-scan).
     assert "LIMIT %s OFFSET %s" in page_statement
     assert page_params[-2:] == (25, 50)
@@ -125,6 +140,7 @@ def test_river_segment_search_omitted_adds_no_predicate(monkeypatch: pytest.Monk
     )
 
     assert "ILIKE" not in cursor.statements[1]
+    assert "lower(rs.river_segment_id)" not in cursor.statements[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -178,6 +194,9 @@ def test_river_segment_search_escapes_wildcards_and_quotes(monkeypatch: pytest.M
     # every %/_ in the user value is escaped so it matches literally (no widening).
     bound = next(p for p in page_params if isinstance(p, str) and "DROP TABLE" in p)
     assert bound == "%100\\%\\_'; DROP TABLE core.river\\_segment;--%"
+    # The id arm lowercases AFTER escaping, so the backslash escapes survive
+    # intact -- only the payload's letters change case.
+    assert page_params[2] == "%100\\%\\_'; drop table core.river\\_segment;--%"
 
 
 def test_escape_like_neutralizes_metacharacters() -> None:

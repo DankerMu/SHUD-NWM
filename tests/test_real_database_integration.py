@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -472,3 +473,642 @@ def test_no_cross_gap_invariant_holds_after_ingest(
                 f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m "
                 f"drift={ratio:.3%} exceeds 5% bound"
             )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1468: the identifier trigram index is an EXPRESSION index, so equality
+# lookups cannot select it, and the four core identity tables carry per-table
+# autovacuum analyze parameters. Real PostgreSQL only: every assertion below is
+# about what the planner and the catalog actually do with migration 000052.
+# ---------------------------------------------------------------------------
+
+AUTHORITY_STATS_HYGIENE_MIGRATION = "000052_authority_stats_hygiene_trgm_expression_index.sql"
+# >= 34 characters, mirroring the production `basins_jialingjiang_shud_shud_riv_`
+# family whose shared trigrams made the posting lists cover the whole table.
+_SHARED_ID_PREFIX = "basins_pytest1468_shud_shud_riv_shared_"
+
+
+def _river_segment_id_trgm_index(cursor: Any) -> tuple[str, bool]:
+    cursor.execute(
+        """
+        SELECT pg_get_indexdef(ix.indexrelid) AS indexdef, ix.indisvalid
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'core'
+          AND t.relname = 'river_segment'
+          AND i.relname = 'river_segment_id_trgm_idx'
+        """
+    )
+    row = cursor.fetchone()
+    assert row is not None, "river_segment_id_trgm_idx is missing"
+    return row[0], row[1]
+
+
+def _river_segment_id_trgm_opfamily_operators(cursor: Any) -> set[str]:
+    """Every operator the index's operator family can answer, as `name(left,right)`.
+
+    Which predicates an index is ELIGIBLE for is a property of its indexed
+    expression plus its operator family -- a catalog fact, decided before the
+    planner ever costs anything.
+    """
+
+    cursor.execute(
+        """
+        SELECT oc.opcfamily
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_opclass oc ON oc.oid = ix.indclass[0]
+        WHERE n.nspname = 'core'
+          AND t.relname = 'river_segment'
+          AND i.relname = 'river_segment_id_trgm_idx'
+        """
+    )
+    row = cursor.fetchone()
+    assert row is not None, "river_segment_id_trgm_idx is missing"
+    cursor.execute(
+        "SELECT amopopr::regoperator::text FROM pg_amop WHERE amopfamily = %s",
+        (row[0],),
+    )
+    return {operator for (operator,) in cursor.fetchall()}
+
+
+def _core_index_exists(cursor: Any, indexname: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM pg_indexes WHERE schemaname = 'core' AND indexname = %s",
+        (indexname,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _legacy_index_exists(cursor: Any) -> bool:
+    return _core_index_exists(cursor, "river_segment_id_trgm_idx_legacy")
+
+
+def _trgm_index_family(cursor: Any) -> list[str]:
+    """Every index on core.river_segment whose name starts with the trigram one.
+
+    The migration's two scratch names (``_legacy``, ``_invalid``) share that
+    prefix, so this is the "exactly one index survived" oracle -- a name-exact
+    lookup would report a clean end state while a leftover sat next to it.
+    """
+
+    cursor.execute(
+        """
+        SELECT i.relname
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'core'
+          AND t.relname = 'river_segment'
+          AND i.relname LIKE %s
+        ORDER BY i.relname
+        """,
+        ("river_segment_id_trgm_idx%",),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _autovacuum_analyze_options(cursor: Any) -> dict[str, dict[str, str]]:
+    cursor.execute(
+        """
+        SELECT c.relname, c.reloptions
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'core'
+          AND c.relname IN (
+              'river_segment', 'river_segment_crosswalk',
+              'river_network_version', 'basin_version'
+          )
+        """
+    )
+    options: dict[str, dict[str, str]] = {}
+    for relname, reloptions in cursor.fetchall():
+        parsed: dict[str, str] = {}
+        for option in reloptions or []:
+            key, _, value = option.partition("=")
+            parsed[key] = value
+        options[relname] = parsed
+    return options
+
+
+def _assert_000052_state(cursor: Any) -> None:
+    """Every catalog fact 000052 is responsible for, in one place.
+
+    Called after the first apply and again after the replay, so the idempotence
+    case compares against the same oracle rather than against itself.
+    """
+
+    indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+    # The expression is the whole point: a predicate over the bare column cannot
+    # match `lower(river_segment_id)`, whatever the statistics say.
+    assert "lower(river_segment_id)" in indexdef, indexdef
+    assert "gin_trgm_ops" in indexdef, indexdef
+    assert "USING gin" in indexdef, indexdef
+    # An interrupted CREATE INDEX CONCURRENTLY leaves a same-named INVALID index
+    # that the planner silently ignores -- the index list alone cannot see it.
+    assert indisvalid is True, "river_segment_id_trgm_idx is INVALID (interrupted concurrent build?)"
+    assert not _legacy_index_exists(cursor), "the renamed bare-column index was not dropped"
+
+    options = _autovacuum_analyze_options(cursor)
+    for relname in ("river_segment", "river_segment_crosswalk"):
+        assert float(options[relname]["autovacuum_analyze_scale_factor"]) == 0.01, options[relname]
+        assert int(options[relname]["autovacuum_analyze_threshold"]) == 500, options[relname]
+    # 20-row version tables: a single-row change must cross the bar.
+    for relname in ("river_network_version", "basin_version"):
+        assert float(options[relname]["autovacuum_analyze_scale_factor"]) == 0.0, options[relname]
+        assert int(options[relname]["autovacuum_analyze_threshold"]) == 1, options[relname]
+
+
+def _seed_shared_prefix_family(cursor: Any) -> None:
+    """A synthetic id family sharing a >= 34 character prefix, plus its scope rows.
+
+    This is planner input, not fixture data other tests should see, so the
+    caller must discard it: the transactional caller rolls back, the autocommit
+    callers (which cannot, because they run CONCURRENTLY statements) delete it
+    with ``_delete_shared_prefix_family`` and run against a per-test throwaway
+    database on top of that.
+    """
+
+    cursor.execute(
+        """
+        INSERT INTO core.basin (basin_id, basin_name)
+        VALUES ('it1468_basin', 'Issue 1468 Trigram Basin')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.basin_version (basin_version_id, basin_id, version_label, geom)
+        VALUES (
+            'it1468_basin_v1', 'it1468_basin', 'v1',
+            ST_Multi(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))', 4490))
+        )
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.river_network_version (
+            river_network_version_id, basin_version_id, version_label, segment_count
+        )
+        VALUES ('it1468_rnv_v1', 'it1468_basin_v1', 'v1', 600)
+        """
+    )
+    cursor.executemany(
+        """
+        INSERT INTO core.river_segment (river_segment_id, river_network_version_id, segment_order)
+        VALUES (%s, 'it1468_rnv_v1', %s)
+        """,
+        [(f"{_SHARED_ID_PREFIX}{index:04d}", index % 5) for index in range(600)],
+    )
+    # ANALYZE is legal inside a transaction block (VACUUM is not); without it the
+    # planner would work from default estimates and prove nothing about costs.
+    cursor.execute("ANALYZE core.river_segment")
+
+
+def _explain(cursor: Any, sql: str, params: tuple[Any, ...] | None = None) -> str:
+    cursor.execute(f"EXPLAIN {sql}", params)
+    return "\n".join(row[0] for row in cursor.fetchall())
+
+
+def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
+    integration_database_url: str,
+) -> None:
+    """000052's structural claim, proved structurally (issue #1468).
+
+    Production picked the trigram index for `river_segment_id = $1` and paid
+    51 s instead of 17 ms, with FRESH statistics and a cheaper estimated cost --
+    so a cost- or statistics-based assertion would prove nothing. The negative
+    half is therefore a planner fact costs cannot flip: the equality qual cannot
+    MATCH the expression index under any path setting, so no plan names it. The
+    positive half is a catalog fact: the index's expression and operator family
+    cover the rewritten `lower(...) LIKE ...` predicate.
+
+    The positive half deliberately does NOT consult the planner. On this 600-row
+    synthetic family with `enable_seqscan = off` the planner substitutes a
+    no-condition bitmap scan over an unrelated btree, which is cheaper than the
+    GIN path -- an outcome about costs, not about selectability. Positive planner
+    evidence on real data lives in the node-27 E4(iii) receipt.
+    """
+
+    import psycopg2
+
+    apply_migrations_from_zero(integration_database_url)
+    connection = psycopg2.connect(integration_database_url)
+    try:
+        with connection.cursor() as cursor:
+            _assert_000052_state(cursor)
+
+            _seed_shared_prefix_family(cursor)
+
+            cursor.execute(
+                """
+                CREATE TEMP TABLE it1468_backfill_batch (
+                    river_segment_id TEXT,
+                    river_network_version_id TEXT
+                ) ON COMMIT DROP
+                """
+            )
+            cursor.executemany(
+                "INSERT INTO it1468_backfill_batch VALUES (%s, 'it1468_rnv_v1')",
+                [(f"{_SHARED_ID_PREFIX}{index:04d}",) for index in range(0, 600, 6)],
+            )
+            cursor.execute("ANALYZE it1468_backfill_batch")
+
+            # The `_BATCH_UPDATE_SQL` join shape (scripts/node27_river_identity_backfill.py):
+            # both identity columns bound by equality against a batch of rows.
+            equality_join = """
+                SELECT rs.river_segment_id
+                FROM core.river_segment rs, it1468_backfill_batch t
+                WHERE rs.river_segment_id = t.river_segment_id
+                  AND rs.river_network_version_id = t.river_network_version_id
+            """
+            default_plan = _explain(cursor, equality_join)
+            assert "river_segment_id_trgm_idx" not in default_plan, default_plan
+
+            # ... and it is not the sequential scan hiding the trap: with every
+            # non-bitmap path disabled, a bitmap scan is all the planner has
+            # left, and the trap was a BITMAP Index Scan on the trigram index.
+            # `river_segment_pkey` (btree over both equality columns) is a
+            # perfectly legitimate bitmap candidate and may well be the one
+            # chosen here -- the assertion is only that the trigram index is
+            # not among the bitmap candidates. The structural guarantee that
+            # the surviving index is the expression one belongs to
+            # `_assert_000052_state`, not to this plan.
+            cursor.execute("SET LOCAL enable_seqscan = off")
+            cursor.execute("SET LOCAL enable_indexscan = off")
+            cursor.execute("SET LOCAL enable_indexonlyscan = off")
+            bitmap_only_plan = _explain(cursor, equality_join)
+            assert "river_segment_id_trgm_idx" not in bitmap_only_plan, bitmap_only_plan
+            # No planner call follows, and the transaction is rolled back below,
+            # so these `SET LOCAL` toggles die with it -- nothing to restore.
+
+            # The other half of the contract, read out of the catalog instead of
+            # out of a plan: the rewritten id arm in packages/common/model_registry.py
+            # searches with `lower(river_segment_id) LIKE ...`, and this index CAN
+            # serve that -- its indexed expression is exactly `lower(river_segment_id)`,
+            # it is a valid gin_trgm_ops index, and its operator family answers `~~`.
+            indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+            assert "lower(river_segment_id)" in indexdef, indexdef
+            assert "gin_trgm_ops" in indexdef, indexdef
+            assert indisvalid is True, "river_segment_id_trgm_idx is INVALID"
+            operators = _river_segment_id_trgm_opfamily_operators(cursor)
+            assert "~~(text,text)" in operators, sorted(operators)
+            # The same family also answers `=`: since pg_trgm 1.6 `gin_trgm_ops`
+            # supports equality, which is precisely why a BARE-column trigram index
+            # was eligible for `river_segment_id = $1` in the first place, and why
+            # 000052 had to move the index onto an expression to make it ineligible.
+            assert "=(text,text)" in operators, sorted(operators)
+    finally:
+        # Planner input only: nothing this test seeded outlives it.
+        connection.rollback()
+        connection.close()
+
+
+def test_authority_stats_hygiene_migration_replays_without_changing_anything(
+    integration_database_url: str,
+) -> None:
+    """Idempotence, proved by an actual second apply (issue #1468, design D3).
+
+    ``apply_migrations_from_zero`` is ledger-gated, so calling it twice replays
+    nothing and cannot serve as this evidence: the ledger row has to be removed
+    first. Runs on an autocommit connection because the file contains
+    CREATE/DROP INDEX CONCURRENTLY, which PostgreSQL rejects inside a
+    transaction block.
+    """
+
+    import psycopg2
+
+    from packages.common.migrate import apply_migration
+
+    apply_migrations_from_zero(integration_database_url)
+    connection = psycopg2.connect(integration_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            # Pin the state BEFORE the replay, so a first-apply defect cannot
+            # masquerade as a replay defect below.
+            _assert_000052_state(cursor)
+            indexdef_before, _valid_before = _river_segment_id_trgm_index(cursor)
+            options_before = _autovacuum_analyze_options(cursor)
+            cursor.execute(
+                "DELETE FROM public.schema_migrations WHERE version LIKE '000052%'"
+            )
+
+        apply_migration(connection, MIGRATIONS_DIR / AUTHORITY_STATS_HYGIENE_MIGRATION)
+
+        with connection.cursor() as cursor:
+            _assert_000052_state(cursor)
+            indexdef_after, _valid_after = _river_segment_id_trgm_index(cursor)
+            assert indexdef_after == indexdef_before
+            assert _autovacuum_analyze_options(cursor) == options_before
+            cursor.execute(
+                "SELECT version FROM public.schema_migrations WHERE version LIKE '000052%'"
+            )
+            assert [row[0] for row in cursor.fetchall()] == [AUTHORITY_STATS_HYGIENE_MIGRATION]
+    finally:
+        connection.close()
+
+
+def _delete_shared_prefix_family(cursor: Any) -> None:
+    """Undo ``_seed_shared_prefix_family`` for callers that cannot roll back."""
+
+    cursor.execute("DELETE FROM hydro.river_timeseries WHERE river_network_version_id = 'it1468_rnv_v1'")
+    cursor.execute("DELETE FROM core.river_segment WHERE river_network_version_id = 'it1468_rnv_v1'")
+    cursor.execute("DELETE FROM core.river_network_version WHERE river_network_version_id = 'it1468_rnv_v1'")
+    cursor.execute("DELETE FROM core.basin_version WHERE basin_version_id = 'it1468_basin_v1'")
+    cursor.execute("DELETE FROM core.basin WHERE basin_id = 'it1468_basin'")
+
+
+def test_authority_stats_hygiene_migration_recovers_from_an_interrupted_concurrent_build(
+    throwaway_database_url: str,
+) -> None:
+    """The INVALID-leftover branch of 000052, on a real leftover (issue #1468).
+
+    `apply_migrations_from_zero` alone never reaches that branch: it only runs
+    on a database where nothing was interrupted. The leftover is therefore
+    manufactured the way production would produce one -- a `CREATE INDEX
+    CONCURRENTLY` that fails during the build and leaves a same-named INVALID
+    index behind -- and the migration is then replayed over it.
+
+    The branch used to `DROP INDEX` that leftover non-concurrently, which takes
+    ACCESS EXCLUSIVE on `core.river_segment` (round-1 review C1, design D3); it
+    now renames it to `..._invalid` and drops it concurrently in step 3. What is
+    asserted here is the end state either shape claims to reach, so the test
+    survives the shape and not just this fix.
+
+    Per-TEST throwaway database: the setup renames a shipped index and inserts
+    rows on an autocommit connection (CONCURRENTLY statements are rejected
+    inside a transaction block), so there is no rollback to hide behind.
+    """
+
+    import psycopg2
+
+    from packages.common.migrate import apply_migration
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            _assert_000052_state(cursor)
+
+            # State an interrupted run leaves behind, step by step:
+            # after step 1 the bare-column index is parked as `_legacy` ...
+            cursor.execute(
+                "ALTER INDEX core.river_segment_id_trgm_idx RENAME TO river_segment_id_trgm_idx_legacy"
+            )
+            _seed_shared_prefix_family(cursor)
+            # ... and step 2's build dies. A uniqueness violation is the
+            # deterministic way to kill a concurrent build from SQL: these two
+            # ids differ only in case, so `lower()` collapses them.
+            cursor.executemany(
+                """
+                INSERT INTO core.river_segment (river_segment_id, river_network_version_id, segment_order)
+                VALUES (%s, 'it1468_rnv_v1', 0)
+                """,
+                [("IT1468_DUP_x",), ("it1468_dup_x",)],
+            )
+            with pytest.raises(psycopg2.errors.UniqueViolation):
+                cursor.execute(
+                    "CREATE UNIQUE INDEX CONCURRENTLY river_segment_id_trgm_idx "
+                    "ON core.river_segment (lower(river_segment_id))"
+                )
+
+            # Setup proof: without this the test could pass against a database
+            # where nothing was ever left invalid.
+            _indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+            assert indisvalid is False, "the interrupted build left no INVALID index; the fixture is broken"
+            assert sorted(_trgm_index_family(cursor)) == [
+                "river_segment_id_trgm_idx",
+                "river_segment_id_trgm_idx_legacy",
+            ]
+
+            # The ledger is what stops a replay; the file itself is the subject.
+            cursor.execute("DELETE FROM public.schema_migrations WHERE version LIKE '000052%'")
+
+        apply_migration(connection, MIGRATIONS_DIR / AUTHORITY_STATS_HYGIENE_MIGRATION)
+
+        with connection.cursor() as cursor:
+            # One index, valid, on the expression -- and no scratch name left
+            # over. `IF NOT EXISTS` matches by NAME only, so a run that merely
+            # skipped the rebuild would leave the INVALID index sitting here.
+            assert _trgm_index_family(cursor) == ["river_segment_id_trgm_idx"]
+            assert not _core_index_exists(cursor, "river_segment_id_trgm_idx_invalid")
+            _assert_000052_state(cursor)
+            indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+            assert "lower(river_segment_id)" in indexdef, indexdef
+            assert "gin_trgm_ops" in indexdef, indexdef
+            assert indisvalid is True, indexdef
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM core.river_segment WHERE river_segment_id IN ('IT1468_DUP_x', 'it1468_dup_x')"
+            )
+            _delete_shared_prefix_family(cursor)
+        connection.close()
+
+
+# Repair-leg behavioural oracle (issue #1468, round-1 review C2). The candidate
+# query is otherwise pinned only by substring assertions, which every
+# semantics-neutering mutation of it survives.
+_AUTHORITY_PROBE_TABLES = (("core", "it1468_plain"), ("met", "it1468_plain"), ("public", "it1468_plain"))
+
+# Verbatim copy of the hypertable-exclusion block in
+# `_STATS_GUARD_AUTHORITY_CANDIDATES_SQL`, used to build a mutant query with
+# that clause -- and only that clause -- removed. A reworded constant makes the
+# removal a no-op, which the test asserts against rather than silently running
+# the unmutated query twice.
+_HYPERTABLE_NOT_EXISTS_CLAUSE = """
+  AND NOT EXISTS (
+      SELECT 1
+      FROM timescaledb_information.hypertables h
+      WHERE h.hypertable_schema = s.schemaname
+        AND h.hypertable_name = s.relname
+  )"""
+
+
+def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypertables(
+    throwaway_database_url: str,
+) -> None:
+    """WHICH relations the repair leg picks, decided by a real PostgreSQL.
+
+    Three fixture relations are made candidate-shaped in exactly the same way --
+    populated, ANALYZEd (so `pg_class.relpages > 0`, which the counter wipe does
+    not touch), then `pg_stat_reset_single_table_counters` to reproduce the
+    crash-recovery signature of both timestamps being NULL. The ANALYZE has to
+    come FIRST: it is what sets `relpages`, and the reset only clears the
+    cumulative counters.
+
+    After that the only thing separating them is the candidate query's own
+    clauses: `core`/`met` are in the schema tuple and must be analyzed,
+    `public` is not, and the hypertable chunk (`_timescaledb_internal`) stays
+    out under the schema tuple.
+
+    The hypertable ROOT needs one more step. ANALYZE leaves an inheritance
+    parent's `relpages` at 0 (it measures the root's own heap, which is empty --
+    every row is in a chunk), so a root left alone is already excluded by
+    `relpages > 0` and the `NOT EXISTS` clause would be dead weight this test
+    could not notice being deleted. The root's `relpages`
+    is therefore forged (see the poke below) until it satisfies EVERY predicate
+    except `NOT EXISTS`, and the clause is then shown to be the sole excluder:
+    the shipped query does not return the root, the same query with only that
+    block removed does, and the guard's own selection stays exactly
+    `core`/`met`. ANALYZE on a root recurses into the chunks and on a bare
+    compressed-chunk name it would destroy the relstats TimescaleDB preserves
+    at compression time -- keeping both out is the contract.
+
+    Per-TEST throwaway database: this creates tables, forges one catalog row and
+    resets statistics counters on an autocommit connection.
+    """
+
+    import psycopg2
+
+    import scripts.node27_autopipeline as autopipe
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            for schema, table in _AUTHORITY_PROBE_TABLES:
+                # autovacuum_enabled = false: an autoanalyze landing between the
+                # counter reset and the guard call would silently un-candidate
+                # the table and turn this test into a coin flip.
+                cursor.execute(
+                    f"CREATE TABLE {schema}.{table} (id INT PRIMARY KEY, payload TEXT) "
+                    f"WITH (autovacuum_enabled = false)"
+                )
+                cursor.execute(
+                    f"INSERT INTO {schema}.{table} SELECT g, repeat('x', 40) FROM generate_series(1, 5000) g"
+                )
+                cursor.execute(f"ANALYZE {schema}.{table}")
+                cursor.execute("SELECT pg_stat_reset_single_table_counters(%s::regclass)", (f"{schema}.{table}",))
+
+            # The hypertable needs its FK parents before it can hold a row, and
+            # a chunk has to exist for the exclusion to be about anything.
+            _seed_shared_prefix_family(cursor)
+            # Deliberately the TEXT-era shape (surrogate keys left NULL): no
+            # reader is involved here, the rows exist only to materialize a
+            # chunk with pages in it.
+            cursor.execute(
+                """
+                INSERT INTO hydro.river_timeseries (
+                    run_id, basin_version_id, river_network_version_id, river_segment_id,
+                    valid_time, lead_time_hours, variable, value, unit, quality_flag
+                )
+                SELECT 'it1468_run', 'it1468_basin_v1', 'it1468_rnv_v1', %s,
+                       TIMESTAMPTZ '2026-05-03 00:00:00+00' + (g || ' hours')::interval,
+                       g, 'q_down', g::double precision, 'm3 s-1', 'ok'
+                FROM generate_series(1, 48) AS g
+                """,
+                (f"{_SHARED_ID_PREFIX}0000",),
+            )
+            cursor.execute("ANALYZE hydro.river_timeseries")
+            cursor.execute("SELECT pg_stat_reset_single_table_counters('hydro.river_timeseries'::regclass)")
+            cursor.execute(
+                """
+                SELECT chunk_schema, chunk_name,
+                       pg_stat_reset_single_table_counters(format('%I.%I', chunk_schema, chunk_name)::regclass)
+                FROM timescaledb_information.chunks
+                WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
+                """
+            )
+            chunks = [f"{row[0]}.{row[1]}" for row in cursor.fetchall()]
+            assert chunks, "the seeded rows produced no chunk; the exclusion would prove nothing"
+
+            # The rows all live in chunks, so the root's own heap is 0 pages and
+            # ANALYZE writes that 0 into `pg_class.relpages` (the inherited pass
+            # only fills pg_statistic). Left there, the root is excluded by
+            # `relpages > 0` and deleting the whole `NOT EXISTS` block would not
+            # change one assertion in this test. Forging a page is the only way
+            # to make an inheritance parent candidate-shaped; it is a catalog
+            # write, deliberately, and it is safe exactly here: function-scoped
+            # throwaway database, dropped in `finally`, superuser autocommit
+            # connection, nothing else reads this number. It MUST come after the
+            # ANALYZE above, which would otherwise overwrite it back to 0.
+            cursor.execute("SELECT relpages FROM pg_class WHERE oid = 'hydro.river_timeseries'::regclass")
+            (root_relpages_after_analyze,) = cursor.fetchone()
+            if root_relpages_after_analyze == 0:
+                cursor.execute("UPDATE pg_class SET relpages = 1 WHERE oid = 'hydro.river_timeseries'::regclass")
+
+            # Setup proof for the root: every predicate of the candidate query
+            # is now satisfied EXCEPT the one under test. Without this the
+            # exclusion assertion below would hold for the wrong reason.
+            cursor.execute(
+                """
+                SELECT c.relpages, c.relkind, s.schemaname, s.last_analyze, s.last_autoanalyze
+                FROM pg_stat_user_tables s
+                JOIN pg_class c ON c.oid = s.relid
+                WHERE s.relid = 'hydro.river_timeseries'::regclass
+                """
+            )
+            root_row = cursor.fetchone()
+            assert root_row is not None, "the hypertable root is missing from pg_stat_user_tables"
+            root_relpages, root_relkind, root_schema, root_last, root_last_auto = root_row
+            assert root_relpages > 0, (
+                f"root relpages is {root_relpages} (ANALYZE left {root_relpages_after_analyze}); "
+                "the root is not candidate-shaped and the NOT EXISTS clause would prove nothing"
+            )
+            assert root_relkind == "r", root_relkind
+            assert root_schema == "hydro", root_schema
+            assert root_last is None and root_last_auto is None, root_row
+
+            # One textual difference, one database state: whatever the mutant
+            # returns and the shipped query does not is what `NOT EXISTS` --
+            # and nothing else -- excludes.
+            mutant_sql = autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL.replace(_HYPERTABLE_NOT_EXISTS_CLAUSE, "")
+            assert mutant_sql != autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL, (
+                "the NOT EXISTS block was not found in the shipped SQL; _HYPERTABLE_NOT_EXISTS_CLAUSE is stale "
+                "and this check degenerated into running the unmutated query twice"
+            )
+            cursor.execute(autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
+            shipped_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
+            cursor.execute(mutant_sql)
+            mutant_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
+            assert "hydro.river_timeseries" not in shipped_candidates, shipped_candidates
+            assert "hydro.river_timeseries" in mutant_candidates, mutant_candidates
+            assert mutant_candidates - shipped_candidates == {"hydro.river_timeseries"}, (
+                shipped_candidates,
+                mutant_candidates,
+            )
+
+        summary = autopipe._analyze_unanalyzed_authority_tables(throwaway_database_url)
+
+        assert summary["status"] == "completed", summary
+        analyzed = {entry["table"]: entry for entry in summary["analyzed"]}
+        for table in ("core.it1468_plain", "met.it1468_plain"):
+            assert table in analyzed, summary
+            assert analyzed[table]["status"] == "ok", analyzed[table]
+            assert analyzed[table]["last_analyze"] is not None, analyzed[table]
+        # Selection is exact, not merely inclusive: no migration seeds rows, so
+        # every other core/met table is empty (relpages = 0) and only the
+        # fixture relations above can qualify. `hydro.river_timeseries` is the
+        # one exception -- its relpages was forged above -- which makes this
+        # line a second, independent killer of a deleted `NOT EXISTS`: without
+        # the clause the guard would ANALYZE the root and this list would grow.
+        assert sorted(analyzed) == ["core.it1468_plain", "met.it1468_plain"], summary
+        # Exclusions swept over BOTH lists -- a leaked relation sitting in
+        # `deferred` is the same contract breach as one that got analyzed.
+        touched = set(analyzed) | set(summary["deferred"])
+        assert not [name for name in touched if name.startswith("public.")], summary
+        assert not [name for name in touched if name.startswith("_timescaledb_internal.")], summary
+        assert "hydro.river_timeseries" not in touched, summary
+        assert not touched & set(chunks), summary
+        assert summary["deferred"] == [], summary
+
+        # The runbook's 复核 SQL (same text as the code's) is expected to return
+        # zero rows after a tick ran the leg -- for the tables it repaired.
+        with connection.cursor() as cursor:
+            cursor.execute(autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
+            remaining = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
+        assert not remaining & {"core.it1468_plain", "met.it1468_plain"}, remaining
+    finally:
+        with connection.cursor() as cursor:
+            for schema, table in _AUTHORITY_PROBE_TABLES:
+                cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
+            _delete_shared_prefix_family(cursor)
+        connection.close()
