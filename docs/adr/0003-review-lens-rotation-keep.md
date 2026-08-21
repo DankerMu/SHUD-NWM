@@ -467,3 +467,20 @@ adds no multi-round sample and leaves the ratio untouched.
 **Keep rotation** remains the recorded decision; nothing in this sample bears
 on the attribution question, and the metric caveats recorded above still
 stand. No policy change.
+
+## Revisit 2026-08-21 (post PR #1665 / issue #1650)
+
+Audit re-flagged DECIDABLE at 95 multi-round merged PRs, later-round catches
+core=46 vs rotated=244. #1650 adds one multi-round sample but no later-round
+catch: its three verified findings all came from Round 1; the post-fix Round 2
+used one full-scope invariant lens plus integration and test-evidence delta
+lenses and returned zero candidates, and Phase 7 was also clean. The accumulated
+catch counts are therefore unchanged from the #1668 revisit.
+
+**Keep rotation** remains the recorded decision, with no increase in evidentiary
+strength. A clean post-fix round proves closure for this PR; it does not prove
+that rotation caused or failed to cause recall. The existing metric caveats
+remain load-bearing: fixture/final-review roles, lens-name variants, and rounds
+that shrink or reuse rather than rotate the core can all distort the split.
+No policy change; any future reversal still requires the recorded attribution
+schema/role fixes plus maintainer review.
