@@ -403,3 +403,16 @@ Phase 7 终审用索引 DDL 清单法从结构推出"segment 谓词清零丢失�
 P1（与 E4 live EXPLAIN 独立收敛），终审重跑又以 receipt 的 BUFFERS 逐字段比对证伪了
 修复自身的机理文本——连续第三个 issue 的最重发现均出自终审的独立方法学而非轮换透镜，
 "轮次角色镜单列"的口径修复必要性进一步坐实。
+
+## Revisit 2026-08-21（post PR #1651 / issue #1633）
+
+审计口径：91 个多轮 merged PR，later-round catches core=46 / rotated=231。**决定：keep 不变**，
+三条既有口径修复前置条件仍未排期。本 PR 的 Round 2 是证据措辞修复后的 clean 轮，0 candidates；
+因此样本数 +1 而两类 catch 均 +0。这个数据点既不证明轮换有效，也不证明轮换无效——没有
+later-round finding 就没有可归因的 catch，不能把零产出反读成撤镜证据。
+
+本 PR 真正有价值的新增信号仍来自不同门读不同工件：最终 fixture review 在旧 CI 全绿后抓到
+non-daemon worker 会在 deadline assertion 之后继续卡住 `threading._shutdown()` 的 P1 级
+contract gap；Round 1 则由 test-evidence 镜 + 独立 verifier 抓到两条 exact-mutant 证据错误。
+它们支持保留多层门，而不是加强当前已知受污染的 core/rotated 比值。故维持 autonomous
+默认 keep；任何翻转仍须先修 ADR 已登记的归因 schema/轮次角色污染，再由 maintainer 裁定。
