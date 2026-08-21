@@ -13,8 +13,10 @@ actually land non-NULL, that the ``ON CONFLICT DO UPDATE`` mirror fires on a
 drifted row (design D3: production DELETE-replaces first, so this branch is
 reached by replaying the INSERT without the preceding DELETE), that the #1339
 equality audit sees zero new divergence, that the backfill runner still counts
-only legacy sentinel rows, and that the seed's ``y_stage``/``m`` branch — the
-only writer of those enum values — round-trips through the enum columns.
+only legacy sentinel rows, that the seed's ``y_stage``/``m`` branch — the
+only writer of those enum values — round-trips through the enum columns, and
+(#1681) that the replace chain's two unbounded READ statements reach a real
+compressed chunk through an index instead of decompress-scanning it.
 """
 
 from __future__ import annotations
@@ -30,11 +32,24 @@ import pytest
 from psycopg2.extras import RealDictCursor
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.timescale_write_guard import CompressedChunkWriteError
 from tests.integration_helpers import apply_migrations_from_zero
+
+# The probe SQL under test is read out of production source by the zero-text
+# oracle's AST reader (#1442). Importing it here — rather than transcribing the
+# statement — is what keeps the EXPLAIN below pinned to the shipped text: a
+# hand-copied SQL string would stay green after the aid was deleted from
+# parser.py, which is the whole regression (#1681).
+from tests.test_river_ts_text_identity_cleanup import (
+    PUSHDOWN_AID_MARKER,
+    _parser_river_statements,
+)
 from workers.output_parser.parser import (
     OutputParser,
     OutputParserConfig,
     PsycopgOutputParserRepository,
+    RiverTimeseriesRow,
+    RunIdentityKeys,
 )
 
 pytestmark = pytest.mark.integration
@@ -552,3 +567,339 @@ def test_seed_demo_dual_writes_the_y_stage_branch(throwaway_database_url: str) -
         assert _verify(connection)["equality_audit_divergent"] == 0
     finally:
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Scenario: the replace chain's two READ statements against compressed chunks
+# ---------------------------------------------------------------------------
+#
+# #1442 made probe / window read / DELETE key-only. That was safe for the
+# DELETE (valid_time bounded, and the compressed-chunk guard runs first) and
+# not for the two reads: neither is valid_time bounded — their job is to find
+# this key's rows OUTSIDE the incoming window — so their plan always reaches
+# compressed chunks, where `run_key` is not a segmentby column and has no
+# access path at all. On node-27 a key-only probe for a NEW run therefore
+# decompress-scanned every compressed chunk and hit the 60 s statement_timeout,
+# and no forecast was ingested (#1681). #1681 restores a bound `run_id` aid on
+# those two statements only.
+#
+# These tests need a real TimescaleDB with real compressed chunks, so they
+# carry `timescaledb_210` like the sibling compression tests in
+# tests/test_river_identity_normalization_integration.py.
+
+_AID_OLD_RUN_ID = "run_probe_aid_old"
+_AID_NEW_RUN_ID = "run_probe_aid_new"
+# Two chunks apart at the hypertable's default 7-day chunk_time_interval
+# (000006 creates hydro.river_timeseries with no explicit interval), so the new
+# run's rows cannot land in the compressed chunk by accident.
+_AID_NEW_START_TIME = _START_TIME + timedelta(days=14)
+
+
+def _plan_text(cursor: Any, sql: str, params: tuple[Any, ...]) -> str:
+    """``EXPLAIN (COSTS OFF)`` output as one string.
+
+    Row unpacking is factory-agnostic on purpose: this module connects with
+    ``RealDictCursor`` while the repository under test uses psycopg2's default
+    tuple cursor, and the same helper is used from a plain connection here.
+    """
+    cursor.execute(f"EXPLAIN (COSTS OFF) {sql}", params)
+    return "\n".join(
+        str(next(iter(row.values())) if isinstance(row, dict) else row[0]) for row in cursor.fetchall()
+    )
+
+
+def _index_cond_lines(plan: str) -> list[str]:
+    return [line.strip() for line in plan.splitlines() if line.strip().startswith("Index Cond:")]
+
+
+def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
+    """One compressed chunk of an OLD run's rows plus a registered, empty NEW run.
+
+    This is the production shape the #1681 regression needs: history already
+    compressed, and a freshly registered run whose probe must prove "no rows"
+    across it.
+    """
+    # ``_seed_authority``'s own ``output_uri`` belongs to the module's default
+    # run, which this fixture never parses; the two runs below are the ones
+    # under test and carry their own.
+    _seed_authority(connection, output_uri=f"{_OBJECT_STORE_PREFIX}/runs/{_RUN_ID}/output/")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO hydro.hydro_run
+                (run_id, run_type, scenario_id, model_id, basin_version_id, cycle_time,
+                 start_time, end_time, status, run_manifest_uri, output_uri)
+            VALUES (%s, 'forecast', 'sc', 'm1', 'bv1', %s, %s, %s, 'succeeded', 's3://m', %s)
+            """,
+            (
+                _AID_OLD_RUN_ID,
+                _START_TIME,
+                _START_TIME,
+                _START_TIME + timedelta(hours=_HOURS),
+                f"{_OBJECT_STORE_PREFIX}/runs/{_AID_OLD_RUN_ID}/output/",
+            ),
+        )
+        # Fully normalized fact rows: the compressed chunk must look exactly
+        # like production history, not like a pre-#1340 sentinel batch.
+        cursor.execute(
+            """
+            INSERT INTO hydro.river_timeseries (
+                run_id, basin_version_id, river_network_version_id, river_segment_id,
+                valid_time, lead_time_hours, variable, value, unit, quality_flag,
+                run_key, river_network_version_key, basin_version_key, river_segment_key,
+                variable_e, unit_e, quality_flag_e
+            )
+            SELECT %s, 'bv1', 'rnv1', rs.river_segment_id,
+                   %s::timestamptz + (h * INTERVAL '1 hour'), h, 'q_down', 1.0, 'm3/s', 'ok',
+                   (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s),
+                   (SELECT river_network_version_key FROM core.river_network_version
+                     WHERE river_network_version_id = 'rnv1'),
+                   (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = 'bv1'),
+                   rs.river_segment_key, 'q_down', 'm3/s', 'ok'
+            FROM core.river_segment rs, generate_series(0, %s) h
+            WHERE rs.river_network_version_id = 'rnv1'
+            """,
+            (_AID_OLD_RUN_ID, _START_TIME, _AID_OLD_RUN_ID, _HOURS - 1),
+        )
+        cursor.execute(
+            """
+            SELECT compress_chunk(format('%I.%I', chunk_schema, chunk_name)::regclass)
+            FROM timescaledb_information.chunks
+            WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
+            ORDER BY range_start
+            """
+        )
+        # `run_key` is GENERATED ALWAYS AS IDENTITY (000050): never in the
+        # column list, always read back.
+        cursor.execute(
+            """
+            INSERT INTO hydro.hydro_run
+                (run_id, run_type, scenario_id, model_id, basin_version_id, cycle_time,
+                 start_time, end_time, status, run_manifest_uri, output_uri)
+            VALUES (%s, 'forecast', 'sc', 'm1', 'bv1', %s, %s, %s, 'succeeded', 's3://m', %s)
+            RETURNING run_key
+            """,
+            (
+                _AID_NEW_RUN_ID,
+                _AID_NEW_START_TIME,
+                _AID_NEW_START_TIME,
+                _AID_NEW_START_TIME + timedelta(hours=_HOURS),
+                f"{_OBJECT_STORE_PREFIX}/runs/{_AID_NEW_RUN_ID}/output/",
+            ),
+        )
+        new_run_key = next(iter(cursor.fetchone().values()))
+
+    compressed = _scalar(
+        connection,
+        """
+        SELECT count(*) FROM timescaledb_information.chunks
+        WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries' AND is_compressed
+        """,
+    )
+    assert compressed >= 1, "fixture premise: the old run's chunk must be compressed"
+    assert (
+        _scalar(
+            connection,
+            "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s",
+            (_AID_NEW_RUN_ID,),
+        )
+        == 0
+    ), "fixture premise: the new run starts with zero fact rows"
+
+    return {
+        "new_run_id": _AID_NEW_RUN_ID,
+        "new_run_key": new_run_key,
+        "river_network_version_key": _scalar(
+            connection,
+            "SELECT river_network_version_key FROM core.river_network_version "
+            "WHERE river_network_version_id = 'rnv1'",
+        ),
+        "basin_version_key": _scalar(
+            connection, "SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = 'bv1'"
+        ),
+        "segment_keys": {
+            row["river_segment_id"]: row["river_segment_key"]
+            for row in _rows(
+                connection,
+                "SELECT river_segment_id, river_segment_key FROM core.river_segment "
+                "WHERE river_network_version_id = 'rnv1'",
+            )
+        },
+    }
+
+
+@pytest.fixture()
+def compressed_history(throwaway_database_url: str) -> Any:
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        yield connection, _seed_compressed_history_and_new_run(connection)
+    finally:
+        connection.close()
+
+
+def _new_run_rows(start: datetime, segment_keys: dict[str, int]) -> tuple[Any, ...]:
+    return tuple(
+        RiverTimeseriesRow(
+            run_id=_AID_NEW_RUN_ID,
+            basin_version_id="bv1",
+            river_network_version_id="rnv1",
+            river_segment_id=segment_id,
+            valid_time=start + timedelta(hours=hour),
+            lead_time_hours=hour,
+            variable="q_down",
+            value=float(hour + 1),
+            unit="m3/s",
+        )
+        for hour in range(_HOURS)
+        for segment_id in sorted(segment_keys)
+    )
+
+
+def _new_run_identity(context: dict[str, Any]) -> RunIdentityKeys:
+    return RunIdentityKeys(
+        run_key=context["new_run_key"],
+        river_network_version_key=context["river_network_version_key"],
+        basin_version_key=context["basin_version_key"],
+    )
+
+
+@pytest.mark.timescaledb_210
+def test_probe_uses_the_compressed_segmentby_index_and_seq_scans_without_the_aid(
+    compressed_history: Any, throwaway_database_url: str
+) -> None:
+    """The #1681 claim, proved on a real compressed chunk — with its own control.
+
+    The probe SQL is EXTRACTED from production source (the same AST reader the
+    zero-text oracle uses) rather than transcribed: a hand-copied statement
+    would keep passing after someone deleted the aid from parser.py, which is
+    the only regression this test exists to catch.
+
+    ``enable_seqscan = off`` because the discriminator here is *which access
+    paths exist*, not which one is cheaper. This rig's compressed chunk is a
+    single page, so the cost model can legitimately prefer a sequential scan
+    even when the segmentby index is available, and a cost-based assertion
+    would prove nothing about the production plan. With sequential scans
+    penalized, "index is usable" and "index is not usable" separate cleanly:
+    Postgres only builds an index path when a clause matches the index, and it
+    keeps the sole Seq Scan path when none does.
+
+    The negative control replaces a one-off manual red. Deleting the two aid
+    lines from the extracted SQL and re-EXPLAINing in the same transaction
+    re-proves, on every run, that the assertion above is about the aid and not
+    about some unrelated property of the plan — a pin that cannot rot the way a
+    receipt pasted into a PR body can.
+
+    Both statements run in ONE transaction on a NON-autocommit connection:
+    ``SET LOCAL`` is a no-op under autocommit (which this module's ``_connect``
+    turns on), which would silently disarm the whole discriminator.
+    """
+    _connection, context = compressed_history
+    probe = _parser_river_statements()[0]
+
+    # The control: the marker line and the aid line, and nothing else.
+    probe_lines = probe.splitlines()
+    control_lines = [
+        line
+        for line in probe_lines
+        if PUSHDOWN_AID_MARKER not in line and line.strip() != "AND run_id = %s"
+    ]
+    assert len(probe_lines) - len(control_lines) == 2, "control must drop exactly the marker and the aid"
+    control = "\n".join(control_lines)
+    assert probe.count("%s") == 4 and control.count("%s") == 3
+
+    keys = (context["new_run_key"], context["river_network_version_key"], "q_down")
+    # NOT this module's ``_connect``: that one sets autocommit, under which
+    # ``SET LOCAL`` warns and does nothing.
+    plain = psycopg2.connect(throwaway_database_url)
+    try:
+        with plain.cursor() as cursor:
+            cursor.execute("SET LOCAL enable_seqscan = off")
+            plan = _plan_text(cursor, probe, (keys[0], context["new_run_id"], keys[1], keys[2]))
+            control_plan = _plan_text(cursor, control, keys)
+        plain.rollback()
+    finally:
+        plain.close()
+
+    assert "Index Scan using compress_hyper_" in plan, plan
+    assert any("run_id =" in line for line in _index_cond_lines(plan)), plan
+    assert "Seq Scan on compress_hyper" not in plan, plan
+
+    assert "Seq Scan on compress_hyper" in control_plan, control_plan
+    assert not any("run_id =" in line for line in _index_cond_lines(control_plan)), control_plan
+
+
+@pytest.mark.timescaledb_210
+def test_new_run_writes_past_a_compressed_chunk_and_replays_idempotently(
+    compressed_history: Any, throwaway_database_url: str
+) -> None:
+    """The end-to-end shape the regression broke: a new run ingests, twice.
+
+    The probe and window read cross the compressed chunk on both passes (the
+    second one takes the other branch — rows now exist — so the MATERIALIZED
+    window read runs too), while the guarded DELETE/INSERT stay in the
+    uncompressed chunk.
+    """
+    connection, context = compressed_history
+    rows = _new_run_rows(_AID_NEW_START_TIME, context["segment_keys"])
+    repository = PsycopgOutputParserRepository(database_url=throwaway_database_url)
+
+    repository.upsert_river_timeseries(
+        rows,
+        batch_size=64,
+        run_identity=_new_run_identity(context),
+        segment_keys=context["segment_keys"],
+    )
+    written = _scalar(
+        connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+    )
+    assert written == len(rows)
+
+    repository.upsert_river_timeseries(
+        rows,
+        batch_size=64,
+        run_identity=_new_run_identity(context),
+        segment_keys=context["segment_keys"],
+    )
+    assert (
+        _scalar(
+            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+        )
+        == len(rows)
+    ), "replaying the same window must replace, not duplicate"
+    # The old run's compressed history is untouched by either pass.
+    assert _scalar(
+        connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_OLD_RUN_ID,)
+    ) == _SEGMENTS * _HOURS
+
+
+@pytest.mark.timescaledb_210
+def test_new_run_targeting_the_compressed_chunk_still_fails_the_guard_closed(
+    compressed_history: Any, throwaway_database_url: str
+) -> None:
+    """The aid must not have bought throughput with silent partial writes.
+
+    Narrowing the two reads by valid_time (the rejected alternative) would have
+    turned "the replacement window reaches a compressed chunk" from a closed
+    failure into surviving rows nobody deletes. The aid narrows nothing, so
+    this stays exactly as it was: a batch aimed at compressed storage raises
+    and writes nothing.
+    """
+    connection, context = compressed_history
+    rows = _new_run_rows(_START_TIME, context["segment_keys"])
+    repository = PsycopgOutputParserRepository(database_url=throwaway_database_url)
+
+    with pytest.raises(CompressedChunkWriteError) as exc_info:
+        repository.upsert_river_timeseries(
+            rows,
+            batch_size=64,
+            run_identity=_new_run_identity(context),
+            segment_keys=context["segment_keys"],
+        )
+    assert "hydro.river_timeseries" in str(exc_info.value)
+    assert (
+        _scalar(
+            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+        )
+        == 0
+    ), "the guard must fail the batch closed, leaving no rows behind"

@@ -412,10 +412,17 @@ def test_output_parser_replacement_window_includes_existing_rows_before_guard(
         for statement, params in connection.executions
         if "hydro.river_timeseries" in statement and "DELETE" not in statement and "INSERT" not in statement
     )
-    assert probe_call[1] == (7, 8, "q_down")
-    assert window_call[1] == (7, 8, "q_down")
+    # Four bindings, not three: since #1681 the two READS also bind the
+    # transitional `run_id` pushdown aid, in conjunction order (run_key, aid,
+    # network key, variable). The aid is the batch's own run_id — the same value
+    # the DELETE's run_key resolves to — so it narrows nothing; the DELETE
+    # asserted above deliberately stays three keys plus the window.
+    assert probe_call[1] == (7, "run_a", 8, "q_down")
+    assert window_call[1] == (7, "run_a", 8, "q_down")
     assert "WHERE run_key = %s" in probe_call[0]
     assert "WHERE run_key = %s" in window_call[0]
+    for statement in (probe_call[0], window_call[0]):
+        assert "AND run_id = %s" in statement
 
 
 # ---------------------------------------------------------------------------
