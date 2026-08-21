@@ -84,6 +84,17 @@ Regression rows:
 - ci.yml-only PR -> backend true + selector meta-guard suite executes assertions。
 - mutate run_id fallback to ref / conditional cancellation to true / remove self-route -> contract test red。
 
+## Boundary Surface Checklist
+
+- Shared helper roots: `scripts/select_ci_tests.py` 的 `PATH_TEST_RULES`（changed）；其余 selector derivation/helper 保持不变。
+- Public entrypoints: CI `pull_request` / `push` / `workflow_dispatch` triggers（trigger set unchanged，group/cancel policy changed）。
+- Read surfaces: GitHub event contexts、`dorny/paths-filter` changed-file set、target selector input（changed policy/routing only）。
+- Write/delete/overwrite surfaces: none — no repository/runtime write path。
+- Staging/publish/rollback surfaces: GitHub workflow scheduling only；rollback is a three-file revert。
+- Producer/consumer evidence boundaries: event context -> concurrency group/cancel policy -> full/targeted jobs；workflow diff -> backend filter -> selector -> contract suite。
+- Stale-state/idempotency boundaries: PR number intentionally groups superseding runs；`run_id` remains stable across rerun but unique across distinct non-PR runs。
+- Unchanged downstream consumers: all job names、conditions、timeouts、marker expressions、workflow triggers；Governance and visual-evidence workflows。
+
 ## Risks / Trade-offs
 
 - [Master merges can run full suites concurrently] → intentional; losing all but one post-merge oracle is worse. Hosted-runner capacity queues outside this workflow group rather than cancelling repository evidence.
