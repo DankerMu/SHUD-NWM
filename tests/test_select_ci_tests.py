@@ -384,11 +384,13 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
     assert selected == [
         "tests/test_api_contract.py",
         # #1597: the closure guard (direct UNION one hop over
-        # services.tiles.mvt) put these seven in the rule. This pin is the
+        # services.tiles.mvt) put these eight in the rule. This pin is the
         # complement of the guard — the guard forbids missing suites, the pin
         # forbids extra ones — so it is updated from the selector's own output,
-        # never hand-assembled. The three cutover suites are the one-hop
-        # contribution through apps/api/routes/hydro_display.py.
+        # never hand-assembled. The three cutover suites and
+        # test_openapi_31_contract.py are the one-hop contributions through
+        # apps/api/routes/hydro_display.py and
+        # apps/api/openapi_patching.py respectively.
         "tests/test_direct_grid_display_cutover_flip.py",
         "tests/test_direct_grid_display_cutover_history.py",
         "tests/test_direct_grid_display_cutover_model_resolution.py",
@@ -398,6 +400,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_migrations.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
+        "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
