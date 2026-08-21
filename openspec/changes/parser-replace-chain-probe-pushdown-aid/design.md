@@ -46,8 +46,10 @@ marker 文本必须逐字等于 `tests/test_river_ts_text_identity_cleanup.py` �
 （000006:44,55）；`hydro_run.run_key` 是 `GENERATED ALWAYS AS IDENTITY UNIQUE`
 （000050:178），run_id ↔ run_key 双射；dual-write 在同一行同一上下文写两列
 （parser.py ~:937-962）；`parse_run` 单 run（~:225-250），batch 内 `replacement_key[0]`
-恒等于该 run。因此 `run_key = K AND run_id ≠ text(K)` 的行不可表示，辅助是空操作过滤，
-只改变计划不改变结果集；α 收窄的是 valid_time（真实行会落在窗外），二者性质不同。
+恒等于该 run。因此本仓任一写入方（INSERT 与 #1339 回填）都不会产出 `run_key = K` 却挂着另一个
+`run_id` 的行——这是 writer-enforced 不变量而非 schema 约束（`river_timeseries.run_key`
+无 FK，000050:250-254 明示外部写入方的漂移仍由审计兜底），辅助对本仓写入的行是空操作
+过滤，只改变计划不改变结果集；α 收窄的是 valid_time（真实行会落在窗外），二者性质不同。
 
 为什么是 `run_id` 而不是三列文本：segmentby 是 `(run_id, river_network_version_id,
 river_segment_id)`，压缩侧索引前导列是 `run_id`；`river_network_version_id` 作为第二
@@ -70,9 +72,9 @@ DELETE MUST 无辅助"；保留的"node-27 键收敛 preflight receipt"是 #1442
 - 探针/取窗：三键谓词仍在；裸列面逐调用点定向断言（规格 :338 允许）：
   (1) 行级相邻——存在连续三行 `run_key = %s` / `PUSHDOWN_AID_MARKER` / `AND run_id = %s`
   （正则跨行匹配，空白任意），即"恰一个 AND 隔开键与辅助 + marker 紧邻"一次钉死；
-  (2) 除 `run_id` 外无其它文本身份谓词（对 `river_network_version_id`/`variable`/
-  `basin_version_id`/`river_segment_id` 逐列跑 `_assert_no_text_identity_predicate` 的
-  单列形态，或等价正则）；(3) `run_id` 恰出现一次。
+  (2) 除 `run_id` 外**全部** `TEXT_IDENTITY_COLUMNS`（从 `tests/test_sql_shape_helpers.py`
+  派生：`tuple(c for c in TEXT_IDENTITY_COLUMNS if c != "run_id")`，含 `unit`/
+  `quality_flag`——#1342 要删的列一个不漏，不得手抄子集）逐列零谓词；(3) `run_id` 恰出现一次。
 - DELETE：原断言原样（零文本、零 marker）。
 先改断言、跑红（当前代码无 `run_id`）、再改 SQL 跑绿——anti-vacuity。
 

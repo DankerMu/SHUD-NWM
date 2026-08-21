@@ -938,14 +938,16 @@ def test_parser_replace_chain_has_exactly_three_read_statements_plus_the_insert(
 _PARSER_AID_ADJACENCY = re.compile(
     rf"WHERE run_key = %s[ \t]*\n[ \t]*{re.escape(PUSHDOWN_AID_MARKER)}[ \t]*\n[ \t]*AND run_id = %s"
 )
-# Text identity columns the read statements must STILL have no predicate on.
-# `run_id` is the one sanctioned aid and is asserted positively above; the rest
-# are the columns whose absence #1342 depends on.
-_PARSER_READ_FORBIDDEN_TEXT_COLUMNS = (
-    "river_network_version_id",
-    "variable",
-    "basin_version_id",
-    "river_segment_id",
+# Text identity columns the read statements must STILL have no predicate on:
+# every text identity column other than the sanctioned `run_id` aid, which is
+# asserted positively above. DERIVED from the shared register rather than
+# listed, so this test keeps the same coverage
+# `_assert_no_text_identity_predicate` gave these statements before #1681 split
+# `run_id` out of it, and a column added to 000050's text set is covered here
+# the day it is classified. (A hand-written list dropped `unit` and
+# `quality_flag` — the two columns the pre-#1681 check did cover.)
+_PARSER_READ_FORBIDDEN_TEXT_COLUMNS: tuple[str, ...] = tuple(
+    column for column in TEXT_IDENTITY_COLUMNS if column != "run_id"
 )
 
 
@@ -972,9 +974,16 @@ def test_parser_probe_and_window_locate_rows_by_key_with_one_marked_run_id_aid()
       ``_assert_aids_are_marked``;
     * exactly one ``run_id`` occurrence and exactly one marker, so a second,
       unconjoined predicate on the same column cannot hide behind the first;
-    * every other text identity column is still predicate-free.
+    * every text identity column OTHER than the sanctioned `run_id` aid is
+      still predicate-free — the whole set 000050 defines, minus that one aid.
     """
     probe, window, _delete, _insert = _parser_river_statements()
+
+    # Self-check on the derivation: the forbidden set is the complete text
+    # identity register minus the single sanctioned aid. Pinned here so the
+    # tuple above cannot silently shrink back to a partial hand-written list
+    # (which is how `unit` and `quality_flag` fell out of this test's reach).
+    assert set(_PARSER_READ_FORBIDDEN_TEXT_COLUMNS) == set(TEXT_IDENTITY_COLUMNS) - {"run_id"}
 
     for label, sql in (("probe", probe), ("window", window)):
         assert "WHERE run_key = %s" in sql, label

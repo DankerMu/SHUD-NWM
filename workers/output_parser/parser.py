@@ -677,12 +677,13 @@ def _replacement_read_bindings(
     what makes the aid readable as "redundant with the conjunct above it" rather
     than as a fourth independent filter.
 
-    The aid is a no-op on the RESULT set: ``hydro_run.run_key`` is
-    ``GENERATED ALWAYS AS IDENTITY UNIQUE`` (000050) and
-    ``river_timeseries.run_id`` is NOT NULL, both written from the same batch
-    context by the INSERT below, so ``run_key = K AND run_id <> text(K)`` is
-    unrepresentable. It exists only to give the compressed chunks an access
-    path; remove it with #1342, together with its marker line.
+    The aid is a no-op filter for rows this repo writes: run_id<->run_key is
+    bijective through ``hydro.hydro_run`` (run_id PK, run_key IDENTITY UNIQUE)
+    and every writer pairs them (the INSERT below from one ``HydroRunContext``;
+    #1339's backfill via ``run_key = hr.run_key ... WHERE hr.run_id =
+    t.run_id``) — a writer-enforced invariant, not a schema constraint
+    (``run_key`` has no FK, 000050:216-224; foreign-writer drift stays
+    auditable, 000050:250-254). Remove it with #1342 and its marker line.
     """
     return (
         run_key,
