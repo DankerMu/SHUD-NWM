@@ -8,7 +8,27 @@ from pathlib import Path
 
 
 class SafeFilesystemError(RuntimeError):
-    """Raised when a filesystem operation cannot be completed safely."""
+    """Raised when a filesystem operation cannot be completed safely.
+
+    ``kind`` discriminates the refusal structurally so callers can branch on
+    the field rather than on message text:
+
+    - ``"unsafe"`` (default) -- tamper-shaped refusal: symlinked target or
+      path component, non-regular target, containment violation.
+    - ``"io"`` -- an ``OSError`` wrapped into this module's contract.
+    - ``"indeterminate"`` -- an operation that may or may not have taken
+      effect (durable-replace dir-fsync / parent-identity uncertainty).
+    - ``"identity_changed"`` -- the target's inode was replaced between the
+      pre-open stat and the post-open fstat: the target was swapped for a
+      DIFFERENT REGULAR FILE while it was being opened.  An ordinary atomic
+      ``os.replace`` and a hostile swap are indistinguishable at this layer,
+      so this is a CONSISTENCY refusal, not the symlink defense: a symlink
+      appearing in that window is refused by ``O_NOFOLLOW`` (ELOOP) and the
+      symlink mode checks and never reaches the identity comparison.  Callers
+      that own a concurrent-replace relationship may absorb this kind with a
+      bounded retry; callers that must reject any inode movement keep
+      rejecting it.  The primitive itself never retries.
+    """
 
     def __init__(self, message: str, *, kind: str = "unsafe") -> None:
         super().__init__(message)
@@ -282,7 +302,7 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
             if not stat.S_ISREG(opened.st_mode):
                 raise SafeFilesystemError(f"Target file must be a regular file: {target}")
             if expected.st_dev != opened.st_dev or expected.st_ino != opened.st_ino:
-                raise SafeFilesystemError(f"Target file changed while being opened: {target}")
+                raise SafeFilesystemError(f"Target file changed while being opened: {target}", kind="identity_changed")
             _verify_fd_matches_path(parent_fd, parent_path)
             return file_fd
         except Exception:
