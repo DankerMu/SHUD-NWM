@@ -28,7 +28,7 @@
 
 | 组 | 身份来源 | 保留的文本辅助 |
 |---|---|---|
-| A :418-707 八块 | basin/segment/network 字面量；run 经 `h` join | `river_segment_id` + `river_network_version_id` + `variable`（run 无字面量可绑，**不加** run_id；segment 辅助为 E4(ii) live-plan 追加裁定，见 D10.7） |
+| A :418-707 八块 | basin/segment/network 字面量；run 经 `h` join | `river_segment_id` + `river_network_version_id` + `variable`（run 无字面量可绑，**不加** run_id；segment 辅助为 E4(ii) live-plan 追加裁定，**仅服务压缩腿 segmentby 剪枝**，见 D10.7） |
 | A :1717-1737 (A9) | `cr` join + `scan_*` 绑定参数 | `scan_run_id` / `scan_river_network_version_id` / `variable`；`scan_basin_version_id` 消失 |
 | B publisher | run 经 `h` join；`'q_down'` 字面量 | 仅 `variable` |
 | C copyback EXISTS | run 经 `h` join；`'q_down'` 字面量 | 仅 `variable` |
@@ -38,9 +38,8 @@
 
 `basin_version_id` 文本谓词全部清零（非 segmentby、无索引价值）；
 `river_segment_id` 仅在 **A 段块的绑定字面量形态**下作为受批辅助保留
-（D10.7 的 E4(ii) live-plan 翻案——它是 000047 segmentby 第三列，也是
-未压缩腿 PK/`river_ts_segment_time_idx` 的可用前缀；#1341 的 LATERAL 特批
-仍仅限 mvt.py 两探针体）。文本入参需要解键时用标量子查询
+（D10.7 的 E4(ii) live-plan 翻案——它是 000047 segmentby 第三列，收益
+**仅在压缩腿**；#1341 的 LATERAL 特批仍仅限 mvt.py 两探针体）。文本入参需要解键时用标量子查询
 （`apps/api/routes/hydro_display.py:749-789`）。
 
 ## D2: 输出侧文本列同 scope（不只是谓词）
@@ -184,18 +183,24 @@ sentinel 行的老 run 会把既定契约误判为回归。
    转红。偏离 #9 的措辞随之修正："oracle 在其注册面更深，普查方向由本条
    补齐"。
 
-7. **A 段块恢复 `river_segment_id` 文本辅助**（P1，E4(ii) live-plan 翻案）：
-   node-27 实测（2026-08-20，四组 EXPLAIN ANALYZE receipt 落
-   `/home/nwm/nwm-1442-e4/after/`）：清零 segment 文本谓词后，压缩腿失去
-   segmentby（000047 第三列）剪枝、整 network 解压（18550ms vs 旧 139ms），
-   未压缩腿失去 PK/segment 索引前缀、扫整 run×network 切片（1967ms vs 旧
-   203ms）；注回 `rt.river_segment_id = %s` 辅助后 259ms / 1117ms（同负载
-   假说验证 receipt）。该谓词为绑定字面量 + 压缩可达，恰满足 D1 两条件——
-   初版"全部清零"裁定被 must-preserve (5) 证伪。修形：
-   `_SEGMENT_IDENTITY_PREDICATE_SQL` 键对应物后注回带 marker 的文本辅助
-   （绑定 5→6），与 `river_segment_key` 同合取式（邻接 oracle 兼容）；
-   oracle 的 A 组允许集、`TEXT_AID_COUNTERPARTS`、曲线绑定销钉（10→11）
-   同批重钉；**不改** `tests/test_sql_shape_helpers.py` 与 #1341 共享的
+7. **A 段块恢复 `river_segment_id` 文本辅助**（P1，E4(ii) live-plan 翻案，
+   机理经二次终审校正）：node-27 实测（2026-08-20/21，EXPLAIN ANALYZE+BUFFERS
+   receipt 落 `/home/nwm/nwm-1442-e4/after/`）：
+   - **压缩腿（辅助的唯一收益面）**：清零 segment 文本谓词后失去 000047
+     segmentby 第三列剪枝，整 network 解压——32660 batches / Rows Removed
+     3,292,128 / 18549ms；注回辅助后 40 batches / 4032 / 1117ms。
+   - **未压缩腿（辅助无收益，二次终审证伪初版机理）**：新旧两计划的
+     Index Cond 与 Rows Removed（24261/loop）逐字相同，1967→259ms 纯属
+     I/O 缓存差；该腿由 000051 键索引 + 堆过滤承担，`river_ts_segment_time_
+     idx` 存在但 planner 不选。**已量化残余**：稳态 259ms vs 旧 PK 前缀下降
+     203ms（+28%），chunk 侧 buffer 触达 ~15,120 vs ~275（~40x 工作量放大），
+     绝对值可用，裁定接受并记录；真解药 = #1342 键形后继索引
+     `(river_segment_key, variable_e, valid_time DESC)`（已路由
+     issuecomment-5363238972，它同时治愈本残余与删列后的两腿）。
+   修形：`_SEGMENT_IDENTITY_PREDICATE_SQL` 键对应物后注回带 marker 的文本
+   辅助（绑定 5→6），与 `river_segment_key` 同合取式（邻接 oracle 兼容）；
+   oracle 的 A 组允许集、曲线绑定销钉（10→11）同批重钉；**不改**
+   `tests/test_sql_shape_helpers.py` 与 #1341 共享的
    `SANCTIONED_TEXT_PUSHDOWN_COLUMNS`（避免放宽 display 面 oracle），A 组
    扩展在 #1442 oracle 本地表达。压缩 chunk NULL-key 行的空结果属 D8 继承
    契约（本次实测 168/168 行 NULL key），非本项范围。

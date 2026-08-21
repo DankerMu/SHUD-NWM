@@ -179,12 +179,17 @@ PUSHDOWN_AID_MARKER = "-- transitional compressed-chunk pushdown aid, remove wit
 
 # Per-group ceilings, as adjudicated in design D1 (A segment blocks amended by
 # D10.7). The segment blocks are the one group whose ceiling exceeds the shared
-# SANCTIONED_TEXT_PUSHDOWN_COLUMNS: node-27 EXPLAIN ANALYZE showed that without
-# a literal `rt.river_segment_id` the compressed leg loses 000047's third
-# segmentby column (whole-network decompression) and the uncompressed leg loses
-# its PK / river_ts_segment_time_idx prefix. The widening is expressed HERE, per
-# call site, and deliberately not folded into the shared constant — #1341's
-# display oracles consume that constant and must keep rejecting the column.
+# SANCTIONED_TEXT_PUSHDOWN_COLUMNS, and for exactly one measured reason: without
+# a literal `rt.river_segment_id` the COMPRESSED leg loses 000047's third
+# segmentby column and decompresses the whole network (32660 batches / Rows
+# Removed 3,292,128 / 18549ms, against 40 / 4032 / 1117ms with it). The
+# uncompressed leg gains nothing from the aid — its Index Cond and Rows Removed
+# are identical either way; it runs on 000051's key index plus a heap filter,
+# and its recorded residual is cured by #1342's `(river_segment_key,
+# variable_e, valid_time DESC)` successor index, not by a text predicate. The
+# widening is expressed HERE, per call site, and deliberately not folded into
+# the shared constant — #1341's display oracles consume that constant and must
+# keep rejecting the column.
 A_SEGMENT_BLOCK_ALLOWED_AIDS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
 A_SEGMENT_BLOCK_AIDS = {"river_segment_id", "river_network_version_id", "variable"}
 A_FALLBACK_AIDS = {"run_id", "river_network_version_id", "variable"}
@@ -537,8 +542,10 @@ def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() 
     The ceiling check above is an equality and would already redden on removal,
     but this states the requirement in the form the next reader will search for:
     a "finish the cleanup, drop the last text predicate" edit is the regression
-    E4(ii) caught on node-27 (whole-network decompression, 18550ms vs 139ms),
-    and it must fail here rather than in a plan nobody re-measures.
+    E4(ii) caught on node-27 — the compressed leg loses segmentby pruning and
+    decompresses the whole network (32660 batches / 18549ms, against 40 / 1117ms
+    with the aid) — and it must fail here rather than in a plan nobody
+    re-measures.
     """
     rendered = _segment_block_statements()
     assert len(rendered) == 8
@@ -1180,9 +1187,9 @@ def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
     """The other direction: losing an aid silently reinstates the chunk collapse.
 
     Both aids the E4(ii) receipts measured are covered: the network one (000047's
-    second segmentby column) and the segment one (its third, plus the
-    uncompressed leg's index prefix — the 18550ms/1967ms regression D10.7
-    reverses).
+    second segmentby column) and the segment one (its third — the whole-network
+    decompression D10.7 reverses, 18549ms against 1117ms). Both are
+    compressed-leg pruning; neither is an uncompressed-leg index prefix.
     """
     for dropped in ("AND rt.river_network_version_id = %s\n", "AND rt.river_segment_id = %s\n"):
         mutated = _SWITCHED_SPECIMEN.replace(dropped, "")

@@ -55,14 +55,24 @@ QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id
 #   Each is AND-ed with its key/enum counterpart, so it only ever narrows, and
 #   all three are removed with the text columns in #1342.
 # * ``river_segment_id`` is here by the E4(ii) live-plan adjudication (design
-#   D10.7), not by the original "zero every segment predicate" draft: node-27
-#   EXPLAIN ANALYZE showed that dropping it costs BOTH legs — the compressed leg
-#   loses segmentby pruning on 000047's third column and decompresses the whole
-#   network (18550ms vs 139ms), and the uncompressed leg loses the PK /
-#   ``river_ts_segment_time_idx`` prefix and scans the whole run x network slice
-#   (1967ms vs 203ms). Injected back: 259ms / 1117ms. It qualifies as a
-#   sanctioned aid because these blocks bind it as a LITERAL (never as a text
-#   fact join) and it is compression-reachable.
+#   D10.7), not by the original "zero every segment predicate" draft. It buys
+#   exactly ONE thing, on the COMPRESSED leg: segmentby pruning on 000047's
+#   third column. Without it that leg decompresses the whole network — 32660
+#   batches, Rows Removed 3,292,128, 18549ms; with it, 40 batches, 4032, 1117ms.
+#   It qualifies as a sanctioned aid because these blocks bind it as a LITERAL
+#   (never as a text fact join) and it is compression-reachable.
+# * What the aid does NOT do (an earlier draft of this comment claimed it did,
+#   and the second reading of the receipts disproved it): it gives the
+#   UNCOMPRESSED leg nothing. Both plans there carry byte-identical Index Cond
+#   and Rows Removed (24261/loop) with and without the predicate — the
+#   1967ms -> 259ms difference was I/O caching, not planning. That leg runs on
+#   000051's key index plus a heap filter either way; the text-shaped
+#   ``river_ts_segment_time_idx`` still exists, but the planner does not choose
+#   it. Its recorded, accepted residual:
+#   steady-state 259ms against the old PK-prefix descent's 203ms, with
+#   chunk-side buffer touches ~15,120 vs ~275 (~40x amplification). The cure is
+#   not a text predicate but #1342's key-form successor index
+#   ``(river_segment_key, variable_e, valid_time DESC)``.
 # * ``basin_version_id`` still gets NO text conjunct: it is neither a segmentby
 #   column nor an index prefix here, so it would buy nothing and only widen the
 #   text surface #1342 has to remove.
