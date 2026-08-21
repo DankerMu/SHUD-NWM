@@ -103,9 +103,14 @@ long-shared-prefix `station_id` equality hotspot ever appear under an
   `lower(col) gin_trgm_ops`; the query that is meant to use them must spell
   `lower(col) LIKE <lowercased pattern>`. A reviewer seeing a bare-column
   trigram index on an identifier column should ask for this ADR.
-- The rebuild is a three-step idempotent swap (conditional rename → `CREATE
-  INDEX CONCURRENTLY` → `DROP INDEX CONCURRENTLY`) with no transaction wrapper;
-  see the migration header for the interrupted-build recovery step.
+- The rebuild is an idempotent swap (conditional renames → `CREATE INDEX
+  CONCURRENTLY` → `DROP INDEX CONCURRENTLY`) with no transaction wrapper, and
+  it never takes ACCESS EXCLUSIVE on `core.river_segment`: an INVALID leftover
+  from an interrupted build is RENAMED aside (`..._invalid`) and dropped
+  concurrently rather than dropped in place, because a non-concurrent `DROP
+  INDEX` locks the TABLE even when the index it removes has no readers. Same
+  convention for any future rebuild of an index on a table serving live reads.
+  See the migration header for the interrupted-build recovery step.
 - Equality consumers (`scripts/node27_river_identity_backfill.py` and any future
   identity join) no longer need `enable_bitmapscan=off`. The one place that used
   it — node-27's `run-campaign-v3.sh`, session-scoped and never in this

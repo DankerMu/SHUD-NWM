@@ -26,7 +26,7 @@ node-27 ingest tick（`scripts/node27_autopipeline.py` phase 3.5 stats guard）M
 
 ### Requirement: Identifier columns MUST NOT carry a bare-column trigram GIN that equality lookups can select
 
-`core.river_segment.river_segment_id` 的 trigram 索引 `river_segment_id_trgm_idx` MUST 建在表达式 `lower(river_segment_id)` 上，使 `river_segment_id = $1` 形态的等值查找在结构上不可选该索引（与统计新鲜度、成本估计无关）；search 消费者 MUST 以同一表达式 `lower(rs.river_segment_id) LIKE <小写 pattern> ESCAPE '\'` 使用它，命中集合与原 `ILIKE` 相同。迁移 MUST 幂等可重跑，且重建窗口内 search 不失去索引（旧索引先改名、新索引建成后再并发删除）。
+`core.river_segment.river_segment_id` 的 trigram 索引 `river_segment_id_trgm_idx` MUST 建在表达式 `lower(river_segment_id)` 上，使 `river_segment_id = $1` 形态的等值查找在结构上不可选该索引（与统计新鲜度、成本估计无关）；search 消费者 MUST 以同一表达式 `lower(rs.river_segment_id) LIKE <小写 pattern> ESCAPE '\'` 使用它，命中集合与原 `ILIKE` 相同。迁移 MUST 幂等可重跑且不对表取 ACCESS EXCLUSIVE 锁（旧索引与 invalid 残骸只改名，新索引并发建成后再并发删除；改名的作用是幂等判别，不是可用性——并发重建的秒级窗口内改写后的 search 走 bitmap(network) + Filter，属已记账的可接受退化）。
 
 #### Scenario: 等值查找不再选中 trigram 索引
 

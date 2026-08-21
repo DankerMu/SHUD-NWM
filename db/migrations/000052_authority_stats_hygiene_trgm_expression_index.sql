@@ -40,7 +40,7 @@
 -- trigrams inside the GIN, so the hit set is unchanged for ASCII slug ids.
 --
 -- ---------------------------------------------------------------------------
--- SHAPE: three-step idempotent swap, deliberately outside any transaction
+-- SHAPE: idempotent rename/build/drop swap, deliberately outside any transaction
 -- ---------------------------------------------------------------------------
 --
 -- `CREATE/DROP INDEX CONCURRENTLY` cannot run inside a transaction block, so
@@ -48,14 +48,26 @@
 -- executes each statement on an autocommit connection and its splitter keeps
 -- dollar-quoted bodies intact, so the DO block below arrives whole.
 --
---   1. DO block (`SET LOCAL lock_timeout = '2s'`, precedent 000050): drop a
---      same-named INVALID index left by an interrupted concurrent build, then
---      rename the bare-column index out of the way as `..._legacy`. The rename
---      takes SHARE UPDATE EXCLUSIVE and does not block readers; its purpose is
+-- NO STATEMENT IN THIS FILE TAKES ACCESS EXCLUSIVE ON `core.river_segment`.
+-- The table serves live MVT reads; a lock that queues behind them would block
+-- every new reader until this file's `lock_timeout` fires and then abort the
+-- migration. Every index removal is therefore CONCURRENTLY, and every index
+-- displacement is a RENAME (SHARE UPDATE EXCLUSIVE, readers unaffected).
+--
+--   0. `DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid`
+--      -- clears the leftover of a PREVIOUS interrupted run, so the rename in
+--      step 1 cannot collide with a name that is already taken.
+--   1. DO block (`SET LOCAL lock_timeout = '2s'`, precedent 000050): rename a
+--      same-named INVALID index left by an interrupted concurrent build to
+--      `..._invalid`, then rename the bare-column index out of the way as
+--      `..._legacy`. Renaming rather than dropping the INVALID leftover is not
+--      cosmetic: an INVALID index has no readers, but a NON-CONCURRENT
+--      `DROP INDEX` still takes ACCESS EXCLUSIVE on the TABLE, which is exactly
+--      what the paragraph above forbids. The `_legacy` rename's purpose is
 --      IDEMPOTENCE (a second pass can tell the old bare-column index apart from
 --      the freshly built expression index and will not delete the new one).
 --   2. `CREATE INDEX CONCURRENTLY IF NOT EXISTS` the expression index.
---   3. `DROP INDEX CONCURRENTLY IF EXISTS` the renamed leftover.
+--   3. `DROP INDEX CONCURRENTLY IF EXISTS` both renamed leftovers.
 --
 -- During the seconds-long build window search falls back to
 -- bitmap(river_network_version) + Filter (measured ~20 ms, issue #1468
@@ -65,10 +77,12 @@
 -- RECOVERY AFTER AN INTERRUPTED CONCURRENT BUILD: re-run this file. A cancelled
 -- `CREATE INDEX CONCURRENTLY` leaves an INVALID index behind, and
 -- `IF NOT EXISTS` alone would happily skip it (it matches by name only), which
--- is why step 1 removes the leftover before rebuilding. Every interruption
--- point is replayable: after step 1 the second pass renames nothing and builds;
--- after step 2 it only drops the leftover; after step 3 only the ALTERs remain,
--- and those are idempotent.
+-- is why step 1 moves the leftover aside as `..._invalid` before rebuilding and
+-- step 3 drops it concurrently. Every interruption point is replayable: after
+-- step 0 or 1 the second pass renames what is still there and builds; after
+-- step 2 it only drops the leftovers; if the run dies between the two drops of
+-- step 3, step 0 of the next pass removes the `_invalid` one. After step 3 only
+-- the ALTERs remain, and those are idempotent.
 --
 -- ---------------------------------------------------------------------------
 -- WHY THE per-table AUTOVACUUM PARAMETERS ARE HERE TOO
@@ -81,6 +95,8 @@
 -- cumulative statistics, after which a zero-churn table never crosses ANY
 -- threshold -- is covered by the autopipe stats guard's repair leg
 -- (scripts/node27_autopipeline.py) and runbook section 4.8.
+
+DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid;
 
 DO $$
 DECLARE
@@ -101,10 +117,13 @@ BEGIN
           AND ix.indisvalid = false
     ) INTO invalid_leftover;
 
-    -- An INVALID index has no readers (the planner ignores it) and no
-    -- concurrent build to protect, so a plain, instantaneous DROP is correct.
+    -- An INVALID index has no readers (the planner ignores it), but dropping it
+    -- non-concurrently would still take ACCESS EXCLUSIVE on core.river_segment
+    -- and block live MVT readers -- so move it aside instead and let step 3
+    -- drop it concurrently. The rename takes SHARE UPDATE EXCLUSIVE.
     IF invalid_leftover THEN
-        DROP INDEX core.river_segment_id_trgm_idx;
+        ALTER INDEX core.river_segment_id_trgm_idx
+            RENAME TO river_segment_id_trgm_idx_invalid;
     END IF;
 
     SELECT EXISTS (
@@ -125,6 +144,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS river_segment_id_trgm_idx
   ON core.river_segment USING GIN (lower(river_segment_id) gin_trgm_ops);
 
 DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_legacy;
+
+DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid;
 
 -- 209k / 155k row tables: a new network (~5k segments) must cross the bar.
 ALTER TABLE core.river_segment

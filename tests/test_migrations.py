@@ -993,20 +993,25 @@ def test_state_snapshot_clone_provenance_migration_is_column_only_forward_upgrad
 
 
 def test_authority_stats_hygiene_migration_splits_into_the_expected_statements() -> None:
-    """000052 mixes a DO block with two CONCURRENTLY statements (issue #1468).
+    """000052 mixes a DO block with four CONCURRENTLY statements (issue #1468).
 
     ``split_sql_statements`` is the splitter ``packages.common.migrate`` applies
-    migrations with, so it is the authoritative statement oracle. Two things
+    migrations with, so it is the authoritative statement oracle. Three things
     must hold at once and only this test can see them without a database:
 
     * the ``$$`` body survives whole -- the DO block carries five internal
       semicolons, and a splitter that cut on them would ship five syntactically
       broken fragments;
-    * no statement is wrapped in a transaction and the two CONCURRENTLY
-      statements arrive as their own top-level statements -- ``CREATE/DROP
-      INDEX CONCURRENTLY`` is rejected inside a transaction block, and
+    * no statement is wrapped in a transaction and the CONCURRENTLY statements
+      arrive as their own top-level statements -- ``CREATE/DROP INDEX
+      CONCURRENTLY`` is rejected inside a transaction block, and
       ``apply_migration`` runs one statement per ``cursor.execute`` on an
-      autocommit connection.
+      autocommit connection;
+    * no index is dropped NON-concurrently. ``core.river_segment`` serves live
+      MVT reads and a plain ``DROP INDEX`` takes ACCESS EXCLUSIVE on the TABLE,
+      not merely on the index -- including on the INVALID-leftover branch, whose
+      leftover is therefore RENAMED aside and dropped concurrently in step 3
+      (round-1 review C1, design D3).
     """
 
     migration = dict(_migration_sql())[AUTHORITY_STATS_HYGIENE_MIGRATION]
@@ -1017,15 +1022,21 @@ def test_authority_stats_hygiene_migration_splits_into_the_expected_statements()
         for statement in statements
     ]
 
-    assert len(executables) == 7, f"expected seven executable statements, got {len(executables)}"
+    assert len(executables) == 9, f"expected nine executable statements, got {len(executables)}"
 
-    do_block = executables[0]
+    # Step 0: a leftover `_invalid` from a PREVIOUS interrupted run is cleared
+    # first, so the DO block's rename below cannot collide with the name.
+    assert executables[0] == (
+        "DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid;"
+    ), executables[0]
+
+    do_block = executables[1]
     assert do_block.startswith("DO $$"), do_block
     assert do_block.endswith("$$;"), do_block
-    # The whole body, semicolons and all, is inside statement 0.
+    # The whole body, semicolons and all, is inside statement 1.
     for body_fragment in (
         "SET LOCAL lock_timeout = '2s';",
-        "DROP INDEX core.river_segment_id_trgm_idx;",
+        "RENAME TO river_segment_id_trgm_idx_invalid;",
         "ALTER INDEX core.river_segment_id_trgm_idx",
         "RENAME TO river_segment_id_trgm_idx_legacy;",
         "ix.indisvalid = false",
@@ -1033,17 +1044,30 @@ def test_authority_stats_hygiene_migration_splits_into_the_expected_statements()
     ):
         assert body_fragment in do_block, body_fragment
 
-    assert executables[1].startswith(
+    assert executables[2].startswith(
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS river_segment_id_trgm_idx"
-    ), executables[1]
-    # The equality trap is closed by the EXPRESSION, not by the index existing.
-    assert "GIN (lower(river_segment_id) gin_trgm_ops)" in executables[1], executables[1]
-    assert executables[2] == (
-        "DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_legacy;"
     ), executables[2]
+    # The equality trap is closed by the EXPRESSION, not by the index existing.
+    assert "GIN (lower(river_segment_id) gin_trgm_ops)" in executables[2], executables[2]
+    assert executables[3] == (
+        "DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_legacy;"
+    ), executables[3]
+    assert executables[4] == (
+        "DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid;"
+    ), executables[4]
+
+    # Every DROP INDEX in the executable body -- the DO block's included -- must
+    # be CONCURRENTLY. Checked against the comment-stripped statements so the
+    # header's prose about non-concurrent drops cannot satisfy or trip it.
+    for statement in executables:
+        for match in re.finditer(r"\bDROP\s+INDEX\b(?!\s+CONCURRENTLY\b)", statement, re.IGNORECASE):
+            raise AssertionError(
+                f"non-concurrent DROP INDEX takes ACCESS EXCLUSIVE on core.river_segment: "
+                f"{statement[match.start() : match.start() + 120]!r}"
+            )
 
     assert [
-        re.sub(r"\s+", " ", statement).strip() for statement in executables[3:]
+        re.sub(r"\s+", " ", statement).strip() for statement in executables[5:]
     ] == [
         "ALTER TABLE core.river_segment SET (autovacuum_analyze_scale_factor = 0.01,"
         " autovacuum_analyze_threshold = 500);",

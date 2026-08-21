@@ -2247,9 +2247,21 @@ hypertable 根表与 `_timescaledb_internal` 下的 chunk **明确排除**（根
 
 条目语义与前沿腿一致：`analyzed` 逐**尝试**一条；只有 `status: "ok"` 承诺
 `last_analyze` 真刷到了；`warning` 是"发了 ANALYZE 但回读没刷新"（PG15 非 owner
-静默跳过，见 §4.7），`failed` 是没执行成。`--progress` 的 `[stats-guard]` 行尾部
-追加 `authority ok N / failed M / deferred K`；该行现在只要**任一腿**有动作就打印
-——旧条件在 `not_triggered` 时整行抑制，恰好吞掉修复腿唯一干活的那种 tick。
+静默跳过，见 §4.7），`failed` 是没执行成。
+
+**生产上的权威读法就是上面这段 summary JSON，不是 `[stats-guard]` 进度行。**
+`scripts/node27_autopipe_cron.sh` **不传** `--progress`，所以定时 tick 根本不打那
+一行；它只在人工 `--progress` 跑时出现，形态与前沿段同构（腿级 status + 四个计数）：
+
+```
+[stats-guard] not_triggered: ok 0, warning 0, failed 0, deferred 0, authority completed: ok 1, warning 1, failed 1, deferred 1
+```
+
+`authority` 后面的 status 是**腿级**的：guard 级失败（连不上 / 候选查询炸）时
+`analyzed` 为空、四个计数全 0，与"这一腿没活干"长得一模一样，只有 status 分得开
+（`authority failed: ok 0, warning 0, failed 0, deferred 0`）。该行现在只要**任一
+腿**有动作就打印——旧条件在 `not_triggered` 时整行抑制，恰好吞掉修复腿唯一干活的
+那种 tick。
 
 #### 复核 SQL（双 NULL 候选，期望 0 行）
 
@@ -2272,6 +2284,14 @@ ORDER BY c.relpages DESC;
 
 一个跑过修复腿的 tick 之后这条应返回 **0 行**。持续非空 = 修复腿没跑（开关 off /
 guard 级失败）或每条都 `failed`/`warning`——先看 summary，别先怀疑 SQL。
+
+这条 SQL 的**取/舍口径由真库用例钉住**，不是靠字符串比对：
+`tests/test_real_database_integration.py::test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypertables`
+在 throwaway 库里把 `core`/`met`/`public` 三张普通表与一个 hypertable chunk 做成
+同样的候选形态（先 ANALYZE 让 `relpages > 0`，再
+`pg_stat_reset_single_table_counters` 造双 NULL），直接调修复腿并断言：`core`/`met`
+两张被 ANALYZE 且 `status: "ok"`，`public.*`、hypertable 根表、
+`_timescaledb_internal.*` chunk **一个都不入选**。改这段 SQL 先跑它。
 
 #### per-table autovacuum 参数（覆盖 churn 型）
 
@@ -2309,6 +2329,17 @@ ANALYZE **之后**实测 2,000 次等值查找：
 `lower(rs.river_segment_id) LIKE <小写 pattern> ESCAPE '\'`，命中集合不变、
 计划仍走该索引。完整机制、备选方案与约定见
 [ADR 0004](../adr/0004-identifier-trgm-gin-equality-trap.md)。
+
+**施加 000052 的运维口径**：`psql -v ON_ERROR_STOP=1 -f` 直接跑，重跑幂等，**全文
+没有任何对 `core.river_segment` 取 ACCESS EXCLUSIVE 的语句**——旧索引与上一次
+`CREATE INDEX CONCURRENTLY` 中断留下的 INVALID 残骸都只 **RENAME**（`_legacy` /
+`_invalid`，SHARE UPDATE EXCLUSIVE，不阻塞 MVT 读），新索引并发建成后再
+`DROP INDEX CONCURRENTLY` 删掉这两个名字。非并发 `DROP INDEX` 即使删的是没有读者
+的 INVALID 索引，也会锁**表**、在读流量下排队并被文件里的 `lock_timeout = '2s'`
+打断（round-1 审查 C1）。所以中断后的恢复动作只有一个：**重跑该文件**；不要手工
+`DROP INDEX`（要手工清也必须带 `CONCURRENTLY`）。看恢复是否干净：
+`\di core.river_segment_id_trgm_idx*` 应只剩一个名字，且
+`pg_index.indisvalid = true`。
 
 `met.met_station` 的 `met_station_id_trgm_idx` 是 partial（`WHERE active_flag =
 true`）：不带该谓词的等值查找结构上不可选它（实测走 `met_station_pkey`，

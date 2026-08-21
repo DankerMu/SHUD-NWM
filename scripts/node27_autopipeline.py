@@ -1164,10 +1164,23 @@ WHERE schemaname = %s AND relname = %s
 
 # Repair leg (issue #1468): ordinary tables whose cumulative statistics were
 # wiped. Double NULL is the signature -- an ANALYZE that ever ran, by hand or by
-# autovacuum, leaves one of the two timestamps behind. ``relpages > 0`` keeps
-# genuinely empty tables (nothing to analyze) out of the candidate set, and it
-# survives the wipe because it lives in ``pg_class``, not in the cumulative
-# statistics. Hypertables and their chunks are excluded on purpose (#1378 D3):
+# autovacuum, leaves one of the two timestamps behind.
+#
+# ``relpages > 0`` survives the wipe because it lives in ``pg_class``, not in
+# the cumulative statistics -- which is what makes it usable here at all, and
+# also what limits it: ``relpages`` is maintained only by VACUUM / ANALYZE /
+# CREATE INDEX, and is 0 on a relation none of the three has ever visited (PG14+
+# pairs that with the ``reltuples = -1`` never-analyzed sentinel). So the clause
+# does not only exclude empty tables: a POPULATED table that was never analyzed
+# is invisible to this leg too. That is a deliberate residual risk, recorded in
+# the change design's 残余风险 ledger (#1468), not an oversight -- such a table
+# has churn by definition (the rows were written), so the flat 50-row
+# autoanalyze threshold reaches it, and
+# below 50 rows the planner's default estimates are harmless. Do not widen the
+# predicate: dropping it would drag every empty table into the candidate set and
+# spend the per-tick cap on relations with nothing to analyze.
+#
+# Hypertables and their chunks are excluded on purpose (#1378 D3):
 # ANALYZE on a hypertable root recurses into the chunks, and ANALYZE on a bare
 # compressed-chunk name zeroes the relstats TimescaleDB preserved at
 # compression time. Chunks live in ``_timescaledb_internal``, which the schema
@@ -2149,13 +2162,21 @@ def main(argv: list[str] | None = None) -> int:
         # an all-failed tick would otherwise read like a success.
         statuses = [entry["status"] for entry in stats_guard["analyzed"]]
         authority_statuses = [entry["status"] for entry in authority_guard["analyzed"]]
+        # Both segments carry the SAME four counts plus their own leg status.
+        # `warning` is not decoration: it is the PG15 non-owner silent skip
+        # (see `_analyze_one_relation`), i.e. an ANALYZE that returned success
+        # and refreshed nothing -- folding it into neither ok nor failed would
+        # report that as work done. The leg status is printed because a
+        # guard-level failure (connect / candidate query) leaves `analyzed`
+        # empty, so all four counts read 0 on a leg that did nothing at all.
         print(
             f"[stats-guard] {stats_guard['status']}: ok {statuses.count('ok')}"
             f", warning {statuses.count('warning')}, failed {statuses.count('failed')}"
             f", deferred {len(stats_guard['deferred'])}"
-            f", authority ok {authority_statuses.count('ok')}"
-            f" / failed {authority_statuses.count('failed')}"
-            f" / deferred {len(authority_guard['deferred'])}",
+            f", authority {authority_guard['status']}: ok {authority_statuses.count('ok')}"
+            f", warning {authority_statuses.count('warning')}"
+            f", failed {authority_statuses.count('failed')}"
+            f", deferred {len(authority_guard['deferred'])}",
             file=sys.stderr,
             flush=True,
         )

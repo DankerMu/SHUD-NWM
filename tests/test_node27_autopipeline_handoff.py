@@ -1292,6 +1292,16 @@ def test_stats_guard_progress_line_reports_the_repair_leg_on_a_quiet_tick(
                     "status": "failed",
                     "error": "RuntimeError: nope",
                 },
+                # PG15 non-owner silent skip: ANALYZE returned success and
+                # refreshed nothing. Counted apart from ok and from failed, or
+                # the line would report work that did not happen.
+                {
+                    "table": "core.basin_version",
+                    "relpages": 12,
+                    "seconds": 0.1,
+                    "last_analyze": _BEFORE.isoformat(),
+                    "status": "warning",
+                },
             ],
             deferred=["hydro.run_display_coverage"],
         ),
@@ -1303,7 +1313,37 @@ def test_stats_guard_progress_line_reports_the_repair_leg_on_a_quiet_tick(
     guard_lines = [line for line in captured.err.splitlines() if line.startswith("[stats-guard]")]
     assert guard_lines == [
         "[stats-guard] not_triggered: ok 0, warning 0, failed 0, deferred 0"
-        ", authority ok 1 / failed 1 / deferred 1"
+        ", authority completed: ok 1, warning 1, failed 1, deferred 1"
+    ]
+
+
+def test_stats_guard_progress_line_reports_a_failed_repair_leg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A guard-level repair-leg failure (connect / candidate query) leaves
+    ``analyzed`` empty, so every count reads 0 -- exactly like a leg that found
+    nothing to do. Only the leg's own status tells the two apart, which is why
+    the line prints it (round-1 review C3)."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_unanalyzed_authority_tables",
+        lambda _database_url: _authority_result(
+            status="failed", error="OperationalError: could not connect to server"
+        ),
+    )
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    guard_lines = [line for line in captured.err.splitlines() if line.startswith("[stats-guard]")]
+    assert guard_lines == [
+        "[stats-guard] not_triggered: ok 0, warning 0, failed 0, deferred 0"
+        ", authority failed: ok 0, warning 0, failed 0, deferred 0"
     ]
 
 

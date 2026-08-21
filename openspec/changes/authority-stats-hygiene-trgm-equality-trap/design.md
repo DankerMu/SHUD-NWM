@@ -67,22 +67,34 @@ btree Hash Join（22 ms/500）。不改，记录复核 SQL；若未来出现带 
   已有先例——000052 的新形态是 DO 块与两条 CONCURRENTLY 混排且全文无事务）：
   1. `DO $$ … $$`（`SET LOCAL lock_timeout = '2s'`，000050 先例）：若
      `pg_index.indisvalid = false` 的同名索引存在（上一次 CIC 中断的残骸）则
-     `DROP INDEX`（非并发、瞬时，残骸无读者）；若 `pg_indexes` 中
+     `ALTER INDEX … RENAME TO river_segment_id_trgm_idx_invalid`（SHARE UPDATE
+     EXCLUSIVE；**不能**用非并发 `DROP INDEX`——它对**表**取 ACCESS EXCLUSIVE，会在
+     MVT 读流量下排队阻塞读者再被 lock_timeout 打断，round-1 审查 C1）；若 `pg_indexes` 中
      `schemaname='core' AND indexname='river_segment_id_trgm_idx' AND indexdef NOT
      LIKE '%lower(%'` 则 `ALTER INDEX core.river_segment_id_trgm_idx RENAME TO
      river_segment_id_trgm_idx_legacy`（SHARE UPDATE EXCLUSIVE，不阻塞读者）。
   2. `CREATE INDEX CONCURRENTLY IF NOT EXISTS river_segment_id_trgm_idx ON
      core.river_segment USING GIN (lower(river_segment_id) gin_trgm_ops);`
   3. `DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_legacy;`
+     与 `DROP INDEX CONCURRENTLY IF EXISTS core.river_segment_id_trgm_idx_invalid;`
+     （并发删除对 invalid 普通索引合法；全文件唯一可能取表级 AEL 的语句因此不存在）。
   4. 四张表 `ALTER TABLE … SET (autovacuum_*)`（幂等）。
 - RENAME 步骤的收益是**幂等判别**（第二遍能区分"裸列旧索引"与"已置换的表达式
   索引"，不会误删刚建好的索引），不是可用性：`_legacy` 是裸列 GIN，服务不了改写后
   的 `lower(river_segment_id) LIKE`，CIC 的秒级窗口（209k 行、11 MB）内该查询走
   bitmap(network) + Filter（只读诊断实测 20 ms 量级），可接受。
 - 中断态全部可重跑：步 1 后中断 → 第二遍步 1 判别不触发、步 2 建新、步 3 删旧；
-  步 2 中断留下 invalid 同名索引 → 第二遍步 1 先清残骸再建；步 3 前中断 → 第二遍
+  步 2 中断留下 invalid 同名索引 → 第二遍步 1 先把残骸改名为 `_invalid`（若上上次
+  已留下 `_invalid`，步 1 之前先并发删除它，避免改名撞名）再建；该分支由真库用例
+  覆盖（用 case-dup 行让 `CREATE UNIQUE INDEX CONCURRENTLY` 同名失败制造 invalid
+  残骸，再删账本行重放）；步 3 前中断 → 第二遍
   只剩步 3/4。`IF NOT EXISTS` 单独不够（它只按名字判存在，会跳过 invalid 残骸），
   故 invalid 清理是必需步骤，E4(i) 与集成断言都要查 `indisvalid = true`。
+- 修复腿候选 SQL 需要**行为** oracle（round-1 审查 C2：字符串钉下三种语义中和突变
+  全绿）：真库用例在 throwaway DB 造 core/met 普通表（先 ANALYZE 使 `relpages > 0`，
+  再 `pg_stat_reset_single_table_counters`）与同样处理的 hypertable chunk，直接调用
+  `_analyze_unanalyzed_authority_tables(dsn)`，断言普通表入选且被 ANALYZE、
+  hypertable/chunk 不入选。
 - node-27 以 `psql -v ON_ERROR_STOP=1 -f` 施加两遍（真两遍）；CI 只施加一遍
   （账本门控），幂等证据来自集成测试的"删账本行后 `apply_migration()` 重放"。
 
@@ -129,3 +141,6 @@ station search 不动（D2）。
   改一个 schema 元组。
 - `public.spatial_ref_sys`（PostGIS 自带，8,500 行，零统计）不在候选集，等值查找
   走 pkey，无影响。
+- `relpages` 只由 VACUUM/ANALYZE/CREATE INDEX 维护：一张有行但从未被 analyze 过的
+  小表 `relpages = 0`，不在修复腿候选集内；这类表有 churn（行是写进去的），50 行
+  阈值由 autoanalyze 兜住，且 <50 行的表 planner 默认估计无害。判据保持 `relpages > 0`。
