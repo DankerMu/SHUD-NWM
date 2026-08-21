@@ -8045,14 +8045,13 @@ def test_file_journal_read_caches_survive_concurrent_readers_and_a_writer(
     for cycle_time in [*cycle_times, writer_cycle]:
         repository.ensure_forecast_cycle(source_id="gfs", cycle_time=cycle_time)
         repository.upsert_pipeline_job(_rotation_job(cycle_time))
-    # The writer owns a cycle of its own: readers must not open a file that
-    # is being atomically replaced, which is a pre-existing safe_fs race and
-    # not the cache defect under test.
-    writer_segment = format_cycle_time(writer_cycle)
+    # Readers read every journal file including the writer's own cycle: the
+    # #1600 fix absorbs the mid-open atomic replacement at the read
+    # chokepoint, so the same-cycle read/write hammer must stay green
+    # (spec: "Two threads read and write the same cycle").  The carve-out
+    # that filtered the writer's segment out was removed with it.
     journal_files = sorted(
-        path
-        for path in journal_root.rglob("*")
-        if path.is_file() and path.suffix in {".json", ".jsonl"} and writer_segment not in str(path)
+        path for path in journal_root.rglob("*") if path.is_file() and path.suffix in {".json", ".jsonl"}
     )
     assert journal_files
 

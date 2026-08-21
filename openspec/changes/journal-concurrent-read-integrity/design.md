@@ -228,8 +228,9 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
    issue #1595 也自己写明「若它引入任何语义风险，优先保留全局 clear」。
 
 该缺陷**pre-existing 且非本 change 引入**（初版 D2 的错误是把它描述反了，不是造出来的）。
-出口 clear 的性能收窄可另行立 issue，**该 issue 必须把上面第 1 条作为约束写进去**——
-否则执行那个 follow-up 的人会在一个假前提上收窄入口 clear，那才是真会出事的地方。
+出口 clear 的性能收窄已路由 [#1658](https://github.com/DankerMu/SHUD-NWM/issues/1658)，
+其正文把上面第 1 条写成硬约束：否则执行 follow-up 的人会在一个假前提上收窄入口 clear，
+那才是真会出事的地方。
 
 对应地，tasks 3.4 与 spec 的对应 scenario 必须限定在**非 owner 读**上：
 「正确性不依赖 clear 粒度」这句只对非 owner 读成立，对 owner 快路径为假。
@@ -318,6 +319,51 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 `services/orchestrator/scheduler_file_providers.py` ↔ `scripts/scheduler_file_provider_refresh.py`、
 `packages/common/object_store.py`、`packages/common/state_manager.py`。
 
+#### D7.1 — 实现期逐模块普查结果
+
+判定词：**AFFECTED** 表示合法并发原子替换被误报、调用方应吸收；**GUARDED** 表示锁/CAS/快照或
+既定 fail-closed 已正确处理；**NO CONCURRENT WRITER** 表示同键写者由阶段/路径/生命周期隔离；
+**PRIMITIVE** 表示定义层，不能替调用方选择策略。逐模块结果如下（行号按实现期 HEAD 复核）：
+
+| 模块 | 判定 | 同键 writer / 现有边界的依据 |
+|---|---|---|
+| `packages/common/evidence_io.py` | GUARDED | `:106/:326` 固定同一 fd，并在 `:94-141/:320-361` 做 fstat/digest/长度身份校验，变更按证据不稳定拒绝。 |
+| `packages/common/manifest_index.py` | NO CONCURRENT WRITER | `:97-116` 读 stage index；`chain_manifests.py:317-340` 在 array submit 前写完，worker 启动后才消费。 |
+| `packages/common/object_store_forcing.py` | **AFFECTED → #1660** | `:503` 直读 station CSV；`forcing_producer/producer.py:1970-2005,2101-2104` 对同 key 原子 replace；`:541-556` 将竞态误报为 malformed。 |
+| `packages/common/object_store.py` | GUARDED | `:191-239` / `:207-214` 是泛型 read/write primitive；是否吸收必须由具体 caller 裁定，不能在这里全局重试。 |
+| `packages/common/provider_atomic.py` | GUARDED | `:99/:135/:365` 的读由 `:117-145` preimage→read→postimage/digest 或 `:342-421` flock+CAS 包住。 |
+| `packages/common/rollback_execution_binding.py` | GUARDED | `:194-198` 读 active/archive binding；`:93-161` 原子写由 migration 的 rollback execution lock 串行，身份变化按权限协议 fail-closed。 |
+| `packages/common/safe_fs.py` | PRIMITIVE | `:277-368` 定义 no-follow reader，`:138-208` 定义 atomic writer；本 change 只暴露 kind，原语自身不重试。 |
+| `packages/common/state_cli.py` | GUARDED | `:493/:966-975` 读提交前 index 或 completed-run checkpoint；publish admission 在 `:719-765/:879-907` 重验 hash。 |
+| `packages/common/state_manager.py` | GUARDED | `:243/:2800-2804` 读 IC/index；index 更新用 `:1762-1771/:3026-3082` flock + `:2807-2834` CAS，unlocked lookup 有意报 unreadable。 |
+| `scripts/audit_first_cycle_initial_state.py` | NO CONCURRENT WRITER | `:231/:402/:464` 审计既有 registry/package 对象；本脚本只写独立 receipt，读异常全部阻断。 |
+| `scripts/scheduler_file_provider_refresh.py` | GUARDED | `:650-748` 从 refresh flock 和 preimage/digest 开始；receipt publication 的 `:1532-1565` 也在 destination lock 内。 |
+| `scripts/validate_two_node_docker_source_trust.py` | NO CONCURRENT WRITER | `:373-401` 只在同一 CLI 的 publication-failure 路径读自身 PASS，`:308-340/:424-441` 顺序原子写。 |
+| `services/orchestrator/chain_manifests.py` | GUARDED | `:288-314` 比对 control/worker registry mirror；任何不可读/不等直接 `SCHEDULER_REGISTRY_MIRROR_MISMATCH`。 |
+| `services/orchestrator/file_orchestration_journal.py` | **AFFECTED，本 PR 修复** | cached chokepoint `:4623` 与 `:6789-6850/:6986-6998` 同 cycle 原子 writer 并发；仅此读点加有界重试。 |
+| `services/orchestrator/scheduler_file_providers.py` | GUARDED | `:1674-1723` 读 provider；renewal `:1777-1823` 走 snapshot，`:1756-1774` 写走 lock+CAS。 |
+| `services/orchestrator/scheduler_generation.py` | NO CONCURRENT WRITER | `:735-844` 每 planning pass 加载一次 operator cutover declaration；缺失/漂移成为 `_load_error` 并阻断依赖候选。 |
+| `services/orchestrator/source_cycle_raw_manifest.py` | GUARDED | `:386-519` 在 destination lock 内重读 source 并逐字节比对；`:587-611` target writer 原子替换，变化显式报 `source_manifest_changed_*`。 |
+| `services/production_closure/e2e_validation.py` | NO CONCURRENT WRITER | `:1109-1122` 读 lane 自己已产出的 SHUD raw output；同 lane 顺序写且既有路径先拒绝。 |
+| `services/production_closure/object_store_validation.py` | GUARDED | `:1943-1960` 读自建 staging；`:1927-1940` 顺序写新路径，workspace-empty 与 prefix identity 先钉死。 |
+| `services/production_closure/readiness_dependency_summaries.py` | NO CONCURRENT WRITER | `:98-159` 聚合既有 summary root；模块无同路径 writer，读失败即 blocked。 |
+| `services/production_closure/readiness_scheduler_evidence.py` | NO CONCURRENT WRITER | `:270-344` 聚合既有 scheduler evidence；无同 lane 并发 publisher 契约，读失败即 blocked。 |
+| `services/production_closure/readiness_shared_artifacts.py` | NO CONCURRENT WRITER | `:253-335` 读外部 proof；`:135-147` 写的是另一 readiness bundle path。 |
+| `services/production_closure/readonly_db_validation.py` | NO CONCURRENT WRITER | `:1211-1276` 读既成 source bundle 并复核 artifact hash/run_id；无并发 bundle publisher lane。 |
+| `services/production_closure/scale_validation.py` | NO CONCURRENT WRITER | `:885-934/:1379-1406` 读外部 contract/threshold 输入；本模块只写另一 lane evidence。 |
+| `services/production_closure/two_node_e2e_evidence.py` | NO CONCURRENT WRITER | `:1024-1076/:3253-3309` 读 producer evidence 并复核 approved-root/run/hash；模块无同键 writer。 |
+| `services/production_closure/two_node_e2e_manual_ops_lane.py` | NO CONCURRENT WRITER | `:840-914` 读 manual receipt 后校验 sha256；无同路径 publisher 在 lane 内定义。 |
+| `services/production_closure/two_node_e2e_readonly_db_lane.py` | NO CONCURRENT WRITER | `:896-974` 读 readonly DB artifact 后校验 metadata/hash；无同路径 writer。 |
+| `services/slurm_gateway/real_backend.py` | NO CONCURRENT WRITER | `:1736-1755` 读 Slurm 外部 log；本模块 workspace writer 是 create-exclusive，不 replace log。 |
+| `services/tile_publisher/publisher.py` | GUARDED | `:2290-2324` 从既有 rollback backup 读到新 clone path；source/target 不同，且有 symlink/type/tree-count guards。 |
+| `workers/model_registry/qhh_production_bootstrap.py` | NO CONCURRENT WRITER | `:2336/:2387` 读 no-mutation-expected QHH/package 输入；derived JSON 是同进程顺序生成。 |
+| `workers/shud_runtime/runtime.py` | GUARDED | `:2188-2205/:2644-2661` 读 manifest/checksum 约束的 forcing 与本 run staging；读后再次 hash，变化应 fail-closed。 |
+
+普查结论：除本 PR 的 journal 外，仅新确证 station CSV display 直读竞态，已路由
+[#1660](https://github.com/DankerMu/SHUD-NWM/issues/1660)；没有第三个 AFFECTED 模块。
+泛型 `object_store`、`state_manager` 与 provider 系列虽有原子 writer，但其调用契约要求 lock/CAS/身份拒绝，
+不应把 journal 的重试政策扩散过去。
+
 ### D8 — 与 #1567 的交叉裁定（#1595 验收项）
 
 #1567 的验收标准列有「`in_write_window` 免指纹命中的处置有明确裁定」，
@@ -349,7 +395,8 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 
 1. `_next_sequence`（`:6582`）在生产侧**无调用者**（全仓仅 `tests/test_file_orchestration_journal.py`
    5 处引用）。它是 8 个 `_write_lock` 站点之一，本 change 因 D1 收窄而不动它。
-   死代码本身是 out-of-scope finding，报告立 issue。
+   死代码本身是 out-of-scope finding，已路由
+   [#1659](https://github.com/DankerMu/SHUD-NWM/issues/1659)，本 change 不动。
 2. 重试只覆盖 `_read_bytes_limited_cached`。若将来新增一条绕过该 chokepoint 的 journal 读路径，
    它不带重试——与 F-a 的 event lane carve-out 同形的**分层保证**，是声明的边界不是覆盖的情形。
 3. 本 change 不改变「读者不取 flock」这一架构选择。跨进程读 vs 写的竞态被重试**吸收**，
@@ -364,7 +411,8 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
    v1「一段永远命不中的缓存写入」——假（措辞把不可达说成命不中，且当时以为它会存）；
    v2「窗外也存、窗内 owner 可命中」——也假（它根本不存）。
    v3 才是实测：不是命不中，是**从不写入**。
-   **报告立 issue（死分支），本 change 不动。** 它**不是** D2 的依据——
+   **已按该准确口径路由 [#1661](https://github.com/DankerMu/SHUD-NWM/issues/1661)，本 change 不动。**
+   它**不是** D2 的依据——
    D2 只靠 `:4162` 与 `:6839` 成立。
 
 ### D11 — fixture 评审中被推翻/收紧的裁定（保留记录，避免后续重新发明）

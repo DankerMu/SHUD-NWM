@@ -146,6 +146,11 @@ MAX_FILE_JOURNAL_JSON_DEPTH = 64
 MAX_FILE_JOURNAL_JSON_NODES = 300_000
 MAX_FILE_JOURNAL_PATH_SEGMENT_CHARS = 255
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
+#: Total attempts (initial plus retries) the journal's cached read chokepoint
+#: makes against a mid-open atomic replacement of the file it is reading.  An
+#: ``os.replace`` leaves the new inode stable immediately, so one re-read
+#: suffices; the cap keeps a relentless writer failing closed (design D5).
+MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS = 3
 MAX_FILE_JOURNAL_READ_CACHE_ENTRIES = 4096
 MAX_FILE_JOURNAL_READ_CACHE_BYTES = 64 * 1024 * 1024
 _RECONCILE_INVENTORY_DIRECTORY = "reconcile-inventory"
@@ -542,6 +547,11 @@ class FileOrchestrationJournalRepository:
         self.max_json_depth = int(max_json_depth)
         self.max_records = int(max_records)
         self._write_lock = threading.Lock()
+        # Identity of the thread inside a cycle write window, as
+        # (thread_ident, normalized source_id, cycle_segment).  Only the
+        # `_locked_cycle_write` context manager sets it; only the thread it
+        # names may skip fingerprint revalidation for exactly that cycle.
+        self._cycle_write_owner: tuple[int, str, str] | None = None
         # The production scheduler shares one repository instance across a
         # thread pool of per-cohort orchestrators, so every read-side cache
         # access below (lookup, store, eviction, whole-table iteration) is a
@@ -4095,12 +4105,27 @@ class FileOrchestrationJournalRepository:
         )
         cycle_segment = format_cycle_time(cycle_time)
         cache_key = (source_id, cycle_segment, model_id, source_segments)
-        # Inside a locked write window the cycle flock excludes external
-        # writers and the append hook keeps the cache coherent, so hits are
-        # trusted as-is. Outside a window a hit must prove its source files
-        # are stat-identical, otherwise writes from other processes (or
-        # direct file fixtures) would be served stale forever.
-        in_write_window = self._write_lock.locked()
+        # A hit is trusted as-is only inside the write window, and only for
+        # the thread and cycle the window covers: the cycle flock excludes
+        # other writers for THAT cycle and the in-window append hook keeps
+        # the cache coherent for THAT owner's records.  Any other thread —
+        # or the same thread reading a different cycle from inside a window —
+        # must prove its source files are stat-identical, otherwise writes
+        # from other processes (or direct file fixtures) would be served
+        # stale forever.  The marker is the only producer of the fast path,
+        # and `None == <tuple>` is always false, so a cold instance always
+        # revalidates.
+        in_write_window = self._cycle_write_owner == (
+            threading.get_ident(),
+            source_id,
+            cycle_segment,
+        )
+        # A window entry carries `fingerprint=None` and can therefore only be
+        # hit through the unvalidated branch above, so the wipe performed
+        # when the window opens is the fast path's correctness precondition —
+        # not a performance measure — and the owner's own fast path still
+        # performs no tamper detection (that is #1567's scope; ownership only
+        # narrows the exposure from any thread to the window owner).
         fingerprint = (
             None
             if in_write_window
@@ -4584,7 +4609,37 @@ class FileOrchestrationJournalRepository:
                 cached = self._read_bytes_cache.get(key)
             if cached is not None and cached[0] == signature:
                 return cached[1], cached[2]
-        content = read_bytes_limited_no_follow(path, max_bytes=self.max_bytes, containment_root=self.root)
+        # The journal's durable writes replace files atomically, which changes
+        # the target inode; the hardened reader reports that as
+        # `kind="identity_changed"`.  That is the SAME event as a normal
+        # concurrent write at this layer, so a mid-open replacement is
+        # absorbed with a bounded retry, selected on the structured kind —
+        # never on message text — and with no sleep.  Every other refusal
+        # (symlink, non-regular, containment, a different kind) propagates on
+        # the first attempt, and an exhausted retry fails closed with the
+        # last exception unchanged.
+        for attempt in range(MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS):
+            try:
+                content = read_bytes_limited_no_follow(
+                    path, max_bytes=self.max_bytes, containment_root=self.root
+                )
+                break
+            except SafeFilesystemError as error:
+                if error.kind != "identity_changed":
+                    raise
+                if attempt + 1 == MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS:
+                    raise
+                # The stat probe and its signature must be re-derived together
+                # on every round; the stale signature from the previous round
+                # would crash on the new probe's fields.
+                signature = None
+                try:
+                    probe = os.stat(path, follow_symlinks=False)
+                except OSError:
+                    probe = None
+                    self._read_bytes_cache_drop(key)
+                if probe is not None and stat.S_ISREG(probe.st_mode):
+                    signature = (probe.st_mtime_ns, probe.st_size, probe.st_ino)
         if signature is not None and len(content) == probe.st_size:
             self._read_bytes_cache_store(key, signature, content)
         return content, False
@@ -6951,11 +7006,22 @@ class FileOrchestrationJournalRepository:
                 self._cycle_rows_cache.clear()
             self._ensure_root_unlocked()
             try:
+                # First statement inside the try: a failure raised while the
+                # window is opening must still clear the marker, so it is the
+                # existing finally's job, never a new try/finally.  The
+                # normalized source id keeps the marker's identity space in
+                # step with the flock and with `_cycle_rows`'s comparison.
+                self._cycle_write_owner = (
+                    threading.get_ident(),
+                    _normalize_file_source_id(source_id, field="source_id"),
+                    format_cycle_time(cycle_time),
+                )
                 with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
                     yield
             finally:
                 with self._cache_lock:
                     self._cycle_rows_cache.clear()
+                self._cycle_write_owner = None
 
     @contextmanager
     def _cycle_file_lock_unlocked(self, *, source_id: str, cycle_time: datetime) -> Iterable[None]:
