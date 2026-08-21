@@ -72,6 +72,17 @@
       必须入册）；N1/N2 突变红证。搭车 F4：parser INSERT 列清单断言收紧、
       F5：scan fold-away 恢复 verbatim 形状钉。
 
+## 4. E4(ii) live-plan 翻案修复（design D10.7）
+
+- [x] 4.1 (P1) `_SEGMENT_IDENTITY_PREDICATE_SQL` 注回
+      `rt.river_segment_id = %s` 受批辅助（带 marker、与
+      `river_segment_key` 同合取式；绑定 5→6，八块参数元组随
+      `_segment_identity_params` 同步）；曲线绑定销钉 10→11 重钉
+      （benchmark names/测试/样例 JSON）；oracle A 组允许集 +
+      `TEXT_AID_COUNTERPARTS` 本地扩展（不动共享
+      `SANCTIONED_TEXT_PUSHDOWN_COLUMNS`）；突变红证（去掉 segment 辅助
+      或其键对应物 → 红）。
+
 ## Evidence Floor
 
 - [x] E1 `uv run pytest -q tests/test_forecast_api.py
@@ -88,7 +99,9 @@
       tests/test_migrations.py` PASS（实现期追加两个受影响文件：
       `tests/test_select_ci_tests.py`、
       `tests/test_node27_timeseries_compression_benchmark.py`；
-      1093 passed / 8 skipped）
+      task 4.1 后重跑：1135 passed / 8 skipped，含 1 项 pre-commit 构造性红
+      （`test_before_and_after_slices_merge_into_exact_live_evidence_contract`
+      比对工作树 blob 与 HEAD blob，commit 后自愈））
 - [x] E2 `uv run ruff check .` PASS
 - [x] E3 `openspec validate river-ts-consumer-identity-migration --strict
       --no-interactive` PASS

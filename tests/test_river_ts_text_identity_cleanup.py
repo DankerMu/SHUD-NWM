@@ -39,7 +39,8 @@ compressed chunk:
 ===========================  ==========================================
 group                        allowed text fact columns
 ===========================  ==========================================
-A, eight segment blocks      river_network_version_id, variable
+A, eight segment blocks      river_segment_id, river_network_version_id,
+                             variable
 A9, latest-product fallback  run_id, river_network_version_id, variable
 B, publisher discovery       variable
 C, copyback EXISTS           variable
@@ -176,8 +177,16 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 # retained aid without the marker is an aid nobody will remember to delete.
 PUSHDOWN_AID_MARKER = "-- transitional compressed-chunk pushdown aid, remove with #1342"
 
-# Per-group ceilings, as adjudicated in design D1.
-A_SEGMENT_BLOCK_AIDS = {"river_network_version_id", "variable"}
+# Per-group ceilings, as adjudicated in design D1 (A segment blocks amended by
+# D10.7). The segment blocks are the one group whose ceiling exceeds the shared
+# SANCTIONED_TEXT_PUSHDOWN_COLUMNS: node-27 EXPLAIN ANALYZE showed that without
+# a literal `rt.river_segment_id` the compressed leg loses 000047's third
+# segmentby column (whole-network decompression) and the uncompressed leg loses
+# its PK / river_ts_segment_time_idx prefix. The widening is expressed HERE, per
+# call site, and deliberately not folded into the shared constant — #1341's
+# display oracles consume that constant and must keep rejecting the column.
+A_SEGMENT_BLOCK_ALLOWED_AIDS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
+A_SEGMENT_BLOCK_AIDS = {"river_segment_id", "river_network_version_id", "variable"}
 A_FALLBACK_AIDS = {"run_id", "river_network_version_id", "variable"}
 PUBLISHER_AIDS = {"variable"}
 COPYBACK_AIDS = {"variable"}
@@ -370,9 +379,16 @@ def _assert_switched_surface(
     alias: str,
     expected_aids: set[str],
     label: str,
+    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
 ) -> None:
-    """The full per-surface contract, in one call."""
-    assert_text_fact_columns(sql, alias, expected_aids, label)
+    """The full per-surface contract, in one call.
+
+    ``allowed`` is the ceiling the expectation is measured against; it defaults
+    to the shared sanctioned set and is widened only by the A segment blocks
+    (``A_SEGMENT_BLOCK_ALLOWED_AIDS``, design D10.7), so a future surface cannot
+    grow a ``river_segment_id`` predicate just by inheriting a default.
+    """
+    assert_text_fact_columns(sql, alias, expected_aids, label, allowed=allowed)
     _assert_no_text_fact_join(sql, alias, label)
     _assert_aids_are_marked(sql, alias, expected_aids, label)
     # Adjacency (#1442 round-2, design D10.5): presence of the aid is not
@@ -506,7 +522,28 @@ def _latest_product_fallback_statement() -> str:
 
 def test_forecast_store_segment_blocks_carry_only_their_sanctioned_aids() -> None:
     for label, sql in _segment_block_statements().items():
-        _assert_switched_surface(sql, "rt", A_SEGMENT_BLOCK_AIDS, f"forecast_store {label}")
+        _assert_switched_surface(
+            sql,
+            "rt",
+            A_SEGMENT_BLOCK_AIDS,
+            f"forecast_store {label}",
+            allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
+        )
+
+
+def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() -> None:
+    """Presence pin for the D10.7 aid, verbatim, in all eight blocks.
+
+    The ceiling check above is an equality and would already redden on removal,
+    but this states the requirement in the form the next reader will search for:
+    a "finish the cleanup, drop the last text predicate" edit is the regression
+    E4(ii) caught on node-27 (whole-network decompression, 18550ms vs 139ms),
+    and it must fail here rather than in a plan nobody re-measures.
+    """
+    rendered = _segment_block_statements()
+    assert len(rendered) == 8
+    for label, sql in rendered.items():
+        assert "AND rt.river_segment_id = %s" in sql, label
 
 
 def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
@@ -529,8 +566,9 @@ def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_ta
 def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> None:
     """Placeholder arithmetic, with a non-empty filter interpolated.
 
-    Switching to keys turned three text bindings into five placeholders per
-    block (the network binds three times: segment resolution, pushdown aid, own
+    Switching to keys turned three text bindings into six placeholders per
+    block: the segment binds twice (key resolution, D10.7 pushdown aid) and the
+    network three times (segment resolution, own pushdown aid, own key
     resolution). psycopg2 raises at execute time on a count mismatch, so a
     dropped binding is a production-only crash that a text-shape assertion never
     sees — and the scenario / identity filters append their own ``%s`` after the
@@ -585,19 +623,23 @@ def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> Non
         call(cursor)
         statement, parameters = cursor.executed[0]
         assert len(re.findall("%s", statement)) == len(parameters), label
-        # The five identity bindings, in text order, are the caller's three
-        # values with the network repeated — not a key, and not reordered.
+        # The six identity bindings, in text order, are the caller's three
+        # values with the segment and the network repeated — not a key, and not
+        # reordered. Order is dictated by the constant: basin, then the
+        # segment-key sub-select's (segment, network), then the segment aid, the
+        # network aid, and the network's own resolution.
         expected = (
             _IDENTITY["basin_version_id"],
             _IDENTITY["segment_id"],
             _IDENTITY["river_network_version_id"],
+            _IDENTITY["segment_id"],
             _IDENTITY["river_network_version_id"],
             _IDENTITY["river_network_version_id"],
         )
         # The selected-cycles branch prepends its VALUES list: two bindings
         # (scenario, cycle_time) per selected cycle, two cycles in this fixture.
         offset = 4 if label == "forecast_segment_rows_selected_cycles" else 0
-        assert tuple(parameters[offset : offset + 5]) == expected, label
+        assert tuple(parameters[offset : offset + 6]) == expected, label
 
 
 def test_forecast_store_segment_blocks_emit_unit_and_network_without_the_text_columns() -> None:
@@ -963,6 +1005,12 @@ _SWITCHED_SPECIMEN = f"""
     WHERE rt.basin_version_key = (
               SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s
           )
+      AND rt.river_segment_key = (
+              SELECT river_segment_key FROM core.river_segment
+              WHERE river_segment_id = %s AND river_network_version_id = %s
+          )
+      {PUSHDOWN_AID_MARKER}
+      AND rt.river_segment_id = %s
       {PUSHDOWN_AID_MARKER}
       AND rt.river_network_version_id = %s
       AND rt.river_network_version_key = (
@@ -975,26 +1023,37 @@ _SWITCHED_SPECIMEN = f"""
 """
 
 
+def _assert_specimen_surface(sql: str, label: str) -> None:
+    """``_assert_switched_surface`` at the A segment blocks' widened ceiling."""
+    _assert_switched_surface(sql, "rt", A_SEGMENT_BLOCK_AIDS, label, allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS)
+
+
 def test_the_specimen_the_counter_examples_mutate_is_itself_green() -> None:
     """Without this, a counter-example could be red for the wrong reason."""
-    _assert_switched_surface(_SWITCHED_SPECIMEN, "rt", A_SEGMENT_BLOCK_AIDS, "specimen")
+    _assert_specimen_surface(_SWITCHED_SPECIMEN, "specimen")
 
 
 def test_a_forbidden_text_predicate_turns_the_oracle_red() -> None:
+    """``basin_version_id`` stays forbidden on every surface in this register.
+
+    ``river_segment_id`` used to be injected here too; since D10.7 it is the
+    group's third sanctioned aid, so the forbidden case is basin alone — and the
+    ceiling that admits the segment aid still has to reject this one.
+    """
     mutated = _SWITCHED_SPECIMEN.replace(
         "WHERE rt.basin_version_key = (",
-        "WHERE rt.basin_version_id = %s AND rt.river_segment_id = %s AND rt.basin_version_key = (",
+        "WHERE rt.basin_version_id = %s AND rt.basin_version_key = (",
     )
 
     with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "forbidden predicate")
+        _assert_specimen_surface(mutated, "forbidden predicate")
 
 
 def test_an_unmarked_aid_turns_the_oracle_red() -> None:
     mutated = _SWITCHED_SPECIMEN.replace(PUSHDOWN_AID_MARKER, "-- keep this one", 1)
 
     with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "unmarked aid")
+        _assert_specimen_surface(mutated, "unmarked aid")
 
 
 def test_a_text_fact_join_turns_the_oracle_red() -> None:
@@ -1007,7 +1066,7 @@ def test_a_text_fact_join_turns_the_oracle_red() -> None:
     # It is caught twice over: as an out-of-ceiling column for this group, and
     # as a text fact join regardless of group.
     with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "text fact join")
+        _assert_specimen_surface(mutated, "text fact join")
     with pytest.raises(AssertionError):
         _assert_no_text_fact_join(mutated, "rt", "text fact join")
 
@@ -1020,7 +1079,13 @@ def test_a_text_fact_join_is_red_even_where_that_column_is_a_sanctioned_aid() ->
         "      AND rt.run_id = h.run_id",
     )
 
-    assert_text_fact_columns(mutated, "rt", A_FALLBACK_AIDS, "widened group")
+    assert_text_fact_columns(
+        mutated,
+        "rt",
+        A_FALLBACK_AIDS | {"river_segment_id"},
+        "widened group",
+        allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS,
+    )
     with pytest.raises(AssertionError):
         _assert_no_text_fact_join(mutated, "rt", "widened group")
 
@@ -1035,11 +1100,38 @@ def test_an_aid_whose_counterpart_disappears_turns_the_oracle_red() -> None:
     """
     mutated = _SWITCHED_SPECIMEN.replace("\n      AND rt.variable_e = 'q_down'::hydro.river_variable", "")
 
-    assert_text_fact_columns(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
+    assert_text_fact_columns(
+        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
+    )
     _assert_no_text_fact_join(mutated, "rt", "counterpart dropped")
     _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
     with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "counterpart dropped")
+        _assert_specimen_surface(mutated, "counterpart dropped")
+
+
+def test_the_segment_aid_without_its_key_counterpart_turns_the_oracle_red() -> None:
+    """D10.7's own M-case: keep the restored text aid, drop ``rt.river_segment_key``.
+
+    The aid is only sanctioned because the key predicate that supersedes it sits
+    in the same conjunction; without it the block reads segment identity from
+    the text column and #1342's column drop would break it outright — while the
+    aid set, the marker and the fact-join checks all stay green.
+    """
+    mutated = re.sub(
+        r"\n      AND rt\.river_segment_key = \([^)]*\)\n",
+        "\n",
+        _SWITCHED_SPECIMEN,
+        flags=re.DOTALL,
+    )
+
+    assert "rt.river_segment_key" not in mutated
+    assert "AND rt.river_segment_id = %s" in mutated
+    assert_text_fact_columns(
+        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "segment counterpart dropped", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
+    )
+    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "segment counterpart dropped")
+    with pytest.raises(AssertionError):
+        _assert_specimen_surface(mutated, "segment counterpart dropped")
 
 
 def test_an_aid_separated_from_its_counterpart_turns_the_oracle_red() -> None:
@@ -1050,21 +1142,26 @@ def test_an_aid_separated_from_its_counterpart_turns_the_oracle_red() -> None:
     )
 
     with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "separated aid")
+        _assert_specimen_surface(mutated, "separated aid")
 
 
 def test_a_marker_detached_from_its_aid_turns_the_oracle_red() -> None:
     """F6: #1342 deletes BY LINE, so a marker that floats free is not a marker.
 
-    The mutation keeps both markers and both aids — it only hoists the markers
-    to the top of the block, which is exactly the shape the pre-#1442 "somewhere
-    above" rule accepted.
+    The mutation keeps all three markers and all three aids — it only hoists the
+    markers to the top of the block, which is exactly the shape the pre-#1442
+    "somewhere above" rule accepted. The count is kept whole on purpose: one
+    marker fewer than sanctioned aids would redden the arithmetic check instead
+    of the adjacency one this test is about.
     """
     without_markers = _SWITCHED_SPECIMEN.replace(f"      {PUSHDOWN_AID_MARKER}\n", "")
-    mutated = f"    {PUSHDOWN_AID_MARKER}\n    {PUSHDOWN_AID_MARKER}\n{without_markers}"
+    hoisted = f"    {PUSHDOWN_AID_MARKER}\n" * len(A_SEGMENT_BLOCK_AIDS)
+    mutated = f"{hoisted}{without_markers}"
 
-    assert mutated.count(PUSHDOWN_AID_MARKER) == 2
-    assert_text_fact_columns(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
+    assert mutated.count(PUSHDOWN_AID_MARKER) == len(A_SEGMENT_BLOCK_AIDS) == 3
+    assert_text_fact_columns(
+        mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker", allowed=A_SEGMENT_BLOCK_ALLOWED_AIDS
+    )
     with pytest.raises(AssertionError):
         _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
 
@@ -1080,11 +1177,18 @@ def test_a_marker_on_the_aids_own_line_is_accepted() -> None:
 
 
 def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
-    """The other direction: losing an aid silently reinstates the chunk collapse."""
-    mutated = _SWITCHED_SPECIMEN.replace("AND rt.river_network_version_id = %s\n", "")
+    """The other direction: losing an aid silently reinstates the chunk collapse.
 
-    with pytest.raises(AssertionError):
-        _assert_switched_surface(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "dropped aid")
+    Both aids the E4(ii) receipts measured are covered: the network one (000047's
+    second segmentby column) and the segment one (its third, plus the
+    uncompressed leg's index prefix — the 18550ms/1967ms regression D10.7
+    reverses).
+    """
+    for dropped in ("AND rt.river_network_version_id = %s\n", "AND rt.river_segment_id = %s\n"):
+        mutated = _SWITCHED_SPECIMEN.replace(dropped, "")
+        assert mutated != _SWITCHED_SPECIMEN, dropped
+        with pytest.raises(AssertionError):
+            _assert_specimen_surface(mutated, f"dropped aid {dropped.strip()}")
 
 
 def test_a_bare_column_regression_turns_the_oracle_red() -> None:
@@ -1183,11 +1287,22 @@ def test_the_census_counts_statements_and_ignores_prose() -> None:
 
 
 def test_the_sanctioned_ceiling_is_the_shared_one_not_a_private_copy() -> None:
-    """Every per-group ceiling in this file is a subset of the shared vocabulary."""
-    for group in (A_SEGMENT_BLOCK_AIDS, A_FALLBACK_AIDS, PUBLISHER_AIDS, COPYBACK_AIDS, NO_AIDS):
+    """Every per-group ceiling in this file is the shared vocabulary, plus one adjudicated column.
+
+    The A segment blocks are the single exception (design D10.7) and it is
+    stated here as an exact difference, mirroring how #1341 pins its
+    lateral-probe extension: the local ceiling may add ``river_segment_id`` and
+    nothing else, and every other group stays at the shared set.
+    """
+    for group in (A_FALLBACK_AIDS, PUBLISHER_AIDS, COPYBACK_AIDS, NO_AIDS):
         assert group <= set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
     assert A_FALLBACK_AIDS == set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
-    # basin_version_id / river_segment_id are forbidden on EVERY surface in this
-    # register — the lateral-probe exception is #1341's, and no file here has one.
+    assert set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) < set(A_SEGMENT_BLOCK_ALLOWED_AIDS)
+    assert set(A_SEGMENT_BLOCK_ALLOWED_AIDS) - set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) == {"river_segment_id"}
+    assert A_SEGMENT_BLOCK_AIDS <= set(A_SEGMENT_BLOCK_ALLOWED_AIDS)
+    # The widening is local: the shared constant #1341's display oracles consume
+    # still classifies river_segment_id as a forbidden text fact column, and
+    # basin_version_id is forbidden on EVERY surface, this register included.
     assert {"basin_version_id", "river_segment_id"} <= set(FORBIDDEN_TEXT_FACT_COLUMNS)
+    assert "river_segment_id" not in set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS)
     assert forecast_store is not None  # import is load-bearing for the capture harness

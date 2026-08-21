@@ -262,15 +262,18 @@ def _curve_query_and_binding(
         raise BenchmarkCaptureError("production curve path did not yield exactly one primary SQL call")
     query_text, parameters = primary[0]
     # #1442: the curve query resolves the caller's text identity to surrogate
-    # keys inside the statement, so the network id now binds three times — once
-    # for the segment-key resolution (core.river_segment's primary key is
-    # (segment, network)), once as the transitional text pushdown aid, once for
-    # its own key resolution. The values are still exactly the three text
-    # identities the caller supplied; only the placeholder count moved.
+    # keys inside the statement, so the segment id binds twice (segment-key
+    # resolution plus the transitional text pushdown aid design D10.7 restored)
+    # and the network id three times — once for the segment-key resolution
+    # (core.river_segment's primary key is (segment, network)), once as its own
+    # transitional text aid, once for its own key resolution. The values are
+    # still exactly the three text identities the caller supplied; only the
+    # placeholder count moved.
     names = [
         "basin_version_id",
         "river_segment_id",
         "river_network_version_id",
+        "river_segment_id",
         "river_network_version_id",
         "river_network_version_id",
         "issue_time",

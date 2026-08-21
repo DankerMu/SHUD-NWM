@@ -2788,16 +2788,19 @@ def _validate_benchmarks(
             # The curve query filters on the surrogate keys and the enum since
             # #1442; the bindings stay text (required_parameter_names above), the
             # query resolves them through the authority tables. The transitional
-            # river_network_version_id / variable text aids survive as pushdown
-            # conjuncts until #1342 drops the text columns, so they are still
-            # required here — a benchmark that stopped seeing them would be
-            # measuring a different (collapsed) plan than production runs.
+            # river_segment_id / river_network_version_id / variable text aids
+            # survive as pushdown conjuncts until #1342 drops the text columns,
+            # so they are still required here — a benchmark that stopped seeing
+            # them would be measuring a different (collapsed) plan than
+            # production runs, which is exactly what design D10.7's node-27
+            # EXPLAIN receipts measured when the segment aid went missing.
             required_query_tokens = {
                 "FROM hydro.river_timeseries",
                 "JOIN hydro.hydro_run",
                 "rt.basin_version_key",
                 "rt.river_segment_key",
                 "rt.river_network_version_key",
+                "rt.river_segment_id",
                 "rt.river_network_version_id",
                 "rt.variable = 'q_down'",
                 "rt.variable_e",

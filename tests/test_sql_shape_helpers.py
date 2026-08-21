@@ -70,8 +70,11 @@ vocabulary:
   its own private list. The third set exists because the boundary is
   positional: inside the national legs' correlated ``CROSS JOIN LATERAL``
   probe, ``river_segment_id`` is a per-loop constant that really does push
-  down, while on every constant-binding surface it would still be the
-  forbidden text fact join.
+  down, while on the display surfaces this module's default serves it would
+  still be the forbidden text fact join. #1442's forecast_store segment blocks
+  are the second such position (a literal-bound segment identity, design
+  D10.7); their ceiling is expressed at their own oracle rather than here, so
+  the default this module hands every other caller stays narrow.
 * :func:`outer_predicates` — sub-selects stripped, comments removed and
   whitespace collapsed, so an "immediately followed by its key counterpart"
   adjacency assertion can be written as one exact substring and stays readable
@@ -103,9 +106,18 @@ _WHITESPACE = re.compile(r"\s+")
 # segmentby run_id, river_network_version_id, river_segment_id; orderby
 # variable, valid_time) and TimescaleDB 2.10.2 cannot push an integer-key
 # predicate through that. `river_segment_id` is a segmentby column too but is
-# NOT sanctioned on these surfaces: they bind identity as a constant and reach
-# the fact table once, so a `river_segment_id` predicate could only be a text
-# fact join, which the delta forbids outright.
+# NOT sanctioned by this shared default: on the display surfaces #1341 owns it
+# would be a text fact join (they reach the fact table once per row of a
+# segment relation), which the delta forbids outright.
+#
+# Two adjudicated position-dependent exceptions extend this default WITHOUT
+# widening it, so no surface inherits them by accident:
+# LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS below (#1341's correlated probe bodies),
+# and #1442's eight constant-binding forecast_store segment blocks, which bind
+# `river_segment_id` as a literal and measurably need it for segmentby pruning
+# (design D10.7). The latter lives in
+# `tests/test_river_ts_text_identity_cleanup.py` as that oracle's own ceiling,
+# passed per call site through `assert_text_fact_columns(..., allowed=...)`.
 SANCTIONED_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = (
     "run_id",
     "river_network_version_id",
@@ -409,9 +421,14 @@ def assert_text_fact_columns(
 
     ``allowed`` is the ceiling the expectation itself is checked against, so a
     future edit cannot widen a surface just by widening its expectation. It is
-    the constant-bound sanctioned set everywhere except the two national legs,
-    whose correlated lateral probe may additionally bind ``river_segment_id``
-    (see :data:`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS`).
+    the constant-bound sanctioned set except on two adjudicated surfaces that
+    pass their own wider tuple: the two national legs, whose correlated lateral
+    probe may additionally bind ``river_segment_id`` (see
+    :data:`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS`), and #1442's eight
+    forecast_store segment blocks, whose literal-bound ``river_segment_id`` aid
+    is the measured segmentby-pruning remedy of design D10.7 (ceiling defined in
+    ``tests/test_river_ts_text_identity_cleanup.py``, deliberately NOT folded
+    into the shared constant so no display surface inherits it).
 
     Lives here rather than in one consumer (it was private to
     ``tests/test_river_ts_read_path_surrogate_keys.py`` until #1442) because the

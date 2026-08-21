@@ -6,7 +6,7 @@
 
 `packages/common/forecast_store.py`（九处查询块，含 A9 fallback 的整条 CTE 链）、`services/tile_publisher/publisher.py`、`services/tile_publisher/forcing_copyback_backfill.py`、`scripts/node27_autopipeline.py`（ingest 判据与 publish 回填 EXISTS）、`db/seeds/seed_demo.py`、`scripts/summarize_qhh_smoke_results.py`、`scripts/reset_qhh_smoke_db.py`、`tests/integration_helpers.py` 对 `hydro.river_timeseries` 的过滤、连接、聚合**与身份输出**（SELECT/GROUP BY 中的文本身份列）MUST 以代理键（`run_key`/`basin_version_key`/`river_network_version_key`/`river_segment_key`）与枚举（`variable_e`/`unit_e`/`quality_flag_e`）为主形态；对外仍需文本处 MUST 从权威表 join 还原或枚举 `::text` 还原，payload 对**键收敛行**逐字段等价（NULL-key 遗留行对键过滤不可见——继承本 capability 已记录的有期限排除契约，不视为数据丢失）。
 
-文本谓词 MUST 限于受批过渡下推辅助列（`run_id`/`river_network_version_id`/`variable`），且仅当 (a) 该身份以字面量/绑定参数形态出现（经权威表 join 到达的身份保持 key-join only，文本 fact join 在受批探针体外禁止）且 (b) 查询可达压缩 chunk 时保留，带 `remove with #1342` 标记；`basin_version_id`/`river_segment_id` 文本谓词 MUST 清零。生产（PostgreSQL）路径的 segment 计数 MUST 用键的行元组 DISTINCT；`publisher.py` 的 sqlite 测试路径 MUST 用键基的方言等价构造（整型拼接计数、直取枚举列），语义一致。
+文本谓词 MUST 限于受批过渡下推辅助列（`run_id`/`river_network_version_id`/`variable`，以及 **A 段块绑定字面量形态下的 `river_segment_id`**——它是压缩 segmentby 第三列与未压缩腿 segment 索引前缀，缺席即执行计划劣化，node-27 E4(ii) EXPLAIN receipt 为证），且仅当 (a) 该身份以字面量/绑定参数形态出现（经权威表 join 到达的身份保持 key-join only，文本 fact join 在受批探针体外禁止）且 (b) 查询可达压缩 chunk 时保留，带 `remove with #1342` 标记，并与其键/枚举对应物同一合取式；`basin_version_id` 文本谓词与非 A 段块的 `river_segment_id` 文本谓词 MUST 清零。生产（PostgreSQL）路径的 segment 计数 MUST 用键的行元组 DISTINCT；`publisher.py` 的 sqlite 测试路径 MUST 用键基的方言等价构造（整型拼接计数、直取枚举列），语义一致。
 
 清零 MUST 由 `tests/test_river_ts_text_identity_cleanup.py` 看护：别名限定面用渲染 SQL 断言（复用 `tests/test_sql_shape_helpers.py` 机制），裸列/片段面用逐调用点定向断言；范围仅本单在册文件（display 面由既有 oracle 看护；`db/migrations/**` 与 `scripts/node27_river_identity_backfill.py` 按定义读文本列，不在册）。oracle 看护 MUST 满足三个接线维度：(1) 每个受批文本辅助 MUST 与其键/枚举对应物出现在同一合取式中（辅助单独存活即 oracle 红），`remove with #1342` 标记 MUST 与辅助行相邻；(2) 在册文件内新增的 `hydro.river_timeseries` 语句 MUST 强制 register 更新（普查断言，新语句未入册即红）；(3) `scripts/select_ci_tests.py` MUST 让任一被守护生产文件的 diff 选中本 oracle（沿 #1341 at-site 规则惯例）。
 
@@ -31,8 +31,9 @@
 
 #### Scenario: 禁列谓词与无标记辅助被 oracle 拒绝
 
-- **GIVEN** 在册文件的渲染 SQL 中出现 `basin_version_id`/`river_segment_id`
-  文本谓词，或受批辅助行缺 `remove with #1342` 标记
+- **GIVEN** 在册文件的渲染 SQL 中出现 `basin_version_id` 文本谓词（或 A 段块
+  受批形态之外的 `river_segment_id` 文本谓词），或受批辅助行缺
+  `remove with #1342` 标记
 - **WHEN** 运行 `tests/test_river_ts_text_identity_cleanup.py`
 - **THEN** 测试失败并指出调用点
 

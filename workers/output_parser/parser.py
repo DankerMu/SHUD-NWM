@@ -852,13 +852,25 @@ class PsycopgOutputParserRepository:
         replacement_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
             with self._connection.cursor() as cursor:
-                # Existence probe first (pkey prefix descent). A bare min/max
-                # with these filters makes the planner walk valid_time_idx
-                # backward per chunk hunting for the first matching row — for
-                # a NEW run (0 rows) that is a full index scan of every chunk.
-                # The MATERIALIZED fence on the fallback blocks the same
-                # min/max transform so the window read stays on the pkey
-                # prefix and touches only this key's rows.
+                # Existence probe first. A bare min/max with these filters makes
+                # the planner walk valid_time_idx backward per chunk hunting for
+                # the first matching row — for a NEW run (0 rows) that is a full
+                # index scan of every chunk. The MATERIALIZED fence on the
+                # fallback blocks the same min/max transform, so the window read
+                # keeps its own index descent and touches only this key's rows.
+                #
+                # Which index (#1442): NOT the pkey any more. The pkey is
+                # (run_id, river_network_version_id, river_segment_id, variable,
+                # valid_time) (000006:56) and its leading column is unbound here
+                # — both statements bind run_key / river_network_version_key /
+                # variable_e. The descent is 000051's
+                # river_ts_selected_identity_key_valid_time_idx (run_key,
+                # basin_version_key, river_network_version_key, variable_e,
+                # valid_time DESC): `run_key` is the bound leading column, and
+                # the other two bound keys apply as index filters past the
+                # unbound basin_version_key. #1342 must keep that index (or an
+                # equivalent run_key-leading one) when it drops the text
+                # columns; the mitigation above is only as good as the descent.
                 cursor.execute(
                     """
                     SELECT 1 FROM hydro.river_timeseries

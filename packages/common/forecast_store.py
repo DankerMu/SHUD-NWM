@@ -27,7 +27,7 @@ QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id
 # segment-scoped ``hydro.river_timeseries`` reads of ``forecast_series`` (#1442).
 #
 # All eight bind the same three text identities as constants and filter the same
-# way, so they render from ONE constant: eight hand-copied five-placeholder
+# way, so they render from ONE constant: eight hand-copied six-placeholder
 # blocks is exactly the drift a surrogate-key migration cannot afford, and the
 # positional parameter tuple is built by ``_segment_identity_params`` so text and
 # bindings can only move together.
@@ -41,12 +41,31 @@ QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id
 # * the segment resolution binds the NETWORK as well: ``core.river_segment``'s
 #   primary key is (river_segment_id, river_network_version_id), so a bare
 #   segment-id lookup can return more than one row and would raise 21000.
-# * ``river_network_version_id`` and ``variable`` additionally survive as
-#   transitional TEXT conjuncts: compression still segments compressed chunks by
-#   the text columns (000047), so a pure-key predicate cannot be pushed into
-#   them. Each is AND-ed with its key/enum counterpart, so it only ever narrows,
-#   and both are removed with the text columns in #1342. ``basin_version_id`` and
-#   ``river_segment_id`` get NO text conjunct: the delta forbids them outright.
+# * ``river_segment_id``, ``river_network_version_id`` and ``variable``
+#   additionally survive as transitional TEXT conjuncts, because compression
+#   still keys compressed chunks on the TEXT columns (000047) and TimescaleDB
+#   2.10.2 cannot push an integer-key predicate through that. The two mechanics
+#   are NOT the same and the distinction matters when #1342 removes them:
+#   ``river_network_version_id`` and ``river_segment_id`` are SEGMENTBY columns
+#   (000047: segmentby run_id, river_network_version_id, river_segment_id), so
+#   their predicates prune whole compressed batches; ``variable`` is an ORDERBY
+#   column (000047: orderby variable, valid_time), so it buys per-batch min/max
+#   metadata exclusion rather than segmentby pruning — the same wording
+#   ``services/tile_publisher/publisher.py`` uses for its lone ``variable`` aid.
+#   Each is AND-ed with its key/enum counterpart, so it only ever narrows, and
+#   all three are removed with the text columns in #1342.
+# * ``river_segment_id`` is here by the E4(ii) live-plan adjudication (design
+#   D10.7), not by the original "zero every segment predicate" draft: node-27
+#   EXPLAIN ANALYZE showed that dropping it costs BOTH legs — the compressed leg
+#   loses segmentby pruning on 000047's third column and decompresses the whole
+#   network (18550ms vs 139ms), and the uncompressed leg loses the PK /
+#   ``river_ts_segment_time_idx`` prefix and scans the whole run x network slice
+#   (1967ms vs 203ms). Injected back: 259ms / 1117ms. It qualifies as a
+#   sanctioned aid because these blocks bind it as a LITERAL (never as a text
+#   fact join) and it is compression-reachable.
+# * ``basin_version_id`` still gets NO text conjunct: it is neither a segmentby
+#   column nor an index prefix here, so it would buy nothing and only widen the
+#   text surface #1342 has to remove.
 # * ``run_id`` gets none either — these queries never bind a run as a constant,
 #   they reach it through the ``hydro_run`` join, and a text fact join is
 #   forbidden (a join equality is not pushdown material anyway).
@@ -61,6 +80,8 @@ rt.basin_version_key = (
       WHERE river_segment_id = %s
         AND river_network_version_id = %s
   )
+  -- transitional compressed-chunk pushdown aid, remove with #1342
+  AND rt.river_segment_id = %s
   -- transitional compressed-chunk pushdown aid, remove with #1342
   AND rt.river_network_version_id = %s
   AND rt.river_network_version_key = (
@@ -94,14 +115,19 @@ def _segment_identity_params(
 ) -> tuple[str, ...]:
     """Positional bindings for ``_SEGMENT_IDENTITY_PREDICATE_SQL``, in text order.
 
-    Five placeholders, three values: the network is bound three times (segment
-    resolution, transitional text aid, own resolution). Kept adjacent to the SQL
-    it feeds so a predicate edit that forgets a binding is a one-file change.
+    Six placeholders, three values: the segment is bound twice (key resolution,
+    transitional text aid) and the network three times (segment resolution,
+    transitional text aid, own resolution). The order below is the order the
+    placeholders appear in the constant — basin, segment and network inside the
+    segment-key sub-select, then the segment aid, the network aid, and the
+    network's own resolution. Kept adjacent to the SQL it feeds so a predicate
+    edit that forgets a binding is a one-file change.
     """
     return (
         basin_version_id,
         segment_id,
         river_network_version_id,
+        segment_id,
         river_network_version_id,
         river_network_version_id,
     )
