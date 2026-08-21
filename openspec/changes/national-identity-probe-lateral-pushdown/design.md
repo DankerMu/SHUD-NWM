@@ -211,7 +211,9 @@ marker，node-27 真实 DB 跑）：
     (i) 命中 → 亚秒 + tile 字节相同 + **fact 侧内层相关节点 loops =
     前导 miss 数 + 1**（首序候选命中时 loops=1；EXPLAIN ANALYZE 必发该
     字段，round-3 D2 换掉本栈不存在的 batches 单位；preflight 向量显示
-    混合则以 (ii-b) BUFFERS 口径兜底）；
+    混合则以 (ii-b) BUFFERS 口径兜底）+ **无条件**落账压缩 chunk 关系
+    Shared Hit+Read ≤ 同会话 before、比值进 receipt（与 delta THEN
+    covered 分支及 tasks E4 (i) 同口径，round-4 rider）；
     (ii) 无覆盖 → <1s 空响应、零 fact 触达；
     (ii-b) 内部空洞 miss → 424 语义保持 + 计划为逐身份参数化探针（非整片
     seq-scan 解压）+ **定量主证 = BUFFERS**：after 腿压缩 chunk 关系上的
