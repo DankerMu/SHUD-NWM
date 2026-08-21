@@ -31,8 +31,10 @@ Issue #1468：node-27 生产库的 `core.river_segment` / `core.river_network_ve
    posting list 几乎全表重合，GIN 成本模型严重低估。**新鲜统计不是修法**。
 
 `met.met_station` 的同形态索引 `met_station_id_trgm_idx` 是 partial 索引
-（`WHERE active_flag = true`）：不带该谓词的等值查找根本不可选它；带谓词的实测
-计划走 `met_station_active_basin_station_idx` Hash Join（22 ms/500 行），未中招。
+（`WHERE active_flag = true`）：不带该谓词的等值查找根本不可选它；带谓词的等值
+join 诊断当日 05:50Z 走 `met_station_active_basin_station_idx` Hash Join（22 ms/500），
+但 E4 receipt（08:32Z，统计刷新后）翻为 `met_station_id_trgm_idx` Bitmap（174 ms/500，
+~8×）——**同一陷阱在 met 侧真实存在且随统计翻转**，对齐工作路由 #1669。
 
 ## What Changes
 
@@ -73,8 +75,8 @@ Issue #1468：node-27 生产库的 `core.river_segment` / `core.river_network_ve
 
 ## Non-Goals
 
-- 不改 `met.met_station` 的两条 partial trgm 索引（实测无陷阱；partial 谓词已结构性
-  保护绝大多数等值查找；记录结论与复核 SQL）。
+- 不改 `met.met_station` 的两条 partial trgm 索引（E4 实测带 `active_flag` 谓词的等值
+  join 会中招，~8×；按同一约定对齐路由 #1669，本 change 只落账结论与复核 SQL）。
 - 不删 `river_segment_name_trgm_idx` / `river_segment_segment_name_trgm_idx`
   （idx_scan=0，但与 search 的 OR 三臂绑定；去留另议）。
 - 不动簇级 planner 旋钮；不在回填脚本内固化 `enable_bitmapscan` 开关

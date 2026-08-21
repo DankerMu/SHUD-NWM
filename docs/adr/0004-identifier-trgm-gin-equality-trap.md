@@ -88,14 +88,19 @@ The two name arms (`properties_json->>'name'`, `->>'segment_name'`) keep their
 bare-column indexes and `ILIKE`: they are free-text, not identifiers, and no
 equality consumer exists for them.
 
-`met.met_station`'s same-shaped `met_station_id_trgm_idx` is **left alone**, and
-that is a measured decision, not an oversight: it is a partial index
-(`WHERE active_flag = true`), so an equality lookup without that predicate
-cannot select it structurally (measured: `met_station_pkey`, 1.7 ms / 500
-lookups), and an equality join that does carry the predicate measured onto
-`met_station_active_basin_station_idx` via a Hash Join (22 ms / 500). Should a
-long-shared-prefix `station_id` equality hotspot ever appear under an
-`active_flag` predicate, apply the same expression convention.
+`met.met_station`'s same-shaped `met_station_id_trgm_idx` is **out of scope here
+but NOT safe**: it is a partial index (`WHERE active_flag = true`), so an
+equality lookup without that predicate cannot select it structurally (measured:
+`met_station_pkey`, 1.8 ms / 500 lookups) — but an equality join that carries the
+predicate is exposed to the same pg_trgm `=` mechanism, and the planner's choice
+flipped with statistics within one day: 2026-08-21 ~05:50Z it chose
+`met_station_active_basin_station_idx` via a Hash Join (22 ms / 500); at the PR
+#1666 E4 receipt (~08:32Z, after autovacuum refreshed the table's statistics,
+no schema change) it chose a Bitmap Index Scan on `met_station_id_trgm_idx`
+(0.33 ms per lookup, 174 ms / 500, 29.6k buffers) — ~8x, not 2900x, because
+station ids share shorter prefixes, but statistics-dependent exactly as this
+ADR describes. Applying the same expression convention to `met_station_id_trgm_idx`
+(and the `forecast_store` search arm) is routed to #1669.
 
 ## Consequences
 

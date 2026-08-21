@@ -2337,7 +2337,7 @@ ANALYZE **之后**实测 2,000 次等值查找：
 计划仍走该索引。完整机制、备选方案与约定见
 [ADR 0004](../adr/0004-identifier-trgm-gin-equality-trap.md)。
 
-**施加 000052 的运维口径**：`psql -v ON_ERROR_STOP=1 -f` 直接跑，重跑幂等，**全文
+**施加 000052 的运维口径**：首遍用 `uv run python -m packages.common.migrate`（autocommit 逐语句执行且写 `public.schema_migrations` 账本；`psql -f` 不写账本，会让下一次 bring-up/`run_qhh_cycle.sh` 静默重放）；重跑验证可 `psql -v ON_ERROR_STOP=1 -f` 直接跑，重跑幂等，**全文
 没有任何对 `core.river_segment` 取 ACCESS EXCLUSIVE 的语句**——旧索引与上一次
 `CREATE INDEX CONCURRENTLY` 中断留下的 INVALID 残骸都只 **RENAME**（`_legacy` /
 `_invalid`，SHARE UPDATE EXCLUSIVE，不阻塞 MVT 读），新索引并发建成后再
@@ -2350,8 +2350,13 @@ ANALYZE **之后**实测 2,000 次等值查找：
 
 `met.met_station` 的 `met_station_id_trgm_idx` 是 partial（`WHERE active_flag =
 true`）：不带该谓词的等值查找结构上不可选它（实测走 `met_station_pkey`，
-1.7 ms/500）；带谓词的等值 join 实测走 `met_station_active_basin_station_idx`
-Hash Join（22 ms/500）。**未中招，不改**，复核 SQL 同上（`EXPLAIN` 该两种形态）。
+1.8 ms/500）；**带谓词的等值 join 会中招且随统计翻转**——2026-08-21 05:50Z 实测走
+`met_station_active_basin_station_idx` Hash Join（22 ms/500），同日 08:32Z（PR #1666
+E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Index Scan
+`met_station_id_trgm_idx`（0.33 ms/次，174 ms/500，29.6k buffers，~8×）。本 change
+不改 met 侧，按 ADR 0004 约定对齐（表达式索引 + `forecast_store` search 臂改写）
+路由到 #1669；复核 SQL：`EXPLAIN` 上述两种形态，带谓词形态出现
+`met_station_id_trgm_idx` 即为陷阱复现。
 
 #### 两项既有缓解的作用域（都不要再依赖）
 

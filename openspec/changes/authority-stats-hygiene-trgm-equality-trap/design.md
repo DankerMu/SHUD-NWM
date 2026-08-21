@@ -53,10 +53,11 @@ bitmap(network) + Filter，实测 9 → 20 ms（只读诊断第二轮），但 O
 `lower()` 而非 `col || ''`：PG 大小写不敏感表达式索引的标准写法，读者不需要
 背景知识；ILIKE 在 trgm GIN 上本就按小写三元组匹配，语义一致。
 
-`met.met_station`：同机制（pg_trgm 1.6 `=` 支持）但 partial 谓词
-`active_flag = true` 使不带该谓词的等值查找无法选它；带谓词的实测计划走 partial
-btree Hash Join（22 ms/500）。不改，记录复核 SQL；若未来出现带 `active_flag`
-谓词的长前缀 station_id 等值热点，套用同一表达式约定（ADR 0004）。
+`met.met_station`：同机制（pg_trgm 1.6 `=` 支持）；partial 谓词
+`active_flag = true` 只保护不带该谓词的等值查找。带谓词的等值 join 诊断时走 partial
+btree Hash Join（22 ms/500），E4 receipt 时（统计刷新后）翻为 `met_station_id_trgm_idx`
+Bitmap（174 ms/500，~8×）——陷阱真实且随统计翻转。本 change 不扩 scope，结论入账，
+对齐（`lower(station_id)` partial 表达式索引 + `forecast_store` search 臂）路由 #1669。
 
 ## D3: 迁移形态与 CI/node-27 施加
 
@@ -95,7 +96,8 @@ btree Hash Join（22 ms/500）。不改，记录复核 SQL；若未来出现带 
   再 `pg_stat_reset_single_table_counters`）与同样处理的 hypertable chunk，直接调用
   `_analyze_unanalyzed_authority_tables(dsn)`，断言普通表入选且被 ANALYZE、
   hypertable/chunk 不入选。
-- node-27 以 `psql -v ON_ERROR_STOP=1 -f` 施加两遍（真两遍）；CI 只施加一遍
+- node-27 首遍以 `python -m packages.common.migrate` 施加（写 `schema_migrations` 账本，
+  否则后续 bring-up 会静默重放），第二遍以 `psql -v ON_ERROR_STOP=1 -f` 真重放；CI 只施加一遍
   （账本门控），幂等证据来自集成测试的"删账本行后 `apply_migration()` 重放"。
 
 ## D4: search 查询改写的边界

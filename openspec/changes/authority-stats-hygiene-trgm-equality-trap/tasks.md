@@ -64,11 +64,12 @@
 - [x] E1 本地：`uv run ruff check .`；`uv run pytest -q tests/test_node27_autopipeline_handoff.py
       tests/test_list_search_contract.py`；`openspec validate
       authority-stats-hygiene-trgm-equality-trap --strict --no-interactive`。
-- [ ] E2 CI：`SQL Migration Dry Run`（真 PG；000052 经 `apply_migrations_from_zero`
+- [x] E2 CI：`SQL Migration Dry Run`（真 PG；000052 经 `apply_migrations_from_zero`
       施加一遍 + 2.3 的删账本行重放幂等断言 + 其余集成断言）绿。
 - [x] E3 node-27 真库 pytest：`tests/test_real_database_integration.py` 相关用例绿——
       目标为 superuser DSN 建/删的 throwaway DB（项目既定做法），绝不指向生产库。
-- [ ] E4 node-27 live receipt（只读诊断 + 迁移施加 + 看护一次 tick）：
+- [x] E4 node-27 live receipt（只读诊断 + 迁移施加 + 看护一次 tick）——PR #1666 E4 评论，
+      (iv) 的定时 tick 级 `stats_guard.authority` 为 post-merge 核对项：
       (i) 迁移 `psql -v ON_ERROR_STOP=1 -f` 施加两遍均 exit 0，`pg_indexes` 显示
       表达式定义且 `pg_index.indisvalid = true`、`_legacy` 不存在、reloptions 在位；
       (ii) 等值 join（诊断同形态，2,000 查找）**无任何 session pin** 的
@@ -79,5 +80,6 @@
       (iv) 下一次 autopipe tick summary `stats_guard.authority.analyzed` 含
       `core.river_segment_crosswalk` 与 `met.canonical_grid_cell`（status ok、
       `last_analyze` 非空），随后复核 SQL（双 NULL 候选）返回 0 行；
-      (v) `met.met_station` 复核 SQL（带 `active_flag` 的等值计划）记录结论。
+      (v) `met.met_station` 复核 SQL（带 `active_flag` 的等值计划）记录结论——实测
+      中招（174 ms vs 22 ms，随统计翻转），路由 #1669。
 - [x] E5 #1378 评论：链接 08-19 ANALYZE 后的 Q2 数据点（issuecomment-5366736732）；PR body 引用。
