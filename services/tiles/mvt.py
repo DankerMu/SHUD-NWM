@@ -603,13 +603,18 @@ def postgis_tile_sql(layer: str) -> str:
         #     `ts.river_segment_id = seg.river_segment_id` (5/5 text-PK, 3/3
         #     segmentby columns); an existence probe has no per-segment
         #     correlation, so it binds 4/5 and 2/3.
-        #   * Cost: a HIT short-circuits on the first matching row (sub-second,
-        #     batches on the order of the candidate identity count). A MISS
-        #     inside a covered window — the interior-gap branch — pays
-        #     proof-of-absence over each absent identity's whole (run, network)
-        #     slice: on uncompressed chunks an index-filter walk of the
-        #     2-column PK prefix (variable/valid_time filter in-index, no skip
-        #     scan in PG15); on compressed chunks ~segment-count batches per
+        #   * Cost: the nested loop probes identities in ascending
+        #     river_network_version_id order (DISTINCT ON emission order; LIMIT
+        #     1 fences keep that plan) and stops at the first outer row that
+        #     hits, so an instant with a hit touches the fact table for
+        #     (leading misses + 1) identities — an all-hit instant touches ONE
+        #     identity's batches, not ~19. Every MISS — each identity ordered
+        #     before the first hit, and every candidate on the interior-gap
+        #     branch — pays proof-of-absence over that identity's whole (run,
+        #     network) slice: on uncompressed chunks a run-scoped index prefix
+        #     (text pkey or surrogate-key read index; which the planner picks
+        #     is not pinned by any measurement) with the remaining columns as
+        #     in-index filters; on compressed chunks ~segment-count batches per
         #     identity surviving the (variable, valid_time) orderby min/max
         #     pruning. Bounded above by the pre-change full scan — each
         #     identity's batch set is a disjoint subset of what the set-based

@@ -62,17 +62,23 @@
       计数（chunk 32/51 键全 NULL——误选退化成空对空取证）、覆盖该时次的
       run_display_coverage 行在场性、所触 chunk reltuples/last_analyze；
       (i) 压缩有覆盖 pin（**z4 12/6 @ 2026-08-12T12Z**，chunk 55——先回填
-      后压缩，字节比对非空有意义；retention 若已推进按同判据另选并记录）：
-      before 整片解压 → after 亚秒、解压 batch 数与候选身份数同量级、
-      tile 字节相同；
+      后压缩，字节比对非空有意义；retention 若已推进按同判据另选并记录；
+      preflight 附该时次逐身份命中/缺席向量，round-2 K2）：before 整片
+      解压 → after 亚秒、tile 字节相同、解压 batch ~1 个身份量级（首序
+      候选命中时；混合则按 (ii-b) 口径兜底）；
       (ii) 压缩无覆盖 pin（preflight 实查选定：落压缩 chunk 且无任何
       coverage 窗覆盖的时次，**不得与 (i) 同时次**——探针无 tile 坐标依赖，
       同时次任意 z/x/y 同答案，原 z9 407/200 pin 与 (i) 同为命中，round-1
       审查 C1 更正）：before 数十秒 → after <1s 空响应（零 fact 触达）；
       (ii-b) 压缩内部空洞 miss pin（窗覆盖、该时次零行——取窗内非整点时刻
       如 2026-08-12T12:30Z，preflight 验证零行）：424 语义保持、计划为逐
-      身份参数化探针非整片解压、耗时实测落账且不高于同会话 before 腿；
+      身份参数化探针非整片解压、**定量主证 BUFFERS**——after 压缩 chunk
+      关系 Shared Hit+Read ≤ 同会话 before，比值落 receipt（round-2 K1：
+      PG15.2 无 Batches 字段，wall time 仅记录不判据）；
       (iii) 未压缩 pin（当批时次任一 z4）：毫秒级不退化、tile 字节相同；
+      (iii-b) 未压缩内部空洞 miss pin（当前未压缩批内窗覆盖非整点时刻，
+      round-2 K3）：计划与耗时落账，索引取舍（文本 PK vs 000051）据实
+      记录；
       (iv) z4 national 端到端压缩时次进秒级（#1341 AC-1 口径）；
       (v) integration oracle（D4 三分支）在 node-27 真实 DB 全绿；
       receipt（preflight + before/after 计划 + 计时 + 字节比对）随 PR 附出。

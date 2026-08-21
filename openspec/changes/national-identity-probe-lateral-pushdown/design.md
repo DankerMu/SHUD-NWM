@@ -105,11 +105,16 @@ source_identity_stats AS (
 - **无 segment 相关**：本探针不需要逐 segment（EXISTS 一行即真），lr 基数
   = 活跃 network 数（~19）。**短路语义与代价模型**（round-1 审查 C1 更正，
   原"~19 × 亚毫秒"高估了未命中侧）：
-  - 命中侧：EXISTS 命中即停，首行即真——亚秒，解压 batches 与候选身份数
-    同量级。
+  - 命中侧（round-2 审查 K2 更正）：nested loop 按
+    `river_network_version_id` 升序逐身份探（DISTINCT ON 强制
+    Unique-over-Sort 发射序，LIMIT 1 栅栏禁止重排），**首个探中的外层行即
+    停**。全命中时次只有一个身份触 fact 表（~1 个身份的 batches，非 ~19）；
+    混合时次排在首个命中之前的每个缺席身份先各付一次证无（fact 触达数 =
+    前导 miss 数 + 1）。
   - 未命中侧（内部空洞——窗覆盖但该时次无行）：每个缺席身份要对其整个
-    (run, network) 切片证无——未压缩走 2 列 PK 前缀内过滤（PG15 无 skip
-    scan，variable/valid_time 只是 in-index filter）；压缩侧每身份留
+    (run, network) 切片证无——未压缩走 run 作用域索引前缀（文本 PK 或
+    000051 代理键读索引，余列 in-index filter；planner 取舍未被任何实测钉
+    住，round-2 审查 K3 对冲，(iii-b) pin 落账）；压缩侧每身份留
     ~segment 数个 batch（orderby min/max 只消 ~49%）。上界是改前整片解压
     （各身份 batch 集是旧 seq-scan 读集的不相交子集，逐身份严格不劣），
     但**不是** ~19 × 亚毫秒；实际量级由 E4 的内部空洞 pin 实测落账。
@@ -180,22 +185,39 @@ marker，node-27 真实 DB 跑）：
     (ii-b) 压缩**内部空洞（miss 分支）** = 窗覆盖但该时次零 fact 行的
     压缩时次——数据为整点、窗为闭区间，取窗内非整点时刻（如
     2026-08-12T12:30Z）即天然内部空洞，preflight 验证零行后作 pin；
-    (iii) 未压缩 = 当批时次任一 z4。若 retention 已推进致 pin 失效，按
+    (iii) 未压缩（命中侧）= 当批时次任一 z4；
+    (iii-b) 未压缩**内部空洞（miss 分支，round-2 审查 K3 增补）** = 当前
+    未压缩批内窗覆盖的非整点时刻，preflight 验证零行——落账 planner 在
+    未压缩 miss 上实际取哪条索引（文本 PK vs 000051 代理键读索引），
+    终结注释里的未测叙事。若 retention 已推进致 pin 失效，按
     同判据另选并在 receipt 记录选择依据。
   - **E4 preflight**：逐 pin 落 receipt——所触 chunk `is_compressed`、键
     NULL 计数（chunk 32/51 键全 NULL 不回填，误选会退化成"空对空"取证）、
     覆盖该时次的 `run_display_coverage` 行在场性，以及所触 chunk 的
     `reltuples`/`last_analyze`（压缩 chunk 统计清零陷阱，#1378/#1442 家族
-    ——计划形态结论必须能对统计态归因）。
+    ——计划形态结论必须能对统计态归因）；另在 pin (i) 时次落**逐身份
+    命中/缺席向量**（~19 次 shipped 形态的只读 EXISTS 探针，round-2 审查
+    K2 增补）——判定该时次是全命中还是混合；若向量显示存在混合时次，追加
+    一个混合时次 pin。
   - **before/after 必须同一安静库会话内成对重采**（before 用当前 master
     shipped SQL，不引用 issue 里 pre-#1341/争用期数字——#1442 的"203/259ms
     误标"教训）；warm 二采取第二采；不走 issue 提到的仓外 shape_explain.py
     脚手架。
-  - 判据：(i) 命中 → 亚秒 + 解压 batches 与候选身份数同量级 + tile 字节
-    相同；(ii) 无覆盖 → <1s 空响应、零 fact 触达；(ii-b) 内部空洞 miss →
-    424 语义保持 + 计划为逐身份参数化探针（非整片 seq-scan 解压）+ 耗时
-    实测落账且不高于同会话 before 腿（上界=改前整片解压）；(iii) 未压缩 →
-    毫秒不退化 + 字节相同；z4 端到端压缩时次进秒级（#1341 AC-1 口径）。
+  - 判据（round-2 审查 K1/K2 修订——(ii-b) 定量口径改 BUFFERS 主证，
+    (i) 命中侧按短路真相重述）：
+    (i) 命中 → 亚秒 + tile 字节相同 + 解压 batches ~ **1 个身份量级**
+    （首序候选命中该时次时；preflight 向量显示混合则以 (ii-b) 口径兜底）；
+    (ii) 无覆盖 → <1s 空响应、零 fact 触达；
+    (ii-b) 内部空洞 miss → 424 语义保持 + 计划为逐身份参数化探针（非整片
+    seq-scan 解压）+ **定量主证 = BUFFERS**：after 腿压缩 chunk 关系上的
+    Shared Hit+Read ≤ 同会话 before 腿，比值落 receipt（node-27 PG15.2/
+    TSDB 2.10.2 无 "Batches Decompressed" 字段，子 Index Scan 的
+    rows×loops 仅作旁证——受逐 loop 平均取整失真）；wall time 记录为辅，
+    不单独作判据；
+    (iii) 未压缩命中 → 毫秒不退化 + 字节相同；
+    (iii-b) 未压缩 miss → 计划与耗时落账（索引取舍据实记录，无先验断言）；
+    z4 端到端压缩时次进秒级（#1341 AC-1 口径）。此 before/after BUFFERS
+    基线即路由给 #1342 的对照物（issuecomment-5364465639 第 3 条）。
 
 ## D6: select_ci_tests 观察（报告不改）
 
