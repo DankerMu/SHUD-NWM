@@ -22,4 +22,4 @@
       输出含 7 个新增套件；修复前输出（5 个）留档。
 - [x] E2 守卫 anti-vacuity：1.1 后 1.2 前守卫红（missing 列表）；1.2 后绿。
 - [x] E3 `uv run pytest -q tests/test_select_ci_tests.py`；7 个套件实跑墙钟；`uv run ruff check .`。
-- [ ] E4 CI：PR 自身的 "Unit Tests" 绿（selector 改动会自选 `tests/test_select_ci_tests.py`）。
+- [x] E4 CI：PR 自身的 "Unit Tests" 绿（selector 改动会自选 `tests/test_select_ci_tests.py`）。
