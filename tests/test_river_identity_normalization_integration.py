@@ -1101,3 +1101,82 @@ def test_already_ingested_recompute_detection_on_a_legacy_run_is_init_state_only
         ) == {"legacy-published"}
     finally:
         connection.close()
+
+
+def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_at(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """#1674 (vi): the non-NULL `parsed_at` plumbing that (i)-(v) cannot observe.
+
+    Scenarios (i)-(iv) pass ``object_store_root=None``, so `_ingested_run_is_current`
+    returns before `parsed_at` is ever read, and (v) is a NULL-`parsed_at` cohort by
+    construction. Outside the SQL string pin nothing holds `MAX(rt.created_at)` to a
+    real timestamp on the post-cutover population — the population that actually gets
+    recomputed. Under the pre-#1674 inner join a row-bearing run structurally
+    guaranteed a non-NULL aggregate; the #1674 LEFT JOIN makes NULL a legal output
+    state, so a refactor could keep the literal `MAX(rt.created_at) AS parsed_at` and
+    still hand every key-visible run a NULL, silently disabling recompute detection.
+
+    That is exactly what this test bites on: with `parsed_at` NULL,
+    `_ingested_run_is_current` short-circuits to True, the run comes back complete,
+    and the first assertion below (products rewritten AFTER the parse must not be
+    skipped) fails.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "keyed-published", status="published", init_state_id="state-a")
+        _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
+        _seed_run_facts(connection, "keyed-published", normalized=True)
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries "
+                "WHERE run_id = 'keyed-published' AND run_key IS NOT NULL",
+            )
+            > 0
+        )
+        assert (
+            _scalar(
+                connection,
+                "SELECT max(rt.created_at) FROM hydro.river_timeseries rt "
+                "JOIN hydro.hydro_run h ON h.run_key = rt.run_key "
+                "WHERE h.run_id = 'keyed-published'",
+            )
+            is not None
+        )
+
+        # Manifest AGREES with the DB initial state, so the init_state comparison
+        # passes and detection falls through to the mtime branch — the one branch
+        # only a non-NULL `parsed_at` can reach.
+        _write_manifest(tmp_path, "keyed-published", "state-a")
+        manifest = tmp_path / "runs" / "keyed-published" / "input" / "manifest.json"
+        product = tmp_path / "runs" / "keyed-published" / "output" / "rivqdown.csv"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text("time,q\n", encoding="utf-8")
+        now = datetime.now(tz=UTC).timestamp()
+
+        # Products rewritten after the parse: the warm-start recompute path. Not
+        # complete, re-ingest it.
+        os.utime(product, (now + 3600, now + 3600))
+        assert autopipe._run_product_mtime(tmp_path, "keyed-published") >= now + 3600
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["keyed-published", _SUPERSEDED_RUN],
+            object_store_root=tmp_path,
+        ) == {_SUPERSEDED_RUN}
+
+        # Products older than the parse: nothing was recomputed, stay skipped. The
+        # manifest is back-dated too because `_run_product_mtime` maxes over it as
+        # well; leaving it at write time (~now, i.e. after the fact rows were
+        # inserted) would race the +1s tolerance against the database clock.
+        os.utime(product, (now - 3600, now - 3600))
+        os.utime(manifest, (now - 3600, now - 3600))
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["keyed-published", _SUPERSEDED_RUN],
+            object_store_root=tmp_path,
+        ) == {"keyed-published", _SUPERSEDED_RUN}
+    finally:
+        connection.close()

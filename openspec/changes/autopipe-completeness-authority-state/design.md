@@ -85,6 +85,11 @@ census 排除 docstring，均不受影响）。
   / `_seed_facts` 硬编码单 run `'run1'`，多 run 多状态的 helper 是新代码。压缩
   对 SQL 语义不承重（NULL 键压不压都命不中），它是对 issue 失效条件的保真，
   测试叙述不得写成"压缩导致 (i) 红"。
+  (vi)（round-1 审查 CONFIRMED 补齐）：键可见 published run + 一致 manifest，产品
+  mtime 置为未来 → 不在（非 NULL `parsed_at` 确实流进 mtime 比对，钉住 must-preserve
+  第二条）；mtime 置为过去 → 在。(i)-(v) 要么 `object_store_root=None` 要么
+  `parsed_at` 为 NULL，都观察不到这条管道；旧内连接结构性保证非 NULL，LEFT JOIN 让
+  NULL 成为合法输出，故必须单独钉。
 - SQL 形态 pin：放在 `tests/test_river_ts_text_identity_cleanup.py`（已在
   selector 对 `scripts/node27_autopipeline.py` 的等值选择集内，新文件会让
   `test_select_ci_tests.py:412-421` 的等值断言红或根本不跑）：`LEFT JOIN`、
