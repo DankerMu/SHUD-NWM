@@ -40,8 +40,12 @@
       小写化钉 + name 臂仍 `ILIKE` 钉 + COUNT/分页语句同步钉。
 - [ ] 2.3 `tests/test_real_database_integration.py`：`indexdef` 含
       `lower(river_segment_id)` 且 `pg_index.indisvalid = true`；共享长前缀样本上
-      等值 join EXPLAIN 不含 `river_segment_id_trgm_idx`；`enable_seqscan=off` 下
-      lower/LIKE 计划含之；四表 reloptions 回读；幂等——`DELETE FROM
+      等值 join EXPLAIN 不含 `river_segment_id_trgm_idx`（默认计划 + 仅剩 bitmap
+      路径两种设置下均不含）；正向可选性用 catalog 断言而非计划断言——索引表达式为
+      `lower(river_segment_id)`、opclass `gin_trgm_ops`，且该 opfamily 的 `pg_amop`
+      含 `~~(text,text)`（LIKE）；planner 实际选用的证据归 E4(iii) 真数据 receipt
+      （小样本上 `enable_seqscan=off` 仍会被"无条件 bitmap 全索引扫描"抢走，E3
+      实跑已证明计划断言不可靠）；四表 reloptions 回读；幂等——`DELETE FROM
       public.schema_migrations WHERE version LIKE '000052%'` 后
       `apply_migration()` 重放，indexdef / `indisvalid` / reloptions / `_legacy`
       缺席均不变。

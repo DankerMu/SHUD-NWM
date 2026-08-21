@@ -506,6 +506,36 @@ def _river_segment_id_trgm_index(cursor: Any) -> tuple[str, bool]:
     return row[0], row[1]
 
 
+def _river_segment_id_trgm_opfamily_operators(cursor: Any) -> set[str]:
+    """Every operator the index's operator family can answer, as `name(left,right)`.
+
+    Which predicates an index is ELIGIBLE for is a property of its indexed
+    expression plus its operator family -- a catalog fact, decided before the
+    planner ever costs anything.
+    """
+
+    cursor.execute(
+        """
+        SELECT oc.opcfamily
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_opclass oc ON oc.oid = ix.indclass[0]
+        WHERE n.nspname = 'core'
+          AND t.relname = 'river_segment'
+          AND i.relname = 'river_segment_id_trgm_idx'
+        """
+    )
+    row = cursor.fetchone()
+    assert row is not None, "river_segment_id_trgm_idx is missing"
+    cursor.execute(
+        "SELECT amopopr::regoperator::text FROM pg_amop WHERE amopfamily = %s",
+        (row[0],),
+    )
+    return {operator for (operator,) in cursor.fetchall()}
+
+
 def _legacy_index_exists(cursor: Any) -> bool:
     cursor.execute(
         """
@@ -617,13 +647,21 @@ def _explain(cursor: Any, sql: str, params: tuple[Any, ...] | None = None) -> st
 def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
     integration_database_url: str,
 ) -> None:
-    """000052's structural claim, measured on a real planner (issue #1468).
+    """000052's structural claim, proved structurally (issue #1468).
 
     Production picked the trigram index for `river_segment_id = $1` and paid
     51 s instead of 17 ms, with FRESH statistics and a cheaper estimated cost --
-    so a cost- or statistics-based assertion would prove nothing. What this test
-    pins is that the equality predicate cannot MATCH the index at all, and that
-    the search predicate still can.
+    so a cost- or statistics-based assertion would prove nothing. The negative
+    half is therefore a planner fact costs cannot flip: the equality qual cannot
+    MATCH the expression index under any path setting, so no plan names it. The
+    positive half is a catalog fact: the index's expression and operator family
+    cover the rewritten `lower(...) LIKE ...` predicate.
+
+    The positive half deliberately does NOT consult the planner. On this 600-row
+    synthetic family with `enable_seqscan = off` the planner substitutes a
+    no-condition bitmap scan over an unrelated btree, which is cheaper than the
+    GIN path -- an outcome about costs, not about selectability. Positive planner
+    evidence on real data lives in the node-27 E4(iii) receipt.
     """
 
     import psycopg2
@@ -669,25 +707,25 @@ def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
             cursor.execute("SET LOCAL enable_indexonlyscan = off")
             bitmap_only_plan = _explain(cursor, equality_join)
             assert "river_segment_id_trgm_idx" not in bitmap_only_plan, bitmap_only_plan
-            cursor.execute("SET LOCAL enable_indexscan = on")
-            cursor.execute("SET LOCAL enable_indexonlyscan = on")
+            # No planner call follows, and the transaction is rolled back below,
+            # so these `SET LOCAL` toggles die with it -- nothing to restore.
 
-            # The other half of the contract: search (the rewritten id arm in
-            # packages/common/model_registry.py) still gets the index.
-            # NOTE: `enable_seqscan = off` set above is deliberately still in
-            # effect. On this small synthetic family a sequential scan would win
-            # on cost and the plan would say nothing about SELECTABILITY, which
-            # is what this assertion is for. Do not "fix" the missing re-enable.
-            search_plan = _explain(
-                cursor,
-                """
-                SELECT rs.river_segment_id
-                FROM core.river_segment rs
-                WHERE lower(rs.river_segment_id) LIKE %s ESCAPE '\\'
-                """,
-                ("%0012%",),
-            )
-            assert "river_segment_id_trgm_idx" in search_plan, search_plan
+            # The other half of the contract, read out of the catalog instead of
+            # out of a plan: the rewritten id arm in packages/common/model_registry.py
+            # searches with `lower(river_segment_id) LIKE ...`, and this index CAN
+            # serve that -- its indexed expression is exactly `lower(river_segment_id)`,
+            # it is a valid gin_trgm_ops index, and its operator family answers `~~`.
+            indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+            assert "lower(river_segment_id)" in indexdef, indexdef
+            assert "gin_trgm_ops" in indexdef, indexdef
+            assert indisvalid is True, "river_segment_id_trgm_idx is INVALID"
+            operators = _river_segment_id_trgm_opfamily_operators(cursor)
+            assert "~~(text,text)" in operators, sorted(operators)
+            # The same family also answers `=`: since pg_trgm 1.6 `gin_trgm_ops`
+            # supports equality, which is precisely why a BARE-column trigram index
+            # was eligible for `river_segment_id = $1` in the first place, and why
+            # 000052 had to move the index onto an expression to make it ineligible.
+            assert "=(text,text)" in operators, sorted(operators)
     finally:
         # Planner input only: nothing this test seeded outlives it.
         connection.rollback()

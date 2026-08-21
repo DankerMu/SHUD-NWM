@@ -108,8 +108,10 @@ station search 不动（D2）。
 - 真库集成（`tests/test_real_database_integration.py`，CI 真 PG + node-27）：
   (i) 索引清单钉不变；(ii) `indexdef` 含 `lower(river_segment_id)`；(iii) 造
   共享长前缀 id 数据后 `EXPLAIN` 等值 join **不含** `river_segment_id_trgm_idx`
-  （结构性，不依赖成本），`SET LOCAL enable_seqscan=off` 下
-  `lower(river_segment_id) LIKE '%x%'` 计划**含**该索引（可选性）；(iv) reloptions
+  （结构性，不依赖成本），正向可选性用 catalog 断言（索引表达式
+  `lower(river_segment_id)` + opclass `gin_trgm_ops` + 该 opfamily 的 `pg_amop` 含
+  `~~(text,text)`），不用计划断言——E3 node-27 实跑证明小样本上 `enable_seqscan=off`
+  仍会被无条件 bitmap 全索引扫描抢走，planner 实选归 E4(iii) 真数据 receipt；(iv) reloptions
   回读；(v) 幂等：`DELETE FROM schema_migrations WHERE version LIKE '000052%'` 后
   `apply_migration()` 重放，indexdef / `indisvalid` / reloptions / `_legacy` 缺席不变。
   索引断言一律含 `pg_index.indisvalid = true`。
