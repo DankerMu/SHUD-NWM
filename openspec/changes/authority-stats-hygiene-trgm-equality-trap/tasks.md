@@ -2,8 +2,8 @@
 
 ## 1. Implementation
 
-- [ ] 1.1 `db/migrations/000052_authority_stats_hygiene_trgm_expression_index.sql`：
-      三步幂等索引置换（先 `DROP INDEX CONCURRENTLY IF EXISTS …_invalid` 清上上次
+- [x] 1.1 `db/migrations/000052_authority_stats_hygiene_trgm_expression_index.sql`：
+      幂等索引置换（先 `DROP INDEX CONCURRENTLY IF EXISTS …_invalid` 清上上次
       残骸；DO 块带 `SET LOCAL lock_timeout = '2s'`：同名 `indisvalid = false` 残骸
       RENAME 为 `_invalid`，`schemaname='core'` 的裸列索引 RENAME 为 `_legacy` →
       `CREATE INDEX CONCURRENTLY IF NOT EXISTS river_segment_id_trgm_idx … GIN
@@ -11,7 +11,7 @@
       …_legacy` 与 `…_invalid`）+ 四张 core 身份表 reloptions（design D3）。全文无
       BEGIN/COMMIT，无任何对表取 ACCESS EXCLUSIVE 的语句。
       文件头注释写明陷阱机制、#1468、CIC 中断后 invalid 索引的恢复步骤（重跑即可）。
-- [ ] 1.2 `scripts/node27_autopipeline.py`：stats guard 修复腿
+- [x] 1.2 `scripts/node27_autopipeline.py`：stats guard 修复腿
       `_analyze_unanalyzed_authority_tables`（候选 SQL 限 `core`/`met`/`hydro`、
       `relkind='r'`、排除 hypertable；`relpages>0 AND last_analyze IS NULL AND
       last_autoanalyze IS NULL`；复用上限 3 / 120 s / `_STATS_GUARD_IDENT_RE` /
@@ -41,7 +41,7 @@
       summary `authority` 结构钉。既有用例全部保持绿。
 - [x] 2.2 `tests/test_list_search_contract.py`：id 臂 `lower(... ) LIKE` 钉 + 参数
       小写化钉 + name 臂仍 `ILIKE` 钉 + COUNT/分页语句同步钉。
-- [ ] 2.3 `tests/test_real_database_integration.py`：`indexdef` 含
+- [x] 2.3 `tests/test_real_database_integration.py`：`indexdef` 含
       `lower(river_segment_id)` 且 `pg_index.indisvalid = true`；共享长前缀样本上
       等值 join EXPLAIN 不含 `river_segment_id_trgm_idx`（默认计划 + 仅剩 bitmap
       路径两种设置下均不含）；正向可选性用 catalog 断言而非计划断言——索引表达式为
@@ -55,7 +55,9 @@
       CONCURRENTLY` 失败制造 `indisvalid=false` 残骸后删账本行重放，终态为单个 valid
       表达式索引、无 `_legacy`/`_invalid`；修复腿候选 SQL 行为 oracle——core/met 普通表
       先 ANALYZE 再 `pg_stat_reset_single_table_counters`、hypertable chunk 同样处理，
-      调 `_analyze_unanalyzed_authority_tables(dsn)` 断言入选/排除与 ANALYZE 落地。
+      调 `_analyze_unanalyzed_authority_tables(dsn)` 断言入选/排除与 ANALYZE 落地；
+      hypertable 根表须先被做成候选形态（根表 heap 无行、ANALYZE 不写 relpages，throwaway
+      库内以 superuser 把其 `pg_class.relpages` 置 1 并断言），`NOT EXISTS` 子句才承重。
 
 ## Evidence Floor
 

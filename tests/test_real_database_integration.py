@@ -917,6 +917,19 @@ def test_authority_stats_hygiene_migration_recovers_from_an_interrupted_concurre
 # semantics-neutering mutation of it survives.
 _AUTHORITY_PROBE_TABLES = (("core", "it1468_plain"), ("met", "it1468_plain"), ("public", "it1468_plain"))
 
+# Verbatim copy of the hypertable-exclusion block in
+# `_STATS_GUARD_AUTHORITY_CANDIDATES_SQL`, used to build a mutant query with
+# that clause -- and only that clause -- removed. A reworded constant makes the
+# removal a no-op, which the test asserts against rather than silently running
+# the unmutated query twice.
+_HYPERTABLE_NOT_EXISTS_CLAUSE = """
+  AND NOT EXISTS (
+      SELECT 1
+      FROM timescaledb_information.hypertables h
+      WHERE h.hypertable_schema = s.schemaname
+        AND h.hypertable_name = s.relname
+  )"""
+
 
 def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypertables(
     throwaway_database_url: str,
@@ -932,14 +945,24 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
 
     After that the only thing separating them is the candidate query's own
     clauses: `core`/`met` are in the schema tuple and must be analyzed,
-    `public` is not, and the hypertable chunk (`_timescaledb_internal`) plus its
-    root must stay out under the schema tuple and the `NOT EXISTS` respectively.
-    ANALYZE on a root recurses into the chunks and on a bare compressed-chunk
-    name it would destroy the relstats TimescaleDB preserves at compression
-    time, which is why "not selected" is the assertion that matters here.
+    `public` is not, and the hypertable chunk (`_timescaledb_internal`) stays
+    out under the schema tuple.
 
-    Per-TEST throwaway database: this creates tables and resets statistics
-    counters on an autocommit connection.
+    The hypertable ROOT needs one more step. ANALYZE leaves an inheritance
+    parent's `relpages` at 0 (it measures the root's own heap, which is empty --
+    every row is in a chunk), so a root left alone is already excluded by
+    `relpages > 0` and the `NOT EXISTS` clause would be dead weight this test
+    could not notice being deleted. The root's `relpages`
+    is therefore forged (see the poke below) until it satisfies EVERY predicate
+    except `NOT EXISTS`, and the clause is then shown to be the sole excluder:
+    the shipped query does not return the root, the same query with only that
+    block removed does, and the guard's own selection stays exactly
+    `core`/`met`. ANALYZE on a root recurses into the chunks and on a bare
+    compressed-chunk name it would destroy the relstats TimescaleDB preserves
+    at compression time -- keeping both out is the contract.
+
+    Per-TEST throwaway database: this creates tables, forges one catalog row and
+    resets statistics counters on an autocommit connection.
     """
 
     import psycopg2
@@ -997,6 +1020,62 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             chunks = [f"{row[0]}.{row[1]}" for row in cursor.fetchall()]
             assert chunks, "the seeded rows produced no chunk; the exclusion would prove nothing"
 
+            # The rows all live in chunks, so the root's own heap is 0 pages and
+            # ANALYZE writes that 0 into `pg_class.relpages` (the inherited pass
+            # only fills pg_statistic). Left there, the root is excluded by
+            # `relpages > 0` and deleting the whole `NOT EXISTS` block would not
+            # change one assertion in this test. Forging a page is the only way
+            # to make an inheritance parent candidate-shaped; it is a catalog
+            # write, deliberately, and it is safe exactly here: function-scoped
+            # throwaway database, dropped in `finally`, superuser autocommit
+            # connection, nothing else reads this number. It MUST come after the
+            # ANALYZE above, which would otherwise overwrite it back to 0.
+            cursor.execute("SELECT relpages FROM pg_class WHERE oid = 'hydro.river_timeseries'::regclass")
+            (root_relpages_after_analyze,) = cursor.fetchone()
+            if root_relpages_after_analyze == 0:
+                cursor.execute("UPDATE pg_class SET relpages = 1 WHERE oid = 'hydro.river_timeseries'::regclass")
+
+            # Setup proof for the root: every predicate of the candidate query
+            # is now satisfied EXCEPT the one under test. Without this the
+            # exclusion assertion below would hold for the wrong reason.
+            cursor.execute(
+                """
+                SELECT c.relpages, c.relkind, s.schemaname, s.last_analyze, s.last_autoanalyze
+                FROM pg_stat_user_tables s
+                JOIN pg_class c ON c.oid = s.relid
+                WHERE s.relid = 'hydro.river_timeseries'::regclass
+                """
+            )
+            root_row = cursor.fetchone()
+            assert root_row is not None, "the hypertable root is missing from pg_stat_user_tables"
+            root_relpages, root_relkind, root_schema, root_last, root_last_auto = root_row
+            assert root_relpages > 0, (
+                f"root relpages is {root_relpages} (ANALYZE left {root_relpages_after_analyze}); "
+                "the root is not candidate-shaped and the NOT EXISTS clause would prove nothing"
+            )
+            assert root_relkind == "r", root_relkind
+            assert root_schema == "hydro", root_schema
+            assert root_last is None and root_last_auto is None, root_row
+
+            # One textual difference, one database state: whatever the mutant
+            # returns and the shipped query does not is what `NOT EXISTS` --
+            # and nothing else -- excludes.
+            mutant_sql = autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL.replace(_HYPERTABLE_NOT_EXISTS_CLAUSE, "")
+            assert mutant_sql != autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL, (
+                "the NOT EXISTS block was not found in the shipped SQL; _HYPERTABLE_NOT_EXISTS_CLAUSE is stale "
+                "and this check degenerated into running the unmutated query twice"
+            )
+            cursor.execute(autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
+            shipped_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
+            cursor.execute(mutant_sql)
+            mutant_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
+            assert "hydro.river_timeseries" not in shipped_candidates, shipped_candidates
+            assert "hydro.river_timeseries" in mutant_candidates, mutant_candidates
+            assert mutant_candidates - shipped_candidates == {"hydro.river_timeseries"}, (
+                shipped_candidates,
+                mutant_candidates,
+            )
+
         summary = autopipe._analyze_unanalyzed_authority_tables(throwaway_database_url)
 
         assert summary["status"] == "completed", summary
@@ -1006,8 +1085,11 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             assert analyzed[table]["status"] == "ok", analyzed[table]
             assert analyzed[table]["last_analyze"] is not None, analyzed[table]
         # Selection is exact, not merely inclusive: no migration seeds rows, so
-        # every other core/met/hydro table is empty (relpages = 0) and only the
-        # fixture relations above can qualify.
+        # every other core/met table is empty (relpages = 0) and only the
+        # fixture relations above can qualify. `hydro.river_timeseries` is the
+        # one exception -- its relpages was forged above -- which makes this
+        # line a second, independent killer of a deleted `NOT EXISTS`: without
+        # the clause the guard would ANALYZE the root and this list would grow.
         assert sorted(analyzed) == ["core.it1468_plain", "met.it1468_plain"], summary
         # Exclusions swept over BOTH lists -- a leaked relation sitting in
         # `deferred` is the same contract breach as one that got analyzed.

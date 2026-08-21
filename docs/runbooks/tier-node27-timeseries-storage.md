@@ -2279,7 +2279,7 @@ WHERE s.schemaname IN ('core', 'met', 'hydro')
       SELECT 1 FROM timescaledb_information.hypertables h
       WHERE h.hypertable_schema = s.schemaname AND h.hypertable_name = s.relname
   )
-ORDER BY c.relpages DESC;
+ORDER BY c.relpages DESC, 1, 2;
 ```
 
 一个跑过修复腿的 tick 之后这条应返回 **0 行**。持续非空 = 修复腿没跑（开关 off /
@@ -2291,7 +2291,14 @@ guard 级失败）或每条都 `failed`/`warning`——先看 summary，别先�
 同样的候选形态（先 ANALYZE 让 `relpages > 0`，再
 `pg_stat_reset_single_table_counters` 造双 NULL），直接调修复腿并断言：`core`/`met`
 两张被 ANALYZE 且 `status: "ok"`，`public.*`、hypertable 根表、
-`_timescaledb_internal.*` chunk **一个都不入选**。改这段 SQL 先跑它。
+`_timescaledb_internal.*` chunk **一个都不入选**。
+
+hypertable 根表还多一道：ANALYZE 不给继承父表写 `pg_class.relpages`，根表本来就被
+`relpages > 0` 挡在外面，`NOT EXISTS` 删掉也没人发现。用例因此**直接改写根表的
+`relpages`**（一次 catalog 写，只在 per-test throwaway 库里做）把它凑成除
+`NOT EXISTS` 外每条谓词都满足的候选，再证明该子句是**唯一**排除者：出厂 SQL 不返回
+根表、仅删掉 `NOT EXISTS` 块的变异 SQL 返回根表、且修复腿的入选集仍恰好是
+`core`/`met` 两张。改这段 SQL 先跑它。
 
 #### per-table autovacuum 参数（覆盖 churn 型）
 

@@ -38,11 +38,12 @@ Issue #1468：node-27 生产库的 `core.river_segment` / `core.river_network_ve
 
 1. **迁移 `db/migrations/000052_authority_stats_hygiene_trgm_expression_index.sql`**：
    - `river_segment_id_trgm_idx` 由裸列改为表达式索引 `GIN (lower(river_segment_id)
-     gin_trgm_ops)`，三步幂等置换：DO 块内条件 `ALTER INDEX … RENAME TO …_legacy`
-     （仅当 `schemaname='core'` 的现有 indexdef 不含 `lower(`；同块先清理同名
-     invalid 残骸）→ `CREATE INDEX CONCURRENTLY IF NOT EXISTS` → `DROP INDEX
-     CONCURRENTLY IF EXISTS …_legacy`。等值查找 `river_segment_id = $1` 在结构上
-     不再匹配该索引——不是成本博弈，是不可选。
+     gin_trgm_ops)`，幂等置换且**全文件无任何对表取 ACCESS EXCLUSIVE 的语句**：
+     并发清上上次 `_invalid` 残骸 → DO 块内（`lock_timeout='2s'`）同名 invalid 残骸
+     `RENAME TO …_invalid`、裸列索引（`schemaname='core'` 且 indexdef 不含 `lower(`）
+     `RENAME TO …_legacy` → `CREATE INDEX CONCURRENTLY IF NOT EXISTS` → 并发删
+     `_legacy` 与 `_invalid`。等值查找 `river_segment_id = $1` 在结构上不再匹配该
+     索引——不是成本博弈，是不可选。
    - 四张 core 身份表 per-table autovacuum analyze 参数：`river_segment` /
      `river_segment_crosswalk` `(autovacuum_analyze_scale_factor=0.01,
      autovacuum_analyze_threshold=500)`；`river_network_version` / `basin_version`

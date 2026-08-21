@@ -60,7 +60,7 @@ btree Hash Join（22 ms/500）。不改，记录复核 SQL；若未来出现带 
 
 ## D3: 迁移形态与 CI/node-27 施加
 
-- 三步幂等置换，全部在事务外（`CREATE/DROP INDEX CONCURRENTLY` 不能在事务内；
+- 幂等置换（清残骸 → DO 块改名 → CIC → 并发删旧/残骸 → reloptions），全部在事务外（`CREATE/DROP INDEX CONCURRENTLY` 不能在事务内；
   `packages/common/migrate.apply_migration()` 在 `autocommit=True` 连接上经
   `split_sql_statements` 逐语句执行，该切分器维护 `$$` 状态，DO 块不会被 `;`
   切碎；000031 是 CONCURRENTLY 的在产先例，DO 块在 000003/000011/…/000050 共 11 个迁移
