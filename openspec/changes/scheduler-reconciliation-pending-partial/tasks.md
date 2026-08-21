@@ -1,7 +1,7 @@
 ## 1. Fixture and Invariant Gate
 
 - [x] 1.1 Pass one read-only fixture review and strict validation before implementation.
-- [ ] 1.2 Preserve the governing invariant across producer, quality, pass counts, readiness recount, nested defer, confirmed submission provenance, final-span timing, durable no-op, compaction, and downstream stop surfaces.
+- [x] 1.2 Preserve the governing invariant across producer, quality, pass counts, readiness recount, nested defer, confirmed submission provenance, final-span timing, durable no-op, compaction, and downstream stop surfaces.
 - [x] 1.3 Keep Part A and Part B in one mergeable PR; record any implementation deviation.
 
 ## 2. Part A — Evidence and Readiness
