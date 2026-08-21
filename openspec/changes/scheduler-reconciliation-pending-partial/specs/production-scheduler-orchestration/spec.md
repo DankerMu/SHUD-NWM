@@ -17,3 +17,18 @@ Scheduler candidate evidence SHALL treat cycle terminal `reconciling` and stage/
 - **WHEN** candidate evidence carries `submit_result_ambiguous` or `reconcile_unverified`
 - **THEN** the same non-success predicate SHALL reject final success
 - **THEN** existing failed-status classification SHALL remain false for both statuses
+
+#### Scenario: Confirmed first dispatch survives nested pending projection
+
+- **GIVEN** a scheduler candidate's initial full-array stage has a confirmed Slurm master job identity
+- **WHEN** a nested retry ends reconciliation-pending and the pass artifact is produced
+- **THEN** the candidate model-run evidence SHALL retain `submitted=true` and `slurm_submit_called=true`
+- **THEN** execution proof SHALL retain a positive `submitted_count` and `slurm_submit_count`
+- **THEN** `slurm_submit_proven_absent` SHALL be false and no-mutation proof SHALL NOT claim `slurm_submit_called=false`
+- **THEN** evidence compaction SHALL preserve those facts
+
+#### Scenario: Pending status without confirmed identity remains non-submitted
+
+- **WHEN** a scheduler candidate has a reconciliation-pending status but no confirmed Slurm identity
+- **THEN** model-run evidence SHALL keep `submitted=false`
+- **THEN** no producer SHALL turn the pending token itself into a positive submission proof

@@ -60,6 +60,14 @@ When a nested submission returns one governed status with `aggregation is None`,
 
 The nested `reconcile_unverified` path must retain the existing terminal-hook no-op: the defer must not re-enter `_after_cycle_stage_terminal` as `partially_failed`. The nested call may already have emitted its own `reconcile_unverified` event/row; this change adds no second cycle write. The accepted nested attempt that produced the pending result is observable, but no attempt N+1 is derived after it.
 
+### D6: Confirmed submission facts are monotone
+
+The raw nested pending result must remain the returned stage terminal, but replacing the prior partial stage cannot erase a confirmed first dispatch. If and only if the prior stage has a non-empty Slurm master job identity and the raw pending result lacks one, the replacement retains that identity. It does not retain old task rows, add another stage entry, or infer submission from a bare pending status. Existing evidence projection can then derive `submitted` and `slurm_submit_called` from the same concrete identity it already trusts.
+
+### D7: Final defer span uses zero/zero attribution
+
+A reconciliation-pending terminal is a defer, not an all-basin failure. Its final stage timing span records the entered basin count but zero submitted and zero failed, matching the existing duplicate-skip defer convention. The earlier confirmed dispatch remains represented by the returned stage identity and scheduler proof; it is not reassigned to the final defer span. Ordinary submission and execution failures stay in the generic failure branch.
+
 ## Risk Packs Considered
 
 - Public API / CLI / script entry: not selected — no external entrypoint change.
@@ -84,8 +92,8 @@ The nested `reconcile_unverified` path must retain the existing terminal-hook no
 
 ## Invariant Matrix
 
-- Governing invariant: A submission whose exact result is pending reconciliation is incomplete and review-blocking; it is never fabricated as success or failure, and no further work is scheduled from that uncertainty.
-- Source of truth: raw stage status (`submit_result_ambiguous` or `reconcile_unverified`) and mapped cycle terminal `reconciling`.
+- Governing invariant: Known reconciliation facts are monotone: a confirmed dispatch cannot become absent, an unknown terminal cannot become failure, and no new work is derived from uncertainty.
+- Source of truth: raw stage status (`submit_result_ambiguous` or `reconcile_unverified`), mapped cycle terminal `reconciling`, and any non-empty Slurm master identity already present on the prior stage.
 - Producers: `chain_stage_execution.py` ambiguous submit and polling-timeout paths; unchanged.
 - Validators/preflight: candidate quality non-success predicate; readiness pass/model-run vocabularies.
 - Storage/cache/query: file-journal accepted-submit rows/events; existing writers remain unchanged and `reconcile_unverified` no-op stays authoritative.
@@ -96,14 +104,16 @@ The nested `reconcile_unverified` path must retain the existing terminal-hook no
 - Regression rows:
   - top-level cycle `reconciling` + active candidate -> non-success, partial evidence, failed false.
   - zero-submission reconciling pass + one row -> `partial_count=1`, readiness blocked, no status/cardinality errors.
-  - nested ambiguous result -> raw stage result, no task failure stamp, cycle `reconciling`, no downstream or N+1 attempt.
+  - nested ambiguous result -> raw stage status and empty task results, prior confirmed master ID retained, no task failure stamp, cycle `reconciling`, no downstream or N+1 attempt.
   - nested unverified result -> same plus no second durable cycle-status write.
-  - duplicate skip and nested `submission_failed` -> existing behavior unchanged.
+  - produced nested-pending scheduler artifact -> submitted/called facts remain positive, absence proof remains false, and compaction preserves them.
+  - both nested pending terminals -> final forecast timing span has basin `N`, submitted `0`, failed `0`.
+  - bare pending without prior identity remains non-submitted; duplicate skip and nested `submission_failed` retain existing behavior.
 
 ## Boundary Surface Checklist
 
-- Shared state-machine root: `chain_forecast_execution.py` defer set, mapping, caller, retry helper.
-- Evidence producer/consumer boundary: cycle result -> candidate evidence -> pass counts -> readiness recount.
+- Shared state-machine root: `chain_forecast_execution.py` defer set, mapping, caller, retry helper, and timing counter owner.
+- Evidence producer/consumer boundary: prior partial stage -> raw pending replacement -> cycle result -> candidate evidence -> pass proof/compaction -> readiness recount.
 - Stale/idempotency boundary: accepted-submit ambiguity may still correspond to a live job; no new attempt may be minted.
 - Durable boundary: existing nested event/write is retained; no fabricated partial/failure write.
 - Unchanged sibling consumers: duplicate skip, submission failure, succeeded/failed partial retry, production status translator.

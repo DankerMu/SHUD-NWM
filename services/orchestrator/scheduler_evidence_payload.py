@@ -785,6 +785,8 @@ def _compact_write_proof(field_name: str, value: Any) -> Any:
                 "protected_by_pre_execution_evidence",
                 "submitted_count",
                 "slurm_submit_called",
+                "slurm_submit_count",
+                "slurm_submit_proven_absent",
                 "mutation_occurred",
                 "pipeline_status_writes",
                 "pipeline_event_writes",

@@ -19,6 +19,28 @@ The partial-array retry helper SHALL preserve a nested `submit_result_ambiguous`
 - **THEN** the existing reconciliation event or row MAY remain, but the executor SHALL NOT add a second partial or failed cycle-status write
 - **THEN** no downstream stage or further retry attempt SHALL run
 
+#### Scenario: Nested pending replacement preserves confirmed dispatch identity
+
+- **GIVEN** the prior partial stage contains a non-empty Slurm master job identity proving that the full array was dispatched
+- **WHEN** a nested resubmission returns a raw reconciliation-pending result with no Slurm identity or task outcomes
+- **THEN** the returned pending stage SHALL retain the prior non-empty Slurm master job identity
+- **THEN** it SHALL retain the raw pending terminal and empty task outcomes
+- **THEN** it SHALL NOT reconstruct stale per-task outcomes or infer any additional submission
+
+#### Scenario: Bare pending result does not manufacture dispatch identity
+
+- **GIVEN** no prior stage contains confirmed Slurm submission identity
+- **WHEN** a reconciliation-pending stage result is returned
+- **THEN** the result SHALL remain without Slurm submission identity
+- **THEN** the pending status alone SHALL NOT prove that Slurm submission occurred
+
+#### Scenario: Reconciliation defer timing is neither submitted nor failed
+
+- **WHEN** either governed nested reconciliation-pending terminal closes a stage span entered with `N` basins
+- **THEN** the final span SHALL report `basin_count=N`
+- **THEN** it SHALL report `submitted_count=0` and `failed_count=0`
+- **THEN** ordinary failed or `submission_failed` terminals SHALL retain their existing failure attribution
+
 #### Scenario: Unrelated nested terminals retain existing behavior
 
 - **WHEN** a nested resubmission returns `skipped_duplicate_submission`, `submission_failed`, success, or an ordinary failed aggregation

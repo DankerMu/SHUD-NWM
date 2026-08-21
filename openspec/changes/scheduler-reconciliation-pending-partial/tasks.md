@@ -1,7 +1,7 @@
 ## 1. Fixture and Invariant Gate
 
 - [x] 1.1 Pass one read-only fixture review and strict validation before implementation.
-- [x] 1.2 Preserve the governing invariant across producer, quality, pass counts, readiness recount, nested defer, durable no-op, and downstream stop surfaces.
+- [ ] 1.2 Preserve the governing invariant across producer, quality, pass counts, readiness recount, nested defer, confirmed submission provenance, final-span timing, durable no-op, compaction, and downstream stop surfaces.
 - [x] 1.3 Keep Part A and Part B in one mergeable PR; record any implementation deviation.
 
 ## 2. Part A — Evidence and Readiness
@@ -21,16 +21,21 @@
 - [x] 3.4 Flip the two existing collapse tests into positive defer oracles: no failed task stamp, no downstream stage, no attempt N+1, cycle `reconciling`.
 - [x] 3.5 For nested `reconcile_unverified`, prove no second partial/failed cycle-status write lands beyond the nested producer's existing write/event.
 - [x] 3.6 Preserve duplicate-skip, `submission_failed`, ordinary partial retry success/failure, and unknown fail-closed behavior.
+- [x] 3.7 When nested reconciliation replaces a stage with a raw pending result, preserve an already-confirmed non-empty Slurm master identity without restoring stale task outcomes or inferring submission from the pending token itself.
+- [x] 3.8 Attribute both nested reconciliation defer terminals as `basin_count=N`, `submitted_count=0`, `failed_count=0` in the final stage span while retaining real-failure timing.
+- [x] 3.9 Add scheduler-produced artifact oracles proving the confirmed first dispatch remains submitted/called/not-proven-absent through compaction; bare pending remains non-submitted.
 
 ## 4. Red Proof and Evidence Floor
 
 - [x] 4.1 Produce one batched pre-change red run for the Part A truth table/artifact tests and Part B nested defer tests; leave no `red-proof` stash.
-- [x] 4.2 `uv run pytest -q tests/test_orchestration_chain.py tests/test_production_readiness_validation.py tests/test_production_scheduler.py` passes.
-- [x] 4.3 `uv run ruff check .` passes.
-- [x] 4.4 `openspec validate scheduler-reconciliation-pending-partial --strict --no-interactive` passes.
+- [x] 4.2 Run new Round 1 invariant tests red on `56e17cbacb31a0040797f839a6528d1a0e987b9c` and green after the fix; record the exact command and outcomes.
+- [x] 4.3 The existing focused #1326 bundle passes.
+- [x] 4.4 `uv run pytest -q tests/test_orchestration_chain.py tests/test_production_readiness_validation.py tests/test_production_scheduler.py` passes.
+- [x] 4.5 `uv run ruff check .` passes.
+- [x] 4.6 `openspec validate scheduler-reconciliation-pending-partial --strict --no-interactive` passes.
 
 ## 5. Scope and Oracle Integrity
 
 - [x] 5.1 Confirm no production-status alias, DB schema, Slurm gateway, reserve-gate, forcing-ready-partial, or public API change entered the diff.
 - [x] 5.2 Confirm no existing test/spec/CI oracle was weakened; former collapse tests are replaced only because the governed contract explicitly changes.
-- [x] 5.3 Record inspected unchanged sibling surfaces and state `No deviations` when applicable.
+- [x] 5.3 Record inspected unchanged sibling surfaces and implementation deviations, including the original red-proof chronology deviation and Round 1 contract closure.

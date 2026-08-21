@@ -22281,7 +22281,11 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_600)
+    # #1326 D6: compaction now retains ``slurm_submit_count`` /
+    # ``slurm_submit_proven_absent`` on execution_write_proof, so the budget is
+    # nudged up to keep the artifact fitting while asserting the same
+    # evidence-pre-execution / status-sync survival facts.
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_700)
 
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
@@ -22353,6 +22357,10 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
         assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
         assert evidence["runtime_config"]["dry_run"] is False
         assert evidence["runtime_config"]["slurm_array_concurrency_bound"] == 32
+        # The writer MUST have fallen back to bounded compaction for this budget
+        # to be meaningful — otherwise the budget adjustment would bypass the
+        # very fallback this test exists to exercise.
+        assert evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -47524,6 +47532,171 @@ def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: P
         if blocker.get("quality_flag") == "candidate_not_successful"
     ] == ["CANDIDATE_RECONCILING"]
     assert item["candidate_outcome"]["status"] == "active"
+
+
+def _nested_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the nested ambiguous accepted-submit defer for real.
+
+    Returns the ``PipelineResult`` from the real ``ForecastOrchestrator`` cycle
+    whose first full-array forecast pass confirmed a Slurm master dispatch and
+    whose nested resubmission came back ``submit_result_ambiguous``. The
+    confirmed master identity must survive on the returned pending stage. The
+    cycle is aligned with the scheduler's registry/discovery (May 21 00:00 UTC)
+    so the replayed candidate outcomes match the scheduler's candidates.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import (
+        AttemptScopedArraySubmitFailureClient,
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    assert result.status == "reconciling"
+    assert next(stage for stage in result.stages if stage.stage == "forecast").slurm_job_id == "2001"
+    return result
+
+
+def test_nested_pending_produced_artifact_retains_confirmed_submission_facts(
+    tmp_path: Path,
+) -> None:
+    """D6 (#1326 Round 1): confirmed dispatch survives through the produced artifact.
+
+    A real nested ambiguous accepted-submit cycle (first full-array dispatch
+    confirmed on master ``2001``, nested resubmission reconciliation-pending)
+    is run through the real ``ProductionScheduler``. The produced pass evidence
+    must retain ``submitted=true`` and ``slurm_submit_called=true`` per
+    candidate, a positive execution write proof, no submission-absence proof,
+    and the persisted/compacted artifact must preserve those facts — the raw
+    pending token alone must never erase a confirmed dispatch.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    cycle_result = _nested_pending_ambiguous_cycle_result(tmp_path)
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert items[model_id]["status"] == "reconciling"
+        assert items[model_id]["submitted"] is True
+        assert items[model_id]["slurm_submit_called"] is True
+        assert items[model_id]["execution_attempted"] is True
+        assert items[model_id]["final_candidate_success"] is False
+        assert items[model_id]["candidate_outcome"]["status"] == "active"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["partial_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 0
+    # Execution write proof: EXACT counts (both candidates submitted via the
+    # retained confirmed dispatch) and submission is proven NOT absent.
+    proof = result.evidence["execution_write_proof"]
+    assert proof["submitted_count"] == 2
+    assert proof["slurm_submit_count"] == 2
+    assert proof["slurm_submit_proven_absent"] is False
+    # No-mutation proof MUST claim slurm_submit_called=true.
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    # Persisted artifact preserves the same EXACT facts.
+    assert result.artifact_path is not None
+    persisted = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    persisted_items = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert persisted_items[model_id]["submitted"] is True
+        assert persisted_items[model_id]["slurm_submit_called"] is True
+    persisted_proof = persisted["execution_write_proof"]
+    assert persisted_proof["submitted_count"] == 2
+    assert persisted_proof["slurm_submit_count"] == 2
+    assert persisted_proof["slurm_submit_proven_absent"] is False
+    assert persisted["no_mutation_proof"]["slurm_submit_called"] is True
+    # Bounded-compaction seam: the produced payload compacted at the evidence
+    # size limit retains the EXACT confirmed-submission facts, including the
+    # slurm-submit count and the absence proof (fixture D6 contract).
+    compacted = scheduler_module._bounded_evidence_payload(
+        persisted,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "submitted"
+    assert compacted_proof["submitted_count"] == 2
+    assert compacted_proof["slurm_submit_called"] is True
+    assert compacted_proof["slurm_submit_count"] == 2
+    assert compacted_proof["slurm_submit_proven_absent"] is False
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is True
+
+
+def test_bounded_compaction_retains_no_submit_execution_proof() -> None:
+    """D6 (#1326): compaction keeps zero/absent execution-proof facts too.
+
+    The added retention is not positive-only: a proof with zero submits and
+    ``slurm_submit_proven_absent=true`` must survive compaction with those
+    exact zero/false facts, so an unknown or missing proof can never be
+    mistaken for a confirmed submission.
+    """
+
+    payload = {
+        "schema": "nhms.production_scheduler.pass_evidence.v1",
+        "status": "completed_no_submit",
+        "pass_id": "scheduler_no_submit_compaction",
+        "counts": {"candidate_count": 1, "submitted_count": 0, "failed_count": 0, "partial_count": 0},
+        "execution_write_proof": {
+            "status": "completed_no_submit",
+            "submitted_count": 0,
+            "slurm_submit_called": False,
+            "slurm_submit_count": 0,
+            "slurm_submit_proven_absent": True,
+            "mutation_occurred": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
+        },
+        "no_mutation_proof": {
+            "slurm_submit_called": False,
+            "adapter_download_called": False,
+            "slurm_status_sync_called": False,
+            "slurm_cancellation_called": False,
+            "shud_runtime_called": False,
+            "hydro_result_table_writes": False,
+            "met_result_table_writes": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
+        },
+    }
+
+    compacted = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "completed_no_submit"
+    assert compacted_proof["submitted_count"] == 0
+    assert compacted_proof["slurm_submit_called"] is False
+    assert compacted_proof["slurm_submit_count"] == 0
+    assert compacted_proof["slurm_submit_proven_absent"] is True
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:

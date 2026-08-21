@@ -14259,16 +14259,20 @@ class HangingPollClock:
         return 10_000.0
 
 
-def _accepted_submit_forecast_basins() -> list[dict[str, Any]]:
+def _accepted_submit_forecast_basins(
+    *,
+    cycle: str = "2026050100",
+    cycle_time: str = "2026-05-01T00:00:00Z",
+) -> list[dict[str, Any]]:
     """Forecast-cohort basins for the accepted-submit repository class."""
 
     basins = _basins(2)
     for index, basin in enumerate(basins):
         basin.update(
             {
-                "run_id": f"fcst_gfs_2026050100_model_{index}",
-                "candidate_id": f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic",
-                "orchestration_run_id": "cycle_gfs_2026050100_forecast_cohort_fixture",
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": f"gfs:{cycle_time}:model_{index}:forecast_gfs_deterministic",
+                "orchestration_run_id": f"cycle_gfs_{cycle}_forecast_cohort_fixture",
                 "restart_stage": "forecast",
                 "state_evidence": {"restart_stage": "forecast"},
                 "model_package_uri": f"s3://nhms/models/model_{index}.tar",
@@ -14422,6 +14426,334 @@ def test_nested_retry_reconcile_unverified_defers_the_cycle(
         "forcing_ready_partial",
         "forecast_running",
     ]
+
+
+def test_nested_retry_submit_result_ambiguous_preserves_prior_confirmed_master_id(
+    tmp_path: Path,
+) -> None:
+    """D6 (#1326 Round 1): the prior confirmed dispatch survives pending projection.
+
+    The first full-array forecast pass dispatched the whole cohort and returned
+    ``partially_failed``; its stage entry carries the confirmed Slurm master id
+    ``2001``. The nested ambiguous resubmission returns a RAW pending result
+    with an empty Slurm identity. Replacing the prior stage with it must NOT
+    erase the confirmed dispatch: the returned pending stage keeps the prior
+    master id while staying raw pending (empty task results), so scheduler
+    evidence can still read ``submitted``/``slurm_submit_called`` from the same
+    concrete identity it already trusts.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    assert client.array_submit_attempts.count("forecast") == 2
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    # Raw pending preserved: status stays ambiguous, no task outcomes, and the
+    # confirmed full-array dispatch identity survives the replacement.
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.slurm_job_id == "2001"
+    assert result.status == "reconciling"
+    # No downstream stage, no attempt N+1, no second stage entry.
+    assert [row["stage"] for row in client.submissions] == ["forecast"]
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert client.array_submit_attempts.count("forecast") == 2
+    assert all(job["job_id"].count("_retry_") <= 1 for job in repository.query_pipeline_jobs_by_cycle("gfs_2026050100"))
+
+
+@pytest.mark.parametrize(
+    ("prior_id", "raw_status", "raw_id", "expected_id"),
+    [
+        # Empty raw pending inherits the prior confirmed master id.
+        ("2001", "submit_result_ambiguous", "", "2001"),
+        ("2001", "submit_result_ambiguous", "   ", "2001"),
+        # A non-empty raw retry master always wins over the prior id.
+        ("2001", "reconcile_unverified", "2002", "2002"),
+        ("2001", "submit_result_ambiguous", "2002", "2002"),
+        # Bare pending with no prior and no raw id stays empty.
+        ("", "reconcile_unverified", "", ""),
+        # Non-pending raw never inherits.
+        ("2001", "skipped_duplicate_submission", "", ""),
+        ("2001", "submission_failed", "", ""),
+        # Unknown status fails closed even with an empty raw id and a prior id:
+        # only statuses the mapping routes to ``reconciling`` inherit.
+        ("2001", "mystery_status", "", ""),
+    ],
+)
+def test_preserve_prior_confirmed_master_id_boundary(
+    prior_id: str,
+    raw_status: str,
+    raw_id: str,
+    expected_id: str,
+) -> None:
+    """D6 (#1326 Round 1): helper boundary — inherit prior ONLY when raw is empty.
+
+    The rule is: inherit prior only for a reconciliation-pending status whose
+    raw identity is empty/whitespace. A non-empty raw identity (a retry master
+    the submit returned) is retained; bare pending with neither id stays empty;
+    non-pending statuses (duplicate skip, submission_failed) never inherit.
+    """
+
+    from services.orchestrator import chain_forecast_execution
+
+    prior = StageRunResult(
+        stage="forecast",
+        job_type=M3_STAGES[2].job_type,
+        pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+        slurm_job_id=prior_id,
+        status="partially_failed",
+    )
+    raw = StageRunResult(
+        stage="forecast",
+        job_type=M3_STAGES[2].job_type,
+        pipeline_job_id="job_cycle_gfs_2026050100_forecast_retry_1",
+        slurm_job_id=raw_id,
+        status=raw_status,
+    )
+
+    replaced = chain_forecast_execution._preserve_prior_confirmed_master_id(prior, raw)
+
+    assert replaced.slurm_job_id == expected_id
+    assert replaced.status == raw_status
+    assert replaced.task_results == ()
+    assert replaced.pipeline_job_id == raw.pipeline_job_id
+
+
+def test_nested_retry_reconcile_unverified_retains_raw_retry_master_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D6 (#1326 Round 1): unverified pending retains its own raw retry master.
+
+    The nested polling-timeout result carries the concrete retry-master
+    identity ``2002`` (submit returned it; only its terminal outcome is
+    unknown). The replacement keeps ``2002`` — the helper inherits the prior
+    ``2001`` ONLY when the raw pending result has no identity. The raw pending
+    status and empty task outcomes are retained and no second cycle write
+    lands.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    class RecordingJournalRepository(FileOrchestrationJournalRepository):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.cycle_status_writes: list[str] = []
+
+        def update_forecast_cycle_status(self, **kwargs: Any) -> Any:
+            self.cycle_status_writes.append(str(kwargs["status"]))
+            return super().update_forecast_cycle_status(**kwargs)
+
+    repository = RecordingJournalRepository(tmp_path / "journal")
+    client = AttemptScopedNeverTerminalClient(
+        hang_stage="forecast",
+        hang_stage_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain.time.monotonic",
+        HangingPollClock(client, stage="forecast", attempt=1),
+    )
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(
+        tmp_path, repository, client, retry_service=retry_service, terminal_stage="forecast"
+    )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "reconcile_unverified"
+    assert forecast.task_results == ()
+    # The raw result's own retry-master identity (2002) is retained — only an
+    # EMPTY raw identity would inherit the prior confirmed 2001.
+    assert forecast.slurm_job_id == "2002"
+    assert result.status == "reconciling"
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert sum(1 for row in client.submissions if row["stage"] == "forecast") == 2
+    assert all(job["job_id"].count("_retry_") <= 1 for job in repository.query_pipeline_jobs_by_cycle("gfs_2026050100"))
+    # The `:598` no-op: no second partial/failed cycle write.
+    assert repository.cycle_status_writes == [
+        "forecast_running",
+        "forcing_ready_partial",
+        "forecast_running",
+    ]
+
+
+def test_bare_pending_stage_without_prior_identity_is_not_submitted_evidence() -> None:
+    """D6 (#1326 Round 1): a bare pending token never manufactures a dispatch.
+
+    A reconciliation-pending stage result with no Slurm identity must keep
+    ``_pipeline_result_slurm_submit_called`` false — submission is inferred
+    only from a concrete confirmed identity, never from the pending status
+    token itself.
+    """
+
+    from services.orchestrator.chain import PipelineResult
+    from services.orchestrator.scheduler_candidate_execution_evidence import (
+        _pipeline_result_slurm_submit_called,
+    )
+
+    result = PipelineResult(
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        status="reconciling",
+        stages=(
+            StageRunResult(
+                stage="forecast",
+                job_type=M3_STAGES[2].job_type,
+                pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+                slurm_job_id="",
+                status="submit_result_ambiguous",
+            ),
+        ),
+        candidate_outcomes=(),
+    )
+
+    assert _pipeline_result_slurm_submit_called(result) is False
+
+
+def test_nested_pending_defer_span_counters_zero_zero_for_both_arms(tmp_path: Path) -> None:
+    """D7 (#1326 Round 1): both nested pending deferrals attribute 0/0 to the span.
+
+    A reconciliation-pending terminal is a defer, not an all-basin failure: the
+    final forecast stage span entered with ``N`` basins reports
+    ``submitted_count=0`` and ``failed_count=0`` for both
+    ``submit_result_ambiguous`` and ``reconcile_unverified``, matching the
+    duplicate-skip convention.
+    """
+
+    from services.orchestrator.chain import TERMINAL_PIPELINE_SUCCESS_STATUSES
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1326pending01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    evidence = timing.finalize_evidence(status=result.status)
+    forecast_span = next(record for record in evidence["stages"] if record["stage_name"] == "forecast")
+
+    assert result.status == "reconciling"
+    assert next(stage for stage in result.stages if stage.stage == "forecast").status == "submit_result_ambiguous"
+    assert forecast_span["basin_count"] == 2
+    assert forecast_span["submitted_count"] == 0
+    assert forecast_span["failed_count"] == 0
+    # D3 invariant: an all-basins-failed span forbids a success terminal.
+    for record in evidence["stages"]:
+        if record["basin_count"] > 0 and record["failed_count"] == record["basin_count"]:
+            assert result.status not in TERMINAL_PIPELINE_SUCCESS_STATUSES
+
+
+def test_nested_pending_unverified_span_counters_zero_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D7 (#1326 Round 1): unverified nested defer attributes 0/0 to the span.
+
+    The ``reconcile_unverified`` arm of the defer also closes the forecast span
+    with zero submitted and zero failed.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedNeverTerminalClient(
+        hang_stage="forecast",
+        hang_stage_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain.time.monotonic",
+        HangingPollClock(client, stage="forecast", attempt=1),
+    )
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(
+        tmp_path, repository, client, retry_service=retry_service, terminal_stage="forecast"
+    )
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1326pending02", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    evidence = timing.finalize_evidence(status=result.status)
+    forecast_span = next(record for record in evidence["stages"] if record["stage_name"] == "forecast")
+
+    assert result.status == "reconciling"
+    assert next(stage for stage in result.stages if stage.stage == "forecast").status == "reconcile_unverified"
+    assert forecast_span["basin_count"] == 2
+    assert forecast_span["submitted_count"] == 0
+    assert forecast_span["failed_count"] == 0
+
+
+def test_submission_failed_span_counters_remain_all_failed(tmp_path: Path) -> None:
+    """D7 (#1326 Round 1): a true submission-failed terminal keeps all-failed.
+
+    ``submission_failed`` is NOT a defer: a stage that ends on the
+    submission-failed terminal still attributes the entered basins as failed on
+    the stage span, unchanged from the ordinary failure branch.
+    """
+
+    from services.orchestrator.scheduler_timing import (
+        SchedulerPassTiming,
+        set_current_scheduler_pass_timing,
+    )
+
+    repository = FakeCycleRepository()
+    client = SubmitJobOnlyCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    timing = SchedulerPassTiming(pass_id="scheduler_test_1326sfail01", level="stage")
+
+    with timing.pass_span():
+        with set_current_scheduler_pass_timing(timing):
+            result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    evidence = timing.finalize_evidence(status=result.status)
+    forcing_span = next(record for record in evidence["stages"] if record["stage_name"] == "forcing")
+
+    assert result.status == "failed"
+    assert next(stage for stage in result.stages if stage.stage == "forcing").status == "submission_failed"
+    assert forcing_span["basin_count"] == 2
+    assert forcing_span["submitted_count"] == 0
+    assert forcing_span["failed_count"] == 2
 
 
 def test_nested_retry_submission_failed_keeps_collapse_and_retry_semantics(tmp_path: Path) -> None:

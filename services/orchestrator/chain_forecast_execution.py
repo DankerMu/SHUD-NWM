@@ -280,7 +280,18 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         )
                         if retried is not None:
                             result, aggregation = retried
-                            stage_results[-1] = result
+                            # #1326 Round 1 (D6): a raw reconciliation-pending
+                            # result may carry no Slurm identity (ambiguous arm)
+                            # or a concrete retry-master identity (unverified
+                            # arm). The stage it replaces already confirmed the
+                            # full-array dispatch; keep the raw pending terminal
+                            # and empty task outcomes, inheriting the prior
+                            # confirmed master id only when the raw result has
+                            # none, so evidence never loses a confirmed
+                            # submission.
+                            stage_results[-1] = _preserve_prior_confirmed_master_id(
+                                stage_results[-1], result
+                            )
                             result_slot = len(stage_results) - 1
                             if result.status in NESTED_RETRY_DEFER_STATUSES:
                                 # #1322/#1326: the NESTED resubmission was
@@ -404,6 +415,37 @@ def _skip_terminal_pipeline_result(
     )
 
 
+def _preserve_prior_confirmed_master_id(
+    prior: StageRunResult,
+    raw: StageRunResult,
+) -> StageRunResult:
+    """Inherit the prior confirmed master id only when the raw pending result has none.
+
+    Qualification is governed by the single source of truth — a status inherits
+    only when ``_NESTED_RETRY_DEFER_TERMINALS`` maps it to the ``reconciling``
+    terminal (the two reconciliation-pending statuses); duplicate skip (mapped
+    to its own terminal) and any unknown status never inherit and are returned
+    unchanged. A raw pending result that ALREADY carries a concrete retry-master
+    identity keeps that identity: submit returned it, only its terminal outcome
+    is unknown, and dropping a returned identity is itself non-monotone. So the
+    rule is inherit prior ONLY when the mapped ``reconciling`` status has an
+    empty/whitespace ``raw.slurm_job_id``. Everything else — the raw pending
+    status, the empty task outcomes, and the rest of the raw result — is
+    preserved; no task rows are reconstructed and no submission is inferred
+    from the pending token itself.
+    """
+
+    if _NESTED_RETRY_DEFER_TERMINALS.get(raw.status) != "reconciling":
+        return raw
+    if not _nonempty_master_id(prior.slurm_job_id) or _nonempty_master_id(raw.slurm_job_id):
+        return raw
+    return replace(raw, slurm_job_id=prior.slurm_job_id)
+
+
+def _nonempty_master_id(value: str | None) -> bool:
+    return bool(value and str(value).strip())
+
+
 def _nested_defer_terminal_pipeline_result(
     context: CycleOrchestrationContext,
     stage_results: list[StageRunResult],
@@ -497,6 +539,11 @@ def _populate_stage_span_counters(
       any basin: ``submitted_count == 0`` AND ``failed_count == 0``. Counting the
       entering basins as failed (the pre-#1202 ``else`` behaviour) would report a
       deferral as an all-basin failure.
+    - ``submit_result_ambiguous`` / ``reconcile_unverified`` (#1326 D7) — a
+      reconciliation-pending terminal is a defer, not an all-basin failure: the
+      final stage span attributes zero submitted and zero failed, matching the
+      duplicate-skip convention. The earlier confirmed dispatch remains
+      represented by the returned stage identity and scheduler proof.
     - Everything else (``failed`` / ``submission_failed`` / ``permanently_failed``
       / ``cancelled`` / etc.) — none of the entering basins reached a successful
       terminal state at this stage.
@@ -506,7 +553,7 @@ def _populate_stage_span_counters(
     if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES or result.status == "partially_failed":
         span.set_submitted_count(basin_count_at_entry)
         span.set_failed_count(0)
-    elif result.status == "skipped_duplicate_submission":
+    elif result.status in NESTED_RETRY_DEFER_STATUSES:
         span.set_submitted_count(0)
         span.set_failed_count(0)
     else:
