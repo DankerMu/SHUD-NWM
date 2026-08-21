@@ -12,9 +12,72 @@
 | Reversibility | 中 | 纯进程内逻辑，无迁移、无数据格式变更，revert 即回退 |
 | Oracle 可得性 | **受限** | 见 D6：node-22 实机 NFS 时序确认被既有禁令挡住，本 change 以本地确定性红证交付并显式记账 |
 
-选中的 risk pack：`correctness-durable-state`（判据正确性）、`blast-radius-oracle-integrity`
-（共享原语的调用面）、`concurrency-determinism`（红证不得靠 sleep 碰运气）。
-未选：`data-migration`（无迁移）、`display-boundary`（不碰展示面）、`db-integrity`（db-free 面）。
+Repair intensity：**high**。文件身份、共享读原语、持久状态与并发重试同时被触及；首个可复用的
+P0/P1 模式必须先做 invariant inventory，不能只补审查点。
+
+### Risk packs considered
+
+Core packs：
+
+- Public API / CLI / script entry：**selected** —— `SafeFilesystemError.kind` 是共享调用方可见的错误契约；
+  不改变任何 CLI 形状。
+- Config / project setup：**not selected** —— 不读写配置，也不改变部署或初始化。
+- File IO / path safety / overwrite：**selected** —— 保留 no-follow、containment、regular-file 与 inode 一致性拒绝；
+  仅由 journal 调用方吸收结构化的正常原子替换。
+- Schema / columns / units / field names：**selected** —— 新增稳定的 `kind="identity_changed"` 取值，既有取值不变。
+- Auth / permissions / secrets：**not selected** —— 不涉及主体、凭据或权限判定，现有路径拒绝不得弱化。
+- Concurrency / shared state / ordering：**selected** —— cycle 写窗 owner、跨线程 cache 命中与 stat→open 竞态是本 change 核心。
+- Resource limits / large input / discovery：**selected** —— 总尝试次数固定为 3、无 sleep，重试耗尽必须 fail-closed。
+- Legacy compatibility / examples：**selected** —— owner 的单线程快路径、所有既有 error kind 与非 journal 调用方行为保持不变。
+- Error handling / rollback / partial outputs：**selected** —— 只重试 identity change，其他拒绝原样传播；异常退出清 owner。
+- Release / packaging / dependency compatibility：**not selected** —— 无依赖、打包或运行时版本变化。
+- Documentation / migration notes：**selected** —— 原语 docstring、OpenSpec 与 PR 明确区分一致性拒绝和 symlink 防御，并记账 node-22 限制。
+
+NHMS domain packs：
+
+- Geospatial / CRS / basin geometry：**not selected** —— 无空间数据或几何语义。
+- Hydro-met time series / forcing windows：**not selected** —— cycle key 仅作为 journal 身份，不改变 forcing 时间窗。
+- SHUD numerical runtime / conservation / NaN：**not selected** —— 不触及求解器或数值结果。
+- PostGIS / TimescaleDB domain behavior：**not selected** —— file repository 专属，DB-free。
+- Slurm production lifecycle / mock-vs-real parity：**selected** —— journal 的 submit-once/resume 判据会影响调度；
+  以确定性本地并发测试闭环，node-22 NFS 时序确认受既有禁令挂起（D6）。
+- External hydro-met providers / snapshot reproducibility：**not selected** —— 不改变 provider 数据发现或快照身份。
+- Run manifest / QC provenance：**not selected** —— 不改变 manifest/QC 格式、签名或接纳规则。
+- Published NHMS artifacts / display identity：**not selected** —— 不触及发布、object URI 或展示面。
+
+原先的项目化简称映射为：`correctness-durable-state` → Concurrency + Error handling，
+`blast-radius-oracle-integrity` → File IO + Legacy compatibility，`concurrency-determinism` →
+Concurrency + Resource limits；不是额外 vocabulary。
+
+### Invariant Matrix
+
+- **Governing invariant**：只有当前线程拥有目标 source/cycle 的 cycle 写窗时才可免 fingerprint；
+  journal 读只吸收有界的正常 inode replacement，任何其他安全拒绝及重试耗尽均 fail-closed。
+- **Source-of-truth identity/contract**：`(thread ident, normalized source_id, cycle_segment)` owner tuple；
+  `SafeFilesystemError.kind == "identity_changed"`；总尝试常量 `3`。
+- **Producers**：`_locked_cycle_write` 唯一设置/清除 owner；`open_file_no_follow` 唯一产生新 kind。
+- **Validators/preflight**：`_cycle_rows` 比较完整 owner key；journal chokepoint 只按 kind 分流。
+- **Storage/cache/query**：`_cycle_rows_cache` 的 fingerprint / `None` entry 与
+  `_read_bytes_limited_cached` 的 stat-signature cache。
+- **Public routes/entrypoints**：`FileOrchestrationJournalRepository` 的 journal/jsonl 读者；
+  `safe_fs` 共享 reader 保持一次失败即抛。
+- **Frontend/downstream consumers**：scheduler submit-once/resume/candidate-state 消费者；PG repository 与展示面不变。
+- **Failure paths/rollback/stale state**：window body/opening exception 清 owner；持续 replacement 第 3 次后原异常抛出；
+  symlink、非 regular、containment、非匹配 kind 一次即抛。
+- **Evidence/audit/readiness**：确定性 barrier/monkeypatch 红证、变异矩阵、safe_fs 全调用面测试、
+  10 次同-cycle hammer；node-22 NFS 确认按 D6 显式挂起。
+- **Regression rows**：
+  - owner + 同 source/cycle + 热 cache → 不算 fingerprint，既有快路径不变；
+  - non-owner / wrong cycle / identity_changed 连续出现 → 重校验或最多 3 次后 fail-closed；
+  - symlink、非 regular、containment、其他 kind、非 journal safe_fs caller → 不重试且原契约不变。
+
+### Boundary-surface checklist
+
+- Shared helper roots：`packages/common/safe_fs.py` 只新增判别位，不内置 retry；全调用模块做并发 replace 普查。
+- Read surfaces：journal cached chokepoint 覆盖 optional JSON 与 JSONL；三处旁路逐一裁定。
+- Write/overwrite surfaces：cycle 原子 replace 与 `_locked_cycle_write`；不改变写格式、flock 或两次 cache clear。
+- Stale-state/idempotency boundaries：非 owner 必须 fingerprint；owner key 必须精确到 source/cycle；重试无副作用。
+- Unchanged downstream consumers：PG repository、manifest fallback、所有非 journal safe_fs 调用方、#1567 fingerprint 强度。
 
 ## must-preserve
 
@@ -296,7 +359,7 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
    **是全仓不可达的死代码**——被 `:4232` 的 `if include_direct_jobs:` 守住，
    而它全部 6 个调用点（生产 `:1581`/`:2618`/`:2970`/`:3307`/`:6853`
    + 测试 `tests/test_gateway_reconcile.py:4764`）**无一**不显式传 `include_direct_jobs=False`；
-   形参默认值 `True`（`:4170`）无人使用。即该函数的整个 `include_direct_jobs=True` 分支是死的。
+   形参默认值 `True`（`:4171`）无人使用。即该函数的整个 `include_direct_jobs=True` 分支是死的。
    **这是本条的第三版描述，前两版都是我写错的**：
    v1「一段永远命不中的缓存写入」——假（措辞把不可达说成命不中，且当时以为它会存）；
    v2「窗外也存、窗内 owner 可命中」——也假（它根本不存）。
