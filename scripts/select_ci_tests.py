@@ -47,6 +47,16 @@ CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py",
 )
 
+# #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
+# opens the backend gate via ci.yml's paths-filter and must reach real drift/type
+# assertions, not the collect-only smoke; the runtime patch owner carries the
+# drift suite as well as its existing API contract consumers.
+OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_api_contract.py",
+    "tests/test_openapi_31_contract.py",
+    "tests/test_openapi_drift.py",
+)
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -834,6 +844,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_external_contract_snapshot.json",
         ("tests/test_node27_external_contract_snapshot.py",),
+    ),
+    PathTestRule(
+        # #1644: the committed OpenAPI snapshot is the drift oracle's subject, so
+        # an OpenAPI-only PR must run the drift + API-contract + 3.1-contract
+        # suites. Exact set, no core-smoke fallback, no other suites.
+        "openapi/**",
+        OPENAPI_CONTRACT_TESTS,
+    ),
+    PathTestRule(
+        # #1644: the runtime schema owner injects every nullable node and the
+        # security metadata, so a patch-owner PR must reach the drift + 3.1
+        # contract suites in addition to the broad API consumers it already
+        # carried.
+        "apps/api/openapi_patching.py",
+        (
+            "tests/test_api.py",
+            "tests/test_api_contract.py",
+            "tests/test_monitoring_api.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_drift.py",
+        ),
     ),
     PathTestRule(
         "apps/api/**",

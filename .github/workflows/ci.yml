@@ -64,6 +64,7 @@ jobs:
               - 'scripts/validate_*.py'
               - 'scripts/**/*.sh'
               - '.github/workflows/ci.yml'
+              - 'openapi/**'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'

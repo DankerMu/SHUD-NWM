@@ -294,6 +294,7 @@ def _patch_openapi_schema(schema: dict) -> None:
     _patch_layer_metadata_openapi(schema)
     _patch_pipeline_openapi(schema)
     _patch_runtime_openapi(schema)
+    _finalize_openapi_schema(schema)
 
 
 def __getattr__(name: str) -> Any:
@@ -309,6 +310,7 @@ _patch_met_stations_list_openapi = openapi_patching._patch_met_stations_list_ope
 _patch_layer_metadata_openapi = openapi_patching._patch_layer_metadata_openapi
 _patch_pipeline_openapi = openapi_patching._patch_pipeline_openapi
 _patch_runtime_openapi = openapi_patching._patch_runtime_openapi
+_finalize_openapi_schema = openapi_patching._finalize_openapi_schema
 
 
 def _register_static_and_health_routes(api: FastAPI) -> None:

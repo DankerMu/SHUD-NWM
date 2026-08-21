@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Callable
 from typing import Any
 
@@ -49,6 +50,259 @@ def patch_openapi_schema(schema: dict) -> None:
     _patch_layer_metadata_openapi(schema)
     _patch_pipeline_openapi(schema)
     _patch_runtime_openapi(schema)
+    _finalize_openapi_schema(schema)
+
+
+# Alternative requirement objects are OR; the live-proof leg is a single object
+# requiring the proof token AND the live user id AND roles headers.
+_PROTECTED_OPERATION_SECURITY: list[dict] = [
+    {"DevRoleHeader": []},
+    {"DevBearerToken": []},
+    {"InternalLiveProof": [], "LiveUserID": [], "LiveUserRoles": []},
+]
+
+# Exactly the operations enforced by apps/api/main.protected_mutation_auth_guard
+# (registry mutations, model active/lifecycle/preflight) or the pipeline
+# retry/cancel require_action dependencies.
+PROTECTED_OPERATION_OVERRIDES: dict[tuple[str, str], list[dict]] = {
+    ("POST", "/api/v1/basins"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/basins/{basin_id}/versions"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/river-networks"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/mesh-versions"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/models"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/models/{model_id}/preflight"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/models/{model_id}/lifecycle"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/river-segment-crosswalks"): _PROTECTED_OPERATION_SECURITY,
+    ("PUT", "/api/v1/models/{model_id}/active"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/runs/{run_id}/retry"): _PROTECTED_OPERATION_SECURITY,
+    ("POST", "/api/v1/runs/{run_id}/cancel"): _PROTECTED_OPERATION_SECURITY,
+}
+
+
+def _finalize_openapi_schema(schema: dict) -> None:
+    """Normalize hand-patched nullable schemas and publish truthful security metadata.
+
+    FastAPI emits OpenAPI 3.1.0, where JSON Schema nullability is a type union
+    rather than the 3.0-only ``nullable`` keyword. All 109 ``nullable: true``
+    nodes are injected by this module, so the single post-patch finalizer below
+    is the only place that re-expresses them. It recurses the whole document,
+    replaces scalar ``type`` with ``[type, "null"]`` for the 108 ordinary nodes,
+    and re-expresses the one ``type + allOf`` composition (Layer.metadata) as a
+    complete composition-or-null union so openapi-typescript keeps generating
+    ``LayerMetadata | null`` instead of an erroneous intersection. Any other
+    nullable shape fails loudly rather than being silently weakened.
+
+    The same owner publishes the same-origin ``servers`` entry and the security
+    boundary: public operations inherit explicit root anonymous, and exactly the
+    operations enforced today override root with the conditional credential
+    alternatives the server actually accepts. No credential value is embedded.
+    """
+    normalized = _remove_nullable_keywords(schema)
+    schema.clear()
+    schema.update(normalized)
+    _publish_security_boundary(schema)
+
+
+def _remove_nullable_keywords(node: Any) -> Any:
+    """Recursively re-express every ``nullable`` schema as valid OpenAPI 3.1.
+
+    Children are normalized before the current node so a nested nullable node
+    cannot survive inside a parent that is itself re-expressed. The current
+    node's nullable handling:
+
+    - no ``nullable`` key: recurse into all values and return a new dict;
+    - ``nullable: False``: drop the legacy keyword and recurse — the value
+      domain stays non-nullable (no type union is introduced);
+    - ``nullable: True`` with a scalar ``type: T``: ``type: [T, "null"]``;
+    - ``nullable: True`` with a valid JSON Schema type array (list[str], e.g.
+      ``["string", "number"]``): keep the member order and append ``"null"``
+      exactly once if absent, never duplicating it;
+    - ``nullable: True`` with ``type + allOf``: the complete composition-or-null
+      union (allOf and all siblings recursed, annotations preserved); the
+      composition branch's type keeps the same scalar/type-array rules;
+    - any other shape (empty type array, non-string member, non str/list type)
+      or a non-boolean ``nullable`` value: raise ValueError instead of silently
+      weakening the schema.
+    """
+    if isinstance(node, dict):
+        normalized = {key: _remove_nullable_keywords(value) for key, value in node.items()}
+        if "nullable" not in normalized:
+            return normalized
+        nullable = normalized.pop("nullable")
+        if not isinstance(nullable, bool):
+            raise ValueError(
+                f"unable to finalize schema with non-boolean nullable value {nullable!r}: {node!r}"
+            )
+        if not nullable:
+            return normalized
+        schema_type = normalized.get("type")
+        if "allOf" in normalized:
+            composed_type = normalized.pop("type", None)
+            all_of = normalized.pop("allOf")
+            composed = {"allOf": all_of, "type": _composition_type(composed_type, node=node)}
+            composed.update(normalized)
+            # The composition branch stays non-null: openapi-typescript turns a
+            # null member inside a type+allOf branch into an erroneous
+            # intersection, so nullability lives only in the outer anyOf branch.
+            return {"anyOf": [composed, {"type": "null"}]}
+        normalized["type"] = _with_null(schema_type, node=node)
+        return normalized
+    if isinstance(node, list):
+        return [_remove_nullable_keywords(item) for item in node]
+    return node
+
+
+def _with_null(value: Any, *, node: Any) -> list[str]:
+    """Return ``value`` as a type array with ``"null"`` included exactly once.
+
+    A scalar string becomes ``[T, "null"]``; a valid JSON Schema type array
+    (non-empty, all string members) keeps its member order and normalizes the
+    ``"null"`` members to exactly one (deduplicating any existing ones and
+    appending once if absent). Any other value (missing type, empty array,
+    non-string member, or a non str/list shape) raises instead of silently
+    weakening the schema.
+    """
+    if isinstance(value, str):
+        if value == "null":
+            return ["null"]
+        return [value, "null"]
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        non_null = [item for item in value if item != "null"]
+        return [*non_null, "null"]
+    raise ValueError(
+        "unable to finalize nullable schema without a scalar type or non-empty "
+        f"string type array: {node!r}"
+    )
+
+
+def _composition_type(value: Any, *, node: Any) -> str | list[str]:
+    """The non-null type for a type+allOf composition branch.
+
+    The composition branch must never carry a null member (openapi-typescript
+    would emit an erroneous intersection), so any ``"null"`` is stripped from a
+    type array. A non-null scalar string stays scalar. A missing type, a
+    ``"null"`` scalar, an empty type array, an array with no non-null members
+    (e.g. ``["null"]``), or a non str/list shape raises instead of silently
+    weakening the schema.
+    """
+    if isinstance(value, str):
+        if value == "null":
+            raise ValueError(
+                "unable to finalize nullable type+allOf composition with no non-null "
+                f"type member: {node!r}"
+            )
+        return value
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        non_null = [item for item in value if item != "null"]
+        if not non_null:
+            raise ValueError(
+                "unable to finalize nullable type+allOf composition with no non-null "
+                f"type member: {node!r}"
+            )
+        return non_null
+    raise ValueError(
+        "unable to finalize nullable type+allOf composition without a scalar type or "
+        f"non-empty type array: {node!r}"
+    )
+
+
+def _publish_security_boundary(schema: dict) -> None:
+    """Overwrite the published server/security truth, never keep a wrong value.
+
+    The finalizer is the current authority for the same-origin server, the
+    explicit anonymous-by-default root security, and the conditional credential
+    schemes. Exact assignment (not ``setdefault``) means a pre-existing wrong
+    ``servers: []``, a false global bearer root, or a stale same-name scheme is
+    replaced by the fixture-pinned truth rather than silently preserved. Each
+    value is a deep copy so the deterministic YAML dump cannot alias shared
+    objects.
+    """
+    schema["servers"] = [{"url": "/", "description": "Same-origin API endpoint."}]
+    schema["security"] = []
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schemes["DevRoleHeader"] = _dev_role_header_scheme()
+    schemes["DevBearerToken"] = _dev_bearer_token_scheme()
+    schemes["InternalLiveProof"] = _internal_live_proof_scheme()
+    schemes["LiveUserID"] = _live_user_id_scheme()
+    schemes["LiveUserRoles"] = _live_user_roles_scheme()
+    for (method, path), requirements in PROTECTED_OPERATION_OVERRIDES.items():
+        operation = schema.get("paths", {}).get(path, {}).get(method.lower())
+        if operation is not None:
+            # Each operation gets its own deep copy so a consumer mutating one
+            # operation's security requirement cannot corrupt the others, and so
+            # the deterministic YAML dump does not alias the shared empty lists.
+            operation["security"] = copy.deepcopy(requirements)
+
+
+def _dev_role_header_scheme() -> dict:
+    return {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-User-Role",
+        "description": (
+            "Non-production development role header. Accepted only when "
+            "AUTH_BACKEND is not live/live_idp/oidc/saml, ALLOW_DEV_ROLE_HEADER "
+            "is enabled, and NHMS_AUTH_MODE is not production/live/live_idp; "
+            "grants roles directly without a token."
+        ),
+    }
+
+
+def _dev_bearer_token_scheme() -> dict:
+    return {
+        "type": "http",
+        "scheme": "bearer",
+        "description": (
+            "Non-production bearer token matching the configured NHMS_DEV_AUTH_TOKEN, "
+            "accepted only when AUTH_BACKEND is not live/live_idp/oidc/saml, that "
+            "token is configured, and NHMS_AUTH_MODE is not production/live/live_idp."
+        ),
+    }
+
+
+def _internal_live_proof_scheme() -> dict:
+    return {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-NHMS-Internal-Live-Proof",
+        "description": (
+            "Non-production internal live-proof token for the test_internal trusted "
+            "live-proof mode. Required together with X-Live-User-ID and "
+            "X-Live-User-Roles when AUTH_BACKEND is live/live_idp/oidc/saml, "
+            "NHMS_TRUSTED_LIVE_PROOF_MODE is test_internal, the "
+            "NHMS_INTERNAL_LIVE_PROOF_TOKEN is configured, and NHMS_AUTH_MODE is not "
+            "production/live/live_idp. When NHMS_AUTH_MODE is live/live_idp the "
+            "internal proof is not accepted and requests remain release-blocked; "
+            "this is a test-mode credential, not a production identity-provider "
+            "token. The configured token value is never embedded in this document."
+        ),
+    }
+
+
+def _live_user_id_scheme() -> dict:
+    return {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Live-User-ID",
+        "description": (
+            "Non-production live identity actor id. Supplied together with "
+            "X-NHMS-Internal-Live-Proof and X-Live-User-Roles under the same "
+            "test_internal live-proof conditions."
+        ),
+    }
+
+
+def _live_user_roles_scheme() -> dict:
+    return {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Live-User-Roles",
+        "description": (
+            "Non-production live identity role list. Supplied together with "
+            "X-NHMS-Internal-Live-Proof and X-Live-User-ID under the same "
+            "test_internal live-proof conditions."
+        ),
+    }
 
 
 def _patch_mvt_tile_openapi(schema: dict) -> None:
