@@ -681,9 +681,10 @@ def _replacement_read_bindings(
     bijective through ``hydro.hydro_run`` (run_id PK, run_key IDENTITY UNIQUE)
     and every writer pairs them (the INSERT below from one ``HydroRunContext``;
     #1339's backfill via ``run_key = hr.run_key ... WHERE hr.run_id =
-    t.run_id``) — a writer-enforced invariant, not a schema constraint
-    (``run_key`` has no FK, 000050:216-224; foreign-writer drift stays
-    auditable, 000050:250-254). Remove it with #1342 and its marker line.
+    t.run_id``) — a writer-enforced invariant, not a schema constraint:
+    ``run_key`` has no FK (000050:216-224) and the run_id<->run_key pairing has no audit leg —
+    000050's equality audit (:290-298) covers only text<->surrogate drift — so the aid's
+    soundness rests on the writer invariant alone. Remove it with #1342 and its marker line.
     """
     return (
         run_key,

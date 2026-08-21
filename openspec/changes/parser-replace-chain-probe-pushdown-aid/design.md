@@ -43,12 +43,13 @@ marker 文本必须逐字等于 `tests/test_river_ts_text_identity_cleanup.py` �
 `PUSHDOWN_AID_MARKER`，置于辅助行正上方（相邻规则：同一行或上一行）。
 
 **辅助不会收窄结果（与 α 的区别）**：`river_timeseries.run_id` NOT NULL 且是 PK 成员
-（000006:44,55）；`hydro_run.run_key` 是 `GENERATED ALWAYS AS IDENTITY UNIQUE`
+（000006:45,56）；`hydro_run.run_key` 是 `GENERATED ALWAYS AS IDENTITY UNIQUE`
 （000050:178），run_id ↔ run_key 双射；dual-write 在同一行同一上下文写两列
 （parser.py ~:937-962）；`parse_run` 单 run（~:225-250），batch 内 `replacement_key[0]`
 恒等于该 run。因此本仓任一写入方（INSERT 与 #1339 回填）都不会产出 `run_key = K` 却挂着另一个
 `run_id` 的行——这是 writer-enforced 不变量而非 schema 约束（`river_timeseries.run_key`
-无 FK，000050:250-254 明示外部写入方的漂移仍由审计兜底），辅助对本仓写入的行是空操作
+无 FK；000050 的等值审计 :290-298 只覆盖文本↔代理列漂移，run_id↔run_key 配对漂移
+**无审计腿**，辅助的可靠性仅系于写入方不变量），辅助对本仓写入的行是空操作
 过滤，只改变计划不改变结果集；α 收窄的是 valid_time（真实行会落在窗外），二者性质不同。
 
 为什么是 `run_id` 而不是三列文本：segmentby 是 `(run_id, river_network_version_id,
