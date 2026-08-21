@@ -40,7 +40,7 @@
       写死在同一钉里）+ `assert_text_fact_columns` 列集普查——为身份探针
       体新增同款合取式钉与列集登记；体外无 ts 引用、EXISTS 包装保留；
       反用例（辅助失键伴随 / 加 segment 辅助 / 体外 text fact join）→ 红。
-- [ ] 2.2 D4 三分支 integration oracle 全绿（node-27 real DB）。
+- [x] 2.2 D4 三分支 integration oracle 全绿（node-27 real DB）。
 - [x] 2.3 既有套件全绿：mvt.py 的 select_ci_tests 选集 +
       `tests/test_sql_shape_helpers.py`。
 
@@ -54,7 +54,7 @@
 - [x] E2 `uv run ruff check .` PASS
 - [x] E3 `openspec validate national-identity-probe-lateral-pushdown --strict
       --no-interactive` PASS
-- [ ] E4 **硬门**，node-27 实机（EXPLAIN 协议：安静库、warm 二采取第二采、
+- [x] E4 **硬门**，node-27 实机（EXPLAIN 协议：安静库、warm 二采取第二采、
       BUFFERS/相关节点 loops/Rows Removed 主证（PG15.2 无 Batches 字段，
       round-3 D2）、**shipped SQL 直采**——不用 issue 提的仓外
       shape_explain.py 脚手架；before/after 同一安静会话内成对重采，不引用
@@ -81,9 +81,20 @@
       PG15.2 无 Batches 字段，wall time 仅记录不判据）；
       (iii) 未压缩 pin（当批时次任一 z4）：毫秒级不退化、tile 字节相同；
       (iii-b) 未压缩内部空洞 miss pin（当前未压缩批内窗覆盖非整点时刻，
-      round-2 K3）：计划与耗时落账，索引取舍（文本 PK vs 000051）据实
-      记录；
+      round-2 K3）：计划与耗时落账，索引取舍据实记录（实测
+      `river_timeseries_valid_time_idx`，两个预设候选均未中；0.093→2.68 ms，
+      差额主要为 after 腿必然执行的 discovery 1,388 buffers，证无本身仅
+      70 buffers）；
       (iv) z4 national 端到端压缩时次进秒级（#1341 AC-1 口径）；
       (v) integration oracle（D4 三分支）在 node-27 真实 DB 全绿；
       receipt（preflight + before/after 计划 + 计时 + 字节比对）随 PR 附出。
-- [ ] E5 特批扩宽随 PR 偏离记录呈报用户复核（D3 协议）。
+      **实测落账（PR #1657 issuecomment-5365795613，node-27 2026-08-21，warm
+      样本，BUFFERS=top-node shared hit）**：(i) 32858→16.0 ms、buffers
+      10,159,741→2,692、loops=1、tile 304,520 B sha 相同；(ii) 17742→0.84 ms、
+      569,332→258、fact 节点 never executed；(ii-b) 31927→242.9 ms、
+      10,167,316→13,348（0.13%）、loops=17、cnt 0=0；(iii) 3.48→2.53 ms、
+      1,673→1,399、字节相同；(iii-b) 0.093→2.68 ms、6→1,458（其中 discovery
+      1,388、17 次证无 70）、planner 取 `river_timeseries_valid_time_idx`；
+      (iv) z4 端到端 32.4 s→0.55 s；(v) 3 passed（node-27 真库）。
+- [x] E5 特批扩宽随 PR 偏离记录呈报用户复核（D3 协议）——已呈报（PR body
+      偏离记录 1 + 工作总结评论）；用户复核结论以 PR 评论为准。

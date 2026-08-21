@@ -97,10 +97,11 @@ source_identity_stats AS (
   `tests/test_river_ts_read_path_surrogate_keys.py:198-231` 明令禁止（词表外
   字面量会 22P02，违反基线 spec 的 degrade-to-empty Scenario）。
 - LATERAL 体内 `lr.*` 为 per-loop 常量 → `run_id`/`river_network_version_id`
-  文本等值获得压缩 segmentby 剪枝（绑 3 列中前 2）；未压缩侧绑 run 作用
-  域索引前缀（文本 PK 5 列中的 1,2,4,5 位或 000051 代理键读索引——
-  `river_segment_id` 第 3 位不绑，planner 取舍未实测，见下条对冲与
-  (iii-b) pin），
+  文本等值获得压缩 segmentby 剪枝（绑 3 列中前 2）；未压缩侧命中走文本
+  PK 5 列中的 1,2,4,5 位 run 作用域前缀（`river_segment_id` 第 3 位不绑；
+  E4 (iii) 实测 Index Cond run+network+variable+valid_time），内部空洞
+  miss 则由 planner 取单列 `river_timeseries_valid_time_idx`（E4 (iii-b)
+  实测，既非文本 PK 亦非 000051），
   `(variable, valid_time)` orderby 批级 min/max 进一步消批。**机制同类但
   非同构**（round-1 审查 C1 更正）：数据腿绑满 5/5 与 3/3，逐 loop 是点查
   （实测 0.013-0.086ms/loop）；本探针少绑 segment 列，代价形态分命中/未命中
@@ -115,9 +116,10 @@ source_identity_stats AS (
     混合时次排在首个命中之前的每个缺席身份先各付一次证无（fact 触达数 =
     前导 miss 数 + 1）。
   - 未命中侧（内部空洞——窗覆盖但该时次无行）：每个缺席身份要对其整个
-    (run, network) 切片证无——未压缩走 run 作用域索引前缀（文本 PK 或
-    000051 代理键读索引，余列 in-index filter；planner 取舍未被任何实测钉
-    住，round-2 审查 K3 对冲，(iii-b) pin 落账）；压缩侧每身份留
+    (run, network) 切片证无——未压缩侧 E4 (iii-b) 实测 planner 取单列
+    `river_timeseries_valid_time_idx`（K3 对冲成立——既非文本 PK 亦非
+    000051），run/network/variable 落 filter，17 loops 共 70 buffers
+    （~4/身份）；压缩侧每身份留
     ~segment 数个 batch（orderby min/max 只消 ~49%）。上界是改前整片解压
     （各身份 batch 集是旧 seq-scan 读集的不相交子集，逐身份严格不劣），
     但**不是** ~19 × 亚毫秒；实际量级由 E4 的内部空洞 pin 实测落账。
@@ -191,8 +193,8 @@ marker，node-27 真实 DB 跑）：
     (iii) 未压缩（命中侧）= 当批时次任一 z4；
     (iii-b) 未压缩**内部空洞（miss 分支，round-2 审查 K3 增补）** = 当前
     未压缩批内窗覆盖的非整点时刻，preflight 验证零行——落账 planner 在
-    未压缩 miss 上实际取哪条索引（文本 PK vs 000051 代理键读索引），
-    终结注释里的未测叙事。若 retention 已推进致 pin 失效，按
+    未压缩 miss 上实际取哪条索引，终结注释里的未测叙事（实测：
+    `river_timeseries_valid_time_idx`，两个预设候选均未中）。若 retention 已推进致 pin 失效，按
     同判据另选并在 receipt 记录选择依据。
   - **E4 preflight**：逐 pin 落 receipt——所触 chunk `is_compressed`、键
     NULL 计数（chunk 32/51 键全 NULL 不回填，误选会退化成"空对空"取证）、
@@ -222,9 +224,20 @@ marker，node-27 真实 DB 跑）：
     rows×loops 仅作旁证——受逐 loop 平均取整失真）；wall time 记录为辅，
     不单独作判据；
     (iii) 未压缩命中 → 毫秒不退化 + 字节相同；
-    (iii-b) 未压缩 miss → 计划与耗时落账（索引取舍据实记录，无先验断言）；
+    (iii-b) 未压缩 miss → 计划与耗时落账（索引取舍据实记录，无先验断言）
+    ——**实测**：planner 取 `river_timeseries_valid_time_idx`（非文本 PK、
+    非 000051），17 loops 合计 70 buffers；before 腿 fact 侧 valid_time 索引
+    零命中后 discovery never executed（6 buffers），after 腿必然执行
+    discovery（1,388 buffers）——0.093→2.68 ms 的差额来源于此，毫秒级；
     z4 端到端压缩时次进秒级（#1341 AC-1 口径）。此 before/after BUFFERS
     基线即路由给 #1342 的对照物（issuecomment-5364465639 第 3 条）。
+    **E4 实测结果**（PR #1657 issuecomment-5365795613）：(i) 32.9 s→16 ms，
+    buffers 10.16M→2,692，loops=1，字节相同；(ii-b) 31.9 s→243 ms，
+    buffers 比值 0.13%，loops=17；(ii) 17.7 s→0.84 ms 零 fact 触达；
+    (iii) 3.5→2.5 ms 字节相同；z4 端到端 32.4 s→0.55 s；integration 3 passed。
+    压缩侧 after 计划 = DecompressChunk ← compress_hyper segmentby 索引
+    （Index Cond run_id+rnv_id）+ orderby min/max 过滤，before = 整片
+    Seq Scan（Rows Removed 1.40 亿）。
 
 ## D6: select_ci_tests 观察（报告不改）
 

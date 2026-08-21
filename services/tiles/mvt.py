@@ -610,10 +610,13 @@ def postgis_tile_sql(layer: str) -> str:
         #     identity's batches, not ~19. Every MISS — each identity ordered
         #     before the first hit, and every candidate on the interior-gap
         #     branch — pays proof-of-absence over that identity's whole (run,
-        #     network) slice: on uncompressed chunks a run-scoped index prefix
-        #     (text pkey or surrogate-key read index; which the planner picks
-        #     is not pinned by any measurement) with the remaining columns as
-        #     in-index filters; on compressed chunks ~segment-count batches per
+        #     network) slice: on uncompressed chunks the planner chose the
+        #     text pkey prefix (`62_130_river_timeseries_pkey`, Index Cond
+        #     run + network + variable + valid_time) for the hit and the
+        #     retained single-column `river_timeseries_valid_time_idx` for
+        #     the interior-gap miss, with run / network / variable left as
+        #     heap filters (#1596 E4 receipt; 17 loops, ~4 buffers per absent
+        #     identity); on compressed chunks ~segment-count batches per
         #     identity surviving the (variable, valid_time) orderby min/max
         #     pruning. Bounded above by the pre-change full scan — each
         #     identity's batch set is a disjoint subset of what the set-based
