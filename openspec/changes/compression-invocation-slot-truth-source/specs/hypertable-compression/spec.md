@@ -14,9 +14,11 @@ required by the verifier's exact-key check on the input bundle and by
 the schema in a v3 qualifying (non-failure) terminal document; its
 invocation semantics — argv, exit code, timings — never interpreted;
 the terminal slot re-derived from `execution.ledger` rather than copied
-from what was authored; and the authored value closure-checked, and
-retained in the terminal `source_manifest`, only when it is exactly a
-`{path, sha256, bytes}` mapping. The runbook narrative describing these
+from what was authored; and the authored value itself a
+closure node, retained in the terminal `source_manifest`, only when it
+is exactly a `{path, sha256, bytes}` mapping — with any well-formed
+reference nested inside a value of another shape still closure-checked
+in its own right. The runbook narrative describing these
 referenced contracts SHALL name the five keys and SHALL NOT describe
 them as optional.
 
@@ -63,11 +65,18 @@ identity gate is introduced.
   symlink, or whose hash or size disagrees with the file
 - **THEN** the run fails closed at the artifact-closure check
 
-- **WHEN** a slot's authored value is any other shape — a mapping with
-  an extra key, a string, or `null`
+- **WHEN** a slot's authored value is any other shape that contains no
+  nested reference — a mapping with an extra scalar key, a string, or
+  `null`
 - **THEN** no closure check reaches it and verification can still
   qualify, because the evidence schema is applied to the terminal
   document rather than to the input bundle
+
+- **WHEN** a slot's authored value is a mapping of another shape that
+  *wraps* a well-formed `{path, sha256, bytes}` reference
+- **THEN** the nested reference is still collected as a closure node in
+  its own right, and an unavailable or unsafe path inside it still
+  fails the run closed
 
 #### Scenario: A well-formed authored reference is retained in the terminal manifest
 

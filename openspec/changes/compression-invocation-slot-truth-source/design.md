@@ -52,7 +52,15 @@ universally quantified and both false on the shape the repo's own bundle author 
 - *"this slot in the terminal document is never the authored reference."* `scripts/node27_timeseries_compression_bundle_author.py:237,247,249,258,260` writes `ledger_ref` into all five slots (its docstring `:21-25` says so outright), so on author-produced bundles the authored value and the terminal value are byte-identical. A verifier probe measured `slots(bundle) == slots(terminal)` → `True`.
 - *"enforced only as an artifact-closure node: the file must exist…"* Closure enforcement is gated on the value being exactly a three-key mapping — `packages/common/evidence_io.py:192`, `if set(current) == {"path", "sha256", "bytes"}`. A four-key value, a string, or `null` is never collected and receives **no** enforcement; a probe with all five slots set to a four-key value naming `/nonexistent/nope.json` still returned `qualifies_task_4_5 is True` and produced a schema-valid terminal document. **The evidence schema is never applied to the input bundle at all** — the only `jsonschema` application is `scripts/node27_timeseries_compression_live_evidence.py:4208`, over the *terminal* document, after `verify_bundle` returns.
 
-The lesson, recorded because it caught three drafts in a row: this contract has **two** live bundle shapes — the
+**Wrong #4 — the third draft's final clause, caught by the implementer during the round-1 fix pass and
+reported rather than silently patched.** *"A value of any other shape is not closure-checked at all"* is false
+for a mapping that **wraps** a well-formed reference: `artifact_references`
+(`packages/common/evidence_io.py:189-197`) descends into a non-three-key mapping's values
+(`stack.extend(current.values())`), so a nested `{path, sha256, bytes}` is collected as a root-level closure
+node in its own right and an unavailable path inside it still fails the run closed. The escape is real only
+for shapes containing no nested reference — a mapping whose extra key holds a scalar, a bare string, `null`.
+
+The lesson, recorded because it caught four drafts in a row: this contract has **two** live bundle shapes — the
 legacy hand-assembled one (five distinct `*-invocation.json` files; the committed example and the suite's
 `_bundle` fixture) and the production author one (all five slots literally the ledger ref). An unqualified
 sentence must be true of both. Every earlier draft was written against one shape and checked against the same
@@ -64,7 +72,7 @@ defensible claim, and it is the one `test_legacy_authored_invocations_do_not_con
 
 So the canonical sentence, used identically in every carrier:
 
-> Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not closure-checked at all.
+> Required — by the verifier's exact-key check on the input bundle, and by this schema in a v3 qualifying (non-failure) terminal document. The invocation semantics inside the value — argv, exit code, timings — are never interpreted, and the verifier re-derives this slot from `execution.ledger` rather than copying what was authored here; the committed bundle author already writes that same ledger reference into this slot, so on its output the authored and terminal values coincide. The value is not otherwise inert: when it is exactly a `{path, sha256, bytes}` mapping it becomes an artifact-closure node — the file must exist as a regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON it is complexity-bounded and its own nested artifact references are resolved transitively — and it is retained, deduplicated by normalized path, in the terminal `source_manifest`. A value of any other shape is not itself a closure node, though any well-formed reference nested inside it still is, collected in its own right.
 
 Carriers that must agree: the five schema `description`s, the three verifier comments, the runbook
 narrative, the spec delta, this D2, and the PR body. Copy the sentence; do not paraphrase it per carrier.
