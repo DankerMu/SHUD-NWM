@@ -21,7 +21,7 @@ The CI workflow MUST group pull-request runs by pull-request identity and cancel
 
 ### Requirement: CI workflow policy changes MUST execute their contract suite
 
-A pull request that changes `.github/workflows/ci.yml` MUST open the backend targeted-test gate and the selector MUST choose `tests/test_select_ci_tests.py`, so concurrency, paths-filter, and workflow-consumer contracts execute assertions on the same pull request that changes them.
+A pull request that changes `.github/workflows/ci.yml` MUST open the backend targeted-test gate and the selector MUST choose `tests/test_select_ci_tests.py`, so concurrency, paths-filter, and workflow-consumer contracts execute assertions on the same pull request that changes them. The paths-filter PR files result MUST be the single changed-file authority consumed by the selector; the selector MUST NOT recompute a merge-base diff that can diverge after master changes while the pull request is open.
 
 #### Scenario: Workflow-only change reaches assertion-level tests
 
@@ -32,3 +32,8 @@ A pull request that changes `.github/workflows/ci.yml` MUST open the backend tar
 
 - **WHEN** the workflow path is removed from either the backend filter or the selector rule
 - **THEN** the selector contract suite fails and names the missing self-routing leg
+
+#### Scenario: Selector consumes the same pull-request changed-file set as paths-filter
+
+- **WHEN** master changes while a pull request remains open, including an identical change to a file also touched by the pull request
+- **THEN** the targeted selector consumes the paths-filter `all_files` output for that pull request and cannot silently drop the file through a separate merge-base diff

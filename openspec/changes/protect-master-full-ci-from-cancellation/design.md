@@ -50,9 +50,11 @@ cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 这条不是单独的完整修复，必须与 D1 同时存在。D1 防 pending replacement，D2 防 running cancellation。
 
-### D3 — workflow self-routing 是发布契约的一部分
+### D3 — workflow self-routing 与 changed-file authority 是发布契约的一部分
 
 `.github/workflows/ci.yml` 加入 `changes.backend` filter；`scripts/select_ci_tests.py` 加 exact path rule，选择 `tests/test_select_ci_tests.py`。两层都需要：只有 filter 没 selector 会走 zero-assertion collect-only；只有 selector 没 filter，targeted job 不启动。
+
+此外 paths-filter 与 selector 不得各自推导一份 PR diff：前者默认通过 GitHub PR files API 读取 head-vs-base changed files，后者原先另跑 `git diff origin/base...HEAD`。当 master 在 PR 存续期落入同形改动后，merge-base diff 可把本 PR 仍相对 base 不同的文件消掉，backend gate 已开而 selector 退化为 collect-only。`changes` job 因此新增 catch-all `all: ['**']` + `list-files: json`，输出完整 changed-file JSON；targeted job 使用 Ubuntu runner 明确预装的 `jq -r '.[]'` 安全解析为 newline file，再走 selector 已有 `--changed-file` seam。不能只传 `backend_files`：selector 的组合规则会读取同一 PR 中的 OpenSpec/非 backend 路径。不得假设 hosted runner 自带 `uv`；该 job 只有 `setup-python` + `pip install -e ".[dev]"`，而 dev extra 不安装 `uv`。
 
 ### D4 — 测试钉语义，不引入 YAML parser authority
 
@@ -70,7 +72,7 @@ Governing invariant: PR superseded runs MAY cancel；每个 push/manual CI run M
 
 - Source of truth: `.github/workflows/ci.yml` 顶层 `concurrency` 与 `changes.backend` filter。
 - Producers: GitHub `pull_request` / `push` / `workflow_dispatch` events and contexts.
-- Validators/preflight: `tests/test_select_ci_tests.py` workflow block + selector behavior tests。
+- Validators/preflight: `tests/test_select_ci_tests.py` workflow block + selector behavior tests；`changes.all_files` 是 PR changed-file 单一 authority。
 - Storage/cache/query: GitHub Actions concurrency scheduler；仓库无本地持久态。
 - Public entrypoint: CI workflow triggers。
 - Downstream consumers: `Unit Tests (full)`、targeted `Unit Tests`、merge 后 master regression。
@@ -81,8 +83,9 @@ Regression rows:
 
 - same PR number + new push -> same group + old PR run cancelled。
 - two master pushes or manual runs -> different run_id groups + neither cancelled by policy。
-- ci.yml-only PR -> backend true + selector meta-guard suite executes assertions。
-- mutate run_id fallback to ref / conditional cancellation to true / remove self-route -> contract test red。
+- ci.yml-only PR -> backend true + paths-filter `all_files` contains ci.yml + selector meta-guard suite executes assertions。
+- master merges an identical file change while PR is open -> selector still consumes PR API `all_files`, not a divergent merge-base diff。
+- mutate group branch/order / run_id fallback to ref / conditional cancellation to true / remove changed-file/self-route -> contract test red。
 
 ## Boundary Surface Checklist
 
@@ -91,7 +94,7 @@ Regression rows:
 - Read surfaces: GitHub event contexts、`dorny/paths-filter` changed-file set、target selector input（changed policy/routing only）。
 - Write/delete/overwrite surfaces: none — no repository/runtime write path。
 - Staging/publish/rollback surfaces: GitHub workflow scheduling only；rollback is a three-file revert。
-- Producer/consumer evidence boundaries: event context -> concurrency group/cancel policy -> full/targeted jobs；workflow diff -> backend filter -> selector -> contract suite。
+- Producer/consumer evidence boundaries: event context -> concurrency group/cancel policy -> full/targeted jobs；PR files API -> `changes.all_files` -> newline changed-file artifact -> selector -> contract suite。
 - Stale-state/idempotency boundaries: PR number intentionally groups superseding runs；`run_id` remains stable across rerun but unique across distinct non-PR runs。
 - Unchanged downstream consumers: all job names、conditions、timeouts、marker expressions、workflow triggers；Governance and visual-evidence workflows。
 

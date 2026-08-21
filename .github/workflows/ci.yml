@@ -33,12 +33,22 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       openapi: ${{ steps.filter.outputs.openapi }}
       schemas: ${{ steps.filter.outputs.schemas }}
+      all_files: ${{ steps.filter.outputs.all_files }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # The PR changed-file set IS the single authority for both paths-filter
+          # and targeted selection: the selector must never recompute a
+          # merge-base diff that can diverge after master changes while the PR
+          # is open (#1650 D3). The JSON listing plus the catch-all filter
+          # expose the complete set (not just backend_files — combination rules
+          # read non-backend paths too).
+          list-files: json
           filters: |
+            all:
+              - '**'
             backend:
               - '**/*.py'
               - 'pyproject.toml'
@@ -245,8 +255,18 @@ jobs:
           chmod u+rwx /scratch/frd_muziyao
       - name: Select targeted tests
         id: targeted
+        env:
+          CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}
         run: |
-          python scripts/select_ci_tests.py --base-ref "${GITHUB_BASE_REF}" --github-output "$GITHUB_OUTPUT"
+          # Consume the paths-filter PR changed-file set (single authority, #1650
+          # D3). JSON is passed via env, never shell-interpolated/split, and
+          # converted with the runner-provided jq — this job has no setup-uv, so
+          # uv is not available here. Empty JSON writes an empty changed-file
+          # list, which makes the selector select nothing and the count==0
+          # branch below report collect-only smoke. GitHub path values never
+          # contain newlines, so the newline-separated selector seam is exact.
+          jq -r '.[]' <<< "$CHANGED_FILES_JSON" > .ci-changed-files.txt
+          python scripts/select_ci_tests.py --changed-file .ci-changed-files.txt --github-output "$GITHUB_OUTPUT"
       - name: Run targeted tests
         env:
           TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}
