@@ -596,12 +596,11 @@ def postgis_tile_sql(layer: str) -> str:
         #     longer prove the slice empty before decompressing.
         #   * Inside the LATERAL the `lr.` values are constants for one loop, so
         #     `run_id` / `river_network_version_id` reach the compressed
-        #     segmentby index and the uncompressed text primary key. Each sits
-        #     in the same conjunction as its key counterpart, so it can only
-        #     narrow, and both go with the text columns in #1342. This binds
-        #     LESS than the data legs: they also bind
-        #     `ts.river_segment_id = seg.river_segment_id` (5/5 text-PK, 3/3
-        #     segmentby columns); an existence probe has no per-segment
+        #     segmentby index. Each sits in the same conjunction as its key
+        #     counterpart, so it can only narrow, and both go with the text
+        #     columns in #1342. This binds LESS than the data legs: they also
+        #     bind `ts.river_segment_id = seg.river_segment_id` (5/5 text-PK,
+        #     3/3 segmentby columns); an existence probe has no per-segment
         #     correlation, so it binds 4/5 and 2/3.
         #   * Cost: the nested loop probes identities in ascending
         #     river_network_version_id order (DISTINCT ON emission order; LIMIT

@@ -67,7 +67,9 @@
       preflight 附该时次逐身份命中/缺席向量，round-2 K2）：before 整片
       解压 → after 亚秒、tile 字节相同、fact 侧内层相关节点 loops =
       前导 miss 数 + 1（首序候选命中时 loops=1；混合则按 (ii-b) BUFFERS
-      口径兜底；round-3 D2 换掉 batches 单位）；
+      口径兜底；round-3 D2 换掉 batches 单位）、且**无条件**落账压缩
+      chunk 关系 Shared Hit+Read ≤ 同会话 before（比值进 receipt——
+      round-4 rider：闭合 delta THEN covered 分支与 E4 oracle 的错配）；
       (ii) 压缩无覆盖 pin（preflight 实查选定：落压缩 chunk 且无任何
       coverage 窗覆盖的时次，**不得与 (i) 同时次**——探针无 tile 坐标依赖，
       同时次任意 z/x/y 同答案，原 z9 407/200 pin 与 (i) 同为命中，round-1

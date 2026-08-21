@@ -89,14 +89,15 @@ silent data loss.
   text indexes keep serving out-of-boundary text readers unchanged;
   shape carve-out (round 3, extended by #1596): the three
   `hydro-national` lateral probe legs instead plan as per-segment (data
-  legs) or per-identity (existence probe) parameterized probes — the
-  data legs on the text primary key (uncompressed chunks, measured in
-  PR #1443), the identity probe on a run-scoped index prefix whose pick
-  (text primary key or the integer discovery index) is recorded, not
-  presumed, by the delivery receipt — and the compressed `segmentby`
-  index on compressed chunks; the integer index remains the planned
-  path for every other switched shape, and #1342 owns the post-cutover
-  index set that replaces the text plans for these legs
+  legs) or per-identity (existence probe) parameterized probes — on
+  compressed chunks all three probe through the compressed `segmentby`
+  index; on uncompressed chunks the data legs plan on the text primary
+  key (measured in PR #1443) while the identity probe plans on a
+  run-scoped index prefix whose pick (text primary key or the integer
+  discovery index) is recorded, not presumed, by the delivery receipt;
+  the integer index remains the planned path for every other switched
+  shape, and #1342 owns the post-cutover index set that replaces the
+  text plans for these legs
 
 #### Scenario: Compressed-chunk portions keep predicate pushdown via the transitional text predicates
 
@@ -127,9 +128,10 @@ silent data loss.
 - **THEN** the identity-existence probe plans as per-identity
   parameterized probes: no full-decompression sequential scan over all
   batches, the fact-side inner node's loop count equals the number of
-  identities probed before short-circuit (leading misses plus one on a
-  hit; every candidate on an all-miss instant), and shared buffer
-  touches on the compressed-chunk relations do not exceed the
-  pre-change shape's on the same instant in the same session; the
-  covered request serves the same tile bytes as before the change, and
-  the uncovered request returns its empty response in under one second
+  identities probed before short-circuit (leading misses plus one on
+  the covered request; the uncovered request finds no candidates and
+  never touches the fact table), and shared buffer touches on the
+  compressed-chunk relations do not exceed the pre-change shape's on
+  the same instant in the same session; the covered request serves the
+  same tile bytes as before the change, and the uncovered request
+  returns its empty response in under one second
