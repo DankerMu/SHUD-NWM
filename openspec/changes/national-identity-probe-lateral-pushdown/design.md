@@ -96,13 +96,23 @@ source_identity_stats AS (
   `tests/test_river_ts_read_path_surrogate_keys.py:198-231` 明令禁止（词表外
   字面量会 22P02，违反基线 spec 的 degrade-to-empty Scenario）。
 - LATERAL 体内 `lr.*` 为 per-loop 常量 → `run_id`/`river_network_version_id`
-  文本等值获得压缩 segmentby 剪枝（第 1、2 列）与未压缩文本索引路径，
-  `(variable, valid_time)` orderby 批级 min/max 进一步消批——机制与 #1341
-  数据腿完全同构（数据腿实测 0.013-0.086ms/loop）。
+  文本等值获得压缩 segmentby 剪枝（绑 3 列中前 2）与未压缩文本 PK 前缀
+  （绑 5 列中 1,2,4,5——`river_segment_id` 位于第 3 位不绑），
+  `(variable, valid_time)` orderby 批级 min/max 进一步消批。**机制同类但
+  非同构**（round-1 审查 C1 更正）：数据腿绑满 5/5 与 3/3，逐 loop 是点查
+  （实测 0.013-0.086ms/loop）；本探针少绑 segment 列，代价形态分命中/未命中
+  两侧，见下。
 - **无 segment 相关**：本探针不需要逐 segment（EXISTS 一行即真），lr 基数
-  = 活跃 network 数（~19）。**短路语义**：EXISTS 命中即停（有数据时次探最多
-  一两个身份）；未命中侧（无数据/内部空洞）会把全部候选身份探完——每身份
-  一次参数化探针，成本 ~19 × 亚毫秒，可接受且正是语义等价所必需。
+  = 活跃 network 数（~19）。**短路语义与代价模型**（round-1 审查 C1 更正，
+  原"~19 × 亚毫秒"高估了未命中侧）：
+  - 命中侧：EXISTS 命中即停，首行即真——亚秒，解压 batches 与候选身份数
+    同量级。
+  - 未命中侧（内部空洞——窗覆盖但该时次无行）：每个缺席身份要对其整个
+    (run, network) 切片证无——未压缩走 2 列 PK 前缀内过滤（PG15 无 skip
+    scan，variable/valid_time 只是 in-index filter）；压缩侧每身份留
+    ~segment 数个 batch（orderby min/max 只消 ~49%）。上界是改前整片解压
+    （各身份 batch 集是旧 seq-scan 读集的不相交子集，逐身份严格不劣），
+    但**不是** ~19 × 亚毫秒；实际量级由 E4 的内部空洞 pin 实测落账。
 - 无覆盖时次：discovery 子查询空集 → EXISTS 假、零 fact 触达——38s 空瓦片
   回归即刻消失（该腿加速不依赖任何下推）。
 - 内部空洞时次：LATERAL 实际探 fact 表 → 0 分支保持（语义等价的关键）。
@@ -159,10 +169,19 @@ marker，node-27 真实 DB 跑）：
   经勘察确认对数据腿锚定、本改动下自然存活。
 - 语义层：D4 三分支 integration oracle。
 - E4 node-27 硬门（BUFFERS 主证；fixture 审查 P2-1/2/4 增补）：
-  - **指名 pin**（issue 补充实测坐标，落 chunk 55——先回填后压缩，字节比对
-    非空有意义）：压缩有覆盖 = z4 12/6 @ 2026-08-12T12Z；压缩无覆盖 =
-    z9 407/200 @ 同时次；未压缩 = 当批时次任一 z4。若 retention 已推进致
-    pin 失效，按同判据另选并在 receipt 记录选择依据。
+  - **指名 pin**（round-1 审查 C1 更正：探针只绑 `:variable`/`:valid_time`
+    不含 tile 坐标，同一时次下任何 z/x/y 的探针答案相同——原"(ii) z9
+    407/200 @ 同时次"与 (i) 是同一命中，miss 分支零覆盖）：
+    (i) 压缩有覆盖（命中侧）= z4 12/6 @ 2026-08-12T12Z（chunk 55——先回填
+    后压缩，字节比对非空有意义）；
+    (ii) 压缩**无覆盖** = 落压缩 chunk 且无任何 run_display_coverage 窗
+    覆盖的时次——node-27 preflight 实查选定（不得与 (i) 同时次），选择
+    依据落 receipt；
+    (ii-b) 压缩**内部空洞（miss 分支）** = 窗覆盖但该时次零 fact 行的
+    压缩时次——数据为整点、窗为闭区间，取窗内非整点时刻（如
+    2026-08-12T12:30Z）即天然内部空洞，preflight 验证零行后作 pin；
+    (iii) 未压缩 = 当批时次任一 z4。若 retention 已推进致 pin 失效，按
+    同判据另选并在 receipt 记录选择依据。
   - **E4 preflight**：逐 pin 落 receipt——所触 chunk `is_compressed`、键
     NULL 计数（chunk 32/51 键全 NULL 不回填，误选会退化成"空对空"取证）、
     覆盖该时次的 `run_display_coverage` 行在场性，以及所触 chunk 的
@@ -172,9 +191,11 @@ marker，node-27 真实 DB 跑）：
     shipped SQL，不引用 issue 里 pre-#1341/争用期数字——#1442 的"203/259ms
     误标"教训）；warm 二采取第二采；不走 issue 提到的仓外 shape_explain.py
     脚手架。
-  - 判据：压缩有覆盖 → 亚秒 + 解压 batches 与候选身份数同量级 + tile 字节
-    相同；压缩无覆盖 → <1s 空响应、零 fact 触达；未压缩 → 毫秒不退化 +
-    字节相同；z4 端到端压缩时次进秒级（#1341 AC-1 口径）。
+  - 判据：(i) 命中 → 亚秒 + 解压 batches 与候选身份数同量级 + tile 字节
+    相同；(ii) 无覆盖 → <1s 空响应、零 fact 触达；(ii-b) 内部空洞 miss →
+    424 语义保持 + 计划为逐身份参数化探针（非整片 seq-scan 解压）+ 耗时
+    实测落账且不高于同会话 before 腿（上界=改前整片解压）；(iii) 未压缩 →
+    毫秒不退化 + 字节相同；z4 端到端压缩时次进秒级（#1341 AC-1 口径）。
 
 ## D6: select_ci_tests 观察（报告不改）
 

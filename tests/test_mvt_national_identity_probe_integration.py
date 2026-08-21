@@ -58,6 +58,7 @@ from psycopg2.extras import RealDictCursor
 
 from apps.api.main import app
 from packages.common.display_coverage import refresh_run_display_coverage
+from services.tiles.mvt import MVT_MEDIA_TYPE
 from tests.integration_helpers import (
     apply_migrations_from_zero,
     insert_river_timeseries_dual_written,
@@ -363,7 +364,7 @@ def test_national_tile_is_200_with_a_non_empty_mvt_when_the_instant_has_data(nat
     response = _request_tile(client, _WINDOW_END)
 
     assert response.status_code == 200, response.text
-    assert response.headers["content-type"].startswith("application/vnd.mapbox-vector-tile")
+    assert response.headers["content-type"].startswith(MVT_MEDIA_TYPE)
     assert response.content, "a 200 with empty bytes would mean the probe answered 1 for nothing"
     # MVT string values are stored as plain UTF-8 in the protobuf, so the seeded
     # identity is visible in the bytes without decoding the tile.

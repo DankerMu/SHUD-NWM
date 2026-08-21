@@ -596,11 +596,24 @@ def postgis_tile_sql(layer: str) -> str:
         #     longer prove the slice empty before decompressing.
         #   * Inside the LATERAL the `lr.` values are constants for one loop, so
         #     `run_id` / `river_network_version_id` reach the compressed
-        #     segmentby index and the uncompressed text primary key, exactly as
-        #     in the data legs. Each sits in the same conjunction as its key
-        #     counterpart, so it can only narrow, and all of them go with the
-        #     text columns in #1342. There is no `river_segment_id` aid here:
-        #     an existence probe has no per-segment correlation to bind it to.
+        #     segmentby index and the uncompressed text primary key. Each sits
+        #     in the same conjunction as its key counterpart, so it can only
+        #     narrow, and both go with the text columns in #1342. This binds
+        #     LESS than the data legs: they also bind
+        #     `ts.river_segment_id = seg.river_segment_id` (5/5 text-PK, 3/3
+        #     segmentby columns); an existence probe has no per-segment
+        #     correlation, so it binds 4/5 and 2/3.
+        #   * Cost: a HIT short-circuits on the first matching row (sub-second,
+        #     batches on the order of the candidate identity count). A MISS
+        #     inside a covered window — the interior-gap branch — pays
+        #     proof-of-absence over each absent identity's whole (run, network)
+        #     slice: on uncompressed chunks an index-filter walk of the
+        #     2-column PK prefix (variable/valid_time filter in-index, no skip
+        #     scan in PG15); on compressed chunks ~segment-count batches per
+        #     identity surviving the (variable, valid_time) orderby min/max
+        #     pruning. Bounded above by the pre-change full scan — each
+        #     identity's batch set is a disjoint subset of what the set-based
+        #     join decompressed — but not "~19 x sub-ms".
         #   * The discovery sub-select stays INLINE rather than referencing the
         #     shared `latest_runs` CTE: that CTE is nested inside the
         #     `source_rows` sub-query's own WITH, so it is not in scope for this
@@ -636,8 +649,7 @@ def postgis_tile_sql(layer: str) -> str:
                     FROM hydro.river_timeseries ts
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
-                      -- transitional compressed-chunk pushdown aids, remove
-                      -- with #1342
+                      -- transitional compressed-chunk pushdown aids, remove with #1342
                       AND ts.run_id = lr.run_id
                       AND ts.river_network_version_id = lr.river_network_version_id
                       AND ts.variable = :variable
