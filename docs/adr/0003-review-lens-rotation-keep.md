@@ -443,3 +443,16 @@ rotated-in fix-correctness lens (fixture residue; an oracle setup-proof gap).
 Direction unchanged: **keep rotation** stands; no new analysis warranted for a
 one-PR delta. Next revisit on maintainer override or a materially changed
 attribution ratio.
+
+## Revisit 2026-08-21 (post PR #1668 / issue #1324)
+
+Audit re-flagged DECIDABLE at 94 multi-round merged PRs, later-round catches
+core=46 vs rotated=244. #1324 adds one multi-round sample but no later-round
+catch: Round 1 found one fixture-named test-evidence gap, and Round 2 closed it
+cleanly. The accumulated ratio is therefore unchanged.
+
+**Keep rotation** remains the recorded decision. This sample adds no evidence
+for either direction, and the attribution caveats above still apply: lens-name
+suffixes, fixture/final-review roles, and non-rotation subset rounds can distort
+the core/rotated split. No policy change; a future reversal still requires the
+recorded metric fixes plus maintainer review.
