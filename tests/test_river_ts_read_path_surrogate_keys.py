@@ -31,10 +31,14 @@ columns. So the pins are two-sided:
   surface may carry, so both a forbidden column appearing and a pushdown aid
   quietly vanishing are red.
 
-Surfaces whose identity arrives by join rather than as a bound constant (the
-two national legs and the national identity probe) can carry only ``variable``:
-a join equality is not pushdown material, and a text fact join is forbidden
-outright.
+Surfaces whose identity arrives by join rather than as a bound constant can
+carry only ``variable``: a join equality is not pushdown material, and a text
+fact join is forbidden outright. The three ``hydro-national`` ``CROSS JOIN
+LATERAL`` probe bodies are the adjudicated exception — inside them the
+correlated values are per-loop constants, so they additionally carry
+``run_id`` / ``river_network_version_id`` (all three probes) and
+``river_segment_id`` (the two per-segment data legs only; #1341 round 3 and
+#1596).
 """
 
 from __future__ import annotations
@@ -272,6 +276,35 @@ NATIONAL_LATERAL_PROBE_PREDICATES = (
 # surrogate spelling, which is why `LIMIT 1` cannot change the result set.
 NATIONAL_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "river_segment_id", "variable"}
 
+# The identity-existence probe's conjunction, same one-substring discipline
+# (#1596). It is the data legs' probe minus everything per-segment: no
+# `river_segment_key` predicate, and therefore no `river_segment_id` aid to
+# pair with one. `lr` here is the probe's OWN inline discovery sub-select, not
+# the `latest_runs` CTE — that CTE lives inside the `source_rows` sub-query's
+# WITH and is not in scope for this sibling CTE.
+NATIONAL_IDENTITY_PROBE_PREDICATES = (
+    "FROM hydro.river_timeseries ts "
+    "WHERE ts.run_key = lr.run_key "
+    "AND ts.river_network_version_key = lr.river_network_version_key "
+    "AND ts.run_id = lr.run_id "
+    "AND ts.river_network_version_id = lr.river_network_version_id "
+    "AND ts.variable = :variable "
+    "AND ts.variable_e = "
+    "AND ts.valid_time = :valid_time "
+    "LIMIT 1"
+)
+NATIONAL_IDENTITY_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "variable"}
+# The four columns the inline discovery hands the probe: the two keys that
+# select the rows and the two text identities the aids bind. The pre-#1596
+# shape selected only the keys, because the fact table was reached by a
+# set-based key join with nothing to correlate.
+NATIONAL_IDENTITY_DISCOVERY_COLUMNS = (
+    "SELECT DISTINCT ON (mi.river_network_version_id) "
+    "h.run_key, rnv.river_network_version_key, "
+    "h.run_id, mi.river_network_version_id "
+    "FROM hydro.hydro_run h"
+)
+
 
 def test_national_tile_probes_the_fact_table_once_per_segment_through_a_lateral() -> None:
     """Both legs read the fact table as a per-segment correlated probe.
@@ -430,15 +463,54 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
 
 
 def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> None:
-    probe = _identity_stats_cte("hydro-national")
+    """The existence probe is a per-identity LATERAL, like the data legs (#1596).
 
-    assert "lr.run_key = ts.run_key" in probe
-    assert "lr.river_network_version_key = ts.river_network_version_key" in probe
-    assert "ts.variable_e = (" in probe
-    assert "h.run_key, rnv.river_network_version_key" in probe
+    It used to join the fact table to its discovery sub-select set-based, on
+    keys alone. Compression segments compressed chunks by the TEXT columns, so
+    a join-column key equality pushes nothing down: node-27 measured 23-37s per
+    compressed instant, and 38s to answer an UNCOVERED instant — a tile with no
+    features at all — because the planner could no longer prove the slice empty
+    without decompressing it. Inside the LATERAL the discovery row is a
+    per-loop constant, so the two text aids reach the segmentby index.
+
+    What must NOT drift: the probe still reads the fact table (the coverage
+    window is a MIN/MAX over complete instants, so answering existence from it
+    alone flips an interior gap's 424 into an empty-tile 200), and it carries
+    no `river_segment_id` aid — it has no per-segment correlation to pair one
+    with, which is why its sanctioned set is narrower than the data legs'.
+    """
+    probe = _identity_stats_cte("hydro-national")
+    lateral = _slice(probe, "CROSS JOIN LATERAL (", ") hit")
+
+    # Shape: inline 4-column discovery, cross-joined laterally to the probe,
+    # the whole thing still wrapped in the EXISTS the 0/1 semantics come from.
+    assert NATIONAL_IDENTITY_DISCOVERY_COLUMNS in outer_predicates(probe)
     assert "JOIN core.river_network_version rnv" in probe
-    _assert_text_fact_columns(probe, "ts", {"variable"}, "national identity probe")
+    assert "SELECT CASE WHEN EXISTS (" in probe
+    assert ") lr CROSS JOIN LATERAL (" in outer_predicates(probe)
+    assert "JOIN hydro.river_timeseries" not in probe
+    # Nothing reads the fact table outside the probe body: a second `ts`
+    # reference would be the unpushable set-based join creeping back in.
+    assert "ts." not in probe.replace(lateral, "")
+
+    # The whole conjunction, one substring: every key predicate and its
+    # transitional text aid in the SAME `AND` chain, terminated by the `LIMIT 1`
+    # fence that keeps the planner from pulling the probe back up into a join.
+    assert NATIONAL_IDENTITY_PROBE_PREDICATES in outer_predicates(lateral)
     assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(probe)
+    assert ENUM_VARIABLE_RESOLUTION in probe
+
+    # Column census: exactly the two aids plus `variable`, checked against the
+    # narrow constant-bound ceiling rather than the legs' widened one — so an
+    # added segment aid is red twice over, at the equality and at the ceiling.
+    _assert_text_fact_columns(
+        probe,
+        "ts",
+        NATIONAL_IDENTITY_PROBE_TEXT_AIDS,
+        "national identity probe",
+    )
+    assert NATIONAL_IDENTITY_PROBE_TEXT_AIDS < set(NATIONAL_PROBE_TEXT_AIDS)
+    assert "river_segment_id" not in probe
 
 
 def test_national_output_and_ordering_stay_on_restored_text_expressions() -> None:

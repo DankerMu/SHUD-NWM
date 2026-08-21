@@ -584,18 +584,39 @@ def postgis_tile_sql(layer: str) -> str:
         # layer. Otherwise each z/x/y request ranks every nationwide river_timeseries row
         # for the selected valid_time before clipping a tiny tile, which turns cache misses
         # into multi-second gateway risks.
-        # Identity-stats probe: same surrogate-key switch as the two data legs
-        # below (issue #1341). The DISTINCT ON sub-select already joins the
-        # authority tables, so the keys come out of the join it was doing
-        # anyway -- only core.river_network_version is added, because
-        # core.model_instance carries the network's text id but not its key.
+        # Identity-stats probe: one correlated existence probe per candidate
+        # national identity (issue #1596), the same remedy the two data legs
+        # below already carry (#1341 round 3).
+        #   * The set-based shape this replaced joined the fact table to the
+        #     discovery sub-select on keys alone. Compression still segments
+        #     compressed chunks by the TEXT columns, so a join-column key
+        #     equality pushes nothing down: the probe decompressed whole chunks
+        #     (23-37s per compressed instant) and even an UNCOVERED compressed
+        #     instant — an empty tile — cost 38s, because the planner could no
+        #     longer prove the slice empty before decompressing.
+        #   * Inside the LATERAL the `lr.` values are constants for one loop, so
+        #     `run_id` / `river_network_version_id` reach the compressed
+        #     segmentby index and the uncompressed text primary key, exactly as
+        #     in the data legs. Each sits in the same conjunction as its key
+        #     counterpart, so it can only narrow, and all of them go with the
+        #     text columns in #1342. There is no `river_segment_id` aid here:
+        #     an existence probe has no per-segment correlation to bind it to.
+        #   * The discovery sub-select stays INLINE rather than referencing the
+        #     shared `latest_runs` CTE: that CTE is nested inside the
+        #     `source_rows` sub-query's own WITH, so it is not in scope for this
+        #     sibling CTE. It is the same display-coverage gating, widened from
+        #     two columns to four so the LATERAL has text to bind.
+        #   * The probe MUST keep touching the fact table. `run_display_coverage`
+        #     windows are a MIN/MAX over complete instants, not a per-instant
+        #     bitmap, so answering existence from the window alone would turn an
+        #     interior gap's 424 into an empty-tile 200.
         source_identity_stats_sql = """
             SELECT CASE WHEN EXISTS (
                 SELECT 1
-                FROM hydro.river_timeseries ts
-                JOIN (
+                FROM (
                     SELECT DISTINCT ON (mi.river_network_version_id)
-                           h.run_key, rnv.river_network_version_key
+                           h.run_key, rnv.river_network_version_key,
+                           h.run_id, mi.river_network_version_id
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
                     JOIN core.river_network_version rnv
@@ -609,20 +630,24 @@ def postgis_tile_sql(layer: str) -> str:
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
-                -- Key-only join. The national identity is chosen by the
-                -- sub-select, so run/network arrive as join columns rather than
-                -- bound constants; a text join equality buys no compressed-chunk
-                -- pushdown and text fact joins are forbidden outright, so the
-                -- only pushdown aid available on this surface is `variable`.
-                ) lr ON lr.run_key = ts.run_key
-                    AND lr.river_network_version_key = ts.river_network_version_key
-                -- transitional compressed-chunk pushdown aid, remove with #1342
-                WHERE ts.variable = :variable
-                  AND ts.variable_e = (
-                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                          WHERE e::text = :variable
-                      )
-                  AND ts.valid_time = :valid_time
+                ) lr
+                CROSS JOIN LATERAL (
+                    SELECT 1
+                    FROM hydro.river_timeseries ts
+                    WHERE ts.run_key = lr.run_key
+                      AND ts.river_network_version_key = lr.river_network_version_key
+                      -- transitional compressed-chunk pushdown aids, remove
+                      -- with #1342
+                      AND ts.run_id = lr.run_id
+                      AND ts.river_network_version_id = lr.river_network_version_id
+                      AND ts.variable = :variable
+                      AND ts.variable_e = (
+                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                              WHERE e::text = :variable
+                          )
+                      AND ts.valid_time = :valid_time
+                    LIMIT 1
+                ) hit
                 LIMIT 1
             ) THEN 1 ELSE 0 END AS source_identity_count
         """
