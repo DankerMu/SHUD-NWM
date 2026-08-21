@@ -12,7 +12,7 @@ The issue's anchors were verified on master `c2439f62`. Re-checked here on `c16d
 | verifier ledger overwrites | `:3523`, `:3554-3555`, `:3607-3608` | **`:3535`, `:3566-3567`, `:3619-3620`** | +12 |
 | terminal output sites | `:3992`, `:4011`, `:4015`, `:4043`, `:4045` | **`:4004`, `:4023`, `:4027`, `:4055`, `:4057`** | +12 |
 | recovery exact-key set | `:3463` | **`:3475`** | +12 |
-| closure call site | `:4159` (issue) | **`:4171`** | +12 |
+| closure call site | `:4159` (issue) | **`:4171`** pre-edit / **`:4174`** post-edit | +12, then +3 |
 | `#1261` ruling comment | `:1140-1149` | `:1148` (the `pinning argv[0]` line) | — |
 
 Use the located anchors, not the issue's. **And note the self-inflicted drift**: inserting `description` at `:90`, `:128-129`, `:157-158` shifts every schema line below it, so `:269` / `:271` / `:272` go stale *inside this PR*. No carrier may cite post-edit schema line numbers until the edit is final; the PR body re-derives them from the landed file.
@@ -24,13 +24,13 @@ point of the change is to stop a false contract claim, and shipping a *new* fals
 closest at hand.
 
 **Wrong #1 — the issue's shorthand, "输入值被忽略" (the input value is ignored).** False: the value is read.
-`resolve_artifact_closure(bundle)` (`scripts/node27_timeseries_compression_live_evidence.py:4171` →
+`resolve_artifact_closure(bundle)` (`scripts/node27_timeseries_compression_live_evidence.py:4174` (post-edit; `:4171` pre-edit) →
 `packages/common/evidence_io.py:201`) hashes the file and rejects a slot pointing at an absent, symlinked,
 or hash-mismatched path with `BoundedEvidenceError`.
 
 **Wrong #2 — this fixture's own first draft, "the authored value never reaches the terminal state."** Also
 false, and worse because it would have shipped into normative SHALL text. The closure's manifest is emitted
-as the terminal document's `source_manifest` (`:4090-4092`, fed from `closure.manifest` at `:4202`), and
+as the terminal document's `source_manifest` (`:4093`, fed from `closure.manifest` at `:4205`; both post-edit, +3 from the three added comment lines), and
 `artifact_references` (`packages/common/evidence_io.py:178-186`) collects every `{path, sha256, bytes}`
 mapping in the raw input bundle — the five authored slots included. Empirically, the repo's own canonical v3
 example carries all five authored invocation paths in `source_manifest`
