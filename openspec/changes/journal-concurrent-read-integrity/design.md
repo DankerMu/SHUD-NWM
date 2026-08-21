@@ -120,12 +120,13 @@ Concurrency + Resource limits；不是额外 vocabulary。
 issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维护 owner 标记」。
 **本 change 采纳 owner 标记，但把作用域收窄到 `_locked_cycle_write` 一处——这是对 issue 推荐项的显式偏离。**
 
-理由是判据自己的注释（`:4098-4102`）：
+理由是判据在本 change 中钉死的两个前提：
 
-> Inside a locked write window the cycle flock excludes external writers and the append hook
-> keeps the cache coherent, so hits are trusted as-is.
+1. cycle flock 排除目标 cycle 的其它写者；
+2. 每次 append 后按 `(source_id, cycle_segment)` 失效所有**可达** cache key，下一次读从刚提交的
+   journal bytes 重算。append hook 的正确性作用是 invalidation，不是原地更新一个可达 base entry。
 
-免指纹的前提有两条：**cycle flock** 与 **append hook**。实测 master 上 8 个 `_write_lock` 站点：
+实测 master 上 8 个 `_write_lock` 站点，只有一处同时具备 cycle flock 与 append 后失效：
 
 | `with` 行 | 所属函数（def 行） | 取 cycle flock？ | 窗内跑 append hook？ |
 |---|---|---|---|
@@ -192,25 +193,20 @@ issue #1595 的推荐项是「在 8 个 `with self._write_lock:` 站点成对维
 `:6950-6951`（入口）与 `:6957-6958`（`finally`）各做一次全局 `self._cycle_rows_cache.clear()`，
 与 source/cycle 无关，cohort X 的写会打空 cohort Y、Z 的 entry。
 
-**本条裁定在 fixture 评审中被推翻过一次，此处是更正后的版本。**
-初版写「正确性由 fingerprint 校验保证，不依赖 clear 粒度，所以 clear 是纯性能项」。
-**这句是假的**，实测依据：
+**本条裁定在 fixture 与 round-1 评审中各被推翻过一次，此处是最终版本。**
 
-`_cycle_rows_cache` 的 entry 可以带 `fingerprint=None`，而 `None` **永远无法通过**
-`:4111` 的 `cached[0] == fingerprint` 比较（右侧是真元组时恒假）。三个存入点：
+- 初版写「正确性由 fingerprint 校验保证，不依赖 clear 粒度，所以 clear 是纯性能项」——错，
+  因为 owner 分支对**任何** cache 命中都不校验 fingerprint。
+- 第二版又把 append hook 的 legacy `(source, cycle, None, None)` store 当成可达的
+  `fingerprint=None` 生产者——仍错。所有 `_cycle_rows` key 的第四槽都是实际 `source_segments`
+  tuple，没有生产者写 `(None, None)` base key；hook 的 update/store arm 从不执行。它的可达行为是
+  先按 source/cycle sweep 全部 key，然后返回；下一次读从新 journal bytes 重算。
 
-| 存入点 | 何时存 `None` |
-|---|---|
-| `:4162` `_cache_cycle_rows(..., fingerprint=fingerprint)` | `in_write_window` 为真时（`:4104-4108`） |
-| `:4233-4237` `_cycle_rows_by_model_unlocked` | 形参上 `fingerprint=None` 恒定，但**该 store 全仓不可达**——被 `:4232` 的 `if include_direct_jobs:` 挡住，而 6 个调用点（生产 5 + 测试 1）**无一**不传 `False`。**不构成 D2 的依据**，见 D10.5 |
-| `:6839` append hook | 无条件 `(None, updated)` |
-
-（D2 的结论只靠 `:4162` 与 `:6839` 两处成立，第三行是不可达的死代码——
-这一格我先后写错过三版，见 D10.5，**引用 D2 时不要把它算进依据**。）
-
-于是这些 entry **只能**经 `:4111` 的 `in_write_window` 那一支被命中，
-而那一支**不做任何校验**。让 owner 快路径安全的不是「重算指纹」，
-而是**入口那次 clear 把进窗前的一切 entry 抹掉了**。反例（单线程、同 cycle）：
+D2 只需要一条、也只有一条正确性依据：**owner 分支对任何 cache 命中都不做 fingerprint 校验**。
+入口 clear 必须在 marker 置位前抹掉所有 pre-window entry；否则其中一个已被其它进程写入淘汰的旧 entry
+仍会被 owner 无条件信任。进窗后的读可按正常 `_cycle_rows` 路径写入 `fingerprint=None` entry；
+每次 append 又把该 source/cycle 的所有可达 entry sweep 掉，所以 append 后的下一次读必从刚提交的
+journal bytes 重算。反例（单线程、同 cycle）：
 
 1. 窗外 `_cycle_rows(C1)` 算出真指纹 F1，miss，存 `(F1, rows_old)`；
 2. 另一进程（#1600 列举的 CLI 路径）写 C1 的 journal；
@@ -370,9 +366,9 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 并给出备选「承认写窗内 flock 已排除外部写者、篡改场景不适用，在注释里钉死」。
 
 **本 change 使该备选在修复后成立，但成立范围比 #1567 设想的窄得多。**
-修复后 `in_write_window` 为真当且仅当**本线程正在这个 cycle 的写窗内**，
-此时 cycle flock 确实排除了其他写者（含跨进程），append hook 确实维持了 cache 相干——
-`#1567` 那句「flock 已排除外部写者」对**这一个**线程成立。
+修复后 `in_write_window` 为真当且仅当**本线程正在这个 cycle 的写窗内**。
+此时 cycle flock 排除了其他写者（含跨进程）；每次 append 又按 source/cycle sweep 全部可达 key，
+所以下一次读从新 journal bytes 重算。`#1567` 那句「flock 已排除外部写者」只对**这一个**线程成立。
 对任何其他线程，判据现在返回假，走完整 fingerprint 校验，
 因此 #1567 关心的 `_stat_signature` 指纹强度问题**照常适用于它们**，一分不减。
 
@@ -412,8 +408,8 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
    v2「窗外也存、窗内 owner 可命中」——也假（它根本不存）。
    v3 才是实测：不是命不中，是**从不写入**。
    **已按该准确口径路由 [#1661](https://github.com/DankerMu/SHUD-NWM/issues/1661)，本 change 不动。**
-   它**不是** D2 的依据——
-   D2 只靠 `:4162` 与 `:6839` 成立。
+   它**不是** D2 的依据。append hook 的 legacy `(None, None)` base store 同样不可达，
+   也不是 D2 的依据；D2 只靠「owner 无条件信任任何命中」与入口 clear 的时序成立。
 
 ### D11 — fixture 评审中被推翻/收紧的裁定（保留记录，避免后续重新发明）
 
@@ -421,7 +417,8 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 |---|---|---|
 | owner 标记置于 `_ensure_root_unlocked()` 之前 | 置于既有 `try:` 内第一条 | `_ensure_root_unlocked`（`:6952`）在 `try`（`:6953`）之外且会抛，那条路径永不进 `finally`，标记泄漏给线程池复用的下一个任务——违反本 change 自己的 spec |
 | owner 标记 = 裸 `threading.get_ident()` | `(ident, source_id, cycle_segment)` | 裸 ident 下「C1 窗内读 C2」判据仍为真而 C1 的 flock 不保护 C2；今天不可达，但正是本 change 要根除的「判据为真、前提不成立」缺陷类 |
-| D2「正确性不依赖 clear 粒度，clear 是纯性能项」 | 入口 clear 是正确性前提，仅出口 clear 粒度自由 | 窗内 entry 带 `fingerprint=None`、只能经免校验支命中；让 owner 快路径安全的是入口 clear 而非重算指纹（反例见 D2） |
+| D2「正确性不依赖 clear 粒度，clear 是纯性能项」 | 入口 clear 是正确性前提，仅出口 clear 粒度自由 | owner 对任何 cache 命中都免校验；入口 clear 必须先删掉 pre-window entry（反例见 D2） |
+| D2「append hook 的 `(None, None)` base store 可达并原地维持相干」 | 该 store 无生产者，hook 的可达行为是按 source/cycle sweep 后重算 | round-1 verifier 追完全部 cache-key 生产者；dead store 不得作为 D2 依据 |
 | 红证：B 读「已热 cache key」 | 预热必须发生在 A 进窗**之后** | `_locked_cycle_write` 入口就 clear，进窗前预热的 entry 已被抹掉，构造 pre-fix 即绿、变异体结构性不可能红 |
 
 前两条与第四条来自 fixture 评审，第三条推翻的是我自己写的裁定。
@@ -439,6 +436,7 @@ issue #1600 的「真实 oracle 路由」写着并发行为最终判据在 node-
 | 标记存原始 `source_id` | 比较侧比的是归一化值，非规范 id 开的窗静默失去快路径 |
 | 4.5 同一格连写错三版 | v1「永远命不中」→ v2「窗外也存、窗内可命中」→ v3（实测）**该 store 被 `:4232` 守死、全仓 6 个调用点无一触发，是死代码**。三版分别错在：把不可达当命不中、没查守卫、没查调用点实参。**每一版我都先断定结论再补理由**，见 D10.5 |
 | D1 的不可达理由写成「所有读点都显式传本窗 cycle」 | 5 个窗内读点里 2 个自行推导 cycle；真正的不变量是「job_id / run_id 自身编码 cycle」。结论对、理由错——理由错会让将来改 job-id 作用域的人误以为安全 |
+| D2 把 append hook dead store 当成 live `fingerprint=None` 生产者 | 所有可达 key 的第四槽都是 tuple；hook 只 sweep，下一读重算 | round-1 cache verifier 的 key-producer 全量追踪；与 D10.5 同一类「死 store 被当依据」错误 |
 
 **教训 1**：修复一个「构造在某条路径上不成立」的缺陷时，新构造必须**沿同一条路径重新走一遍**，
 而不是只检查它是否覆盖了原缺陷。前两条都是新构造在**另一条**路径上失效，

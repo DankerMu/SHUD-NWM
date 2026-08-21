@@ -1,9 +1,8 @@
-"""Read-cache and append-coherence tests for the file orchestration journal.
+"""Read-cache and append-invalidation tests for the file journal.
 
 Covers the stat-identity byte cache (`_read_bytes_limited_cached`), the
-prevalidated fast decode, and the append-time rows-cache synchronization
-that keeps materialized latest views coherent with the record appended in
-the same locked write window.
+prevalidated fast decode, and the append-time rows-cache sweep that makes
+the next read recompute from records committed in the same write window.
 """
 
 from __future__ import annotations
@@ -764,9 +763,10 @@ def test_read_chokepoint_safety_refusals_are_never_retried(tmp_path: Path) -> No
 
     Exactly one attempt, and the refusal propagates unchanged.  The window
     swap to a symlink (ELOOP) is driven through the chokepoint with the same
-    `_replace_on_open` injection the identity case uses; the other shapes are
-    direct fixtures the chokepoint's stat probe or hardened reader refuse on
-    the first attempt.
+    `_replace_on_open` injection the identity case uses; the other shapes
+    (a symlink target, a directory occupying the target path, and a path
+    outside the containment root) are direct fixtures the chokepoint's stat
+    probe or hardened reader refuse on the first attempt.
     """
     root = tmp_path / "journal"
     repository = FileOrchestrationJournalRepository(root)
@@ -824,6 +824,18 @@ def test_read_chokepoint_safety_refusals_are_never_retried(tmp_path: Path) -> No
         with pytest.raises(SafeFilesystemError):
             repository._read_bytes_limited_cached(outside)
     assert attempts == 1
+
+    # 4. a directory occupying the target path: the chokepoint's stat probe
+    # sees a non-regular object and the hardened reader refuses it on the
+    # first attempt with the same stable journal error (task 3.8).
+    target.unlink()
+    target.mkdir()
+    attempts = 0
+    with _patch("services.orchestrator.file_orchestration_journal.read_bytes_limited_no_follow", counting_reader):
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            repository._read_optional_json(target)
+    assert attempts == 1
+    assert caught.value.reason == "file_journal_unreadable"
 
 
 def test_read_chokepoint_retry_selects_on_kind_not_message(tmp_path: Path) -> None:

@@ -4107,13 +4107,14 @@ class FileOrchestrationJournalRepository:
         cache_key = (source_id, cycle_segment, model_id, source_segments)
         # A hit is trusted as-is only inside the write window, and only for
         # the thread and cycle the window covers: the cycle flock excludes
-        # other writers for THAT cycle and the in-window append hook keeps
-        # the cache coherent for THAT owner's records.  Any other thread —
-        # or the same thread reading a different cycle from inside a window —
-        # must prove its source files are stat-identical, otherwise writes
-        # from other processes (or direct file fixtures) would be served
-        # stale forever.  The marker is the only producer of the fast path,
-        # and `None == <tuple>` is always false, so a cold instance always
+        # other writers for THAT cycle and the in-window append hook sweeps
+        # every reachable source/cycle key, so the next read recomputes from
+        # the newly committed journal bytes.  Any other thread — or the same
+        # thread reading a different cycle from inside a window — must prove
+        # its source files are stat-identical, otherwise writes from other
+        # processes (or direct file fixtures) would be served stale forever.
+        # The marker is the only producer of the fast path, and
+        # `None == <tuple>` is always false, so a cold instance always
         # revalidates.
         in_write_window = self._cycle_write_owner == (
             threading.get_ident(),
@@ -4123,9 +4124,12 @@ class FileOrchestrationJournalRepository:
         # A window entry carries `fingerprint=None` and can therefore only be
         # hit through the unvalidated branch above, so the wipe performed
         # when the window opens is the fast path's correctness precondition —
-        # not a performance measure — and the owner's own fast path still
-        # performs no tamper detection (that is #1567's scope; ownership only
-        # narrows the exposure from any thread to the window owner).
+        # not a performance measure — because the owner's hits bypass the
+        # fingerprint check.  Reads after the wipe may store their own
+        # `fingerprint=None` entries for the rest of the window; the owner's
+        # own fast path still performs no tamper detection (that is #1567's
+        # scope; ownership only narrows the exposure from any thread to the
+        # window owner).
         fingerprint = (
             None
             if in_write_window
@@ -4201,7 +4205,7 @@ class FileOrchestrationJournalRepository:
         reduce records into separate model containers rather than filtering
         the lossy ``model_id=None`` merge.  The caller holds the cycle write
         lock; the populated model caches therefore remain authoritative until
-        an append invalidates them.
+        an append sweeps them.
         """
         source_id = _normalize_file_source_id(source_id, field="source_id")
         normalized_model_ids = sorted({_safe_segment(model_id) for model_id in model_ids})
@@ -6856,13 +6860,13 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         record: Mapping[str, Any],
     ) -> None:
-        """Keep the in-window rows cache coherent with a just-appended record.
+        """Invalidate in-window rows-cache entries for the appended record.
 
-        Applying the record through the same reducer used by fresh reads is
-        equivalent to re-reading the journal: merges are decided by the
-        strictly increasing replay sequence, not list position. Derived
-        (model-scoped and segment-override) entries are dropped and rebuilt
-        lazily from the updated base entry.
+        Every reachable cache key for this source/cycle is removed, so the
+        next read recomputes from the newly committed journal bytes.  The
+        legacy `(source, cycle, None, None)` base-key update/store arm below
+        is unreachable under all current key producers and is not a
+        correctness premise.
         """
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)

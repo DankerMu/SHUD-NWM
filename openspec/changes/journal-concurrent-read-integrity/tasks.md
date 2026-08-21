@@ -25,11 +25,11 @@ issue 正文的行号锚在 `c2439f62`，已被后续合并推移。
   `in_write_window = self._cycle_write_owner == (threading.get_ident(), source_id, cycle_segment)`
   （`source_id` 已在 `:4090` 规范化、`cycle_segment` 已在 `:4096` 算出，就地可用）。
   **注意 `None == <tuple>` 恒假**，无需额外判空；但要有测试锁死冷实例（owner 为 `None`）走 fingerprint 路径。
-- [x] 1.4 更新 `:4098-4102` 的注释：写清楚免指纹的两条前提（cycle flock + append hook）
-  只在 **该 cycle 写窗的持有线程**上成立，**并写明入口 clear（`:6950-6951`）
-  是这条快路径的正确性前提**——可达的窗内 entry 带 `fingerprint=None`（`:4162`/`:6839`），
-  只能经免校验支命中，抹掉进窗前的 entry 的是那次 clear 而不是重算指纹（design D2；
-  `:4233-4237` 已由 D10.5 证实是守卫挡死的不可达 store，不得算作依据）。
+- [x] 1.4 更新 `:4098-4102` 的注释：写清楚免指纹的两条前提只在
+  **该 cycle 写窗的持有线程**上成立：cycle flock 排除其它写者；append 后按 source/cycle
+  sweep 全部可达 key，下一读从新 journal bytes 重算。**并写明入口 clear（`:6950-6951`）
+  是快路径正确性前提**——owner 对任何命中都免 fingerprint，入口 clear 必须先删掉 pre-window entry。
+  append hook 的 legacy `(None, None)` base store 与 `:4233-4237` store 都不可达，均不得作为 D2 依据。
   并按 design D8 写入与 #1567 的交叉裁定
   （免指纹分支的篡改暴露面从「任何线程」缩到「写窗 owner」，owner 自身的免指纹不做篡改检测，
   那是 #1567 的地盘）。
@@ -258,7 +258,7 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
 - 生产改动：`safe_fs.open_file_no_follow` 的 inode mismatch 新增
   `kind="identity_changed"`；journal 增加 keyed cycle owner 与 3 次、无 sleep、仅按 kind 分流的
   cached-read retry。其余 7 个 `_write_lock` 站点、两次 cache clear、所有安全拒绝均未改。
-- 新增 16 个 mutation-sensitive 测试，覆盖 3.1–3.9b、3.11、3.12 与冷实例；3.10 选择方案 (a)，
+- 新增 16 个测试（其中并发/变异敏感矩阵覆盖 3.1–3.9b、3.11、3.12 与冷实例）；3.10 选择方案 (a)，
   删除既有 same-cycle carve-out。并发 harness 复用 `_join_all`，用有界 Event（不是 sleep）协调。
 - Batched red proof：只 stash 两个生产源文件、保留新测试，运行
   `uv run pytest -q tests/test_file_orchestration_journal_read_cache.py` → **14 failed**；
@@ -299,3 +299,18 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
   避免为纯测试 import 新造 selector 路由缺口；测试语义不变。
 - Phase 2 修复：初版实现为 owner 清理多开一层 nested `try/finally`，违反 D1；已改回**单一既有
   `try/finally`**，owner assignment 是 try 首条，出口 clear 与 owner clear 同在既有 finally；最终无行为偏离。
+
+### 7.4 Round 1 review / verifier 修复证据
+
+- Round 1：6 个 reviewer（其中中断的 invariant lens 由 Sonnet 5 替补）产出 3 个去重候选；
+  独立 verifier 裁决 2 项 `CONFIRMED/FIX_NOW`、1 项 `PLAUSIBLE/DISCARD`。
+- `test-evidence`：task 3.8 缺 non-regular 一次尝试 pin。现已在同一测试增加 directory target，
+  经 journal chokepoint 断言 `attempts == 1` 与稳定 `file_journal_unreadable`。
+  broad-retry mutant（所有 `SafeFilesystemError` 都重试）实测 **RED：`assert 3 == 1`**；恢复后
+  journal + read-cache 双套件 **403 passed**。
+- `cache` 文档契约：round-1 verifier 追完所有 key producer，确认 append hook 的 legacy
+  `(source, cycle, None, None)` base store 无生产者、update/store arm 不可达。运行时安全机制实际是
+  append 后按 source/cycle sweep，下一读从新 journal bytes 重算。已同步纠正 source comment/docstring、
+  design D1/D2/D8/D10-D12、task 1.4 与 pipeline-job-persistence requirement；**未改 cache 运行时行为**。
+- 被丢弃的稳定性候选只在 fixture 明禁的并行 pytest 环境出现，且一处引用事实错误；最终独占全量证据
+  已覆盖支持域，不据此改并发 harness。
