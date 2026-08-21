@@ -18880,6 +18880,7 @@ def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None
     assert production_stage_for("publish_tiles") == "q_down_publish"
     assert production_stage_for("unknown_stage") == "production_run"
     assert production_status_for("skipped") == "superseded"
+    assert production_status_for("skip") == "superseded"
     assert production_status_for("complete") == "succeeded"
     assert production_status_for("source_cycle_unavailable") == "unavailable"
     assert production_status_for("lock_contended") == "blocked"
