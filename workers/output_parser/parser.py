@@ -639,6 +639,30 @@ def _resolved_run_identity(run_identity: RunIdentityKeys | None) -> tuple[int, i
     )
 
 
+def _replacement_key_bindings(
+    replacement_key: tuple[str, str, str],
+    run_key: int,
+    river_network_version_key: int,
+) -> tuple[int, int, str]:
+    """Surrogate-key bindings for one replacement group's three statements (#1442).
+
+    The replacement groups are still keyed by the row's text
+    (run_id, river_network_version_id, variable) because that is what the rows
+    carry per row; but the run and network keys are BATCH scalars — one
+    ``HydroRunContext`` per parse, already validated non-NULL by
+    ``_resolved_run_identity`` — so the group's key form is those two scalars
+    plus the group's own variable. That is exactly the identity the INSERT below
+    writes for every row of the batch, so the DELETE window and the rows it
+    makes room for cannot describe different runs.
+
+    ``variable`` binds as text against the ``variable_e`` enum column: psycopg2
+    adapts it to an unknown-typed literal that PostgreSQL coerces to
+    ``hydro.river_variable``, and an out-of-vocabulary value fails the
+    transaction closed rather than silently deleting nothing.
+    """
+    return (run_key, river_network_version_key, replacement_key[2])
+
+
 def _resolved_segment_keys(
     rows: tuple[RiverTimeseriesRow, ...],
     segment_keys: Mapping[str, int | None] | None,
@@ -828,22 +852,34 @@ class PsycopgOutputParserRepository:
         replacement_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
             with self._connection.cursor() as cursor:
-                # Existence probe first (pkey prefix descent). A bare min/max
-                # with these filters makes the planner walk valid_time_idx
-                # backward per chunk hunting for the first matching row — for
-                # a NEW run (0 rows) that is a full index scan of every chunk.
-                # The MATERIALIZED fence on the fallback blocks the same
-                # min/max transform so the window read stays on the pkey
-                # prefix and touches only this key's rows.
+                # Existence probe first. A bare min/max with these filters makes
+                # the planner walk valid_time_idx backward per chunk hunting for
+                # the first matching row — for a NEW run (0 rows) that is a full
+                # index scan of every chunk. The MATERIALIZED fence on the
+                # fallback blocks the same min/max transform, so the window read
+                # keeps its own index descent and touches only this key's rows.
+                #
+                # Which index (#1442): NOT the pkey any more. The pkey is
+                # (run_id, river_network_version_id, river_segment_id, variable,
+                # valid_time) (000006:56) and its leading column is unbound here
+                # — both statements bind run_key / river_network_version_key /
+                # variable_e. The descent is 000051's
+                # river_ts_selected_identity_key_valid_time_idx (run_key,
+                # basin_version_key, river_network_version_key, variable_e,
+                # valid_time DESC): `run_key` is the bound leading column, and
+                # the other two bound keys apply as index filters past the
+                # unbound basin_version_key. #1342 must keep that index (or an
+                # equivalent run_key-leading one) when it drops the text
+                # columns; the mitigation above is only as good as the descent.
                 cursor.execute(
                     """
                     SELECT 1 FROM hydro.river_timeseries
-                    WHERE run_id = %s
-                      AND river_network_version_id = %s
-                      AND variable = %s
+                    WHERE run_key = %s
+                      AND river_network_version_key = %s
+                      AND variable_e = %s
                     LIMIT 1
                     """,
-                    replacement_key,
+                    _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                 )
                 if cursor.fetchone() is None:
                     existing_window = (None, None)
@@ -853,15 +889,15 @@ class PsycopgOutputParserRepository:
                         WITH existing AS MATERIALIZED (
                             SELECT valid_time
                             FROM hydro.river_timeseries
-                            WHERE run_id = %s
-                              AND river_network_version_id = %s
-                              AND variable = %s
+                            WHERE run_key = %s
+                              AND river_network_version_key = %s
+                              AND variable_e = %s
                         )
                         SELECT MIN(valid_time) AS valid_time_min,
                                MAX(valid_time) AS valid_time_max
                         FROM existing
                         """,
-                        replacement_key,
+                        _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                     )
                     existing_window = cursor.fetchone()
             incoming_min, incoming_max = incoming_windows[replacement_key]
@@ -881,20 +917,22 @@ class PsycopgOutputParserRepository:
                 valid_time_min=valid_time_min,
                 valid_time_max=valid_time_max,
             )
-        for run_id, river_network_version_id, variable in replacement_keys:
-            replacement_min, replacement_max = replacement_windows[
-                (run_id, river_network_version_id, variable)
-            ]
+        for replacement_key in replacement_keys:
+            replacement_min, replacement_max = replacement_windows[replacement_key]
             self._fetch_all(
                 """
                 DELETE FROM hydro.river_timeseries
-                WHERE run_id = %s
-                  AND river_network_version_id = %s
-                  AND variable = %s
+                WHERE run_key = %s
+                  AND river_network_version_key = %s
+                  AND variable_e = %s
                   AND valid_time >= %s
                   AND valid_time <= %s
                 """,
-                (run_id, river_network_version_id, variable, replacement_min, replacement_max),
+                (
+                    *_replacement_key_bindings(replacement_key, run_key, river_network_version_key),
+                    replacement_min,
+                    replacement_max,
+                ),
             )
         value_rows = [
             (
@@ -944,6 +982,16 @@ class PsycopgOutputParserRepository:
                 quality_flag_e
             )
             VALUES %s
+            -- The conflict-update assignments below also refresh the identity
+            -- key/enum columns (#1442). For a key-converged row that is a no-op:
+            -- the excluded tuple carries exactly the keys the conflict target
+            -- resolved from. It restores the "replay heals" property the text
+            -- link used to give for free -- the keyed DELETE above only reaches
+            -- rows whose keys are already populated, so a NULL-key sentinel row
+            -- left by a pre-000050 write would otherwise survive replay
+            -- untouched. Keep the assignment list itself comment-free: the
+            -- shape tests parse it by splitting on commas
+            -- (tests/test_output_parser_dual_write.py).
             ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)
             DO UPDATE SET
                 basin_version_id = EXCLUDED.basin_version_id,
@@ -951,7 +999,11 @@ class PsycopgOutputParserRepository:
                 value = EXCLUDED.value,
                 unit = EXCLUDED.unit,
                 quality_flag = EXCLUDED.quality_flag,
+                run_key = EXCLUDED.run_key,
+                river_network_version_key = EXCLUDED.river_network_version_key,
                 basin_version_key = EXCLUDED.basin_version_key,
+                river_segment_key = EXCLUDED.river_segment_key,
+                variable_e = EXCLUDED.variable_e,
                 unit_e = EXCLUDED.unit_e,
                 quality_flag_e = EXCLUDED.quality_flag_e
             """,

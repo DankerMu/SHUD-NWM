@@ -52,8 +52,8 @@ from tests.test_sql_shape_helpers import (
     outer_predicates,
     sql_from_python,
     sql_literals,
-    text_fact_columns,
 )
+from tests.test_sql_shape_helpers import assert_text_fact_columns as _assert_text_fact_columns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MVT_SOURCE = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="utf-8")
@@ -101,29 +101,11 @@ def _identity_stats_cte(layer: str) -> str:
     return _slice(postgis_tile_sql(layer), "source_identity_stats AS (", "bounded_rows AS (")
 
 
-def _assert_text_fact_columns(
-    sql: str,
-    alias: str,
-    expected: set[str],
-    label: str,
-    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
-) -> None:
-    """The surface's text fact-column references are EXACTLY ``expected``.
-
-    Equality rather than "none of the forbidden ones": it is red both when a
-    forbidden column (``basin_version_id`` / ``river_segment_id`` / ``unit`` /
-    ``quality_flag``) reappears and when a sanctioned pushdown aid is silently
-    dropped, which would reintroduce the compressed-chunk collapse this change
-    was amended to avoid.
-
-    ``allowed`` is the ceiling the expectation itself is checked against, so a
-    future edit cannot widen a surface just by widening its expectation. It is
-    the constant-bound sanctioned set everywhere except the two national legs,
-    whose correlated lateral probe may additionally bind ``river_segment_id``
-    (see ``LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS``).
-    """
-    assert expected <= set(allowed), f"{label}: expectation exceeds the allowed pushdown set"
-    assert text_fact_columns(sql, alias) == expected, label
+# The equality-plus-ceiling assertion this file used to define privately now
+# lives in ``tests/test_sql_shape_helpers.py`` (#1442): the out-of-boundary
+# cleanup oracle asserts the same invariant on its own surfaces, and one
+# ceiling shared beats two that can drift. Imported under the old private name
+# so every call site below is unchanged.
 
 
 # ---------------------------------------------------------------------------

@@ -313,15 +313,72 @@ def test_output_parser_uncompressed_delete_is_time_bounded(
         if "DELETE FROM hydro.river_timeseries" in statement
     ]
     # One DELETE per (run_id, river_network_version_id, variable) key — only
-    # one such key in the fixture.
+    # one such key in the fixture. Since #1442 the statement locates rows by the
+    # surrogate keys, so the bindings are the batch's run_key / network key from
+    # _river_identity_kwargs plus the group's variable, then the window bounds.
     assert len(delete_calls) == 1
-    _, params = delete_calls[0]
-    assert params == ("run_a", "rivnet_v1", "q_down", _t(0), _t(2))
-    assert "valid_time >= %s" in delete_calls[0][0]
-    assert "valid_time <= %s" in delete_calls[0][0]
+    statement, params = delete_calls[0]
+    assert params == (7, 8, "q_down", _t(0), _t(2))
+    assert "WHERE run_key = %s" in statement
+    assert "AND river_network_version_key = %s" in statement
+    assert "AND variable_e = %s" in statement
+    for text_column in ("run_id", "river_network_version_id", "variable ="):
+        assert text_column not in statement, text_column
+    assert "valid_time >= %s" in statement
+    assert "valid_time <= %s" in statement
     assert len(execute_values_calls) == 1
     assert "INSERT INTO hydro.river_timeseries" in execute_values_calls[0][0]
     assert len(execute_values_calls[0][1]) == len(rows)
+
+
+def test_output_parser_same_window_replay_is_idempotent_on_the_keyed_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replaying one run's window twice issues the identical keyed replace (#1442).
+
+    The replace contract is "same run + same network + same variable + same
+    valid_time window, delete then insert". After the switch to surrogate keys
+    the window read, the guard input and the DELETE must all still describe that
+    one group — so a second pass over the same rows must produce byte-identical
+    statements and bindings, and the same number of inserted rows. A key that
+    leaked a per-call value (a row's text identity, an enumeration order) would
+    show up here as a diff between the two passes.
+    """
+    execute_values_calls = _patch_parser_execute_values(monkeypatch)
+    rows = _river_rows()
+    # Second pass sees the first pass's rows already stored, spanning the same
+    # window — the realistic replay, and the case where the window read matters.
+    passes = [
+        _RecordingConnection(),
+        _RecordingConnection(existing_river_window=(_t(0), _t(2))),
+    ]
+    for connection in passes:
+        _output_parser_repository(connection).upsert_river_timeseries(
+            rows, batch_size=len(rows), **_river_identity_kwargs()
+        )
+
+    first_pass, replay = passes
+    # The replay really took the other branch: the existence probe found the
+    # stored rows, so the MATERIALIZED window read ran. Without this the two
+    # passes would be trivially equal by both doing nothing interesting.
+    assert not any("WITH existing AS MATERIALIZED" in statement for statement, _ in first_pass.executions)
+    assert any("WITH existing AS MATERIALIZED" in statement for statement, _ in replay.executions)
+
+    def _delete(connection: _RecordingConnection) -> tuple[str, tuple[Any, ...]]:
+        return next(
+            (statement, params)
+            for statement, params in connection.executions
+            if "DELETE FROM hydro.river_timeseries" in statement
+        )
+
+    # Same statement, same bindings, same window — the replay is a no-op in
+    # effect even though it reached the fact table by a different path.
+    assert _delete(first_pass) == _delete(replay)
+    assert _delete(replay)[1] == (7, 8, "q_down", _t(0), _t(2))
+    # And every row is re-inserted both times: window emptied, batch restored.
+    assert len(execute_values_calls) == 2
+    assert [len(call[1]) for call in execute_values_calls] == [len(rows), len(rows)]
+    assert execute_values_calls[0][1] == execute_values_calls[1][1]
 
 
 def test_output_parser_replacement_window_includes_existing_rows_before_guard(
@@ -346,7 +403,19 @@ def test_output_parser_replacement_window_includes_existing_rows_before_guard(
         for statement, params in connection.executions
         if "DELETE FROM hydro.river_timeseries" in statement
     )
-    assert delete_call[1] == ("run_a", "rivnet_v1", "q_down", existing_min, existing_max)
+    assert delete_call[1] == (7, 8, "q_down", existing_min, existing_max)
+    # The window read that produced those bounds located rows by the same keys —
+    # if it drifted back to text the guard's input and the DELETE's coverage
+    # would describe different row sets (#1442, design D4).
+    probe_call, window_call = (
+        (statement, params)
+        for statement, params in connection.executions
+        if "hydro.river_timeseries" in statement and "DELETE" not in statement and "INSERT" not in statement
+    )
+    assert probe_call[1] == (7, 8, "q_down")
+    assert window_call[1] == (7, 8, "q_down")
+    assert "WHERE run_key = %s" in probe_call[0]
+    assert "WHERE run_key = %s" in window_call[0]
 
 
 # ---------------------------------------------------------------------------

@@ -26,16 +26,19 @@ def main() -> int:
         )
         run = dict(cur.fetchone() or {})
         cur.execute(
+            # #1442: counted and filtered on the surrogate keys. The smoke
+            # database has no compressed chunks, so no transitional text
+            # pushdown aid applies here.
             """
             SELECT count(*) AS rows,
-                   count(DISTINCT river_segment_id) AS segment_count,
+                   count(DISTINCT river_segment_key) AS segment_count,
                    min(valid_time) AS first_valid_time,
                    max(valid_time) AS last_valid_time,
                    min(value) AS min_m3s,
                    max(value) AS max_m3s,
                    avg(value) AS avg_m3s
             FROM hydro.river_timeseries
-            WHERE run_id = %s
+            WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)
             """,
             (run_id,),
         )

@@ -70,8 +70,11 @@ vocabulary:
   its own private list. The third set exists because the boundary is
   positional: inside the national legs' correlated ``CROSS JOIN LATERAL``
   probe, ``river_segment_id`` is a per-loop constant that really does push
-  down, while on every constant-binding surface it would still be the
-  forbidden text fact join.
+  down, while on the display surfaces this module's default serves it would
+  still be the forbidden text fact join. #1442's forecast_store segment blocks
+  are the second such position (a literal-bound segment identity, design
+  D10.7); their ceiling is expressed at their own oracle rather than here, so
+  the default this module hands every other caller stays narrow.
 * :func:`outer_predicates` — sub-selects stripped, comments removed and
   whitespace collapsed, so an "immediately followed by its key counterpart"
   adjacency assertion can be written as one exact substring and stays readable
@@ -103,9 +106,18 @@ _WHITESPACE = re.compile(r"\s+")
 # segmentby run_id, river_network_version_id, river_segment_id; orderby
 # variable, valid_time) and TimescaleDB 2.10.2 cannot push an integer-key
 # predicate through that. `river_segment_id` is a segmentby column too but is
-# NOT sanctioned on these surfaces: they bind identity as a constant and reach
-# the fact table once, so a `river_segment_id` predicate could only be a text
-# fact join, which the delta forbids outright.
+# NOT sanctioned by this shared default: on the display surfaces #1341 owns it
+# would be a text fact join (they reach the fact table once per row of a
+# segment relation), which the delta forbids outright.
+#
+# Two adjudicated position-dependent exceptions extend this default WITHOUT
+# widening it, so no surface inherits them by accident:
+# LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS below (#1341's correlated probe bodies),
+# and #1442's eight constant-binding forecast_store segment blocks, which bind
+# `river_segment_id` as a literal and measurably need it for segmentby pruning
+# (design D10.7). The latter lives in
+# `tests/test_river_ts_text_identity_cleanup.py` as that oracle's own ceiling,
+# passed per call site through `assert_text_fact_columns(..., allowed=...)`.
 SANCTIONED_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = (
     "run_id",
     "river_network_version_id",
@@ -130,6 +142,23 @@ FORBIDDEN_TEXT_FACT_COLUMNS: tuple[str, ...] = (
 # either leg lives outside the lateral body.
 LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
 TEXT_IDENTITY_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + FORBIDDEN_TEXT_FACT_COLUMNS
+
+# The key/enum column each text identity column is transitional FOR. A retained
+# text aid is only ever allowed to narrow, which is exactly the statement "it is
+# AND-ed with this column in the same conjunction" — see
+# :func:`assert_aid_is_conjoined_with_its_counterpart`.
+TEXT_AID_COUNTERPARTS: dict[str, str] = {
+    "run_id": "run_key",
+    "river_network_version_id": "river_network_version_key",
+    "river_segment_id": "river_segment_key",
+    "basin_version_id": "basin_version_key",
+    "variable": "variable_e",
+    # Not identity predicates on any switched surface, but 000050 gives them a
+    # twin too, and the map is asserted total against TEXT_IDENTITY_COLUMNS so a
+    # column cannot be classified without naming what makes it redundant.
+    "unit": "unit_e",
+    "quality_flag": "quality_flag_e",
+}
 
 
 def _scan_quoted(sql: str, start: int, quote: str) -> int:
@@ -222,6 +251,49 @@ def strip_scalar_subqueries(sql: str) -> str:
             index = end
             continue
         if character == "(" and _SUBQUERY_START.match(sql, index) and _in_comparison_value_position(kept):
+            index = _skip_balanced(sql, index)
+            continue
+        kept.append(character)
+        index += 1
+    return "".join(kept)
+
+
+def strip_all_subqueries(sql: str) -> str:
+    """Return ``sql`` with EVERY parenthesized sub-``SELECT`` removed.
+
+    The blunt companion to :func:`strip_scalar_subqueries`, added for #1442's
+    bare-fragment face. Those call sites resolve identity with an ``IN``
+    sub-select — ``run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id
+    = %s)`` — which is deliberately NOT comparison position, so the precise
+    stripper keeps it and the authority table's own ``WHERE run_id = %s`` reads
+    as a regression.
+
+    Only safe where the fragment has no CTE and no derived table, because this
+    deletes those too. That is exactly the shape of a WHERE fragment or a single
+    flat statement; anything with a ``WITH`` must keep using
+    :func:`outer_predicates`, or its body vanishes and its pins go vacuous.
+    """
+    kept: list[str] = []
+    index = 0
+    length = len(sql)
+    while index < length:
+        character = sql[index]
+        if character in "'\"":
+            end = _scan_quoted(sql, index, character)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("--", index):
+            end = _scan_line_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("/*", index):
+            end = _scan_block_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if character == "(" and _SUBQUERY_START.match(sql, index):
             index = _skip_balanced(sql, index)
             continue
         kept.append(character)
@@ -330,6 +402,120 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
         for column in TEXT_IDENTITY_COLUMNS
         if re.search(rf"\b{re.escape(alias)}\.{column}\b", outer) is not None
     }
+
+
+def assert_text_fact_columns(
+    sql: str,
+    alias: str,
+    expected: set[str],
+    label: str,
+    allowed: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+) -> None:
+    """The surface's text fact-column references are EXACTLY ``expected``.
+
+    Equality rather than "none of the forbidden ones": it is red both when a
+    forbidden column (``basin_version_id`` / ``river_segment_id`` / ``unit`` /
+    ``quality_flag``) reappears and when a sanctioned pushdown aid is silently
+    dropped, which would reintroduce the compressed-chunk collapse this change
+    was amended to avoid.
+
+    ``allowed`` is the ceiling the expectation itself is checked against, so a
+    future edit cannot widen a surface just by widening its expectation. It is
+    the constant-bound sanctioned set except on two adjudicated surfaces that
+    pass their own wider tuple: the two national legs, whose correlated lateral
+    probe may additionally bind ``river_segment_id`` (see
+    :data:`LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS`), and #1442's eight
+    forecast_store segment blocks, whose literal-bound ``river_segment_id`` aid
+    is the measured segmentby-pruning remedy of design D10.7 (ceiling defined in
+    ``tests/test_river_ts_text_identity_cleanup.py``, deliberately NOT folded
+    into the shared constant so no display surface inherits it).
+
+    Lives here rather than in one consumer (it was private to
+    ``tests/test_river_ts_read_path_surrogate_keys.py`` until #1442) because the
+    out-of-boundary cleanup oracle asserts the very same invariant on a second
+    set of surfaces: two copies of a ceiling check are two ceilings.
+    """
+    assert expected <= set(allowed), f"{label}: expectation exceeds the allowed pushdown set"
+    assert text_fact_columns(sql, alias) == expected, label
+
+
+def assert_aid_is_conjoined_with_its_counterpart(sql: str, alias: str, aid: str, label: str) -> None:
+    """The adjacency invariant: EVERY ``alias.aid`` comparison is AND-ed to its twin.
+
+    A retained text predicate is sanctioned only as a REDUNDANT pushdown aid. It
+    is redundant precisely when the key (or enum) predicate that supersedes it is
+    AND-ed to it — then the aid can only narrow, and #1342 can delete it without
+    changing the result set. An aid that drifts away from its counterpart becomes
+    load-bearing, and dropping the counterpart turns the surface back into a
+    text-identity consumer while every "is the text column still there" pin
+    stays green.
+
+    What is actually checked, exactly
+    ---------------------------------
+
+    On :func:`outer_predicates` output (key-resolution sub-selects stripped, so
+    ``rt.run_key = (SELECT ...)`` reads as ``rt.run_key =``, which is all this
+    needs; comments removed; whitespace collapsed to a single folded line, so
+    re-indenting the SQL cannot change the verdict):
+
+    * every occurrence of ``alias.aid`` **in comparison position** (followed by
+      ``=`` / ``<>`` / ``!=``) must have ``alias.counterpart`` separated from it
+      by exactly one ``AND`` — no other `` AND ``-separated conjunct in between.
+      Either order counts: ``aid AND counterpart`` and ``counterpart AND aid``
+      are the same conjunction.
+    * a bare projection reference (``SELECT rt.variable``, ``GROUP BY
+      rt.run_id``) is NOT an occurrence: it binds nothing, so there is nothing
+      for it to be redundant to. Same operator-anchored discipline as
+      ``_assert_aids_are_marked``.
+
+    Universal, not existential (#1442 round-2, P3): the first conjoined pair used
+    to satisfy the whole statement, so a surface could grow a SECOND, bare
+    predicate on the same text column and stay green.
+
+    What is NOT checked
+    -------------------
+
+    Parenthesis structure, ``OR`` branches and ``NOT`` are not analyzed — this
+    operates on the flat folded text, so it cannot tell an aid inside a guard's
+    ``OR`` branch from one outside it, and it cannot see that a guard's
+    parentheses still close where they used to. The scan-guard fold-away shape
+    is protected instead by the whole-guard verbatim pins (#1442 round-2, F5) in
+    ``tests/test_river_ts_text_identity_cleanup.py`` and
+    ``tests/test_qhh_latest_fallback_pushdown.py``; this invariant does not
+    subsume them.
+
+    #1341 pinned adjacency per surface as hand-written verbatim substrings (see
+    ``tests/test_river_ts_read_path_surrogate_keys.py``'s coverage-scan pins).
+    This is the same statement, computed instead of transcribed, so every
+    surface a register renders inherits it.
+    """
+    counterpart = TEXT_AID_COUNTERPARTS[aid]
+    outer = outer_predicates(sql)
+    aid_reference = rf"\b{re.escape(alias)}\.{re.escape(aid)}\b"
+    counterpart_reference = rf"\b{re.escape(alias)}\.{re.escape(counterpart)}\b"
+    comparison = r"\s*(?:=|<>|!=)\s*"
+    # A compared value that itself spans an ``AND`` means another conjunct sits
+    # between the pair, so they are adjacent only by accident of text order.
+    # `%(scan_run_id)s` contains parentheses, so "no parens" is not usable as the
+    # separator test; the gap is written AND-free instead, which also keeps the
+    # leftmost-match rule from picking a far counterpart over a near one.
+    gap = r"(?:(?!\sAND\s).)*?"
+    forward = re.compile(rf"{aid_reference}{comparison}{gap}\s+AND\s+{counterpart_reference}")
+    # Anchored at the end of the text preceding the occurrence, so the
+    # counterpart must be the conjunct immediately before this very aid.
+    backward = re.compile(rf"{counterpart_reference}{comparison}{gap}\s+AND\s+$")
+
+    occurrences = [match.start() for match in re.finditer(rf"{aid_reference}{comparison}", outer)]
+    assert occurrences, f"{label}: text aid {alias}.{aid} is not compared anywhere"
+    for position in occurrences:
+        if forward.match(outer, position) is not None:
+            continue
+        if backward.search(outer[:position]) is not None:
+            continue
+        raise AssertionError(
+            f"{label}: text aid {alias}.{aid} is not AND-ed with {alias}.{counterpart} "
+            f"at offset {position}: ...{outer[max(0, position - 60) : position + 60]}..."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +741,137 @@ def test_text_fact_columns_ignores_columns_inside_key_resolution_subqueries() ->
     )
 
     assert text_fact_columns(sql, "ts") == set()
+
+
+def test_strip_all_subqueries_removes_an_in_position_key_resolution() -> None:
+    """The precise stripper keeps it (not comparison position); this one must not."""
+    fragment = "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
+
+    assert "run_id = ANY(%s)" in strip_scalar_subqueries(fragment)
+    assert strip_all_subqueries(fragment) == "run_key IN "
+
+
+def test_strip_all_subqueries_leaves_a_bare_text_predicate_visible() -> None:
+    """Non-vacuity: the regression it exists to catch must survive stripping."""
+    assert strip_all_subqueries("run_id = ANY(%s)") == "run_id = ANY(%s)"
+
+
+def test_strip_all_subqueries_also_eats_cte_bodies_which_is_why_it_is_fragment_only() -> None:
+    """Documented hazard, pinned so the docstring cannot drift from behaviour."""
+    sql = "WITH existing AS MATERIALIZED (SELECT valid_time FROM t WHERE run_id = %s) SELECT 1"
+
+    assert "run_id = %s" not in strip_all_subqueries(sql)
+    assert "run_id = %s" in outer_predicates(sql)
+
+
+def test_assert_text_fact_columns_rejects_an_expectation_above_the_ceiling() -> None:
+    """Widening a surface by widening its own expectation must not be possible."""
+    sql = "FROM hydro.river_timeseries ts WHERE ts.river_segment_id = :segment_id"
+
+    try:
+        assert_text_fact_columns(sql, "ts", {"river_segment_id"}, "widened surface")
+    except AssertionError as error:
+        assert "exceeds the allowed pushdown set" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("assert_text_fact_columns accepted a forbidden expectation")
+
+
+def test_assert_text_fact_columns_is_red_when_a_sanctioned_aid_disappears() -> None:
+    sql = "FROM hydro.river_timeseries ts WHERE ts.run_key = 1"
+
+    try:
+        assert_text_fact_columns(sql, "ts", {"run_id"}, "aid dropped")
+    except AssertionError as error:
+        assert "aid dropped" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("assert_text_fact_columns accepted a dropped pushdown aid")
+
+
+def test_adjacency_accepts_the_pair_in_either_order_across_a_reindent() -> None:
+    forward = "WHERE rt.variable = 'q_down'\n  AND rt.variable_e = 'q_down'::hydro.river_variable"
+    reversed_order = "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'"
+
+    for sql in (forward, reversed_order):
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "pair")
+
+
+def test_adjacency_accepts_a_pair_whose_counterpart_is_a_stripped_key_resolution() -> None:
+    """The switched shape's counterpart is a sub-select, which the stripper eats."""
+    sql = (
+        "WHERE (%(scan_run_id)s IS NULL\n"
+        "       OR (rt.run_id = %(scan_run_id)s\n"
+        "           AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)))"
+    )
+
+    assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "run_id", "scan guard")
+
+
+def test_adjacency_is_red_when_the_counterpart_is_gone() -> None:
+    sql = "WHERE rt.variable = 'q_down' AND rt.valid_time >= %s"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "counterpart dropped")
+    except AssertionError as error:
+        assert "not AND-ed with rt.variable_e" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted an aid whose enum counterpart was deleted")
+
+
+def test_adjacency_is_red_when_another_conjunct_separates_the_pair() -> None:
+    """Same statement, different conjunction: the aid is no longer redundant.
+
+    This is the case a plain "both columns appear in the SQL" check cannot see,
+    and it is why the invariant is written as adjacency rather than presence.
+    """
+    sql = "WHERE rt.variable = 'q_down' AND rt.valid_time >= %s AND rt.variable_e = 'q_down'"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "separated pair")
+    except AssertionError as error:
+        assert "separated pair" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a pair split across conjuncts")
+
+
+def test_adjacency_is_red_when_a_SECOND_occurrence_of_the_aid_is_bare() -> None:
+    """Universal, not existential (#1442 round-2, P3).
+
+    One conjoined pair used to satisfy the whole statement, so a surface could
+    grow a SECOND text predicate on the same column — load-bearing, with no key
+    counterpart to make it redundant — and #1342 would delete a predicate that
+    was narrowing the result set. Every comparison occurrence is checked, so the
+    green first pair no longer covers the bare second one.
+    """
+    sql = (
+        "WHERE rt.variable = 'q_down' AND rt.variable_e = 'q_down' "
+        "AND rt.valid_time >= %s AND rt.variable <> 'q_up'"
+    )
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "bare second occurrence")
+    except AssertionError as error:
+        assert "bare second occurrence" in str(error)
+        assert "not AND-ed with rt.variable_e" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a second, unconjoined occurrence of the aid")
+
+
+def test_adjacency_is_alias_scoped() -> None:
+    """A counterpart on a DIFFERENT relation does not satisfy the fact table's aid."""
+    sql = "WHERE rt.variable = 'q_down' AND other.variable_e = 'q_down'"
+
+    try:
+        assert_aid_is_conjoined_with_its_counterpart(sql, "rt", "variable", "wrong alias")
+    except AssertionError as error:
+        assert "wrong alias" in str(error)
+    else:  # pragma: no cover - the assertion above is the contract
+        raise AssertionError("adjacency accepted a counterpart on another relation")
+
+
+def test_every_text_identity_column_has_a_declared_counterpart() -> None:
+    """No text column may be sanctioned somewhere with no twin to be redundant to."""
+    assert set(TEXT_AID_COUNTERPARTS) == set(TEXT_IDENTITY_COLUMNS)
+    assert set(LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS) <= set(TEXT_AID_COUNTERPARTS)
 
 
 def test_sanctioned_and_forbidden_column_sets_are_disjoint_and_complete() -> None:

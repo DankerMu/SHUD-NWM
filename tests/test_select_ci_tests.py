@@ -274,6 +274,9 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         "tests/test_migrations.py",
         "tests/test_model_registry_list_basins.py",
         "tests/test_qhh_latest_fallback_pushdown.py",
+        # #1442 added the zero-text-identity oracle for this file's nine
+        # registered statements.
+        "tests/test_river_ts_text_identity_cleanup.py",
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -307,7 +310,15 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
     assert selected == [
         "tests/test_display_coverage_refresh.py",
         "tests/test_migrations.py",
+        # #1442 round-2: the latest-product fallback's fold-away pins are
+        # whole-guard verbatim substrings of `outer_predicates` output, so the
+        # helper can blunt them too.
+        "tests/test_qhh_latest_fallback_pushdown.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        # #1442's out-of-boundary cleanup oracle is the fourth consumer: it
+        # imports assert_text_fact_columns / strip_all_subqueries from the
+        # helper, so a helper-only diff can blunt it the same way.
+        "tests/test_river_ts_text_identity_cleanup.py",
         # Every changed test suite drags the meta-guard suite along, because a
         # test-file PR is exactly the change class that can invalidate the
         # tree-derived guards. Not part of the oracle closure; asserted here so
@@ -333,6 +344,39 @@ def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins(
     assert "tests/test_river_ts_read_path_surrogate_keys.py" in probe_selected
 
 
+def test_select_tests_maps_every_registered_cleanup_source_to_the_zero_text_oracle() -> None:
+    """#1442's mirror of the rule above, derived rather than frozen.
+
+    ``tests/test_river_ts_text_identity_cleanup.py`` is the machine-checkable
+    "no consumer still reads text identity" claim that #1342's irreversible
+    column drop rests on. It is only worth anything if a diff to a guarded file
+    actually runs it, and six of the nine registered files were matching only
+    broad rules (or the core-smoke fallback) that assert nothing about their
+    SQL.
+
+    The expectation is READ FROM the oracle's own register, so adding a file
+    there without wiring it here is red — the failure mode a frozen second copy
+    of the list cannot catch.
+
+    ``tests/integration_helpers.py`` is the single documented exception: it is
+    an issue-#1487 support-module scope carve-out, so it routes to the
+    meta-guard suite only. Named explicitly rather than filtered by prefix, so
+    the carve-out cannot silently grow.
+    """
+    from tests.test_river_ts_text_identity_cleanup import REGISTERED_SOURCES
+
+    oracle = "tests/test_river_ts_text_identity_cleanup.py"
+    carve_out = "tests/integration_helpers.py"
+    assert carve_out in REGISTERED_SOURCES
+
+    for source in REGISTERED_SOURCES:
+        selected = select_tests([source], repo_root=Path("."))
+        if source == carve_out:
+            assert selected == [SELECTOR_META_GUARD_TEST], source
+            continue
+        assert oracle in selected, source
+
+
 def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> None:
     # scripts/node27_autopipeline.py has no same-name tests/test_node27_autopipeline.py,
     # so before its explicit rule it dropped into the core-smoke fallback and none
@@ -346,6 +390,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_display_publish_status_only.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        # #1442: the two per-tick criteria are registered oracle statements.
+        "tests/test_river_ts_text_identity_cleanup.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 

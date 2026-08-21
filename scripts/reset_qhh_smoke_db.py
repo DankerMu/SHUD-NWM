@@ -42,7 +42,16 @@ def main() -> int:
             "forcing_version_id",
         )
 
-        _delete(cur, deleted, "hydro.river_timeseries", "run_id = ANY(%s)", (run_ids,))
+        # #1442: located by surrogate key. Sound in this order only because the
+        # hydro_run rows this resolves against are deleted further down, after
+        # every child table.
+        _delete(
+            cur,
+            deleted,
+            "hydro.river_timeseries",
+            "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
+            (run_ids,),
+        )
         _delete(cur, deleted, "hydro.state_snapshot", "model_id = %s OR run_id = ANY(%s)", (MODEL_ID, run_ids))
         _delete(cur, deleted, "ops.qc_result", _qc_where(), (MODEL_ID, run_ids, forcing_ids, "qhh_%_smoke"))
         _delete(cur, deleted, "ops.pipeline_job", "run_id = ANY(%s)", (run_ids,))

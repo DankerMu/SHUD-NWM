@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -315,10 +315,14 @@ class TilePublisher:
         if "forcing_version_id" not in forcing_columns:
             forcing_table_available = False
             forcing_columns = set()
+        # The variable filter is the enum column (#1442). Its transitional TEXT
+        # twin lives in the JOIN's ON clause, where the marker comment can sit on
+        # its own line — these fragments are joined onto ONE line, so a `--`
+        # comment here would swallow every clause after it.
         where_clauses = [
             "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
             "h.status IN ('succeeded', 'parsed', 'published')",
-            "r.variable = 'q_down'",
+            "r.variable_e = 'q_down'",
             "lower(h.source_id) = :source_id",
         ]
         params: dict[str, Any] = {"source_id": cycle["source_id"].lower()}
@@ -329,10 +333,6 @@ class TilePublisher:
             where_clauses.append("h.cycle_time = :cycle_time")
             params["cycle_time"] = cycle["cycle_time"]
 
-        agg_unit = "GROUP_CONCAT(DISTINCT r.unit)" if is_sqlite else "STRING_AGG(DISTINCT r.unit, ',')"
-        agg_quality = (
-            "GROUP_CONCAT(DISTINCT r.quality_flag)" if is_sqlite else "STRING_AGG(DISTINCT r.quality_flag, ',')"
-        )
         optional = self._qdown_optional_selects(hydro_columns)
         forcing = self._qdown_forcing_selects(
             table_available=forcing_table_available,
@@ -340,28 +340,12 @@ class TilePublisher:
         )
         rows = session.execute(
             text(
-                f"""
-                SELECT h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
-                       h.source_id, h.cycle_time, h.scenario_id,
-                       r.river_network_version_id,
-                       {optional['select']}
-                       {forcing['select']}
-                       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count,
-                       COUNT(r.value) AS row_count,
-                       MIN(r.valid_time) AS first_valid_time,
-                       MAX(r.valid_time) AS last_valid_time,
-                       {agg_unit} AS units,
-                       {agg_quality} AS quality_flags
-                FROM hydro.hydro_run h
-                JOIN hydro.river_timeseries r
-                  ON r.run_id = h.run_id AND r.variable = 'q_down'
-                {forcing['join']}
-                WHERE {' AND '.join(where_clauses)}
-                GROUP BY h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
-                         h.source_id, h.cycle_time, h.scenario_id,
-                         r.river_network_version_id{optional['group']}{forcing['group']}
-                ORDER BY h.run_id
-                """
+                _qdown_discovery_sql(
+                    is_sqlite=is_sqlite,
+                    optional=optional,
+                    forcing=forcing,
+                    where_clauses=where_clauses,
+                )
             ),
             params,
         ).mappings()
@@ -2615,6 +2599,82 @@ def _quality_flags(value: Any) -> list[str]:
     if isinstance(value, list | tuple | set):
         return sorted({str(item).strip() for item in value if str(item).strip()})
     return [str(value)]
+
+
+def _qdown_discovery_sql(
+    *,
+    is_sqlite: bool,
+    optional: Mapping[str, str],
+    forcing: Mapping[str, str],
+    where_clauses: Sequence[str],
+) -> str:
+    """Render the q_down publish-discovery aggregate for one dialect.
+
+    A pure function rather than an inline f-string so both legs are assertable
+    without a database: the cleanup oracle (#1442) renders each dialect and
+    checks the fact-table predicate shape, and the sqlite leg is additionally
+    exercised end to end by ``tests/test_tile_publisher.py``.
+
+    Identity handling (#1442, migration 000050/000051):
+
+    * the fact table is reached by ``r.run_key = h.run_key`` — key-only. The
+      run's identity arrives through the ``hydro_run`` join here, and a text
+      join equality is both unpushable and forbidden by the delta.
+    * ``r.variable`` survives as the one sanctioned transitional pushdown aid
+      (it is a literal, and compressed chunks are still ordered by the text
+      column), AND-ed with ``r.variable_e`` so it can only narrow. It goes with
+      the text columns in #1342.
+    * segment identity is counted on the KEYS. PostgreSQL counts the row tuple;
+      sqlite rejects ``COUNT(DISTINCT (a, b))`` ("row value misused") so its leg
+      concatenates the two integers, which cannot collide the way the old
+      ``network_id || '::' || segment_id`` text concatenation could.
+      Semantics note: the old text concatenation dropped a row whose either side
+      was NULL, the tuple form counts ``(NULL, NULL)`` as one. That difference
+      is unreachable while the seven keys are written all-or-nothing per row
+      (dual-write and backfill both write whole rows), which the node-27
+      preflight receipt re-verifies before this ships.
+    * unit / quality_flag aggregate the ENUM columns; on PostgreSQL they are
+      cast back to text, so the aggregated string is byte-identical.
+    * ``river_network_version_id`` is grouped by its KEY and restored from
+      ``core.river_network_version``, so the ``layer_id`` assembled downstream
+      (``q_down_{run_id}_{network}``) is unchanged.
+    """
+    if is_sqlite:
+        segment_count = "COUNT(DISTINCT r.river_network_version_key || ':' || r.river_segment_key)"
+        agg_unit = "GROUP_CONCAT(DISTINCT r.unit_e)"
+        agg_quality = "GROUP_CONCAT(DISTINCT r.quality_flag_e)"
+    else:
+        segment_count = "COUNT(DISTINCT (r.river_network_version_key, r.river_segment_key))"
+        agg_unit = "STRING_AGG(DISTINCT r.unit_e::text, ',')"
+        agg_quality = "STRING_AGG(DISTINCT r.quality_flag_e::text, ',')"
+    return f"""
+                SELECT h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
+                       h.source_id, h.cycle_time, h.scenario_id,
+                       rnv.river_network_version_id,
+                       {optional['select']}
+                       {forcing['select']}
+                       {segment_count} AS segment_count,
+                       COUNT(r.value) AS row_count,
+                       MIN(r.valid_time) AS first_valid_time,
+                       MAX(r.valid_time) AS last_valid_time,
+                       {agg_unit} AS units,
+                       {agg_quality} AS quality_flags
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON r.run_key = h.run_key
+                 -- transitional compressed-chunk pushdown aid, remove with #1342
+                 AND r.variable = 'q_down'
+                 AND r.variable_e = 'q_down'
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_key = r.river_network_version_key
+                {forcing['join']}
+                WHERE {' AND '.join(where_clauses)}
+                GROUP BY h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
+                         h.source_id, h.cycle_time, h.scenario_id,
+                         r.river_network_version_key,
+                         rnv.river_network_version_id{optional['group']}{forcing['group']}
+                ORDER BY h.run_id
+                """
 
 
 def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:

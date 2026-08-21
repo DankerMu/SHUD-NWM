@@ -912,8 +912,12 @@ def _already_ingested_runs(
                        h.init_state_id,
                        MAX(rt.created_at) AS parsed_at
                 FROM hydro.hydro_run h
+                -- #1442: key-only join. The run's identity arrives from
+                -- hydro_run, never as a literal here, so there is no
+                -- transitional text aid to add — a text equality would only be
+                -- the forbidden text fact join, and it is not pushdown material.
                 JOIN hydro.river_timeseries rt
-                  ON rt.run_id = h.run_id
+                  ON rt.run_key = h.run_key
                 WHERE h.run_id = ANY(%s)
                   AND h.status IN ('parsed', 'published')
                 GROUP BY h.run_id, h.init_state_id
@@ -1118,8 +1122,11 @@ def _publish_display_runs(database_url: str) -> int:
                     UPDATE hydro.hydro_run h
                     SET status = 'published'
                     WHERE h.status = 'parsed'
+                      -- #1442: key-only correlation, same reasoning as
+                      -- _already_ingested_runs — the run arrives by join, so no
+                      -- transitional text aid applies.
                       AND EXISTS (
-                          SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id
+                          SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = h.run_key
                       )
                     """
                 )

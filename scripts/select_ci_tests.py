@@ -198,14 +198,24 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
 # tests/test_sql_shape_helpers.py is both a test module and the SQL-shape
 # ORACLE the #1341 read-path negative pins are written against
 # (`strip_scalar_subqueries`). Its own self-tests run because it self-selects,
-# but a helper-only diff would otherwise leave the three consumer files
-# unselected — and a silently over-eager stripper makes those pins vacuous
-# without failing anything here. The rule pulls the consumers in with it.
+# but a helper-only diff would otherwise leave the consumer files unselected —
+# and a silently over-eager stripper makes those pins vacuous without failing
+# anything here. The rule pulls the consumers in with it.
+#
+# #1442 added a fourth consumer, tests/test_river_ts_text_identity_cleanup.py,
+# and moved two more pieces of shared vocabulary into the helper
+# (`assert_text_fact_columns`, `strip_all_subqueries`), so a helper-only diff can
+# now blunt the out-of-boundary cleanup oracle too.
 SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
     "tests/test_sql_shape_helpers.py",
     "tests/test_river_ts_read_path_surrogate_keys.py",
+    "tests/test_river_ts_text_identity_cleanup.py",
     "tests/test_display_coverage_refresh.py",
     "tests/test_migrations.py",
+    # Fifth consumer (#1442 round-2): the latest-product fallback's scan-guard
+    # fold-away pins moved from split substrings to whole-guard verbatim ones,
+    # which only stay readable through `outer_predicates`.
+    "tests/test_qhh_latest_fallback_pushdown.py",
 )
 
 
@@ -251,6 +261,13 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
 # the module and the missing suite. `tests/integration_helpers.py` and
 # `tests/conftest.py` are deliberately absent — an issue-#1487 scope carve-out
 # recorded with its measured partial coverage in that suite's allowlist.
+# #1442 note: `tests/integration_helpers.py` also owns a statement registered in
+# tests/test_river_ts_text_identity_cleanup.py, so a diff to it should ideally
+# select that oracle. It does not, because of the carve-out above: the file maps
+# to the meta-guard suite only. The oracle still guards it on every OTHER path —
+# it is a consumer of tests/test_sql_shape_helpers.py, so the SQL_SHAPE_ORACLE
+# rule runs it on a helper diff, and it self-selects on its own diff. Closing the
+# gap belongs to #1487's carve-out, not here.
 SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/fixtures/mapping_builder/in_memory_grid_snapshot.py",
@@ -533,6 +550,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_analysis_pipeline.py",
             "tests/test_timescale_write_guard_wired.py",
+            # #1442: the replace chain's three statements plus the dual-write
+            # INSERT are registered in the zero-text-identity oracle. It sits on
+            # the narrow parser.py rule rather than the package directory rule
+            # because parser.py is the only module in the package the oracle
+            # reads.
+            "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),
     PathTestRule(
@@ -656,6 +679,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_forcing_copyback_backfill.py",
             "tests/test_static_serving.py",
             "tests/test_cli_publish_qdown.py",
+            # #1442: publisher.py (B) and forcing_copyback_backfill.py (C) are
+            # both in the zero-text-identity oracle's register, and both ride
+            # this directory rule. The four suites above assert behaviour, not
+            # the SQL identity shape, so the oracle joins the directory list
+            # rather than getting two per-file entries for the same targets.
+            "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),
     PathTestRule(
@@ -716,6 +745,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
+            # #1442: this file carries nine of the zero-text-identity oracle's
+            # registered statements. None of the suites above assert the
+            # pushdown-aid pairing or the statement census, so without this
+            # entry a diff that reintroduces a text fact predicate here reaches
+            # CI green unchallenged (same at-site reasoning as #1341's
+            # mvt.py / display_coverage.py entries).
+            "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),
     PathTestRule(
@@ -791,6 +827,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_migrations.py",),
     ),
     PathTestRule(
+        # #1442 (group E). The seed's two river verification counts are
+        # registered statements of the zero-text-identity oracle. `db/**` above
+        # only buys tests/test_migrations.py, which never reads this module, so
+        # a seed-only diff that reintroduced a text identity predicate reached
+        # CI green. Narrow pattern on purpose: no other file under db/seeds/ is
+        # in the register.
+        "db/seeds/seed_demo.py",
+        ("tests/test_river_ts_text_identity_cleanup.py",),
+    ),
+    PathTestRule(
         "infra/compose.compute.yml",
         ("tests/test_two_node_docker_runtime.py",),
     ),
@@ -819,6 +865,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_run_qhh_continuous.py",),
     ),
     PathTestRule(
+        # #1442 (group E). Both qhh smoke scripts own a registered
+        # river_timeseries statement and had no rule at all, so they fell
+        # through to the core-smoke fallback — which imports neither and asserts
+        # nothing about their SQL. One narrow rule each, one target each: the
+        # cleanup oracle is the suite that pins these files' SQL shapes. The
+        # wire-site invariant suite also scans them, but is not PR-selected for
+        # scripts/** — see issue #1656.
+        "scripts/summarize_qhh_smoke_results.py",
+        ("tests/test_river_ts_text_identity_cleanup.py",),
+    ),
+    PathTestRule(
+        "scripts/reset_qhh_smoke_db.py",
+        ("tests/test_river_ts_text_identity_cleanup.py",),
+    ),
+    PathTestRule(
         # No same-name tests/test_node27_autopipeline.py exists, so without this
         # rule the autopipe script falls through to the core-smoke fallback and
         # none of its own suites run.
@@ -827,6 +888,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
             "tests/test_display_publish_status_only.py",
+            # #1442: the two per-tick criteria are registered statements of the
+            # zero-text-identity oracle (group D, no sanctioned aid at all), and
+            # the oracle additionally censuses this file for a THIRD
+            # river_timeseries statement. Nothing above would notice either.
+            "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),
     PathTestRule(

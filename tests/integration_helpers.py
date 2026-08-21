@@ -415,8 +415,15 @@ def _clear_issue_126_rows(connection: Any) -> None:
         cursor.execute("DELETE FROM ops.pipeline_event WHERE entity_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM ops.qc_result WHERE target_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM hydro.state_snapshot WHERE state_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
+        # #1442: located by surrogate key, resolved from hydro_run — which is
+        # only deleted on the next line, so the resolution still sees the runs.
         cursor.execute(
-            "DELETE FROM hydro.river_timeseries WHERE run_id IN (%s, %s)",
+            """
+            DELETE FROM hydro.river_timeseries
+            WHERE run_key IN (
+                SELECT run_key FROM hydro.hydro_run WHERE run_id IN (%s, %s)
+            )
+            """,
             (FORECAST_RUN_ID, HINDCAST_RUN_ID),
         )
         cursor.execute("DELETE FROM hydro.hydro_run WHERE run_id IN (%s, %s)", (FORECAST_RUN_ID, HINDCAST_RUN_ID))

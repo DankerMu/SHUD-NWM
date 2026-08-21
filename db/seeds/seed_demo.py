@@ -1044,10 +1044,25 @@ def collect_counts(cursor: Any) -> dict[str, int]:
             "SELECT COUNT(*) FROM hydro.hydro_run WHERE run_id = ANY(%s)",
             ([IFS_RUN_ID, IFS_06Z_RUN_ID],),
         ),
-        ("hydro.river_timeseries", "SELECT COUNT(*) FROM hydro.river_timeseries WHERE run_id = %s", (RUN_ID,)),
+        # #1442: verified through the surrogate key. This is also a stronger
+        # check than the text one it replaces — a seeded row that failed to get
+        # its run_key is now a verification failure instead of a silent pass.
+        (
+            "hydro.river_timeseries",
+            """
+            SELECT COUNT(*)
+            FROM hydro.river_timeseries
+            WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)
+            """,
+            (RUN_ID,),
+        ),
         (
             "hydro.river_timeseries.ifs",
-            "SELECT COUNT(*) FROM hydro.river_timeseries WHERE run_id = ANY(%s)",
+            """
+            SELECT COUNT(*)
+            FROM hydro.river_timeseries
+            WHERE run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))
+            """,
             ([IFS_RUN_ID, IFS_06Z_RUN_ID],),
         ),
         ("map.tile_layer", "SELECT COUNT(*) FROM map.tile_layer WHERE layer_id = %s", (TILE_LAYER_ID,)),

@@ -25,6 +25,19 @@ FORCING_KEY = "forcing/gfs/2024060112/basin-1/model-1"
 FORCING_KEY_2 = "forcing/gfs/2024060212/basin-1/model-1"
 
 
+_RUN_KEYS: dict[str, int] = {}
+
+
+def _run_key(run_id: str) -> int:
+    """Stable integer surrogate for a run in the sqlite harness (#1442).
+
+    Production allocates it with ``GENERATED ALWAYS AS IDENTITY`` (000050); the
+    probe only needs "same run_id, same key" so both sides of the correlation
+    agree.
+    """
+    return _RUN_KEYS.setdefault(run_id, len(_RUN_KEYS) + 1)
+
+
 def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
     db_path = tmp_path / "backfill.sqlite"
     engine = create_engine(f"sqlite:///{db_path}", future=True)
@@ -34,6 +47,7 @@ def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
                 """
                 CREATE TABLE hydro_run (
                     run_id TEXT PRIMARY KEY,
+                    run_key INTEGER,
                     status TEXT NOT NULL,
                     model_id TEXT,
                     basin_version_id TEXT,
@@ -47,11 +61,17 @@ def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
         connection.execute(
             text(
                 """
+                -- run_key / variable_e mirror migration 000050: the discovery
+                -- probe correlates on the key and filters on the enum since
+                -- #1442 (sqlite has no enum type, so variable_e is TEXT holding
+                -- the same label).
                 CREATE TABLE river_timeseries (
                     run_id TEXT NOT NULL,
+                    run_key INTEGER,
                     river_segment_id TEXT NOT NULL,
                     valid_time DATETIME NOT NULL,
                     variable TEXT NOT NULL,
+                    variable_e TEXT,
                     value REAL
                 )
                 """
@@ -90,16 +110,17 @@ def _insert_run(
             text(
                 """
                 INSERT INTO hydro_run (
-                    run_id, status, model_id, basin_version_id,
+                    run_id, run_key, status, model_id, basin_version_id,
                     forcing_version_id, source_id, cycle_time
                 ) VALUES (
-                    :run_id, :status, :model_id, :basin_version_id,
+                    :run_id, :run_key, :status, :model_id, :basin_version_id,
                     :forcing_version_id, :source_id, :cycle_time
                 )
                 """
             ),
             {
                 "run_id": run_id,
+                "run_key": _run_key(run_id),
                 "status": status,
                 "model_id": model_id,
                 "basin_version_id": basin_version_id,
@@ -112,14 +133,15 @@ def _insert_run(
             text(
                 """
                 INSERT INTO river_timeseries (
-                    run_id, river_segment_id, valid_time, variable, value
+                    run_id, run_key, river_segment_id, valid_time, variable, variable_e, value
                 ) VALUES (
-                    :run_id, 'seg-1', :valid_time, :variable, :value
+                    :run_id, :run_key, 'seg-1', :valid_time, :variable, :variable, :value
                 )
                 """
             ),
             {
                 "run_id": run_id,
+                "run_key": _run_key(run_id),
                 "valid_time": cycle_time,
                 "variable": variable,
                 "value": value,
@@ -313,10 +335,60 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
 
     assert "FROM hydro.hydro_run h" in sql
     assert "EXISTS (" in sql
-    assert "rt.run_id = h.run_id" in sql
+    # #1442: correlated on the surrogate key. `variable` keeps its transitional
+    # text conjunct (a literal that still reaches the compressed segmentby)
+    # alongside the enum predicate; `run_id` gets none, because it arrives by
+    # join and a text fact join is forbidden.
+    assert "rt.run_key = h.run_key" in sql
+    assert "rt.run_id = h.run_id" not in sql
     assert "rt.variable = 'q_down'" in sql
+    # No explicit enum cast: this statement is also parsed by the sqlite harness
+    # above, and PostgreSQL coerces the unknown-typed literal to the enum anyway.
+    assert "rt.variable_e = 'q_down'" in sql
+    assert "::hydro.river_variable" not in sql
     assert "SELECT DISTINCT" not in sql
     assert "JOIN (\n" not in sql
+
+
+@pytest.mark.parametrize(
+    ("table_name", "column"),
+    [
+        ("river_timeseries", "run_key"),
+        ("river_timeseries", "variable_e"),
+        ("hydro_run", "run_key"),
+    ],
+)
+def test_backfill_schema_guard_names_the_missing_identity_column(
+    tmp_path: Path,
+    table_name: str,
+    column: str,
+) -> None:
+    """The guard's column set must track _DISCOVER_BACKFILL_RUNS_SQL (#1442).
+
+    A database that predates 000050 lacks the surrogate keys and the enum
+    column the discovery probe now reads; the run must stop with a structured
+    BACKFILL_SCHEMA_MISSING naming the exact column instead of failing deep
+    inside the query with an opaque driver error.
+    """
+
+    engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    object_store_root.mkdir()
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table_name} DROP COLUMN {column}"))
+
+    with pytest.raises(backfill_module.BackfillError) as excinfo:
+        run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+            )
+        )
+
+    assert excinfo.value.error_code == "BACKFILL_SCHEMA_MISSING"
+    assert excinfo.value.details == {"missing_columns": {f"hydro.{table_name}": [column]}}
 
 
 def test_cli_dry_run_emits_json_and_writes_nothing(tmp_path: Path) -> None:
