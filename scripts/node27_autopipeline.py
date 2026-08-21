@@ -96,6 +96,12 @@ INGEST_ROLE = "node27_data_plane_ingest"
 # a plan regression no row-count threshold predicts. The floor exists only to
 # skip chunks this tick never touched (one real run writes segments x timesteps
 # rows, orders of magnitude above it), never to postpone the refresh.
+# The guard's second leg (issue #1468) repairs a statistics WIPE instead: PG15
+# discards all cumulative statistics on crash recovery without writing
+# `stats_reset`, and a zero-churn table then sits at n_mod_since_analyze = 0
+# forever, so no autovacuum threshold can ever re-trigger it.
+# That leg is therefore ungated by ingest -- its trigger is statistics being
+# absent, not the frontier having moved (see _analyze_unanalyzed_authority_tables).
 STATS_GUARD_MIN_MODS = 10_000
 STATS_GUARD_MAX_CHUNKS = 3
 # 6x the measured worst case (~20 s for a 250M-row chunk; 64 s for three on
@@ -1156,6 +1162,34 @@ FROM pg_stat_user_tables
 WHERE schemaname = %s AND relname = %s
 """
 
+# Repair leg (issue #1468): ordinary tables whose cumulative statistics were
+# wiped. Double NULL is the signature -- an ANALYZE that ever ran, by hand or by
+# autovacuum, leaves one of the two timestamps behind. ``relpages > 0`` keeps
+# genuinely empty tables (nothing to analyze) out of the candidate set, and it
+# survives the wipe because it lives in ``pg_class``, not in the cumulative
+# statistics. Hypertables and their chunks are excluded on purpose (#1378 D3):
+# ANALYZE on a hypertable root recurses into the chunks, and ANALYZE on a bare
+# compressed-chunk name zeroes the relstats TimescaleDB preserved at
+# compression time. Chunks live in ``_timescaledb_internal``, which the schema
+# tuple already excludes; the NOT EXISTS excludes the roots.
+_STATS_GUARD_AUTHORITY_CANDIDATES_SQL = """
+SELECT s.schemaname, s.relname, c.relpages, s.last_analyze
+FROM pg_stat_user_tables s
+JOIN pg_class c ON c.oid = s.relid
+WHERE s.schemaname IN ('core', 'met', 'hydro')
+  AND c.relkind = 'r'
+  AND c.relpages > 0
+  AND s.last_analyze IS NULL
+  AND s.last_autoanalyze IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM timescaledb_information.hypertables h
+      WHERE h.hypertable_schema = s.schemaname
+        AND h.hypertable_name = s.relname
+  )
+ORDER BY c.relpages DESC, 1, 2
+"""
+
 # Chunk identifiers come from the TimescaleDB catalog, but ANALYZE takes no
 # bind parameters -- refuse to interpolate anything that is not a bare
 # identifier rather than quote-escaping by hand.
@@ -1168,6 +1202,56 @@ def _stats_guard_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {redact_text(str(exc))}".rstrip(": ")
 
 
+def _analyze_one_relation(
+    cur: Any,
+    schema: str,
+    name: str,
+    entry: dict[str, Any],
+    last_analyze_before: Any,
+) -> dict[str, Any]:
+    """ANALYZE one relation and read its statistics back -- failures stay local.
+
+    Shared by both guard legs (frontier chunks and authority tables): the
+    ANALYZE, the read-back self-check and the per-relation isolation are the
+    same mechanism, only the candidate query and the entry's identity keys
+    differ. ``entry`` arrives carrying those identity keys and leaves carrying
+    the outcome ones.
+
+    Per-relation isolation (design D1): a relation held by the compression lock
+    or dropped between the candidate query and the ANALYZE must not swallow the
+    rest of the batch. A failed ANALYZE leaves ``n_mod_since_analyze``
+    untouched, so that same chunk stays on top of the next tick's descending
+    candidate list and would starve every other frontier chunk forever.
+
+    Safe because the caller's connection is autocommit: an error leaves no
+    aborted transaction for the remaining relations to trip over.
+
+    The returned entry always carries the same keys; a failure is
+    ``status: "failed"`` plus a non-empty ``error`` string, so the summary's
+    ``analyzed`` list is one flat, uniformly shaped record of every attempt.
+    """
+    try:
+        if not (_STATS_GUARD_IDENT_RE.match(schema) and _STATS_GUARD_IDENT_RE.match(name)):
+            raise ValueError(f"refusing to ANALYZE non-identifier relation name: {schema}.{name}")
+        cur.execute(f"SET statement_timeout = {STATS_GUARD_TIMEOUT_MS}")
+        started = time.monotonic()
+        cur.execute(f'ANALYZE "{schema}"."{name}"')
+        seconds = round(time.monotonic() - started, 3)
+        cur.execute(_STATS_GUARD_LAST_ANALYZE_SQL, (schema, name))
+        row = cur.fetchone()
+        last_analyze = row[0] if row else None
+        refreshed = last_analyze is not None and (last_analyze_before is None or last_analyze > last_analyze_before)
+        entry["seconds"] = seconds
+        entry["last_analyze"] = last_analyze.isoformat() if last_analyze is not None else None
+        entry["status"] = "ok" if refreshed else "warning"
+    except Exception as exc:  # noqa: BLE001 - deliberate per-relation isolation
+        entry["seconds"] = None
+        entry["last_analyze"] = None
+        entry["status"] = "failed"
+        entry["error"] = _stats_guard_error(exc)
+    return entry
+
+
 def _analyze_one_frontier_chunk(
     cur: Any,
     chunk_schema: str,
@@ -1175,45 +1259,39 @@ def _analyze_one_frontier_chunk(
     n_mod: int,
     last_analyze_before: Any,
 ) -> dict[str, Any]:
-    """ANALYZE one chunk and read its statistics back -- failures stay local.
+    """Frontier-leg entry shape: ``chunk`` + the drift measure that selected it."""
 
-    Per-chunk isolation (design D1): a chunk held by the compression lock or
-    dropped between the candidate query and the ANALYZE must not swallow the
-    rest of the batch. A failed ANALYZE leaves ``n_mod_since_analyze``
-    untouched, so that same chunk stays on top of the next tick's descending
-    candidate list and would starve every other frontier chunk forever.
+    return _analyze_one_relation(
+        cur,
+        chunk_schema,
+        chunk_name,
+        {"chunk": f"{chunk_schema}.{chunk_name}", "n_mod_since_analyze": int(n_mod)},
+        last_analyze_before,
+    )
 
-    Safe because the caller's connection is autocommit: an error leaves no
-    aborted transaction for the remaining chunks to trip over.
 
-    The returned entry always carries the same keys; a failure is
-    ``status: "failed"`` plus a non-empty ``error`` string, so the summary's
-    ``analyzed`` list is one flat, uniformly shaped record of every attempt.
+def _analyze_one_authority_table(
+    cur: Any,
+    schema: str,
+    relname: str,
+    relpages: int,
+    last_analyze_before: Any,
+) -> dict[str, Any]:
+    """Repair-leg entry shape: ``table`` + the size that ordered it.
+
+    ``relpages`` rather than ``n_mod_since_analyze``: the repair leg's
+    candidates are tables whose counters were wiped, so their modification
+    counter is exactly 0 and says nothing -- ``pg_class.relpages`` survives the
+    wipe and is the only honest ordering key.
     """
-    entry: dict[str, Any] = {
-        "chunk": f"{chunk_schema}.{chunk_name}",
-        "n_mod_since_analyze": int(n_mod),
-    }
-    try:
-        if not (_STATS_GUARD_IDENT_RE.match(chunk_schema) and _STATS_GUARD_IDENT_RE.match(chunk_name)):
-            raise ValueError(f"refusing to ANALYZE non-identifier chunk name: {chunk_schema}.{chunk_name}")
-        cur.execute(f"SET statement_timeout = {STATS_GUARD_TIMEOUT_MS}")
-        started = time.monotonic()
-        cur.execute(f'ANALYZE "{chunk_schema}"."{chunk_name}"')
-        seconds = round(time.monotonic() - started, 3)
-        cur.execute(_STATS_GUARD_LAST_ANALYZE_SQL, (chunk_schema, chunk_name))
-        row = cur.fetchone()
-        last_analyze = row[0] if row else None
-        refreshed = last_analyze is not None and (last_analyze_before is None or last_analyze > last_analyze_before)
-        entry["seconds"] = seconds
-        entry["last_analyze"] = last_analyze.isoformat() if last_analyze is not None else None
-        entry["status"] = "ok" if refreshed else "warning"
-    except Exception as exc:  # noqa: BLE001 - deliberate per-chunk isolation
-        entry["seconds"] = None
-        entry["last_analyze"] = None
-        entry["status"] = "failed"
-        entry["error"] = _stats_guard_error(exc)
-    return entry
+
+    return _analyze_one_relation(
+        cur,
+        schema,
+        relname,
+        {"table": f"{schema}.{relname}", "relpages": int(relpages)},
+        last_analyze_before,
+    )
 
 
 def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
@@ -1267,8 +1345,58 @@ def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
     return summary
 
 
+def _analyze_unanalyzed_authority_tables(database_url: str) -> dict[str, Any]:
+    """ANALYZE the ordinary tables whose cumulative statistics were wiped.
+
+    The repair leg (issue #1468). Same connection discipline, cap, timeout,
+    identifier refusal, read-back self-check and two failure levels as
+    ``_analyze_frontier_chunks`` -- see ``_analyze_one_relation``, which both
+    legs share; only the candidate query and the entry's identity keys differ.
+
+    Deliberately NOT gated on this tick's ingest: its trigger is statistics
+    being absent, not the frontier having moved. A crash recovery zeroes the
+    counters of every table at once, and the tables that need repair most are
+    exactly the zero-churn authority tables an ingest tick never writes to.
+    """
+    summary: dict[str, Any] = {
+        "status": "completed",
+        "analyzed": [],
+        "deferred": [],
+    }
+    conn = None
+    try:
+        conn = psycopg2.connect(database_url)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(_STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
+            candidates = cur.fetchall()
+            selected = candidates[:STATS_GUARD_MAX_CHUNKS]
+            # Same named-backlog rule as the frontier leg: the leftovers are the
+            # next tick's work, never a silent truncation.
+            summary["deferred"] = [f"{row[0]}.{row[1]}" for row in candidates[STATS_GUARD_MAX_CHUNKS:]]
+            for schema, relname, relpages, last_analyze_before in selected:
+                summary["analyzed"].append(
+                    _analyze_one_authority_table(cur, schema, relname, relpages, last_analyze_before)
+                )
+    # Guard-level failure only (connect / candidate query); per-table failures
+    # never reach here and never change the tick's return code.
+    except Exception as exc:  # noqa: BLE001 - deliberate blanket isolation
+        summary["status"] = "failed"
+        summary["error"] = _stats_guard_error(exc)
+    finally:
+        if conn is not None:
+            conn.close()
+    return summary
+
+
 def _stats_guard(database_url: str, *, ingested_runs: int, env: Mapping[str, str]) -> dict[str, Any]:
-    """Phase 3.5 gate: only a tick that actually ingested rows moved the frontier."""
+    """Phase 3.5 gate: two legs, one switch.
+
+    The frontier leg is gated on this tick having ingested rows (only such a
+    tick moved a frontier). The repair leg is not gated at all -- see
+    ``_analyze_unanalyzed_authority_tables`` -- so its result is attached to
+    every non-skipped summary, ``not_triggered`` included.
+    """
     skeleton: dict[str, Any] = {
         "min_mods": STATS_GUARD_MIN_MODS,
         "max_chunks": STATS_GUARD_MAX_CHUNKS,
@@ -1276,13 +1404,29 @@ def _stats_guard(database_url: str, *, ingested_runs: int, env: Mapping[str, str
         "deferred": [],
     }
     if (env.get("NODE27_AUTOPIPE_STATS_GUARD") or "").strip().lower() == "off":
-        return {"status": "skipped", "reason": "NODE27_AUTOPIPE_STATS_GUARD=off", **skeleton}
-    if ingested_runs < 1:
-        return {"status": "not_triggered", "reason": "no_run_ingested", **skeleton}
+        return {
+            "status": "skipped",
+            "reason": "NODE27_AUTOPIPE_STATS_GUARD=off",
+            **skeleton,
+            "authority": {
+                "status": "skipped",
+                "reason": "NODE27_AUTOPIPE_STATS_GUARD=off",
+                "analyzed": [],
+                "deferred": [],
+            },
+        }
     try:
-        return _analyze_frontier_chunks(database_url)
+        authority = _analyze_unanalyzed_authority_tables(database_url)
+    except Exception as exc:  # noqa: BLE001 - same isolation as the frontier leg
+        authority = {"status": "failed", "error": _stats_guard_error(exc), "analyzed": [], "deferred": []}
+    if ingested_runs < 1:
+        return {"status": "not_triggered", "reason": "no_run_ingested", **skeleton, "authority": authority}
+    try:
+        summary = _analyze_frontier_chunks(database_url)
     except Exception as exc:  # noqa: BLE001 - same isolation as coverage refresh
-        return {"status": "failed", "error": _stats_guard_error(exc), **skeleton}
+        summary = {"status": "failed", "error": _stats_guard_error(exc), **skeleton}
+    summary["authority"] = authority
+    return summary
 
 
 # --------------------------------------------------------------------------- #
@@ -1993,14 +2137,25 @@ def main(argv: list[str] | None = None) -> int:
         ingested_runs=0 if args.seed_only else len(by("ingested")),
         env=env,
     )
-    if args.progress and stats_guard["status"] not in ("skipped", "not_triggered"):
+    authority_guard = stats_guard.get("authority") or {"status": "skipped", "analyzed": [], "deferred": []}
+    # Printed whenever EITHER leg did or attempted something. Keying the line on
+    # the frontier leg's status alone suppressed it on exactly the no-ingest
+    # ticks where the repair leg does its work (issue #1468).
+    legs_worked = any(
+        leg["analyzed"] or leg["deferred"] or leg["status"] == "failed" for leg in (stats_guard, authority_guard)
+    )
+    if args.progress and legs_worked:
         # Per-status, never a bare count: ``analyzed`` records every attempt, so
         # an all-failed tick would otherwise read like a success.
         statuses = [entry["status"] for entry in stats_guard["analyzed"]]
+        authority_statuses = [entry["status"] for entry in authority_guard["analyzed"]]
         print(
             f"[stats-guard] {stats_guard['status']}: ok {statuses.count('ok')}"
             f", warning {statuses.count('warning')}, failed {statuses.count('failed')}"
-            f", deferred {len(stats_guard['deferred'])}",
+            f", deferred {len(stats_guard['deferred'])}"
+            f", authority ok {authority_statuses.count('ok')}"
+            f" / failed {authority_statuses.count('failed')}"
+            f" / deferred {len(authority_guard['deferred'])}",
             file=sys.stderr,
             flush=True,
         )

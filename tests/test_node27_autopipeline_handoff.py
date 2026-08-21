@@ -28,6 +28,17 @@ def _stats_guard_result(**overrides: Any) -> dict[str, Any]:
     }
 
 
+def _authority_result(**overrides: Any) -> dict[str, Any]:
+    """The repair leg's summary shape (issue #1468)."""
+
+    return {
+        "status": "completed",
+        "analyzed": [],
+        "deferred": [],
+        **overrides,
+    }
+
+
 def _write_run(object_store_root: Path, run_id: str, *, handoff: bool = True) -> None:
     input_dir = object_store_root / "runs" / run_id / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -100,8 +111,12 @@ def _prepare_autopipe(
     monkeypatch.setattr(autopipe, "_publish_display_runs", fake_publish)
     # Phase 3.5 talks to the database directly; the handoff cases below are not
     # about it, and an unstubbed guard would dial a real socket. The #1378 cases
-    # at the bottom of this file re-patch it with their own doubles.
+    # at the bottom of this file re-patch it with their own doubles. BOTH legs
+    # need a double: the #1468 repair leg runs on every tick, ingest or not.
     monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", lambda _database_url: _stats_guard_result())
+    monkeypatch.setattr(
+        autopipe, "_analyze_unanalyzed_authority_tables", lambda _database_url: _authority_result()
+    )
 
     reports = dict(apply_reports or {})
 
@@ -490,10 +505,14 @@ class _FakeCursor:
         analyze_error: Exception | None,
         analyze_errors: Mapping[str, Exception],
         candidates_error: Exception | None = None,
+        authority_candidates: list[tuple[str, str, int, datetime | None]] | None = None,
+        authority_candidates_error: Exception | None = None,
     ) -> None:
         self._statements = statements
         self._candidates = candidates
         self._candidates_error = candidates_error
+        self._authority_candidates = list(authority_candidates or [])
+        self._authority_candidates_error = authority_candidates_error
         self._last_analyze = last_analyze
         self._analyze_error = analyze_error
         self._analyze_errors = analyze_errors
@@ -512,6 +531,16 @@ class _FakeCursor:
             if self._candidates_error is not None:
                 raise self._candidates_error
             self._result = list(self._candidates)
+        # The repair leg's candidate query also selects from pg_stat_user_tables,
+        # so it MUST be matched before the generic read-back branch below --
+        # otherwise it would be answered with a last_analyze row and the leg
+        # would silently analyze nothing. `hypertables` is unique to it.
+        elif "timescaledb_information.hypertables" in sql:
+            # Constant SQL, unlike the frontier candidate query: no parameters.
+            assert params is None
+            if self._authority_candidates_error is not None:
+                raise self._authority_candidates_error
+            self._result = list(self._authority_candidates)
         elif sql.startswith("ANALYZE"):
             if self._analyze_error is not None:
                 raise self._analyze_error
@@ -551,11 +580,17 @@ def _install_fake_db(
     analyze_error: Exception | None = None,
     analyze_errors: Mapping[str, Exception] | None = None,
     candidates_error: Exception | None = None,
+    authority_candidates: list[tuple[str, str, int, datetime | None]] | None = None,
+    authority_candidates_error: Exception | None = None,
 ) -> tuple[list[tuple[str, Any]], list[str], list[_FakeConnection]]:
     statements: list[tuple[str, Any]] = []
     dsns: list[str] = []
     connections: list[_FakeConnection] = []
-    reads = dict(last_analyze or {f"{row[0]}.{row[1]}": _AFTER for row in candidates})
+    authority_rows = list(authority_candidates or [])
+    reads = dict(
+        last_analyze
+        or {f"{row[0]}.{row[1]}": _AFTER for row in list(candidates) + authority_rows}
+    )
     per_chunk_errors = dict(analyze_errors or {})
 
     def connect(database_url: str) -> _FakeConnection:
@@ -568,6 +603,8 @@ def _install_fake_db(
                 analyze_error,
                 per_chunk_errors,
                 candidates_error=candidates_error,
+                authority_candidates=authority_rows,
+                authority_candidates_error=authority_candidates_error,
             )
         )
         connections.append(connection)
@@ -619,7 +656,7 @@ def test_stats_guard_below_the_floor_does_no_work(monkeypatch: pytest.MonkeyPatc
     }
 
 
-def test_stats_guard_without_ingest_never_touches_the_database(
+def test_stats_guard_without_ingest_frontier_leg_never_touches_the_database(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -627,7 +664,10 @@ def test_stats_guard_without_ingest_never_touches_the_database(
     """A tick that only re-published earlier runs wrote no rows and moved no frontier.
 
     Deliberately NOT the publish predicate, which also fires on
-    ``already_ingested``: the guard's trigger is rows this tick actually wrote.
+    ``already_ingested``: the FRONTIER leg's trigger is rows this tick actually
+    wrote. The repair leg (#1468) is a different question entirely -- statistics
+    being absent -- so it still runs on this very tick, and its result still
+    reaches the summary.
     """
     object_store_root, _calls, published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
     monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
@@ -636,6 +676,19 @@ def test_stats_guard_without_ingest_never_touches_the_database(
         autopipe,
         "_analyze_frontier_chunks",
         lambda database_url: analyze_calls.append(database_url) or _stats_guard_result(),
+    )
+    authority_calls: list[str] = []
+    repaired = {
+        "table": "core.river_segment_crosswalk",
+        "relpages": 2_180,
+        "seconds": 0.4,
+        "last_analyze": _AFTER.isoformat(),
+        "status": "ok",
+    }
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_unanalyzed_authority_tables",
+        lambda database_url: authority_calls.append(database_url) or _authority_result(analyzed=[repaired]),
     )
 
     rc, summary = _run_main(capsys, object_store_root)
@@ -647,6 +700,13 @@ def test_stats_guard_without_ingest_never_touches_the_database(
     assert analyze_calls == []
     assert summary["stats_guard"]["status"] == "not_triggered"
     assert summary["stats_guard"]["reason"] == "no_run_ingested"
+    # The gate is per-leg, not per-guard: the repair leg ran on the same tick.
+    assert authority_calls == [NODE27_DATABASE_URL]
+    assert summary["stats_guard"]["authority"] == {
+        "status": "completed",
+        "analyzed": [repaired],
+        "deferred": [],
+    }
 
 
 def test_stats_guard_defers_everything_past_the_per_tick_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -892,3 +952,373 @@ def test_stats_guard_constants_match_the_agreed_budget() -> None:
 
     assert autopipe.STATS_GUARD_MIN_MODS == 10_000
     assert autopipe.STATS_GUARD_TIMEOUT_MS == 120_000
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3.5 repair leg (issue #1468): authority tables whose cumulative
+# statistics were wiped by a crash recovery and can never re-trigger a
+# threshold on their own.
+# --------------------------------------------------------------------------- #
+
+CROSSWALK = ("core", "river_segment_crosswalk")
+GRID_CELL = ("met", "canonical_grid_cell")
+
+
+def _run_main_captured(
+    capsys: pytest.CaptureFixture[str], object_store_root: Path, *extra: str
+) -> tuple[int, pytest.CaptureResult[str]]:
+    """``_run_main`` consumes stderr with the summary; the --progress lines live there."""
+
+    rc = autopipe.main(
+        [
+            "--object-store-root",
+            str(object_store_root),
+            "--basins-root",
+            str(object_store_root.parent / "Basins"),
+            *extra,
+        ]
+    )
+    return rc, capsys.readouterr()
+
+
+def test_stats_guard_authority_candidate_query_pins_the_repair_contract() -> None:
+    """The repair leg's candidate SQL only ever meets a fake cursor here, so the
+    clauses deciding WHICH tables get ANALYZEd need their own oracle (same
+    precedent as the frontier candidate pin above)."""
+
+    sql = autopipe._STATS_GUARD_AUTHORITY_CANDIDATES_SQL
+
+    # The wipe signature: BOTH timestamps absent. Either one alone would also
+    # match tables that autovacuum is looking after perfectly well.
+    assert "s.last_analyze IS NULL" in sql
+    assert "s.last_autoanalyze IS NULL" in sql
+    # An empty table has nothing to analyze; relpages lives in pg_class and so
+    # survives the very wipe that zeroed the cumulative counters.
+    assert "c.relpages > 0" in sql
+    # Ordinary tables only -- not views, not partitioned parents, not indexes.
+    assert "c.relkind = 'r'" in sql
+    assert "s.schemaname IN ('core', 'met', 'hydro')" in sql
+    # Hypertable roots are excluded (ANALYZE on a root recurses into chunks);
+    # chunks themselves live in _timescaledb_internal, outside the schema tuple.
+    assert "NOT EXISTS" in sql
+    assert "timescaledb_information.hypertables h" in sql
+    assert "h.hypertable_schema = s.schemaname" in sql
+    assert "h.hypertable_name = s.relname" in sql
+    assert "_timescaledb_internal" not in sql
+    # "First 3" only means "the 3 biggest" while the ordering holds.
+    assert "ORDER BY c.relpages DESC" in sql
+
+
+def test_stats_guard_repair_leg_analyzes_a_wiped_authority_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements, dsns, connections = _install_fake_db(
+        monkeypatch,
+        candidates=[],
+        authority_candidates=[(*CROSSWALK, 2_180, None)],
+    )
+
+    authority = autopipe._analyze_unanalyzed_authority_tables(NODE27_DATABASE_URL)
+
+    assert dsns == [NODE27_DATABASE_URL]
+    # Same connection discipline as the frontier leg: the read-back is only
+    # honest on a later transaction.
+    assert connections[0].autocommit is True
+    assert connections[0].closed is True
+    assert [sql for sql, _params in statements][1:3] == [
+        f"SET statement_timeout = {autopipe.STATS_GUARD_TIMEOUT_MS}",
+        'ANALYZE "core"."river_segment_crosswalk"',
+    ]
+    assert authority["status"] == "completed"
+    assert authority["deferred"] == []
+    (entry,) = authority["analyzed"]
+    assert entry == {
+        "table": "core.river_segment_crosswalk",
+        "relpages": 2_180,
+        "seconds": entry["seconds"],
+        "last_analyze": _AFTER.isoformat(),
+        "status": "ok",
+    }
+    assert isinstance(entry["seconds"], float)
+
+
+def test_stats_guard_repair_leg_runs_on_a_tick_that_ingested_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``ingested_runs`` gate belongs to the frontier leg alone.
+
+    Driven through ``_stats_guard`` rather than the leg function, because the
+    gate is what is under test: a wiped table is repaired on precisely the quiet
+    ticks the old single-leg guard returned early from.
+    """
+
+    _install_fake_db(
+        monkeypatch,
+        candidates=[],
+        authority_candidates=[(*GRID_CELL, 4_100, None)],
+    )
+    frontier_calls: list[str] = []
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_frontier_chunks",
+        lambda database_url: frontier_calls.append(database_url) or _stats_guard_result(),
+    )
+
+    guard = autopipe._stats_guard(NODE27_DATABASE_URL, ingested_runs=0, env={})
+
+    assert guard["status"] == "not_triggered"
+    assert guard["reason"] == "no_run_ingested"
+    assert frontier_calls == []
+    authority = guard["authority"]
+    assert authority["status"] == "completed"
+    assert [(entry["table"], entry["status"]) for entry in authority["analyzed"]] == [
+        ("met.canonical_grid_cell", "ok")
+    ]
+    assert authority["analyzed"][0]["last_analyze"] == _AFTER.isoformat()
+
+
+def test_stats_guard_repair_leg_defers_everything_past_the_shared_per_tick_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One cap for both legs: the repair leg does not get its own budget."""
+
+    authority_candidates = [
+        ("core", f"authority_table_{index}", 9_000 - index, None) for index in range(5)
+    ]
+    statements, _dsns, _connections = _install_fake_db(
+        monkeypatch,
+        candidates=[],
+        authority_candidates=authority_candidates,
+    )
+
+    authority = autopipe._analyze_unanalyzed_authority_tables(NODE27_DATABASE_URL)
+
+    assert [sql for sql, _params in statements if sql.startswith("ANALYZE")] == [
+        f'ANALYZE "core"."authority_table_{index}"' for index in range(autopipe.STATS_GUARD_MAX_CHUNKS)
+    ]
+    assert [entry["table"] for entry in authority["analyzed"]] == [
+        f"core.authority_table_{index}" for index in range(autopipe.STATS_GUARD_MAX_CHUNKS)
+    ]
+    assert authority["deferred"] == ["core.authority_table_3", "core.authority_table_4"]
+
+
+def test_stats_guard_repair_leg_isolates_one_failed_table_from_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked or vanished authority table must not starve the batch behind it.
+
+    A failed ANALYZE leaves the double-NULL signature untouched, so the offender
+    keeps re-appearing at the top of the candidate list: aborting the batch would
+    re-lose the very same tables every tick, forever.
+    """
+
+    authority_candidates = [
+        (*CROSSWALK, 2_180, None),
+        (*GRID_CELL, 1_900, None),
+        ("hydro", "run_display_coverage", 40, None),
+    ]
+    statements, _dsns, _connections = _install_fake_db(
+        monkeypatch,
+        candidates=[],
+        authority_candidates=authority_candidates,
+        analyze_errors={
+            "core.river_segment_crosswalk": RuntimeError("canceling statement due to lock timeout"),
+        },
+    )
+
+    authority = autopipe._analyze_unanalyzed_authority_tables(NODE27_DATABASE_URL)
+
+    # Attempted, not merely recorded: tables 2 and 3 reached the database.
+    assert [sql for sql, _params in statements if sql.startswith("ANALYZE")] == [
+        'ANALYZE "core"."river_segment_crosswalk"',
+        'ANALYZE "met"."canonical_grid_cell"',
+        'ANALYZE "hydro"."run_display_coverage"',
+    ]
+    # A table-level failure is that table's entry, never the leg's verdict.
+    assert authority["status"] == "completed"
+    assert "error" not in authority
+    assert [(entry["table"], entry["status"]) for entry in authority["analyzed"]] == [
+        ("core.river_segment_crosswalk", "failed"),
+        ("met.canonical_grid_cell", "ok"),
+        ("hydro.run_display_coverage", "ok"),
+    ]
+    assert "lock timeout" in authority["analyzed"][0]["error"]
+    assert authority["analyzed"][0]["seconds"] is None
+    assert authority["analyzed"][0]["last_analyze"] is None
+
+
+def test_stats_guard_repair_leg_candidate_query_failure_never_reaches_the_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard-level isolation, repair-leg side: the catalog query blowing up is
+    the leg's own verdict and leaves the frontier leg's summary intact."""
+
+    _install_fake_db(
+        monkeypatch,
+        candidates=[],
+        authority_candidates=[(*CROSSWALK, 2_180, None)],
+        authority_candidates_error=RuntimeError("permission denied for view timescaledb_information.hypertables"),
+    )
+    monkeypatch.setattr(autopipe, "_analyze_frontier_chunks", lambda _database_url: _stats_guard_result())
+
+    guard = autopipe._stats_guard(NODE27_DATABASE_URL, ingested_runs=1, env={})
+
+    assert guard["status"] == "completed"
+    assert guard["authority"]["status"] == "failed"
+    assert "permission denied for view" in guard["authority"]["error"]
+    assert guard["authority"]["analyzed"] == []
+    assert guard["authority"]["deferred"] == []
+
+
+def test_stats_guard_switch_off_skips_both_legs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One switch, both legs -- and the summary says so for each of them."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    frontier_calls: list[str] = []
+    authority_calls: list[str] = []
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_frontier_chunks",
+        lambda database_url: frontier_calls.append(database_url) or _stats_guard_result(),
+    )
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_unanalyzed_authority_tables",
+        lambda database_url: authority_calls.append(database_url) or _authority_result(),
+    )
+    monkeypatch.setenv("NODE27_AUTOPIPE_STATS_GUARD", "off")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["ingested"] == 1
+    assert frontier_calls == []
+    assert authority_calls == []
+    assert summary["stats_guard"]["status"] == "skipped"
+    assert summary["stats_guard"]["reason"] == "NODE27_AUTOPIPE_STATS_GUARD=off"
+    assert summary["stats_guard"]["authority"] == {
+        "status": "skipped",
+        "reason": "NODE27_AUTOPIPE_STATS_GUARD=off",
+        "analyzed": [],
+        "deferred": [],
+    }
+
+
+def test_stats_guard_summary_carries_both_legs_on_an_ingesting_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Structure pin: the summary an operator reads carries the repair leg under
+    ``stats_guard.authority`` with its own status / analyzed / deferred, without
+    disturbing any key the frontier leg already published."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    chunk_entry = {
+        "chunk": f"{CHUNK_SCHEMA}._hyper_1_58_chunk",
+        "n_mod_since_analyze": 6_800_000,
+        "seconds": 1.5,
+        "last_analyze": _AFTER.isoformat(),
+        "status": "ok",
+    }
+    authority_entry = {
+        "table": "met.canonical_grid_cell",
+        "relpages": 4_100,
+        "seconds": 0.9,
+        "last_analyze": _AFTER.isoformat(),
+        "status": "ok",
+    }
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_frontier_chunks",
+        lambda _database_url: _stats_guard_result(analyzed=[chunk_entry]),
+    )
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_unanalyzed_authority_tables",
+        lambda _database_url: _authority_result(
+            analyzed=[authority_entry], deferred=["core.river_segment_crosswalk"]
+        ),
+    )
+
+    rc, summary = _run_main(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    assert summary["stats_guard"] == {
+        "status": "completed",
+        "min_mods": autopipe.STATS_GUARD_MIN_MODS,
+        "max_chunks": autopipe.STATS_GUARD_MAX_CHUNKS,
+        "analyzed": [chunk_entry],
+        "deferred": [],
+        "authority": {
+            "status": "completed",
+            "analyzed": [authority_entry],
+            "deferred": ["core.river_segment_crosswalk"],
+        },
+    }
+
+
+def test_stats_guard_progress_line_reports_the_repair_leg_on_a_quiet_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The old print condition suppressed the whole line on ``not_triggered`` --
+    i.e. on exactly the ticks where the repair leg is the only thing working."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
+    monkeypatch.setattr(
+        autopipe,
+        "_analyze_unanalyzed_authority_tables",
+        lambda _database_url: _authority_result(
+            analyzed=[
+                {
+                    "table": "core.river_segment_crosswalk",
+                    "relpages": 2_180,
+                    "seconds": 0.4,
+                    "last_analyze": _AFTER.isoformat(),
+                    "status": "ok",
+                },
+                {
+                    "table": "met.canonical_grid_cell",
+                    "relpages": 4_100,
+                    "seconds": None,
+                    "last_analyze": None,
+                    "status": "failed",
+                    "error": "RuntimeError: nope",
+                },
+            ],
+            deferred=["hydro.run_display_coverage"],
+        ),
+    )
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    guard_lines = [line for line in captured.err.splitlines() if line.startswith("[stats-guard]")]
+    assert guard_lines == [
+        "[stats-guard] not_triggered: ok 0, warning 0, failed 0, deferred 0"
+        ", authority ok 1 / failed 1 / deferred 1"
+    ]
+
+
+def test_stats_guard_progress_line_stays_silent_when_neither_leg_worked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The relaxed condition must not turn into "print on every tick": a tick
+    where both legs found nothing still says nothing."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(monkeypatch, tmp_path, runs={RUN_A: True})
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", lambda *_args, **_kwargs: {RUN_A})
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    assert [line for line in captured.err.splitlines() if line.startswith("[stats-guard]")] == []

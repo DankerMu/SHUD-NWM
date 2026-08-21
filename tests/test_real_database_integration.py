@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -472,3 +473,267 @@ def test_no_cross_gap_invariant_holds_after_ingest(
                 f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m "
                 f"drift={ratio:.3%} exceeds 5% bound"
             )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1468: the identifier trigram index is an EXPRESSION index, so equality
+# lookups cannot select it, and the four core identity tables carry per-table
+# autovacuum analyze parameters. Real PostgreSQL only: every assertion below is
+# about what the planner and the catalog actually do with migration 000052.
+# ---------------------------------------------------------------------------
+
+AUTHORITY_STATS_HYGIENE_MIGRATION = "000052_authority_stats_hygiene_trgm_expression_index.sql"
+# >= 34 characters, mirroring the production `basins_jialingjiang_shud_shud_riv_`
+# family whose shared trigrams made the posting lists cover the whole table.
+_SHARED_ID_PREFIX = "basins_pytest1468_shud_shud_riv_shared_"
+
+
+def _river_segment_id_trgm_index(cursor: Any) -> tuple[str, bool]:
+    cursor.execute(
+        """
+        SELECT pg_get_indexdef(ix.indexrelid) AS indexdef, ix.indisvalid
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_class t ON t.oid = ix.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'core'
+          AND t.relname = 'river_segment'
+          AND i.relname = 'river_segment_id_trgm_idx'
+        """
+    )
+    row = cursor.fetchone()
+    assert row is not None, "river_segment_id_trgm_idx is missing"
+    return row[0], row[1]
+
+
+def _legacy_index_exists(cursor: Any) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'core' AND indexname = 'river_segment_id_trgm_idx_legacy'
+        """
+    )
+    return cursor.fetchone() is not None
+
+
+def _autovacuum_analyze_options(cursor: Any) -> dict[str, dict[str, str]]:
+    cursor.execute(
+        """
+        SELECT c.relname, c.reloptions
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'core'
+          AND c.relname IN (
+              'river_segment', 'river_segment_crosswalk',
+              'river_network_version', 'basin_version'
+          )
+        """
+    )
+    options: dict[str, dict[str, str]] = {}
+    for relname, reloptions in cursor.fetchall():
+        parsed: dict[str, str] = {}
+        for option in reloptions or []:
+            key, _, value = option.partition("=")
+            parsed[key] = value
+        options[relname] = parsed
+    return options
+
+
+def _assert_000052_state(cursor: Any) -> None:
+    """Every catalog fact 000052 is responsible for, in one place.
+
+    Called after the first apply and again after the replay, so the idempotence
+    case compares against the same oracle rather than against itself.
+    """
+
+    indexdef, indisvalid = _river_segment_id_trgm_index(cursor)
+    # The expression is the whole point: a predicate over the bare column cannot
+    # match `lower(river_segment_id)`, whatever the statistics say.
+    assert "lower(river_segment_id)" in indexdef, indexdef
+    assert "gin_trgm_ops" in indexdef, indexdef
+    assert "USING gin" in indexdef, indexdef
+    # An interrupted CREATE INDEX CONCURRENTLY leaves a same-named INVALID index
+    # that the planner silently ignores -- the index list alone cannot see it.
+    assert indisvalid is True, "river_segment_id_trgm_idx is INVALID (interrupted concurrent build?)"
+    assert not _legacy_index_exists(cursor), "the renamed bare-column index was not dropped"
+
+    options = _autovacuum_analyze_options(cursor)
+    for relname in ("river_segment", "river_segment_crosswalk"):
+        assert float(options[relname]["autovacuum_analyze_scale_factor"]) == 0.01, options[relname]
+        assert int(options[relname]["autovacuum_analyze_threshold"]) == 500, options[relname]
+    # 20-row version tables: a single-row change must cross the bar.
+    for relname in ("river_network_version", "basin_version"):
+        assert float(options[relname]["autovacuum_analyze_scale_factor"]) == 0.0, options[relname]
+        assert int(options[relname]["autovacuum_analyze_threshold"]) == 1, options[relname]
+
+
+def _seed_shared_prefix_family(cursor: Any) -> None:
+    """A synthetic id family sharing a >= 34 character prefix, plus its scope rows.
+
+    Written inside the caller's transaction and rolled back: this is planner
+    input, not fixture data other tests should see.
+    """
+
+    cursor.execute(
+        """
+        INSERT INTO core.basin (basin_id, basin_name)
+        VALUES ('it1468_basin', 'Issue 1468 Trigram Basin')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.basin_version (basin_version_id, basin_id, version_label, geom)
+        VALUES (
+            'it1468_basin_v1', 'it1468_basin', 'v1',
+            ST_Multi(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))', 4490))
+        )
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.river_network_version (
+            river_network_version_id, basin_version_id, version_label, segment_count
+        )
+        VALUES ('it1468_rnv_v1', 'it1468_basin_v1', 'v1', 600)
+        """
+    )
+    cursor.executemany(
+        """
+        INSERT INTO core.river_segment (river_segment_id, river_network_version_id, segment_order)
+        VALUES (%s, 'it1468_rnv_v1', %s)
+        """,
+        [(f"{_SHARED_ID_PREFIX}{index:04d}", index % 5) for index in range(600)],
+    )
+    # ANALYZE is legal inside a transaction block (VACUUM is not); without it the
+    # planner would work from default estimates and prove nothing about costs.
+    cursor.execute("ANALYZE core.river_segment")
+
+
+def _explain(cursor: Any, sql: str, params: tuple[Any, ...] | None = None) -> str:
+    cursor.execute(f"EXPLAIN {sql}", params)
+    return "\n".join(row[0] for row in cursor.fetchall())
+
+
+def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
+    integration_database_url: str,
+) -> None:
+    """000052's structural claim, measured on a real planner (issue #1468).
+
+    Production picked the trigram index for `river_segment_id = $1` and paid
+    51 s instead of 17 ms, with FRESH statistics and a cheaper estimated cost --
+    so a cost- or statistics-based assertion would prove nothing. What this test
+    pins is that the equality predicate cannot MATCH the index at all, and that
+    the search predicate still can.
+    """
+
+    import psycopg2
+
+    apply_migrations_from_zero(integration_database_url)
+    connection = psycopg2.connect(integration_database_url)
+    try:
+        with connection.cursor() as cursor:
+            _assert_000052_state(cursor)
+
+            _seed_shared_prefix_family(cursor)
+
+            cursor.execute(
+                """
+                CREATE TEMP TABLE it1468_backfill_batch (
+                    river_segment_id TEXT,
+                    river_network_version_id TEXT
+                ) ON COMMIT DROP
+                """
+            )
+            cursor.executemany(
+                "INSERT INTO it1468_backfill_batch VALUES (%s, 'it1468_rnv_v1')",
+                [(f"{_SHARED_ID_PREFIX}{index:04d}",) for index in range(0, 600, 6)],
+            )
+            cursor.execute("ANALYZE it1468_backfill_batch")
+
+            # The `_BATCH_UPDATE_SQL` join shape (scripts/node27_river_identity_backfill.py):
+            # both identity columns bound by equality against a batch of rows.
+            equality_join = """
+                SELECT rs.river_segment_id
+                FROM core.river_segment rs, it1468_backfill_batch t
+                WHERE rs.river_segment_id = t.river_segment_id
+                  AND rs.river_network_version_id = t.river_network_version_id
+            """
+            default_plan = _explain(cursor, equality_join)
+            assert "river_segment_id_trgm_idx" not in default_plan, default_plan
+
+            # ... and it is not the sequential scan hiding the trap: with every
+            # non-bitmap path disabled, the trigram index is the ONLY other
+            # candidate an equality qual could reach -- and still cannot.
+            cursor.execute("SET LOCAL enable_seqscan = off")
+            cursor.execute("SET LOCAL enable_indexscan = off")
+            cursor.execute("SET LOCAL enable_indexonlyscan = off")
+            bitmap_only_plan = _explain(cursor, equality_join)
+            assert "river_segment_id_trgm_idx" not in bitmap_only_plan, bitmap_only_plan
+            cursor.execute("SET LOCAL enable_indexscan = on")
+            cursor.execute("SET LOCAL enable_indexonlyscan = on")
+
+            # The other half of the contract: search (the rewritten id arm in
+            # packages/common/model_registry.py) still gets the index.
+            # NOTE: `enable_seqscan = off` set above is deliberately still in
+            # effect. On this small synthetic family a sequential scan would win
+            # on cost and the plan would say nothing about SELECTABILITY, which
+            # is what this assertion is for. Do not "fix" the missing re-enable.
+            search_plan = _explain(
+                cursor,
+                """
+                SELECT rs.river_segment_id
+                FROM core.river_segment rs
+                WHERE lower(rs.river_segment_id) LIKE %s ESCAPE '\\'
+                """,
+                ("%0012%",),
+            )
+            assert "river_segment_id_trgm_idx" in search_plan, search_plan
+    finally:
+        # Planner input only: nothing this test seeded outlives it.
+        connection.rollback()
+        connection.close()
+
+
+def test_authority_stats_hygiene_migration_replays_without_changing_anything(
+    integration_database_url: str,
+) -> None:
+    """Idempotence, proved by an actual second apply (issue #1468, design D3).
+
+    ``apply_migrations_from_zero`` is ledger-gated, so calling it twice replays
+    nothing and cannot serve as this evidence: the ledger row has to be removed
+    first. Runs on an autocommit connection because the file contains
+    CREATE/DROP INDEX CONCURRENTLY, which PostgreSQL rejects inside a
+    transaction block.
+    """
+
+    import psycopg2
+
+    from packages.common.migrate import apply_migration
+
+    apply_migrations_from_zero(integration_database_url)
+    connection = psycopg2.connect(integration_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            # Pin the state BEFORE the replay, so a first-apply defect cannot
+            # masquerade as a replay defect below.
+            _assert_000052_state(cursor)
+            indexdef_before, _valid_before = _river_segment_id_trgm_index(cursor)
+            options_before = _autovacuum_analyze_options(cursor)
+            cursor.execute(
+                "DELETE FROM public.schema_migrations WHERE version LIKE '000052%'"
+            )
+
+        apply_migration(connection, MIGRATIONS_DIR / AUTHORITY_STATS_HYGIENE_MIGRATION)
+
+        with connection.cursor() as cursor:
+            _assert_000052_state(cursor)
+            indexdef_after, _valid_after = _river_segment_id_trgm_index(cursor)
+            assert indexdef_after == indexdef_before
+            assert _autovacuum_analyze_options(cursor) == options_before
+            cursor.execute(
+                "SELECT version FROM public.schema_migrations WHERE version LIKE '000052%'"
+            )
+            assert [row[0] for row in cursor.fetchall()] == [AUTHORITY_STATS_HYGIENE_MIGRATION]
+    finally:
+        connection.close()
