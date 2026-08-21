@@ -9,7 +9,8 @@
   含"coverage 窗覆盖但该时次无行"的 0 分支——本探针必须触 fact 表的根本原因）；
   (2) 有数据 pin 上 tile 字节相同；(3) 未压缩时次毫秒级不退化；(4) 文本 fact
   join 禁令在特批探针体外不破（基线 spec:195-196）；(5) 计划判据以
-  BUFFERS/batches/Rows Removed 为主证、wall time 为辅（#1442 教训：争用期
+  BUFFERS/相关节点 loops/Rows Removed 为主证（PG15.2/TSDB 2.10.2 无
+  Batches 字段，round-3 D2 统一口径）、wall time 为辅（#1442 教训：争用期
   wall time 会说谎），验收含"无覆盖压缩时次空瓦片 <1s"（issue 补充实测的
   0.17s 旧文本形态是可行性证明）；(6) `source_identity_stats` CTE 名不变
   （`test_river_ts_read_path_surrogate_keys.py:100-101` 与
@@ -96,8 +97,10 @@ source_identity_stats AS (
   `tests/test_river_ts_read_path_surrogate_keys.py:198-231` 明令禁止（词表外
   字面量会 22P02，违反基线 spec 的 degrade-to-empty Scenario）。
 - LATERAL 体内 `lr.*` 为 per-loop 常量 → `run_id`/`river_network_version_id`
-  文本等值获得压缩 segmentby 剪枝（绑 3 列中前 2）与未压缩文本 PK 前缀
-  （绑 5 列中 1,2,4,5——`river_segment_id` 位于第 3 位不绑），
+  文本等值获得压缩 segmentby 剪枝（绑 3 列中前 2）；未压缩侧绑 run 作用
+  域索引前缀（文本 PK 5 列中的 1,2,4,5 位或 000051 代理键读索引——
+  `river_segment_id` 第 3 位不绑，planner 取舍未实测，见下条对冲与
+  (iii-b) pin），
   `(variable, valid_time)` orderby 批级 min/max 进一步消批。**机制同类但
   非同构**（round-1 审查 C1 更正）：数据腿绑满 5/5 与 3/3，逐 loop 是点查
   （实测 0.013-0.086ms/loop）；本探针少绑 segment 列，代价形态分命中/未命中
@@ -108,7 +111,7 @@ source_identity_stats AS (
   - 命中侧（round-2 审查 K2 更正）：nested loop 按
     `river_network_version_id` 升序逐身份探（DISTINCT ON 强制
     Unique-over-Sort 发射序，LIMIT 1 栅栏禁止重排），**首个探中的外层行即
-    停**。全命中时次只有一个身份触 fact 表（~1 个身份的 batches，非 ~19）；
+    停**。全命中时次只有一个身份触 fact 表（内层相关节点 loops=1，非 ~19）；
     混合时次排在首个命中之前的每个缺席身份先各付一次证无（fact 触达数 =
     前导 miss 数 + 1）。
   - 未命中侧（内部空洞——窗覆盖但该时次无行）：每个缺席身份要对其整个
@@ -205,8 +208,10 @@ marker，node-27 真实 DB 跑）：
     脚手架。
   - 判据（round-2 审查 K1/K2 修订——(ii-b) 定量口径改 BUFFERS 主证，
     (i) 命中侧按短路真相重述）：
-    (i) 命中 → 亚秒 + tile 字节相同 + 解压 batches ~ **1 个身份量级**
-    （首序候选命中该时次时；preflight 向量显示混合则以 (ii-b) 口径兜底）；
+    (i) 命中 → 亚秒 + tile 字节相同 + **fact 侧内层相关节点 loops =
+    前导 miss 数 + 1**（首序候选命中时 loops=1；EXPLAIN ANALYZE 必发该
+    字段，round-3 D2 换掉本栈不存在的 batches 单位；preflight 向量显示
+    混合则以 (ii-b) BUFFERS 口径兜底）；
     (ii) 无覆盖 → <1s 空响应、零 fact 触达；
     (ii-b) 内部空洞 miss → 424 语义保持 + 计划为逐身份参数化探针（非整片
     seq-scan 解压）+ **定量主证 = BUFFERS**：after 腿压缩 chunk 关系上的

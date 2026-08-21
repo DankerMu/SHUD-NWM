@@ -55,7 +55,8 @@
 - [x] E3 `openspec validate national-identity-probe-lateral-pushdown --strict
       --no-interactive` PASS
 - [ ] E4 **硬门**，node-27 实机（EXPLAIN 协议：安静库、warm 二采取第二采、
-      BUFFERS/batches 主证、**shipped SQL 直采**——不用 issue 提的仓外
+      BUFFERS/相关节点 loops/Rows Removed 主证（PG15.2 无 Batches 字段，
+      round-3 D2）、**shipped SQL 直采**——不用 issue 提的仓外
       shape_explain.py 脚手架；before/after 同一安静会话内成对重采，不引用
       issue 里的历史数字）：
       (0) preflight receipt：逐 pin 落所触 chunk `is_compressed`、键 NULL
@@ -64,8 +65,9 @@
       (i) 压缩有覆盖 pin（**z4 12/6 @ 2026-08-12T12Z**，chunk 55——先回填
       后压缩，字节比对非空有意义；retention 若已推进按同判据另选并记录；
       preflight 附该时次逐身份命中/缺席向量，round-2 K2）：before 整片
-      解压 → after 亚秒、tile 字节相同、解压 batch ~1 个身份量级（首序
-      候选命中时；混合则按 (ii-b) 口径兜底）；
+      解压 → after 亚秒、tile 字节相同、fact 侧内层相关节点 loops =
+      前导 miss 数 + 1（首序候选命中时 loops=1；混合则按 (ii-b) BUFFERS
+      口径兜底；round-3 D2 换掉 batches 单位）；
       (ii) 压缩无覆盖 pin（preflight 实查选定：落压缩 chunk 且无任何
       coverage 窗覆盖的时次，**不得与 (i) 同时次**——探针无 tile 坐标依赖，
       同时次任意 z/x/y 同答案，原 z9 407/200 pin 与 (i) 同为命中，round-1

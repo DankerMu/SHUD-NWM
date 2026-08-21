@@ -17,7 +17,9 @@ prewarm 网格放大。
 1. **探针重塑（方向 (a)，逐身份 LATERAL 下推）**：`source_identity_stats`
    （hydro-national 分支）改为对身份集合做 `CROSS JOIN LATERAL` 逐身份存在
    探针——身份成为 per-loop 常量，`run_id`/`river_network_version_id` 文本
-   等值获得压缩 segmentby 剪枝与未压缩 PK 前缀，与 #1341 数据腿同构。身份
+   等值获得压缩 segmentby 剪枝与未压缩 run 作用域索引前缀——机制与 #1341
+   数据腿同类但非同构（数据腿绑满列；本探针无 segment 相关项，代价分
+   命中/未命中两侧，详 design D2，round-1 C1/round-3 D3 更正）。身份
    集合用**内联 4 列发现子查询**（键对 + 文本对；与 `latest_runs` 同门控
    形状）——共享 CTE 引用在词法上不可行：`latest_runs` 嵌在 `source_rows`
    的内层 WITH（mvt.py:597）里，对本 CTE 不可见（design D2）。
