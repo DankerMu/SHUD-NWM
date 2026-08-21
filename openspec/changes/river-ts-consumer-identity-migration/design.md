@@ -191,12 +191,16 @@ sentinel 行的老 run 会把既定契约误判为回归。
      3,292,128 / 18549ms；注回辅助后 40 batches / 4032 / 1117ms。
    - **未压缩腿（辅助无收益，二次终审证伪初版机理）**：新旧两计划的
      Index Cond 与 Rows Removed（24261/loop）逐字相同，1967→259ms 纯属
-     I/O 缓存差；该腿由 000051 键索引 + 堆过滤承担，`river_ts_segment_time_
-     idx` 存在但 planner 不选。**已量化残余**：稳态 259ms vs 旧 PK 前缀下降
-     203ms（+28%），chunk 侧 buffer 触达 ~15,120 vs ~275（~40x 工作量放大），
-     绝对值可用，裁定接受并记录；真解药 = #1342 键形后继索引
-     `(river_segment_key, variable_e, valid_time DESC)`（已路由
-     issuecomment-5363238972，它同时治愈本残余与删列后的两腿）。
+     I/O 缓存差；该腿由 000051 键索引 + 堆过滤承担，`river_ts_segment_time_idx`
+     存在但 planner 不选。**已量化残余（安静库终版 receipt，
+     `/home/nwm/nwm-1442-e4/final/`，warm 二采）**：未压缩腿旧 6.2ms（per-run
+     PK 嵌套循环下降）→ 新 226ms，buffers 387→15,439；压缩腿旧 3.0ms（文本
+     PK 循环参数获得 run 级 segmentby 剪枝——键连接在 spec:195 禁文本 fact
+     join 下结构性不可得）→ 新 1085ms。绝对值对展示端点可用（且压缩腿现按
+     D8 契约返回空集），裁定接受并记录；真解药 = #1342 键形后继索引
+     `(river_segment_key, variable_e, valid_time DESC)` 与压缩布局重裁
+     （已路由 issuecomment-5363238972/5363821877）。此前引用的"203/259ms
+     稳态"为争用期误标，以本段安静库数字为准。
    修形：`_SEGMENT_IDENTITY_PREDICATE_SQL` 键对应物后注回带 marker 的文本
    辅助（绑定 5→6），与 `river_segment_key` 同合取式（邻接 oracle 兼容）；
    oracle 的 A 组允许集、曲线绑定销钉（10→11）同批重钉；**不改**

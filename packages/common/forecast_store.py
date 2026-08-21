@@ -58,21 +58,29 @@ QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id
 #   D10.7), not by the original "zero every segment predicate" draft. It buys
 #   exactly ONE thing, on the COMPRESSED leg: segmentby pruning on 000047's
 #   third column. Without it that leg decompresses the whole network — 32660
-#   batches, Rows Removed 3,292,128, 18549ms; with it, 40 batches, 4032, 1117ms.
+#   batches, Rows Removed 3,292,128, 18549ms; with it, 40 batches, 4032, 1085ms.
 #   It qualifies as a sanctioned aid because these blocks bind it as a LITERAL
 #   (never as a text fact join) and it is compression-reachable.
 # * What the aid does NOT do (an earlier draft of this comment claimed it did,
-#   and the second reading of the receipts disproved it): it gives the
+#   and a second reading of the receipts disproved it): it gives the
 #   UNCOMPRESSED leg nothing. Both plans there carry byte-identical Index Cond
-#   and Rows Removed (24261/loop) with and without the predicate — the
-#   1967ms -> 259ms difference was I/O caching, not planning. That leg runs on
-#   000051's key index plus a heap filter either way; the text-shaped
+#   and Rows Removed with and without the predicate — the difference measured
+#   there was I/O caching, not planning. That leg runs on 000051's key index
+#   plus a heap filter either way; the text-shaped
 #   ``river_ts_segment_time_idx`` still exists, but the planner does not choose
-#   it. Its recorded, accepted residual:
-#   steady-state 259ms against the old PK-prefix descent's 203ms, with
-#   chunk-side buffer touches ~15,120 vs ~275 (~40x amplification). The cure is
-#   not a text predicate but #1342's key-form successor index
-#   ``(river_segment_key, variable_e, valid_time DESC)``.
+#   it.
+# * The recorded, ACCEPTED residual of the whole switch, from the quiet-database
+#   shipped-SQL receipts (node-27 ``/home/nwm/nwm-1442-e4/final/``, warm second
+#   run of each; they supersede every contended earlier figure, including the
+#   "203ms/259ms steady state" an earlier draft of this comment quoted):
+#   uncompressed leg 6.2ms -> 226ms with buffer touches 387 -> 15,439;
+#   compressed leg 3.0ms -> 1085ms. The old compressed number is not something
+#   the aid can recover: the text PK nested loop got run-level segmentby pruning
+#   from its loop parameter, and a keyed join cannot, because a text fact join
+#   is forbidden outright. Both residuals are accepted for the display endpoints
+#   at these absolute values; the cure is not a text predicate but #1342's
+#   key-form successor index ``(river_segment_key, variable_e, valid_time
+#   DESC)`` plus a compression-layout re-cut.
 # * ``basin_version_id`` still gets NO text conjunct: it is neither a segmentby
 #   column nor an index prefix here, so it would buy nothing and only widen the
 #   text surface #1342 has to remove.

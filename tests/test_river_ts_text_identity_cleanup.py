@@ -182,11 +182,17 @@ PUSHDOWN_AID_MARKER = "-- transitional compressed-chunk pushdown aid, remove wit
 # SANCTIONED_TEXT_PUSHDOWN_COLUMNS, and for exactly one measured reason: without
 # a literal `rt.river_segment_id` the COMPRESSED leg loses 000047's third
 # segmentby column and decompresses the whole network (32660 batches / Rows
-# Removed 3,292,128 / 18549ms, against 40 / 4032 / 1117ms with it). The
+# Removed 3,292,128 / 18549ms, against 40 / 4032 / 1085ms with it). The
 # uncompressed leg gains nothing from the aid — its Index Cond and Rows Removed
-# are identical either way; it runs on 000051's key index plus a heap filter,
-# and its recorded residual is cured by #1342's `(river_segment_key,
-# variable_e, valid_time DESC)` successor index, not by a text predicate. The
+# are identical either way; it runs on 000051's key index plus a heap filter.
+# The switch's accepted residual, from the quiet-database shipped-SQL receipts
+# (node-27 `/home/nwm/nwm-1442-e4/final/`, warm second run, superseding the
+# contended earlier figures): uncompressed 6.2ms -> 226ms, buffers 387 ->
+# 15,439; compressed 3.0ms -> 1085ms, where the old number came from run-level
+# segmentby pruning through the text PK loop parameter — structurally
+# unavailable to a keyed join, since a text fact join is forbidden. The cure is
+# #1342's `(river_segment_key, variable_e, valid_time DESC)` successor index
+# plus a compression-layout re-cut, not a text predicate. The
 # widening is expressed HERE, per call site, and deliberately not folded into
 # the shared constant — #1341's display oracles consume that constant and must
 # keep rejecting the column.
@@ -543,7 +549,7 @@ def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() 
     but this states the requirement in the form the next reader will search for:
     a "finish the cleanup, drop the last text predicate" edit is the regression
     E4(ii) caught on node-27 — the compressed leg loses segmentby pruning and
-    decompresses the whole network (32660 batches / 18549ms, against 40 / 1117ms
+    decompresses the whole network (32660 batches / 18549ms, against 40 / 1085ms
     with the aid) — and it must fail here rather than in a plan nobody
     re-measures.
     """
@@ -1188,7 +1194,7 @@ def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
 
     Both aids the E4(ii) receipts measured are covered: the network one (000047's
     second segmentby column) and the segment one (its third — the whole-network
-    decompression D10.7 reverses, 18549ms against 1117ms). Both are
+    decompression D10.7 reverses, 18549ms against 1085ms). Both are
     compressed-leg pruning; neither is an uncompressed-leg index prefix.
     """
     for dropped in ("AND rt.river_network_version_id = %s\n", "AND rt.river_segment_id = %s\n"):
