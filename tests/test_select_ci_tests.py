@@ -301,8 +301,21 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
 
     assert selected == [
         "tests/test_api_contract.py",
+        # #1597: the closure guard (direct UNION one hop over
+        # services.tiles.mvt) put these seven in the rule. This pin is the
+        # complement of the guard — the guard forbids missing suites, the pin
+        # forbids extra ones — so it is updated from the selector's own output,
+        # never hand-assembled. The three cutover suites are the one-hop
+        # contribution through apps/api/routes/hydro_display.py.
+        "tests/test_direct_grid_display_cutover_flip.py",
+        "tests/test_direct_grid_display_cutover_history.py",
+        "tests/test_direct_grid_display_cutover_model_resolution.py",
         "tests/test_display_publish_status_only.py",
+        "tests/test_hhe_mvt_binding.py",
+        "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        "tests/test_node27_timeseries_compression_benchmark.py",
+        "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_drift.py",
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
@@ -968,6 +981,11 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "services/slurm_gateway/real_backend.py",
         "services.slurm_gateway.real_backend",
         "tests/test_real_slurm_gateway.py",
+    ),
+    (
+        "services/tiles/mvt.py",
+        "services.tiles.mvt",
+        "tests/test_hydro_display_mvt_scaling.py",
     ),
 )
 
@@ -2232,7 +2250,7 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
 # with a reason token.
 #
 # DOMAIN SPLIT vs test_guarded_module_rules_cover_their_non_gated_importer_closure
-# above: that guard owns the two GUARDED_MODULE_CLOSURES modules and derives
+# above: that guard owns the three GUARDED_MODULE_CLOSURES modules and derives
 # direct importers UNION a ONE-HOP module extension. This guard owns every
 # tracked module under the nine audited directory paths and derives DIRECT
 # importers only — those directories hold ~150 modules, so one-hop here would

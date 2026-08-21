@@ -698,6 +698,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # here; an mvt.py diff that quietly drops a predicate pairing must
             # not reach CI green without them.
             "tests/test_river_ts_read_path_surrogate_keys.py",
+            # #1597: the seven below are DERIVED by the #1455 importer-closure
+            # guard in tests/test_select_ci_tests.py
+            # (test_guarded_module_rules_cover_their_non_gated_importer_closure,
+            # now covering services.tiles.mvt), not hand-curated — the guard
+            # owns the required set, so a future importer reds it here
+            # instead of silently falling out of the PR lane. Of the seven
+            # added entries, four are direct non-gated importers that assert
+            # the postgis_tile_sql() output shape (hhe_mvt_binding,
+            # hydro_display_mvt_scaling, the two node27_timeseries_compression
+            # suites); the three direct_grid_display_cutover_* suites are the
+            # one-hop additions via apps/api/routes/hydro_display.py. The two
+            # `integration`-marked importers stay out per the #1447 ruling:
+            # they auto-skip without NHMS_RUN_INTEGRATION (tests/conftest.py),
+            # so requiring them buys constant skips and zero assertions.
+            "tests/test_direct_grid_display_cutover_flip.py",
+            "tests/test_direct_grid_display_cutover_history.py",
+            "tests/test_direct_grid_display_cutover_model_resolution.py",
+            "tests/test_hhe_mvt_binding.py",
+            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
