@@ -40,4 +40,6 @@ Issue #1597：`scripts/select_ci_tests.py` 里 `services/tiles/mvt.py` 的
 - 不改 `mvt.py` 自身；不改两个带 `integration` marker 的门控 importer
   （`tests/test_mvt_national_identity_probe_integration.py`、
   `tests/test_river_ts_read_path_surrogate_keys_integration.py`）——守卫定义按 #1447 裁定
-  排除 file-level 门控套件，它们在 "SQL Migration Dry Run" lane 跑。
+  排除 file-level 门控套件：无 `NHMS_RUN_INTEGRATION` 时自动 skip，纳入规则只买到
+  常量 skip、零断言；mvt-only diff 不点亮 CI 的 `database` filter，它们只在显式
+  integration opt-in（`database` lane / node-27 真库）下执行。

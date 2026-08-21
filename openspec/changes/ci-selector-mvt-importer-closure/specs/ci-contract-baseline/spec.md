@@ -38,12 +38,13 @@ normative disposition rule for their direct-importer gaps.
   `tests/test_display_coverage_refresh.py`,
   `tests/test_display_coverage_parallel.py`, `tests/test_forecast_api.py`)
 - **WHEN** a PR changes only `services/tiles/mvt.py`
-- **THEN** the selector output includes its four non-gated direct importer suites
-  (`tests/test_hhe_mvt_binding.py`, `tests/test_hydro_display_mvt_scaling.py`,
+- **THEN** the selector output includes every non-gated direct importer suite
+  of `services.tiles.mvt` (including `tests/test_hhe_mvt_binding.py`,
+  `tests/test_hydro_display_mvt_scaling.py`,
   `tests/test_node27_timeseries_compression_benchmark.py`,
-  `tests/test_node27_timeseries_compression_live_evidence.py`) and the three
-  one-hop suites contributed by `apps/api/routes/hydro_display.py`
-  (`tests/test_direct_grid_display_cutover_flip.py`,
+  `tests/test_node27_timeseries_compression_live_evidence.py`) and every
+  one-hop suite contributed by `apps/api/routes/hydro_display.py` (including
+  `tests/test_direct_grid_display_cutover_flip.py`,
   `tests/test_direct_grid_display_cutover_history.py`,
   `tests/test_direct_grid_display_cutover_model_resolution.py`),
   and no core-smoke-only fallback suite
