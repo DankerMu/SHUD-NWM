@@ -1124,6 +1124,12 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
         same_name_test = _same_name_backend_python_test(path)
         if same_name_test is not None and _test_target_exists(same_name_test, repo_root=repo_root):
             selected.add(same_name_test)
+            # A source-only PR can ADD a second colliding source that maps to an
+            # existing same-name suite, so the PR lane must run the collision
+            # contract now rather than first failing after merge (where the
+            # tracked-tree guards re-derive from `git ls-files`). Routed support
+            # modules ride the same meta-guard rider for the same reason.
+            selected.add(SELECTOR_META_GUARD_TEST)
             matched = True
 
         if (_is_backend_python_path(path) or _is_backend_shell_path(path)) and not matched:
@@ -1177,6 +1183,11 @@ def changed_paths_from_git(base_ref: str) -> list[str]:
 # same-name suite derivation (`_same_name_backend_python_test`), so the two
 # cannot drift apart: a path classified as backend gets same-name routing, and
 # only those paths do.
+#
+# This tuple is the one production/runtime authority. The selector's test suite
+# pins the exact five-prefix membership through an independent assert-only
+# behavioral oracle (target-present selection matrix), so a prefix removed or
+# added here reddens there before the tracked-tree guards can shrink with it.
 BACKEND_PYTHON_SOURCE_PREFIXES: tuple[str, ...] = (
     "apps/api/",
     "packages/",

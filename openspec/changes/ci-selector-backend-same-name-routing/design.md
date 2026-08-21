@@ -42,11 +42,15 @@ Two source paths can map to one basename suite. Current master has one such cros
 
 The PR SHALL report current `pytest --collect-only` count and actual wall clock for all 14 unique suites reached by the 15 previously missing source/suite pairs. It SHALL separately report the issue's 13 core-smoke-only suite subtotal so the historical 309-node acceptance baseline is not conflated with the full current 383-node gap set (which also includes `tests/test_runtime_mode.py`). No timeout or marker changes are permitted to make the budget pass.
 
+### D6: Every same-name source route schedules the selector meta-guard
+
+A source-only PR can ADD a new colliding source that maps to an existing same-name suite, which is exactly the change class the collision/import contract exists to reject — but the selector meta-guard was only scheduled from changed-test and routed-support-module branches, so the collision guard first ran after merge. At the same-name derivation chokepoint, an EXISTING same-name target accepted for a backend source therefore also selects `SELECTOR_META_GUARD_TEST`. This is the simplest bounded guard route: it reuses the existing meta-guard rider instead of adding per-basename runtime logic, and it does not weaken the collision/import contract or the no-suite fallback. The cost is one additional suite (the selector's own, ~186 tests / ~15 s measured) on every same-name source PR, far inside the 35-minute targeted-job cap. D6 intentionally broadens the OUTPUT of every existing same-name source route (and scripts/ same-name routes, which now gain the rider too): the same-name suite inclusion, explicit business targets, set-union, target-existence gate, missing-target filtering, and no-suite fallback semantics are preserved exactly, and only the meta-guard target is added to the emitted list. Sources without a same-name suite keep their existing explicit/fallback output byte-for-byte.
+
 ## Must Preserve
 
-- Existing `scripts/` source-to-suite mappings and explicit-rule outputs.
+- Same-name suite inclusion and explicit business targets: a backend source with an existing same-name suite still selects that suite, and an explicit rule still contributes its targets; only the meta-guard target is intentionally ADDED to the emitted list for same-name routes (D6), never replacing or removing a target.
 - Set-union semantics when an explicit rule and same-name derivation both match.
-- Core-smoke fallback for backend Python sources with neither an explicit rule nor an existing same-name suite.
+- Core-smoke fallback for backend Python sources with neither an explicit rule nor an existing same-name suite: the fallback output stays byte-for-byte unchanged (no rider is added there).
 - Existing broad `apps/api/**` rule, changed-test/meta-guard routing, missing-target warnings, gated-suite policy, and all guarded-module/importer closure contracts.
 
 ## Seams Under Test

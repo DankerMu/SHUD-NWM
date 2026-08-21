@@ -8,7 +8,8 @@ Issue #1587 exposes a standing targeted-CI blind spot: a changed backend Python 
 - Keep existence checking, explicit-rule union, unknown-backend fallback, changed-test routing, and node-id handling unchanged.
 - Replace the scripts-only tree guard with a tracked-tree guard over all five prefixes, and explicitly rewrite the former scripts-only scope assertion.
 - Pin the current cross-prefix same-stem collision so a shared same-name suite must import every colliding source module instead of silently becoming an unrelated basename match.
-- Record collected-test and wall-clock cost for the newly reached suites; do not change CI timeout or workflow topology.
+- Schedule the selector meta-guard on every same-name source route, so the collision/import contract runs in the PR targeted lane on exactly the source-only PRs that can create a new collision.
+- Record collected-test and wall-clock cost for the newly reached suites plus the meta-guard rider; do not change CI timeout or workflow topology.
 
 ## Capabilities
 

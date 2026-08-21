@@ -52,3 +52,10 @@ convergence cannot silently route an unrelated suite.
   map to the same `tests/test_<basename>.py`
 - **THEN** the tracked-tree guard requires that suite to import every colliding
   source module and fails by naming any source whose import edge is absent
+
+#### Scenario: a same-name source change schedules the collision guard
+
+- **WHEN** a PR changes a backend Python source whose same-name test file exists
+- **THEN** the selector output also includes the selector meta-guard suite, so
+  the collision/import contract runs in the PR targeted lane on exactly the
+  source-only PRs that can add a colliding source

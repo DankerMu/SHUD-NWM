@@ -326,6 +326,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_timing.py",
+        # The selector meta-guard joins because retry.py has a same-name
+        # tests/test_retry.py and every same-name source route now schedules it
+        # (round-1 fix: the collision/import contract must run in the PR lane).
+        "tests/test_select_ci_tests.py",
         "tests/test_source_cycle_raw_manifest.py",
         "tests/test_source_scoped_dispatch.py",
         "tests/test_state_clone.py",
@@ -656,6 +660,108 @@ def test_select_tests_same_name_derivation_covers_all_backend_prefixes() -> None
         assert test_path in fallback
 
 
+# --------------------------------------------------------------------------
+# Independent exact-prefix boundary oracle (round-1 fix, CAND-01/C-R1-TE-01).
+#
+# The production constant feeds classification, same-name derivation, the
+# tracked-pair completeness guard and the collision scan; a wrong prefix edit
+# shrinks or widens ALL of them together, and the existing direct pins only
+# exercised `packages/`. This matrix independently fixes the contract
+# membership to exactly these five prefixes — no `db/`, no arbitrary `.py`.
+# It is ASSERT-ONLY: it never feeds production derivation, the tracked-tree
+# pathspecs, or any other guard. Each case uses a tmp_path repo_root with a
+# present same-name target, so the derivation must land the same-name route
+# rather than being masked by the unknown-backend core-smoke fallback.
+# --------------------------------------------------------------------------
+SAME_NAME_ROUTING_PREFIX_CONTRACT: tuple[str, ...] = (
+    "apps/api/",
+    "packages/",
+    "services/",
+    "workers/",
+    "scripts/",
+)
+
+
+@pytest.mark.parametrize("prefix", SAME_NAME_ROUTING_PREFIX_CONTRACT)
+def test_each_exact_backend_prefix_routes_a_present_same_name_target_without_core_smoke(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    probe = f"{prefix}surface/same_name_probe.py"
+    suite = "tests/test_same_name_probe.py"
+    suite_path = tmp_path / suite
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    suite_path.write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    selected = select_tests([probe], repo_root=tmp_path)
+
+    assert selected == [suite], f"{prefix}: expected only the same-name suite, got {selected}"
+
+
+def test_prefix_contract_membership_is_exactly_the_five_backend_prefixes() -> None:
+    # The oracle's contract membership must equal the production authority:
+    # the moment the production tuple and this matrix disagree, one side has
+    # drifted and the assertion names which side moved.
+    assert tuple(BACKEND_PYTHON_SOURCE_PREFIXES) == SAME_NAME_ROUTING_PREFIX_CONTRACT
+
+
+@pytest.mark.parametrize(
+    ("probe", "suite", "prefix_label"),
+    [
+        # A .py OUTSIDE the five prefixes with its own present same-name suite.
+        # Widening the domain to any `.py` must red here (the derivation would
+        # otherwise land this route instead of the empty selection).
+        (
+            "infra/probe/outside_domain_probe.py",
+            "tests/test_outside_domain_probe.py",
+            "py-outside-five-prefixes",
+        ),
+        # A non-Python path INSIDE a backend prefix — the derivation must stay
+        # Python-only even though its same-name suite exists.
+        (
+            "workers/surface/same_name_probe.sql",
+            "tests/test_same_name_probe.py",
+            "non-py-inside-backend-prefix",
+        ),
+    ],
+)
+def test_target_present_negative_cases_never_same_name_route(
+    tmp_path: Path,
+    probe: str,
+    suite: str,
+    prefix_label: str,
+) -> None:
+    suite_path = tmp_path / suite
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    suite_path.write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    selected = select_tests([probe], repo_root=tmp_path)
+
+    # Both fixture paths match no explicit rule and are not backend shell, so
+    # the honest existing empty-selection semantics hold despite the present
+    # same-name target — and any widening of the backend-python domain that
+    # would route either probe reds here.
+    assert selected == [], f"{prefix_label}: expected empty selection, got {selected}"
+    assert suite not in selected, f"{prefix_label}: same-name suite wrongly selected for {probe}"
+
+
+def test_same_name_victim_pin_is_live_without_fallback() -> None:
+    # The round-1 blind spot, anchored as a direct pin: `workers/` was the
+    # prefix whose removal left every guard green while this real path selected
+    # nothing. The path has no explicit rule and no other rule matches it, so
+    # the pin is exactly the same-name derivation plus the meta-guard rider.
+    source = "workers/grid_registry/shared_binding_eligibility.py"
+    suite = "tests/test_shared_binding_eligibility.py"
+    assert Path(source).is_file()
+    assert Path(suite).is_file()
+    assert not [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(source, rule.pattern)]
+
+    selected = select_tests([source], repo_root=Path("."))
+
+    assert suite in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
 def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
     # The explicit-rule AND same-name scenario (spec "explicit and derived
     # mappings form a union"): apps/api/runtime_mode.py matches the broad
@@ -674,8 +780,9 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
 
     # SET union, mirroring the caller's deduplicating semantics: the derived
     # target must not replace the explicit ones, and an explicit rule that later
-    # also names it must not false-red the pin.
-    assert selected == sorted({*matching[0].tests, same_name_target})
+    # also names it must not false-red the pin. The selector meta-guard joins
+    # every same-name source route, so it is part of the union here.
+    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST})
 
 
 # The `git ls-files` pathspecs for the same-name derivation are derived from the
@@ -731,10 +838,19 @@ def test_every_tracked_backend_source_with_a_same_name_suite_selects_it_without_
         if same_name_test not in selected:
             offenders.append(f"{source_path}: {same_name_test} not selected (got {selected})")
             continue
-        if same_name_test in CORE_SMOKE_TESTS:
-            # Exemption: a same-name test that IS a core-smoke file makes the
-            # no-smoke clause meaningless. No such pair exists today.
+        # Every same-name source route also schedules the selector meta-guard,
+        # so the collision/import contract and the tracked-tree guards run in
+        # the PR lane (a source-only PR can create a new collision). A pair
+        # that stops dragging the meta-guard has lost that reachability.
+        if SELECTOR_META_GUARD_TEST not in selected:
+            offenders.append(f"{source_path}: same-name route no longer schedules the selector meta-guard")
             continue
+        # No CORE_SMOKE exemption exists here: a same-name suite that happens
+        # to BE a core-smoke file (today `services/slurm_gateway/gateway.py` ->
+        # `tests/test_gateway.py`) is already independently owned by the
+        # `services/slurm_gateway/**` rule, so the unowned-smoke check below
+        # filters it out legitimately. An exemption would mask the fallback
+        # leaking a smoke file the rules do not own.
         smoke_overlap = sorted(
             {
                 target
@@ -800,6 +916,53 @@ def test_cross_prefix_stem_collisions_require_their_shared_suite_to_import_every
     missing = _collision_missing_imports(collisions)
 
     assert not missing, "colliding same-name suite must import every colliding source: " + "; ".join(missing)
+
+
+def test_same_name_source_routes_schedule_the_collision_guard_in_the_pr_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A source-only PR can ADD a second source sharing a stem with an existing
+    # suite, which is exactly the change class that can create a new collision —
+    # so every existing same-name route must carry the selector meta-guard that
+    # runs the collision/import contract in the targeted lane. Fully synthetic
+    # on a temporary git repo, so the real tree is never required to contain a
+    # collision (a zero-collision repo is a legal terminal state). The same
+    # synthetic collision exercises BOTH legs: route reachability (the second
+    # source's selection includes the shared suite and the meta-guard) and
+    # collision detection (the tree derivation names the missing import).
+    first = "apps/api/routes/collision_probe.py"
+    second = "services/surface/collision_probe.py"
+    suite = "tests/test_collision_probe.py"
+    (tmp_path / "apps/api/routes").mkdir(parents=True)
+    (tmp_path / "services/surface").mkdir(parents=True)
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / first).write_text("MARKER = 'first'\n", encoding="utf-8")
+    (tmp_path / second).write_text("MARKER = 'second'\n", encoding="utf-8")
+    # The shared suite imports ONLY the first source module; the second source's
+    # import edge is absent, which is exactly what the collision contract must
+    # name.
+    (tmp_path / suite).write_text(
+        f"from {_dotted_module_name(first)} import MARKER\n", encoding="utf-8"
+    )
+    # A dummy meta-guard target so _test_target_exists preserves the rider.
+    (tmp_path / SELECTOR_META_GUARD_TEST).write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    selected = select_tests([second], repo_root=tmp_path)
+    assert selected == sorted([suite, SELECTOR_META_GUARD_TEST]), (
+        f"second collision source must select the shared suite plus the meta-guard, got {selected}"
+    )
+
+    collisions = _collision_stem_map()
+    assert collisions == {"collision_probe": [first, second]}, f"unexpected collisions: {collisions}"
+    missing = _collision_missing_imports(collisions)
+    assert missing == [f"{second} -> {suite}"], (
+        f"collision guard must name the second source's missing import, got {missing}"
+    )
 
 
 @pytest.mark.parametrize(
