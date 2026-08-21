@@ -983,6 +983,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/select_ci_tests.py",
         (SELECTOR_META_GUARD_TEST,),
     ),
+    # #1650 self-routing: ci.yml's top-level concurrency and the backend
+    # paths-filter ARE the contract tests/select_ci_tests.py pins, so a
+    # workflow-only PR must select the meta-guard suite and not collapse to
+    # core smoke. Backed by ci.yml's own `backend` paths-filter entry; both
+    # legs together make a workflow-only PR run these assertions.
+    PathTestRule(
+        ".github/workflows/ci.yml",
+        (SELECTOR_META_GUARD_TEST,),
+    ),
     PathTestRule(
         "pyproject.toml",
         CORE_SMOKE_TESTS,

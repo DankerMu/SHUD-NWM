@@ -264,6 +264,20 @@ def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
     assert selected == ["tests/test_two_node_docker_runtime.py"]
 
 
+def test_select_tests_maps_ci_workflow_change_to_the_meta_guard_suite() -> None:
+    # #1650 self-routing: a PR that changes ci.yml must open the targeted gate
+    # (backend filter leg) AND select the selector's own contract suite — the
+    # only suite that asserts the concurrency/paths-filter contract on the very
+    # PR that rewrites them. Exact single-target selection; the core-smoke
+    # fallback must not arm.
+    assert Path(CI_WORKFLOW_PATH).is_file()
+
+    selected = select_tests([CI_WORKFLOW_PATH], repo_root=Path("."))
+
+    assert selected == [SELECTOR_META_GUARD_TEST]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
 def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
     selected = select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
     fallback_only_tests = set(CORE_SMOKE_TESTS) - {"tests/test_migrations.py"}
@@ -1904,6 +1918,274 @@ def test_ci_workflow_consumes_the_meta_guard_only_output(tmp_path: Path) -> None
     assert "meta_guard_only" in _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
 
 
+def test_ci_concurrency_pins_pr_number_run_id_and_conditional_cancel() -> None:
+    # #1650: master's full pytest is the only whole-repo regression after the
+    # PR targeted lane, and every non-PR run shares one `github.ref` group with
+    # `cancel-in-progress: true` — so a later master push cancels the running
+    # full suite, and a same-group pending run is silently dropped (#1119 fired
+    # three times on one regression). The contract: PR runs keep the PR-number
+    # identity and PR-only cancellation; every push/workflow_dispatch run gets
+    # its own `github.run_id` group and is never cancelled or replaced by
+    # policy. Pinned on the UNIQUE top-level block, sliced from the workflow
+    # text — GitHub expressions cannot be executed locally, so the contract
+    # test pins the exact strings the runner will evaluate.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert not _ci_concurrency_pin_offenders(workflow)
+
+
+def test_ci_concurrency_reds_on_the_github_ref_fallback() -> None:
+    # The exact regression this change exists to kill, on constructed workflow
+    # text so the tracked ci.yml is untouched: `github.ref` fallback under
+    # `||` re-shared the group across every master push / manual run.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    block = _top_level_concurrency_block(workflow)
+    assert "github.run_id" in block, "the run_id contract leg is not pinned by this test"
+
+    ref_fallback = workflow.replace("github.run_id", "github.ref")
+
+    assert ref_fallback != workflow
+    offenders = _ci_concurrency_pin_offenders(ref_fallback)
+    assert any("github.ref" in offender for offender in offenders), offenders
+
+
+def test_ci_concurrency_reds_on_unconditional_cancel_in_progress() -> None:
+    # The other half of the regression: a literal `true` cancels a RUNNING
+    # non-PR run even if the unique-group fix prevented pending replacement.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    block = _top_level_concurrency_block(workflow)
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in block, (
+        "the PR-only cancellation leg is not pinned by this test"
+    )
+
+    unconditional = workflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: true",
+    )
+
+    assert unconditional != workflow
+    offenders = _ci_concurrency_pin_offenders(unconditional)
+    assert any("cancel" in offender for offender in offenders), offenders
+
+
+def test_ci_concurrency_reds_on_a_second_top_level_block() -> None:
+    # The extraction helper's contract is a UNIQUE top-level block; a second one
+    # (YAML duplicate — last-wins, or a parse failure) must red the guard rather
+    # than the pin silently reading the first, correct block.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    duplicated = workflow + (
+        "\nconcurrency:\n"
+        "  group: ci-duplicate\n"
+        "  cancel-in-progress: true\n"
+    )
+
+    with pytest.raises(AssertionError, match="exactly 1 top-level `concurrency:` block, found 2"):
+        _ci_concurrency_pin_offenders(duplicated)
+
+
+def test_ci_changed_files_authority_is_a_single_workflow_contract() -> None:
+    # #1650 D3: paths-filter and the selector must share ONE PR changed-file
+    # authority (the paths-filter `all_files` output), never a recomputed
+    # merge-base diff that diverges after master changes while the PR is open.
+    # Each leg pinned on the sliced workflow blocks.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    changes_job = _changes_job_block(workflow)
+    selection = _targeted_selection_step(workflow)
+
+    # changes job: dorny action with the json listing + catch-all all filter,
+    # and the all_files job output exposed.
+    assert "list-files: json" in changes_job
+    assert "all:\n              - '**'" in changes_job
+    assert "all_files: ${{ steps.filter.outputs.all_files }}" in changes_job
+
+    # targeted selection: env-passed JSON (never shell interpolation), safe
+    # JSON-to-newline conversion via the runner-provided jq (the job has no
+    # setup-uv, so `uv run` would fail here), selector via --changed-file, and
+    # NO --base-ref.
+    assert "CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}" in selection
+    assert "jq -r '.[]'" in selection
+    assert "uv run" not in selection
+    assert "--changed-file" in selection
+    assert "--base-ref" not in selection
+
+
+def test_ci_changes_job_slice_stops_at_the_next_job_key() -> None:
+    # The `changes` job block must be the job itself, not the whole tail of the
+    # file: an authority token parked in a LATER job (or anywhere past the next
+    # two-space job key) must not satisfy the contract.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert "\n  markdown-lint:" not in _changes_job_block(workflow)
+
+
+def test_ci_changes_job_authority_tokens_in_a_later_job_are_not_accepted() -> None:
+    # Constructed mutation: REMOVE each authority token from the changes job and
+    # re-add it only in a later job (past the `markdown-lint` key). The
+    # changes-job pin must not accept the later-job copy — the contract reads
+    # the changes job block only.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    stripped = (
+        workflow.replace("          list-files: json\n", "")
+        .replace("            all:\n              - '**'\n", "")
+        .replace("      all_files: ${{ steps.filter.outputs.all_files }}\n", "")
+    )
+    assert stripped != workflow
+    moved_to_later_job = stripped + (
+        "  probe-job:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          echo 'list-files: json'\n"
+        "          echo 'all:\\n              - \\'**\\''\n"
+        "          echo 'all_files: ${{ steps.filter.outputs.all_files }}'\n"
+    )
+
+    block = _changes_job_block(moved_to_later_job)
+    assert "\n  markdown-lint:" not in block
+    assert "list-files: json" not in block
+    assert "all:\n              - '**'" not in block
+    assert "all_files: ${{ steps.filter.outputs.all_files }}" not in block
+
+
+def test_ci_changed_files_authority_reds_when_a_leg_is_removed() -> None:
+    # Each authority leg is load-bearing: dropping the catch-all filter, the
+    # json listing, the all_files output, the env-passed JSON, the jq
+    # conversion, the --changed-file seam, reintroducing --base-ref, or
+    # reintroducing `uv run` must red the contract.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    removed_catch_all = workflow.replace("            all:\n              - '**'\n", "")
+    assert removed_catch_all != workflow
+    assert "all:\n              - '**'" not in _changes_job_block(removed_catch_all)
+
+    removed_json = workflow.replace("          list-files: json\n", "")
+    assert removed_json != workflow
+    assert "list-files: json" not in _changes_job_block(removed_json)
+
+    removed_output = workflow.replace("      all_files: ${{ steps.filter.outputs.all_files }}\n", "")
+    assert removed_output != workflow
+    assert "all_files: ${{ steps.filter.outputs.all_files }}" not in _changes_job_block(removed_output)
+
+    removed_env = workflow.replace(
+        "          CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}\n", ""
+    )
+    assert removed_env != workflow
+    assert "CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}" not in _targeted_selection_step(removed_env)
+
+    replaced_jq = workflow.replace("jq -r '.[]'", "python -c 'import json,sys;print()'")
+    assert replaced_jq != workflow
+    assert "jq -r '.[]'" not in _targeted_selection_step(replaced_jq)
+
+    reintroduced_base_ref = workflow.replace("--changed-file", "--base-ref")
+    assert reintroduced_base_ref != workflow
+    assert "--changed-file" not in _targeted_selection_step(reintroduced_base_ref)
+    assert "--base-ref" in _targeted_selection_step(reintroduced_base_ref)
+
+    reintroduced_uv = workflow.replace("jq -r '.[]'", "uv run python -c 'pass'")
+    assert reintroduced_uv != workflow
+    assert "uv run" in _targeted_selection_step(reintroduced_uv)
+
+
+def test_ci_concurrency_ignores_job_level_indented_concurrency_blocks() -> None:
+    # The uniqueness count must be top-level only — `\nconcurrency:\n` at column
+    # 0. An indented `concurrency:` under a job is a different (job-scoped)
+    # policy and must not be miscounted as a duplicate of the top-level block.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    with_a_job_level_block = workflow + (
+        "  probe-job:\n"
+        "    concurrency:\n"
+        "      group: job-scoped\n"
+        "    run: true\n"
+    )
+
+    assert not _ci_concurrency_pin_offenders(with_a_job_level_block)
+
+
+def test_ci_concurrency_reds_on_a_duplicate_group_line() -> None:
+    # YAML duplicate keys are last-wins (or a parse failure) at runtime. A second
+    # `group:` line inside the top-level block must red the guard even though the
+    # first line is the exact correct expression.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    duplicated = workflow.replace(
+        EXACT_CI_CONCURRENCY_GROUP,
+        EXACT_CI_CONCURRENCY_GROUP + "\n  group: ci-broken-shared",
+    )
+
+    assert duplicated != workflow
+    offenders = _ci_concurrency_pin_offenders(duplicated)
+    assert any("group" in offender for offender in offenders), offenders
+
+
+def test_ci_concurrency_reds_on_a_duplicate_cancel_line() -> None:
+    # Mirror of the group duplicate: a second `cancel-in-progress:` line must
+    # red even though the first line is the exact PR-only expression.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    duplicated = workflow.replace(
+        EXACT_CI_CONCURRENCY_CANCEL,
+        EXACT_CI_CONCURRENCY_CANCEL + "\n  cancel-in-progress: true",
+    )
+
+    assert duplicated != workflow
+    offenders = _ci_concurrency_pin_offenders(duplicated)
+    assert any("cancel" in offender for offender in offenders), offenders
+
+
+def test_ci_concurrency_exact_group_expression_is_pinned() -> None:
+    # #1650 D1 verbatim. This is the green side of the exact pin — the full
+    # group expression must be present byte-for-byte. The mutation tests below
+    # prove each single-token-preserving rearrangement reds it.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert EXACT_CI_CONCURRENCY_GROUP in _top_level_concurrency_block(workflow)
+    assert EXACT_CI_CONCURRENCY_CANCEL in _top_level_concurrency_block(workflow)
+
+
+def test_ci_concurrency_reds_on_run_id_first_group() -> None:
+    # The dangerous mutation: run_id-first still contains every token, so the
+    # old token-presence pin passed it while push/master runs re-shared one
+    # group and cancelled each other.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    run_id_first = (
+        "ci-${{ github.workflow }}-"
+        "${{ github.event_name == 'pull_request' && github.run_id || github.event.pull_request.number }}"
+    )
+
+    assert EXACT_CI_CONCURRENCY_GROUP in workflow
+    mutated = workflow.replace(EXACT_CI_CONCURRENCY_GROUP, run_id_first)
+    assert EXACT_CI_CONCURRENCY_GROUP not in _top_level_concurrency_block(mutated)
+    assert _ci_concurrency_pin_offenders(mutated) != []
+
+
+def test_ci_concurrency_reds_on_or_joined_group() -> None:
+    # Removing the precedence by OR-joining the two branches loses the
+    # PR-first guarantee while keeping every token.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    or_joined = (
+        "ci-${{ github.workflow }}-"
+        "${{ github.event_name == 'pull_request' || github.event.pull_request.number || github.run_id }}"
+    )
+
+    assert EXACT_CI_CONCURRENCY_GROUP in workflow
+    mutated = workflow.replace(EXACT_CI_CONCURRENCY_GROUP, or_joined)
+    assert EXACT_CI_CONCURRENCY_GROUP not in _top_level_concurrency_block(mutated)
+    assert _ci_concurrency_pin_offenders(mutated) != []
+
+
+def test_ci_concurrency_reds_on_inverted_branch_group() -> None:
+    # The other precedence inversion: `github.run_id` guards the branch, so
+    # non-PR runs pick the PR number. Keeps every token again.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    inverted = (
+        "ci-${{ github.workflow }}-"
+        "${{ github.run_id && github.event.pull_request.number || github.run_id }}"
+    )
+
+    assert EXACT_CI_CONCURRENCY_GROUP in workflow
+    mutated = workflow.replace(EXACT_CI_CONCURRENCY_GROUP, inverted)
+    assert EXACT_CI_CONCURRENCY_GROUP not in _top_level_concurrency_block(mutated)
+    assert _ci_concurrency_pin_offenders(mutated) != []
+
+
 def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
     # c4f2a8d4 renamed two scheduler tests but left their node ids pinned in
     # the selector; every scheduler.py PR then failed collection with
@@ -2891,6 +3173,129 @@ def _database_filter_block(workflow: str) -> str:
     return workflow[body_start : following.start() if following else len(workflow)]
 
 
+_BACKEND_FILTER_KEY = "\n            backend:\n"
+
+
+def _backend_filter_block(workflow: str) -> str:
+    """ci.yml's `backend:` paths-filter block, from its key to the next key.
+
+    Block-scoped rather than a whole-file grep: `.github/workflows/ci.yml`
+    appearing under some other filter (or in a comment) says nothing about
+    whether the targeted `unit-test-targeted` job starts for it. ``workflow`` is
+    TEXT so the red path can feed a constructed workflow.
+    """
+    start = workflow.find(_BACKEND_FILTER_KEY)
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `backend:` paths-filter block"
+    body_start = start + len(_BACKEND_FILTER_KEY)
+    following = _NEXT_FILTER_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+# A job key in this workflow is two-space indented at column 0 under `jobs:`.
+# Slicing at the next column-0 key would run through the whole tail of the
+# file, accepting authority tokens parked in any later job.
+_NEXT_JOB_KEY_LINE = re.compile(r"\n  [A-Za-z0-9_-]+:")
+
+
+def _changes_job_block(workflow: str) -> str:
+    """ci.yml's `changes` job, from its key to the next job key.
+
+    Sliced to the next TWO-SPACE job key rather than grepped: a `changes:`
+    mention elsewhere is not the authority job, and an authority token in a
+    later job must not satisfy the contract. ``workflow`` is TEXT so the red
+    path can feed a constructed workflow.
+    """
+    start = workflow.find("\n  changes:\n")
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `changes:` job"
+    body_start = start + len("\n  changes:\n")
+    following = _NEXT_JOB_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+_NEXT_TOP_LEVEL_KEY_LINE = re.compile(r"\n\S")
+
+
+def _targeted_selection_step(workflow: str) -> str:
+    """ci.yml's `unit-test-targeted` job `Select targeted tests` step.
+
+    Sliced from the step's `env:` (or `run: |`) to the next `- name:` line, so
+    the pin reads the env-passed JSON AND the selection command together.
+    """
+    start = workflow.find("\n      - name: Select targeted tests\n")
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `Select targeted tests` step"
+    step_start = start + len("\n      - name: Select targeted tests\n")
+    following = re.search(r"\n      - name: ", workflow[step_start:])
+    end = step_start + (following.start() if following else len(workflow) - step_start)
+    return workflow[step_start:end]
+
+
+def _top_level_concurrency_block(workflow: str) -> str:
+    """ci.yml's unique top-level `concurrency:` block, to the next top-level key.
+
+    Sliced to the next column-0 key rather than grepped: a `concurrency:`
+    mention nested under a job would be a different policy and must not satisfy
+    the contract. The `concurrency:` key at column 0 is counted — exactly one is
+    required — so a second top-level block reds instead of letting the pin
+    silently read the first, correct one. ``workflow`` is TEXT so the red path
+    can feed a constructed workflow.
+    """
+    markers = [m.start() for m in re.finditer(r"^concurrency:\n", workflow, re.MULTILINE)]
+    assert len(markers) == 1, (
+        f"{CI_WORKFLOW_PATH} must define exactly 1 top-level `concurrency:` block, found {len(markers)}"
+    )
+    start = markers[0]
+    body_start = start + len("concurrency:\n")
+    following = _NEXT_TOP_LEVEL_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+# The EXACT group expression #1650 D1 pins. Structurally: pull_request ANDed
+# with PR number takes precedence, else github.run_id — never github.ref.
+# Token-presence pins cannot catch a mutation that keeps every token but
+# rearranges the expression (run_id-first, OR-join, branch inversion), so the
+# contract pins the full sequence verbatim.
+EXACT_CI_CONCURRENCY_GROUP = (
+    "ci-${{ github.workflow }}-"
+    "${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}"
+)
+EXACT_CI_CONCURRENCY_CANCEL = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
+
+
+def _ci_concurrency_pin_offenders(workflow: str) -> list[str]:
+    """#1650 concurrency-contract violations in ci.yml's top-level block.
+
+    Returns a violation list (empty when the block complies) so the red path
+    can simulate a regression on constructed workflow text without touching the
+    tracked file. The exact group expression and the PR-only cancel line are
+    pinned verbatim AND each must appear exactly once — YAML duplicate keys are
+    last-wins (or a parse failure), so a second `group:`/`cancel-in-progress:`
+    line breaks the runtime even when the first line is exact. The token-level
+    legs stay so a shared ``github.ref`` fallback still reds after a legitimate
+    reformat of the group.
+    """
+    block = _top_level_concurrency_block(workflow)
+    offenders: list[str] = []
+    # Count the KEY lines, not just the exact expression: a second `group:`
+    # line (YAML last-wins) reds even though the first line is exact.
+    group_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("group: ")]
+    if group_lines != [f"group: {EXACT_CI_CONCURRENCY_GROUP}"]:
+        offenders.append(
+            "top-level concurrency must define exactly one group line equal to "
+            f"'group: {EXACT_CI_CONCURRENCY_GROUP}'"
+        )
+    if "github.ref" in block:
+        offenders.append("top-level concurrency re-introduced the shared github.ref fallback group")
+    cancel_lines = [
+        line.strip() for line in block.splitlines() if line.strip().startswith("cancel-in-progress: ")
+    ]
+    if cancel_lines != [EXACT_CI_CONCURRENCY_CANCEL]:
+        offenders.append(
+            "top-level concurrency must define exactly one cancel-in-progress line equal to "
+            f"{EXACT_CI_CONCURRENCY_CANCEL!r}"
+        )
+    return offenders
+
+
 def _carveout_filter_pin_offenders(
     *,
     workflow: str,
@@ -3051,6 +3456,34 @@ def test_carveout_filter_pin_reds_when_a_path_leaves_the_database_block() -> Non
     assert _carveout_filter_pin_offenders(workflow=moved_to_backend) == [
         "tests/conftest.py: carve-out is not listed in the ci.yml `database:` filter block"
     ]
+
+
+def test_ci_workflow_self_change_opens_the_backend_targeted_gate() -> None:
+    # #1650 self-routing, backend-filter leg: a workflow-only PR must start the
+    # targeted Unit Tests job, or the contract suite below never executes on the
+    # PR that rewrote the workflow. Pin the exact literal inside the `backend:`
+    # filter block — a mention elsewhere in the file (docs, comments, another
+    # filter) opens no job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert "              - '.github/workflows/ci.yml'\n" in _backend_filter_block(workflow)
+
+
+def test_ci_workflow_self_change_gate_reds_when_the_path_leaves_the_backend_block() -> None:
+    # Constructed workflow text, so the tracked ci.yml is untouched. Two shapes:
+    # the entry deleted outright, and the entry moved under ANOTHER filter — the
+    # second is why the pin slices the block instead of grepping the file, since
+    # `ci.yml` under `docs:` starts no targeted job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    entry = "              - '.github/workflows/ci.yml'\n"
+    assert entry in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(entry, "")
+    assert entry not in _backend_filter_block(deleted)
+
+    moved_to_frontend = deleted.replace("            frontend:\n", "            frontend:\n" + entry)
+    assert entry in moved_to_frontend
+    assert entry not in _backend_filter_block(moved_to_frontend)
 
 
 def test_support_module_rule_patterns_are_distinct_exact_paths() -> None:
