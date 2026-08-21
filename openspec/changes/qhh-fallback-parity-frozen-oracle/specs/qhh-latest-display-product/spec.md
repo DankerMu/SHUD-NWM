@@ -18,7 +18,7 @@ The authoritative CTE fallback of latest-QHH candidate discovery SHALL bound its
 #### Scenario: Result parity
 
 - **WHEN** the pushdown fallback and the previous single-statement fallback — frozen in-repo as `tests/fixtures/legacy_qhh_fallback_pre_1413.sql`, never updated alongside production SQL — run against the same database snapshot with the same inputs
-- **THEN** they return identical rows (columns, values, ordering)
+- **THEN** they return identical rows (values and ordering) on the frozen statement's column set — the production-only #1442 surrogate-key columns (`run_key`, `basin_version_key`, `river_network_version_key`) being an explicitly asserted, pinned exclusion, so a further production-only column reddens the comparison rather than widening it
 - **AND** the comparison is reproducible by a real-database test in the repository against that frozen statement (not against the fast path, whose coverage cache shares the pushdown idiom), covering a covered candidate, a candidate whose `forcing_version_id` is NULL (the `scan_* IS NULL` guard branch), and the empty-header state.
 
 #### Scenario: Parity oracle is independent of the production SQL

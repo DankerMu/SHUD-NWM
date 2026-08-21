@@ -80,6 +80,17 @@ _LEGACY_PUBLISH_SQL = """
 _LEGACY_FALLBACK_SQL = (Path(__file__).parent / "fixtures" / "legacy_qhh_fallback_pre_1413.sql").read_text(
     encoding="utf-8"
 )
+# Checked at import so a stray percent in the frozen file's prose header fails at
+# collection — on any machine — instead of at execute time inside a DB-only test.
+# The whole file, comments included, is handed to cursor.execute, and psycopg2
+# interpolates the entire statement; this module is integration-marked, so that
+# failure would otherwise only ever surface on the node-27 lane. The header's own
+# re-freeze/retire rule invites #1342 to edit that prose, hence the guard.
+assert _LEGACY_FALLBACK_SQL.count("%") == 6 and _LEGACY_FALLBACK_SQL.count("%s") == 6, (
+    "the frozen fallback must hold exactly its six positional placeholders and no other "
+    "percent sign: psycopg2 interpolates comments too, so a stray % in the header raises "
+    "at execute time, and only on the node-27 integration lane"
+)
 
 # Columns the production candidate CTE carries that the frozen text does not:
 # #1442 added the three surrogate keys for the river fact-table join and the
@@ -517,10 +528,26 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
 ) -> None:
     """The `scan_forcing_version_id IS NULL` branch of the pushdown guards.
 
-    Station rows for the seed's forcing version exist in this snapshot, so a
-    guard that degraded into "NULL means match everything" would have something
-    to wrongly admit; both sides must still report zero station coverage while
-    river coverage stays non-trivial.
+    What this state pins is binding, not admission: with the candidate's
+    forcing_version_id NULL, the NULL scan scalars bind and execute through the
+    named-parameter path across both the station and the river guards.
+
+    It deliberately does not claim to catch a forcing-version guard that
+    "degraded into NULL means match everything" -- that IS the guard's
+    specification, not a degradation, and it would be unobservable here anyway.
+    station_sample_rows inner-joins candidate_runs ON cr.forcing_version_id =
+    fst.forcing_version_id, so a NULL candidate forcing version annihilates the
+    station side on BOTH statements whatever the scan guards do; the scan guards
+    are conjuncts and can only narrow, never admit. The assertions below pin the
+    resulting zero-coverage COALESCE arms equal on both sides. Nor can the
+    station side be strengthened: met.forcing_station_timeseries.forcing_version_id
+    is TEXT NOT NULL and part of the primary key (db/migrations/000005_met.sql), so
+    no station row that a degraded forcing-version guard could admit is
+    constructible.
+
+    The river side stays live and carries the non-vacuity (segment_count > 0),
+    so this state discriminates a mis-bound scan_run_id / scan_basin_version_id
+    / scan_display_start / scan_display_end.
     """
     _prepared_database(throwaway_database_url)
     connection = _connect(throwaway_database_url)

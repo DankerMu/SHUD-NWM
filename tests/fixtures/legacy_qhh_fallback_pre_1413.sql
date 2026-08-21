@@ -34,7 +34,33 @@
 --       and still joins that table on the text identity columns. The parity
 --       helper pops exactly those three columns off the production rows and
 --       asserts the popped set, so a fourth new column reddens the test rather
---       than being silently tolerated.
+--       than being silently tolerated. That same shape entails the
+--       hydro_coverage rollup's authority re-resolution INNER JOINs, which
+--       read the text ids back out of the surrogate keys; those joins are
+--       lossless, because every key reaching the rollup arrived through the
+--       key join to candidate_runs, whose keys were themselves read out of
+--       those very authority tables, so no row can fail to match.
+--   (c) #1340/#1442 enum dual-write column: production's river scan carries an
+--       extra conjunct, rt.variable_e = 'q_down'::hydro.river_variable, beside
+--       its rt.variable = 'q_down' text twin -- annotated in production as one
+--       more member of the transitional "remove with #1342" family. This text
+--       has only the text conjunct. Consequence: a row with variable =
+--       'q_down' and variable_e IS NULL is visible to this frozen statement
+--       and invisible to production. Those are the pre-#1340 text-only rows:
+--       000050 added variable_e nullable, and the SET NOT NULL that would
+--       forbid them lives only inside
+--       hydro.cutover_river_identity_normalization(), which the migration
+--       chain never calls. Bounded twice, though. It cannot redden the parity
+--       tests, because every river row they seed goes through
+--       tests/integration_helpers.py:insert_river_timeseries_dual_written,
+--       which always writes variable_e. And live un-backfilled rows have
+--       run_key and variable_e NULL together -- one writer, one SET list -- so
+--       the (b) key join already excludes them, an exclusion that is itself a
+--       recorded contract -- see the out-of-boundary river_timeseries
+--       consumers requirement in
+--       openspec/specs/river-identity-normalization/spec.md: NULL-key legacy
+--       rows being invisible to key filtering is a sanctioned, time-bounded
+--       exclusion, not data loss.
 --
 -- Re-freeze / retire rule (#1342): the text identity columns this statement
 -- joins on (rt.run_id, rt.basin_version_id, rt.river_network_version_id) are
