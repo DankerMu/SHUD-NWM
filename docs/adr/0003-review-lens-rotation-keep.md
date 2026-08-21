@@ -421,9 +421,11 @@ contract gap；Round 1 则由 test-evidence 镜 + 独立 verifier 抓到两条 e
 
 Audit re-flagged DECIDABLE at 92 multi-round merged PRs, later-round
 catches core=46 vs rotated=242 (rotated share 84.0%, down from 98.8% on
-2026-08-15 — the core share grew as fix-correctness re-review lenses
-began to be labelled as core in recent lines, not because rotated lenses
-stopped catching). Direction unchanged: **keep rotation** stands under
+2026-08-15 — 43 of the 46 core catches come from PRs merged 2026-08-17
+to 08-20 (#1531, #1551, #1566, #1574, #1591, #1618, #1626, …) whose
+round-2+ catches carry round-1 lens names, i.e. re-review rounds re-ran
+the same lenses and the audit counts those as core; rotated-in lenses
+did not stop catching). Direction unchanged: **keep rotation** stands under
 the same autonomous default-keep rule. #1596 is a cautionary data point
 on the other axis: its rounds 3-5 catches all came from rotated-in
 delta-verification lenses, but every one was a fix-propagation miss
