@@ -40,8 +40,8 @@ All NHMS domain packs are not selected: no geospatial, hydro-met, SHUD numerical
 - [x] 3.2 `uv run ruff check .` passes.
 - [x] 3.3 `openspec validate protect-master-full-ci-from-cancellation --strict --no-interactive` passes.
 - [x] 3.4 `scripts/select_ci_tests.py` with a workflow-only changed-file list selects `tests/test_select_ci_tests.py` and reports `meta_guard_only=true` rather than zero files.
-- [x] 3.5 PR CI run 32454410142 on `b7b8d35f7f63f7f23a821153414593a905d3d3f2` parsed the workflow, selected `tests/test_select_ci_tests.py`, and ran 162 assertions; rerun on the final repair head remains required by the pre-merge CI gate.
-- [ ] 3.6 After merge, capture the master `Unit Tests (full)` terminal receipt and duration; if it times out at 45 minutes, report a measured follow-up rather than changing the timeout in this PR.
+- [x] 3.5 Final-head PR CI run [32461229539](https://github.com/DankerMu/SHUD-NWM/actions/runs/32461229539) on `5a52d2161064d6d51e8a56524bbd24158ab2ba2f` parsed the workflow, carried all nine PR paths through `all_files`, executed hosted-runner `jq`, selected `tests/test_select_ci_tests.py`, ran 172 assertions, and collected the 13,258-test tree.
+- [x] 3.6 Post-merge receipt: merge SHA `4524ceefb955f79d6afc5887b17d46ae4bac57f7` run [32464770825](https://github.com/DankerMu/SHUD-NWM/actions/runs/32464770825), job [96718991932](https://github.com/DankerMu/SHUD-NWM/actions/runs/32464770825/job/96718991932), ran for 45m15s and reached 97% before GitHub annotated `The job has exceeded the maximum execution time of 45m0s`; overlapping backend master run [32467042826](https://github.com/DankerMu/SHUD-NWM/actions/runs/32467042826), job [96725776125](https://github.com/DankerMu/SHUD-NWM/actions/runs/32467042826/job/96725776125), independently repeated the 45m16s / 97% timeout. Later master pushes overlapped the first run without cancelling it, so the concurrency repair held; measured timeout remediation is routed to #1671 rather than changing the bound or coverage here.
 
 ## 4. Non-goals
 
