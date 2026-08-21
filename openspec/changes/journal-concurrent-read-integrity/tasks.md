@@ -272,12 +272,14 @@ post-fix 仍然会抛**——把它当成"post-fix 应返回正确内容"的载�
 - `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py`
   → **403 passed**。
 - `uv run pytest -q tests/test_orchestration_chain.py` → **357 passed**。
-- `uv run pytest -q $(grep -rl safe_fs tests/)` → **2938 passed, 6 skipped**。
+- `uv run pytest -q $(grep -rl safe_fs tests/)`（重锚后最终 HEAD `53c20fd`）→
+  **2941 passed, 6 skipped**。
 - same-cycle hammer 定向用例连续运行 10 次 → **10/10 passed**。
 - `uv run ruff check $(git ls-files '*.py')` → **All checks passed**。
 - `openspec validate journal-concurrent-read-integrity --strict --no-interactive` → **valid**。
-- 独占运行 `uv run pytest -q -m "not e2e and not grib and not integration"` →
-  **13068 passed, 19 skipped, 162 deselected, 1 failed**。唯一失败是 entropy hard-gate
+- 重锚后最终 candidate HEAD `53c20fd` 上、确认全局无其他 pytest 后独占运行
+  `uv run pytest -q -m "not e2e and not grib and not integration"` →
+  **13071 passed, 19 skipped, 162 deselected, 1 failed**（42m55s）。唯一失败是 entropy hard-gate
   `ENT-0001`；clean `git archive origin/master` 同命令/同 finding 可复现，故本 PR **新增红为零**。
   master 基线回归已路由 [#1662](https://github.com/DankerMu/SHUD-NWM/issues/1662)。
 - node-22 NFS 时序确认按 D6 **挂起、未执行**；既有禁令不允许探针类负载，该限制会在 PR body
