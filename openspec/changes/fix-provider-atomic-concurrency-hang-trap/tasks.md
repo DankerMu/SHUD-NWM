@@ -1,5 +1,31 @@
 # Tasks: provider_atomic concurrency hang trap
 
+## 0. Expanded fixture and risk closure
+
+Fixture level: **expanded** (corrected from compact because concurrency/shared
+state/ordering is a mandatory expanded trigger). Repair intensity: medium.
+
+Selected packs and evidence:
+
+- **Concurrency / shared state / ordering** — tasks 1.1-1.4, 2.2-2.3d: release,
+  ordering, bounds, cleanup, and whole-process termination.
+- **Resource limits / large input / discovery** — tasks 1.2-1.3, 2.3c-2.3d,
+  E1/E3: bounded spin, join, subprocess, and suite wall clock; large input and
+  discovery are absent.
+- **Legacy compatibility / examples** — MP1-MP4 and E2: all existing assertions,
+  iterations, calls, seed behavior, and selectors remain compatible.
+- **Error handling / rollback / partial outputs** — tasks 2.2-2.3d and E4/E8:
+  raising and blocked workers produce bounded attributed failures; no production
+  rollback semantics change.
+
+Not selected: Public API/CLI/script entry; Config/project setup; File IO/path
+safety/overwrite (real file calls are preserved oracle evidence, not changed
+production semantics); Schema/columns/units/field names; Auth/permissions/
+secrets; Release/packaging/dependencies; Documentation/migration notes. Each has
+no touched runtime or consumer surface. All eight NHMS domain packs are not selected: no geospatial,
+hydro-met window, SHUD numerical, PostGIS/Timescale, Slurm, external-provider,
+run-manifest/QC, or published-display identity behavior changes.
+
 ## 1. Implementation
 
 - [x] 1.1 Rewrite the writer thread in
@@ -21,6 +47,11 @@
   must not introduce one.
 - [x] 1.3 Replace the bare `thread.join()` with a bounded
   `thread.join(timeout=...)`, using the same >= 30s hang-backstop value as 1.2.
+- [x] 1.3b Start the harness-owned worker with `daemon=True`. This is the
+  last-resort guarantee that a permanently blocked writer cannot strand
+  `threading._shutdown()` after the deadline assertion (design D8). Do not use
+  daemon status as a cleanup substitute: every controllably blocked test still
+  releases and joins its worker.
 - [x] 1.4 Add `assert not errors, errors` and `assert not thread.is_alive()`,
   **before** the three existing substantive assertions (design D3).
 - [x] 1.5 Update the `:827-830` comment: after this change the test fails
@@ -37,9 +68,9 @@
 - [x] 2.1 The rewritten
   `test_provider_atomic_readers_observe_only_complete_old_or_new_json` still
   passes, with its three substantive assertions unchanged.
-- [x] 2.2 New failure-injection test: with `atomic_replace_provider_bytes`
-  patched to raise, the same harness shape surfaces a **clean, bounded
-  failure** — the assertion fires, the exception identity is visible in the
+- [x] 2.2 New failure-injection test: with a callable writer body that raises,
+  the same harness shape surfaces a **clean, bounded failure** — the assertion
+  fires, the exception identity is visible in the
   failure, and the call returns within the deadline rather than hanging.
   **Required shape: one shared harness.** Factor the harness into a single
   module-level helper parameterized by the worker body, and have the real test
@@ -67,6 +98,13 @@
   The test must release the blocking Event and join the worker before returning
   so no thread outlives it. Use a short, explicitly-passed deadline for this
   case rather than the 30s production value, so the test stays fast.
+- [x] 2.3d **Whole-run terminability test.** In a bounded subprocess, import the
+  real shared harness, pass a permanently blocked writer and a short deadline,
+  catch the expected deadline `AssertionError`, and let the process exit without
+  releasing that writer. The subprocess must exit before its external timeout.
+  The mutant changing `daemon=True` back to the default non-daemon setting must
+  hit the external timeout after printing/catching the assertion. Kill the
+  process group on timeout and prove no probe process remains.
 - [x] 2.3b **Anti-vacuity:** demonstrate the injection test FAILS when the
   harness fix is absent, not merely that it passes when present (design D6).
 - [x] 2.4 Whole-file green: `uv run pytest -q tests/test_scheduler_file_provider_refresh.py`.
@@ -80,7 +118,8 @@
 | Lint | `uv run ruff check .` | local |
 | Spec | `openspec validate fix-provider-atomic-concurrency-hang-trap --strict --no-interactive` | local |
 | Content-coupling | grep meta-guards/selector tooling that read this file as text (design D5 leg 2) | local |
-| Backend oracle | targeted pytest on node-27 if CI's selection is non-trivial | node-27 |
+| Permanent-block process exit | focused bounded subprocess test from 2.3d; mutant `daemon=False` must externally time out | local |
+| Backend oracle | targeted pytest on node-27 only if CI selection is non-trivial or local/CI results diverge; this test-only DB-free change otherwise uses local + CI targeted pytest | node-27 conditional |
 
 ## 4. Evidence Floor
 
@@ -117,20 +156,29 @@
   by a line-number range check. Range sweeps are a known false negative once a
   change shifts its own cited lines.
 - **E7 — Lint + spec clean.**
-- **E8 — Anti-vacuity.** Revert each half of the harness fix separately and
-  record what is observed. The two halves do not both produce a literal pytest
-  FAIL, so name the observable per half rather than asserting "it fails":
-  - **(i) remove `finally: finished.set()`, keep the loop deadline.** Observable:
-    the spin-loop exits at its deadline and `assert not errors` reports the
-    injected exception — a clean FAIL. If the deadline is *also* removed the
-    observable becomes a hang instead, which is E1's instrument, not this one.
-  - **(ii) remove the `errors` capture and its assertion.** Observable: the
-    injection test's expected failure never materialises and the run reports
-    `1 passed, 1 warning` with `PytestUnhandledThreadExceptionWarning` — the
-    silent-pass signature from E4, not a FAIL.
-  Both observables must be recorded. A single "it went red" line does not
-  distinguish these and is not acceptable evidence. A test that only passes-when-present cannot distinguish
-  "harness works" from "patch was inert" (design D6).
+- **E8 — Anti-vacuity mutation matrix.** Mutate each independent obligation and
+  record its distinct observable; do not call a full pre-fix rollback a
+  half-revert:
+  - **Release mutant:** remove `finally: finished.set()` and invoke the helper
+    from a bounded probe with a no-op writer that returns normally plus a short
+    deadline. Correct code returns successfully; the mutant must FAIL on
+    `spin-wait deadline`. The existing blocked-worker test cannot prove this —
+    it expects that same deadline failure with or without the `finally`.
+  - **Attribution mutant:** remove the catch-all/errors assertion but keep
+    `finally` and both bounds. Run the shipped raising-writer injection test.
+    It must report `1 failed, 1 warning`: the failure names the downstream
+    empty-observation symptom while `InjectedWriterFailure` appears only in
+    `PytestUnhandledThreadExceptionWarning`. A standalone minimal probe can be
+    `1 passed, 1 warning`, but that is not the shipped test's observable.
+  - **Deadline mutant:** remove the spin-loop deadline. The blocked-worker case
+    must hit an external process timeout instead of a pytest assertion.
+  - **Run-termination mutant:** change the harness worker from daemon to
+    non-daemon. The permanent-block subprocess must catch/print the deadline
+    assertion and still hit the parent's external timeout during interpreter
+    shutdown.
+  Every mutant must be run under an external bound and restored cleanly. These
+  observables jointly prove release, attribution, deadline delivery, and whole-
+  process termination; a generic "it went red" is insufficient.
 
 ## 5. Report, don't fix — filed, do not fix in this PR
 
@@ -155,34 +203,29 @@ All three are already filed; the implementer must not touch them.
 
 ### Survey method and its bounds
 
-Two sweeps were run, because they answer different questions and neither alone
-is sufficient:
+Two sweeps were run because they find different hazards:
 
-1. **Barrier/Event enumeration** — all 12 `threading.Barrier(` and ~20
-   `threading.Event()` constructions under `tests/`. This finds the
-   *synchronization-strand* class (#1645).
-2. **`while`-loop enumeration** — all 33 `while` loops under `tests/`, each
-   classified by whether its exit condition depends on a worker thread. **This
-   is the only sweep that can find the governed set**, and sweep 1 structurally
-   cannot: the sentinels at `tests/test_production_scheduler.py:44138` and
-   `tests/test_node27_timeseries_compression_supervisor.py:974` are an integer
-   inside a lock file and a filesystem path respectively — there is no `Event`
-   object to enumerate. An earlier draft of this section claimed exhaustiveness
-   on the strength of sweep 1 alone; that claim was unsupported.
+1. **Barrier/Event enumeration** — all 12 `threading.Barrier(` and roughly 20
+   `threading.Event()` constructions under `tests/`. This finds the separate
+   synchronization-strand class routed to #1645, but cannot find integer/path
+   state polls.
+2. **`while`-loop enumeration** — all 33 `while` loops under `tests/`, classified
+   first by worker/process dependency and then by the requirement's three-part
+   ownership trigger.
 
-Sweep 2 result: 33 `while` loops, of which most are docstring prose, pure
-computation (`while stack:`, `while index < length:`), or shell strings inside
-subprocess payloads. Four are main-thread polls on a worker-set sentinel: the
-target test, plus the three routed to #1648.
+Sweep 2 finds four main-thread polls whose observed value is affected by a
+worker thread: the target plus the three #1648 sites. Only the target is governed
+here because only it polls a dedicated completion sentinel owned solely by the
+test harness. The #1648 sites poll production state under assertion and remain
+an adjacent diagnostic-quality follow-up, not exceptions to this requirement.
+The two production-scheduler ready-file loops poll subprocess output and are
+outside the worker-harness trigger.
 
-Known caliper limits of the sweep, stated so the next reader can widen it:
-it enumerated `threading.Event()` and `threading.Barrier(` textually, so it
-does **not** cover `multiprocessing` synchronization (e.g.
-`tests/test_file_orchestration_journal.py:2702` uses `context.Event()`),
-sentinels obtained from a factory or passed in as parameters, or spin-waits on
-plain attributes. The separate spin-wait sweep in design D7 covers the
-main-thread side by loop shape rather than by sentinel type, which is what makes
-the "one governed site" claim robust to this gap.
+Known caliper limits: the Barrier/Event sweep is textual and does not enumerate
+`multiprocessing` synchronization, factory-supplied objects, or plain-attribute
+state. The independent all-`while` sweep covers the main-thread polling side by
+loop shape, then applies the ownership trigger; neither sweep is presented as a
+proof that unrelated concurrency tests are safe.
 
 **Outside the trigger** — not main-thread polls on a worker-set sentinel — so
 these were never evaluated against (a)(b)(c) and no conformance is claimed for

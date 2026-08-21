@@ -38,18 +38,23 @@ closes the trap.
 
 ## What Changes
 
-- Adopt the **house concurrency pattern already used twice in this same file**
-  (`:796-818`, `:1929-1943`): collect thread exceptions into an `errors` list,
-  join with a bounded timeout, then assert `not errors` and
-  `not thread.is_alive()`.
-- Add the two elements the house pattern does **not** have, because neither
-  house instance uses a completion sentinel: set the sentinel from a `finally`,
-  and bound the spin-loop with its own deadline. These are new, not conformance.
-- Bound the main-thread busy-loop with a deadline, per the
-  `tests/test_file_orchestration_journal.py:7894` precedent.
-- Add a failure-injection test proving the harness now surfaces a writer
-  exception as a clean, bounded failure.
-- Correct the now-false anchor comment at `:827-830`.
+- Factor the target test's signalling/waiting logic into one test-local shared
+  harness. Borrow only the safe pieces of nearby concurrency tests: capture
+  worker exceptions, use a bounded join, and assert errors/liveness before the
+  caller's data oracle. The nearby Barrier setups are not wholesale exemplars;
+  #1645 tracks their separate stranded-peer risk.
+- Set the dedicated completion sentinel from `finally` and bound the spin-loop
+  with its own deadline.
+- Start the harness-owned worker as a daemon. Python cannot cancel a blocked
+  thread; daemon status is the last-resort guarantee that a permanently blocked
+  writer cannot strand `threading._shutdown()` after the deadline assertion.
+  This is acceptable only because this harness is test-local and the real body
+  writes exclusively below its `tmp_path`.
+- Add distinct injected raising-worker and blocked-worker tests. Add a bounded
+  subprocess proof that the permanently blocked path makes the whole run exit,
+  not merely the main test thread assert.
+- Preserve the real 40-write atomic-replace oracle byte-for-byte and correct the
+  now-false anchor comment at `:827-830`.
 
 ## Non-Goals
 

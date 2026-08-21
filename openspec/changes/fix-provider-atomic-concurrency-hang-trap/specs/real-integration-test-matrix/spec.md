@@ -4,20 +4,26 @@
 
 ### Requirement: Spin-wait concurrency harnesses MUST fail, never hang or silently pass
 
-A test whose main thread spin-waits on a completion sentinel that a worker thread is expected to set SHALL guarantee the sentinel is set on every exit path from the worker, bound the spin-loop with its own deadline, bound the join, capture any exception the worker raised, and assert on it — so a worker failure surfaces as a bounded, attributed test failure instead of an unbounded hang or a run that passes carrying only a warning.
+A test-owned concurrency harness whose main thread spin-waits on a dedicated completion sentinel SHALL guarantee the sentinel is set on every exit path from the harness-owned worker, bound the spin-loop with its own deadline, bound the join, capture any exception the worker raised, and assert on it — so a worker failure surfaces as a bounded, attributed test failure instead of an unbounded hang or a run that passes carrying only a warning.
 
-The governed shape is defined by **dependency**, not by CPU burn: the
-main thread's progress depends on a sentinel that a worker thread must
-set, and it waits by polling that sentinel — with or without a
-`time.sleep()` between reads. Carrying a deadline on that poll
-**satisfies (b); it does not exit the trigger.** Stating this matters:
-scoping the trigger to undeadlined loops would make (b) vacuous, since
-every loop that could violate it would fall outside by construction.
+The governed shape requires all three properties:
 
-Not governed: a blocking `event.wait(timeout=N)`, which terminates on
-its own without polling; and a bare `thread.join()` over workers that
-depend on no sentinel and on no synchronization point with each other,
-where a worker that raises simply dies and the join returns.
+1. the test itself starts the worker;
+2. the harness owns a dedicated completion sentinel whose sole purpose is to
+   release the main thread's polling loop; and
+3. the main thread polls that sentinel before joining and checking worker
+   output.
+
+The trigger is defined by that ownership/dependency contract, not by CPU burn:
+polling may include `time.sleep()`, and carrying a deadline satisfies obligation
+(b) rather than removing the harness from scope.
+
+Not governed: a blocking `event.wait(timeout=N)`; a bare `thread.join()` whose
+workers share no other synchronization point; a poll of production state that
+is itself under assertion (for example a heartbeat counter, lease-loss flag, or
+terminal-intent path); a subprocess-ready file; or inter-worker synchronization
+such as `Barrier`. Those may need their own diagnostics or bounds, but they are
+not dedicated harness-completion sentinels.
 
 For a governed harness the obligations are stated as **outcomes**, not
 as a mandated code shape:
@@ -46,10 +52,15 @@ error list, no `finally`, and no liveness assertion anywhere. A rule
 written in terms of those constructs would flag it, wrongly.
 
 One conforming implementation, and the one this change adopts: set the
-sentinel from a `finally` (a); give the spin-loop its own deadline and
-the join a `timeout=` (b); collect worker exceptions via a catch-all
-`except BaseException` into a list, and assert that list is empty — and
-that no thread is still alive — before the substantive assertions (c).
+sentinel from a `finally` (a); give the spin-loop its own deadline and the join a
+`timeout=`, and make the test-local worker daemon so a permanently blocked
+thread cannot strand interpreter shutdown (b); collect worker exceptions via a
+catch-all `except BaseException` into a list, and assert that list is empty — and
+that no thread is still alive — before the substantive assertions (c). The
+daemon backstop SHALL be proven with a bounded subprocess that catches the
+main-thread deadline assertion and still exits while its injected writer remains
+permanently blocked. Controlled in-process blockers SHALL still be released and
+joined; daemon status does not excuse cleanup.
 
 Both the `finally` and the captured-exception assertion are required in
 that implementation; neither alone suffices. The `finally` alone
@@ -64,32 +75,19 @@ concurrency oracle: iteration counts, real (non-doubled) calls into the
 code under test, and the substantive assertions about observed state are
 unaffected by conforming a harness to this shape.
 
-Adjacent hazards, routed rather than grandfathered: the
-`Barrier`-mediated variant — a worker that raises before reaching an
-unbounded `threading.Barrier`, stranding its peers — is the same failure
-class but is not a spin-wait and so falls outside this requirement's
-trigger; it is tracked in issue #1645 and is expected to come under a
-widened form of this requirement when fixed. Recorded reason for not
-closing it here: those sites lie outside the blast radius of this
-test-only, single-file change, and fixing them requires touching a
-different suite with its own DB-backed setup. Residual risk, disclosed
-rather than implied absent: until #1645 lands, a constructor failure in
-either of those two tests still strands its peers and hangs the run —
-this requirement does not currently protect them. Three further sites are governed by this requirement and satisfy (a) and
-(b) but violate (c): `tests/test_production_scheduler.py:44138` and
-`:44149`, and
-`tests/test_node27_timeseries_compression_supervisor.py:974`. Each polls
-a sentinel set by a worker thread, captures no worker exception, and
-asserts on worker-produced data first. Recorded reason for not closing
-them here: they span two other suites with their own fixtures and thread
-models, outside this single-file change's blast radius. Residual risk:
-until issue #1648 lands, a worker failure in those three surfaces as a
-data-shaped assertion failure rather than the real exception — a
-debugging cost, not a correctness hole, since (b) holds and they neither
-hang nor pass silently. The repo-wide backstops
-that would close the class independently of harness shape
-(`filterwarnings = ["error::pytest.PytestUnhandledThreadExceptionWarning"]`,
-`pytest-timeout`) are tracked in issue #1646.
+Adjacent hazards are routed rather than grandfathered. The
+`Barrier`-mediated variant — a worker that raises before reaching an unbounded
+`threading.Barrier`, stranding its peers — is the same hang family but not a
+spin-wait completion harness; #1645 tracks it. Until #1645 lands, those tests can
+still strand non-daemon peers and hang the run.
+
+#1648 tracks diagnostic quality in three tests that poll production state
+(`heartbeat_seq`, `lost`, terminal-intent path) rather than a dedicated harness
+completion sentinel. They are outside this requirement, not exceptions to it.
+In particular, production `_LeaseHeartbeat._run` catches renew exceptions and
+maps them to `lost = True`, so this requirement SHALL NOT claim all three are
+uncaught-thread-exception paths. The repo-wide warning/timeout backstops that
+operate independently of harness shape are tracked in #1646.
 
 #### Scenario: A worker that raises produces a bounded, attributed failure
 
@@ -108,27 +106,27 @@ that would close the class independently of harness shape
 - **THEN** the reported failure is the captured worker exception, not a
   downstream assertion about the empty collection
 
-#### Scenario: A blocked worker is caught by the loop deadline
+#### Scenario: A blocked worker is caught and the whole run terminates
 
-- **WHEN** the worker blocks indefinitely instead of raising, so it
-  never reaches its `finally` and the sentinel is never set
-- **THEN** the spin-loop still terminates at its own deadline and the
-  test fails, because the `finally` is unreachable in this case and the
-  deadline is the only backstop
+- **WHEN** the harness-owned worker blocks indefinitely instead of raising, so
+  it never reaches its `finally` and the completion sentinel is never set
+- **THEN** the spin-loop terminates at its own deadline and the test fails on the
+  missing completion sentinel
+- **AND** a bounded subprocess that catches that assertion still exits while the
+  injected writer remains blocked, proving interpreter shutdown is not stranded
+- **AND** changing the harness worker back to non-daemon makes that subprocess
+  hit its parent's external timeout, proving the terminability test bites
 
-#### Scenario: Bounded waits and independent bare joins are not governed
+#### Scenario: Production-state polls and other waits are not governed
 
-- **WHEN** a test's main thread waits via `event.wait(timeout=N)`, or
-  starts workers and only calls `thread.join()` where the workers depend
-  on no sentinel **and on no synchronization point with each other**
-- **THEN** this requirement does not apply — the first already
-  terminates on its own, and in the second a worker that raises dies and
-  the join returns
-- **AND** the qualifier is load-bearing: a bare `join()` over workers
-  that DO share a synchronization point can still hang, because a worker
-  that dies early strands its peers there and the join never returns.
-  `tests/test_gateway_reconcile.py:3591` is exactly that shape, which is
-  why it is routed to #1645 rather than excluded here
+- **WHEN** a test waits via `event.wait(timeout=N)`, performs an independent bare
+  join, polls production state or a subprocess-ready file, or coordinates
+  workers through an inter-worker synchronization primitive
+- **THEN** this requirement does not apply because the object is not a dedicated
+  completion sentinel owned by a test harness
+- **AND** this exclusion makes no safety claim: a bare join whose workers share
+  an unbounded `Barrier` can still hang and is routed to #1645, while
+  symptom-first assertions on production state are tracked by #1648
 
 #### Scenario: Conforming a harness does not weaken its oracle
 

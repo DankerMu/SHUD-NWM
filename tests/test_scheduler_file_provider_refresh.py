@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -878,7 +879,12 @@ def run_spin_wait_writer_harness(
             # spin-loop, or its failure surfaces as a hang instead.
             finished.set()
 
-    thread = threading.Thread(target=worker)
+    # Daemon is the last-resort run-termination backstop (design D8): Python
+    # cannot cancel a blocked thread, and a non-daemon worker that outlives
+    # the deadline assertion would strand threading._shutdown() so the whole
+    # pytest process hangs. Every controllably blocked caller still releases
+    # and joins its worker; daemon status is not a cleanup substitute.
+    thread = threading.Thread(target=worker, daemon=True)
     if started_threads is not None:
         started_threads.append(thread)
     thread.start()
@@ -1004,6 +1010,81 @@ def test_spin_wait_harness_deadline_catches_a_writer_that_blocks_instead_of_rais
             thread.join(timeout=SPIN_WAIT_HANG_BACKSTOP_SECONDS)
 
     assert threads and all(not thread.is_alive() for thread in threads)
+
+
+def test_spin_wait_harness_permanently_blocked_writer_does_not_strand_interpreter_shutdown() -> None:
+    """Whole-run terminability: a permanently blocked writer must not hang exit (#1633).
+
+    The in-process deadline test releases its worker and joins it, so it cannot
+    see what happens when the deadline assertion has fired while the blocked
+    worker is still alive. Python cannot cancel that thread; if it is a
+    non-daemon thread, `threading._shutdown()` waits for it without limit at
+    interpreter exit and the pytest process hangs even though every assertion
+    has already reported (spec obligation (b), design D8).
+
+    This test therefore runs the REAL shared harness in a bounded child
+    subprocess: the child imports `run_spin_wait_writer_harness`, passes a
+    writer that blocks forever and a short deadline, and catches the expected
+    deadline `AssertionError`. The daemon worker is the last-resort backstop
+    that lets the child's interpreter exit while that writer remains blocked.
+    The child must exit before this parent's external bound; if it does not,
+    the parent kills the whole process group and the test fails.
+    """
+
+    deadline_seconds = 0.25
+    external_timeout_seconds = 30.0
+    repository = Path(__file__).resolve().parents[1]
+    probe = f"""
+import sys
+from tests.test_scheduler_file_provider_refresh import run_spin_wait_writer_harness
+
+blocked = __import__("threading").Event()
+
+def writer() -> None:
+    blocked.wait()
+
+def observe() -> None:
+    pass
+
+try:
+    run_spin_wait_writer_harness(writer, observe, deadline_seconds={deadline_seconds})
+except AssertionError as error:
+    if "spin-wait deadline" not in str(error):
+        raise
+    print("caught-spin-wait-deadline")
+    # Deliberately DO NOT release `blocked` or join the worker: this probe is
+    # the whole-run-terminability proof. Exiting while the injected writer is
+    # still blocked must not strand `threading._shutdown()`.
+    raise SystemExit(0)
+print("unexpectedly-no-deadline")
+raise SystemExit(1)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", probe],
+        cwd=repository,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=external_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                "child did not exit within the external bound while the injected "
+                "writer stayed blocked: a non-daemon harness worker strands "
+                "threading._shutdown() (design D8). Killing the process group."
+            ) from None
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+
+    assert stdout.strip() == "caught-spin-wait-deadline", (
+        f"child printed {stdout.strip()!r} / {stderr.strip()!r}"
+    )
 
 
 def test_provider_atomic_publishes_shared_mode_under_private_umask(tmp_path: Path) -> None:

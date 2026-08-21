@@ -12,20 +12,61 @@ file are frame-independent, since no other file is modified.
 
 ## Risk triage
 
-- **Fixture tier: `compact`.** Test-only, single file, one function rewritten
-  plus one added test, no production module touched, no schema/API/migration
-  surface. Size S.
-- **Upstream contract note:** #1633 was filed by `issue-scribe` as an
-  out-of-scope finding from #1513 / PR #1625. It carries no
-  `Suggested fixture level` and no `Minimal mergeable slice` field, so there is
-  no upstream triage to start from or diverge from; `compact` is this
-  workflow's own triage, recorded here as the baseline.
-- **Selected risk packs:** `correctness` (the fix must not make the test pass
-  vacuously), `test-oracle-integrity` (the test's job is to catch a real
-  concurrency invariant; the fix must not weaken it).
-- **Not selected:** `security`, `performance`, `data-migration`,
-  `api-compatibility`, `frontend` — no such surface is in reach of a change
-  confined to one test function.
+- **Issue type:** bugfix / test harness.
+- **Project profile:** NHMS.
+- **Blast radius:** medium — one test module, but a shared concurrency harness
+  and its archived test-matrix requirement become reusable contracts.
+- **Fixture tier: `expanded`.** The original `compact` classification was
+  invalid: concurrency/shared-state ordering is a mandatory expanded trigger,
+  even though no production module, API, schema, or migration is touched.
+- **Repair intensity:** medium. The helper is shared only inside one test module;
+  it is not a production shared-helper root and has no high-risk publish/auth/path
+  boundary.
+- **Upstream suggested level:** absent. #1633 was filed by `issue-scribe` from
+  #1513 / PR #1625 and carries neither `Suggested fixture level` nor `Minimal
+  mergeable slice`.
+
+### Core risk packs considered
+
+- **Public API / CLI / script entry: not selected** — the helper is private to a
+  pytest module; no shipped entrypoint changes.
+- **Config / project setup: not selected** — no runtime configuration or setup
+  contract changes.
+- **File IO / path safety / overwrite: not selected** — production path trust,
+  overwrite, and atomic-write semantics are not changed. The existing real file
+  operations must remain in the test as oracle-integrity/legacy evidence, but
+  preserving a consumer does not make its untouched production pack selected.
+- **Schema / columns / units / field names: not selected** — JSON payload shape
+  and `generation` assertions are unchanged; no schema is edited.
+- **Auth / permissions / secrets: not selected** — no auth, credential, or
+  permission boundary changes; #1513's mode-pinned seed is only preserved.
+- **Concurrency / shared state / ordering: selected** — completion release,
+  deadline, thread lifetime, exception attribution, and assertion order are the
+  governing behavior.
+- **Resource limits / large input / discovery: selected** — spin wait, join, and
+  an external run-termination probe need explicit time bounds; no large-input or
+  discovery surface exists.
+- **Legacy compatibility / examples: selected** — the existing 40 real writes,
+  seed path, observations, and three substantive assertions are compatibility
+  constraints.
+- **Error handling / rollback / partial outputs: selected** — raising and
+  permanently blocked worker paths must fail with the cause and must not leave
+  the test process alive; production rollback behavior is unchanged.
+- **Release / packaging / dependency compatibility: not selected** — no package,
+  dependency, or release metadata changes.
+- **Documentation / migration notes: not selected** — the stale in-test comment
+  and OpenSpec delta are updated, but there is no user migration or runbook.
+
+### NHMS domain risk packs considered
+
+All are **not selected** because this is a DB-free, provider-fetch-free,
+test-local harness change: Geospatial / CRS / basin geometry; Hydro-met time
+series / forcing windows; SHUD numerical runtime / conservation / NaN; PostGIS /
+TimescaleDB domain behavior; Slurm production lifecycle / mock-vs-real parity;
+External hydro-met providers / snapshot reproducibility; Run manifest / QC
+provenance; Published NHMS artifacts / display identity. The filename
+`manifest-last.json` and `provider_atomic` helper do not make this a manifest
+schema, external-provider, or publication change.
 
 ## Must-preserve behavior
 
@@ -42,14 +83,18 @@ file are frame-independent, since no other file is modified.
 
 ## Seams under test
 
-- `atomic_replace_provider_bytes` (raising vs. succeeding) — the failure
-  injection seam for D3.
-- `threading.Event` / `Thread.join(timeout=)` — the completion-signalling seam.
+- `run_spin_wait_writer_harness(writer_body, observe, ...)` — the public seam
+  within this test module. The real case supplies the 40-call writer; injected
+  cases supply raising and blocked callables. No production function is patched.
+- `threading.Event` / `Thread.join(timeout=)` / daemon worker lifetime — the
+  release, bounded-wait, cleanup, and whole-process-termination seam.
+- A bounded pytest subprocess invoking the shared harness — the proof that a
+  permanently blocked writer cannot strand interpreter shutdown.
 
-## D1 — Conform to the house pattern; do not invent a new one
+## D1 — Reuse the safe house-pattern pieces; do not copy its Barrier hazard
 
-`tests/test_scheduler_file_provider_refresh.py` already contains the correct
-shape, twice:
+`tests/test_scheduler_file_provider_refresh.py` already contains the useful
+exception-capture and bounded-join pieces twice:
 
 ```python
 errors: list[BaseException] = []
@@ -70,12 +115,12 @@ assert all(not thread.is_alive() for thread in threads)
 (`:796-818`, and again at `:1929-1943`.) The target test at `:823-848` is the
 odd one out in its own file.
 
-Scope of the borrowing, stated precisely: the `errors` list, the catch-all, the
-bounded join, and the two closing assertions are **conformance** — they already
-exist here. The `finally`-set sentinel and the spin-loop deadline are **new**;
-neither house instance has a completion sentinel at all (both gate on a
-`Barrier` and simply join). Calling the whole fix "conforming to the house
-pattern" would overstate it.
+Scope of the borrowing, stated precisely: the `errors` list, catch-all,
+bounded join, and closing error/liveness assertions are reused. The
+`finally`-set sentinel, spin-loop deadline, and daemon worker are new. Neither
+nearby instance has a completion sentinel, and both gate on an unbounded
+`Barrier`; #1645 records why that part is unsafe. Calling either nearby test a
+complete house pattern would overstate it.
 
 ## D2 — The issue's proposed fix is insufficient; recorded, not silently absorbed
 
@@ -83,11 +128,14 @@ pattern" would overstate it.
 转成干净的失败" (turns any future failure from a hang into a clean failure).
 **That claim is false**, and the correction is load-bearing for this design.
 
-`threading.Thread` swallows exceptions raised in the thread body. pytest reports
-them only as `PytestUnhandledThreadExceptionWarning`, and `pyproject.toml`
-`[tool.pytest.ini_options]` declares no `filterwarnings`, so the warning is
-non-fatal. A bare `try/finally` therefore converts the hang into a **silent
-pass** — arguably worse than the hang, because a hang at least stops the run.
+`threading.Thread` does not propagate exceptions to the joining thread. pytest
+reports an uncaught worker exception only as
+`PytestUnhandledThreadExceptionWarning`, and `pyproject.toml`
+`[tool.pytest.ini_options]` declares no `filterwarnings`, so that warning is
+non-fatal. A bare `try/finally` therefore loses the cause: a minimal probe can
+silently pass, while the real target can either pass after collecting an earlier
+observation or fail on a downstream empty/data assertion. Neither is the clean,
+attributed failure #1633 requires.
 
 Verified empirically before designing, with a standalone probe reproducing the
 proposed fix exactly (writer raises, `finally: finished.set()`, nothing else):
@@ -155,9 +203,10 @@ Three legs, per the discipline banked in #1119:
      referencing this file. The last one names a *specific* test
      (`::test_full_runner_refresh_lock_is_held_during_precommit_gate`), which is
      NOT the test being changed.
-   - `tests/test_timescale_write_guard_wire_site_invariant.py` — the tree's only
-     AST meta-guard; it targets `workers/forcing_producer/store.py`, not this
-     file.
+   - AST meta-guards under `tests/` were also searched. The directly relevant
+     example, `tests/test_timescale_write_guard_wire_site_invariant.py`, targets
+     `workers/forcing_producer/store.py`; none parses or text-couples to this
+     test module's body.
    **Derived constraint:** do not rename the target test function, and do not
    touch selector rules.
 3. **Config/collection coupling:** `pyproject.toml` testpaths, CI path filters.
@@ -216,68 +265,87 @@ Incidental: `time` is **not** currently imported in this file (imports at
 `:1-23`). The D-1 deadline needs it added in isort order — `ruff check .` is the
 gate.
 
-## D7 — Scope of the spec requirement, and why it is narrowed twice
+## D7 — Scope: test-owned completion harness, not every production-state poll
 
-The first draft governed any test that "hands work to a thread and waits on a
-completion sentinel". Sweeping the tree showed that is **overreach**: the
-population is 12 `threading.Barrier(` sites and roughly 20 `threading.Event()`
-sites, and a requirement that broad would be false against the tree the moment
-it merged.
+Earlier drafts tried "any completion sentinel", then "blocking dependence",
+then any worker-set value polled by the main thread. All are too broad. They mix
+three different things: a test harness's own completion protocol, production
+state being asserted, and inter-worker synchronization. Those have different
+owners and failure contracts.
 
-A second draft scoped it to "blocking dependence" — the main thread cannot
-progress until a worker reaches a synchronization point. Still too broad. It
-swept in bounded waiters such as `tests/test_gateway_reconcile.py:6297` and
-`:7713`, where the main thread does `assert entered.wait(timeout=5)`. Those have
-no catch-all and so would violate the "captured exceptions" bullet, yet they
-cannot hang: the bounded wait returns, the assert fails, the test ends. Marking
-them violations would be false.
+This requirement governs only a **test-owned spin-wait completion harness**:
 
-The requirement is therefore scoped to **spin-wait on a self-set sentinel**: the
-main thread's only exit condition is a sentinel the worker must set, and it
-burns CPU until then. Excluded, explicitly:
+1. the test itself starts the worker;
+2. the harness owns a dedicated completion sentinel whose sole purpose is to
+   release the main thread's polling loop; and
+3. the main thread polls that sentinel before joining and checking worker output.
 
-- bounded `event.wait(timeout=N)` — terminates on its own;
-- bare `thread.join()` — a raising worker dies and the join returns, so
-  `tests/test_scheduler_generation.py:1196` is out of scope rather than a
-  violation.
+The target's `finished = threading.Event()` is exactly that shape. A lock-file
+heartbeat counter, production `lost` flag, terminal-intent path, subprocess
+ready file, or inter-worker `Barrier` is not a dedicated harness-completion
+sentinel merely because a test polls it.
 
-Under this trigger the only site in the tree today is the one this change fixes,
-so **after the fix the tree conforms with zero exceptions**. That is the point:
-a spec with no exceptions is worth more than a broader spec carrying a list of
-things it silently tolerates.
+Explicitly outside this requirement:
 
-### Conformance sweep behind the "zero exceptions" claim
+- bounded `event.wait(timeout=N)`, which is not a polling harness;
+- bare joins whose workers share no other synchronization point;
+- polls of production state that is itself under assertion; and
+- inter-worker synchronization such as `Barrier`, tracked separately by #1645.
 
-The claim that exactly one site in the tree is governed is evidenced, not
-asserted. Spin-waits were enumerated by every form they take here, not just the
-obvious one:
+### Survey of the current trigger
 
-- `is_set()` busy-loops — 3 total. `tests/test_scheduler_file_provider_refresh.py:842`
-  is the target. The other two are **worker** bodies, not main-thread waits:
-  `tests/test_file_orchestration_journal.py:7894` (inside `_hammer_until`, which
-  already satisfies (a)(b)(c) — deadline-bounded, `except BaseException` into a
-  `failures` list, then `stop.set()`), and `tests/test_gateway_reconcile.py:5238`
-  (inside a daemon's `_write`).
-- Predicate spin-waits not using `is_set()` — `tests/test_shud_runtime.py:6006`,
-  `tests/test_node27_timeseries_compression_supervisor.py:974`,
-  `tests/test_production_scheduler.py:21748`, `:21766`, `:44149`. All carry
-  `and time.monotonic() < deadline`, so all satisfy (b); most spin on a
-  subprocess-written file rather than a worker-thread sentinel, placing them
-  outside the trigger regardless.
-- `while True:` loops — 3 total, none relevant.
-  `tests/test_node27_timeseries_compression_benchmark.py:553` is a deliberate
-  infinite block inside a fake `close()` whose *bounding* is the test's subject;
-  `tests/test_select_ci_tests.py:682` is a fixed-point set iteration with no
-  threads; the third is inside a `python -c` string run as a subprocess.
+The repository-wide `while` sweep found exactly one current instance of the
+three-part trigger: the target at baseline
+`tests/test_scheduler_file_provider_refresh.py:823-848`. This change must make
+that one harness conform. This population statement does **not** claim that
+unrelated polling or Barrier tests are safe.
 
-Result: one governed site, which this change fixes. After it, the tree conforms
-with no exceptions.
+The nearby loops are classified rather than silently ignored:
 
-The two `tests/test_gateway_reconcile.py` Barrier strands are real hangs of the
-same family but are not spin-waits, so rather than grandfather them the spec
-names them as an adjacent hazard routed to #1645, expected to come under a
-widened form of the requirement when fixed. #1646 carries the shape-independent
-backstops.
+- `tests/test_production_scheduler.py:44138` and `:44149` poll the production
+  `_LeaseHeartbeat`'s persisted `heartbeat_seq` and `lost` state. In production,
+  `_LeaseHeartbeat._run` catches `Exception` from renew and maps it to
+  `lost = True`; describing both loops as unhandled-thread-exception paths would
+  itself be false.
+- `tests/test_node27_timeseries_compression_supervisor.py:974` polls a production
+  terminal-intent path created during finalization, not a dedicated completion
+  sentinel. Its finalizer-thread diagnostic quality remains tracked by #1648,
+  but it is not an exception to this narrower requirement.
+- `tests/test_production_scheduler.py:21748` and `:21766` poll subprocess-created
+  ready files; `tests/test_shud_runtime.py:6006` is inside the subprocess body.
+- `tests/test_file_orchestration_journal.py:7894` and
+  `tests/test_gateway_reconcile.py:5238` are worker-body loops, not main-thread
+  completion polling.
+- the unbounded Barrier sites in this file and `test_gateway_reconcile.py` are
+  the separate stranded-peer class routed to #1645.
+
+#1648 therefore remains an adjacent follow-up about symptom-first assertions;
+it is no longer described as three violations of this requirement. #1646 owns
+shape-independent pytest warning/timeout backstops.
+
+## D8 — The deadline must terminate the process, not only deliver an assertion
+
+Python cannot safely cancel a blocked thread. A deadline plus
+`thread.join(timeout=N)` can let the main thread assert while a non-daemon worker
+remains alive; `threading._shutdown()` then waits without limit and the pytest
+process still hangs. That is exactly the defect obligation (b) forbids.
+
+The harness-owned worker is therefore a **daemon thread**. This is a last-resort
+run-termination backstop, not a substitute for cleanup:
+
+- the ordinary and raising paths still join cleanly;
+- the in-process blocked-worker test uses a test-controlled release and joins in
+  `finally`, so it leaves no thread behind;
+- a separate bounded subprocess imports the real shared harness, gives it a
+  permanently blocked writer, catches the deadline assertion, and must exit.
+  Changing `daemon=True` back to the default non-daemon setting must make that
+  subprocess hit the parent's external timeout.
+
+Daemon use is confined to this test-local helper. The real writer touches only
+its `tmp_path` destination, so it cannot leave production state partially
+mutated. A future caller with non-test or non-temporary side effects is outside
+this helper's contract and must use a cancellable process/task abstraction
+instead.
 
 ## Expected collateral
 
