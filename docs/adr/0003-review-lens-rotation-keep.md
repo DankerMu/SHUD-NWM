@@ -670,3 +670,36 @@ subset/non-rotation rounds can contaminate the aggregate. **Keep rotation**
 under the autonomous default; no policy change. Any future reversal still
 requires the recorded attribution schema/round-role fixes plus maintainer
 review.
+
+## Revisit 2026-08-22 (after #1326 / PR #1680)
+
+Auditor now reports 103 multi-round merged PRs, later-round catches
+**core=55 rotated=261** (was 102 / 54 / 258 after PR #1689). PR #1680 is the
+entire delta: **core +1, rotated +3**.
+
+The raw ratio again overstates rotation. Two of the three entries counted as
+`rotated` came from the Phase 6.2 `invariant-audit` gate, not from a
+comprehensive-review free slot. The script sees only a lens name absent from
+Round 1 and therefore folds a different workflow role into rotation, the same
+role-attribution defect already recorded for fixture and final-review gates.
+Only one rotated catch is a genuine reviewer-lens sample: the Round 2
+`invariant-state-machine-compatibility` lens found the P1 multi-hop path where
+an empty-ID `submission_failed` hop erased an earlier confirmed Slurm master.
+
+The `core +1` is also real: pinned `test-evidence` found that the production-
+reachable normal-start indexed replacement had no committed oracle even though
+the restart-at-forecast trailing form did. Both catches bought necessary work:
+the first forced the depth redesign from adjacent-result copying to a
+stage-loop provenance owner; the second forced a distinct indexed real-path
+test so the redesign could not mask caller wiring.
+
+This is a clean argument for the **additive** policy the ADR actually chose:
+keep the core pinned for fix-regression/coverage recall, and rotate a free slot
+for sibling-state/history depth. It is not evidence that `261 / 55` is a
+trustworthy effect size; two-thirds of this PR's apparent rotated increment is
+a gate-role classification artifact.
+
+**Keep rotation.** No policy change. The same prerequisites remain before any
+autonomous reversal: normalize the `round_lenses` schema, define core from the
+first comprehensive round, and exclude or separately bucket fixture,
+Phase 6.2 invariant-audit, and Phase 7 final-review roles.
