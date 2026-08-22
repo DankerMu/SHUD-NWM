@@ -837,3 +837,21 @@ would confuse severity-driven fix verification with a failed exploration
 policy. **Keep rotation** remains unchanged; pinned core and additive free-slot
 rotation serve different jobs. Any reversal still requires the recorded schema
 and round-role fixes plus maintainer review.
+
+## Revisit 2026-08-22 (after #1698 / PR #1721 and #1699 / PR #1724)
+
+The audit still reports **106** multi-round merged PRs and later-round catches
+**core=64 / rotated=264** — numerically identical to the preceding #1587
+receipt. Both #1698 and #1699 are `fixture: none, rounds: 0` operational
+rollouts (production scheduler-registry cutover and new-basin onboarding) whose
+repository increment was a runbook section; neither ran a cross-review loop, so
+neither contributes a multi-round denominator or a later-round catch.
+
+Two zero-increment lines are not evidence in either direction, and recording
+them as a revisit exists only to keep the ledger honest about *why* the counters
+did not move: no rotation was applied because no review rounds ran at all. That
+is the third distinct shape this ADR has now had to separate from a genuine
+rotation experiment (pinned-core depth loops, fix-verification-only rounds, and
+now review-exempt ops rollouts). **Keep rotation** remains unchanged; any
+reversal still requires the recorded schema and round-role fixes plus maintainer
+review.
