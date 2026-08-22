@@ -7,6 +7,7 @@ from typing import Any
 from services.orchestrator import scheduler as _scheduler
 
 __all__ = (
+    "RECONCILIATION_PENDING_STATUSES",
     "_candidate_artifact_refs",
     "_candidate_display_evidence",
     "_candidate_forcing_evidence",
@@ -26,6 +27,16 @@ __all__ = (
     "_is_non_submitted_terminal_or_unavailable_status",
     "_model_package_manifest_uri",
     "_nested_bool",
+)
+
+
+# #1326: the governed reconciliation-pending family. A cycle whose exact result
+# is still being reconciled is incomplete evidence — never a successful final
+# candidate and never a manufactured failed one. The cycle terminal
+# ``reconciling`` and the two stage terminals it collapses to share ONE
+# classifier on this plane.
+RECONCILIATION_PENDING_STATUSES = frozenset(
+    {"reconciling", "submit_result_ambiguous", "reconcile_unverified"}
 )
 
 
@@ -386,5 +397,10 @@ def _is_non_submitted_terminal_or_unavailable_status(status: str) -> bool:
             "skipped_duplicate_submission",
             "unavailable",
         }
+        # #1326: reconciliation-pending evidence is non-successful but never
+        # failed. The failed classifier above already rejects the family (none
+        # of the three tokens matches ``_failed``), so the family only needs
+        # the non-success half here.
+        or normalized in RECONCILIATION_PENDING_STATUSES
         or normalized.endswith(("_blocked", "_cancelled", "_unavailable"))
     )

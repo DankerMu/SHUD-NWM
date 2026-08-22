@@ -22281,7 +22281,11 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_600)
+    # #1326 D6: compaction now retains ``slurm_submit_count`` /
+    # ``slurm_submit_proven_absent`` on execution_write_proof, so the budget is
+    # nudged up to keep the artifact fitting while asserting the same
+    # evidence-pre-execution / status-sync survival facts.
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_700)
 
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
@@ -22353,6 +22357,10 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
         assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
         assert evidence["runtime_config"]["dry_run"] is False
         assert evidence["runtime_config"]["slurm_array_concurrency_bound"] == 32
+        # The writer MUST have fallen back to bounded compaction for this budget
+        # to be meaningful — otherwise the budget adjustment would bypass the
+        # very fallback this test exists to exercise.
+        assert evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -43706,7 +43714,12 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
 
     initial_result = initial_scheduler.run_once()
 
-    assert initial_result.status == "submitted", [
+    # #1326: the ambiguous forecast submit terminates the cycle as
+    # ``reconciling``, so every submitted candidate is now partial non-success
+    # evidence and the pass is ``submitted_partial`` (pre-change the reconciling
+    # terminal was unrecognized, partial_count read 0, and the pass reported a
+    # plain ``submitted``). The tuple keeps the per-candidate debug context.
+    assert initial_result.status == "submitted_partial", [
         (
             item.get("model_id"),
             item.get("status"),
@@ -47444,6 +47457,492 @@ def test_nested_retry_deferred_cycle_surfaces_skip_on_the_evidence_plane(tmp_pat
     assert items["model_b"]["candidate_outcome"]["status"] == "active"
     assert items["model_b"]["candidate_outcome"].get("reason") is None
     assert items["model_b"]["error_code"] == "CANDIDATE_SKIPPED_DUPLICATE_SUBMISSION"
+
+
+# --- #1326: reconciliation-pending family on the evidence plane -------------
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["reconciling", "submit_result_ambiguous", "reconcile_unverified"],
+)
+def test_reconciliation_pending_statuses_are_non_success_but_not_failed(status: str) -> None:
+    """D1/D2 (#1326): one governed family shared by the candidate quality plane.
+
+    All three tokens reject final success through the single non-success
+    predicate while the failed classifier stays false — the evidence never
+    fabricates a failed candidate from a pending reconciliation outcome.
+    """
+
+    from services.orchestrator.scheduler_candidate_quality import (
+        _is_non_submitted_terminal_or_unavailable_status,
+    )
+    from services.orchestrator.scheduler_candidate_runtime import _is_failed_model_run_status
+
+    assert _is_non_submitted_terminal_or_unavailable_status(status) is True
+    assert _is_failed_model_run_status(status) is False
+
+
+def test_reconciling_cycle_candidate_is_partial_non_success_evidence(tmp_path: Path) -> None:
+    """D1 (#1326): an active candidate under a ``reconciling`` cycle terminal.
+
+    The cycle-derived item carries the reconciling status, contributes one
+    producer partial count (never a failed count), and reads as a non-success
+    candidate with the ``candidate_not_successful`` blocker — no fabricated
+    failure and no fabricated success.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+        ),
+        result_status="reconciling",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    # The pass status is producer-derived: the cycle submitted candidates and
+    # the reconciling candidate counts as partial, so the pass is a partial one.
+    assert result.status == "submitted_partial"
+    assert result.evidence["status"] == "submitted_partial"
+    assert result.evidence["counts"]["failed_count"] == 0
+    assert result.evidence["counts"]["partial_count"] == 1
+    item = result.evidence["model_run_evidence"][0]
+    assert item["status"] == "reconciling"
+    assert item["submitted"] is True
+    assert item["execution_attempted"] is True
+    assert item["final_candidate_success"] is False
+    assert item["quality_states"]["candidate"]["quality_flag"] == "blocked"
+    assert [
+        blocker["code"]
+        for blocker in item["residual_blockers"]
+        if blocker.get("quality_flag") == "candidate_not_successful"
+    ] == ["CANDIDATE_RECONCILING"]
+    assert item["candidate_outcome"]["status"] == "active"
+
+
+def _nested_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the nested ambiguous accepted-submit defer for real.
+
+    Returns the ``PipelineResult`` from the real ``ForecastOrchestrator`` cycle
+    whose first full-array forecast pass confirmed a Slurm master dispatch and
+    whose nested resubmission came back ``submit_result_ambiguous``. The
+    confirmed master identity must survive on the returned pending stage. The
+    cycle is aligned with the scheduler's registry/discovery (May 21 00:00 UTC)
+    so the replayed candidate outcomes match the scheduler's candidates.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import (
+        AttemptScopedArraySubmitFailureClient,
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    assert result.status == "reconciling"
+    assert next(stage for stage in result.stages if stage.stage == "forecast").slurm_job_id == "2001"
+    return result
+
+
+def test_nested_pending_produced_artifact_retains_confirmed_submission_facts(
+    tmp_path: Path,
+) -> None:
+    """D6 (#1326 Round 1): confirmed dispatch survives through the produced artifact.
+
+    A real nested ambiguous accepted-submit cycle (first full-array dispatch
+    confirmed on master ``2001``, nested resubmission reconciliation-pending)
+    is run through the real ``ProductionScheduler``. The produced pass evidence
+    must retain ``submitted=true`` and ``slurm_submit_called=true`` per
+    candidate, a positive execution write proof, no submission-absence proof,
+    and the persisted/compacted artifact must preserve those facts — the raw
+    pending token alone must never erase a confirmed dispatch.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    cycle_result = _nested_pending_ambiguous_cycle_result(tmp_path)
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert items[model_id]["status"] == "reconciling"
+        assert items[model_id]["submitted"] is True
+        assert items[model_id]["slurm_submit_called"] is True
+        assert items[model_id]["execution_attempted"] is True
+        assert items[model_id]["final_candidate_success"] is False
+        assert items[model_id]["candidate_outcome"]["status"] == "active"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["partial_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 0
+    # Execution write proof: EXACT counts (both candidates submitted via the
+    # retained confirmed dispatch) and submission is proven NOT absent.
+    proof = result.evidence["execution_write_proof"]
+    assert proof["submitted_count"] == 2
+    assert proof["slurm_submit_count"] == 2
+    assert proof["slurm_submit_proven_absent"] is False
+    # No-mutation proof MUST claim slurm_submit_called=true.
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    # Persisted artifact preserves the same EXACT facts.
+    assert result.artifact_path is not None
+    persisted = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    persisted_items = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert persisted_items[model_id]["submitted"] is True
+        assert persisted_items[model_id]["slurm_submit_called"] is True
+    persisted_proof = persisted["execution_write_proof"]
+    assert persisted_proof["submitted_count"] == 2
+    assert persisted_proof["slurm_submit_count"] == 2
+    assert persisted_proof["slurm_submit_proven_absent"] is False
+    assert persisted["no_mutation_proof"]["slurm_submit_called"] is True
+    # Bounded-compaction seam: the produced payload compacted at the evidence
+    # size limit retains the EXACT confirmed-submission facts, including the
+    # slurm-submit count and the absence proof (fixture D6 contract).
+    compacted = scheduler_module._bounded_evidence_payload(
+        persisted,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "submitted"
+    assert compacted_proof["submitted_count"] == 2
+    assert compacted_proof["slurm_submit_called"] is True
+    assert compacted_proof["slurm_submit_count"] == 2
+    assert compacted_proof["slurm_submit_proven_absent"] is False
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is True
+
+
+def _outer_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the OUTER whole-array retry -> ambiguous defer for real.
+
+    The first full-array forecast submit is CONFIRMED on master ``2001`` but
+    all tasks fail transiently, so the outer same-stage retry is scheduled. The
+    retry crosses the gateway boundary and returns a raw empty-ID
+    ``submit_result_ambiguous``. The outer replacement seam must retain the
+    confirmed ``2001`` on the pending stage (design D6, Round 2), so the
+    replayed scheduler artifact keeps the confirmed submission facts. The
+    cycle is aligned with the scheduler's registry/discovery (May 21 00:00 UTC)
+    so the replayed candidate outcomes match the scheduler's candidates.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import (
+        AttemptScopedArraySubmitFailureClient,
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert result.status == "reconciling"
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.slurm_job_id == "2001"
+    return result
+
+
+def test_outer_pending_produced_artifact_retains_confirmed_submission_facts(
+    tmp_path: Path,
+) -> None:
+    """D6 (#1326 Round 2): OUTER retry ambiguity keeps the produced submission facts.
+
+    A real whole-array forecast dispatch confirmed on master ``2001``, an
+    all-failed run that schedules the OUTER retry, and a retry that returns raw
+    empty-ID ``submit_result_ambiguous`` is run through the real
+    ``ProductionScheduler``. The produced pass evidence must retain
+    ``submitted=true`` and ``slurm_submit_called=true`` per candidate, a
+    positive execution write proof, no submission-absence proof, and the
+    persisted/compacted artifact must preserve those facts — the raw outer
+    retry pending token must never erase the confirmed dispatch.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    cycle_result = _outer_pending_ambiguous_cycle_result(tmp_path)
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert items[model_id]["status"] == "reconciling"
+        assert items[model_id]["submitted"] is True
+        assert items[model_id]["slurm_submit_called"] is True
+        assert items[model_id]["execution_attempted"] is True
+        assert items[model_id]["final_candidate_success"] is False
+        assert items[model_id]["candidate_outcome"]["status"] == "active"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["partial_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 0
+    # Execution write proof: EXACT counts (both candidates submitted via the
+    # retained confirmed dispatch) and submission is proven NOT absent.
+    proof = result.evidence["execution_write_proof"]
+    assert proof["submitted_count"] == 2
+    assert proof["slurm_submit_count"] == 2
+    assert proof["slurm_submit_proven_absent"] is False
+    # No-mutation proof MUST claim slurm_submit_called=true.
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    # Persisted artifact preserves the same EXACT facts.
+    assert result.artifact_path is not None
+    persisted = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    persisted_items = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert persisted_items[model_id]["submitted"] is True
+        assert persisted_items[model_id]["slurm_submit_called"] is True
+    persisted_proof = persisted["execution_write_proof"]
+    assert persisted_proof["submitted_count"] == 2
+    assert persisted_proof["slurm_submit_count"] == 2
+    assert persisted_proof["slurm_submit_proven_absent"] is False
+    assert persisted["no_mutation_proof"]["slurm_submit_called"] is True
+    # Bounded-compaction seam: the produced payload compacted at the evidence
+    # size limit retains the EXACT confirmed-submission facts, including the
+    # slurm-submit count and the absence proof (fixture D6 contract).
+    compacted = scheduler_module._bounded_evidence_payload(
+        persisted,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "submitted"
+    assert compacted_proof["submitted_count"] == 2
+    assert compacted_proof["slurm_submit_called"] is True
+    assert compacted_proof["slurm_submit_count"] == 2
+    assert compacted_proof["slurm_submit_proven_absent"] is False
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is True
+
+
+def _multi_hop_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the OUTER multi-hop retry -> ambiguous defer for real.
+
+    A normal full-chain start: convert/forcing succeed before forecast and
+    deterministically consume convert=2001, forcing=2002, so the first full-
+    array forecast submit is CONFIRMED on master ``2003`` but all tasks fail;
+    the outer retry-1 is REJECTED before the gateway boundary (empty-ID
+    ``submission_failed``); the outer retry-2 crosses the gateway and returns
+    an empty-ID ``submit_result_ambiguous``. The stage-loop confirmed-master
+    owner must survive BOTH empty-ID hops so the replayed scheduler artifact
+    keeps the confirmed ``2003``. The cycle is aligned with the scheduler's
+    registry/discovery (May 21 00:00 UTC).
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import (
+        MultiHopOuterRetryClient,
+        _basins,
+        _orchestrator,
+    )
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = MultiHopOuterRetryClient(
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_{cycle}_model_{index}",
+                "candidate_id": (
+                    f"gfs:{cycle_time}:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": f"cycle_gfs_{cycle}",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+    result = orchestrator.orchestrate_cycle("gfs", cycle, basins)
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert result.status == "reconciling"
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.pipeline_job_id.endswith("_retry_2")
+    assert forecast.slurm_job_id == "2003"
+    return result
+
+
+def test_multi_hop_produced_artifact_retains_confirmed_submission_facts(
+    tmp_path: Path,
+) -> None:
+    """D6 (#1326 Round 2 depth): multi-hop retry keeps the produced submission facts.
+
+    A real whole-array forecast dispatch confirmed on master ``2003``, an
+    empty-ID rejected retry, and an empty-ID ambiguous final retry run through
+    the real ``ProductionScheduler``. The produced pass evidence must retain
+    ``submitted=true`` and ``slurm_submit_called=true`` per candidate, a
+    positive execution write proof, no submission-absence proof, and the
+    persisted/compacted artifact must preserve those facts.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    cycle_result = _multi_hop_pending_ambiguous_cycle_result(tmp_path)
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert items[model_id]["status"] == "reconciling"
+        assert items[model_id]["submitted"] is True
+        assert items[model_id]["slurm_submit_called"] is True
+        assert items[model_id]["execution_attempted"] is True
+        assert items[model_id]["final_candidate_success"] is False
+        assert items[model_id]["candidate_outcome"]["status"] == "active"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert result.evidence["counts"]["partial_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 0
+    # Execution write proof: EXACT counts and submission is proven NOT absent.
+    proof = result.evidence["execution_write_proof"]
+    assert proof["submitted_count"] == 2
+    assert proof["slurm_submit_count"] == 2
+    assert proof["slurm_submit_proven_absent"] is False
+    # No-mutation proof MUST claim slurm_submit_called=true.
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+    # Persisted artifact preserves the same EXACT facts.
+    assert result.artifact_path is not None
+    persisted = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    persisted_items = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert persisted_items[model_id]["submitted"] is True
+        assert persisted_items[model_id]["slurm_submit_called"] is True
+    persisted_proof = persisted["execution_write_proof"]
+    assert persisted_proof["submitted_count"] == 2
+    assert persisted_proof["slurm_submit_count"] == 2
+    assert persisted_proof["slurm_submit_proven_absent"] is False
+    assert persisted["no_mutation_proof"]["slurm_submit_called"] is True
+    # Bounded-compaction seam retains the EXACT confirmed-submission facts.
+    compacted = scheduler_module._bounded_evidence_payload(
+        persisted,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "submitted"
+    assert compacted_proof["submitted_count"] == 2
+    assert compacted_proof["slurm_submit_called"] is True
+    assert compacted_proof["slurm_submit_count"] == 2
+    assert compacted_proof["slurm_submit_proven_absent"] is False
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is True
+
+
+def test_bounded_compaction_retains_no_submit_execution_proof() -> None:
+    """D6 (#1326): compaction keeps zero/absent execution-proof facts too.
+
+    The added retention is not positive-only: a proof with zero submits and
+    ``slurm_submit_proven_absent=true`` must survive compaction with those
+    exact zero/false facts, so an unknown or missing proof can never be
+    mistaken for a confirmed submission.
+    """
+
+    payload = {
+        "schema": "nhms.production_scheduler.pass_evidence.v1",
+        "status": "completed_no_submit",
+        "pass_id": "scheduler_no_submit_compaction",
+        "counts": {"candidate_count": 1, "submitted_count": 0, "failed_count": 0, "partial_count": 0},
+        "execution_write_proof": {
+            "status": "completed_no_submit",
+            "submitted_count": 0,
+            "slurm_submit_called": False,
+            "slurm_submit_count": 0,
+            "slurm_submit_proven_absent": True,
+            "mutation_occurred": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
+        },
+        "no_mutation_proof": {
+            "slurm_submit_called": False,
+            "adapter_download_called": False,
+            "slurm_status_sync_called": False,
+            "slurm_cancellation_called": False,
+            "shud_runtime_called": False,
+            "hydro_result_table_writes": False,
+            "met_result_table_writes": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
+        },
+    }
+
+    compacted = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "completed_no_submit"
+    assert compacted_proof["submitted_count"] == 0
+    assert compacted_proof["slurm_submit_called"] is False
+    assert compacted_proof["slurm_submit_count"] == 0
+    assert compacted_proof["slurm_submit_proven_absent"] is True
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def _no_progress_blocked_scheduler(tmp_path: Path, **config_kwargs: Any) -> ProductionScheduler:

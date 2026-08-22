@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -4369,6 +4370,89 @@ def _scheduler_output_uri_unavailable_sibling_artifact(tmp_path: Path) -> Path:
     return Path(result.artifact_path)
 
 
+class _ZeroSubmissionReconcilingOrchestrator(FakeProductionOrchestrator):
+    """Cycle result: a ``reconciling`` terminal with no Slurm dispatch anywhere.
+
+    Models the readiness spec's zero-submission reconciling pass: the cycle
+    result carries no ``slurm_job_id`` on any stage or candidate outcome, so
+    the real ``ProductionScheduler`` producer emits pass status
+    ``reconciling``, ``submitted_count`` zero, and one reconciliation-pending
+    model-run row that was execution-attempted but never submitted.
+    """
+
+    def orchestrate_cycle(
+        self,
+        source: str,
+        cycle_time: datetime,
+        basins: list[dict[str, Any]],
+    ) -> PipelineResult:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status="reconciling",
+            stages=(
+                StageRunResult(
+                    stage="forecast",
+                    job_type="run_shud_forecast_array",
+                    pipeline_job_id="job_cycle_gfs_2026052106_forecast",
+                    slurm_job_id="",
+                    status="reconciling",
+                ),
+            ),
+            candidate_outcomes=(
+                {
+                    "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "status": "active",
+                    "stage": "forecast",
+                },
+            ),
+        )
+
+
+def _scheduler_reconciling_artifact(tmp_path: Path) -> Path:
+    """Produce a REAL zero-submission reconciling scheduler pass artifact.
+
+    Runs ``ProductionScheduler.run_once()`` with a fake orchestrator whose
+    cycle lands the ``reconciling`` terminal with no Slurm dispatch, then
+    asserts the producer-emitted status/counts/model-run fields before handing
+    the written artifact back to the readiness validator.
+    """
+
+    orchestrator = _ZeroSubmissionReconcilingOrchestrator()
+    scheduler = ProductionScheduler(
+        _scheduler_config(
+            tmp_path / "scheduler-workspace",
+            now=_scheduler_dt("2026-05-21T12:00:00Z"),
+            dry_run=False,
+        ),
+        registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "reconciling"
+    assert result.evidence["status"] == "reconciling"
+    assert result.evidence["counts"]["candidate_count"] == 1
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["failed_count"] == 0
+    assert result.evidence["counts"]["partial_count"] == 1
+    assert len(result.evidence["model_run_evidence"]) == 1
+    row = result.evidence["model_run_evidence"][0]
+    assert row["status"] == "reconciling"
+    assert row["submitted"] is False
+    assert row["execution_attempted"] is True
+    assert row["final_candidate_success"] is False
+    assert row["candidate_outcome"]["status"] == "active"
+    assert result.artifact_path is not None
+    return Path(result.artifact_path)
+
+
 def _scheduler_failed_alias_sibling_artifact(tmp_path: Path, *, outcome_status: str) -> Path:
     sibling_reason = f"forcing_task_{outcome_status}"
     orchestrator = FakeProductionOrchestrator(
@@ -5090,6 +5174,84 @@ def test_scheduler_partial_count_accepts_matching_terminal_model_run_row(tmp_pat
     assert live_item["status"] == "release_blocked"
     assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
     assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    "row_status",
+    ["reconciling", "submit_result_ambiguous", "reconcile_unverified"],
+)
+def test_scheduler_reconciliation_pending_row_outcome_flags(row_status: str) -> None:
+    """D1 (#1326): a bare reconciliation-pending row is partial, never failed.
+
+    All three governed statuses read partial and producer-partial so producer
+    ``partial_count`` and the readiness recount stay in agreement, while failed,
+    blocked and submitted all stay false — the row describes incomplete
+    accounting, not a fabricated failure, a reserve/preflight block, or a live
+    submission.
+    """
+
+    outcome = readiness_scheduler_evidence._scheduler_model_run_outcome(
+        {"status": row_status, "submitted": False, "execution_attempted": True}
+    )
+
+    assert outcome.partial is True
+    assert outcome.producer_partial is True
+    assert outcome.failed is False
+    assert outcome.blocked is False
+    assert outcome.submitted is False
+    assert outcome.submitted_explicitly_false is True
+
+
+def test_scheduler_zero_submission_reconciling_pass_has_consistent_cardinality(
+    tmp_path: Path,
+) -> None:
+    """D1/D3 (#1326): a PRODUCED zero-submission reconciling pass artifact.
+
+    A real ``ProductionScheduler.run_once()`` pass whose cycle lands the
+    ``reconciling`` terminal with no Slurm dispatch writes the scheduler
+    artifact (status ``reconciling``, ``submitted_count`` zero, one
+    reconciliation-pending model-run row, ``partial_count`` one). That written
+    artifact is fed through the readiness validator: pass status ``reconciling``
+    is review-blocked vocabulary (no ``status_not_allowed``), producer and
+    readiness partial counts agree (no
+    ``partial_count_exceeds_model_run_evidence`` / cardinality mismatch), and
+    the public scheduler readiness item stays ``blocked`` — reconciliation
+    never passes.
+    """
+
+    root = tmp_path / "artifacts"
+    scheduler_path = _scheduler_reconciling_artifact(tmp_path)
+    payload = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    receipt = _scheduler_proof_bound_to_evidence(
+        scheduler_path,
+        producer_artifact_ref=f"scheduler:{scheduler_path.name}",
+        producer_run_id=str(payload["pass_id"]),
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+            scheduler_proof=receipt,
+        )
+    )
+
+    scheduler_item = next(item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence")
+    live_item = next(item for item in _items(root) if item["surface"] == "live_scheduler_evidence_proof")
+    errors = scheduler_item["details"]["acceptance_errors"]
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["required_for_final"] is False
+    assert "status_not_allowed" not in errors
+    assert "partial_count_exceeds_model_run_evidence" not in errors
+    assert "partial_count_status_cardinality_mismatch" not in errors
+    assert errors == []
+    assert scheduler_item["details"]["submitted_count"] == 0
+    assert scheduler_item["details"]["failed_count"] == 0
+    assert scheduler_item["details"]["partial_count"] == 1
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
+    assert _summary(root)["final_production_readiness_claimed"] is False
 
 
 def test_scheduler_submitted_partial_count_accepts_failed_submitted_sibling(tmp_path: Path) -> None:
