@@ -815,3 +815,25 @@ the measurement error documented above (conflating "no rotation applied" with
 cut under the ADR's default, so **keep rotation** remains unchanged. Any future
 reversal still requires the recorded schema repair and maintainer review; this
 revisit adds no policy change.
+
+## Revisit 2026-08-22 (after #1587 / PR #1679)
+
+The audit now reports **106** multi-round merged PRs and later-round catches
+**core=64 / rotated=264**. Relative to the preceding #1648 receipt, #1679 adds
+one PR and **core +5 / rotated +0**.
+
+This is another pinned-core sample, not a rotation experiment. Round 1 included
+`test-evidence`; Rounds 2–4 intentionally kept that same lens while closing one
+recurring evidence invariant, and Round 5 was clean. The five later-round
+catches therefore show that a pinned lens retains real fix-regression recall:
+it caught fallback/provenance holes and then progressively replaced hand-copied
+mutation counts with a replay-backed receipt. No free-slot lens was rotated in,
+so the zero rotated increment says nothing about rotation's value.
+
+The five-round shape also reinforces the existing measurement caveat: a depth
+loop that correctly pins the owner of a recurring invariant mechanically pushes
+`core` upward. Reading that movement as evidence to revert to the Round 1 mix
+would confuse severity-driven fix verification with a failed exploration
+policy. **Keep rotation** remains unchanged; pinned core and additive free-slot
+rotation serve different jobs. Any reversal still requires the recorded schema
+and round-role fixes plus maintainer review.

@@ -41,33 +41,63 @@ Developer entrypoints for backend Python work MUST use `uv run` so local, CI, an
 
 ### Requirement: Targeted CI selection MUST include a changed script's same-name test suite
 
-The targeted-test selector SHALL map every changed `scripts/**/*.py` whose
-same-name test file `tests/test_<basename>.py` exists to that test file,
-treating the hit as a known mapping that suppresses the unknown-backend
-smoke fallback for that path; the derivation applies to `scripts/**/*.py`
-only (other backend prefixes keep today's behavior even when a same-name
-test exists), a script with neither an explicit rule nor a same-name test
-keeps the existing fallback behavior, and mapping completeness over the
-tracked tree is enforced by a mechanized selector test rather than a
-hand-maintained rule list.
+The targeted-test selector SHALL map every changed backend Python source under
+`apps/api/`, `packages/`, `services/`, `workers/`, or `scripts/` whose same-name
+test file `tests/test_<basename>.py` exists to that test file, treating the hit
+as a known mapping that suppresses the unknown-backend smoke fallback for that
+path. The five-prefix source domain SHALL share one authority with backend
+Python path classification; the same-name target remains file-level and
+existence-gated. An explicit rule and same-name derivation SHALL contribute
+their set union, while a source with neither an explicit rule nor an existing
+same-name test keeps the existing fallback behavior. Mapping completeness over
+the tracked tree SHALL be enforced by a mechanized selector test rather than a
+hand-maintained rule list. When more than one source in the domain shares a
+basename and therefore maps to one same-name suite, the mechanized guard SHALL
+require that suite to import every colliding source module so basename
+convergence cannot silently route an unrelated suite.
 
-#### Scenario: changed script selects its own suite
+#### Scenario: changed backend source selects its own suite
 
-- **WHEN** a PR changes only `scripts/<name>.py` and
-  `tests/test_<name>.py` exists in the tree
-- **THEN** the selector output includes `tests/test_<name>.py` and does not
-  substitute the unrelated core-smoke set for that path
+- **WHEN** a PR changes only a Python source under one of the five backend
+  prefixes and `tests/test_<basename>.py` exists in the tree
+- **THEN** the selector output includes that same-name test and does not
+  substitute the unrelated core-smoke fallback for that path
+
+#### Scenario: explicit and derived mappings form a union
+
+- **WHEN** a changed backend source matches an explicit path rule and also has
+  an existing same-name suite
+- **THEN** the selector output contains the union of both mappings without
+  duplicate targets or removal of the explicit rule's suites
+
+#### Scenario: missing same-name suite preserves fallback
+
+- **WHEN** a changed backend Python source has neither an explicit rule nor an
+  existing `tests/test_<basename>.py`
+- **THEN** the selector retains the existing unknown-backend core-smoke
+  fallback and does not treat the nonexistent derived target as a mapping
 
 #### Scenario: completeness is mechanized
 
-- **WHEN** a new script is added with a same-name test but no explicit
-  selector rule
-- **THEN** the selector already reaches the test via the same-name mapping,
-  and the completeness guard test derives the pair list from the tracked
-  tree and asserts each pair's selection both includes the same-name test
-  and shares no member with the core-smoke set, so a future orphan pair —
-  or a mapping that still drags the smoke set along — fails the selector
-  suite
+- **WHEN** a new source is added under any of the five backend prefixes with a
+  same-name test but no explicit selector rule
+- **THEN** the selector already reaches the test via the same-name mapping, and
+  a tracked-tree guard derives the pair without a frozen source list and fails
+  if the suite is not selected
+
+#### Scenario: basename collisions remain semantically bound
+
+- **WHEN** two or more tracked backend sources share a basename and therefore
+  map to the same `tests/test_<basename>.py`
+- **THEN** the tracked-tree guard requires that suite to import every colliding
+  source module and fails by naming any source whose import edge is absent
+
+#### Scenario: a same-name source change schedules the collision guard
+
+- **WHEN** a PR changes a backend Python source whose same-name test file exists
+- **THEN** the selector output also includes the selector meta-guard suite, so
+  the collision/import contract runs in the PR targeted lane on exactly the
+  source-only PRs that can add a colliding source
 
 ### Requirement: Targeted CI selection MUST include the container contract's dependent suites
 
