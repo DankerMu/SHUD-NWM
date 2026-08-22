@@ -290,10 +290,15 @@ Gap sweep 结论为 **no blocking findings**，两条 finding：
   这条是「从未被要求请求」），三者同属一个 harm family——一份 live clone 行存在于
   一份或两份 state index 中却无持久声明证据——按兄弟项同批修。
   立单：https://github.com/DankerMu/SHUD-NWM/issues/1715
-  （scribe 复核更正了两处：六个省略 `--receipt` 的 `--apply` 调用点里只有**四个**
-  真的写行——`:418`/`:445`/`:769`/`:936`，`:779`/`:791` 在 `pytest.raises` 拒绝测试里
-  写前即拒；成因实证——`git show master:` 下 `_REQUIRED_FLAGS_BY_MODE` 与
-  `TRANSFER_MODE_RECALIBRATION` 两个符号计数均为 0，确属 `169db5b1` 引入。）
+  成因实证：`git show master:` 下 `_REQUIRED_FLAGS_BY_MODE` 与
+  `TRANSFER_MODE_RECALIBRATION` 两个符号计数均为 0，确属 `169db5b1` 引入。
+  可达性由本 PR 自己的 CLI 测试承担——`_cli_args` (`tests/test_state_clone_recalibration_cli.py:206-231`)
+  默认不带 `--receipt`，其中若干 `--apply` 调用点确实把行写进两份索引且不报错，
+  而 `test_recalibration_refuses_its_missing_flags` (`:1052-1077`) 只参数化了
+  required-flags 表里已有的三个 flag。**此处不逐条列举调用点行号**：先前一版列表
+  把 `:936`（`pytest.raises` 内的拒绝）误当作写入点，又漏了跨行写法的 `:725-729`，
+  由 Phase 7 rerun 抓出（N1，P3）。#1715 的验收标准本就是「所有 recalibration
+  调用点各自给出唯一 receipt 路径」这一 catch-all，不依赖任何枚举。
 - [x] 6.16b **6.5 的「with no test edits」措辞与同文档 6.6b 自相矛盾（F2，P3）**
   — 已就地改为「no pre-existing test modified or weakened」并写明两处增量的性质。
   与 C4 / R2-C 同一 evidence-integrity 类，evidence-only，按 Phase 7 `local-repair` 处理。
