@@ -641,3 +641,32 @@ is about the round-1 coverage gap, which was real, was P2, and was invisible to
 the lens best acquainted with the code.
 
 **Keep rotation.** No change to the recorded rule.
+
+## Revisit 2026-08-22 (after #1645 / PR #1689)
+
+Auditor now reports 102 multi-round merged PRs, later-round catches
+**core=54 rotated=258** (was 101 / 53 / 258 after PR #1696). PR #1689 is the
+entire delta: **core +1, rotated +0**.
+
+This attribution is one of the cleaner `core` samples in the ledger. The
+Round 2 P1 was found by the `test-evidence` lens, which was present in Round 1
+and intentionally pinned into Round 2. It caught a regression in the same
+partial-launch invariant after the implementation had already been repaired:
+both explicit-thread tests could still pass when only the exception-path join
+was deleted. The independent verifier executed those mutants and observed
+Gateway 25/25 and scheduler 30/30 false-green; the corrective parent-side join
+proof then made the same mutants deterministically red.
+
+That result establishes that the pinned core still buys fix-regression recall.
+It does **not** support reverting to the Round 1 mix: the policy under review is
+additive rotation and never rotates the pinned core out. A single `core +1`
+sample therefore argues for keeping the core pinned, not for removing the free
+rotated slots. Round 3 used full-scope + pinned evidence/concurrency lenses and
+was clean, so this PR supplies no rotated catch in either direction.
+
+The accumulated ratio still points toward keep, but all previously recorded
+measurement caveats remain: fixture/final-review roles, lens-name variants, and
+subset/non-rotation rounds can contaminate the aggregate. **Keep rotation**
+under the autonomous default; no policy change. Any future reversal still
+requires the recorded attribution schema/round-role fixes plus maintainer
+review.
