@@ -963,3 +963,17 @@ clean. Those replacements complete Round 1; they are not a later round and must
 not be interpreted as rotation. The accountability schema records the effective
 lens mix once, correctly. This adds no keep/cut evidence, but keeps tooling
 failure separate from the experiment being measured.
+
+### Revisit 2026-08-22 — PR #1738 (#1735, lineage-scoped cycle completion)
+
+`rounds: 3`, fixture `expanded`, merged. Enters the multi-round denominator:
+**108 multi-round merged PRs**. `loop_log_audit` reports later-round catch
+counters unchanged at core=66 vs rotated=264 — the two round-2 actionable
+catches (P1 selector-lane coverage from the rotated-in `ci-blast-radius` lens;
+P2 spec-contract drift from the round-2 correctness verifier) did not match the
+audit's core/rotated lens labels and so are attributed to neither bucket.
+Qualitatively both support keep: the P1 was invisible to every round-1 lens and
+only surfaced once the CI-blast-radius lens rotated in. Round 3 (four rotated
+lenses incl. mutation testing) returned zero actionable. **Keep rotation**
+unchanged. Process note recorded in the loop-log line: mutation-testing lenses
+must run in an isolated worktree.

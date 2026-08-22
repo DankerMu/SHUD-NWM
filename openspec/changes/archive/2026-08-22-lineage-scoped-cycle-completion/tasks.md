@@ -10,7 +10,7 @@
       `tests/test_scheduler_generation.py`,
       `tests/test_state_manager_generation_history.py`,
       `tests/test_production_scheduler.py`
-- [ ] node-27 real-DB pytest green (DB-plane resolver parity)
+- [x] node-27 real-DB pytest green (DB-plane resolver parity) — receipt at 862d5249, SQL byte-identical to final head e7c06320; see .workplans/1735/node27-receipt.md / PR #1738 body
 - [ ] **node-22 live receipt** matching `design.md` "Live receipt shape" — this is
       the production oracle and also closes `#1698`'s outstanding warm verification
 
