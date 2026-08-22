@@ -59,7 +59,7 @@ from services.orchestrator.chain_repository import (
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
 )
-from services.orchestrator.chain_source_cycle import _datetime_sort_key
+from services.orchestrator.chain_source_cycle import _datetime_sort_key, _pipeline_job_truth_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
 from services.orchestrator.retry import (
     _DB_FREE_REQUIRED_SELECTOR_FIELDS,
@@ -120,6 +120,10 @@ from services.orchestrator.run_identity import (
 from services.orchestrator.scheduler_file_providers import (
     _public_raw_manifest_evidence,
     _sanitize_file_provider_evidence_scalar,
+)
+from services.orchestrator.scheduler_init_state_match import (
+    INIT_STATE_IDENTITY_FIELDS,
+    init_state_field,
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
@@ -657,51 +661,101 @@ class FileOrchestrationJournalRepository:
     def completed_pipeline_init_state_id(
         self, *, source_id: str, cycle_time: datetime, model_id: str
     ) -> str | None:
-        """Return the completed hydro run's recorded ``init_state_id`` for a cycle.
+        """Return the recorded ``init_state_id`` / ``initial_state_id`` for a cycle.
 
-        Read-only companion to :meth:`has_completed_pipeline`, serving the
-        same memoized ``_cycle_rows`` latest-view rows so a completion probe
-        plus an identity probe cost one cycle read, not two.  Returns
-        ``None`` — never raises — when the identity cannot be read:
+        Legacy string wrapper over :meth:`completed_pipeline_init_state_identity`:
+        it delegates to the full mapping and returns only the two historical
+        aliases it has always recognized.  A bare ``state_id`` alias stays
+        unavailable here, so §8.7 predecessor scoring and candidate quarantine
+        keep their no-judgement shape for those rows.  Returns ``None`` —
+        never raises — when the full accessor returns no mapping.
+        """
+        identity = self.completed_pipeline_init_state_identity(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+        )
+        if not isinstance(identity, Mapping):
+            return None
+        recorded = identity.get("init_state_id") or identity.get("initial_state_id")
+        if recorded in (None, ""):
+            return None
+        return str(recorded).strip() or None
 
-        - no journal rows / unreadable rows (same fail-shape as
-          ``has_completed_pipeline``),
-        - no matching ``hydro_run`` row for the candidate (includes the
-          ``state_save_qc`` terminal mode, where completion is decided from
-          pipeline jobs and ``hydro_run`` may be ``None``),
-        - the matching ``hydro_run`` row is not itself completed — a
-          ``created``/``staged``/``submitted`` placeholder superseded by a
-          pipeline terminal records an ``init_state_id`` too
-          (``:1179``/``:1184``), and the judged identity must be the COMPLETED
-          run's row,
-        - the row records no ``init_state_id`` / ``initial_state_id``.
+    def completed_pipeline_init_state_identity(
+        self, *, source_id: str, cycle_time: datetime, model_id: str
+    ) -> dict[str, Any] | None:
+        """Return the journal's recorded per-model init-state identity, or ``None``.
 
-        No run-manifest reads: this reports what the JOURNAL recorded.
+        Single authority behind the completion verdict, discovery §8.7 scoring
+        and candidate quarantine (design D1/D4).  Read-only companion to
+        :meth:`has_completed_pipeline`, serving the same memoized ``_cycle_rows``
+        latest-view rows so a completion probe plus an identity probe cost one
+        cycle read, not two.  Returns a defensive copy and never writes the
+        journal.  Scheduler wiring consumes it via ``getattr(repo, ..., None)``
+        (repo convention), so it is intentionally absent from the
+        ``ActiveCandidateRepository`` Protocol; repositories without it simply
+        yield no identity judgement.
 
-        Scheduler wiring consumes this via ``getattr(repo, ..., None)`` (repo
-        convention, cf. ``scheduler_backfill_predecessor.py:226``), so it is
-        intentionally absent from the ``ActiveCandidateRepository`` Protocol;
-        repositories without it simply yield no identity judgement.
+        Authority order (design D2):
+
+        1. A matching completed ``hydro_run`` row carrying any init-state
+           identity alias wins, preserving legacy per-basin semantics.
+        2. Otherwise the current accepted-submit contract candidate rows of the
+           internal (untruncated, public-redaction-free) pipeline-jobs view are
+           scanned; the LATEST canonical-truth-order row is chosen FIRST and
+           then accepted only if it is terminal-success and its normalized
+           immutable evidence carries exactly one identity entry bound to this
+           candidate.  An older succeeded row cannot hide a newer failed,
+           empty or malformed row, because selection precedes qualification.
+
+        Every other shape — no journal/unreadable rows, cohort master maps,
+        marker-free historical/ordinary jobs, foreign-model rows, malformed
+        versioned rows, latest rows that failed or recorded an empty/plural
+        identity — returns ``None`` rather than raising.  The value is the
+        writer-recorded identity mapping (id plus the optional
+        checksum/URI/valid-time fields), never the bounded candidate-state
+        projection or a public-redacted row.
         """
         try:
             canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
-            hydro_run = rows.hydro_run
-            if not _row_matches_candidate(
-                hydro_run,
-                source_id=canonical_source_id,
-                cycle_time=cycle_time,
-                model_id=model_id,
-            ):
-                return None
         except FileOrchestrationJournalError:
             return None
-        if str(hydro_run.get("status") or "") not in COMPLETED_HYDRO_STATUSES:
+        hydro_run = rows.hydro_run
+        if _row_matches_candidate(
+            hydro_run,
+            source_id=canonical_source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+        ) and str(hydro_run.get("status") or "") in COMPLETED_HYDRO_STATUSES:
+            recorded = _init_state_identity_from_hydro(hydro_run)
+            if recorded is not None:
+                return recorded
+        try:
+            candidates = [
+                job
+                for job in rows.pipeline_jobs.values()
+                if _job_matches_candidate(
+                    job,
+                    source_id=canonical_source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+                and accepted_submit_contract_is_current(job)
+                and accepted_submit_row_kind(job) == "candidate"
+            ]
+            if not candidates:
+                return None
+            latest = max(candidates, key=_pipeline_job_truth_sort_key)
+            if not _job_is_terminal_success(latest):
+                return None
+            identity = _candidate_row_self_bound_identity(latest, model_id=model_id)
+        except (AcceptedSubmitEvidenceError, AttributeError, TypeError, ValueError):
+            # One unreadable/malformed current row must not blank the journal;
+            # every malformed shape is a no-judgement (fails to absent).
             return None
-        recorded = hydro_run.get("init_state_id") or hydro_run.get("initial_state_id")
-        if recorded in (None, ""):
-            return None
-        return str(recorded).strip() or None
+        return dict(identity) if identity is not None else None
 
     def completed_pipeline_init_state_id_occurrences(
         self,
@@ -9330,6 +9384,78 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+_INIT_STATE_ALIAS_KEYS = ("init_state_id", "initial_state_id", "state_id")
+
+#: Canonical ``init_state_*`` key for each matcher identity field whose bare
+#: aliases must not feed the old string wrapper.  ``state_id`` is deliberately
+#: absent: its canonical key is ``init_state_id`` and fabricating it from a
+#: bare ``state_id`` alias would leak a bare-``state_id`` row into the legacy
+#: accessor, which the authority contract forbids.  The id is instead carried
+#: verbatim under its recorded alias (``_INIT_STATE_ALIAS_KEYS``).
+_INIT_STATE_CANONICAL_KEYS = {
+    "checksum": "init_state_checksum",
+    "uri": "init_state_uri",
+    "valid_time": "init_state_valid_time",
+}
+
+
+def _init_state_identity_from_hydro(hydro_run: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project a completed hydro row's recorded identity onto one full mapping.
+
+    Every optional identity field the shared matcher consumes
+    (``INIT_STATE_IDENTITY_FIELDS`` through ``init_state_field``) is resolved
+    against the row and emitted under its canonical ``init_state_*`` key, so
+    checksum/URI/valid-time conflicts are not lost when the verdict compares a
+    completed hydro identity.  The id aliases (``init_state_id`` /
+    ``initial_state_id`` / bare ``state_id``) are kept verbatim as recorded;
+    the canonical ``init_state_id`` is never fabricated from a bare
+    ``state_id``, so the string wrapper keeps returning ``None`` for a
+    bare-``state_id``-only row while the full accessor still exposes it.
+    """
+
+    identity: dict[str, Any] = {}
+    for key in _INIT_STATE_ALIAS_KEYS:
+        value = hydro_run.get(key)
+        if value not in (None, ""):
+            identity[key] = value
+    for identity_field in INIT_STATE_IDENTITY_FIELDS:
+        if identity_field == "state_id":
+            continue
+        value = init_state_field(hydro_run, identity_field)
+        if value not in (None, ""):
+            identity[_INIT_STATE_CANONICAL_KEYS[identity_field]] = value
+    return identity or None
+
+
+def _candidate_row_self_bound_identity(
+    job: Mapping[str, Any], *, model_id: str
+) -> dict[str, Any] | None:
+    """Return the one normalized identity entry bound to this candidate row.
+
+    ``accepted_submit_candidate_immutable_evidence`` already normalized and
+    validated the row's ``init_state_identities`` for the current contract; the
+    entry must name exactly THIS model.  A master-shaped or malformed row never
+    reaches this helper (the caller restricts to contract-current candidate
+    rows first), and an empty or multi-entry map yields ``None``.
+    """
+
+    try:
+        evidence = accepted_submit_candidate_immutable_evidence(job)
+    except AcceptedSubmitEvidenceError:
+        return None
+    identities = evidence.get(INIT_STATE_IDENTITY_FIELD)
+    if not isinstance(identities, Sequence) or isinstance(identities, str | bytes):
+        return None
+    if len(identities) != 1:
+        return None
+    entry = identities[0]
+    if not isinstance(entry, Mapping):
+        return None
+    if str(entry.get("model_id") or "") != model_id:
+        return None
+    return {key: value for key, value in entry.items() if value not in (None, "")}
 
 
 def _master_row_records_init_state_id(

@@ -330,7 +330,36 @@ def _cycle_completion_verdict(
             }:
                 return "gap"
             if strict_evidence is not None:
-                init_state_verdict = _terminal_init_state_verdict(decision.evidence, strict_evidence)
+                # Full cohort identity (id + optional fields) wins when the
+                # repository exposes the optional accessor and it returns a
+                # mapping; otherwise the terminal evidence's hydro_run stays
+                # the observed input, keeping non-journal repositories and
+                # legacy per-basin rows unchanged (design D3).
+                observed_identity = None
+                full_identity_provider = (
+                    getattr(context.active_repository, "completed_pipeline_init_state_identity", None)
+                    if context.active_repository is not None
+                    else None
+                )
+                if callable(full_identity_provider):
+                    try:
+                        full_identity = full_identity_provider(
+                            source_id=candidate.source_id,
+                            cycle_time=candidate.cycle_time_utc,
+                            model_id=candidate.model_id,
+                        )
+                    except (TypeError, ValueError):
+                        # Within the documented optional-repo tolerance an
+                        # accessor may raise; that shape is a no-mapping and
+                        # falls back to the legacy hydro evidence.
+                        full_identity = None
+                    if isinstance(full_identity, Mapping):
+                        observed_identity = full_identity
+                init_state_verdict = _terminal_init_state_verdict(
+                    decision.evidence,
+                    strict_evidence,
+                    observed=observed_identity,
+                )
                 if init_state_verdict == TERMINAL_INIT_STATE_CONFLICT:
                     return "gap"
                 if init_state_verdict == TERMINAL_INIT_STATE_ABSENT and not _successor_state_proves_continuity(
@@ -529,6 +558,8 @@ def _breaker_engaged_gap_identities(
 def _terminal_init_state_verdict(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
+    *,
+    observed: Mapping[str, Any] | None = None,
 ) -> str:
     """Classify the terminal row's recorded init state for the cycle verdict.
 
@@ -536,12 +567,18 @@ def _terminal_init_state_verdict(
     ``COLD_NEW_MODEL`` / ``COLD_DECLARED_CUTOVER``, ``scheduler_generation_gate
     .py:349-376``) carries nothing to compare against: the verdict path skips
     the shared helper and keeps today's gap, which ``conflict`` expresses here.
+
+    ``observed`` is the full cohort identity mapping from the repository's
+    optional accessor when one was returned; otherwise the terminal evidence's
+    ``hydro_run`` stays the comparison input (design D3).
     """
 
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or init_state_field(selected, "state_id") in (None, ""):
         return TERMINAL_INIT_STATE_CONFLICT
-    return terminal_init_state_match(selected, terminal_evidence.get("hydro_run"))
+    if observed is None:
+        observed = terminal_evidence.get("hydro_run")
+    return terminal_init_state_match(selected, observed)
 
 
 def _successor_state_proves_continuity(successor_evidence: Mapping[str, Any] | None) -> bool:

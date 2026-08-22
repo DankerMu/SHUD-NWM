@@ -14,6 +14,8 @@ from packages.common.state_manager import StateSnapshot, state_snapshot_id
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+from services.orchestrator import scheduler_lineage as _scheduler_lineage
+from services.orchestrator import scheduler_state_decision as _scheduler_state_decision
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from tests.lineage_state_index_fixtures import index_entry as _lineage_index_entry
 from tests.lineage_state_index_fixtures import index_repository as _lineage_index_repository
@@ -24,6 +26,7 @@ from tests.test_file_orchestration_journal import _write_json as _journal_write_
 
 # Reuse the project's existing fixtures/builders rather than re-inventing them.
 from tests.test_production_scheduler import (
+    _ABSENCE_TOLERANCE_SELECTED_STATE,
     FakeActiveRepository,
     FakeAdapter,
     FakeRegistry,
@@ -2712,6 +2715,261 @@ def test_lineage_cutover_is_scoped_per_source(tmp_path: Path) -> None:
         "model_a_prime"
     ]
     assert scope(context, ifs_discovery, models) == ()
+
+
+def _published_hydro_candidate_state_decision(
+    candidate: Any, state: Mapping[str, Any] | None
+) -> Any:
+    return _scheduler_state_decision._candidate_state_decision(
+        candidate,
+        {
+            **dict(state or {}),
+            "run_id": candidate.run_id,
+            "cycle_id": candidate.cycle_id,
+            "cycle_time": candidate.cycle_time_utc.isoformat().replace("+00:00", "Z"),
+            "model_id": candidate.model_id,
+            "source_id": candidate.source_id,
+            "hydro_status": "published",
+            "pipeline_status": "succeeded",
+            "hydro_run": {
+                "run_id": candidate.run_id,
+                "status": "published",
+                "output_uri": f"s3://nhms/runs/{candidate.run_id}/output/",
+            },
+        },
+    )
+
+
+def test_full_cohort_identity_is_read_only_for_models_in_lineage_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1185 x #1735: the full cohort identity accessor only reads in-scope models.
+
+    The #1185 verdict consumes ``completed_pipeline_init_state_identity`` from
+    inside the per-model loop of ``_cycle_completion_verdict``, which the #1735
+    completion-scope filter feeds only the lineage-scoped models.  The two must
+    not be re-ordered: an excluded model (``cycle_time < t*``) that carries a
+    CONFLICTING recorded identity must neither flip the verdict to ``gap`` nor
+    even be queried by the accessor, while an in-scope model's match/conflict
+    keeps deciding the verdict exactly as #1185 specifies.
+    """
+    from services.orchestrator.scheduler_generation import expected_journal_init_state_tokens
+    from tests.test_file_orchestration_journal import (
+        _cohort_candidate_terminal_row,
+    )
+    from tests.test_file_orchestration_journal import (
+        _latest_view as _journal_view,
+    )
+    from tests.test_file_orchestration_journal import (
+        _write_json as _journal_write,
+    )
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    stamp = cycle_id_for("gfs", cycle_time).removeprefix("gfs_")
+    discovery = scheduler_module.CycleDiscovery(
+        cycle_id="gfs_2026072000",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    model_a = _model("model_a", "basin_a")
+    model_b = _model("model_b", "basin_b")
+    models = [
+        scheduler_module._coerce_registered_model(model_a),
+        scheduler_module._coerce_registered_model(model_b),
+    ]
+    # model_b's strict resolution names its own expected token; model_a is
+    # lineage-scoped out (its cutover ``t* = 06:00Z`` is after the cycle).
+    _base, expected_b = expected_journal_init_state_tokens(
+        source_id="gfs",
+        model_id="model_b",
+        candidate_valid_time=cycle_time,
+        required_lead_hours=12,
+    )
+    selected_b = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    selected_b["state_id"] = expected_b
+    selected_b["init_state_id"] = expected_b
+    match_identity_b = {
+        "array_task_id": 0,
+        "model_id": "model_b",
+        "init_state_id": expected_b,
+        "init_state_checksum": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_checksum"],
+        "init_state_uri": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_uri"],
+        "init_state_valid_time": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_valid_time"],
+    }
+    conflict_identity_a = {
+        "array_task_id": 0,
+        "model_id": "model_a",
+        "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        "init_state_checksum": "sha256:" + "z" * 64,
+        "init_state_uri": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_uri"],
+        "init_state_valid_time": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_valid_time"],
+    }
+
+    journal_root = tmp_path / "journal"
+    _journal_write(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _journal_view(
+            cycle_time=cycle_time,
+            jobs=[_cohort_candidate_terminal_row(cycle_time, identity=conflict_identity_a)],
+        ),
+    )
+    _journal_write(
+        journal_root / f"latest/gfs/{stamp}/model_b.json",
+        _journal_view(
+            cycle_time=cycle_time,
+            model_id="model_b",
+            jobs=[_cohort_candidate_terminal_row(cycle_time, model_id="model_b", identity=match_identity_b)],
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    accessor_calls: list[str] = []
+    real_accessor = repository.completed_pipeline_init_state_identity
+
+    class _TrackingJournal(FileOrchestrationJournalRepository):
+        def completed_pipeline_init_state_identity(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> dict[str, Any] | None:
+            accessor_calls.append(model_id)
+            return real_accessor(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt("2026-07-20T12:00:00Z"),
+        cycle_times=["2026-07-20T00:00:00Z"],
+        backfill_enabled=True,
+        active_repository=_TrackingJournal(journal_root),
+        models=[model_a, model_b],
+    )
+    scheduler._strict_warm_start_for_candidate = lambda _candidate, _cycle: {
+        "status": "ready",
+        "ready": True,
+        "candidate_state": dict(selected_b),
+    }
+    scheduler._required_warm_start_lead_hours = lambda _candidate, _cycle: 12
+    scheduler._successor_warm_start_state_for_candidate = lambda _candidate, _cycle: {"ready": True}
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        _published_hydro_candidate_state_decision,
+    )
+    # model_a is scoped out for the cycle; model_b (no lineage) is in scope.
+    scheduler._lineage_cutover_cache[("model_a", "gfs")] = _scheduler_lineage.LineageCutover(
+        model_id="model_a",
+        source_id="gfs",
+        predecessor_model_id="model_a_legacy",
+        cutover_time=_dt("2026-07-20T06:00:00Z"),
+    )
+    scheduler._lineage_cutover_cache[("model_b", "gfs")] = None
+
+    status = scheduler._cycle_completion_status(discovery, models, horizon={})
+
+    # The excluded model's recorded conflict is neither read nor decisive; the
+    # in-scope model's matching identity completes the cycle under #1185.
+    assert status == "complete"
+    assert "model_a" not in accessor_calls
+    assert "model_b" in accessor_calls
+
+
+def test_full_cohort_identity_conflict_of_an_in_scope_model_stays_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1185 x #1735 mirror leg: the in-scope model's conflict still gaps.
+
+    Same lineage coordinates as the sibling oracle — model_a excluded, model_b
+    in scope — but now model_b's journal records a checksum conflict against
+    its own strict resolution.  The cycle must stay ``gap`` through the #1185
+    full-accessor comparison, proving the scope filter narrows WHICH models are
+    read, never WHETHER the #1185 match/conflict semantics apply.
+    """
+    from services.orchestrator.scheduler_generation import expected_journal_init_state_tokens
+    from tests.test_file_orchestration_journal import (
+        _cohort_candidate_terminal_row,
+    )
+    from tests.test_file_orchestration_journal import (
+        _latest_view as _journal_view,
+    )
+    from tests.test_file_orchestration_journal import (
+        _write_json as _journal_write,
+    )
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    stamp = cycle_id_for("gfs", cycle_time).removeprefix("gfs_")
+    discovery = scheduler_module.CycleDiscovery(
+        cycle_id="gfs_2026072000",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    model_a = _model("model_a", "basin_a")
+    model_b = _model("model_b", "basin_b")
+    models = [
+        scheduler_module._coerce_registered_model(model_a),
+        scheduler_module._coerce_registered_model(model_b),
+    ]
+    _base, expected_b = expected_journal_init_state_tokens(
+        source_id="gfs",
+        model_id="model_b",
+        candidate_valid_time=cycle_time,
+        required_lead_hours=12,
+    )
+    selected_b = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    selected_b["state_id"] = expected_b
+    selected_b["init_state_id"] = expected_b
+    conflict_identity_b = {
+        "array_task_id": 0,
+        "model_id": "model_b",
+        "init_state_id": expected_b,
+        "init_state_checksum": "sha256:" + "z" * 64,
+        "init_state_uri": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_uri"],
+        "init_state_valid_time": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_valid_time"],
+    }
+
+    journal_root = tmp_path / "journal"
+    _journal_write(
+        journal_root / f"latest/gfs/{stamp}/model_b.json",
+        _journal_view(
+            cycle_time=cycle_time,
+            model_id="model_b",
+            jobs=[_cohort_candidate_terminal_row(cycle_time, model_id="model_b", identity=conflict_identity_b)],
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt("2026-07-20T12:00:00Z"),
+        cycle_times=["2026-07-20T00:00:00Z"],
+        backfill_enabled=True,
+        active_repository=repository,
+        models=[model_a, model_b],
+    )
+    scheduler._strict_warm_start_for_candidate = lambda _candidate, _cycle: {
+        "status": "ready",
+        "ready": True,
+        "candidate_state": dict(selected_b),
+    }
+    scheduler._required_warm_start_lead_hours = lambda _candidate, _cycle: 12
+    scheduler._successor_warm_start_state_for_candidate = lambda _candidate, _cycle: {"ready": True}
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        _published_hydro_candidate_state_decision,
+    )
+    scheduler._lineage_cutover_cache[("model_a", "gfs")] = _scheduler_lineage.LineageCutover(
+        model_id="model_a",
+        source_id="gfs",
+        predecessor_model_id="model_a_legacy",
+        cutover_time=_dt("2026-07-20T06:00:00Z"),
+    )
+    scheduler._lineage_cutover_cache[("model_b", "gfs")] = None
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
 
 
 def test_db_free_lineage_resolver_reads_the_published_state_index(
