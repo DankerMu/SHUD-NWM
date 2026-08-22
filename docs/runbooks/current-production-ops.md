@@ -365,7 +365,13 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
-#### 3.1.2 DB-free scheduler 的受支持回滚/前滚
+#### 3.1.3 DB-free scheduler 的受支持回滚/前滚
+
+> 编号非单调是**故意**的：本节曾是 3.1.1，#1699 插入新的 3.1.1 后本应顺推为 3.1.2，
+> 但 `openspec/specs/scheduler-registry-refresh/spec.md:376`（live spec，非 archive）明文
+> 把 **§3.1.2** 绑定到下面的「DB-free file-provider 稳态刷新」那节。所以那节保持 3.1.2，
+> 本节让到 3.1.3。**不要顺手把它改回 3.1.2** —— 那会打断 spec 引用；真要改得走独立的
+> openspec change 同步改 spec。
 
 禁止直接把 `/scratch/frd_muziyao/NWM` checkout 到 pre-inventory writer 后启动。
 受支持流程必须保留当前版本作为 rollback controller，并为目标 SHA 创建一个临时、
@@ -1063,6 +1069,89 @@ source cycle，避免恢复运行被更早的历史 backfill 缺口劫持；`--d
 
 如果没有长驻 `node27_autopipeline.py` 进程但 cron 日志持续刷新，这是正常的
 bounded cron 模式，不代表 ingest 停摆。
+
+#### 3.1.4 流域投递规范（发给建模者；平台侧照此验收）
+
+新流域或更新版本交到 `/volume/nwm/Basins/` 之前，建模者必须满足下面七条。
+
+> **先分清两个 Basins 根，别投错地方**（2026-08-22 实测）：
+>
+> | 路径 | 载体 | 谁读它 |
+> |---|---|---|
+> | node-22 `/volume/nwm/Basins` | 本地 175 T xfs (`/dev/sda`) | **投递落点与权威**：`NHMS_BASINS_ROOT`，scheduler / baseline publish / provision 全走它 |
+> | node-22 `/ghdc/data/nwm/Basins` ≡ node-27 `/home/ghdc/nwm/Basins` | NFS `ghdc:/home/ghdc`（同 inode，确为一份） | node-27 ingest 的 `BASINS_ROOT`；#1699 的 staged 树也在这儿 |
+>
+> 两棵树**内容本就不同**且是有意的：权威根放原始投递名（`CJ-DTH-XJ`），NFS 树放
+> only-root staging 后的名字（`DTH_XJ`）。所以「两端不一致」不等于漂移——比对前先确认
+> 比的是同一棵树。建模者只投 `/volume/nwm/Basins`，NFS 侧由平台按需 stage。
+不满足的交付会在上线四跳的第 1 跳（baseline publish）或第 2 跳（provision）失败，
+或者更坏——静默上线成一个错的永久身份。
+
+**1. 目录名就是永久 `basin_id`，投递后改不了。**
+顶层目录名经 `_slug_id()`（`[^0-9a-zA-Z]+` → `_`，转小写）变成 `basin_id`：
+`Huai-MAIN` → `basins_huai_main`，`SHJ-2SHJ` → `basins_shj_2shj`。
+所以取短名、**不带分区/单位/人名前缀**。`basin_id` 一旦进注册表就嵌进
+`basin_version_id` 和 dg `model_id` 的 hash 输入，改名等于换身份，
+必须走一整套「新 id 注册 + 状态克隆 + 旧 id 退役」（见 #1698 / #1701），不是 rename。
+
+**2. 二级容器目录名会成为 `basin_id` 前缀。**
+`HYS/BST/input/BST/` → `basins_hys_bst`。要么别用二级容器，要么容器名本身也当作
+永久标识来取。**深过两级的布局不会被发现**——`a/b/c/input/c/gis/` 在
+`basins_discovery._find_model_dirs` 和两份 geo builder 里都被跳过，不报错、直接不存在。
+
+**3. 结构固定为 `<顶层名>/input/<模型名>/`。**
+`gis/`（含 `domain.shp` / `river.shp` 及其 `.shx`/`.dbf`/`.prj`）在
+`input/<模型名>/gis/` 下。注意 `<模型名>`（`shud_input_name`）**可以**与顶层目录名不同，
+这是 only-root staging 的正常结果（`SHJ-2SHJ/input/2SHJ/`）；但它决定
+packaged IC 的规范路径 `<package>/<模型名>.cfg.ic`，写错就是 IC 探测失败。
+
+**4. `cfg.ic` 首行必须是 3 列。**
+少一列的 header 会让 SHUD 读 IC 失败。平台侧上线时会在 **staging 副本**上补
+`\t0.000000`（#1699 补过 4 个流域），**不改源**——但这属于救火，交付时就应该是对的。
+
+**5. `umask 002`。**
+`/volume/nwm/Basins` 的默认 ACL 给 `nwmuser` 组写权限，但投递者的显式权限位会**覆盖**默认 ACL。
+2026-08 出现过整棵树 20304 个文件对组只读、平台无法 staging 的情况。
+交付后自查：`find <你的目录> -not -writable | wc -l` 应为 0（以 `nwmuser` 组成员身份）。
+
+本条即 #1702 长期方案的 (b) 支：**由投递者保证 `umask 002`**。另一支 (a)——把
+`Basins/` 的 owner 改成平台账号 `nwm`——尚未采纳，属 owner 决策；在它落地之前，
+(b) 是唯一在册的约束，一次性的 root `setfacl` 修复只是补救、不是机制。
+
+**6. 率定更新原地覆盖，但必须通知平台。**
+只改参数、不改 mesh/river/IC 的率定更新可以原地覆盖同一目录。
+但**平台需要在覆盖前后各做一次动作**：包重新发布 + 状态延续克隆（`state_compatibility` 门，见 §5.7）。
+不通知就覆盖 = 新包与旧状态之间没有克隆行，`REQUIRE_FORECAST_WARM_START=true` 下
+下一个 cycle 直接 `state_clone_cold_start_approval_required` 停摆。
+
+平台侧执行这一步时**顺序是硬的，且要留证**：先写克隆行、再发布 manifest。
+反过来会在 `REQUIRE_FORECAST_WARM_START=true` 下 stall 一个 cycle。判定顺序一律看两份
+receipt 的 `generated_at`，**不要看 `manifest-last.json.bak-*` 的 mtime**——备份是保留源
+时间戳的拷贝，mtime 反映的是上一次发布，不是本次。#1698 的实测形状可照抄：
+
+```text
+receipts/<basin>-<cutover>-apply.json   generated_at 2026-08-22T06:42:07Z
+                                        cloned_pair_count 2 / dry_run false /
+                                        invocation_outcome complete
+receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
+                                        introduced_model_ids == 预期新身份集合
+```
+
+即克隆先于发布约 20 分钟。**不要把 provider refresh 的时序当兜底**——它只是碰巧
+掩盖过顺序错误，不是保护机制。
+
+**7. 改 mesh / river / IC 视为新版本，不是更新。**
+这三者进 8 面指纹；变了就不是同一个模型，状态不可延续，必须冷启动或走新 id。
+交付时明确写清属于第 6 条还是第 7 条。
+
+**平台侧责任（不要建模者自己做）**：
+
+- 旧目录**不要自删**。退役由平台 `mv` 到 `/volume/nwm/Basins-retired/issue-<N>-<slug>/`
+  （同 xfs，rename 不拷贝），保留 90 天后由 owner 决定删除。自删会让还在引用该路径的
+  注册行失去溯源根。
+- `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读。
+  2026-08-22 实测：`/volume/nwm/Basins` 总计 127 G，其中 18 个 `forcing/` 目录占
+  **126 G / 19078 文件**——整棵树几乎全是不再被读的代站 CSV。已有的由平台清理。
 
 ### 3.2 Slurm Gateway
 
@@ -1772,12 +1861,13 @@ This section is a live snapshot, not a permanent fact. Refresh it during handoff
 - node-22 Slurm Gateway process is active; node-22 diagnostic API `/health` on
   `:8001` returned `ok`.
 
-### 7.1 2026-08-07：hhe 退出业务化，当前业务集为 17 流域
+### 7.1 2026-08-07：hhe 退出业务化（当时业务集 17 流域）
 
 `basins_hhe`（全国级网格，43799 river segments）SHUD 参数待进一步校正
 （单次 forecast 积分远超常规流域，见 #1295；gfs_2026072112 修复线在
-forecast 运行超 2 小时后由操作员决定取消），暂时退出业务化。当前生产
-业务集为 **17 流域 × gfs/ifs 双源**。
+forecast 运行超 2 小时后由操作员决定取消），暂时退出业务化。**退役当时**的生产业务集是 17 流域 × gfs/ifs 双源（34 行）——
+这是 2026-08-07 的历史快照，不是当前值。当前业务集一律以
+`jq '.models|length' manifest-last.json` 实测为准，口径见 §3.1 开头的 authority 段。
 
 退役操作记录（均有备份，可逆）：
 
