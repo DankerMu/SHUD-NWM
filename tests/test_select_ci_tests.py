@@ -398,6 +398,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        # #1714: ninth guard-derived entry, synced from the selector's own
+        # output per the procedure above — the closure guard put the attribution
+        # suite on the mvt rule as a one-hop importer through
+        # apps/api/routes/hydro_display.py.
+        "tests/test_node27_connection_attribution.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",

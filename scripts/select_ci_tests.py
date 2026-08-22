@@ -564,6 +564,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_output_parser_cli.py",
             "tests/test_output_parser_dual_write.py",
             "tests/test_e2e.py",
+            # #1714: parser.py is a registered connect-owning surface in the
+            # attribution guard's per-file AST registry, and the suite
+            # top-level-imports both it and the package, so BOTH directory
+            # members' importer gaps close here. None of the four above assert
+            # the component-level fallback_application_name identity, so a diff
+            # that drops or renames it would otherwise reach CI green.
+            "tests/test_node27_connection_attribution.py",
         ),
     ),
     PathTestRule(
@@ -745,6 +752,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
+            # #1714: same guard-derived provenance as the #1597 batch above,
+            # not hand-curated — a one-hop importer reached through
+            # apps/api/routes/hydro_display.py. Kept as its own entry so the
+            # "eight below" census stays true.
+            "tests/test_node27_connection_attribution.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -826,6 +838,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_display_coverage_parallel.py",
             "tests/test_forecast_api.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
+            # #1714: this module is a registered connect-owning surface in the
+            # attribution guard's DELEGATED_CONNECT_CLOSURE — it opens the
+            # connection a registered component delegates to, which is exactly
+            # the shape that shipped unattributed once. The four above assert
+            # coverage behaviour and read-path shape, not the component-level
+            # fallback_application_name identity.
+            "tests/test_node27_connection_attribution.py",
         ),
     ),
     PathTestRule(
