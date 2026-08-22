@@ -6,7 +6,8 @@
 is an unindexed full-table scan: it reads **every** `latest/**/*.json` view and
 **every** `journal/**/*.jsonl` segment and JSON-decodes all of it, on every call.
 Six public entrypoints call it to answer what are semantically single-row
-lookups (`:1053`, `:1061`, `:1099`, `:1154`, `:1166`, `:1176`). The only defence
+lookups (defined at `:1051`, `:1060`, `:1075`, `:1150`, `:1162`, `:1174`; they enter
+the replay at `:1053`, `:1061`, `:1099`, `:1154`, `:1166`, `:1176`). The only defence
 is a per-file byte cache whose FIFO limits (`:154-155`) were chosen when
 `latest/` was far smaller; a cyclic full-tree scan is the pathological input for
 FIFO.

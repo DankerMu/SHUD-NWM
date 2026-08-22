@@ -43,11 +43,22 @@
 
 ## 1. Evidence: identify the dominant caller before narrowing
 
-- [ ] Establish, with static call-graph evidence, which entrypoint(s) dominate
-      the read volume (the `/proc` measurement cannot attribute it). If the
-      dominant caller turns out to be `query_pipeline_job_by_slurm_id`, the
-      "leave it on the full scan" decision is void and must be revisited before
-      implementation — not after the node-22 receipt fails the >=90% criterion.
+The `/proc` measurement cannot attribute read volume to an entrypoint, and
+production cannot be instrumented before the change. Discharge is therefore
+three-part, all three required:
+
+- [ ] (a) Static call-graph ranking — recorded in design.md D1. Explicitly an
+      estimate chained across two hops of indirection; it settles the binary
+      narrow/leave ruling and nothing more.
+- [ ] (b) Local call-count instrumentation: wrap `_iter_pipeline_job_records`
+      with a counter and drive an existing end-to-end scheduler test, recording
+      which entrypoints fire and how often. This converts (a)'s estimate into a
+      measured per-entrypoint ranking on a real code path.
+- [ ] (c) The node-22 post-change measurement is the empirical decider.
+      **Pre-declared fallback ruling**: if `rchar` does not drop >=90%, the D1
+      "leave" decisions for `_pipeline_job_for_id_unlocked` and
+      `query_pipeline_job_by_slurm_id` are void and are revisited **inside this
+      change**, not shipped around and deferred.
 
 ## 2. Implementation
 

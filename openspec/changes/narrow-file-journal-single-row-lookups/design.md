@@ -11,33 +11,47 @@ to an entrypoint**, so the attribution below is static call-graph evidence.
 
 | entrypoint | per-cohort per-pass magnitude | derivable? | ruling |
 |---|---|---|---|
-| `query_pipeline_jobs_by_cycle` (`:1154`) | see below | yes — `cycle_id` is `{source_lower}_{cycle}` | **narrow** |
-| `query_pipeline_jobs_by_run` (`:1166`) | ~11 combined | yes — `run_id` regexes | **narrow** |
-| `query_candidate_state` (`:1053`) | ~4 | yes — key is `run_id:stage` | **narrow** |
-| `_candidate_job_for_idempotency_unlocked` (`:1061`) | same order | yes — same key | **narrow** |
-| `_pipeline_job_for_id_unlocked` (`:1099`) | most call sites | **no** — `job_id` carries no cycle | **leave** |
-| `query_pipeline_job_by_slurm_id` (`:1176`) | **zero production callers** | no | **leave** |
+| `query_pipeline_jobs_by_cycle` (def `:1150`, replay `:1154`) | see below | yes — `cycle_id` is `{source_lower}_{cycle}` | **narrow** |
+| `query_pipeline_jobs_by_run` (def `:1162`, replay `:1166`) | ~11 combined | yes — `run_id` regexes | **narrow** |
+| `query_candidate_state` (def `:1051`, replay `:1053`) | ~4 | yes — key is `run_id:stage` | **narrow** |
+| `_candidate_job_for_idempotency_unlocked` (def `:1060`, replay `:1061`) | same order | yes — same key | **narrow** |
+| `_pipeline_job_for_id_unlocked` (def `:1075`, replay `:1099`) | most call sites | **no** — `job_id` carries no cycle | **leave** |
+| `query_pipeline_job_by_slurm_id` (def `:1174`, replay `:1176`) | **zero production callers** | no | **leave** |
 
 Evidence for the two hot ones:
 
-- `query_pipeline_jobs_by_cycle` / `by_run` are reached ~11 times per cohort per
-  pass: once from `_active_orchestration_conflicts`
+- `query_pipeline_jobs_by_cycle` / `by_run` are reached on the order of 11
+  times per cohort per pass: once from `_active_orchestration_conflicts`
   (`chain_runtime_utils.py:103`/`:123`, the guard ahead of `_run_cycle_chain`),
-  once at the top of `_run_cycle_chain`
-  (`chain_forecast_execution.py:144`), and twice per stage inside the stage loop
-  (`:155`, `:209`) across 5 stages.
-- `query_candidate_state` is reached ~4 times per cohort per pass: the
-  accepted-submit fast path is gated on `is_forecast_cohort_stage(stage)`
-  (`chain_forecast_orchestrator_cycle.py:590-592`), so the four non-forecast
-  stages (convert / forcing / state_save_qc / parse) fall to
-  `_pipeline_job_conflicts_unlocked:6467-6471`, which calls it unconditionally.
+  once at the top of `_run_cycle_chain` (`chain_forecast_execution.py:144`),
+  and twice per stage inside the stage loop (`:155`, `:209`) across 5 stages.
+  **The implementer wires the dispatch, not these call sites**: all three go
+  through `_query_pipeline_jobs_for_cycle_context`
+  (`chain_forecast_orchestrator_cycle.py:852`), which delegates to
+  `query_pipeline_jobs_for_cycle_context` (`chain_forecast_cycle.py:478`) and
+  from there to `query_pipeline_jobs_by_run` or `query_pipeline_jobs_by_cycle`.
+  This is the seam to narrow.
+- `query_candidate_state` is reached on the order of 4 times per cohort per
+  pass: the accepted-submit fast path is gated on
+  `is_forecast_cohort_stage(stage)`
+  (`chain_forecast_orchestrator_cycle.py:591`), so the four non-forecast stages
+  (convert / forcing / state_save_qc / parse) fall to
+  `_pipeline_job_conflicts_unlocked` (def `:6454`), whose final return calls it
+  unconditionally at `:6471`.
+
+**Both magnitudes above are estimates chained across two hops of indirection,
+not directly traced call counts.** They are strong enough to settle the binary
+narrow/leave ruling — the two hot entrypoints are the narrowing candidates
+either way — but they are NOT strong enough to satisfy tasks.md Task 1, which
+gates implementation on real attribution. Task 1 is not discharged by this
+section.
 
 Evidence for the two left alone:
 
-- `_pipeline_job_for_id_unlocked` (`:1075-1102`) already tries
+- `_pipeline_job_for_id_unlocked` (`:1075-1102`, replay at `:1099`) already tries
   `_direct_pipeline_job_record()` first and only replays when that misses. The
   flat `pipeline-jobs/<job_id>.json` file is written for every row that is not
-  an accepted-submit candidate (`:6421` else branch), so the fast path covers
+  an accepted-submit candidate (`:6429` else branch), so the fast path covers
   the common case. Its argument also carries no cycle: narrowing it would
   require a new persisted index.
 - `query_pipeline_job_by_slurm_id` has **no production call sites at all** —
@@ -53,7 +67,7 @@ why Task 1 gates implementation on the attribution rather than assuming it.
 ## D2. Forbidden implementation: routing to the direct partition alone
 
 The by-cycle direct partition **is not a complete index of a cycle's pipeline
-jobs**. `_write_pipeline_job_direct_unlocked` (`:6412-6428`) writes into
+jobs**. `_write_pipeline_job_direct_unlocked` (`:6412-6431`) writes into
 `pipeline-jobs/by-cycle/<source>/<cycle>/<job_id>.json` **only** when
 
 ```python
@@ -62,7 +76,7 @@ if accepted_submit_contract_is_current(row) and accepted_submit_row_kind(row) ==
 
 and sends every other row — every cohort **master** row, and every row from the
 four non-forecast stages — to the flat `pipeline-jobs/<job_id>.json` instead
-(`:6421` else branch).
+(`:6429` else branch).
 
 Therefore: a narrowing implemented as "call
 `_direct_pipeline_job_records_for_cycle_cached` instead of
@@ -104,7 +118,7 @@ lowercase run-id segment looks in `journal/ifs/`, finds nothing, and returns
 The derivation therefore **must** pass the parsed segment through
 `normalize_source_id` / `_normalize_file_source_id`
 (`file_orchestration_journal.py:9817-9828`) and then through
-`_cycle_read_source_segments` (`:9853-9876`), which already handles the legacy
+`_cycle_read_source_segments` (`:9872-9896`), which already handles the legacy
 lower/upper directory aliases on the read side. A case-mismatch test is a
 required negative pin (tasks.md).
 
@@ -131,7 +145,7 @@ No production call site looks up a job from a cycle other than the one being
 processed: `_active_orchestration_conflicts` and
 `query_pipeline_jobs_for_cycle_context` both scope to the current
 `cycle_id`/`run_id`. The direction is in fact already the opposite —
-`tests/test_production_scheduler.py:9764-9789`
+`tests/test_production_scheduler.py:9766`
 (`test_foreign_cycle_marker_never_pins_even_with_its_own_stage_record`) asserts
 a cohort-master row stamped with a *different* cycle is **excluded** from the
 current candidate's decision state.
