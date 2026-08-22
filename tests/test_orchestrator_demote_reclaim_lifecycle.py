@@ -28,6 +28,7 @@ from tests.orchestrator_demote_reserved_job_helpers import (
     _demote_kwargs,
     _held_cohort_repository,
     _held_row,
+    _journal_bytes,
 )
 
 
@@ -67,10 +68,213 @@ def test_operator_demoted_row_reclaims_to_fresh_attempt_and_locked_anchor(
     assert reclaimed["cohort_digest"] == demoted["cohort_digest"]
     assert reclaimed["cohort_members"] == demoted["cohort_members"]
     assert reclaimed["job_id"] == demoted["job_id"]
-    # A stale attempt cannot reclaim the demoted row.
-    stale = repository.reclaim_pipeline_job_reservation({**request, "expected_submission_attempt": 1})
+    # The reclaim opened a fresh live attempt, so the durable row is no longer
+    # a reclaimable demoted subject.  The stale-expected-attempt refusal must
+    # be tested against a STILL-demoted row (below), never against this
+    # post-success ``reserved`` row, whose status guard would short-circuit the
+    # expected-attempt predicate (verified finding cand-te-02).
+
+
+# ---------------------------------------------------------------------------
+# Reclaim CAS matrix: every predicate that prevents a wrong accepted-submit
+# master from becoming a fresh live attempt, against a STILL-demoted
+# ``reservation_lost`` / ``operator_verified_absence`` row.  No case reuses a
+# post-success ``reserved`` row (verified finding cand-te-02); every case
+# asserts ``None``, byte-identical authority journal, unchanged current master,
+# and the presence of the exact preloaded mismatch.
+# ---------------------------------------------------------------------------
+def _still_operator_demoted_row(repository: Any) -> dict[str, Any]:
+    """One operator-demoted row that has NEVER been reclaimed (attempt 1)."""
+    demoted = _absence_row(repository, decision=OPERATOR_VERIFIED_ABSENCE_DECISION)
+    assert demoted["status"] == "reservation_lost"
+    assert demoted["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    assert demoted["reconciliation_reason_class"] is None
+    assert demoted["matched_slurm_job_id"] is None
+    assert demoted["slurm_job_id"] is None
+    assert demoted["submission_attempt"] == 1
+    return demoted
+
+
+def _reclaim_request(demoted: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """The legitimate reclaim request a fresh pass builds for a demoted row."""
+    return {
+        **demoted,
+        "expected_submission_attempt": demoted["submission_attempt"],
+        "expected_submission_attempt_started_at": demoted["submission_attempt_started_at"],
+        "status": "reserved",
+        "submission_attempt": int(demoted["submission_attempt"]) + 1,
+        "submission_attempt_started_at": STARTED_AT + timedelta(hours=3),
+        "submit_outcome": None,
+        "reconciliation_source": None,
+        "reconciliation_decision": None,
+        "matched_slurm_job_id": None,
+        **overrides,
+    }
+
+
+def _attempt2_operator_demoted_row(
+    repository: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    locked_anchor: Any = STARTED_AT + timedelta(hours=6),
+) -> dict[str, Any]:
+    """One STILL-demoted operator row at attempt 2, via real producers only.
+
+    The reclaim door opens a fresh reserved attempt-2 row; the real reconcile
+    pass re-holds it (``accounting_unavailable`` / ``comment_accounting_unproven``),
+    and a second typed operator demotion converts it to a still-demoted
+    ``reservation_lost`` / ``operator_verified_absence`` row at attempt 2.  This
+    is the only shape that can express a genuinely stale expected attempt
+    (``1`` against durable ``2``) while remaining a reclaimable current master.
+    """
+    from services.orchestrator import reconcile as reconcile_module
+
+    demoted = _absence_row(repository, decision=OPERATOR_VERIFIED_ABSENCE_DECISION)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    reclaimed = repository.reclaim_pipeline_job_reservation(_reclaim_request(demoted))
+    assert reclaimed is not None
+    assert reclaimed["submission_attempt"] == 2
+
+    class _NoCommentQuery:
+        def __call__(self, _key: str, **kwargs: Any) -> Any:
+            del kwargs
+            raise reconcile_module.ReconcileQueryUnavailable(
+                "accounting does not store job comments",
+                reason_class="comment_accounting_unproven",
+            )
+
+    outcomes = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=_NoCommentQuery(),
+        grace=timedelta(0),
+        now=lambda: STARTED_AT + timedelta(hours=7),
+    )
+    assert [outcome.action for outcome in outcomes] == ["query_unavailable"]
+    held2 = _held_row(repository)
+    assert held2["status"] == "reserved"
+    assert held2["submission_attempt"] == 2
+    assert held2["reconciliation_decision"] == "accounting_unavailable"
+    assert repository.demote_operator_verified_reserved_job(
+        JOB_ID,
+        **_demote_kwargs(held2),
+    ) is not None
+    demoted2 = _held_row(repository)
+    assert demoted2["status"] == "reservation_lost"
+    assert demoted2["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    assert demoted2["submission_attempt"] == 2
+    return demoted2
+
+
+def test_still_demoted_row_refuses_stale_expected_attempt_with_zero_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.1: a still-demoted row must not reclaim under a stale attempt.
+
+    The still-demoted row is at attempt 2 (built through the real producer
+    chain); an expected attempt of 1 is genuinely stale for it.  ``0`` would be
+    clamped to ``1`` by the CAS and is therefore NOT stale, so this is the
+    discriminating pre-success negative the old test could not express (it only
+    probed after a successful reclaim).
+    """
+    repository = _held_cohort_repository(tmp_path)
+    demoted2 = _attempt2_operator_demoted_row(repository, monkeypatch)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=8))
+
+    before = _journal_bytes(repository.root)
+    stale = repository.reclaim_pipeline_job_reservation(
+        _reclaim_request(demoted2, expected_submission_attempt=1)
+    )
+
     assert stale is None
-    assert repository.get_accepted_submit_pipeline_job(JOB_ID)["status"] == "reserved"
+    assert _journal_bytes(repository.root) == before
+    current = _held_row(repository)
+    assert current["status"] == "reservation_lost"
+    assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    assert current["submission_attempt"] == 2
+
+
+def test_still_demoted_row_refuses_stale_expected_anchor_with_zero_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.1: a still-demoted row must not reclaim under a stale anchor.
+
+    The demoted row's anchor is ``STARTED_AT``; the request carries an
+    anchor one second later, which is genuinely stale for this row.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    demoted = _still_operator_demoted_row(repository)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=5))
+
+    before = _journal_bytes(repository.root)
+    stale_anchor = repository.reclaim_pipeline_job_reservation(
+        _reclaim_request(
+            demoted,
+            expected_submission_attempt_started_at=STARTED_AT + timedelta(seconds=1),
+        )
+    )
+
+    assert stale_anchor is None
+    assert _journal_bytes(repository.root) == before
+    current = _held_row(repository)
+    assert current["status"] == "reservation_lost"
+    assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+
+
+def test_still_demoted_row_refuses_mismatched_immutable_identity_with_zero_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.1: a request whose immutable cohort identity differs must refuse.
+
+    ``restart_stage`` is a member of the immutable master identity
+    (``ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS``), is accepted by the request
+    row validation, and is NOT one of the earlier guards (status / binding /
+    outcome / source / decision / reason / matched id / expected attempt /
+    expected anchor all still match).  So the refusal is produced by the
+    immutable identity comparison itself -- proved by the red proof that
+    removing that comparison lets the same request reclaim.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    demoted = _still_operator_demoted_row(repository)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=5))
+
+    before = _journal_bytes(repository.root)
+    mismatched = repository.reclaim_pipeline_job_reservation(
+        _reclaim_request(demoted, restart_stage="state_save_qc")
+    )
+
+    assert mismatched is None
+    assert _journal_bytes(repository.root) == before
+    current = _held_row(repository)
+    assert current["status"] == "reservation_lost"
+    assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    # The preloaded mismatch really exists on the request axis.
+    assert current["restart_stage"] == "forecast"
+
+
+def test_positive_control_still_demoted_row_reclaims_unchanged_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matching positive control: the same demoted shape with correct expected
+    values reclaims to attempt+1 under the lock-owned anchor."""
+    repository = _held_cohort_repository(tmp_path)
+    demoted = _still_operator_demoted_row(repository)
+    locked_anchor = STARTED_AT + timedelta(hours=5)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    reclaimed = repository.reclaim_pipeline_job_reservation(_reclaim_request(demoted))
+
+    assert reclaimed is not None
+    assert reclaimed["status"] == "reserved"
+    assert reclaimed["submission_attempt"] == 2
+    assert reclaimed["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    assert reclaimed["reconciliation_decision"] is None
+    assert reclaimed["reconciliation_reason_class"] is None
+    assert reclaimed["cohort_digest"] == demoted["cohort_digest"]
+    assert reclaimed["job_id"] == demoted["job_id"]
 
 
 def test_reclaim_derives_versioned_master_new_attempt_from_durable_state_only(

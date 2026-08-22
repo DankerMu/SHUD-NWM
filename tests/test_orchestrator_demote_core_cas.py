@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
     OPERATOR_VERIFIED_ABSENCE_DECISION,
@@ -26,6 +27,7 @@ from services.orchestrator.file_orchestration_journal import FileOrchestrationJo
 from tests.orchestrator_demote_reserved_job_helpers import (
     JOB_ID,
     STARTED_AT,
+    _absence_row,
     _axis_mismatch_field,
     _axis_repository,
     _demote_kwargs,
@@ -169,6 +171,45 @@ def test_demotion_refuses_a_row_that_left_the_exact_held_state(
     assert receipt is None
     assert _journal_bytes(repository.root) == before
     assert _held_row(repository) == row
+
+
+def test_operator_verified_absence_transition_rejects_identity_blocked_streak(
+    tmp_path: Path,
+) -> None:
+    """task 1.1: the operator token can never carry a non-zero blocked streak.
+
+    ``operator_verified_absence`` is deliberately outside the
+    identity-mismatch streak set, so constructing its typed transition with
+    ``identity_blocked_streak=1`` must raise the existing typed invariant
+    error BEFORE any journal write.  This is the operator-token-specific
+    public-behavior negative the four suites were missing (verified finding
+    cand-te-03); the transition constructor is a pure value seam, so the
+    refusal provably precedes any repository write.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    before = _journal_bytes(repository.root)
+
+    with pytest.raises(
+        ValueError, match="identity blocked streak belongs to identity-mismatch transitions"
+    ):
+        AcceptedSubmitTransition.accounting(
+            OPERATOR_VERIFIED_ABSENCE_DECISION,
+            submit_outcome="submit_result_ambiguous",
+            status="reservation_lost",
+            identity_blocked_streak=1,
+        )
+    # The transition is never even built, so no journal byte can be touched.
+    assert _journal_bytes(repository.root) == before
+
+
+def test_operator_verified_absence_transition_accepts_zero_streak() -> None:
+    """The same operator transition with the default zero streak builds fine."""
+    transition = AcceptedSubmitTransition.accounting(
+        OPERATOR_VERIFIED_ABSENCE_DECISION,
+        submit_outcome="submit_result_ambiguous",
+        status="reservation_lost",
+    )
+    assert transition.identity_blocked_streak == 0
 
 
 def test_demotion_refuses_repeated_invocation_after_success(tmp_path: Path) -> None:
@@ -487,3 +528,93 @@ def test_demotion_refuses_every_isolated_persisted_axis_mismatch(
     assert receipt is None
     assert _journal_bytes(repository.root) == before
     assert repository.get_accepted_submit_pipeline_job(JOB_ID) == row
+
+
+# ---------------------------------------------------------------------------
+# Reclaim CAS persisted-shape matrix: a still-demoted ``operator_verified_absence``
+# row whose durable shape carries one forbidden axis (bound ``slurm_job_id``,
+# non-null ``reconciliation_reason_class``, non-null ``matched_slurm_job_id``)
+# must be refused with ``None``, byte-identical authority journal, and an
+# unchanged current master.  The matrix is built on a FRESH real held row
+# produced by the #1116 producer, demoted through the typed operator API, then
+# re-read under a test-local lookup that substitutes exactly one persisted
+# axis (the "controlled fixture construction" seam): the authority journal is
+# the real clean demotion, so the reclaim refusal can only come from the
+# persisted predicate, and no post-success ``reserved`` row is ever the
+# negative subject (verified finding cand-te-02).
+# ---------------------------------------------------------------------------
+def _reclaim_request(demoted: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **demoted,
+        "expected_submission_attempt": demoted["submission_attempt"],
+        "expected_submission_attempt_started_at": demoted["submission_attempt_started_at"],
+        "status": "reserved",
+        "submission_attempt": int(demoted["submission_attempt"]) + 1,
+        "submission_attempt_started_at": STARTED_AT + timedelta(hours=5),
+        "submit_outcome": None,
+        "reconciliation_source": None,
+        "reconciliation_decision": None,
+        "matched_slurm_job_id": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("axis", "axis_mutator"),
+    [
+        pytest.param("slurm_job_id", lambda row: row.update({"slurm_job_id": "17667"}), id="bound"),
+        pytest.param(
+            "reconciliation_reason_class",
+            lambda row: row.update({"reconciliation_reason_class": "process_unavailable"}),
+            id="reason_class",
+        ),
+        pytest.param(
+            "matched_slurm_job_id",
+            lambda row: row.update({"matched_slurm_job_id": "17667"}),
+            id="matched",
+        ),
+    ],
+)
+def test_still_demoted_row_refuses_forbidden_persisted_axis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    axis: str,
+    axis_mutator: Any,
+) -> None:
+    """task 2.1: a still-demoted row carrying a forbidden persisted axis refuses.
+
+    The mutated row substitutes exactly the tested axis on the read surface;
+    every other persisted field stays the real clean demotion, so the refusal
+    is caused by that axis alone.  (These shapes are structurally impossible
+    to persist via the typed transitions, so the substitution is the project's
+    lowest test seam that reaches the reclaim CAS without weakening it.)
+    """
+    repository = _held_cohort_repository(tmp_path)
+    demoted = _absence_row(repository, decision=OPERATOR_VERIFIED_ABSENCE_DECISION)
+    assert demoted["status"] == "reservation_lost"
+    assert demoted["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    assert demoted[axis] is None
+
+    mutated = dict(demoted)
+    axis_mutator(mutated)
+    assert mutated[axis] is not None  # the preloaded mismatch really exists
+    original_lookup = repository._accepted_submit_job_for_id_unlocked
+
+    def _substituted_lookup(
+        pipeline_job_id: str, *, source_id: Any, cycle_time: Any
+    ) -> dict[str, Any] | None:
+        del source_id, cycle_time
+        return dict(mutated) if str(pipeline_job_id) == JOB_ID else original_lookup(pipeline_job_id)
+
+    repository._accepted_submit_job_for_id_unlocked = _substituted_lookup
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=5))
+    before = _journal_bytes(repository.root)
+
+    reclaimed = repository.reclaim_pipeline_job_reservation(_reclaim_request(demoted))
+
+    assert reclaimed is None
+    assert _journal_bytes(repository.root) == before
+    repository._accepted_submit_job_for_id_unlocked = original_lookup
+    current = _held_row(repository)
+    assert current["status"] == "reservation_lost"
+    assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+    assert current == demoted  # current master unchanged

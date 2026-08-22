@@ -326,11 +326,17 @@ def test_cli_demote_post_commit_projection_faults_report_committed_with_warnings
         },
     ]
     # Warnings are bounded and never carry exception text, paths, or secrets.
-    rendered = json.dumps(payload, sort_keys=True)
+    # The scan targets the warning-only structure: the legal public receipt
+    # field ``journal_root`` legitimately points under the platform temp dir on
+    # CI, so a whole-payload scan would false-red on ``/tmp/`` while the
+    # warnings themselves must never carry the injected fault evidence.
+    rendered = json.dumps(payload["warnings"], sort_keys=True)
     assert "AKIAEXAMPLE" not in rendered
     assert "/tmp/" not in rendered
     assert "secret-" not in rendered
     assert "injected direct projection failure" not in rendered
+    # The legal public receipt field is pinned to the real resolved journal root.
+    assert payload["journal_root"] == str(root.resolve())
     assert payload["status_from"] == "reserved"
     assert payload["status_to"] == "reservation_lost"
     assert payload["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
