@@ -320,14 +320,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # The #1735 lineage index builders: every lineage suite publishes REAL
         # index entries through `publish_state_snapshot_index`, so a change to
         # the builder shape (clone provenance pass-through, `usable_flag`)
-        # silently changes what the resolver reads. Only the two file-level
-        # importers are routed; `test_scheduler_generation.py` and
-        # `test_state_manager_generation_history.py` import the builders inside
-        # a function and are therefore outside the non-gated closure.
+        # silently changes what the resolver reads. `test_scheduler_generation.
+        # py` and `test_state_manager_generation_history.py` import the builders
+        # inside a function body, so the derived non-gated closure (which sees
+        # module-level imports only) does not require them — but they are routed
+        # anyway: the closure is a FLOOR, not a ceiling, and this PR's own fix
+        # changed `index_entry`'s signature (a keyword-only `usable_flag`), which
+        # is exactly the class of change a function-body caller breaks on while
+        # the floor stays green. Cost: +12.2s for the two, against a fixture
+        # whose whole purpose is to be the shared index-entry shape.
         "tests/lineage_state_index_fixtures.py",
         (
             "tests/test_scheduler_backfill.py",
             "tests/test_scheduler_lineage.py",
+            "tests/test_scheduler_generation.py",
+            "tests/test_state_manager_generation_history.py",
         ),
     ),
     PathTestRule(
@@ -872,6 +879,30 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_state_manager.py",
             "tests/test_state_qc.py",
+            # #1735: the clone-lineage read path (`get_earliest_clone_row_for_
+            # model_source`, `clone_lineage_signal`, `_clone_entries_for_model_
+            # source`) lives in this module, but every assertion about it — the
+            # DB-plane SQL shape included — sits in the scheduler lineage
+            # suites. Without these two, the negative pin written to guard that
+            # SQL (`test_earliest_clone_row_query_is_ascending_and_clone_
+            # scoped`, which asserts `usable_flag` never enters the statement)
+            # was not in this module's lane: injecting `AND usable_flag = true`
+            # into the query left the routed lane green. 24 tests in 0.09s and
+            # 52 in 0.82s — under a second together.
+            "tests/test_scheduler_lineage.py",
+            "tests/test_scheduler_backfill.py",
+            # NODE IDS, not the file: `test_production_scheduler.py` asserts on
+            # the same symbols through the scheduler's cohort suppression, but
+            # the whole file is 1870 tests in 186s — far past what this lane can
+            # carry. These three are the only tests in it that exercise the
+            # lineage provider seam, and they measure 0.34s together. Node ids
+            # are first-class targets here: `_test_target_exists` splits on
+            # `::`, ci.yml passes the selection straight to `pytest -q`, and the
+            # meta-guard re-checks every pinned node id still names a live
+            # `def`, so a rename reds instead of silently dropping the route.
+            "tests/test_production_scheduler.py::test_build_candidates_suppresses_a_model_before_its_lineage_cutover",
+            "tests/test_production_scheduler.py::test_build_candidates_admits_a_model_at_its_lineage_cutover",
+            "tests/test_production_scheduler.py::test_build_candidates_without_lineage_is_unchanged",
         ),
     ),
     PathTestRule(

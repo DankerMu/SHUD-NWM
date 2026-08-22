@@ -125,6 +125,15 @@ row with an absent/unrecognised `clone_gate_kind` (legacy rows, per
 when `cloned_from_model_id` is present — the gate kind refines *why* the clone
 was admitted, not *whether* it happened.
 
+One qualification on "present": the field must name a *different* model. A row
+whose `cloned_from_model_id` equals its own `model_id` names no predecessor and
+so evidences no existence-start; it is disqualified on every plane. The
+disqualification is per row, not per model — a legitimate clone row alongside it
+still sets `t*`, even if the self-referential row is earlier. Rejecting the row
+is not the silent-hide direction that D4 forbids: D4 arbitrates genuine
+ambiguity about where an identity began, and a row naming itself carries no such
+evidence to weigh.
+
 ### D3 — `t*` is the clone row's `valid_time`, resolved per `(model_id, source_id)`
 
 Clone rows are written per source, and GFS/IFS can in principle cut over at

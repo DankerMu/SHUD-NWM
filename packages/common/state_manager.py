@@ -2716,7 +2716,11 @@ def _clone_entries_for_model_source(
     :func:`packages.common.state_clone._build_clone_row` writes both fields
     together and takes ``clone_gate_fingerprint`` as a required ``str`` — and
     diverge only on a partially written or corrupt row, where the DB plane is
-    the stricter of the two.  Tightening this plane up to match would move
+    the stricter of the two on the fingerprint axis — but not uniformly: this
+    plane ``.strip()``\\ s ``cloned_from_model_id`` and skips a whitespace-only
+    value, while the DB plane's ``cloned_from_model_id IS NOT NULL`` accepts it,
+    so on that one sub-case the FILE plane is the stricter one (#1739).
+    Tightening this plane up to match would move
     ``t*`` LATER on such a row, which is the silent-hide direction the design
     forbids, and the spec scenario keys "no lineage" on the absence of
     ``cloned_from_model_id``, never on the fingerprint.  So the divergence is

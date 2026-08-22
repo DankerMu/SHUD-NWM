@@ -21,6 +21,18 @@ identity came into existence for that source. Both `clone_gate_kind` values —
 clone row whose `clone_gate_kind` is absent or unrecognised SHALL still confer
 lineage when `cloned_from_model_id` is present.
 
+A clone row whose `cloned_from_model_id` equals its own `model_id` SHALL NOT
+confer lineage and SHALL be disqualified during resolution, on every
+persistence plane. Such a row names no predecessor, so it evidences no
+existence-start. The disqualification is **per row, not per model**: the
+remaining clone rows for that `(model_id, source_id)` SHALL still be considered,
+so where a self-referential row precedes a legitimate clone row, `t*` SHALL
+resolve to the legitimate row rather than to the self-referential one. A model
+whose only clone row is self-referential therefore resolves to no lineage and
+SHALL be scored and admitted as a model with no clone row — which keeps it in
+scope, the direction that can only leave a loud stuck gap and can never
+silently hide completed work.
+
 Lineage resolution SHALL NOT walk the ancestry chain. For a basin recalibrated
 more than once (`M → M'` at `t1`, `M' → M''` at `t2`), the boundary for `M''`
 SHALL be `t2` and never `t1`: the cycles in `[t1, t2)` were run by `M'`, `M''`
@@ -62,6 +74,17 @@ checks, and the derivation of the content-addressed `model_id` are unchanged.
   exactly as before this change
 - **THEN** its history-existence signal and its first-cycle admission decision
   are byte-for-byte those it would have received before this change.
+
+#### Scenario: A self-referential clone row confers no lineage
+
+- **WHEN** a clone row for `(model_id, source_id)` carries a
+  `cloned_from_model_id` equal to that row's own `model_id`
+- **THEN** that row is disqualified during lineage resolution on both the
+  database and the file state-index plane
+- **THEN** if it is the model's only clone row, the model resolves to no
+  lineage and stays in completion scope and cohort admission for every cycle
+- **THEN** if a legitimate clone row also exists, `t*` resolves to the
+  legitimate row's `valid_time`, even when the self-referential row is earlier.
 
 #### Scenario: A twice-recalibrated model is scoped by its own cutover
 
