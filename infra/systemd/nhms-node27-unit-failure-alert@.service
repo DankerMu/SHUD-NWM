@@ -26,5 +26,7 @@ WorkingDirectory=/home/nwm/NWM
 EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env
 ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i
 # Bounded: this handler only reads 30 journal lines and hands one message to
-# the local MTA. A wedged alerter must become visible, not hang forever.
+# $NHMS_FRONTIER_SENDMAIL (the authenticated-SMTP shim; node-27's local MTA is
+# null-routed and does not deliver). A wedged alerter must become visible, not
+# hang forever.
 TimeoutStartSec=120

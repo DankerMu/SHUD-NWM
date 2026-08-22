@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -2895,8 +2896,15 @@ def test_lock_contention_pgcodes_match_the_drivers_own_table() -> None:
     [
         ("55P03", "canceling statement due to lock timeout"),
         ("40P01", "deadlock detected"),
+        # DISCRIMINATING ROW: a contention SQLSTATE whose message carries no
+        # lock vocabulary at all. Together with the `57014` + lock-timeout-text
+        # row in the non-contention table below, this breaks the correlation
+        # that made every other row indifferent between "read the pgcode" and
+        # "grep the message" — the spec's "message-text matching SHALL NOT be
+        # used" rule has no other oracle.
+        ("55P03", "boom"),
     ],
-    ids=["lock-not-available", "deadlock-detected"],
+    ids=["lock-not-available", "deadlock-detected", "contention-code-without-lock-text"],
 )
 def test_lock_contention_drop_failure_names_itself_in_refusal_reason(
     tmp_path: Path,
@@ -2955,6 +2963,17 @@ def test_lock_contention_drop_failure_names_itself_in_refusal_reason(
             "could not serialize access",
             id="unrelated-sqlstate",
         ),
+        # DISCRIMINATING ROW: PostgreSQL's REAL `lock_timeout` cancellation is
+        # SQLSTATE 57014 carrying the text "canceling statement due to lock
+        # timeout" — the exact string a message-text refactor would match. It
+        # must stay unclassified (57014 is the statement wall, indistinguishable
+        # from "the delete itself was slow"), so this row is what a mis-refactor
+        # would break FIRST, on live errors.
+        pytest.param(
+            _SyntheticDriverError("canceling statement due to lock timeout", "57014"),
+            "canceling statement due to lock timeout",
+            id="lock-text-but-timeout-sqlstate",
+        ),
         pytest.param(RuntimeError("drop_chunks blew up"), "drop_chunks blew up", id="no-pgcode"),
     ],
 )
@@ -3009,6 +3028,70 @@ def test_successful_drops_emit_per_chunk_timings_without_changing_the_receipt(
         "_timescaledb_internal.chk-b",
     ]
     assert {t["outcome"] for t in timings} == {"dropped"}
+
+
+def test_drop_timing_reports_the_measured_interval_not_a_placeholder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``elapsed_ms`` is the actual monotonic delta, to a known value.
+
+    A shape-only oracle (``isinstance(..., float)`` and ``>= 0.0``) is
+    satisfied by a hardcoded ``0.0``, which would make the whole diagnostic
+    useless for the one job it exists to do — telling a lock wait apart from a
+    slow delete, and tuning ``NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS``
+    from measurement. A two-value fake clock pins the arithmetic exactly; with
+    ONE chunk the runner must call ``monotonic`` exactly twice (loop start,
+    emit), so exhausting the iterator would also fail here.
+    """
+    ticks = iter([1_000.0, 1_000.125])
+    monkeypatch.setattr(retention.time, "monotonic", lambda: next(ticks))
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks)
+
+    retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    timings = _drop_timing_lines(capsys.readouterr().err)
+    assert [t["elapsed_ms"] for t in timings] == [125.0]
+    with pytest.raises(StopIteration):
+        next(ticks)
+
+
+# --- #1664 operator-grep anchors vs the runbook ----------------------------
+
+# The literals §8.6 items 6 and 7 tell the operator to grep for, spelled out
+# here by hand so they are an INDEPENDENT oracle for the module constants
+# rather than a re-import of them. Same shape as
+# ``_MEASURE_WARNING_GREP_TOKEN`` / ``_MEASURE_WARNING_GREP_FENCE`` above.
+_DROP_TIMING_GREP_TOKEN = "per-chunk drop timing"
+_LOCK_CONTENTION_GREP_TOKEN = "lock-contention("
+_DROP_TIMING_GREP_FENCE = f"grep '{_DROP_TIMING_GREP_TOKEN}'"
+_LOCK_CONTENTION_GREP_FENCE = f"grep '{_LOCK_CONTENTION_GREP_TOKEN}'"
+
+
+def test_1664_grep_anchors_byte_identical_with_the_runbook() -> None:
+    """Byte-identity: both #1664 stderr anchors are pinned to §8.6.
+
+    Standing requirement in this section (the sibling ``_MEASURE_WARNING``
+    anchor already carries it): a rename on the code side that does not touch
+    the runbook leaves the operator grepping a literal the runner no longer
+    emits and reading "no hit" as "it did not happen". The quoted `grep`
+    form pins §8.6's fenced commands specifically — the same tokens appear in
+    backticks in §8.2.2, which does not match.
+    """
+    assert retention.DROP_TIMING_DIAGNOSTIC == _DROP_TIMING_GREP_TOKEN
+    assert retention.LOCK_CONTENTION_MARKER_PREFIX == _LOCK_CONTENTION_GREP_TOKEN
+
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _DROP_TIMING_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 6 must carry the drop-timing grep command verbatim"
+    )
+    assert _LOCK_CONTENTION_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 7 must carry the lock-contention grep command verbatim"
+    )
 
 
 # --- config: the lock budget knob -----------------------------------------
@@ -3153,12 +3236,40 @@ def test_enumeration_and_measurement_sessions_get_no_lock_budget() -> None:
 # --- OnFailure= alert lane -------------------------------------------------
 
 
+_FAKE_JOURNAL_SENTINEL = "FAKE-JOURNALCTL-CONTEXT-LINE"
+
+
+def _write_fake_journalctl(tmp_path: Path) -> Path:
+    """A stand-in ``journalctl`` so the body's journal clause has an oracle.
+
+    A FAKE rather than the missing-binary fallback: the wrapper captures the
+    command with ``2>&1``, so an absent ``journalctl`` puts the shell's
+    "command not found" text into ``$JOURNAL`` — non-empty — and the
+    ``(no journal context available ...)`` branch is not deterministically
+    reachable that way.
+    """
+    script = tmp_path / "journalctl"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s argv=%s\\n" "{_FAKE_JOURNAL_SENTINEL}" "$*"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 def _alert_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
     """Env-pin shape mirrored from ``tests/test_node27_frontier_stall_alert.py``:
     the failure-alert wrapper reuses that lane's channel variables verbatim.
+
+    ``PATH`` is prefixed with ``tmp_path`` so the fake ``journalctl`` written
+    beside the fake sendmail wins over any real one (or its absence) — the
+    journal-context clause of the message body then has a deterministic
+    oracle on every host.
     """
+    _write_fake_journalctl(tmp_path)
     env: dict[str, str] = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": f"{tmp_path}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         "NHMS_ALERT_EMAIL_TO": "node27-ops@example.invalid",
         "NHMS_ALERT_EMAIL_FROM": "NHMS Node-27 Alert <alerts@example.invalid>",
         "NHMS_FRONTIER_SENDMAIL": str(tmp_path / "fake-sendmail.sh"),
@@ -3217,6 +3328,27 @@ def test_alert_wrapper_mails_the_failed_unit_name(tmp_path: Path) -> None:
         "-i",
     ]
 
+    # RFC 5322 headers nothing downstream injects: the transport on node-27 is
+    # the SMTP shim (`scripts/node27_frontier_smtp_sendmail.py`), which passes
+    # the message through, and `smtplib.SMTP.send_message` adds nothing either.
+    # Mirrors `build_message` in the sibling frontier lane. The charset is the
+    # load-bearing one — journal lines can be non-ASCII.
+    assert "MIME-Version: 1.0" in message
+    assert 'Content-Type: text/plain; charset="utf-8"' in message
+    date_header = next(
+        line for line in message.splitlines() if line.startswith("Date: ")
+    )
+    # `date -R` output, parsed by the same stdlib the shim would hand it to.
+    assert parsedate_to_datetime(date_header[len("Date: "):]).tzinfo is not None
+
+    # The journal-context clause is a real clause, not decoration: the count
+    # line AND the captured `journalctl` output must both reach the body.
+    # Without this the entire `journalctl` call, its empty-output fallback and
+    # NHMS_UNIT_FAILURE_JOURNAL_LINES could be deleted with the suite green.
+    assert "Last 30 journal lines:" in message
+    assert _FAKE_JOURNAL_SENTINEL in message
+    assert f"argv=--user -u {unit} -n 30 --no-pager" in message
+
 
 def test_alert_wrapper_exits_zero_when_no_recipient_is_configured(tmp_path: Path) -> None:
     """T8 (b): an unconfigured recipient must not add a SECOND failed unit on
@@ -3235,7 +3367,11 @@ def test_alert_wrapper_exits_zero_when_no_recipient_is_configured(tmp_path: Path
 
 
 def test_alert_wrapper_exits_zero_when_the_transport_is_missing(tmp_path: Path) -> None:
-    """T8 (c): same for an absent local mail transport."""
+    """T8 (c): same for a configured transport binary that is not there.
+
+    Distinct from the SENDMAIL_UNCONFIGURED row above: here the operator DID
+    set ``NHMS_FRONTIER_SENDMAIL``, and the path simply does not resolve.
+    """
     result = _run_alert_wrapper(
         "nhms-node27-timeseries-retention.service",
         _alert_env(tmp_path, NHMS_FRONTIER_SENDMAIL=str(tmp_path / "no-such-sendmail")),
@@ -3243,6 +3379,81 @@ def test_alert_wrapper_exits_zero_when_the_transport_is_missing(tmp_path: Path) 
 
     assert result.returncode == 0
     assert "SENDMAIL_UNAVAILABLE" in result.stderr
+
+
+def test_alert_wrapper_propagates_a_rejecting_transport(tmp_path: Path) -> None:
+    """A transport that is PRESENT and rejects is deliberately NOT soft: the
+    wrapper propagates sendmail's own rc so a silently broken alert lane is
+    itself visible.
+
+    This is the row that consumes ``_write_fake_sendmail(exit_code=...)`` — with
+    every call site on the default 0, the ``SEND_FAILED`` / ``exit "$rc"``
+    branch was never executed.
+    """
+    _write_fake_sendmail(tmp_path, exit_code=1)
+
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service", _alert_env(tmp_path)
+    )
+
+    assert result.returncode == 1
+    assert "SEND_FAILED" in result.stderr
+    assert "rc=1" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_TO": "node27-ops@example.invalid\nBcc: attacker@example.invalid"},
+            "NHMS_ALERT_EMAIL_TO_UNSAFE",
+            id="recipient-carries-a-header-break",
+        ),
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_FROM": "NHMS <alerts@example.invalid>\rX-Injected: 1"},
+            "NHMS_ALERT_EMAIL_FROM_UNSAFE",
+            id="sender-carries-a-header-break",
+        ),
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_FROM": None},
+            "NHMS_ALERT_EMAIL_FROM_UNSET",
+            id="sender-unset",
+        ),
+        pytest.param(
+            {"NHMS_FRONTIER_SENDMAIL": None},
+            "SENDMAIL_UNCONFIGURED",
+            id="transport-unconfigured",
+        ),
+    ],
+)
+def test_alert_wrapper_soft_exits_on_unusable_channel_configuration(
+    tmp_path: Path, overrides: dict[str, str | None], reason: str
+) -> None:
+    """Every unusable-configuration path exits 0 WITHOUT mailing.
+
+    Two distinct hazards, one discipline:
+
+    * CR/LF in either operator-edited address is REJECTED, never stripped. The
+      chain is real — the SMTP shim derives the envelope from the headers, so
+      an injected ``Bcc:`` becomes an extra recipient while ``del
+      message["Bcc"]`` erases it from the delivered copy. Concatenating the
+      two halves into one malformed address (``tr -d``) would be worse than
+      refusing.
+    * Neither ``NHMS_ALERT_EMAIL_FROM`` nor ``NHMS_FRONTIER_SENDMAIL`` may be
+      defaulted: the shim rejects a From that is not the authenticated account
+      (exit 64), and node-27's ``/usr/sbin/sendmail`` accepts with exit 0 and
+      then asynchronously bounces — a derived default turns a misconfiguration
+      into a second failed unit, or into a logged "SENT" that never arrived.
+    """
+    capture = _write_fake_sendmail(tmp_path)
+
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service", _alert_env(tmp_path, **overrides)
+    )
+
+    assert result.returncode == 0
+    assert f"reason={reason}" in result.stderr
+    assert not capture.exists(), "no message may be handed to the transport"
 
 
 def test_alert_wrapper_exits_zero_without_a_unit_argument(tmp_path: Path) -> None:
@@ -3274,5 +3485,11 @@ def test_retention_unit_declares_the_failure_alert_handler() -> None:
     assert "Type=oneshot" in template_text
     assert "ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i" in template_text
     assert "TimeoutStartSec=120" in template_text
-    assert "infra/env/node27-frontier-alert.env" in template_text
+    # The leading `-` is load-bearing, not cosmetic: without it a host that
+    # lacks the env file fails the HANDLER unit at start, which is exactly the
+    # "second failed unit" the spec forbids. A substring check on the path
+    # alone passes with the dash deleted, so pin the whole literal.
+    assert (
+        "EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env" in template_text
+    )
     assert os.access(_ALERT_WRAPPER_PATH, os.X_OK)

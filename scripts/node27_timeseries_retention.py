@@ -125,13 +125,16 @@ _DROP_TIMEOUT_MS = 300_000
 # ``_DROP_TIMEOUT_MS``; out of range refuses with RETENTION_CONFIG_INVALID
 # before any DB call).
 #
-# RECORDED DEVIATION from issue #1664's suggested 2-5 s — node-27 receipts
-# refute that range. Three grounds (design D3):
-#  1. Observed successful lock wait lower bound ~= 182 s. The 08-19 tick
-#     freed 0.638 GB in 182 s while 08-17 / 08-20 freed ~11 GB in 23 s / 1 s,
-#     so those 182 s were overwhelmingly WAITING, not deleting. A 5 s budget
-#     would have converted that already-successful tick into a
-#     RETENTION_DROP_FAILED refusal.
+# RECORDED DEVIATION from issue #1664's suggested 2-5 s. Three grounds
+# (design D3); note that (1) is UNEXPLAINED TIME, not a measured lock wait:
+#  1. A successful 08-19 tick spent ~=182 s of wall clock that its 0.638 GB of
+#     delete work does not explain (08-17 / 08-20 freed ~11 GB in 23 s / 1 s).
+#     The wrapper's `elapsed_sec` brackets the WHOLE Python invocation —
+#     watermark + enumeration + per-chunk measurement all sit inside it and
+#     none is lock-bounded — so it cannot attribute those seconds to the drop
+#     session, let alone to one lock acquisition. The decision therefore rests
+#     on (2) and (3), and the per-chunk timing added by this change exists to
+#     replace this inference with a measurement.
 #  2. Cost asymmetry. Too small = turning success into failure on the only
 #     lane with delete authority; too large = off-peak wall-clock latency
 #     nobody waits on (``TimeoutStartSec=0``, no ``timeout(1)`` in the
@@ -198,6 +201,17 @@ WIRE_CODES: frozenset[str] = frozenset(
 # contract — and a missing / unknown ``pgcode`` keeps the pre-change reason
 # text byte for byte.
 LOCK_CONTENTION_PGCODES: frozenset[str] = frozenset({"55P03", "40P01"})
+
+# Operator-grep anchors for the two #1664 stderr/receipt surfaces, hoisted out
+# of the emit sites so the runbook §8.6 procedures that grep for them are
+# pinned by a test instead of by two independent literals drifting apart. Same
+# discipline as ``_MEASURE_WARNING`` and its §8.6 item 5 fence.
+#
+# ``LOCK_CONTENTION_MARKER_PREFIX`` is the segment head only: the rendered
+# segment is ``f"{LOCK_CONTENTION_MARKER_PREFIX}{pgcode}): "``, and the
+# operator greps the open-paren head because the code varies.
+DROP_TIMING_DIAGNOSTIC = "per-chunk drop timing"
+LOCK_CONTENTION_MARKER_PREFIX = "lock-contention("
 
 _ROOT = Path(__file__).resolve().parents[1]
 _RECEIPT_SCHEMA_PATH = _ROOT / "schemas/timeseries_retention_receipt.schema.json"
@@ -1016,7 +1030,7 @@ def _emit_drop_timing(chunk: ChunkRow, started: float, *, dropped_ok: bool) -> N
         json.dumps(
             {
                 "chunk": chunk.qualified_name,
-                "diagnostic": "per-chunk drop timing",
+                "diagnostic": DROP_TIMING_DIAGNOSTIC,
                 "elapsed_ms": round((time.monotonic() - started) * 1000.0, 3),
                 "outcome": "dropped" if dropped_ok else "failed",
             },
@@ -1113,7 +1127,9 @@ def run_retention(
             # reason byte for byte.
             pgcode = getattr(error, "pgcode", None)
             classification = (
-                f"lock-contention({pgcode}): " if pgcode in LOCK_CONTENTION_PGCODES else ""
+                f"{LOCK_CONTENTION_MARKER_PREFIX}{pgcode}): "
+                if pgcode in LOCK_CONTENTION_PGCODES
+                else ""
             )
             reason = (
                 f"{CODE_RETENTION_DROP_FAILED}:"

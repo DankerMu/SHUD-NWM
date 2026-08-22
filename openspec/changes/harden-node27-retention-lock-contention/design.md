@@ -54,11 +54,11 @@
 
 ## D3 — 默认值 240_000 ms 的依据（**对 issue 推荐值的记录在案偏离**）
 
-issue「解决思路」建议 2 s–5 s。**该建议被 node-27 的 receipt 直接推翻**，本 change 取
-`_DEFAULT_LOCK_TIMEOUT_MS = 240_000`。三条依据：
+issue「解决思路」建议 2 s–5 s。本 change 取 `_DEFAULT_LOCK_TIMEOUT_MS = 240_000`。
+三条依据，其中 **(1) 是「无法解释的耗时」，不是实测锁等待**：
 
-**(1) 观测到的成功等待下界 ≈ 182 s。** 三份 enforced receipt 逐字对照
-（`/home/nwm/node27-timeseries-retention-logs/`，均为 2 块）：
+**(1) 一趟成功的 08-19 花了 ≈182 s 墙钟，而它 0.638 GB 的删除工作量解释不了这个数。**
+三份 enforced receipt 逐字对照（`/home/nwm/node27-timeseries-retention-logs/`，均为 2 块）：
 
 | 日期 | dropped | freed_bytes 合计 | wrapper `elapsed_sec` |
 |---|---|---|---|
@@ -66,9 +66,16 @@ issue「解决思路」建议 2 s–5 s。**该建议被 node-27 的 receipt 直
 | 08-19 | 2 | **0.638 GB** | **182 s** |
 | 08-20 | 2 | **11.070 GB** | 1 s |
 
-11 GB 能在 1–23 s 删完，0.638 GB 却花了 182 s —— 那 182 s 绝大部分不是删除工作。
+11 GB 能在 1–23 s 删完，0.638 GB 却花了 182 s。
 （08-19 正是压缩全程重叠的那天，且 PG 在同窗口有一个 `write=450.259 s` 的长 checkpoint。）
-**若默认值取 5 s，08-19 这一趟极可能被从「成功」转成 `RETENTION_DROP_FAILED`。**
+
+**但这个 182 s 归因不到 drop 会话**：它是 wrapper 的 `elapsed_sec`，括住整个 Python
+调用——watermark（5 s）+ 枚举（60 s）+ **每块**测量（60 s），三者都没有锁上界，
+光这些在 2 块的一趟里就能凑出 ~190 s。因此 receipt **既不能**证明「某一次加锁等了
+182 s」，**也不能**反过来证伪 issue 的 2–5 s 建议：若等待发生在测量阶段，
+5 s 的 *drop* 锁预算根本碰不到它。
+**取 240 s 的决定因此落在下面 (2)(3) 两条上，它们与这个分解无关。**
+D3a 的每块计时正是为了把这条推断换成实测。
 
 **(2) 成本不对称。** 取小 = 在**唯一有删除权**的 lane 上把成功变失败；
 取大 = 只损失 off-peak 的墙钟延迟——单元 `TimeoutStartSec=0`，wrapper 无 `timeout(1)`，
@@ -148,8 +155,18 @@ ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i
 retention 单元加一行 `OnFailure=nhms-node27-unit-failure-alert@%n.service`。
 
 wrapper 是**哑脚本**（无 DB、无状态机、无 Python）：取 `journalctl --user -u "$1" -n 30`
-拼进正文，经本地 `sendmail -t -i` 投递，收件人取 `NHMS_ALERT_EMAIL_TO`。
-逐字复用 frontier lane 已被证明活着的通道（每 30 min 实跑）。
+拼进正文，经 `$NHMS_FRONTIER_SENDMAIL -t -i` 投递，收件人取 `NHMS_ALERT_EMAIL_TO`。
+逐字复用 frontier lane 已被证明活着的通道（每 30 min 实跑）——那条通道是
+**认证 SMTP shim**（`scripts/node27_frontier_smtp_sendmail.py`），不是本机 MTA：
+node-27 的 postfix 被 null-route，收下（exit 0）之后异步退信
+（2026-08-13 实测 `dsn=5.0.0 status=bounced`）。因此 `NHMS_FRONTIER_SENDMAIL`
+**不给默认值**，未配置即软退出，而不是「记 SENT、其实没投出去」。
+`NHMS_ALERT_EMAIL_FROM` 同理不给派生默认值：shim 会拒绝非认证账号的 From（exit 64），
+派生默认只会把一次配置疏漏变成第二个 failed 单元。
+`NHMS_ALERT_EMAIL_TO` / `NHMS_ALERT_EMAIL_FROM` 含 CR/LF 时**拒发**（不 strip），
+与 frontier lane 的 `_header_safe` 同口径；消息头补齐 `Date` / `MIME-Version` /
+`Content-Type: text/plain; charset="utf-8"`——shim 与 `send_message` 都不会替它注入，
+而 journal 行可能非 ASCII。
 
 **不做**去重/抑制/状态文件：这是每天最多一次的排程失败，重复告警不是问题；
 状态机是 frontier lane 的复杂度，不该在这里复制。
@@ -165,8 +182,9 @@ Phase 0 取证 §4 已实测）。`git pull --ff-only` 只更新 `ExecStart` 背
 因此必须有一步显式安装 + `daemon-reload` + `systemctl --user show ... -p OnFailure` 实机核对。
 
 告警脚本自身失败**不得**污染 retention 的退出码——systemd `OnFailure=` 天然如此
-（是独立单元），无需额外处理，但 wrapper 必须 `exit 0` 于「无邮件地址配置」这类
-软失败，以免在 journal 里再叠一个 failed 单元。
+（是独立单元），无需额外处理，但 wrapper 必须 `exit 0` 于「配置缺失/不可用」这类
+软失败（收件人未配、From 未配、任一值含 CR/LF、传输未配或不可执行），
+以免在 journal 里再叠一个 failed 单元。
 
 ## D7 — 实机 receipt 的时序陷阱（**给 implementer 的硬约束**）
 

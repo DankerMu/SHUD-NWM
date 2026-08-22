@@ -37,8 +37,9 @@ Phase 0 只读取证（node-27，receipt + PG server log 逐字，见 #1664 取�
    **不新增 wire code**——`WIRE_CODES` 是跨 4 处（含已归档 #855 fixture）的
    byte-identical 契约，且 AC 只要求「归到锁而非泛超时」。
 3. **失败可见**：新增 systemd template unit `nhms-node27-unit-failure-alert@.service`
-   + 哑 wrapper，逐字复用 frontier 告警的本地 `sendmail -t -i` 通道与
-   `NHMS_ALERT_EMAIL_TO/FROM`；retention 单元挂 `OnFailure=`。
+   + 哑 wrapper，逐字复用 frontier 告警的 `$NHMS_FRONTIER_SENDMAIL -t -i` 通道
+   （认证 SMTP shim，**不是**本机 MTA——node-27 的 postfix 被 null-route，收下即异步退信）
+   与 `NHMS_ALERT_EMAIL_TO/FROM`；retention 单元挂 `OnFailure=`。
 4. **每块 drop 计时进 stderr 诊断**（无 schema 变更）。没有它，`lock_timeout`
    的取值永远无法调优；且 runbook `:3019-3021` 已经声称这个 instrumentation 存在
    （实际不存在），补上让文档变真。

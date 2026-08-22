@@ -39,14 +39,14 @@ re-entry.
 - **THEN** the parsed configuration SHALL carry the module's pinned default,
   which SHALL itself satisfy the same strict bound
 
-#### Scenario: The pinned default preserves observed successful lock waits
+#### Scenario: The pinned default is tuned from measurement, not from aggregates
 
-- **WHEN** the pinned default is chosen
-- **THEN** it SHALL exceed the longest lock wait observed in a production tick
-  that nonetheless succeeded, so the bound cannot convert an already-working
-  tick into a refusal, and the runner SHALL NOT derive it arithmetically from
-  the drop-phase `statement_timeout` — the two budgets stay independently
-  operable knobs
+- **WHEN** a change to the pinned default is proposed
+- **THEN** the default SHALL NOT be lowered on the basis of an aggregate tick
+  duration, which cannot attribute elapsed time to a lock acquisition, and
+  SHALL be changed only on the basis of the per-chunk elapsed drop diagnostic,
+  and the runner SHALL NOT derive it arithmetically from the drop-phase
+  `statement_timeout` — the two budgets stay independently operable knobs
 
 ### Requirement: Lock-contention drop failures MUST be self-evident in refusal_reason
 
@@ -101,10 +101,11 @@ unit.
   the handler SHALL deliver a message identifying the failed unit together
   with recent journal context
 
-#### Scenario: A missing alert recipient degrades quietly
+#### Scenario: Unusable alert-channel configuration degrades quietly
 
 - **WHEN** the failure-alert handler runs on a host where the alert recipient
-  is not configured, or the local mail transport is unavailable
+  or sender is not configured, carries a header-breaking control character, or
+  the configured sendmail-compatible transport is unset or not executable
 - **THEN** the handler SHALL exit zero after recording the reason, so no
   second failed unit is produced
 

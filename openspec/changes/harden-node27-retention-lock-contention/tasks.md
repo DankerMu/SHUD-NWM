@@ -85,15 +85,20 @@
 
 - [x] 5.1 新增 `infra/systemd/nhms-node27-unit-failure-alert@.service`（design D6）：
       `Type=oneshot`、`WorkingDirectory=/home/nwm/NWM`、
-      `EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env`（复用既有告警地址）、
+      `EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env`（复用既有告警地址；
+      **前导 `-` 承重**——没有该 env 文件的机器必须仍能启动 handler，再由 wrapper 软退出，
+      否则 handler 自己在启动阶段就 failed，正是 spec 禁止的「第二个 failed 单元」）、
       `ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i`、
       `TimeoutStartSec=120`。
 - [x] 5.2 新增 `scripts/node27_unit_failure_alert_once.sh`（`set -euo pipefail`，`chmod +x`）：
       `$1` 为失败单元名（**带 `.service` 后缀**，因 `%n` 展开为全名），
       `journalctl --user -u "$1" -n 30 --no-pager` 拼正文，经
-      `${NHMS_FRONTIER_SENDMAIL:-/usr/sbin/sendmail} -t -i` 投递，
-      收件人 `NHMS_ALERT_EMAIL_TO`、发件人 `NHMS_ALERT_EMAIL_FROM`。
-      **软失败一律 `exit 0`**（地址未配置 / sendmail 不存在），
+      `$NHMS_FRONTIER_SENDMAIL -t -i` 投递（**无默认值**：node-27 的
+      `/usr/sbin/sendmail` 收下即异步退信），收件人 `NHMS_ALERT_EMAIL_TO`、
+      发件人 `NHMS_ALERT_EMAIL_FROM`（同样**无派生默认值**：shim 拒绝非认证 From，exit 64）。
+      两个地址值含 CR/LF 一律**拒发**（不 strip）。消息头补 `Date` / `MIME-Version` /
+      `Content-Type: text/plain; charset="utf-8"`。
+      **软失败一律 `exit 0`**（地址未配置 / 含 CR/LF / sendmail 未配置或不存在），
       不得再叠一个 failed 单元。**不做**去重/状态文件。
 - [x] 5.3 `infra/systemd/nhms-node27-timeseries-retention.service` 的 `[Unit]` 段加
       `OnFailure=nhms-node27-unit-failure-alert@%n.service`。**只改这一个单元**。

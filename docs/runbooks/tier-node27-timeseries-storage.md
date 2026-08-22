@@ -2851,14 +2851,19 @@ no receipt, **no DB connection**. An empty assignment means "unset" and takes
 the default. Enumeration and per-chunk measurement are untouched — they keep
 the 60 s `_QUERY_TIMEOUT_MS` and get no lock budget at all.
 
-Why 240 s and not the 2–5 s that "just fail fast" intuition suggests: node-27's
-own receipts refute the small values. The 08-19 tick freed 0.638 GB in **182 s**
-while 08-17 / 08-20 freed ~11 GB in 23 s / 1 s — those 182 s were waiting, not
-deleting, and a 5 s budget would have converted an already-successful tick into
-a `RETENTION_DROP_FAILED` refusal. The costs are asymmetric (this is the only
-lane with delete authority; nothing waits on its wall clock —
-`TimeoutStartSec=0`, no `timeout(1)` in the wrapper, next tick 24 h later), and
-the 60 s gap between 240 s and 300 s keeps the two walls distinguishable.
+Why 240 s and not the 2–5 s that "just fail fast" intuition suggests. A
+successful 08-19 tick spent **~182 s** of wall clock that its 0.638 GB of
+delete work does not explain (08-17 / 08-20 freed ~11 GB in 23 s / 1 s). Read
+that number carefully: it is the wrapper's `elapsed_sec`, which brackets the
+whole Python invocation — watermark, enumeration, and the per-chunk
+measurement all sit inside it and none of them is lock-bounded — so it
+**cannot** be attributed to the drop session, let alone to a single lock
+acquisition. The choice therefore rests on the other two grounds: the costs are
+asymmetric (this is the only lane with delete authority; nothing waits on its
+wall clock — `TimeoutStartSec=0`, no `timeout(1)` in the wrapper, next tick
+24 h later), and the 60 s gap between 240 s and 300 s keeps the two walls
+distinguishable. The per-chunk drop timing (§8.6 item 6) exists to replace that
+inference with a measurement — tune from it, not from `elapsed_sec`.
 
 **(b) The classification segment.** A drop failure whose driver SQLSTATE is
 `55P03` (lock not available) or `40P01` (deadlock detected) renders as:
@@ -3104,8 +3109,9 @@ before a receipt exists.
    Inspect the offending chunk (the refusal_reason suffix names it
    `<hypertable_schema>.<chunk_name>`). What follows the chunk name is
    EITHER the redacted cause directly, OR — since #1664, and only for
-   SQLSTATE `55P03` / `40P01` — a `lock-contention(<pgcode>): `
-   classification segment first, with the redacted cause after it (§8.2.2;
+   SQLSTATE `55P03` / `40P01` — a `lock-contention(<pgcode>):` classification
+   segment (with its trailing space) first, and the redacted cause after it
+   (§8.2.2;
    that segment is a fixed ASCII literal generated locally and is not driver
    text). The cause text after that point is redacted (§8.2), so read it as
    an intent-preserving summary,
@@ -3248,7 +3254,7 @@ before a receipt exists.
    ```
 
    ```json
-   {"chunk": "_timescaledb_internal._hyper_3_32_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 182431.005, "outcome": "dropped"}
+   {"chunk": "_timescaledb_internal._hyper_3_32_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 4187.226, "outcome": "dropped"}
    ```
 
    `chunk` is the chunk-schema-qualified name (the same key used in the
@@ -3318,11 +3324,35 @@ before a receipt exists.
    (`$NHMS_FRONTIER_SENDMAIL -t -i`, `NHMS_ALERT_EMAIL_TO` /
    `NHMS_ALERT_EMAIL_FROM` from `infra/env/node27-frontier-alert.env`). No
    second mail channel, no state file, no deduplication — a scheduled unit
-   fails at most once per tick. Soft failures (recipient unset, transport
-   missing) log a reason and **exit 0** so the alerter cannot pile a second
-   failed unit on top of the one it is reporting; a transport that is present
-   and rejects the message exits non-zero on purpose, because a silently
-   broken alert lane is worse than a visible one.
+   fails at most once per tick. Soft failures — `NHMS_ALERT_EMAIL_TO` or
+   `NHMS_ALERT_EMAIL_FROM` unset, either of them carrying a CR/LF (rejected,
+   never stripped — header injection), `NHMS_FRONTIER_SENDMAIL` unset or not
+   executable — log a `reason=` token and **exit 0** so the alerter cannot pile
+   a second failed unit on top of the one it is reporting; a transport that is
+   present and rejects the message exits non-zero on purpose, because a
+   silently broken alert lane is worse than a visible one. Neither
+   `NHMS_ALERT_EMAIL_FROM` nor `NHMS_FRONTIER_SENDMAIL` has a default: the
+   authenticated-SMTP shim refuses a From that is not the authenticated
+   account, and node-27's `/usr/sbin/sendmail` accepts with exit 0 and then
+   asynchronously bounces, so either default would manufacture a second failed
+   unit or a "SENT" that never arrived.
+
+   **KNOWN LIMITATION — the mail body does NOT carry `refusal_reason`.** The
+   journal context the handler quotes is systemd **lifecycle lines only**
+   (`Starting…`, `Main process exited, code=exited, status=1/FAILURE`,
+   `Failed with result 'exit-code'`). The runner's own stderr never reaches
+   the journal, for two independent reasons, both pre-existing:
+   `scripts/node27_timeseries_retention_once.sh` redirects the runner's stdout
+   **and** stderr into `retention.log`, and the retention unit writes
+   `StandardOutput=`/`StandardError=append:` files that systemd does not
+   duplicate into the journal. So the alert tells you **that** the tick failed,
+   never **why**. Read the reason out of `retention.log`:
+
+   ```
+   grep 'RETENTION_' ~/node27-timeseries-retention-logs/retention.log | tail -20
+   ```
+
+   Then follow items 1-7 above from whichever wire code that prints.
 
    **Deployment is MANUAL** — node-27's units are user-scope
    (`~/.config/systemd/user/`), so `git pull --ff-only` updates only the
