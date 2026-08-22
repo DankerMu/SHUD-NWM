@@ -855,3 +855,38 @@ rotation experiment (pinned-core depth loops, fix-verification-only rounds, and
 now review-exempt ops rollouts). **Keep rotation** remains unchanged; any
 reversal still requires the recorded schema and round-role fixes plus maintainer
 review.
+
+## Revisit 2026-08-22 (after #1714 / PR #1719)
+
+The audit now reports **107** multi-round merged PRs with later-round catches
+**core=66 / rotated=264**. PR #1719 is the first line since #1587 to move the
+counters at all, and it moved only the `core` side: **+2 core, +0 rotated**.
+
+The movement is real but does not test rotation. Round 2 of #1719 ran five
+lenses — correctness, integration, spec-compliance, invariant-state,
+test-evidence — every one of which was already in the round-1 six (the sixth,
+security-perf, was dropped, not replaced). **No lens was rotated in.** Both
+later-round catches therefore had to land on `core` by construction:
+invariant-state found the module-granularity gap in the delegated-connect guard
+(#1726) and test-evidence found the untested failure-isolation invariant
+(#1725). A round that applies no treatment contributes a denominator and a
+`core` numerator while saying nothing about whether rotation buys recall.
+
+This is a fourth shape the ADR must separate from a genuine rotation
+experiment, alongside pinned-core depth loops, fix-verification-only rounds, and
+review-exempt ops rollouts: a **narrowed** follow-up round, where the round-2
+mix is a subset of round 1 chosen to re-verify the specific fix surface. The
+narrowing was the right call for this PR — round 1's failure class was a
+structural blind spot in the guard, so re-running the lens that found it was the
+point — but it means the line should be read as "rotation not applied", not as
+"rotation underperformed".
+
+Aggregate attribution remains **66 core vs 264 rotated**, a 4:1 concentration in
+rotated-in lenses. **Keep rotation** remains unchanged; any reversal still
+requires the recorded schema and round-role fixes plus maintainer review.
+
+An instrumentation note this line makes concrete: `round_lenses` records which
+lenses ran, but nothing in the log distinguishes "round N rotated a new lens in"
+from "round N re-ran a subset of round 1". Until it does, `core` counts will
+drift upward on narrowed rounds for reasons unrelated to rotation's value. That
+is a measurement gap, not a decision input.
