@@ -945,19 +945,30 @@ def test_shared_finalizer_and_authoritative_reader_complete_without_deadlock(
     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finalizer_result: list[bool] = []
     reader_result: list[str] = []
+    # Unexpected worker failures must reach the parent BEFORE any
+    # worker-produced result assertion (design D3): an unexpected finalizer
+    # failure is not an empty finalizer_result, and an unexpected reader
+    # failure is not a missing reader_result. The expected terminal-intent
+    # TerminalStateError stays a substantive reader result instead.
+    finalizer_error: list[BaseException] = []
+    reader_error: list[BaseException] = []
+    reader_worker_name = "issue1648-authoritative-reader"
 
     def finalize() -> None:
-        finalizer_result.append(
-            supervisor.finalize_receipt(
-                receipt,
-                expected_stale_sha256=expected.sha256,
-                run_id="ordered-run",
-                stage="timeout",
-                possible_mutation=True,
-                mutation_head_sha="a" * 40,
-                deadline_monotonic=time.monotonic() + 0.1,
+        try:
+            finalizer_result.append(
+                supervisor.finalize_receipt(
+                    receipt,
+                    expected_stale_sha256=expected.sha256,
+                    run_id="ordered-run",
+                    stage="timeout",
+                    possible_mutation=True,
+                    mutation_head_sha="a" * 40,
+                    deadline_monotonic=time.monotonic() + 0.1,
+                )
             )
-        )
+        except BaseException as error:
+            finalizer_error.append(error)
 
     def read() -> None:
         try:
@@ -965,20 +976,40 @@ def test_shared_finalizer_and_authoritative_reader_complete_without_deadlock(
                 receipt, deadline_monotonic=time.monotonic() + 0.3
             )
         except terminal_state.TerminalStateError as error:
+            # The expected domain outcome under the held terminal lock; it is
+            # a substantive reader result, never an unexpected worker failure.
             reader_result.append(str(error))
+        except BaseException as error:
+            reader_error.append(error)
 
     finalizer = threading.Thread(target=finalize)
-    reader = threading.Thread(target=read)
+    reader = threading.Thread(target=read, name=reader_worker_name)
     finalizer.start()
     deadline = time.monotonic() + 1
-    while not terminal_state._terminal_intent_root_path(receipt).exists() and time.monotonic() < deadline:
+    while (
+        not terminal_state._terminal_intent_root_path(receipt).exists()
+        and time.monotonic() < deadline
+        and not finalizer_error
+    ):
         time.sleep(0.005)
     reader.start()
     finalizer.join(1)
     reader.join(1)
     fcntl.flock(lock_fd, fcntl.LOCK_UN)
     os.close(lock_fd)
+    # Liveness and unexpected-worker errors come BEFORE result assertions, so a
+    # captured failure names the injected cause instead of a symptom, and the
+    # bounded joins/lock release have already completed (design D4).
     assert not finalizer.is_alive() and not reader.is_alive()
+    if finalizer_error:
+        raise finalizer_error[0]
+    if reader_error:
+        raise reader_error[0]
+    # The expected terminal-intent TerminalStateError took the normal reader
+    # result channel, not the unexpected-worker-error channel, so the latter
+    # is empty in the healthy path (scenario "Expected terminal-intent error
+    # remains a result").
+    assert not finalizer_error and not reader_error
     assert finalizer_result == [False]
     assert reader_result and "intent is pending" in reader_result[0]
     assert supervisor.finalize_receipt(
@@ -989,6 +1020,91 @@ def test_shared_finalizer_and_authoritative_reader_complete_without_deadlock(
         possible_mutation=True,
         mutation_head_sha="a" * 40,
     )
+
+
+class InjectedFinalizerFailure(RuntimeError):
+    """Unique cause identity for an unexpected finalizer worker failure (#1648)."""
+
+
+class InjectedReaderFailure(RuntimeError):
+    """Unique cause identity for an unexpected authoritative-reader failure (#1648)."""
+
+
+def test_shared_supervisor_shipping_test_reports_finalizer_exception_before_empty_result_symptom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected finalizer failure must be parent-visible before the empty-result symptom (#1648).
+
+    Pre-fix this row emitted only a ``PytestUnhandledThreadExceptionWarning``
+    while the parent failed on the empty ``finalizer_result``; the repaired
+    shipping test raises the injected cause first, and both workers are
+    bounded-joined and the owned lock released/closed before it surfaces.
+    """
+    calls: list[str] = []
+
+    def fail_finalize(*args: Any, **kwargs: Any) -> bool:
+        calls.append("finalize")
+        raise InjectedFinalizerFailure("injected finalizer worker failure")
+
+    monkeypatch.setattr(supervisor, "finalize_receipt", fail_finalize)
+    with pytest.raises(
+        InjectedFinalizerFailure,
+        match="injected finalizer worker failure",
+    ):
+        test_shared_finalizer_and_authoritative_reader_complete_without_deadlock(tmp_path)
+    assert calls == ["finalize"], "injection must execute against the exact shipping finalizer seam"
+    # The parent-owned publish lock must be released/closed again on the
+    # captured-failure path so no lock is leaked to later tests.
+    lock_fd = os.open(
+        terminal_state._terminal_lock_path(tmp_path / "terminal.json"),
+        os.O_RDWR,
+    )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def test_shared_supervisor_shipping_test_reports_unexpected_reader_exception_before_missing_result_symptom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected reader failure must be parent-visible before the missing-result symptom (#1648).
+
+    The reader worker carries the deterministic explicit name
+    ``issue1648-authoritative-reader`` (the shipping seam), so the injection
+    targets only that worker, never the finalizer or the parent's own
+    ``finalize_receipt`` calls. Pre-fix this row emitted only a
+    ``PytestUnhandledThreadExceptionWarning`` while the parent failed on the
+    missing ``reader_result``.
+    """
+    real_read = terminal_state.read_authoritative_terminal
+    calls: list[str] = []
+
+    def fail_reader(*args: Any, **kwargs: Any) -> Any:
+        if threading.current_thread().name == "issue1648-authoritative-reader":
+            calls.append("read")
+            raise InjectedReaderFailure("injected reader worker failure")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_state, "read_authoritative_terminal", fail_reader)
+    with pytest.raises(
+        InjectedReaderFailure,
+        match="injected reader worker failure",
+    ):
+        test_shared_finalizer_and_authoritative_reader_complete_without_deadlock(tmp_path)
+    assert calls == ["read"], "injection must execute exactly in the reader worker"
+    lock_fd = os.open(
+        terminal_state._terminal_lock_path(tmp_path / "terminal.json"),
+        os.O_RDWR,
+    )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def test_shared_finalizer_recovers_post_replace_fsync_retry_without_orphan(
