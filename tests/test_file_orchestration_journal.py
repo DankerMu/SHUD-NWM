@@ -12557,6 +12557,86 @@ def test_narrowed_journal_lookup_still_reads_distinct_case_source_directories(tm
     assert {row["job_id"] for row in rows} == {lower_job["job_id"], upper_job["job_id"]}
 
 
+def _make_source_segment_surfaces(root: Path, segment: str) -> None:
+    for surface in journal_module._SOURCE_SEGMENT_SURFACES:
+        root.joinpath(*surface.split("/"), segment).mkdir(parents=True, exist_ok=True)
+
+
+@pytest.mark.parametrize(
+    "stat_error",
+    [
+        FileNotFoundError(errno.ENOENT, "No such file or directory"),
+        PermissionError(errno.EACCES, "Permission denied"),
+        OSError(errno.EIO, "Input/output error"),
+        ValueError("embedded null byte"),
+    ],
+    ids=["file_not_found", "permission_denied", "generic_oserror", "value_error"],
+)
+def test_case_alias_segment_survives_unprovable_identity(
+    tmp_path: Path,
+    stat_error: Exception,
+) -> None:
+    """#1734: an unprovable case-alias identity must fail OPEN, never closed.
+
+    ``_source_segment_directory_identities`` swallows every ``stat`` failure
+    and simply omits that surface, so ``_names_same_directory`` cannot prove
+    the alias names the primary's directory and the alias stays in the read
+    list. Keeping it costs at most a second enumeration of an absent or
+    unreadable directory; dropping it would silently lose every row that
+    lives under the alias spelling -- no error, no log, no exit code, just a
+    short query result. This pins the open direction against any refactor
+    that "tidies" the swallow into a drop.
+
+    The failure is injected rather than filesystem-derived, so the assertion
+    is identical on case-sensitive and case-insensitive filesystems and the
+    test never skips.
+    """
+
+    root = tmp_path / "journal"
+    _make_source_segment_surfaces(root, "gfs")
+    real_stat = os.stat
+    probed_alias: list[str] = []
+
+    def failing_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).name == "GFS":
+            probed_alias.append(str(path))
+            raise stat_error
+        return real_stat(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(journal_module.os, "stat", failing_stat)
+        segments = journal_module._cycle_read_source_segments(
+            source_id="gfs",
+            source_segment_override=None,
+            root=root,
+        )
+
+    # Without this the assertion below could pass for the wrong reason: a
+    # path-construction change that stopped probing the alias at all.
+    assert probed_alias, "alias identity probe never ran"
+    assert segments == ("gfs", "GFS")
+
+
+def test_case_alias_segment_survives_absent_primary_directories(tmp_path: Path) -> None:
+    """#1734: an empty identity map means "not proven same", so both stay.
+
+    When no surface directory exists for the primary spelling there is
+    nothing for the alias to be identical to. ``_names_same_directory``
+    answers ``False`` and both spellings are read -- the same fail-open
+    direction as a ``stat`` failure, and equally unasserted until now.
+    """
+
+    root = tmp_path / "journal"
+    root.mkdir()
+
+    assert journal_module._source_segment_directory_identities(root, "gfs") == {}
+    assert journal_module._cycle_read_source_segments(
+        source_id="gfs",
+        source_segment_override=None,
+        root=root,
+    ) == ("gfs", "GFS")
+
+
 
 @pytest.mark.parametrize(
     "underivable_key",

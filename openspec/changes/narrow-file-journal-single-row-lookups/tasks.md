@@ -134,3 +134,8 @@ three-part, all three required:
       hand-planted divergent row is still recovered via the content-derived
       journal partition. Declared as a residual in the delta rather than closed;
       the fail-closed `job_id` decomposition check is tracked there.
+- [x] #1761 — 大小写别名双读残留：`_merge_cycle_source_discovery` 与
+      `_cycle_read_source_segments` 的 `source_segment_overrides` 分支仍按字符串
+      去重，二者互锁（前者产出的混合拼法 `("IFS","ifs")` 原样喂给后者，后者收不掉）。
+      与本 change 已修的 primary 分支同缺陷类，但在冻结的分支范围之外。属**开发环境
+      完整性**面：本地 macOS 上预算/containment 类断言仍可能「以错误的理由」变绿。
