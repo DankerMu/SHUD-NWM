@@ -890,3 +890,27 @@ lenses ran, but nothing in the log distinguishes "round N rotated a new lens in"
 from "round N re-ran a subset of round 1". Until it does, `core` counts will
 drift upward on narrowed rounds for reasons unrelated to rotation's value. That
 is a measurement gap, not a decision input.
+
+## Revisit 2026-08-22 (after #1701 step 2 / PR #1727)
+
+`loop_log_audit` still returns DECIDABLE at **107 multi-round merged PRs, later-round
+catches core=66 vs rotated=264** — byte-identical to the previous revisit's aggregate,
+because this line is **single-round** (`rounds: 1`) and therefore contributes a merged PR
+to the denominator of neither counter. A one-round PR has no later rounds; it cannot test
+rotation in either direction.
+
+Worth recording anyway, because it is a *fifth* shape distinct from the four already
+separated above: a round-1-clean PR whose only net catch was fixed **without buying a
+second round**. The verifier returned 3 CONFIRMED/DISCARD + 1 PLAUSIBLE/FIX_NOW; the
+FIX_NOW was a spec-governance item (delta filed under a capability that does not govern
+the changed code) repaired as an orchestrator-owned spec-only `local-repair`, so the clean
+baseline SHA legitimately trails the final head. `gate_net_catch: 1` with `rounds: 1` is
+the correct encoding and should not be read as a rotation datum.
+
+It also sharpens the instrumentation gap noted in the previous revisit. That gap was
+"`round_lenses` cannot distinguish rotated-in from narrowed re-runs". This line adds:
+the schema also cannot distinguish "no later round was needed" from "no later round was
+run", even though only the former is evidence about review sufficiency. Both remain
+measurement gaps, not decision inputs.
+
+**Keep rotation** unchanged.
