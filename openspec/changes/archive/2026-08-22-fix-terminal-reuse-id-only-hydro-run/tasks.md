@@ -75,7 +75,7 @@ Evidence floor:
 
 - [x] `uv run pytest -q` on the touched suites (local) — paste counts.
 
-  - `uv run pytest tests/test_production_scheduler.py tests/test_select_ci_tests.py -q` → **2093 passed** (1882 + 211); 12 tests added by this change (11 in the #1736 block + 1 dead-gate pin).
+  - `uv run pytest tests/test_production_scheduler.py tests/test_select_ci_tests.py -q` → **2095 passed** (1884 + 211); 14 tests added by this change (11 in the #1736 block + 1 dead-gate pin).
   - Wider regression under the audit run (nine orchestrator suites): **3068 passed in 1107.62s**.
   - RED-before proof (a) — stash the source change only, run the new block: `test_db_free_id_only_terminal_row_is_reused_when_run_manifest_proves_the_init_state`, `test_db_free_id_only_terminal_row_admitted_by_manifest_still_obeys_the_successor_gate` and `test_candidate_and_verdict_paths_agree_a_manifest_proven_id_only_row_is_current` fail (3 failed, 10 passed); stash popped immediately.
   - RED-before proof (b) — the two negative pins are green on unmodified source **by construction** (today every id-only row already routes to the budgeted mismatch), so they were proved against the *forbidden* implementation instead: relaxing the leg to `terminal_init_state_match(...) == "match"` alone reddens `..._without_run_manifest_keeps_the_budgeted_mismatch` (flips to `strict_warm_start_terminal_run_manifest_missing`, exactly the budget bypass), `..._with_disagreeing_manifest_checksum_is_recomputed`, the `redacted_field_without_manifest` case, and the two pre-existing guards `test_candidate_wrapper_keeps_selected_driven_compare_for_id_only_terminal_rows` / `test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision` (5 failed, 8 passed). Mutant reverted.

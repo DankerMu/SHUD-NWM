@@ -1034,3 +1034,28 @@ repeat the measurement error already documented throughout this ADR—confusing
 autonomous cut, but this PR adds no evidentiary strength in either direction.
 Any future reversal still requires the recorded attribution-schema and
 round-role fixes plus maintainer review.
+
+## Revisit 2026-08-22 — PR #1751 (#1736)
+
+Audit at 445 lines / 441 merged: 110 multi-round merged PRs, later-round catches
+`core=66 rotated=264`. The ratio is unchanged in direction from the previous
+revisit (108 multi-round); **keep**.
+
+Unlike the previous revisit, this PR **did** apply a rotated later-round lens and
+it **did** catch. Round 2 was a single targeted `spec-conformance-targeted` lens
+aimed at the round-1 fix, not a rebroadcast of the round-1 mix. It caught a P2
+the round-1 lenses structurally could not have: the round-1 fix itself replaced a
+wrong-but-unambiguous line-range citation with a prose locator that resolves to
+four gates instead of three. That defect did not exist during round 1 — it was
+created by the fix — so only a later round looking at the fix could see it.
+
+This is the cleanest instance so far of the mechanism the ADR claims: rotated
+later-round lenses find defects **introduced by the fix pass**, a class the
+round-1 mix cannot cover by construction because the class does not yet exist
+when round 1 runs. Recorded as supporting evidence, not as a change of ruling.
+
+Caveat carried forward unchanged: the attribution schema still cannot separate
+"rotated lens found it" from "lens ran later," and this PR is a single
+observation. The keep ruling continues to rest on the cumulative ratio plus the
+absence of a recorded cut rationale; any future reversal still requires the
+attribution-schema and round-role fixes plus maintainer review.
