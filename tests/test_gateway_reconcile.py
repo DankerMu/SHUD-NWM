@@ -4199,6 +4199,13 @@ def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserve
     started peer against one absolute cleanup deadline, and re-raise the
     ORIGINAL launch cause -- never a peer ``BrokenBarrierError`` or an
     ``abort()`` side effect.
+
+    The regression proof observes the SHIPPING helper's own ``Thread.join()``
+    calls on the exactly-tracked successfully started peer (round-2 verifier
+    evidence-r2-01): if only the exception-path join is removed, no helper join
+    is observed and the joined-before-reraise assertion deterministically reds.
+    Worker side effects alone (``peer_errors``, ``first_started``) cannot see a
+    missing parent-side join.
     """
 
     barrier = threading.Barrier(8, timeout=2)
@@ -4206,6 +4213,9 @@ def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserve
     first_started = threading.Event()
 
     real_start = threading.Thread.start
+    # Exact Thread objects whose real start() succeeded -- NOT inferred from
+    # worker side effects.
+    successfully_started: list[threading.Thread] = []
     start_attempts = 0
 
     def failing_start(thread: threading.Thread) -> None:
@@ -4214,6 +4224,7 @@ def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserve
         if start_attempts == 2:
             raise InjectedGatewayThreadStartFailure("injected second start failure")
         real_start(thread)
+        successfully_started.append(thread)
         if start_attempts == 1:
             first_started.set()
 
@@ -4226,6 +4237,21 @@ def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserve
         real_abort(barrier)
 
     monkeypatch.setattr(threading.Barrier, "abort", tracked_abort)
+
+    # Observe the REAL join() calls the shipping helper makes on the tracked
+    # peers. `launch_observable` flips only after pytest.raises returns, so a
+    # recorded join proves the helper joined that peer BEFORE the launch
+    # exception became observable to the parent.
+    real_join = threading.Thread.join
+    launch_observable = False
+    helper_joins: list[tuple[threading.Thread, bool, bool]] = []
+
+    def observing_join(thread: threading.Thread, *args: Any, **kwargs: Any) -> None:
+        real_join(thread, *args, **kwargs)
+        if thread in successfully_started:
+            helper_joins.append((thread, thread.is_alive(), launch_observable))
+
+    monkeypatch.setattr(threading.Thread, "join", observing_join)
 
     peer_errors: list[BaseException] = []
 
@@ -4240,13 +4266,32 @@ def test_gateway_explicit_harness_partial_thread_start_aborts_joins_and_preserve
             peer_errors.append(error)
 
     started = time.monotonic()
-    with pytest.raises(InjectedGatewayThreadStartFailure, match="injected second start failure"):
-        _start_attempt_threads(worker, 8, barrier, join_timeout=5)
+    try:
+        with pytest.raises(InjectedGatewayThreadStartFailure, match="injected second start failure"):
+            _start_attempt_threads(worker, 8, barrier, join_timeout=5)
+    finally:
+        # Fallback cleanup via the saved REAL join, bypassing the observation
+        # wrapper: even a mutated helper that never joins cannot leave a live
+        # peer. It records nothing, so it cannot make the proof below pass.
+        for thread in successfully_started:
+            real_join(thread, timeout=5)
+    launch_observable = True
     elapsed = time.monotonic() - started
 
     assert barrier_aborted.is_set(), "partial launch must abort the Barrier"
     assert elapsed < 5, f"cleanup must respect one absolute deadline, took {elapsed:.2f}s"
     assert first_started.is_set(), "the first peer must have started"
+    # Exact successfully started peer population (this schedule: one peer).
+    assert len(successfully_started) == 1, successfully_started
+    # The shipping helper joined every successfully started peer exactly once,
+    # BEFORE the launch exception became observable to the parent, and each
+    # observed join returned with that peer no longer alive.
+    assert len(helper_joins) == len(successfully_started), helper_joins
+    assert {id(thread) for thread, _, _ in helper_joins} == {
+        id(thread) for thread in successfully_started
+    }
+    assert all(not alive for _, alive, _ in helper_joins), helper_joins
+    assert all(not observable for _, _, observable in helper_joins), helper_joins
     assert peer_errors and all(
         isinstance(error, threading.BrokenBarrierError) for error in peer_errors
     ), f"started peer must observe BrokenBarrierError, got {peer_errors}"
