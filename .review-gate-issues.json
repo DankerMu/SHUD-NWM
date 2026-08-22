@@ -1881,6 +1881,28 @@
           "rounds": 1
         }
       ]
+    },
+    "1736": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1751,
+          "outcome": "closed",
+          "rounds": 2
+        }
+      ]
     }
+  },
+  "1736": {
+    "ceilingPrs": [],
+    "gateEntries": 0,
+    "closed": [
+      {
+        "pr": 1751,
+        "outcome": "merged",
+        "rounds": 2
+      }
+    ]
   }
 }

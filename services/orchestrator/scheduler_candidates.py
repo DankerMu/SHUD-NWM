@@ -18,7 +18,9 @@ from services.orchestrator.chain_source_cycle import (
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
+    TERMINAL_INIT_STATE_MATCH,
     init_state_field,
+    terminal_init_state_match,
 )
 from services.orchestrator.scheduler_state import (
     CandidateStateDecision,
@@ -1961,11 +1963,32 @@ def _terminal_decision_matches_strict_warm_start(
 
     The final ``hydro_run`` leg keeps :func:`_warm_state_record_matches`
     (selected-driven: a field present on the selected state but absent on the
-    observed record is a mismatch). The verdict side's observed-driven
-    ``terminal_init_state_match`` MUST NOT be substituted here: legacy id-only
-    ``hydro_run`` rows would flip from mismatch to match and reroute the
-    budgeted ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173)
-    onto the unbudgeted run-manifest-missing path.
+    observed record is a mismatch) as its DEFAULT, plus exactly one narrow
+    upgrade (#1736).  Every ``hydro_run`` row the file journal writes carries
+    ``init_state_id`` and nothing else, so the selected-driven equality fails on
+    ``checksum`` even when the recorded id is the state strict warm start just
+    selected — and each already-``succeeded`` candidate of a revisited cycle was
+    recomputed from scratch forever.  When the record's remaining identity
+    fields are ABSENT rather than in disagreement (``terminal_init_state_match``
+    answers ``match``; ``conflict``/``absent`` shapes fall through), the leg
+    consults ``run_manifest_initial_state``, which does carry the full
+    quadruple, and admits the reuse exit only when the manifest proves all four
+    fields against the selected state.
+
+    That manifest proof is evaluated HERE, inside the leg, on purpose.
+    Relaxing the leg to return ``True`` for every id-only row whose
+    ``init_state_id`` matches would send the manifest-absent and
+    manifest-disagreeing rows into the call site's true branch, where its own
+    run-manifest check converts them into the UNBUDGETED
+    ``strict_warm_start_terminal_run_manifest_missing`` retry.  Gating the leg's
+    own return value keeps those rows on the budgeted
+    ``strict_warm_start_terminal_init_state_mismatch`` decision (#1173); for an
+    id-only row that does reach the true branch the call site's check is a
+    redundant re-check that passes by construction.
+
+    Reuse on ``init_state_id`` alone stays forbidden: a repaired checkpoint
+    keeps its deterministic ``state_id`` while its checksum changes, and the
+    manifest's ``checksum`` is what preserves that protection (``3b587c55``).
     """
 
     selected = strict_evidence.get("candidate_state")
@@ -1990,7 +2013,16 @@ def _terminal_decision_matches_strict_warm_start(
         and hydro_run.get("error_code") == "COLD_START_QUARANTINED"
     ):
         return True
-    return _warm_state_record_matches(selected, hydro_run)
+    if _warm_state_record_matches(selected, hydro_run):
+        return True
+    # #1736: id-only (or otherwise partially recorded, never disagreeing) row —
+    # admitted only when the run manifest independently proves the quadruple.
+    return terminal_init_state_match(
+        selected, hydro_run
+    ) == TERMINAL_INIT_STATE_MATCH and _terminal_decision_run_manifest_matches_strict_warm_start(
+        terminal_evidence,
+        strict_evidence,
+    )
 
 
 def _terminal_decision_has_run_manifest(terminal_evidence: Mapping[str, Any]) -> bool:
