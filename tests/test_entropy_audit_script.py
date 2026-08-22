@@ -4991,6 +4991,123 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
     _assert_unallowlisted_budget_counted_gate_eligible_finding(findings[0])
 
 
+# #1707: the four lines the pre-narrowing fallback reported are inlined verbatim, not read
+# from their source files, so these cases survive those files being reformatted.
+@pytest.mark.parametrize(
+    "line",
+    [
+        # docs/runbooks/current-production-ops.md:1560
+        "node-22 本地 scratch mirror 的机器；node-22 本身 DB-free，recalibration 模式只写",
+        # openspec/specs/production-scheduler-orchestration/spec.md:103
+        (
+            "The manual cleanup CLI SHALL NOT delete cycle-scoped artifacts with less protection than "
+            "the pass-side frontier exemption, and SHALL fail closed rather than fall back to "
+            "unprotected wall-clock deletion when the frontier is unknown. It SHALL derive its active "
+            "lower bound from the most recent scheduler pass evidence receipt's retention frontier block "
+            "— excluding pre-execution reservation artifacts, selected by the receipt's recorded start "
+            "time with a filename tie-break, and subject to a configurable freshness cap applied in both "
+            "directions; a fresh receipt's explicit null bound SHALL be mirrored verbatim (the pass "
+            "itself ran pure wall-clock, and the CLI is not stricter than the pass); a missing, "
+            "unreadable, malformed, or stale receipt, a fresh receipt whose retention did not run "
+            "(disabled or errored, leaving no frontier block), or any error while resolving or reading "
+            "receipts SHALL force the cleanup into dry-run regardless of the execute flag, deleting "
+            "nothing and recording a machine-readable frontier blocker reason in the cleanup CLI's "
+            "output payload, with no bypass flag offered. The cleanup payload SHALL disclose which "
+            "evidence directory was consulted: the frontier blocker carries an `evidence_dir` key "
+            "holding the absolute path actually probed (explicitly null only when the directory itself "
+            "could not be resolved), and the ok path carries the same key at the payload top level "
+            "alongside the frontier-source field — so a silently mis-resolved workspace root (the "
+            "relative default under a wrong working directory) is distinguishable from genuinely missing "
+            "evidence without reading source code. The node-27 daily raw-retention process is an "
+            "explicitly recorded exception to the protection-parity rule: it SHALL NOT adopt the receipt "
+            "source — the pass receipts and journal live on node-22 private storage it cannot reach, and "
+            "a cross-node frontier publication surface is out of this change's scope by recorded "
+            "decision — and SHALL instead keep its display-watermark anchor while disclosing that "
+            "decision: its summary SHALL carry an anchor block naming the anchor mode, the recorded "
+            "decision, and the residual risk (backfill cycles older than the watermark minus the "
+            "retention window are unprotected), and the process SHALL gain enabled and dry-run "
+            "environment gates whose defaults preserve the current execute-only behaviour byte for byte "
+            "(the removed dry-run CLI flags stay removed). The retention module's own no-bound "
+            "wall-clock fallback is unchanged: the existing direct-invocation scenario continues to "
+            "describe the module API's contract, and this requirement constrains the out-of-pass "
+            "callers, which must now supply a bound or fail closed. The pass-side frontier requirement "
+            "and receipt shape are unchanged by this requirement."
+        ),
+        # scripts/node22_clone_direct_grid_cutover_states.py:25
+        "    node-22-local scratch mirror -- in one invocation.",
+        # scripts/node22_clone_direct_grid_cutover_states.py:28
+        "NFS canonical index and the node-22-local ``/scratch`` mirror, and it is",
+        # The rollback leg recognises a lexeme, not a bare substring: scrollback is a
+        # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
+        # over-match here cannot be suppressed by a same-line no-database disclaimer.
+        "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
+    ],
+    ids=[
+        "runbook-state-index-mirror",
+        "spec-mirrored-verbatim",
+        "clone-script-scratch-mirror",
+        "clone-script-canonical-index",
+        "ci-scrollback-buffer-not-rollback",
+    ],
+)
+def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_lines(line: str) -> None:
+    assert audit_repo_entropy._topology_line_has_node22_local_postgres_or_mirror_drift(line) is False
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Rollback drill still points at the node-22 mirror on :55433 for current state.",
+        "Operators should connect to node-22 local PostgreSQL mirror for current DB checks.",
+        "Export N22_DSN before running the node-22 mirror sync.",
+        "Pass owner-only --node22-dsn-file to the node-22 mirror helper.",
+        "Current runbook: run the node-22 rollback mirror before node-27 ingest.",
+        "Current runbook: run the node-22 roll-back mirror before node-27 ingest.",
+        "当前手册：node-27 ingest 前先跑 node-22 回滚 mirror。",
+        "node-22 hosts the active primary postgresql mirror, and that subsystem is DB-free.",
+        "The node-22 rollback mirror is DB-free and takes no DB handle.",
+        "node-22 本地库通过 mirror 实时同步给 node-27，生产查询直接读取该镜像",
+        "node-22 hosts the warm standby that mirrors production writes from node-27",
+        "node-22's local instance mirrors node-27 and is queried when the primary is busy",
+        "Operators roll back via the node-22 mirror on demand",
+        "State was rolled back from the node-22 mirror last cycle",
+        "node-27 ingest 前先从 node-22 mirror 回退",
+        "node-22 hosts a read replica that mirrors production writes from node-27",
+        "node-22 的从库通过 mirror 对外提供读服务",
+        "node-22 的备库通过 mirror 同步给 node-27",
+        # 主库 is already a _topology_mentions_database token, so the database leg catches
+        # this before the fallback tuple is reached. Pinned anyway: the behaviour must hold
+        # whichever leg fires, so a future narrowing of that helper cannot silently drop it.
+        "node-22 的主库通过 mirror 同步给 node-27",
+    ],
+    ids=[
+        "archived-port",
+        "local-postgresql",
+        "n22-dsn-with-mirror",
+        "node22-dsn-file-with-mirror",
+        "bare-rollback-mirror",
+        "bare-roll-back-mirror",
+        "bare-chinese-rollback-mirror",
+        "fused-clause-real-db-token-plus-db-absence",
+        "rollback-plus-db-absence",
+        "chinese-local-db-mirror-read-as-production",
+        "warm-standby-mirrors-production-writes",
+        "local-instance-mirrors-and-is-queried",
+        "spaced-roll-back-mirror",
+        "rolled-back-from-mirror",
+        "chinese-rollback-huitui-mirror",
+        "read-replica-mirrors-production-writes",
+        "chinese-congku-mirror-serves-reads",
+        "chinese-beiku-mirror-syncs-to-node27",
+        "chinese-zhuku-mirror-syncs-to-node27",
+    ],
+)
+def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(
+    line: str,
+) -> None:
+    assert audit_repo_entropy._topology_line_has_node22_local_postgres_or_mirror_drift(line) is True
+
+
 def test_entropy_audit_topology_guardrails_flag_node22_database_url_scan_runbook(
     tmp_path: Path,
 ) -> None:

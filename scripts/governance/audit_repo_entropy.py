@@ -1933,7 +1933,35 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
         or "node22_dsn_file" in lowered
     ) and _topology_line_mentions_mirror(lowered):
         return True
-    return _topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)
+    # #1707: node-22 + "mirror" alone is not drift - the state-index file mirror is a
+    # legitimate non-database mirror. Require rollback wording or a database token that
+    # survives removal of explicit "no database here" claims on the same line.
+    if not (_topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)):
+        return False
+    if _topology_line_mentions_rollback(lowered):
+        return True
+    stripped = _topology_strip_db_absence_claims(lowered)
+    if _topology_mentions_database(stripped):
+        return True
+    # #1707 D9 (as amended by D10): fallback-only database vocabulary.
+    # _topology_mentions_database has three other callers and is pinned must-preserve, so
+    # the widening lives here. 库 must stay compound - 仓库/代码库/图库 are ordinary words in
+    # this repository. The list is bounded by decision (D10): every token here was measured
+    # free repo-wide, and further synonyms are a separate proposition.
+    return any(
+        token in stripped
+        for token in (
+            "本地库",
+            "本机库",
+            "standby",
+            "instance",
+            "replica",
+            "secondary",
+            "从库",
+            "备库",
+            "生产库",
+        )
+    )
 
 
 def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -> bool:
@@ -1971,6 +1999,29 @@ def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -
 def _topology_line_mentions_mirror(text: str) -> bool:
     lowered = _topology_normalized(text)
     return "mirror" in lowered or "镜像" in lowered
+
+
+def _topology_line_mentions_rollback(text: str) -> bool:
+    # #1707 D3/D10: the fixture commits to rollback wording as a concept, so recognise the
+    # whole lexeme - rollback / roll back / roll-back / rolled back / rolling back / rolls
+    # back - plus both Chinese surface forms 回滚 and 回退. The left \b keeps it a lexeme
+    # rather than a substring: scrollback (a CI/terminal log buffer) is not a rollback.
+    # There is deliberately no right boundary, so rollbacks still matches.
+    lowered = _topology_normalized(text)
+    return bool(re.search(r"\broll(?:ed|ing|s)?[\s-]?back|回滚|回退", lowered))
+
+
+def _topology_strip_db_absence_claims(text: str) -> str:
+    # #1707: strip, do not exclude - a line may deny a database in one clause and name a
+    # real one in another, and only the denied token should stop counting as a signal.
+    lowered = _topology_normalized(text)
+    db = r"(?:postgresql|postgres|database|数据库|db)"
+    stripped = re.sub(
+        rf"no\s+{db}\s+handle|{db}[\s-]?free\b|(?:无|不取任何)\s?{db}",
+        " ",
+        lowered,
+    )
+    return _topology_normalized(stripped)
 
 
 def _topology_local_postgres_context_is_allowed(

@@ -977,3 +977,60 @@ only surfaced once the CI-blast-radius lens rotated in. Round 3 (four rotated
 lenses incl. mutation testing) returned zero actionable. **Keep rotation**
 unchanged. Process note recorded in the loop-log line: mutation-testing lenses
 must run in an isolated worktree.
+
+### Revisit 2026-08-22 — PR #1746 (#1707, topology mirror fallback)
+
+`rounds: 3`, fixture `compact`, merged. Enters the multi-round denominator:
+**109 multi-round merged PRs**. Later-round catch counters unchanged at
+**core=66 vs rotated=264** — the round-2 and round-3 catches carry lens labels
+(`detector-recall-invariant`, `acceptance-closure-fixture-truthfulness`,
+`predicate-correctness`, `final-state-evidence-closure`) that match neither
+bucket, so they land in neither counter. **Keep rotation** unchanged.
+
+Qualitatively this is the strongest keep evidence so far on a `compact` fixture.
+Round 1 ran the core mix (oracle integrity, correctness) and produced one P1.
+Every later finding — two P1s, two P2s, seven stale citations — came from a
+rotated-in lens, and none of them was reachable from the round-1 mix: the
+recall-invariant lens exists to enumerate a predicate's input space, and the
+final-state-evidence lens exists to re-measure receipts written at earlier SHAs.
+On a fixture level whose whole premise is "small surface, few lenses needed",
+rotation still paid three rounds running.
+
+Two things worth recording that the schema does not capture:
+
+**Rotation surfaced a decision, not just defects.** The round-2 recall lens did
+not merely find missing tokens; running it twice established that the failure
+class was *unbounded*, which is what licensed D10 — declaring the boundary
+instead of buying a fourth round. A lens whose value was "prove that more
+rounds of this lens will not converge" is not a catch in the counter's sense,
+and the counter cannot see it.
+
+**Recorded decisions cap a rotated lens's yield, deliberately.** The round-3
+reviewer was briefed that D10 closed the vocabulary axis, and it declined to
+report findings of that shape — as did the round-2 reviewer against D9. So a
+later round's catch count is partly a function of how much the fixture has
+already decided, not only of which lens ran. That biases the rotated-in counter
+*downward* over a PR's life, which if anything strengthens the keep call; but it
+means the 66-vs-264 aggregate should not be read as a clean lens-vs-lens
+experiment. Fourth measurement gap, alongside the three already logged.
+
+Neither observation moves the keep/cut call, which stays on the aggregate.
+
+### Revisit 2026-08-22 — PR #1750 (#1646, pytest thread-exception policy)
+
+`loop_log_audit` reports **109 multi-round merged PRs**, with later-round catches
+**core=66 vs rotated=264**. PR #1750 itself is a single-round clean review:
+six Round 1 lenses returned zero candidate findings, no verifier batch existed,
+and the independent Phase 7 Gap Sweep was also clean. It therefore enters
+neither the multi-round denominator nor either later-round catch counter.
+
+This sample has **zero information about rotation**: no follow-up comprehensive
+round ran, so neither a rotated free slot nor a pinned-core recheck was applied.
+Treating the extra merged-PR/log denominator as evidence for keep or cut would
+repeat the measurement error already documented throughout this ADR—confusing
+"treatment not applied" with "treatment applied and found nothing."
+
+**Keep rotation remains unchanged.** The cumulative ratio still rules out an
+autonomous cut, but this PR adds no evidentiary strength in either direction.
+Any future reversal still requires the recorded attribution-schema and
+round-role fixes plus maintainer review.
