@@ -914,3 +914,14 @@ run", even though only the former is evidence about review sufficiency. Both rem
 measurement gaps, not decision inputs.
 
 **Keep rotation** unchanged.
+
+## Revisit 2026-08-22 (after #1702 item 4 / PR #1731)
+
+Docs-only PR, `rounds: 0` — no cross-review loop ran, so it enters neither the
+multi-round denominator nor either catch counter. Aggregate stays **107 multi-round
+merged PRs, core=66 vs rotated=264**. **Keep rotation** unchanged.
+
+Recorded rather than skipped because the audit re-raises DECIDABLE on every line, and a
+silent skip is indistinguishable from an overlooked obligation. The `rounds: 0` /
+review-exempt shape is already separated above; this line adds no new information about
+rotation and is logged only to keep the per-merge revisit chain unbroken.
