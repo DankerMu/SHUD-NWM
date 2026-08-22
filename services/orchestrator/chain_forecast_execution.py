@@ -167,6 +167,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                 retry_attempts = 0
                 retry_pipeline_job_id: str | None = None
                 pipeline_result: PipelineResult | None = None
+                confirmed_master = _ConfirmedMasterOwner(stage.stage)
                 while True:
                     existing_job = self._find_existing_stage_job(existing_jobs, stage, context=context)
                     if (
@@ -208,23 +209,26 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
                     if stage_results and len(stage_results) > stage_index:
-                        # #1326 Round 2 (outer retry): an outer same-stage retry
-                        # may return a raw reconciliation-pending result whose
-                        # empty Slurm identity would erase the confirmed
-                        # full-array dispatch recorded on the prior slot. Keep
-                        # the raw pending terminal/errors while inheriting the
-                        # prior confirmed master id via the shared helper.
-                        stage_results[stage_index] = _preserve_prior_confirmed_master_id(
-                            stage_results[stage_index], result
-                        )
+                        # #1326 Round 2 depth: an outer same-stage retry may
+                        # return a raw reconciliation-pending result whose empty
+                        # Slurm identity would erase a confirmed dispatch seen
+                        # ANYWHERE earlier in this stage loop (including across
+                        # empty-ID intermediate failures). The stage-loop owner
+                        # records every same-stage concrete master; the raw
+                        # pending terminal/errors stay, inheriting the owner.
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
+                        stage_results[stage_index] = result
                         result_slot = stage_index
                     elif stage_results and stage_results[-1].stage == result.stage:
                         # Same rule for the trailing same-stage replacement form.
-                        stage_results[-1] = _preserve_prior_confirmed_master_id(
-                            stage_results[-1], result
-                        )
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
+                        stage_results[-1] = result
                         result_slot = len(stage_results) - 1
                     else:
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
                         stage_results.append(result)
                         result_slot = len(stage_results) - 1
 
@@ -288,21 +292,18 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                             aggregation,
                             had_partial_before_stage,
                             last_partial_before_stage,
+                            confirmed_master=confirmed_master,
                         )
                         if retried is not None:
                             result, aggregation = retried
-                            # #1326 Round 1 (D6): a raw reconciliation-pending
+                            # #1326 Round 1/2 depth: a raw reconciliation-pending
                             # result may carry no Slurm identity (ambiguous arm)
                             # or a concrete retry-master identity (unverified
-                            # arm). The stage it replaces already confirmed the
-                            # full-array dispatch; keep the raw pending terminal
-                            # and empty task outcomes, inheriting the prior
-                            # confirmed master id only when the raw result has
-                            # none, so evidence never loses a confirmed
-                            # submission.
-                            stage_results[-1] = _preserve_prior_confirmed_master_id(
-                                stage_results[-1], result
-                            )
+                            # arm). The nested helper observes every concrete
+                            # master and returns the projected raw pending
+                            # result; the stage-loop owner retains the confirmed
+                            # full-array dispatch across empty-ID hops.
+                            stage_results[-1] = result
                             result_slot = len(stage_results) - 1
                             if result.status in NESTED_RETRY_DEFER_STATUSES:
                                 # #1322/#1326: the NESTED resubmission was
@@ -426,37 +427,49 @@ def _skip_terminal_pipeline_result(
     )
 
 
-def _preserve_prior_confirmed_master_id(
-    prior: StageRunResult,
-    raw: StageRunResult,
-) -> StageRunResult:
-    """Inherit the prior confirmed master id only when the raw pending result has none.
+class _ConfirmedMasterOwner:
+    """Stage-loop-local confirmed-master provenance (D6, Round 2 depth).
 
-    Qualification is governed by the single source of truth — a status inherits
-    only when ``_NESTED_RETRY_DEFER_TERMINALS`` maps it to the ``reconciling``
-    terminal (the two reconciliation-pending statuses); duplicate skip (mapped
-    to its own terminal) and any unknown status never inherit and are returned
-    unchanged. A raw pending result that ALREADY carries a concrete retry-master
-    identity keeps that identity: submit returned it, only its terminal outcome
-    is unknown, and dropping a returned identity is itself non-monotone. So the
-    rule is inherit prior ONLY when the mapped ``reconciling`` status has an
-    empty/whitespace ``raw.slurm_job_id`` AND the replacement is SAME-STAGE (a
-    raw pending result never inherits identity from a different stage). The raw
-    pending status, the empty task outcomes, and the rest of the raw result are
-    always preserved; no task rows are reconstructed and no submission is
-    inferred from the pending token itself.
+    One owner is created per stage execution loop and observes every same-stage
+    ``StageRunResult`` produced during outer AND nested retry history. It is
+    updated ONLY from a non-empty/whitespace-trimmed concrete ``slurm_job_id``;
+    an empty-ID intermediate result never clears it. The latest non-empty raw
+    retry master becomes the owner, so a confirmed dispatch survives any number
+    of empty-ID hops (e.g. confirmed -> empty-ID ``submission_failed`` ->
+    empty-ID pending). The owner is module-private and stage-loop-local: it is
+    never added to the public context, schema, durable journal, or
+    cross-invocation state, and scheduler evidence performs no journal lookup.
+
+    ``project`` applies the governed preservation rule to one raw result:
+    inherit the owner identity ONLY when the raw stage matches the owner stage,
+    ``_NESTED_RETRY_DEFER_TERMINALS`` maps the raw status to the ``reconciling``
+    cycle terminal, and the raw id is empty/whitespace. The raw
+    ``pipeline_job_id``/``status``/``exit``/``error``/``log``/``accounting``/
+    ``task_results`` are preserved unchanged. A non-empty raw retry master
+    remains authoritative; unknown/non-pending/cross-stage raw results are
+    returned unchanged.
     """
 
-    if _NESTED_RETRY_DEFER_TERMINALS.get(raw.status) != "reconciling":
-        return raw
-    if prior.stage != raw.stage:
-        # The replacement contract is SAME-STAGE: a raw pending result may only
-        # inherit identity from the prior slot for the same stage. A different
-        # stage is a topology drift the indexed seam must never bridge.
-        return raw
-    if not _nonempty_master_id(prior.slurm_job_id) or _nonempty_master_id(raw.slurm_job_id):
-        return raw
-    return replace(raw, slurm_job_id=prior.slurm_job_id)
+    __slots__ = ("stage", "value")
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.value = ""
+
+    def observe(self, result: StageRunResult) -> None:
+        if result.stage != self.stage:
+            return
+        if _nonempty_master_id(result.slurm_job_id):
+            self.value = str(result.slurm_job_id).strip()
+
+    def project(self, raw: StageRunResult) -> StageRunResult:
+        if raw.stage != self.stage:
+            return raw
+        if _NESTED_RETRY_DEFER_TERMINALS.get(raw.status) != "reconciling":
+            return raw
+        if not _nonempty_master_id(self.value) or _nonempty_master_id(raw.slurm_job_id):
+            return raw
+        return replace(raw, slurm_job_id=self.value)
 
 
 def _nonempty_master_id(value: str | None) -> bool:
@@ -632,6 +645,7 @@ def _retry_partial_array_stage(
     aggregation: ArrayAggregation,
     had_partial_before_stage: bool,
     last_partial_before_stage: str | None,
+    confirmed_master: _ConfirmedMasterOwner | None = None,
 ) -> tuple[StageRunResult, ArrayAggregation | None] | None:
     if self.retry_service is None:
         return None
@@ -670,6 +684,8 @@ def _retry_partial_array_stage(
                 pipeline_job_id=retry_pipeline_job_id,
             )
 
+            if confirmed_master is not None:
+                confirmed_master.observe(latest_result)
             if retry_aggregation is None:
                 if latest_result.status in NESTED_RETRY_DEFER_STATUSES:
                     # #1322/#1326 defer: the nested resubmission did no work —
@@ -680,10 +696,13 @@ def _retry_partial_array_stage(
                     # ``failed`` would stamp pending tasks, re-write durable run
                     # statuses another pass or reconciliation owns, and — under
                     # a permissive retry adjudicator — derive attempt N+1 and
-                    # really double-submit. Return the raw nested result so the
-                    # caller lands the governed terminal (skip or
-                    # ``reconciling``). ``context.active_basins`` is restored by
-                    # the enclosing ``finally``.
+                    # really double-submit. Return the projected raw nested
+                    # result so the caller lands the governed terminal (skip or
+                    # ``reconciling``) with the stage-loop confirmed master
+                    # preserved. ``context.active_basins`` is restored by the
+                    # enclosing ``finally``.
+                    if confirmed_master is not None:
+                        latest_result = confirmed_master.project(latest_result)
                     return latest_result, None
                 retry_status = "succeeded" if latest_result.status == "succeeded" else "failed"
                 for task_id in pending_task_ids:

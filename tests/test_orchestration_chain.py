@@ -14477,44 +14477,46 @@ def test_nested_retry_submit_result_ambiguous_preserves_prior_confirmed_master_i
 @pytest.mark.parametrize(
     ("prior_id", "raw_status", "raw_id", "expected_id", "raw_stage"),
     [
-        # Empty raw pending inherits the prior confirmed master id.
+        # Empty raw pending inherits the confirmed master id.
         ("2001", "submit_result_ambiguous", "", "2001", "forecast"),
         ("2001", "submit_result_ambiguous", "   ", "2001", "forecast"),
-        # A non-empty raw retry master always wins over the prior id.
+        # A non-empty raw retry master always wins over the owner id.
         ("2001", "reconcile_unverified", "2002", "2002", "forecast"),
         ("2001", "submit_result_ambiguous", "2002", "2002", "forecast"),
-        # Bare pending with no prior and no raw id stays empty.
+        # Bare pending with no owner and no raw id stays empty.
         ("", "reconcile_unverified", "", "", "forecast"),
         # Non-pending raw never inherits.
         ("2001", "skipped_duplicate_submission", "", "", "forecast"),
         ("2001", "submission_failed", "", "", "forecast"),
-        # Unknown status fails closed even with an empty raw id and a prior id:
+        # Unknown status fails closed even with an empty raw id and an owner id:
         # only statuses the mapping routes to ``reconciling`` inherit.
         ("2001", "mystery_status", "", "", "forecast"),
         # CROSS-STAGE raw pending never inherits: the replacement contract is
-        # same-stage, so a governed empty-ID raw result must not take a prior
+        # same-stage, so a governed empty-ID raw result must not take an owner
         # id from a different stage (topology-drift guard on the indexed seam).
         ("2001", "submit_result_ambiguous", "", "", "forcing"),
     ],
 )
-def test_preserve_prior_confirmed_master_id_boundary(
+def test_stage_confirmed_master_owner_boundary(
     prior_id: str,
     raw_status: str,
     raw_id: str,
     expected_id: str,
     raw_stage: str,
 ) -> None:
-    """D6 (#1326 Round 1): helper boundary — inherit prior ONLY when raw is empty.
+    """D6 (#1326 Round 2 depth): stage-loop owner boundary — project ONLY governed.
 
-    The rule is: inherit prior only for a reconciliation-pending status whose
-    raw identity is empty/whitespace AND whose stage matches the prior slot. A
-    non-empty raw identity (a retry master the submit returned) is retained;
-    bare pending with neither id stays empty; non-pending statuses (duplicate
-    skip, submission_failed) and a cross-stage pending result never inherit.
+    The rule is: the stage-loop owner projects its confirmed master only onto a
+    reconciliation-pending status whose raw identity is empty/whitespace AND
+    whose stage matches the owner stage. A non-empty raw identity (a retry
+    master the submit returned) is retained; bare pending with neither id stays
+    empty; non-pending statuses (duplicate skip, submission_failed), unknown
+    statuses, and a cross-stage pending result never inherit.
     """
 
     from services.orchestrator import chain_forecast_execution
 
+    owner = chain_forecast_execution._ConfirmedMasterOwner("forecast")
     prior = StageRunResult(
         stage="forecast",
         job_type=M3_STAGES[2].job_type,
@@ -14522,6 +14524,7 @@ def test_preserve_prior_confirmed_master_id_boundary(
         slurm_job_id=prior_id,
         status="partially_failed",
     )
+    owner.observe(prior)
     raw = StageRunResult(
         stage=raw_stage,
         job_type=M3_STAGES[2].job_type,
@@ -14530,7 +14533,7 @@ def test_preserve_prior_confirmed_master_id_boundary(
         status=raw_status,
     )
 
-    replaced = chain_forecast_execution._preserve_prior_confirmed_master_id(prior, raw)
+    replaced = owner.project(raw)
 
     assert replaced.slurm_job_id == expected_id
     assert replaced.status == raw_status
@@ -14692,6 +14695,560 @@ def test_outer_retry_submit_result_ambiguous_preserves_prior_confirmed_master_id
         ("active", None),
         ("active", None),
     ]
+
+
+def test_normal_start_indexed_outer_retry_preserves_prior_confirmed_master_id(
+    tmp_path: Path,
+) -> None:
+    """#1326 Round 2 depth (cand-06): normal full-chain start uses the INDEXED outer seam.
+
+    Basins carry NO restart markers, so convert/forcing run and succeed BEFORE
+    forecast. The forecast stage entry therefore lands at ``stage_results[2]``
+    (an indexed slot, not the trailing slot), which is exactly the caller
+    ``stage_results and len(stage_results) > stage_index`` that the
+    restart-at-forecast fixtures never exercised. First forecast submit is
+    confirmed on master ``2003`` (convert=2001, forcing=2002 consume the lower
+    ids) but all tasks fail, so the outer retry is scheduled; the retry returns
+    a raw empty-ID ``submit_result_ambiguous``. The indexed replacement must
+    preserve the confirmed master and raw retry metadata exactly like the
+    trailing oracle, with no downstream stage, no retry N+1, and no stale task
+    outcomes.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=1,
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    # convert + forcing succeeded before forecast — the earlier stage results
+    # exist, so the forecast replacement MUST go through the indexed slot.
+    assert [row["stage"] for row in client.submissions] == ["convert", "forcing", "forecast"]
+    assert [stage.stage for stage in result.stages] == ["convert", "forcing", "forecast"]
+    assert result.status == "reconciling"
+    # The outer retry really happened: two forecast array submissions.
+    assert client.array_submit_attempts.count("forecast") == 2
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert forecast.error_message == "Submit result is ambiguous; exact-comment reconciliation pending."
+    assert forecast.pipeline_job_id.endswith("_retry_1")
+    assert forecast.slurm_job_id == "2003"
+    # No downstream stage (parse/state_save_qc/publish) and no retry N+1.
+    assert all(job["job_id"].count("_retry_") <= 1 for job in repository.query_pipeline_jobs_by_cycle("gfs_2026050100"))
+    # Durable rows are separated: the confirmed master and the pending retry
+    # master are distinct rows.
+    first_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast"
+    )
+    assert first_master is not None
+    assert first_master["slurm_job_id"] == "2003"
+    assert first_master["submit_outcome"] == "accepted"
+    assert first_master["reconciliation_decision"] == "matched_bound"
+    assert first_master["status"] == "failed"
+    retry_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_retry_1"
+    )
+    assert retry_master is not None
+    assert retry_master["status"] == "reserved"
+    assert retry_master["slurm_job_id"] is None
+    assert retry_master["submit_outcome"] == "submit_result_ambiguous"
+    # No stale per-task outcomes.
+    assert [(outcome["status"], outcome.get("reason")) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
+    ]
+
+
+class MultiHopOuterRetryClient(FakeCycleSlurmClient):
+    """Per-attempt outer retry outcomes: confirmed -> rejected -> ambiguous.
+
+    ``submit_job_array`` is called once per outer attempt. Attempt 0 (the
+    whole-array first submit) is accepted with a concrete master id; attempt 1
+    is REJECTED before the gateway boundary (empty-ID ``submission_failed``);
+    attempt 2 crosses the gateway and loses the response (empty-ID
+    ``submit_result_ambiguous``). Attempts are counted per call so a raise
+    that creates no row still advances the counter. Non-forecast stages use the
+    stock behaviour.
+    """
+
+    def __init__(self, *, array_results_by_stage: dict[str, Any] | None = None) -> None:
+        super().__init__(array_results_by_stage=array_results_by_stage)
+        self.array_submit_attempts: list[str] = []
+
+    def submit_job_array(
+        self,
+        job_type: str,
+        *,
+        cycle_id: str,
+        stage_name: str,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        attempt = self.array_submit_attempts.count(stage_name)
+        self.array_submit_attempts.append(stage_name)
+        if stage_name != "forecast":
+            return super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+        if attempt == 0:
+            return super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+        if attempt == 1:
+            from services.orchestrator.chain_config import SubmitDisposition
+
+            error = RuntimeError("gateway rejected submission")
+            error.submit_disposition = SubmitDisposition.REJECTED
+            raise error
+        if attempt == 2:
+            accepted = super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+            assert str(accepted["job_id"]).isdigit()
+            raise RuntimeError("response lost after Gateway accepted the submit")
+        raise AssertionError(f"unexpected forecast submit attempt {attempt}")
+
+
+def test_multi_hop_outer_retry_preserves_confirmed_master_across_empty_id_intermediate(
+    tmp_path: Path,
+) -> None:
+    """#1326 Round 2 depth (cand-05): empty-ID intermediate cannot erase the master.
+
+    A normal full-chain start: convert/forcing succeed before forecast. The
+    whole-array forecast first submit is confirmed (master ``2003`` —
+    convert=2001, forcing=2002 consume the lower ids) but all tasks fail. The
+    outer retry-1 is REJECTED before the gateway boundary and returns an
+    empty-ID ``submission_failed``; the outer retry-2 crosses the gateway and
+    returns an empty-ID ``submit_result_ambiguous``. The confirmed ``2003``
+    must survive BOTH empty-ID hops: the returned pending stage keeps the
+    earlier master (never the empty intermediate), while the intermediate
+    ``submission_failed`` durable row is untouched and the raw retry-2 metadata
+    (pipeline id, status, errors, empty task rows) is kept. No retry-3, no
+    downstream stage, no stale task outcomes.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = MultiHopOuterRetryClient(
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    basins = _basins(2)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026050100_model_{index}",
+                "candidate_id": (
+                    f"gfs:2026-05-01T00:00:00Z:model_{index}:forecast_gfs_deterministic"
+                ),
+                "orchestration_run_id": "cycle_gfs_2026050100",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+            }
+        )
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    # Three forecast submissions: confirmed first, rejected retry-1, ambiguous retry-2.
+    assert [attempt for attempt in client.array_submit_attempts if attempt == "forecast"] == [
+        "forecast",
+        "forecast",
+        "forecast",
+    ]
+    # Submission rows record only accepted creates: convert, forcing, the first
+    # forecast, and the ambiguous retry-2 (which creates the row then raises).
+    # The rejected retry-1 raises before creating any row but still counts as a
+    # per-attempt submission call.
+    assert [row["stage"] for row in client.submissions] == [
+        "convert",
+        "forcing",
+        "forecast",
+        "forecast",
+    ]
+    assert client.array_submit_attempts.count("forecast") == 3
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    # Raw retry-2 preserved: pending status, empty task rows, retry errors, and
+    # the retry-2 pipeline id — but the confirmed full-array master 2003 is
+    # inherited because the raw retry-2 id is empty (the empty-ID rejected
+    # intermediate never cleared it).
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert forecast.error_message == "Submit result is ambiguous; exact-comment reconciliation pending."
+    assert forecast.pipeline_job_id.endswith("_retry_2")
+    assert forecast.slurm_job_id == "2003"
+    assert result.status == "reconciling"
+    # No downstream stage, no retry-3, no stale task outcomes.
+    assert [stage.stage for stage in result.stages] == ["convert", "forcing", "forecast"]
+    assert client.array_submit_attempts.count("forecast") == 3
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    cohort_masters = sorted(
+        job["job_id"]
+        for job in jobs
+        if job["job_id"].startswith("job_cycle_gfs_2026050100_forecast")
+    )
+    assert cohort_masters == [
+        "job_cycle_gfs_2026050100_forecast",
+        "job_cycle_gfs_2026050100_forecast_retry_1",
+        "job_cycle_gfs_2026050100_forecast_retry_2",
+    ]
+    assert all(job["job_id"].count("_retry_") <= 1 for job in jobs)
+    # The durable first master carries the confirmed dispatch.
+    first_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast"
+    )
+    assert first_master is not None
+    assert first_master["slurm_job_id"] == "2003"
+    assert first_master["status"] == "failed"
+    assert first_master["submit_outcome"] == "accepted"
+    assert first_master["reconciliation_source"] == "slurm_exact_comment"
+    assert first_master["reconciliation_decision"] == "matched_bound"
+    assert first_master["matched_slurm_job_id"] == "2003"
+    assert first_master["submission_attempt"] == 1
+    # The rejected intermediate master stays SUBMISSION_FAILED and empty-ID,
+    # untouched by the later pending hop.
+    rejected_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_retry_1"
+    )
+    assert rejected_master is not None
+    assert rejected_master["status"] == "submission_failed"
+    assert rejected_master["slurm_job_id"] is None
+    assert rejected_master["submit_outcome"] == "rejected"
+    assert rejected_master["error_code"] == "SBATCH_SUBMISSION_FAILED"
+    # The final retry-2 master is pending and empty-ID.
+    retry_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_retry_2"
+    )
+    assert retry_master is not None
+    assert retry_master["status"] == "reserved"
+    assert retry_master["slurm_job_id"] is None
+    assert retry_master["submit_outcome"] == "submit_result_ambiguous"
+    assert [(outcome["status"], outcome.get("reason")) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
+    ]
+
+
+class NestedMultiHopRetryClient(FakeCycleSlurmClient):
+    """Nested per-attempt outcomes: partially_failed -> rejected -> ambiguous.
+
+    ``submit_job_array`` is called once per nested attempt. The first full-array
+    forecast submit returns ``["succeeded", "failed"]`` (one succeeded, one
+    failed task) so the aggregation is ``partially_failed`` and only the failed
+    task is reindexed onto retries. Nested retry-1 is REJECTED before the
+    gateway boundary (empty-ID ``submission_failed``); nested retry-2 crosses
+    the gateway and loses the response (empty-ID ``submit_result_ambiguous``).
+    Attempts are counted per call so a raise that creates no row still advances
+    the counter.
+    """
+
+    def __init__(self, *, array_results_by_stage: dict[str, Any] | None = None) -> None:
+        super().__init__(array_results_by_stage=array_results_by_stage)
+        self.array_submit_attempts: list[str] = []
+
+    def submit_job_array(
+        self,
+        job_type: str,
+        *,
+        cycle_id: str,
+        stage_name: str,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        attempt = self.array_submit_attempts.count(stage_name)
+        self.array_submit_attempts.append(stage_name)
+        if stage_name != "forecast":
+            return super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+        if attempt == 0:
+            return super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+        if attempt == 1:
+            from services.orchestrator.chain_config import SubmitDisposition
+
+            error = RuntimeError("gateway rejected submission")
+            error.submit_disposition = SubmitDisposition.REJECTED
+            raise error
+        if attempt == 2:
+            accepted = super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+            assert str(accepted["job_id"]).isdigit()
+            raise RuntimeError("response lost after Gateway accepted the submit")
+        raise AssertionError(f"unexpected forecast submit attempt {attempt}")
+
+
+def test_nested_multi_hop_retry_uses_same_owner_across_empty_id_intermediate(
+    tmp_path: Path,
+) -> None:
+    """#1326 Round 2 depth (task 1): the NESTED path shares the stage-loop owner.
+
+    Restart-at-forecast: the first full-array forecast submit returns
+    ``["succeeded", "failed"]`` so the aggregation is ``partially_failed`` and
+    only the failed task is reindexed onto nested retries. The confirmed
+    dispatch is master ``2001``. Nested retry-1 is REJECTED before the gateway
+    boundary (empty-ID ``submission_failed``); nested retry-2 crosses the
+    gateway and returns an empty-ID ``submit_result_ambiguous``. The nested
+    helper must observe both attempts through the SAME stage-loop owner: the
+    returned pending stage retains the initial concrete master ``2001`` (never
+    the empty intermediate), keeps the raw retry-2 pipeline id / status /
+    errors / empty task rows, the cycle lands ``reconciling``, the full basin
+    cohort is restored, the pending task is never stamped failed, no retry-3 or
+    downstream stage runs, no second cycle failure write lands, and the durable
+    attempt rows stay separate.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+
+    class RecordingJournalRepository(FileOrchestrationJournalRepository):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.cycle_status_writes: list[str] = []
+
+        def update_forecast_cycle_status(self, **kwargs: Any) -> Any:
+            self.cycle_status_writes.append(str(kwargs["status"]))
+            return super().update_forecast_cycle_status(**kwargs)
+
+    repository = RecordingJournalRepository(tmp_path / "journal")
+    client = NestedMultiHopRetryClient(
+        array_results_by_stage={"forecast": [["succeeded", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=2, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _accepted_submit_forecast_basins())
+
+    # Three forecast submissions: partially_failed first, rejected retry-1, ambiguous retry-2.
+    assert client.array_submit_attempts.count("forecast") == 3
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    # Raw retry-2 preserved: pending status, empty task rows, retry errors, and
+    # the retry-2 pipeline id — but the confirmed full-array master 2001 is
+    # inherited because the raw retry-2 id is empty (the empty-ID rejected
+    # intermediate never cleared it).
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.task_results == ()
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert forecast.error_message == "Submit result is ambiguous; exact-comment reconciliation pending."
+    assert forecast.pipeline_job_id.endswith("_retry_2")
+    assert forecast.slurm_job_id == "2001"
+    assert result.status == "reconciling"
+    # No downstream stage, no retry-3, no stale per-task outcomes, full cohort
+    # restored (all two candidates active).
+    assert [stage.stage for stage in result.stages] == ["forecast"]
+    assert client.array_submit_attempts.count("forecast") == 3
+    assert [(outcome["status"], outcome.get("reason")) for outcome in result.candidate_outcomes] == [
+        ("active", None),
+        ("active", None),
+    ]
+    jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026050100")
+    cohort_masters = sorted(
+        job["job_id"]
+        for job in jobs
+        if job["job_id"].startswith("job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast")
+    )
+    assert cohort_masters == [
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast",
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1",
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_2",
+    ]
+    assert all(job["job_id"].count("_retry_") <= 1 for job in jobs)
+    # The durable first master carries the confirmed dispatch.
+    first_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast"
+    )
+    assert first_master is not None
+    assert first_master["slurm_job_id"] == "2001"
+    assert first_master["status"] == "partially_failed"
+    assert first_master["submit_outcome"] == "accepted"
+    assert first_master["reconciliation_decision"] == "matched_bound"
+    # The rejected intermediate master stays SUBMISSION_FAILED and empty-ID.
+    rejected_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_1"
+    )
+    assert rejected_master is not None
+    assert rejected_master["status"] == "submission_failed"
+    assert rejected_master["slurm_job_id"] is None
+    assert rejected_master["submit_outcome"] == "rejected"
+    # The final retry-2 master is pending and empty-ID.
+    retry_master = repository.get_pipeline_job(
+        "job_cycle_gfs_2026050100_forecast_cohort_fixture_forecast_retry_2"
+    )
+    assert retry_master is not None
+    assert retry_master["status"] == "reserved"
+    assert retry_master["slurm_job_id"] is None
+    assert retry_master["submit_outcome"] == "submit_result_ambiguous"
+    # The defer writes no SECOND ``partially_failed``/failure cycle status: the
+    # only failure write is the rejected retry-1's ``failed_run``, and the
+    # ambiguous retry-2 re-enters ``forecast_running`` only. The ``:598`` no-op
+    # holds — ``_retry_partial_array_stage`` never re-enters
+    # ``_after_cycle_stage_terminal`` as ``partially_failed`` after the defer.
+    assert repository.cycle_status_writes == [
+        "forecast_running",
+        "forcing_ready_partial",
+        "forecast_running",
+        "failed_run",
+        "forecast_running",
+    ]
+    assert "forcing_ready_partial" not in repository.cycle_status_writes[2:]
+
+
+def test_stage_confirmed_master_owner_observes_non_empty_then_ignores_empty() -> None:
+    """#1326 Round 2 depth (task D): the stage-loop owner is monotone.
+
+    Direct owner boundary: the owner records a non-empty concrete master, then
+    an empty-ID intermediate result (``submission_failed``) must NOT clear it,
+    and a later empty-ID governed pending result projects the earlier master.
+    A raw non-empty retry master remains authoritative, and a cross-stage /
+    unknown-status / non-pending raw result never projects. No public field,
+    no journal write: the owner is module-private and stage-loop-local.
+    """
+
+    from services.orchestrator import chain_forecast_execution
+
+    owner = chain_forecast_execution._ConfirmedMasterOwner("forecast")
+    # Empty results never update the owner.
+    owner.observe(
+        StageRunResult(
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+            slurm_job_id="",
+            status="submission_failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message="rejected",
+        )
+    )
+    assert owner.value == ""
+    # A non-empty concrete master updates the owner.
+    owner.observe(
+        StageRunResult(
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+            slurm_job_id="2001",
+            status="failed",
+            error_code="NODE_FAILURE",
+            error_message="array tasks failed",
+        )
+    )
+    assert owner.value == "2001"
+    # A later empty-ID intermediate failure must NOT clear the owner.
+    owner.observe(
+        StageRunResult(
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast_retry_1",
+            slurm_job_id="",
+            status="submission_failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            error_message="rejected",
+        )
+    )
+    assert owner.value == "2001"
+    # A governed empty-ID pending result projects the earlier master.
+    raw = StageRunResult(
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        pipeline_job_id="job_cycle_gfs_2026050100_forecast_retry_2",
+        slurm_job_id="",
+        status="submit_result_ambiguous",
+        error_code="SBATCH_SUBMIT_RESULT_AMBIGUOUS",
+        error_message="ambiguous",
+    )
+    projected = owner.project(raw)
+    assert projected.slurm_job_id == "2001"
+    assert projected.status == raw.status
+    assert projected.pipeline_job_id == raw.pipeline_job_id
+    assert projected.error_code == raw.error_code
+    assert projected.error_message == raw.error_message
+    assert projected.task_results == ()
+    # A raw non-empty retry master stays authoritative.
+    raw_with_id = StageRunResult(
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        pipeline_job_id="job_cycle_gfs_2026050100_forecast_retry_3",
+        slurm_job_id="2003",
+        status="reconcile_unverified",
+    )
+    assert owner.project(raw_with_id).slurm_job_id == "2003"
+    # Cross-stage raw pending never projects, even when the owner holds an id.
+    cross_stage = StageRunResult(
+        stage="forcing",
+        job_type="produce_forcing_array",
+        pipeline_job_id="job_cycle_gfs_2026050100_forcing",
+        slurm_job_id="",
+        status="submit_result_ambiguous",
+    )
+    assert owner.project(cross_stage).slurm_job_id == ""
+    # Unknown and non-pending raw statuses never project.
+    for raw_status, raw_id in (("mystery_status", ""), ("submission_failed", ""), ("skipped_duplicate_submission", "")):
+        raw = StageRunResult(
+            stage="forecast",
+            job_type="run_shud_forecast_array",
+            pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+            slurm_job_id=raw_id,
+            status=raw_status,
+        )
+        assert owner.project(raw).slurm_job_id == raw_id
 
 
 def test_bare_pending_stage_without_prior_identity_is_not_submitted_evidence() -> None:

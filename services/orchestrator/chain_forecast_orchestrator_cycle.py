@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
@@ -321,11 +322,19 @@ class ForecastOrchestratorCycleMixin:
         aggregation: _chain.ArrayAggregation,
         had_partial_before_stage: bool,
         last_partial_before_stage: str | None,
+        confirmed_master: Any = None,
     ) -> tuple[_chain.StageRunResult, _chain.ArrayAggregation | None] | None:
         from services.orchestrator import chain_forecast_execution
 
         return chain_forecast_execution._retry_partial_array_stage(
-            self, stage, context, result, aggregation, had_partial_before_stage, last_partial_before_stage
+            self,
+            stage,
+            context,
+            result,
+            aggregation,
+            had_partial_before_stage,
+            last_partial_before_stage,
+            confirmed_master=confirmed_master,
         )
 
     @staticmethod

@@ -62,9 +62,11 @@ The nested `reconcile_unverified` path must retain the existing terminal-hook no
 
 ### D6: Confirmed submission facts are monotone
 
-A raw pending result must remain the returned stage terminal, but neither same-cycle replacement seam may erase a confirmed prior dispatch: the nested partial-array retry replacement and the outer whole-array same-stage retry replacement share one preservation rule. If and only if the prior stage has a non-empty Slurm master job identity and the raw pending result lacks one, the replacement retains that identity. A non-empty raw retry master remains authoritative. The replacement keeps the raw retry pipeline identity, status, errors, and empty task rows; it does not reconstruct old task outcomes, add another stage entry, or infer submission from a bare pending status. Existing evidence projection can then derive `submitted` and `slurm_submit_called` from concrete identity it already trusts.
+A raw pending result must remain the returned stage terminal, but no same-cycle, same-stage retry history may erase an earlier confirmed dispatch. The stage execution loop owns one local confirmed-master provenance value: it starts empty for each stage and is updated only when that stage returns a non-empty concrete Slurm master identity. Empty-ID intermediate failures never clear it.
 
-Manual retry, upstream-refresh retry, forced resubmit, and cross-invocation resume are not generalized by this decision; they keep their existing durable identity paths.
+The nested partial-array and both outer whole-array replacement forms consume that owner through one preservation rule. If the final raw result maps to cycle terminal `reconciling`, belongs to the same stage, and lacks a Slurm identity, the returned result retains the stage-loop confirmed master even when one or more empty-ID retry results intervened. A non-empty raw retry master remains authoritative. The replacement keeps the raw retry pipeline identity, status, errors, and empty task rows; it does not reconstruct old task outcomes, alter an intermediate `submission_failed`, add another stage entry, or infer submission from a bare pending status.
+
+The owner remains local to one stage execution loop. It is not added to the public context, schema, durable journal, or cross-invocation state. Manual retry, upstream-refresh retry, forced resubmit, and cross-invocation resume keep their existing durable identity paths.
 
 ### D7: Final defer span uses zero/zero attribution
 
@@ -110,13 +112,15 @@ A reconciliation-pending terminal is a defer, not an all-basin failure. Its fina
   - nested unverified result -> same plus no second durable cycle-status write.
   - produced nested-pending scheduler artifact -> submitted/called facts remain positive, absence proof remains false, and compaction preserves them.
   - whole-array all-failed -> outer retry raw ambiguity -> prior confirmed master remains visible in returned, persisted, and compacted scheduler evidence.
+  - confirmed whole-array master -> empty-ID rejected `submission_failed` retry -> empty-ID ambiguous retry -> the earlier confirmed master still survives in returned, persisted, and compacted evidence.
+  - normal full-chain start -> convert/forcing precede forecast -> indexed outer replacement has a real-path oracle independent of the restart-at-forecast trailing oracle.
   - both nested pending terminals -> final forecast timing span has basin `N`, submitted `0`, failed `0`.
   - bare pending without prior identity remains non-submitted; duplicate skip and nested `submission_failed` retain existing behavior.
 
 ## Boundary Surface Checklist
 
-- Shared state-machine root: `chain_forecast_execution.py` defer set, mapping, nested and outer same-stage replacement seams, retry helper, and timing counter owner.
-- Evidence producer/consumer boundary: prior submitted stage -> raw pending replacement -> cycle result -> candidate evidence -> pass proof/compaction -> readiness recount.
+- Shared state-machine root: `chain_forecast_execution.py` stage-loop confirmed-master owner, defer mapping, nested and outer same-stage replacement seams, retry helper, and timing counter owner.
+- Evidence producer/consumer boundary: any concrete master observed during the current stage loop -> later raw pending replacement -> cycle result -> candidate evidence -> pass proof/compaction -> readiness recount.
 - Stale/idempotency boundary: accepted-submit ambiguity may still correspond to a live job; no new attempt may be minted.
 - Durable boundary: existing nested event/write is retained; no fabricated partial/failure write.
 - Unchanged sibling consumers: duplicate skip, submission failure, succeeded/failed partial retry, production status translator.
@@ -127,4 +131,6 @@ A reconciliation-pending terminal is a defer, not an all-basin failure. Its fina
 - A defer-set-only edit maps reconciliation to the skip terminal -> explicit mapping oracle is mandatory.
 - Treating reconciliation as blocked at row level obscures incomplete accounting -> row remains partial; public readiness alone is blocked.
 - Tests could pass without proving no N+1 attempt -> submission attempt counts and downstream stage list are load-bearing assertions.
+- Copying identity only from the adjacent result loses provenance after an empty-ID intermediate failure -> the stage loop owns the monotone fact and multi-hop retry history is mandatory evidence.
+- A restart-at-forecast fixture exercises only the trailing replacement form -> a normal full-chain start is mandatory for the indexed caller.
 - Rollback is one PR revert; there is no migration or persisted-format conversion.

@@ -27,8 +27,16 @@ Scheduler candidate evidence SHALL treat cycle terminal `reconciling` and stage/
 - **THEN** `slurm_submit_proven_absent` SHALL be false and no-mutation proof SHALL NOT claim `slurm_submit_called=false`
 - **THEN** evidence compaction SHALL preserve those facts
 
+#### Scenario: Multi-hop retry history preserves confirmed submission proof
+
+- **GIVEN** a scheduler candidate's current stage confirmed a Slurm master before one or more empty-ID same-stage retry results
+- **WHEN** the final retry ends reconciliation-pending without its own Slurm identity and the pass artifact is produced
+- **THEN** model-run and execution proof SHALL retain the earlier confirmed submission facts
+- **THEN** persisted and bounded evidence SHALL keep a positive submit count and `slurm_submit_proven_absent=false`
+- **THEN** raw retry metadata and durable rows SHALL remain attributed to their original attempts
+
 #### Scenario: Pending status without confirmed identity remains non-submitted
 
-- **WHEN** a scheduler candidate has a reconciliation-pending status but no confirmed Slurm identity
+- **WHEN** a scheduler candidate has a reconciliation-pending status but the current stage loop has never observed a confirmed Slurm identity
 - **THEN** model-run evidence SHALL keep `submitted=false`
 - **THEN** no producer SHALL turn the pending token itself into a positive submission proof

@@ -36,9 +36,26 @@ The partial-array retry helper SHALL preserve a nested `submit_result_ambiguous`
 - **THEN** a non-empty raw retry master identity SHALL remain authoritative instead of being overwritten
 - **THEN** no further retry or downstream stage SHALL be derived from the pending result
 
+#### Scenario: Intermediate empty-ID failures cannot erase confirmed dispatch identity
+
+- **GIVEN** the current stage has already returned a non-empty confirmed Slurm master identity
+- **AND** one or more later same-stage retry results carry no Slurm identity, including a retryable `submission_failed`
+- **WHEN** a subsequent same-stage retry returns an empty-ID reconciliation-pending result
+- **THEN** the returned pending stage SHALL retain the earlier confirmed master identity
+- **THEN** every intermediate durable retry row and the final raw retry metadata SHALL remain unchanged
+- **THEN** no retry after the pending result or downstream stage SHALL run
+
+#### Scenario: Normal-start indexed replacement preserves confirmed dispatch identity
+
+- **GIVEN** a normal full-chain start has already completed stages before the current array stage
+- **AND** the current stage has a confirmed Slurm master identity
+- **WHEN** its outer retry returns an empty-ID reconciliation-pending result through the indexed result slot
+- **THEN** the same confirmed-master preservation rule SHALL apply as on the restart-at-stage trailing slot
+- **THEN** the returned result SHALL retain raw retry metadata and SHALL NOT derive another retry or downstream work
+
 #### Scenario: Bare pending result does not manufacture dispatch identity
 
-- **GIVEN** no prior stage contains confirmed Slurm submission identity
+- **GIVEN** the current stage loop has never observed a confirmed Slurm submission identity
 - **WHEN** a reconciliation-pending stage result is returned
 - **THEN** the result SHALL remain without Slurm submission identity
 - **THEN** the pending status alone SHALL NOT prove that Slurm submission occurred
