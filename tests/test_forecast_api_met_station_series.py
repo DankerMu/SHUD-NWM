@@ -11,7 +11,9 @@ from fastapi.testclient import TestClient
 from apps.api.main import create_app
 from apps.api.routes import data_sources
 from apps.api.routes.data_sources import get_station_lookup
+from packages.common import object_store_forcing
 from packages.common.object_store_forcing import StationMetadata, raise_station_not_found
+from packages.common.safe_fs import SafeFilesystemError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATION_ID = "heihe_forc_001"
@@ -277,6 +279,67 @@ def test_station_series_route_missing_database_url_dependency_returns_api_envelo
     assert body["request_id"]
     assert body["error"]["code"] == "DATABASE_URL_MISSING"
     assert "DATABASE_URL is required" in body["error"]["message"]
+
+
+def test_station_series_route_absorbs_concurrent_replace_at_production_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3.9 — the bounded retry is reachable from the public route at its shipped default.
+
+    Every case in tests/test_object_store_forcing.py either injects a non-default
+    ``attempts=`` or takes a path that never retries, so neither the module
+    constant nor the production call site is pinned by them: setting
+    MAX_STATION_FORCING_IDENTITY_RETRY_ATTEMPTS to 1, or making
+    read_station_forcing_csv pass attempts=1, turns the feature off in
+    production while that suite stays green.  This case passes NO ``attempts=``
+    anywhere -- the production default is the only thing that can absorb the
+    single injected replacement -- and asserts the route returns 200 with the
+    parsed series instead of the pre-change STATION_FORCING_FILE_MALFORMED 500.
+
+    Namespace note: object_store_forcing does ``from packages.common.safe_fs
+    import open_file_no_follow``, so the spy must be installed on
+    packages.common.object_store_forcing; patching safe_fs would not bite.
+    """
+
+    _write_csv(tmp_path)
+    real_open = object_store_forcing.open_file_no_follow
+    calls: list[Path] = []
+
+    def spy_open(path: Path, **kwargs: Any) -> int:
+        calls.append(Path(path))
+        if len(calls) == 1:
+            raise SafeFilesystemError(
+                f"Target file changed while being opened: {path}",
+                kind="identity_changed",
+            )
+        return real_open(path, **kwargs)
+
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", spy_open)
+
+    with _client(tmp_path) as client:
+        response = client.get(
+            f"/api/v1/met/stations/{STATION_ID}/series",
+            params={
+                "model_id": MODEL_ID,
+                "source_id": SOURCE_ID,
+                "cycle_time": CYCLE_TIME,
+                "variables": "PRCP",
+                "limit": 3,
+            },
+        )
+
+    assert response.status_code == 200
+    # Vacuity guard: if the route ever stops reaching the module-level binding
+    # the spy never fires, the status stays 200, and only this count notices.
+    assert len(calls) == 2
+    assert calls[0].name == FORCING_FILENAME
+    body = response.json()
+    assert body["status"] == "ok"
+    data = body["data"]
+    assert data["station_id"] == STATION_ID
+    assert [series["variable"] for series in data["series"]] == ["PRCP"]
+    assert [point["value"] for point in data["series"][0]["points"]] == [1.0, 2.0, 3.0]
 
 
 def _client(tmp_path: Path, lookup: FakeStationLookup | None = None) -> TestClient:

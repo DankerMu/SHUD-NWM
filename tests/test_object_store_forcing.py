@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from packages.common.object_store_forcing import (
     raise_station_not_found,
     read_station_forcing_csv,
 )
+from packages.common.safe_fs import SafeFilesystemError
 
 CYCLE_TIME = datetime(2026, 6, 20, 12, tzinfo=UTC)
 MODEL_ID = "basins_heihe_shud"
@@ -915,3 +917,257 @@ def test_missing_required_filter_reuses_existing_details_shape(tmp_path: Path) -
         ]
     }
     assert DEFAULT_STATION_SERIES_LIMIT == 500
+
+
+# --- #1660: concurrent atomic replacement inside the no-follow open window ---
+#
+# The producer publishes each shud CSV with os.replace, which swaps the target
+# inode; open_file_no_follow refuses that swap with kind="identity_changed".
+# These cases pin the bounded retry that absorbs it.  Note the namespace:
+# object_store_forcing does `from packages.common.safe_fs import
+# open_file_no_follow`, so the spy MUST be installed on
+# packages.common.object_store_forcing — patching safe_fs would not bite.
+
+
+def _read_lines(
+    root: Path,
+    *,
+    attempts: int | None = None,
+    station: StationMetadata | None = None,
+) -> list[str]:
+    """Drive _read_csv_lines directly so `attempts` can be injected.
+
+    read_station_forcing_csv deliberately does not expose the knob (design D5),
+    so the injecting cases bind to the private seam that owns the retry.
+    """
+
+    station = station or _station()
+    path = _resolve_disk_path(
+        root,
+        _normalize_source_id(SOURCE_ID),
+        _compute_cycle_compact(CYCLE_TIME),
+        station.basin_version_id,
+        MODEL_ID,
+        station.forcing_filename or FORCING_FILENAME,
+    )
+    kwargs: dict[str, Any] = {
+        "expected_storage_key": object_store_forcing._object_store_relative_path(root, path),
+        "object_store_root": root,
+        "station_id": station.station_id,
+        "basin_version_id": station.basin_version_id,
+        "source_id": _normalize_source_id(SOURCE_ID),
+        "cycle_time": CYCLE_TIME,
+        "model_id": MODEL_ID,
+        "active_flag": station.active_flag,
+    }
+    if attempts is not None:
+        kwargs["attempts"] = attempts
+    return object_store_forcing._read_csv_lines(path, **kwargs)
+
+
+def _install_open_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failures: int = 0,
+    error_factory: Any = None,
+) -> list[Path]:
+    """Count open_file_no_follow calls; fail the first `failures` of them."""
+
+    real_open = object_store_forcing.open_file_no_follow
+    calls: list[Path] = []
+
+    def spy(path: Path, **kwargs: Any) -> int:
+        calls.append(Path(path))
+        if error_factory is not None and len(calls) <= failures:
+            raise error_factory(len(calls))
+        return real_open(path, **kwargs)
+
+    monkeypatch.setattr(object_store_forcing, "open_file_no_follow", spy)
+    return calls
+
+
+def _identity_changed(_attempt: int) -> SafeFilesystemError:
+    return SafeFilesystemError("Target file changed while being opened: /x/y.csv", kind="identity_changed")
+
+
+def test_concurrent_replace_retry_absorbs_identity_change_and_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.1 — a replacement that stops inside the bound is absorbed.
+
+    attempts=4 is injected on purpose (!= the module constant 3): a helper that
+    ignored the parameter and hard-used the constant would exhaust on attempt 3
+    and never reach the successful open.
+    """
+
+    _write_csv(tmp_path, time_days=[0.0, 0.125])
+    calls = _install_open_spy(monkeypatch, failures=3, error_factory=_identity_changed)
+
+    lines = _read_lines(tmp_path, attempts=4)
+
+    assert len(calls) == 4
+    assert lines[0] == "2\t6\t20260620\t20260627"
+    assert lines[1] == "Time_Day\tPrecip\tTemp\tRH\tWind\tRN"
+    assert len(lines) == 4
+
+
+def test_concurrent_replace_retry_exhausted_fails_closed_with_prefixed_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.2 — exhausting the bound keeps the pre-change failure contract.
+
+    attempts=2 is injected on purpose (!= the module constant 3) so a helper
+    that ignored the parameter would be caught by the call count.
+    """
+
+    _write_csv(tmp_path)
+    calls = _install_open_spy(monkeypatch, failures=99, error_factory=_identity_changed)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path, attempts=2)
+
+    assert isinstance(error.value, object_store_forcing.StationForcingFileMalformedError)
+    assert error.value.status_code == 500
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert error.value.details["parse_reason"].startswith("concurrent-replace")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("kind", ["unsafe", "io"])
+def test_non_identity_refusals_are_not_retried_and_keep_verbatim_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """3.3 — default-deny: only identity_changed retries, and only it is relabelled."""
+
+    _write_csv(tmp_path)
+    raised = SafeFilesystemError(f"Target file must be a regular file: {tmp_path}/x.csv", kind=kind)
+    calls = _install_open_spy(monkeypatch, failures=99, error_factory=lambda _attempt: raised)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path)
+
+    assert len(calls) == 1
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    reason = error.value.details["parse_reason"]
+    assert "concurrent-replace" not in reason
+    assert reason == object_store_forcing._public_error_reason(raised)
+
+
+def test_retry_decision_follows_kind_not_message_text_for_unfamiliar_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.4a — identity_changed with wording unlike the primitive's still retries."""
+
+    _write_csv(tmp_path, time_days=[0.0, 0.125])
+
+    def alien_wording(_attempt: int) -> SafeFilesystemError:
+        return SafeFilesystemError("inode moved", kind="identity_changed")
+
+    calls = _install_open_spy(monkeypatch, failures=2, error_factory=alien_wording)
+
+    lines = _read_lines(tmp_path, attempts=3)
+
+    assert len(calls) == 3
+    assert len(lines) == 4
+
+
+def test_retry_decision_follows_kind_not_message_text_for_lookalike_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.4b — the primitive's identity wording under another kind does NOT retry."""
+
+    _write_csv(tmp_path)
+    lookalike = SafeFilesystemError("Target file changed while being opened: /x", kind="unsafe")
+    calls = _install_open_spy(monkeypatch, failures=99, error_factory=lambda _attempt: lookalike)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path, attempts=3)
+
+    assert len(calls) == 1
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert "concurrent-replace" not in error.value.details["parse_reason"]
+
+
+def test_parse_failure_on_opened_descriptor_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.5 — a content defect behind a successful open surfaces on first sight."""
+
+    _write_csv(
+        tmp_path,
+        raw_content=(
+            "2\t6\t20260620\t20260627\n"
+            "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+            "0\t1.000\t271.000\t0.510\t4.000\t101.000\n"
+            "\n"
+        ),
+    )
+    calls = _install_open_spy(monkeypatch)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path, attempts=3)
+
+    assert len(calls) == 1
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
+    assert "concurrent-replace" not in error.value.details["parse_reason"]
+
+
+def test_missing_file_keeps_not_found_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.6 — os.replace leaves no missing-file window, so 404 keeps its shape."""
+
+    path = _write_csv(tmp_path)
+    path.unlink()
+    calls = _install_open_spy(monkeypatch)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path, attempts=3)
+
+    assert isinstance(error.value, object_store_forcing.StationForcingFileNotFoundError)
+    assert error.value.status_code == 404
+    assert len(calls) == 1
+
+
+def test_identity_retry_never_sleeps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """3.7 — the bound is delivered without an interval knob (design D5).
+
+    Asserted along a sequence that really retries: a clean read would exercise
+    no retry at all and would stay green under a sleeping implementation.
+    """
+
+    _write_csv(tmp_path, time_days=[0.0, 0.125])
+    calls = _install_open_spy(monkeypatch, failures=2, error_factory=_identity_changed)
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    lines = _read_lines(tmp_path, attempts=3)
+
+    assert len(calls) == 3
+    assert len(lines) == 4
+    assert sleeps == []
+
+
+def test_identity_changed_raised_during_parse_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """3.8 — the retry's SCOPE is the open, not the parse.
+
+    Without this case, widening the retry to wrap the whole open+parse block is
+    an equivalent mutant: the selector is still the kind, and a normal parse
+    raises only ValueError/OSError, which never matches it.
+    """
+
+    _write_csv(tmp_path)
+    calls = _install_open_spy(monkeypatch)
+
+    def boom(_self: Any, _line_label: str) -> str | None:
+        raise SafeFilesystemError("Target file changed while being opened: /x", kind="identity_changed")
+
+    monkeypatch.setattr(object_store_forcing._ChunkedBoundedCsvLineReader, "readline", boom)
+
+    with pytest.raises(ForecastStoreError) as error:
+        _read_lines(tmp_path, attempts=3)
+
+    assert len(calls) == 1
+    assert error.value.code == "STATION_FORCING_FILE_MALFORMED"
