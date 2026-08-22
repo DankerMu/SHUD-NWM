@@ -50275,3 +50275,130 @@ def test_strict_warm_start_budget_state_retry_attempt_is_unreachable_from_the_no
     assert decision.reason == "strict_warm_start_retry_budget_exhausted"
     assert decision.evidence["retry_policy"]["attempt"] == 2
     assert decision.evidence["retry_policy"]["retry_limit"] == 2
+
+
+# ---------------------------------------------------------------------------
+# #1735: cohort suppression is symmetric with the completion-scope filter.
+# Scoping alone leaves a second deadlock — the pre-``t*`` submission blocks as
+# ``block_predecessor_pending`` and §8.6 prepends an even earlier candidate —
+# so a model must not be submitted for cycles that predate its own cutover.
+# ---------------------------------------------------------------------------
+
+
+class _EarliestCloneRowLineageProvider:
+    """DB-plane duck type: the earliest clone row for one ``(model, source)``."""
+
+    def __init__(self, *, model_id: str, source_id: str, valid_time: datetime) -> None:
+        self.model_id = model_id
+        self.source_id = source_id
+        self.valid_time = valid_time
+        self.calls: list[tuple[str, str]] = []
+
+    def get_earliest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> Any:
+        from packages.common.state_manager import StateSnapshot
+
+        self.calls.append((model_id, source_id))
+        if model_id != self.model_id or source_id != self.source_id:
+            return None
+        return StateSnapshot(
+            state_id="state_clone_row",
+            model_id=model_id,
+            run_id="clone_run",
+            valid_time=self.valid_time,
+            state_uri="s3://nhms/states/gfs/model_a/state.cfg.ic",
+            checksum="sha256:" + "e" * 64,
+            usable_flag=True,
+            source_id=source_id,
+            cloned_from_model_id="model_a_legacy",
+            clone_gate_fingerprint="sha256:" + "d" * 64,
+            clone_gate_kind="state_compatibility",
+        )
+
+
+def _lineage_cohort_scheduler(
+    tmp_path: Path,
+    *,
+    cutover: datetime,
+) -> Any:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T18:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository({}),
+    )
+    scheduler._lineage_provider_cache = _EarliestCloneRowLineageProvider(
+        model_id="model_a", source_id="gfs", valid_time=cutover
+    )
+    return scheduler
+
+
+def _lineage_cohort_cycle(cycle_time: str) -> Any:
+    parsed = _dt(cycle_time)
+    return scheduler_module.SchedulerSourceCycle(
+        discovery=CycleDiscovery(
+            cycle_id=f"gfs_{parsed.strftime('%Y%m%d%H')}",
+            source_id="gfs",
+            cycle_time=parsed,
+            cycle_hour=parsed.hour,
+            available=True,
+            status="discovered",
+        ),
+        horizon={},
+    )
+
+
+def test_build_candidates_suppresses_a_model_before_its_lineage_cutover(
+    tmp_path: Path,
+) -> None:
+    """#1735 §3.1 / 5.1: no candidate for a cycle that predates the model's ``t*``."""
+    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
+        cycles=[_lineage_cohort_cycle("2026-05-21T06:00:00Z")],
+    )
+
+    assert candidates == []
+    assert blocked == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "lineage_scoped_out_pre_cutover"
+    assert skipped[0]["model_id"] == "model_a"
+    assert skipped[0]["state_evidence"]["predecessor_model_id"] == "model_a_legacy"
+    assert skipped[0]["state_evidence"]["cutover_valid_time"] == "2026-05-21T12:00:00Z"
+    # Identity fields survive for the readiness evidence cardinality checks.
+    assert skipped[0]["candidate_id"]
+
+
+def test_build_candidates_admits_a_model_at_its_lineage_cutover(tmp_path: Path) -> None:
+    """Strict boundary: ``C == t*`` is the model's own first cycle."""
+    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T06:00:00Z"))
+
+    candidates, blocked, skipped, _duplicates, _sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
+        cycles=[_lineage_cohort_cycle("2026-05-21T06:00:00Z")],
+    )
+
+    assert [candidate.model_id for candidate in candidates] == ["model_a"]
+    assert blocked == []
+    assert skipped == []
+
+
+def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path) -> None:
+    """A model with no clone row keeps today's admission byte-for-byte."""
+    scheduler = _lineage_cohort_scheduler(tmp_path, cutover=_dt("2026-05-21T12:00:00Z"))
+    scheduler._lineage_provider_cache = _EarliestCloneRowLineageProvider(
+        model_id="model_z", source_id="gfs", valid_time=_dt("2026-05-21T12:00:00Z")
+    )
+
+    candidates, blocked, skipped, _duplicates, _sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
+        cycles=[_lineage_cohort_cycle("2026-05-21T06:00:00Z")],
+    )
+
+    assert [candidate.model_id for candidate in candidates] == ["model_a"]
+    assert blocked == []
+    assert skipped == []

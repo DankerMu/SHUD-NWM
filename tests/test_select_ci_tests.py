@@ -290,7 +290,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # fallback. The list grew from 5 to 28 in #1455, and to 30 in #1407 (the two
     # frontier suites, 46 tests in 0.42s together — noise against the lane it
     # joins), and to 31 in #1405 (the canonical run-id suite, 20 tests in
-    # 0.03s), and stays FROZEN here as a
+    # 0.03s), and to 32 in #1735 (the lineage resolver suite, 24 tests in
+    # 0.09s — the route that closes `services/orchestrator/__init__.py`'s
+    # importer gap), and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -325,6 +327,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_backfill_predecessor.py",
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
+        "tests/test_scheduler_lineage.py",
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
         # tests/test_retry.py and every same-name source route now schedules it
@@ -3813,6 +3816,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/state_clone_recalibration_fixtures.py",
         "tests/test_state_clone_recalibration.py",
     ),
+    (
+        "tests/lineage_state_index_fixtures.py",
+        "tests/test_scheduler_backfill.py",
+    ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
     # The literal-path half (#1498): this pair exists only because
@@ -3823,9 +3830,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ("tests/mock_shud_omp.py", "tests/test_shud_runtime.py"),
 )
 
-# At least this many support modules must derive a non-empty consumer set (7 of 8
-# today — 6 by import, plus mock_shud_omp by literal path). A pure "universe
-# non-empty" floor survives a derivation that collapses to a single lucky module.
+# At least this many support modules must derive a non-empty consumer set (10 of
+# 11 today — 9 by import, plus mock_shud_omp by literal path; #1735 added
+# lineage_state_index_fixtures to both halves). A pure "universe non-empty" floor
+# survives a derivation that collapses to a single lucky module.
 MIN_SUPPORT_MODULES_WITH_IMPORTERS = 3
 
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"

@@ -302,3 +302,46 @@ def test_generation_scoped_history_signal_blocked_when_index_malformed(tmp_path:
     assert signal["history_exists_any_generation"] is None
     assert signal["history_exists_current_generation"] is None
     assert signal["reason"]
+
+
+def test_generation_scoped_history_signal_is_not_scoped_by_clone_lineage(
+    tmp_path: Path,
+) -> None:
+    """#1735 non-goal: the history signal keeps NO ``valid_time`` bound.
+
+    A recalibrated model's clone row makes ``exists_any_generation`` True at
+    EVERY cycle, including cycles before its own cutover ``t*``.  The #1735
+    lineage filter deliberately does not change that — the first-cycle branch
+    was already unreachable for such a model, and moving the bound here would
+    alter cold-start semantics for models with no lineage.  Pinned so a later
+    "tidy-up" cannot quietly reintroduce the cold-start regression.
+    """
+    from tests.lineage_state_index_fixtures import index_entry as _lineage_entry
+    from tests.lineage_state_index_fixtures import index_repository as _lineage_repository
+
+    object_root = tmp_path / "lineage" / "objects"
+    repo = _lineage_repository(
+        tmp_path / "lineage",
+        [
+            _lineage_entry(
+                object_root=object_root,
+                model_id="model_a_prime",
+                valid_time="2026-07-06T00:00:00Z",
+                cloned_from_model_id="model_a",
+            )
+        ],
+        generated_at="2026-07-06T00:00:00Z",
+        now="2026-07-06T12:00:00Z",
+    )
+
+    # ``before_time`` is 12 HOURS EARLIER than the clone row's valid_time.
+    signal = repo.generation_scoped_history_signal(
+        model_id="model_a_prime",
+        source_id="gfs",
+        before_time=_dt("2026-07-05T12:00:00Z"),
+        current_package_checksum="c" * 64,
+    )
+
+    assert signal["ready"] is True
+    assert signal["history_exists_any_generation"] is True
+    assert signal["history_exists_current_generation"] is True

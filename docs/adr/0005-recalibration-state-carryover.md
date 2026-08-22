@@ -194,3 +194,19 @@ table, not just the recalibration ones.
 - If a DB-backed recalibration caller ever appears, the gate itself is already
   repository-agnostic — but re-read the dual-index reasoning above before
   assuming the file plane can be dropped.
+- **`:107` "Scheduler admission and lineage validation are not touched" is now
+  qualified** (`#1735`, change `lineage-scoped-cycle-completion`). Leaving the
+  scheduler alone was the half of the ruling that wedged production: every
+  completeness predicate is keyed strictly by `model_id`, `M1'` has zero
+  pipeline history before its cutover `t*`, so on 2026-08-22 all 29 cycles in
+  the 336h backfill lookback flipped `complete` → `gap` and the lane pinned
+  itself on a cycle `M1'` could never close. The scheduler now DOES consume
+  `cloned_from_model_id` / the clone row's `valid_time`: **completion scope**
+  and **cohort membership** exclude a model for cycles strictly earlier than
+  its own `t*`, resolved per `(model_id, source_id)` from the model's own
+  earliest clone row with no ancestry walk. What remains untouched is what
+  this ADR's sentence was actually protecting: **admission-side** validation —
+  `_validate_state_lineage`, the strict warm-start checks, the D8.3 / D8.7
+  generation quarantine, and the derivation of the content-addressed
+  `model_id`. A model with no clone row is scored and admitted byte-for-byte
+  as before.

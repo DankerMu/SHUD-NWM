@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_generation as _scheduler_generation
+from services.orchestrator import scheduler_lineage as _scheduler_lineage
 from services.orchestrator.scheduler_init_state_match import (
     TERMINAL_INIT_STATE_ABSENT,
     TERMINAL_INIT_STATE_CONFLICT,
@@ -129,6 +130,38 @@ class SchedulerDiscoveryContext:
         [SchedulerCandidateLike, SchedulerSourceCycle],
         int,
     ] | None = None
+    # #1735: resolves ``(model_id, source_id)`` to the model's own state-
+    # lineage cutover ``t*`` (or ``None`` — no lineage).  Optional: ``None``
+    # means no lineage is resolvable in this context, and every model is
+    # scored exactly as before this change.
+    lineage_cutover_for_model_source: Callable[
+        [str, str],
+        _scheduler_lineage.LineageCutover | None,
+    ] | None = None
+
+
+@dataclass(frozen=True)
+class _CompletionScope:
+    """The completion scope of one cycle, with the two filter stages kept apart.
+
+    ``source_scoped`` is the scope after the source-scope filter and BEFORE
+    the #1735 lineage filter; ``models`` is the final scope.  The caller needs
+    both to tell an empty scope caused by missing configuration (a
+    misconfiguration guard that must keep its ``gap`` verdict) from one caused
+    by every model being lineage-scoped out (not a gap) — a distinction
+    ``_cycle_completion_verdict`` cannot make, since it sees only the final
+    tuple and returns ``gap`` unconditionally when it is empty.
+    """
+
+    models: tuple[SchedulerModelLike, ...]
+    source_scoped: tuple[SchedulerModelLike, ...]
+    lineage_excluded: tuple[
+        tuple[SchedulerModelLike, _scheduler_lineage.LineageCutover], ...
+    ]
+
+    @property
+    def emptied_by_lineage_filter(self) -> bool:
+        return not self.models and bool(self.lineage_excluded)
 
 
 def cycle_completion_status(
@@ -140,7 +173,17 @@ def cycle_completion_status(
 ) -> str:
     """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
 
-    scoped_models = _models_in_completion_scope(context, discovery, models)
+    scope = _completion_scope(context, discovery, models)
+    # #1735 (D5): an empty scope has two causes that must not share a verdict.
+    # "Nothing was configured / everything was source-scoped out" keeps its
+    # ``gap`` misconfiguration guard below.  "Every model was lineage-scoped
+    # out" is NOT a gap: there is no model that could ever have run this
+    # cycle under its current identity, so scheduling it can only starve the
+    # forward lane.  Reachable on an all-basin recalibration or a
+    # single-basin deployment.
+    if scope.emptied_by_lineage_filter:
+        return "complete"
+    scoped_models = scope.models
     verdict = _cycle_completion_verdict(context, discovery, scoped_models, horizon=horizon)
     if verdict != "complete":
         return verdict
@@ -161,10 +204,76 @@ def _models_in_completion_scope(
     discovery: CycleDiscovery,
     models: Sequence[SchedulerModelLike],
 ) -> tuple[SchedulerModelLike, ...]:
+    return _completion_scope(context, discovery, models).models
+
+
+def _completion_scope(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+) -> _CompletionScope:
+    """The single choke point every verdict tier consumes.
+
+    Two filters, in order:
+
+    1. source scope — a model variant that does not apply to this source;
+    2. #1735 lineage existence — a model whose own cutover ``t*`` for this
+       source is strictly later than the cycle time did not exist yet, so the
+       completeness predicate ("every model's full pipeline is done for this
+       cycle") cannot be asked about it.  Strict: ``cycle_time == t*`` stays
+       in scope and must genuinely complete.
+    """
+
     source_scope_filter = context.model_source_is_out_of_scope
     if callable(source_scope_filter):
-        return tuple(model for model in models if not source_scope_filter(model, discovery))
-    return tuple(models)
+        source_scoped = tuple(model for model in models if not source_scope_filter(model, discovery))
+    else:
+        source_scoped = tuple(models)
+    resolver = context.lineage_cutover_for_model_source
+    if not callable(resolver) or not source_scoped:
+        return _CompletionScope(models=source_scoped, source_scoped=source_scoped, lineage_excluded=())
+    in_scope: list[SchedulerModelLike] = []
+    excluded: list[tuple[SchedulerModelLike, _scheduler_lineage.LineageCutover]] = []
+    cycle_time = _ensure_utc(discovery.cycle_time)
+    for model in source_scoped:
+        cutover = resolver(str(model.model_id), str(discovery.source_id))
+        if cutover is not None and _scheduler_lineage.is_pre_cutover(cutover, cycle_time):
+            excluded.append((model, cutover))
+            continue
+        in_scope.append(model)
+    return _CompletionScope(
+        models=tuple(in_scope),
+        source_scoped=source_scoped,
+        lineage_excluded=tuple(excluded),
+    )
+
+
+def lineage_scoped_out_evidence(
+    context: SchedulerDiscoveryContext,
+    discovery: CycleDiscovery,
+    models: Sequence[SchedulerModelLike],
+) -> list[dict[str, Any]]:
+    """#1735 §4: one ``lineage_scoped_out_pre_cutover`` annotation per excluded pair.
+
+    Pure annotation — the pass evidence carries it so an operator can tell a
+    cycle that scored ``complete`` with a recalibrated model scoped out from
+    one where every model genuinely completed.  Nothing reads it back.
+    """
+
+    scope = _completion_scope(context, discovery, models)
+    return [
+        {
+            "type": _scheduler_lineage.LINEAGE_SCOPED_OUT_REASON,
+            **_evidence_safe(
+                _scheduler_lineage.lineage_scoped_out_record(
+                    cutover,
+                    cycle_time=_ensure_utc(discovery.cycle_time),
+                    cycle_id=cycle_id_for(discovery.source_id, discovery.cycle_time),
+                )
+            ),
+        }
+        for _model, cutover in scope.lineage_excluded
+    ]
 
 
 def _cycle_completion_verdict(
@@ -570,6 +679,11 @@ def _select_backfill_source_cycles(
             status = cycle_completion_status(context, discovery, models, horizon=horizon)
         else:
             status = completion_status_provider(discovery, models, horizon=horizon)
+        # #1735 §4: annotate every (model, cycle) pair the lineage filter
+        # excluded, whatever the verdict, so a ``complete`` that only holds
+        # because a recalibrated model did not exist yet is never mistaken
+        # for "every model genuinely completed".  Annotation only.
+        evidence.extend(lineage_scoped_out_evidence(context, discovery, models))
         if status == "complete":
             complete_count += 1
             continue
