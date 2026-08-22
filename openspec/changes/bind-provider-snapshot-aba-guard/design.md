@@ -92,7 +92,7 @@ This is where the issue's "用不同长度的替换内容" suggestion belongs. P
 different length into the ABA test instead would re-arm the `size` field and
 break D3's mutation proof.
 
-Known limit, routed at close: disjunct 1 (`before != after`) still has no test
+Known limit, routed as #1733: disjunct 1 (`before != after`) still has no test
 that isolates it — that needs a scenario where the content digest matches but a
 metadata field does not (for example a `chmod` between the payload read and the
 second capture). Out of scope here; #1717's acceptance criteria are all about

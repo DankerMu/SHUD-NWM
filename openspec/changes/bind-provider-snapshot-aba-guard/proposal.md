@@ -45,9 +45,12 @@ oracle-integrity story of this change.
   bytes before the `:135` payload read, then restore the original bytes *and*
   the original `mtime_ns` before the `after` capture. `before == after` holds
   exactly, so the content-hash disjunct is the only thing that can raise.
-- Add a second, smaller test covering the metadata-divergence disjunct
-  (`before != after`) with a different-length replacement that is not restored,
-  which diverges on `size` and so is equally platform-independent.
+- Add a second, smaller test for the replaced-and-left-replaced case, with a
+  different-length replacement that is not restored. It does **not** isolate a
+  disjunct — with the replacement left in place both `before != after` and the
+  content-digest comparison fire — but its divergence rides on `size` rather
+  than on timestamp granularity, so it is deterministic on both platforms.
+  Isolating `before != after` on its own is tracked separately in #1733.
 - Both tests assert the observed call count so a future refactor of the read
   sequence fails loudly instead of degrading back into a vacuous green.
 
