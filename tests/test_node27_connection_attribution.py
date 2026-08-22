@@ -392,10 +392,10 @@ def test_retention_measure_failure_text_stays_credential_redacted(
 # isolation, so the wiring itself (main -> helper -> psycopg2.connect) is what
 # is pinned.
 # --------------------------------------------------------------------------- #
-def _run_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _run_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
     """``main()`` with no injected ``now`` -- the production CLI shape."""
     for key, value in {
-        "DATABASE_URL": DSN,
+        "DATABASE_URL": dsn,
         "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE": "disabled",
         "NODE27_TIMESERIES_RETENTION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
         "NODE27_TIMESERIES_RETENTION_LOCK_PATH": str(tmp_path / "runner.lock"),
@@ -405,10 +405,10 @@ def _run_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert node27_timeseries_retention.main(argv=[]) != 0
 
 
-def _run_compression_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _run_compression_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
     """``main()`` with no injected ``now_utc`` -- the production CLI shape."""
     for key, value in {
-        "DATABASE_URL": DSN,
+        "DATABASE_URL": dsn,
         "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "604800",
         "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "5",
         "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
@@ -418,12 +418,12 @@ def _run_compression_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert node27_timeseries_compression.main([]) != 0
 
 
-def _run_raw_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _run_raw_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
     """``main()`` with no ``--reference-time`` -- the production timer shape."""
     root = tmp_path / "object-store"
     (root / "raw").mkdir(parents=True)
     for key, value in {
-        "NODE27_DISPLAY_WATERMARK_DATABASE_URL": DSN,
+        "NODE27_DISPLAY_WATERMARK_DATABASE_URL": dsn,
         "NODE27_RAW_RETENTION_OBJECT_STORE_ROOT": str(root),
         "NODE27_RAW_RETENTION_SOURCES": "gfs",
         "NODE27_RAW_RETENTION_DAYS": "14",
@@ -464,6 +464,45 @@ def test_display_watermark_connection_is_attributed_on_every_tick(
     # The helper's own bounded-connect contract must survive the injection:
     # display_watermark.py passes connect_timeout=5 and nothing else.
     assert probe.kwargs == {"connect_timeout": 5}
+
+
+@pytest.mark.parametrize(
+    ("case_id", "run_main", "expected_name"),
+    DELEGATED_WATERMARK_CASES,
+    ids=[case[0] for case in DELEGATED_WATERMARK_CASES],
+)
+def test_display_watermark_connection_keeps_the_operator_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    case_id: str,
+    run_main: Any,
+    expected_name: str,
+) -> None:
+    """T4 over the DELEGATED path: the override must survive the extra hop.
+
+    The direct-connect T4 above only covers PSYCOPG2_CASES. Here the identity is
+    injected by a wrapper the component hands to ``fetch_display_watermark``, so
+    an implementation that stamped ``application_name`` (or rewrote the DSN in
+    ``args[0]``) instead of ``fallback_application_name`` would silently outrank
+    the operator on exactly the ticks they are trying to label.
+    """
+    probe = _probe_psycopg2_connect(monkeypatch)
+
+    run_main(monkeypatch, tmp_path, DSN_WITH_OVERRIDE)
+    capsys.readouterr()
+
+    assert probe.called, f"{case_id} never reached psycopg2.connect"
+    # The wrapper must not touch args[0]: the operator's DSN reaches libpq verbatim.
+    assert probe.args == (DSN_WITH_OVERRIDE,)
+    assert probe.kwargs == {"fallback_application_name": expected_name, "connect_timeout": 5}
+
+    conninfo = psycopg2.extensions.make_dsn(
+        probe.args[0], fallback_application_name=probe.kwargs["fallback_application_name"]
+    )
+    parsed = psycopg2.extensions.parse_dsn(conninfo)
+    assert parsed["application_name"] == "operator-override"
+    assert parsed["fallback_application_name"] == expected_name
 
 
 class _FakeCursor:
@@ -518,6 +557,43 @@ def test_refresh_coverage_all_attributes_every_worker_connection(
     for args, kwargs in calls:
         assert args == (DSN,)
         assert kwargs == {"fallback_application_name": "nhms-refresh-coverage"}
+
+
+def test_refresh_coverage_worker_connections_keep_the_operator_override(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T4 over the fanned-out worker path (see the delegated watermark case).
+
+    ``--all`` is also where an operator most plausibly sets their own
+    ``?application_name=`` to tag a manual backfill: every one of the 1+N
+    connections must keep that label while still carrying our default underneath.
+    """
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _connect(*args: Any, **kwargs: Any) -> _FakeConnection:
+        calls.append((args, kwargs))
+        return _FakeConnection()
+
+    run_ids = [f"run-{index}" for index in range(6)]
+    monkeypatch.setattr(psycopg2, "connect", _connect)
+    monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
+    monkeypatch.setattr(display_coverage, "_refresh", lambda _connection, run_id: [run_id])
+
+    assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN_WITH_OVERRIDE]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["refreshed"] == len(run_ids)
+
+    assert len(calls) == 1 + len(run_ids)
+    for args, kwargs in calls:
+        # The DSN is forwarded verbatim -- neither main() nor the worker fan-out
+        # may rewrite it to inject the identity.
+        assert args == (DSN_WITH_OVERRIDE,)
+        assert kwargs == {"fallback_application_name": "nhms-refresh-coverage"}
+        parsed = psycopg2.extensions.parse_dsn(psycopg2.extensions.make_dsn(args[0], **kwargs))
+        assert parsed["application_name"] == "operator-override"
+        assert parsed["fallback_application_name"] == "nhms-refresh-coverage"
 
 
 # --------------------------------------------------------------------------- #
