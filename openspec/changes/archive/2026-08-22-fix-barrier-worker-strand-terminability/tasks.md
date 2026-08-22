@@ -31,7 +31,7 @@ Must preserve: the four named tests, Barrier participant counts (8, 2, 20, 40), 
 - [x] 3.3 `uv run pytest -q tests/test_gateway_reconcile.py` passes within its existing runtime budget.
 - [x] 3.4 `uv run pytest -q tests/test_scheduler_file_provider_refresh.py` passes within its existing runtime budget.
 - [x] 3.5 `uv run ruff check .`, `git diff --check`, and `openspec validate fix-barrier-worker-strand-terminability --strict --no-interactive` pass.
-- [ ] 3.6 Selector probes for changes to each test file include that assertion suite plus `tests/test_select_ci_tests.py` (local half complete); final-head PR CI must execute assertions (not collect-only) and Governance Audit must succeed on the same SHA.
+- [x] 3.6 Selector probes for changes to each test file include that assertion suite plus `tests/test_select_ci_tests.py` (local half complete); final-head PR CI must execute assertions (not collect-only) and Governance Audit must succeed on the same SHA.
 
 ## 4. Non-goals and routing
 
@@ -48,5 +48,10 @@ Must preserve: the four named tests, Barrier participant counts (8, 2, 20, 40), 
 - [x] 5.5 Bind AST guards to exactly one module-level function definition, and reject duplicate or nested same-name decoys in tracked tests.
 - [x] 5.6 Make whole-process evidence non-vacuous: require a flushed post-readiness/injection checkpoint before accepting an expected child timeout, retain partial timeout output, and kill/reap the process group.
 - [x] 5.7 Remove scheduler-order assumptions by attributing errors by participant index and using synchronized positive liveness evidence instead of an incidental exact alive count.
-- [ ] 5.8 Re-run the focused injections, four original race node IDs, both full target files, selector tests, Ruff, diff check, strict OpenSpec validation, Phase 6.2 invariant audit, and final-head assertion-executing PR CI.
+- [x] 5.8 Re-run the focused injections, four original race node IDs, both full target files, selector tests, Ruff, diff check, strict OpenSpec validation, Phase 6.2 invariant audit, and final-head assertion-executing PR CI.
 - [x] 5.9 Pin exception-path joined-before-reraise ordering at both explicit-thread protocol owners: deterministic parent-side evidence SHALL prove every successfully started peer's real `join()` returned with that peer terminated before the launch exception became observable, and removing only the exception-path join SHALL make the proof fail.
+
+## 6. Post-merge receipts
+
+- [x] 6.1 Implementation PR #1689 final head `42c7f6f222c2490fa36ce4a50a00d0d786067529`: CI run `32543514980` assertion-executed the gateway, scheduler, and selector suites (`1004 passed`, not collect-only); Governance run `32543514982` succeeded on the same SHA.
+- [x] 6.2 Review closure: Round 3 clean after the registered same-invariant depth retro; pre-rebase and final-head Phase 7 Gap Sweeps clean; zero deferred findings and zero pre-merge skip blocks.
