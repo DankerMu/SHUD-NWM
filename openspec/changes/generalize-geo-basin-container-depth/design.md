@@ -71,3 +71,25 @@ else:
 `--basins` 显式清单构建的（其 `basins_huai_main` 用 `_basin_id` 自动发现产不出），
 本 PR 不重建产物、不改产物。产物与当前注册表的漂移（缺 #1699 七个新流域、仍含已退役
 `basins_hhe`）是既存问题，另行报告。
+
+## D5：spec delta 落在**新** capability，不挂 `basins-asset-discovery`
+
+初稿把 delta 放进 `basins-asset-discovery`。交叉审查 + verifier 门判定改放新 capability
+`national-geo-basin-discovery`，理由与代价核实如下：
+
+- `openspec/specs/basins-asset-discovery/spec.md` 的五条既有 requirement 全部约束
+  **registry discoverer**（`--basins-root` / `NHMS_BASINS_ROOT` CLI、errno/`ELOOP` 符号链检测、
+  JSON inventory 字段表、`*.cfg.ic` fail-closed 注册、必需文件不可读时的状态降级），
+  没有一条提到两份 geo builder。本变更自己的 proposal 就写明它们是「同一 Basins root 上的**第二套**发现实现」。
+- 全仓 190 个 capability 里没有任何一个约束这两个脚本或 `national-basin-{domain,river}.geojson`
+  （`grep -rn "build_national|national-basin|scripts/geo" openspec/specs/` 零命中）。
+  所以正确处置不是「换一个已有 capability」，而是「本来就缺一个」。
+- `openspec archive` 会把 delta **永久折进**目标 capability 的权威 spec
+  （已用 `2026-08-10-symlink-loop-errno-detection` 的归档件与现行 spec 逐字节比对验证）。
+  合并前迁移只是 fixture 内一次目录改名 + 重跑 `--strict`；合并并归档后再改，
+  要动已折入的权威 spec、仍得新建 capability，且归档件永久错档。
+
+保留说明：`basins-asset-discovery` 的 `## Purpose` 至今是
+`TBD - created by archiving change m9-basins-model-assets`，所以「它不管这两个脚本」
+**无法被证实也无法被证伪**——verifier 因此给 PLAUSIBLE 而非 CONFIRMED。
+处置按「不确定时倾向修而非丢」，且该 delta 文件是本变更新引入的、不具备 defer 资格。

@@ -1,4 +1,4 @@
-# basins-asset-discovery Spec Delta
+# national-geo-basin-discovery Spec Delta
 
 ## ADDED Requirements
 
