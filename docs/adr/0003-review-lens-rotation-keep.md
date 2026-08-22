@@ -597,3 +597,76 @@ self-inflicted — four of them chased a recurring defect in the fixture's own
 meta-checklist, not in the deliverable.
 
 **Keep rotation**, and record the sharper form above as the reason.
+
+## Revisit 2026-08-22 (after #1660 / PR #1696)
+
+Aggregate moved to core=53 rotated=258 (was 53/257). One rotated catch — a
+rounding-error contribution to the count. The value of this PR to the decision
+is not the count but a clean instance of the mechanism, in a shape the ledger
+did not previously contain.
+
+Round 1 ran two lenses on the same 72-line diff. The correctness/concurrency
+lens went deep: it measured attempt accounting across six values of `attempts`,
+drove 320 iterations of a *real* `os.replace` race to count file descriptors,
+and enumerated seven exception shapes against the retry predicate. It returned
+clean on every axis, and it was right — the shipped code was correct, and two
+later rounds plus a final review never found otherwise.
+
+The rotated-in test-evidence lens looked at the same diff and asked a different
+question: not "does the retry work" but "would anything notice if it stopped".
+The answer was no. Two mutants that switch the feature off in production —
+the module constant set to 1, and the sole production call site pinned to one
+attempt — both left the suite fully green, because every test that exercised the
+retry injected its own bound and every test that used the default took a
+non-retrying path. `grep` for the constant across `tests/` returned nothing.
+
+That is the distinction worth recording: **verifying behavior and verifying that
+the behavior is pinned are different questions, and a lens that has just
+convinced itself the code is correct is the worst-placed one to ask the second.**
+It is the same structural argument as the 2026-08-21 entry (rotate off the
+surface your own previous round produced), reached from the opposite direction —
+there the risk was auditing your own artifact, here it is auditing your own
+conclusion.
+
+Round 2 then rotated both lenses again, onto the corrective action itself and
+onto the integration boundary. The audit lens caught a one-word fidelity drift
+in the round-1 spec fix that would have been silently folded into the base spec
+on `openspec archive`; the integration lens found that the diagnostic token this
+PR introduced never reaches server logs, which is where an operator would look
+for it (routed to #1704). Neither surface had a prior owner.
+
+Counter-note: two rounds is a cheap sample, and the round-2 findings were P3 and
+out-of-scope respectively — neither would have blocked a merge. The honest claim
+is about the round-1 coverage gap, which was real, was P2, and was invisible to
+the lens best acquainted with the code.
+
+**Keep rotation.** No change to the recorded rule.
+
+## Revisit 2026-08-22 (after #1645 / PR #1689)
+
+Auditor now reports 102 multi-round merged PRs, later-round catches
+**core=54 rotated=258** (was 101 / 53 / 258 after PR #1696). PR #1689 is the
+entire delta: **core +1, rotated +0**.
+
+This attribution is one of the cleaner `core` samples in the ledger. The
+Round 2 P1 was found by the `test-evidence` lens, which was present in Round 1
+and intentionally pinned into Round 2. It caught a regression in the same
+partial-launch invariant after the implementation had already been repaired:
+both explicit-thread tests could still pass when only the exception-path join
+was deleted. The independent verifier executed those mutants and observed
+Gateway 25/25 and scheduler 30/30 false-green; the corrective parent-side join
+proof then made the same mutants deterministically red.
+
+That result establishes that the pinned core still buys fix-regression recall.
+It does **not** support reverting to the Round 1 mix: the policy under review is
+additive rotation and never rotates the pinned core out. A single `core +1`
+sample therefore argues for keeping the core pinned, not for removing the free
+rotated slots. Round 3 used full-scope + pinned evidence/concurrency lenses and
+was clean, so this PR supplies no rotated catch in either direction.
+
+The accumulated ratio still points toward keep, but all previously recorded
+measurement caveats remain: fixture/final-review roles, lens-name variants, and
+subset/non-rotation rounds can contaminate the aggregate. **Keep rotation**
+under the autonomous default; no policy change. Any future reversal still
+requires the recorded attribution schema/round-role fixes plus maintainer
+review.
