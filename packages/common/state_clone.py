@@ -33,7 +33,10 @@ the clone was blocked. The six distinguished refusal scopes are:
   bypass Change 4's legacy-reactivation guard. Fail-closed, no override.
 * ``degenerate_gate_inputs`` — ``state_schema_bytes`` or
   ``solver_config_bytes`` is empty. Prevents a symmetric-empty degenerate
-  fingerprint from false-passing the equality gate.
+  fingerprint from false-passing the equality gate. In
+  ``transfer_mode='recalibration'`` an OMITTED per-side ``m0_*`` override
+  refuses here too: reusing the target's bytes for both sides would
+  compare the ``state_schema`` surface against itself.
 * ``missing_qualified_source`` — no ``(M0, source, t*)`` row exists.
 * ``stale_latest_snapshot`` — a ``(M0, source, valid_time < t*)`` row
   exists but the ``valid_time == t*`` row does not (Gate G10 condition 4;
@@ -366,10 +369,12 @@ def fingerprint_gated_state_clone(
     Under ``M1 -> M1'`` that fallback would be a FALSE PASS: if ``M1'``
     ships a new ``cfg.ic``, feeding ``M1'``'s bytes to both sides makes
     the ``state_schema`` surface compare equal and admits a clone this
-    change explicitly must refuse. A recalibration caller therefore always
-    supplies both overrides, read per package root. A supplied-but-empty
-    override is refused with ``degenerate_gate_inputs`` like the required
-    inputs.
+    change explicitly must refuse. In ``recalibration`` both overrides are
+    therefore REQUIRED, read per package root: an omitted (``None``) or a
+    supplied-but-empty override refuses with ``degenerate_gate_inputs``
+    like the required inputs, so a caller cannot reach the false pass by
+    leaving the argument at its default. The ``None``-means-reuse-the-
+    target fallback survives unchanged in ``fix_forward``.
 
     Evidence cross-check waiver (D5)
     --------------------------------
@@ -439,7 +444,8 @@ def fingerprint_gated_state_clone(
     #    both modes — solver_config does not enter the eight-surface hash,
     #    but one unconditional check cannot drift out of sync with a mode
     #    branch. A supplied-but-empty m0 override is degenerate for the same
-    #    reason; ``None`` means "reuse the target bytes" and is not empty.
+    #    reason; ``None`` means "reuse the target bytes" and is not empty --
+    #    but only in ``fix_forward``; see 1b for the recalibration rule.
     if not state_schema_bytes or not solver_config_bytes:
         return _refuse(
             audit_recorder,
@@ -453,6 +459,27 @@ def fingerprint_gated_state_clone(
             scope="degenerate_gate_inputs",
         )
     if m0_solver_config_bytes is not None and not m0_solver_config_bytes:
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope="degenerate_gate_inputs",
+        )
+    # 1b. In ``recalibration`` an OMITTED m0 override is degenerate too. The
+    #     ``None`` -> "reuse the target bytes" fallback is correct for
+    #     ``fix_forward`` (the variant copies the baseline's cfg.ic verbatim)
+    #     but under ``M1 -> M1'`` it would compare the ``state_schema`` surface
+    #     against ITSELF and admit exactly the new-cfg.ic clone this mode must
+    #     refuse -- the false pass this docstring declares out of bounds. The
+    #     precondition "a recalibration caller always supplies both overrides"
+    #     is therefore enforced here rather than trusted, so a future caller
+    #     falls into a refusal by omission and not into a false pass.
+    #     ``m0_solver_config_bytes`` is held to the same rule even though
+    #     ``solver_config`` sits outside the eight-surface set: one rule for
+    #     both per-side overrides cannot drift out of sync the way a
+    #     surface-membership-conditional rule would. ``fix_forward`` is
+    #     untouched -- its ``None``-means-reuse-the-target semantics are
+    #     byte-identical to before.
+    if recalibration and (m0_state_schema_bytes is None or m0_solver_config_bytes is None):
         return _refuse(
             audit_recorder,
             audit_context,

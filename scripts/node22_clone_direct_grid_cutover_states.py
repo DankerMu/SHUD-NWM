@@ -333,6 +333,14 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
     Running the gate twice would risk two differing rows, and the copyback merge
     treats ``current == source_entry`` as a no-conflict replay -- byte-identical
     entries on both indexes are what keeps that branch reachable.
+
+    Receipt guarantee: the loop is a single fail-closed unit. Once ANY pair has
+    been applied, an abort on a later pair -- a gate refusal, an unresolvable
+    package, a mirror write failure, anything -- still writes the receipt
+    (``invocation_outcome="aborted"`` plus ``failed_pair``) before the exception
+    propagates, because the applied rows are already live in both indexes and
+    the receipt is their only declared evidence. An abort BEFORE any pair was
+    applied wrote nothing anywhere and produces no receipt.
     """
 
     cutover_time = parse_cycle_time(args.cutover_time)
@@ -367,131 +375,166 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
 
     pair_records: list[dict[str, Any]] = []
     mirror_failure: str | None = None
+    aborted_error: Exception | None = None
+    failed_pair: dict[str, Any] | None = None
+    pair_source_id: str | None = None
 
     for source_model_id, target_model_id in pairs:
-        source_model = models.get(source_model_id)
-        target_model = models.get(target_model_id)
-        if source_model is None:
-            raise CutoverCloneError(f"registry entry missing for --pairs source {source_model_id}")
-        if target_model is None:
-            raise CutoverCloneError(f"registry entry missing for --pairs target {target_model_id}")
+        pair_source_id = None
+        try:
+            source_model = models.get(source_model_id)
+            target_model = models.get(target_model_id)
+            if source_model is None:
+                raise CutoverCloneError(f"registry entry missing for --pairs source {source_model_id}")
+            if target_model is None:
+                raise CutoverCloneError(f"registry entry missing for --pairs target {target_model_id}")
 
-        source_root = _package_root(store, source_model)
-        target_root = _package_root(store, target_model)
-        _classify_direct_grid(source_root, model_id=source_model_id)
-        target_manifest_section = _classify_direct_grid(target_root, model_id=target_model_id)
+            source_root = _package_root(store, source_model)
+            target_root = _package_root(store, target_model)
+            _classify_direct_grid(source_root, model_id=source_model_id)
+            target_manifest_section = _classify_direct_grid(target_root, model_id=target_model_id)
 
-        source_id = _source_for_variant(source_model)
-        target_source_id = _source_for_variant(target_model)
-        if source_id != target_source_id:
-            raise CutoverCloneError(
-                f"--pairs {source_model_id}:{target_model_id} spans two sources "
-                f"({source_id} != {target_source_id}); a recalibration carry-over "
-                "runs once per pair for one source"
-            )
-
-        source_sp_att = _required_single(source_root, "*.sp.att")
-        target_sp_att = _required_single(target_root, "*.sp.att")
-        category_files = _state_compatibility_category_files(source_root, target_root)
-        # Per-side gate bytes: M1's own cfg.ic/cfg.para against M1's own. Feeding
-        # one side's bytes to both sides would make the state_schema surface
-        # compare equal even when M1' ships a new cfg.ic -- the exact false pass
-        # this mode must not ship.
-        source_state_schema_bytes = _required_single(source_root, "*.cfg.ic").read_bytes()
-        target_state_schema_bytes = _required_single(target_root, "*.cfg.ic").read_bytes()
-        source_solver_config_bytes = _required_single(source_root, "*.cfg.para").read_bytes()
-        target_solver_config_bytes = _required_single(target_root, "*.cfg.para").read_bytes()
-
-        recorder = _RefusalRecorder()
-        gate_repo: Any = canonical_repo if args.apply else _DryRunStateIndexRepository(canonical_repo)
-        result = fingerprint_gated_state_clone(
-            m0_model_id=source_model_id,
-            m1_model_id=target_model_id,
-            m1_model_package_version=str(target_model["model_package_uri"]),
-            m1_model_package_checksum=str(target_model["package_checksum"]),
-            source_id=source_id,
-            cutover_valid_time=cutover_time,
-            m0_package_root=source_root,
-            m1_package_root=target_root,
-            m0_sp_att_path=source_sp_att,
-            m1_sp_att_path=target_sp_att,
-            m1_category_files=category_files,
-            # D5: the direct-grid provisioning script records no
-            # hydrologic_core_fingerprint anywhere, so there is no independent
-            # recorded value to cross-check against. The waiver is explicit and
-            # recorded in this receipt rather than satisfied vacuously by
-            # handing the gate back the value it just computed.
-            m1_recorded_hydrologic_core_fingerprint=None,
-            state_schema_bytes=target_state_schema_bytes,
-            solver_config_bytes=target_solver_config_bytes,
-            m0_state_schema_bytes=source_state_schema_bytes,
-            m0_solver_config_bytes=source_solver_config_bytes,
-            m1_forcing_mapping_manifest=target_manifest_section,
-            repository=gate_repo,
-            audit_recorder=recorder,
-            transfer_mode=TRANSFER_MODE_RECALIBRATION,
-        )
-        if result.refused or result.cloned_row is None:
-            raise CutoverCloneError(
-                f"state clone refused: {source_model_id}->{target_model_id}/{source_id}: "
-                f"{result.refusal_scope}; audit={recorder.records}"
-            )
-        clone_row = result.cloned_row
-
-        canonical_outcome: dict[str, Any] = {
-            "index_uri": args.state_index,
-            "outcome": "written" if args.apply else "dry_run_not_written",
-            "error": None,
-        }
-        mirror_outcome: dict[str, Any] = {
-            "index_uri": args.mirror_state_index,
-            "outcome": "dry_run_not_written",
-            "error": None,
-        }
-        if args.apply:
-            try:
-                mirror_repo.upsert_state_snapshot(clone_row)
-            except Exception as error:  # noqa: BLE001 - reported, never swallowed
-                mirror_outcome["outcome"] = "not_written"
-                mirror_outcome["error"] = f"{type(error).__name__}: {error}"
-                mirror_failure = (
-                    f"{source_model_id}->{target_model_id}/{source_id}: "
-                    f"{mirror_outcome['error']}"
+            source_id = _source_for_variant(source_model)
+            pair_source_id = source_id
+            target_source_id = _source_for_variant(target_model)
+            if source_id != target_source_id:
+                raise CutoverCloneError(
+                    f"--pairs {source_model_id}:{target_model_id} spans two sources "
+                    f"({source_id} != {target_source_id}); a recalibration carry-over "
+                    "runs once per pair for one source"
                 )
-            else:
-                mirror_outcome["outcome"] = "written"
 
-        pair_records.append(
-            {
+            source_sp_att = _required_single(source_root, "*.sp.att")
+            target_sp_att = _required_single(target_root, "*.sp.att")
+            category_files = _state_compatibility_category_files(source_root, target_root)
+            # Per-side gate bytes: M1's own cfg.ic/cfg.para against M1's own. Feeding
+            # one side's bytes to both sides would make the state_schema surface
+            # compare equal even when M1' ships a new cfg.ic -- the exact false pass
+            # this mode must not ship.
+            source_state_schema_bytes = _required_single(source_root, "*.cfg.ic").read_bytes()
+            target_state_schema_bytes = _required_single(target_root, "*.cfg.ic").read_bytes()
+            source_solver_config_bytes = _required_single(source_root, "*.cfg.para").read_bytes()
+            target_solver_config_bytes = _required_single(target_root, "*.cfg.para").read_bytes()
+
+            recorder = _RefusalRecorder()
+            gate_repo: Any = canonical_repo if args.apply else _DryRunStateIndexRepository(canonical_repo)
+            result = fingerprint_gated_state_clone(
+                m0_model_id=source_model_id,
+                m1_model_id=target_model_id,
+                m1_model_package_version=str(target_model["model_package_uri"]),
+                m1_model_package_checksum=str(target_model["package_checksum"]),
+                source_id=source_id,
+                cutover_valid_time=cutover_time,
+                m0_package_root=source_root,
+                m1_package_root=target_root,
+                m0_sp_att_path=source_sp_att,
+                m1_sp_att_path=target_sp_att,
+                m1_category_files=category_files,
+                # D5: the direct-grid provisioning script records no
+                # hydrologic_core_fingerprint anywhere, so there is no independent
+                # recorded value to cross-check against. The waiver is explicit and
+                # recorded in this receipt rather than satisfied vacuously by
+                # handing the gate back the value it just computed.
+                m1_recorded_hydrologic_core_fingerprint=None,
+                state_schema_bytes=target_state_schema_bytes,
+                solver_config_bytes=target_solver_config_bytes,
+                m0_state_schema_bytes=source_state_schema_bytes,
+                m0_solver_config_bytes=source_solver_config_bytes,
+                m1_forcing_mapping_manifest=target_manifest_section,
+                repository=gate_repo,
+                audit_recorder=recorder,
+                transfer_mode=TRANSFER_MODE_RECALIBRATION,
+            )
+            if result.refused or result.cloned_row is None:
+                raise CutoverCloneError(
+                    f"state clone refused: {source_model_id}->{target_model_id}/{source_id}: "
+                    f"{result.refusal_scope}; audit={recorder.records}"
+                )
+            clone_row = result.cloned_row
+
+            canonical_outcome: dict[str, Any] = {
+                "index_uri": args.state_index,
+                "outcome": "written" if args.apply else "dry_run_not_written",
+                "error": None,
+            }
+            mirror_outcome: dict[str, Any] = {
+                "index_uri": args.mirror_state_index,
+                "outcome": "dry_run_not_written",
+                "error": None,
+            }
+            if args.apply:
+                try:
+                    mirror_repo.upsert_state_snapshot(clone_row)
+                except Exception as error:  # noqa: BLE001 - reported, never swallowed
+                    mirror_outcome["outcome"] = "not_written"
+                    mirror_outcome["error"] = f"{type(error).__name__}: {error}"
+                    mirror_failure = (
+                        f"{source_model_id}->{target_model_id}/{source_id}: "
+                        f"{mirror_outcome['error']}"
+                    )
+                else:
+                    mirror_outcome["outcome"] = "written"
+
+            pair_records.append(
+                {
+                    "source_model_id": source_model_id,
+                    "target_model_id": target_model_id,
+                    "source_id": source_id,
+                    "state_compatibility_fingerprint": clone_row.clone_gate_fingerprint,
+                    "clone_gate_kind": clone_row.clone_gate_kind,
+                    "evidence_fingerprint_cross_check": "skipped_no_recorded_value",
+                    "covered_paths": sorted(
+                        f"{category}:{';'.join(paths)}" for category, paths in category_files.items()
+                    ),
+                    "source_model_package_version": str(source_model["model_package_uri"]),
+                    "source_model_package_checksum": str(source_model["package_checksum"]),
+                    "target_model_package_version": clone_row.model_package_version,
+                    "target_model_package_checksum": clone_row.model_package_checksum,
+                    "state_id": clone_row.state_id if args.apply else None,
+                    "cloned_from_state_id": clone_row.cloned_from_state_id,
+                    "cloned_from_model_id": clone_row.cloned_from_model_id,
+                    "state_index_outcomes": {
+                        "canonical": canonical_outcome,
+                        "mirror": mirror_outcome,
+                    },
+                }
+            )
+        except Exception as error:  # noqa: BLE001 - re-raised below, never swallowed
+            # A refusal or any other failure raised mid-loop must NOT unwind past
+            # the receipt write. Under ``--apply`` an EARLIER pair in this same
+            # invocation is already live in BOTH indexes, and the receipt is this
+            # carry-over's only declared evidence that it is. Record the failing
+            # pair, leave the loop so no further pair is attempted, let the
+            # receipt below be written (only when a pair really was applied --
+            # a first/only-pair refusal still produces no receipt), then re-raise
+            # the original exception so the exit code stays non-zero.
+            aborted_error = error
+            failed_pair = {
                 "source_model_id": source_model_id,
                 "target_model_id": target_model_id,
-                "source_id": source_id,
-                "state_compatibility_fingerprint": clone_row.clone_gate_fingerprint,
-                "clone_gate_kind": clone_row.clone_gate_kind,
-                "evidence_fingerprint_cross_check": "skipped_no_recorded_value",
-                "covered_paths": sorted(
-                    f"{category}:{';'.join(paths)}" for category, paths in category_files.items()
-                ),
-                "source_model_package_version": str(source_model["model_package_uri"]),
-                "source_model_package_checksum": str(source_model["package_checksum"]),
-                "target_model_package_version": clone_row.model_package_version,
-                "target_model_package_checksum": clone_row.model_package_checksum,
-                "state_id": clone_row.state_id if args.apply else None,
-                "cloned_from_state_id": clone_row.cloned_from_state_id,
-                "cloned_from_model_id": clone_row.cloned_from_model_id,
-                "state_index_outcomes": {
-                    "canonical": canonical_outcome,
-                    "mirror": mirror_outcome,
-                },
+                "source_id": pair_source_id,
+                "failure_kind": "pair_not_completed",
+                "error": f"{type(error).__name__}: {error}",
             }
-        )
+            break
         if mirror_failure is not None:
             # Fail closed on the first mirror divergence: continuing would widen
             # the window in which the two indexes disagree. The receipt below
             # names the canonical row as written and the mirror as not written so
             # the operator can repair the mirror before t*.
+            failed_pair = {
+                "source_model_id": source_model_id,
+                "target_model_id": target_model_id,
+                "source_id": pair_source_id,
+                "failure_kind": "mirror_write_failed",
+                "error": str(pair_records[-1]["state_index_outcomes"]["mirror"]["error"]),
+            }
             break
 
+    cloned_pair_count = sum(
+        record["state_index_outcomes"]["canonical"]["outcome"] == "written"
+        for record in pair_records
+    )
     receipt = {
         "schema_version": RECALIBRATION_RECEIPT_SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -500,18 +543,31 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
         "clone_gate_kind": CLONE_GATE_KIND_STATE_COMPATIBILITY,
         "dry_run": not args.apply,
         "declared_pair_count": len(pairs),
-        "cloned_pair_count": sum(
-            record["state_index_outcomes"]["canonical"]["outcome"] == "written"
-            for record in pair_records
+        "cloned_pair_count": cloned_pair_count,
+        # Invocation-level outcome, so a partial run is never mistaken for a
+        # clean one: ``complete`` means every declared pair ran through to a
+        # recorded outcome, ``aborted`` means the loop stopped early and
+        # ``failed_pair`` names the pair that stopped it. ``pairs`` below carries
+        # COMPLETED pair records only.
+        "invocation_outcome": (
+            "aborted" if (aborted_error is not None or mirror_failure is not None) else "complete"
         ),
+        "failed_pair": failed_pair,
         "state_index": args.state_index,
         "mirror_state_index": args.mirror_state_index,
         "evidence_fingerprint_cross_check": "skipped_no_recorded_value",
         "spin_up_distortion_announcement": RECALIBRATION_SPIN_UP_DISTORTION_ANNOUNCEMENT,
         "pairs": pair_records,
     }
-    if args.receipt:
+    # On an aborted run the receipt is written ONLY when a pair was actually
+    # applied: those rows are live in both indexes and need declaring. A
+    # first/only-pair refusal wrote nothing anywhere, so it keeps producing no
+    # receipt -- there is nothing to declare and an O_EXCL receipt file would
+    # only stand in the way of the corrected re-run.
+    if args.receipt and (aborted_error is None or cloned_pair_count > 0):
         _write_receipt(args.receipt, receipt)
+    if aborted_error is not None:
+        raise aborted_error
     if mirror_failure is not None:
         raise CutoverCloneError(
             "mirror state-index write failed after the canonical write succeeded; "

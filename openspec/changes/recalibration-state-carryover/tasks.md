@@ -142,9 +142,14 @@ Every row below is a required test with named input and expected output.
   `m1_recorded_hydrologic_core_fingerprint=None` → refused
   `evidence_fingerprint_mismatch`. (Rows 6, 7, 11.)
 - [x] 6.6 **Published-artifact / display-identity pack** —
-  `clone_gate_kind` round-trips: index entry with the key parses; index entry
-  without it parses to `None`; a re-upsert through
-  `state_manager.py`'s PG `DO UPDATE` path preserves the value. (Row 8.)
+  `clone_gate_kind` round-trips on the file plane: index entry with the key
+  parses; index entry without it parses to `None`. For `state_manager.py`'s PG
+  `DO UPDATE` path, what is provable DB-free is the static lockstep check —
+  `tests/test_state_clone_cutover_hook.py::test_both_state_snapshot_upsert_sql_copies_name_clone_gate_kind_in_lockstep`
+  pins the `clone_gate_kind = EXCLUDED.clone_gate_kind` assignment, the column
+  list, the `VALUES` arity and the params-tuple position in both copies. The
+  **runtime** upsert→re-upsert round trip is a PostgreSQL behavior with only one
+  honest oracle and is owed by §7.4 on node-27, not by this row. (Row 8.)
 - [x] 6.6b **PostGIS / TimescaleDB pack** — hook write path: extend
   `tests/test_state_clone_cutover_hook.py` so its `FakeCursor` asserts
   `clone_gate_kind='hydrologic_core'` is persisted on a hook-driven clone. That
@@ -165,6 +170,49 @@ Every row below is a required test with named input and expected output.
 - [x] 6.9 CLI end-to-end against fixture packages + fixture state indexes:
   dry-run writes nothing; `--apply` writes both indexes and a receipt whose
   fields match 4.6. Assert on the receipt JSON, not on stdout prose.
+
+### 6.10-6.13 — round-1 cross-review 裁决后追加（PR #1706）
+
+- [x] 6.10 **Receipt guarantee under a mid-batch abort** (round-1 C1, verified
+  P1) — a multi-pair `--apply` invocation where pair 1 is admitted and pair 2
+  raises: the receipt IS written, records pair 1 as `written` to both indexes,
+  names pair 2 in `failed_pair`, carries `invocation_outcome="aborted"`, and the
+  original exception still propagates. Plus: a first/only-pair refusal still
+  writes NO receipt (`cloned_pair_count == 0`), and a dry-run mid-batch refusal
+  writes neither index nor receipt. The guarantee is control-flow-shaped — the
+  loop body is wrapped whole, exception types are NOT enumerated — because the
+  refusal branch is only one of several in-loop raisers (empty non-lake category
+  union, `DirectGridProvisionError`, `UnknownCategoryError`/`SpAttRewriteError`
+  out of the gate's partial `except`).
+- [x] 6.11 `--baseline-registry` second payload (round-1 C2, verified P2) — (a)
+  a pair whose source resolves only out of `--baseline-registry` and whose
+  target resolves only out of `--variant-registry` clones successfully, with a
+  negative control asserting `registry entry missing` when the second payload is
+  withheld (proving the merge is load-bearing); (b) the same `model_id`
+  disagreeing between the two payloads refuses by name, before any write. The
+  strict whole-dict equality is PINNED, not relaxed.
+- [x] 6.12 `_parse_pairs` input validation (round-1 C3, verified P3) — one
+  parametrized test over the malformed (`a:b:c`), empty-side (`:b`, `a:`),
+  duplicate-pair and empty-`--pairs` refusals, each asserting the refusal
+  happens before any registry read.
+- [x] 6.13 Omitted per-side overrides are degenerate in recalibration mode
+  (round-1 C5, verdict PLAUSIBLE; included by risk-weighting — it is Invariant
+  Matrix row 2 failing silently when the overrides are omitted) —
+  `transfer_mode="recalibration"` with `m0_state_schema_bytes=None` (or
+  `m0_solver_config_bytes=None`) refuses `degenerate_gate_inputs` instead of
+  falling back to the target's own bytes. `fix_forward` keeps the
+  `None`-means-reuse-target semantics byte-identical. Both overrides are guarded
+  for symmetry even though `solver_config` is outside the eight surfaces, so the
+  contract reads as one sentence rather than a mode-dependent half-rule.
+  `test_shared_gate_bytes_would_false_pass_the_new_cfg_ic` keeps its
+  `refused is False` assertion and its D3-demonstration value: it now feeds the
+  target's bytes to the `m0_*` overrides EXPLICITLY, which is byte-for-byte what
+  the removed fallback produced (fixtures `:372` `solver_config_bytes=_PARA_V2`),
+  so the mechanism under test is unchanged — only the by-omission entry closes.
+- [x] 6.14 Migration `000053` static shape (optional, taken) — mirrors
+  `000046`'s column-only-forward-upgrade test: exactly one `ADD COLUMN`, one
+  `ALTER TABLE`, only `hydro.state_snapshot` touched, no destructive DDL tokens,
+  and the `state_snapshot_model_source_valid_time_key` unique index untouched.
 
 ## 7. Verification commands
 

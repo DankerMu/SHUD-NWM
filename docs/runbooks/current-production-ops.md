@@ -1388,15 +1388,28 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   `evidence_fingerprint_cross_check=skipped_no_recorded_value`（provision 脚本不记录
   `hydrologic_core_fingerprint`，因此交叉校验显式豁免而非拿刚算出的值自证）。
   receipt 以 `O_EXCL` 写入，路径已存在会直接失败——不要覆盖旧 receipt。
+- **先看 `invocation_outcome`**：`complete` = 每一对都跑到了记录结果；`aborted` = 中途
+  停了，`failed_pair` 指名是哪一对、`failure_kind` 是 `pair_not_completed`（该对被拒
+  或报错）还是 `mirror_write_failed`，`error` 带原文。`pairs` 数组里**只有已完成的
+  对**，失败的那对不在里面；`declared_pair_count` vs `cloned_pair_count` 给出写了几行。
 - **spin-up 失真告知义务保留**：warm carry-over 的失真小于冷启动但不为零，receipt
   里的 `spin_up_distortion_announcement` 是这条义务的落点。
-- 被拒绝时（`refusal_scope=state_compatibility_unequal`）：两份索引都没有写入、
-  也不产出 receipt。审计记录里带 `missing_category`/`missing_relative_path`/
-  `missing_side` 时，说明某个 hydrologic-core 文件只存在于一侧（新增或删除都算面不
-  相等），按该路径定位后再决定是修包还是走冷启动 + approval。
+- 被拒绝时（`refusal_scope=state_compatibility_unequal`）工具非零退出，**索引状态取决
+  于这对是第几对**：
+  - 第一对（或唯一一对）被拒：两份索引都没有写入，也不产出 receipt——干净重来即可。
+  - 前面已经有对写成功、后面某对被拒：**前面那些对的克隆行已经真实落在两份索引里**，
+    工具照样写 receipt（`invocation_outcome=aborted`，`pairs` 列出已写入的对，
+    `failed_pair` 记录被拒的对与原因）。这时**不要**当成"什么都没发生"：要么按 receipt
+    修好被拒那对后补跑（`--pairs` 只写剩下的对，receipt 换新路径），要么显式决定让已写
+    入的对生效。dry-run（不带 `--apply`）中途被拒则两份索引都没动，同样不产出 receipt。
+  审计记录里带 `missing_category`/`missing_relative_path`/`missing_side` 时，说明某个
+  hydrologic-core 文件只存在于一侧（新增或删除都算面不相等），按该路径定位后再决定是修
+  包还是走冷启动 + approval。
 - **mirror 写失败**（canonical 已写成功）：工具非零退出，receipt 里该对的
   `state_index_outcomes.canonical.outcome=written` 而
-  `...mirror.outcome=not_written` 并带错误文本。必须在 `t*` 之前修好 mirror；在
+  `...mirror.outcome=not_written` 并带错误文本，顶层同时是
+  `invocation_outcome=aborted` + `failed_pair.failure_kind=mirror_write_failed`。
+  必须在 `t*` 之前修好 mirror；在
   `NHMS_REQUIRE_FORECAST_WARM_START=true` 下，未修好的后果是本轮停摆（fail-safe），
   不是算错。
 - 调度准入侧**零改动**：克隆行带 `M1'` 的 `model_id` + `model_package_version` +

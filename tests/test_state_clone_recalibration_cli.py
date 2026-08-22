@@ -27,6 +27,7 @@ from packages.common.state_manager import (
     StateSnapshot,
     merge_state_snapshot_index_copyback,
     publish_state_snapshot_index,
+    state_snapshot_id,
 )
 from scripts.node22_clone_direct_grid_cutover_states import (
     CutoverCloneError,
@@ -228,6 +229,111 @@ def _cli_args(env: Mapping[str, Any], *extra: str) -> Any:
     enforce_mode_flags(parser, args)
     args.dry_run = not args.apply
     return args
+
+
+def _write_registry(path: Path, models: Sequence[Mapping[str, Any]]) -> Path:
+    path.write_text(json.dumps(_registry_payload(list(models))), encoding="utf-8")
+    return path
+
+
+def _registry_models_by_id(env: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    payload = json.loads(Path(env["registry_path"]).read_text(encoding="utf-8"))
+    return {str(model["model_id"]): dict(model) for model in payload["models"]}
+
+
+def _add_recalibration_pair(
+    env: dict[str, Any],
+    *,
+    source_model_id: str,
+    target_model_id: str,
+    target_ic: bytes,
+) -> dict[str, Any]:
+    """Append a SECOND ``M1->M1'`` pair to an existing CLI environment.
+
+    Writes both packages, publishes a qualified ``(source, gfs, t*)`` +12h row
+    into BOTH indexes, and appends both registry rows -- everything the second
+    pair needs to reach the gate on its own merits.
+    """
+
+    object_root = env["object_root"]
+    store = LocalObjectStore(object_root, "s3://nhms")
+    source_uri = f"s3://nhms/models/{source_model_id}/package"
+    target_uri = f"s3://nhms/models/{target_model_id}/package"
+    source_checksum = f"sha256:pkg-{source_model_id}"
+    target_checksum = f"sha256:pkg-{target_model_id}"
+
+    source_root = _write_package(
+        store.resolve_path(source_uri),
+        model_id=source_model_id,
+        calib=_CALIB_V1,
+        calib_table=_CALIB_TABLE_V1,
+        para=_PARA_V1,
+        ic=_IC_V1,
+    )
+    target_root = _write_package(
+        store.resolve_path(target_uri),
+        model_id=target_model_id,
+        calib=_CALIB_V2,
+        calib_table=_CALIB_TABLE_V2,
+        para=_PARA_V2,
+        ic=target_ic,
+    )
+
+    state_content = _valid_ic_bytes(source_model_id.encode("utf-8"))
+    state_uri = store.write_bytes_atomic(
+        f"states/{SOURCE_ID}/{source_model_id}/2026081512/state.cfg.ic", state_content
+    )
+    checksum = f"sha256:{sha256_bytes(state_content)}"
+    entry = {
+        "state_id": state_snapshot_id(
+            source_model_id,
+            CUTOVER_VALID_TIME,
+            source_id=SOURCE_ID,
+            cycle_id=CYCLE_ID,
+            lead_hours=12,
+        ),
+        "model_id": source_model_id,
+        "run_id": f"fcst_{SOURCE_ID}_{CYCLE_ID}_{source_model_id}",
+        "source_id": SOURCE_ID,
+        "valid_time": _iso(CUTOVER_VALID_TIME),
+        "state_uri": state_uri,
+        "checksum": checksum,
+        "usable_flag": True,
+        "created_at": _iso(CUTOVER_VALID_TIME),
+        "cycle_id": CYCLE_ID,
+        "lead_hours": 12,
+        "model_package_version": source_uri,
+        "model_package_checksum": source_checksum,
+    }
+    for index_path in (env["canonical_index"], env["mirror_index"]):
+        entries = json.loads(Path(index_path).read_text(encoding="utf-8"))["entries"]
+        publish_state_snapshot_index(
+            [*entries, entry],
+            Path(index_path),
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            generated_at=CUTOVER_VALID_TIME,
+            verify_objects=False,
+        )
+
+    models = list(_registry_models_by_id(env).values())
+    models.extend(
+        [
+            _registry_model(
+                source_model_id, package_uri=source_uri, package_checksum=source_checksum
+            ),
+            _registry_model(
+                target_model_id, package_uri=target_uri, package_checksum=target_checksum
+            ),
+        ]
+    )
+    _write_registry(Path(env["registry_path"]), models)
+    return {
+        "source_root": source_root,
+        "target_root": target_root,
+        "source_model_id": source_model_id,
+        "target_model_id": target_model_id,
+    }
 
 
 def test_cli_apply_writes_both_indexes_with_byte_identical_entries(
@@ -469,6 +575,177 @@ def test_mirror_write_failure_writes_the_receipt_and_exits_non_zero(
     assert not any(item["model_id"] == M1P_MODEL_ID for item in mirror_payload["entries"])
 
 
+def test_receipt_is_written_when_a_later_pair_refuses_after_an_applied_pair(
+    tmp_path: Path,
+) -> None:
+    """Round-1 C1: a mid-loop refusal must not unwind past the receipt write.
+
+    Pair 1 is admitted and its clone row goes live in BOTH indexes; pair 2's
+    target ships a drifted ``cfg.ic`` and is refused. Before the fix the
+    ``raise`` walked straight out of ``run_recalibration``, leaving pair 1's
+    rows persisted in both indexes with NO declaring artifact -- while the
+    runbook told the operator a refusal writes nothing anywhere. The receipt is
+    now written first (recording pair 1 as written, pair 2 as the failure) and
+    only then does the refusal propagate.
+    """
+
+    env = _build_cli_environment(tmp_path)
+    second = _add_recalibration_pair(
+        env,
+        source_model_id="huai_dg_gfs_v3",
+        target_model_id="huai_dg_gfs_v4",
+        target_ic=_IC_V2,
+    )
+    receipt_path = tmp_path / "partial-apply-receipt.json"
+
+    with pytest.raises(CutoverCloneError) as excinfo:
+        dispatch(
+            _cli_args(
+                env,
+                "--apply",
+                "--receipt",
+                str(receipt_path),
+                "--pairs",
+                f"{M1_MODEL_ID}:{M1P_MODEL_ID},"
+                f"{second['source_model_id']}:{second['target_model_id']}",
+            )
+        )
+
+    # The refusal still propagates -- the exit code stays non-zero.
+    assert "state_compatibility_unequal" in str(excinfo.value)
+    assert second["target_model_id"] in str(excinfo.value)
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == "nhms.recalibration_state_clone.v1"
+    assert receipt["invocation_outcome"] == "aborted"
+    assert receipt["declared_pair_count"] == 2
+    assert receipt["cloned_pair_count"] == 1
+
+    # Pair 1 is recorded as written to BOTH indexes; only completed pairs are
+    # listed under "pairs".
+    assert [record["target_model_id"] for record in receipt["pairs"]] == [M1P_MODEL_ID]
+    outcomes = receipt["pairs"][0]["state_index_outcomes"]
+    assert outcomes["canonical"]["outcome"] == "written"
+    assert outcomes["mirror"]["outcome"] == "written"
+
+    # Pair 2 is named as the pair that did not complete, with its reason.
+    failed_pair = receipt["failed_pair"]
+    assert failed_pair["source_model_id"] == second["source_model_id"]
+    assert failed_pair["target_model_id"] == second["target_model_id"]
+    assert failed_pair["source_id"] == SOURCE_ID
+    assert failed_pair["failure_kind"] == "pair_not_completed"
+    assert "state_compatibility_unequal" in failed_pair["error"]
+
+    # And the receipt tells the truth about the disk: pair 1's clone row really
+    # is live in both indexes, pair 2's is in neither.
+    for label, index_path in (
+        ("canonical", env["canonical_index"]),
+        ("mirror", env["mirror_index"]),
+    ):
+        entries = json.loads(Path(index_path).read_text(encoding="utf-8"))["entries"]
+        model_ids = {item["model_id"] for item in entries}
+        assert M1P_MODEL_ID in model_ids, label
+        assert second["target_model_id"] not in model_ids, label
+
+
+def test_multi_pair_dry_run_refusal_still_produces_no_receipt(tmp_path: Path) -> None:
+    """The receipt-on-abort guarantee is scoped to rows that actually exist.
+
+    Same two-pair shape as above but WITHOUT ``--apply``: nothing was written to
+    either index, so there is nothing to declare and the O_EXCL receipt path
+    stays free for the corrected re-run. This pins that the new write-on-abort
+    branch keys on "a pair was applied", not on "a pair was processed".
+    """
+
+    env = _build_cli_environment(tmp_path)
+    second = _add_recalibration_pair(
+        env,
+        source_model_id="huai_dg_gfs_v3",
+        target_model_id="huai_dg_gfs_v4",
+        target_ic=_IC_V2,
+    )
+    receipt_path = tmp_path / "dry-run-refusal-receipt.json"
+
+    with pytest.raises(CutoverCloneError, match="state_compatibility_unequal"):
+        dispatch(
+            _cli_args(
+                env,
+                "--receipt",
+                str(receipt_path),
+                "--pairs",
+                f"{M1_MODEL_ID}:{M1P_MODEL_ID},"
+                f"{second['source_model_id']}:{second['target_model_id']}",
+            )
+        )
+
+    assert not receipt_path.exists()
+
+
+def test_mirror_write_failure_marks_the_invocation_aborted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mirror-failure receipt must not read as a clean run either."""
+
+    env = _build_cli_environment(tmp_path)
+    receipt_path = tmp_path / "mirror-failure-outcome-receipt.json"
+    original_upsert = FileStateSnapshotIndexRepository.upsert_state_snapshot
+
+    def _failing_upsert(
+        self: FileStateSnapshotIndexRepository, snapshot: StateSnapshot
+    ) -> StateSnapshot:
+        if str(self.index_uri) == str(env["mirror_index"]):
+            raise OSError("scratch mirror is read-only")
+        return original_upsert(self, snapshot)
+
+    monkeypatch.setattr(
+        FileStateSnapshotIndexRepository, "upsert_state_snapshot", _failing_upsert
+    )
+
+    with pytest.raises(CutoverCloneError, match="repair the mirror before t\\*"):
+        dispatch(_cli_args(env, "--apply", "--receipt", str(receipt_path)))
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["invocation_outcome"] == "aborted"
+    assert receipt["failed_pair"]["failure_kind"] == "mirror_write_failed"
+    assert receipt["failed_pair"]["target_model_id"] == M1P_MODEL_ID
+    assert "scratch mirror is read-only" in receipt["failed_pair"]["error"]
+
+
+def test_clean_multi_pair_apply_reports_a_complete_invocation(tmp_path: Path) -> None:
+    """The control case: two admitted pairs -> ``complete`` and no failed pair."""
+
+    env = _build_cli_environment(tmp_path)
+    second = _add_recalibration_pair(
+        env,
+        source_model_id="huai_dg_gfs_v3",
+        target_model_id="huai_dg_gfs_v4",
+        target_ic=_IC_V1,
+    )
+
+    receipt = dispatch(
+        _cli_args(
+            env,
+            "--apply",
+            "--pairs",
+            f"{M1_MODEL_ID}:{M1P_MODEL_ID},"
+            f"{second['source_model_id']}:{second['target_model_id']}",
+        )
+    )
+
+    assert receipt["invocation_outcome"] == "complete"
+    assert receipt["failed_pair"] is None
+    assert receipt["declared_pair_count"] == 2
+    assert receipt["cloned_pair_count"] == 2
+    for label, index_path in (
+        ("canonical", env["canonical_index"]),
+        ("mirror", env["mirror_index"]),
+    ):
+        entries = json.loads(Path(index_path).read_text(encoding="utf-8"))["entries"]
+        model_ids = {item["model_id"] for item in entries}
+        assert {M1P_MODEL_ID, second["target_model_id"]} <= model_ids, label
+
+
 # --- §6.8 --pairs resolution (row 10) --------------------------------------
 
 
@@ -573,6 +850,153 @@ def test_pairs_naming_an_unknown_model_refuses(tmp_path: Path) -> None:
 
     with pytest.raises(CutoverCloneError, match="registry entry missing"):
         dispatch(args)
+
+
+@pytest.mark.parametrize(
+    ("pairs_value", "expected_message"),
+    [
+        (f"{M1_MODEL_ID}:{M1P_MODEL_ID}:extra", "malformed --pairs entry"),
+        (f":{M1P_MODEL_ID}", "malformed --pairs entry"),
+        (f"{M1_MODEL_ID}:", "malformed --pairs entry"),
+        (
+            f"{M1_MODEL_ID}:{M1P_MODEL_ID},{M1_MODEL_ID}:{M1P_MODEL_ID}",
+            "duplicate --pairs entry",
+        ),
+        (",", "--pairs declared no <M1>:<M1prime> pair"),
+    ],
+)
+def test_malformed_pairs_refuse_before_any_registry_read(
+    tmp_path: Path, pairs_value: str, expected_message: str
+) -> None:
+    """§6.8: every ``_parse_pairs`` refusal branch, and it runs FIRST.
+
+    ``--variant-registry`` deliberately points at a path that does not exist.
+    ``_parse_pairs`` runs before the registry payload is read, so a pairs-shaped
+    ``CutoverCloneError`` -- rather than the ``FileNotFoundError`` the read would
+    raise -- is itself the proof that no registry or gate work happened. Both
+    indexes and the receipt path are checked untouched on top of that.
+    """
+
+    env = _build_cli_environment(tmp_path)
+    before = {
+        label: Path(path).read_text(encoding="utf-8")
+        for label, path in (
+            ("canonical", env["canonical_index"]),
+            ("mirror", env["mirror_index"]),
+        )
+    }
+    receipt_path = tmp_path / "never-written-receipt.json"
+
+    with pytest.raises(CutoverCloneError) as excinfo:
+        dispatch(
+            _cli_args(
+                env,
+                "--apply",
+                "--receipt",
+                str(receipt_path),
+                "--pairs",
+                pairs_value,
+                "--variant-registry",
+                str(tmp_path / "no-such-registry.json"),
+            )
+        )
+
+    assert expected_message in str(excinfo.value)
+    assert not receipt_path.exists()
+    for label, path in (
+        ("canonical", env["canonical_index"]),
+        ("mirror", env["mirror_index"]),
+    ):
+        assert Path(path).read_text(encoding="utf-8") == before[label], label
+
+
+# --- --baseline-registry as a second payload under recalibration -----------
+
+
+def test_a_pair_spanning_two_registry_payloads_resolves_and_clones(
+    tmp_path: Path,
+) -> None:
+    """PR deviation record 3: the two payloads MERGE, they do not compete.
+
+    The realistic node-22 shape: ``M1`` lives only in the pre-update canonical
+    registry and ``M1'`` only in the freshly provisioned one. The refusal
+    without ``--baseline-registry`` is asserted first, in the same environment,
+    so the merge is proven load-bearing rather than incidentally harmless.
+    """
+
+    env = _build_cli_environment(tmp_path)
+    models = _registry_models_by_id(env)
+    _write_registry(Path(env["registry_path"]), [models[M1P_MODEL_ID]])
+    baseline_path = _write_registry(
+        tmp_path / "baseline-registry.json", [models[M1_MODEL_ID]]
+    )
+
+    # One payload alone cannot resolve the pair at all.
+    with pytest.raises(CutoverCloneError, match="registry entry missing"):
+        dispatch(_cli_args(env, "--apply"))
+
+    receipt = dispatch(
+        _cli_args(env, "--apply", "--baseline-registry", str(baseline_path))
+    )
+
+    assert receipt["invocation_outcome"] == "complete"
+    assert receipt["cloned_pair_count"] == 1
+    pair_record = receipt["pairs"][0]
+    # The source resolved out of the SECOND payload, with ITS package root.
+    assert pair_record["source_model_id"] == M1_MODEL_ID
+    assert pair_record["source_model_package_version"] == M1_PACKAGE_URI
+    assert pair_record["source_model_package_checksum"] == M1_PACKAGE_CHECKSUM
+    assert pair_record["target_model_package_version"] == M1P_PACKAGE_URI
+    assert pair_record["target_model_package_checksum"] == M1P_PACKAGE_CHECKSUM
+    assert pair_record["clone_gate_kind"] == "state_compatibility"
+    for label, index_path in (
+        ("canonical", env["canonical_index"]),
+        ("mirror", env["mirror_index"]),
+    ):
+        entries = json.loads(Path(index_path).read_text(encoding="utf-8"))["entries"]
+        assert any(item["model_id"] == M1P_MODEL_ID for item in entries), label
+
+
+def test_a_model_disagreeing_between_the_two_payloads_refuses_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed half of the same contract: disagreement is not merged.
+
+    Same ``model_id`` in both payloads with a differing ``package_checksum``.
+    Which of the two is authoritative is unknowable from the payloads alone, so
+    the tool refuses by name instead of silently preferring one.
+    """
+
+    env = _build_cli_environment(tmp_path)
+    before = {
+        label: Path(path).read_text(encoding="utf-8")
+        for label, path in (
+            ("canonical", env["canonical_index"]),
+            ("mirror", env["mirror_index"]),
+        )
+    }
+    models = _registry_models_by_id(env)
+    disagreeing_source = dict(models[M1_MODEL_ID])
+    disagreeing_source["package_checksum"] = "sha256:pkg-m1-recorded-differently"
+    baseline_path = _write_registry(
+        tmp_path / "baseline-registry.json",
+        [disagreeing_source, models[M1P_MODEL_ID]],
+    )
+
+    with pytest.raises(CutoverCloneError) as excinfo:
+        dispatch(
+            _cli_args(env, "--apply", "--baseline-registry", str(baseline_path))
+        )
+
+    assert (
+        f"model {M1_MODEL_ID} differs between --variant-registry and "
+        "--baseline-registry"
+    ) in str(excinfo.value)
+    for label, path in (
+        ("canonical", env["canonical_index"]),
+        ("mirror", env["mirror_index"]),
+    ):
+        assert Path(path).read_text(encoding="utf-8") == before[label], label
 
 
 # --- Parser: per-mode required flags (§4.1) --------------------------------

@@ -37,6 +37,7 @@ from tests.state_clone_recalibration_fixtures import (
     _IC_V2,
     _LAKE_RELATIVE_PATH,
     _PARA_V1,
+    _PARA_V2,
     BASIN,
     CUTOVER_VALID_TIME,
     M1_MODEL_ID,
@@ -190,20 +191,27 @@ def test_new_cfg_ic_refuses_the_carry_over(tmp_path: Path) -> None:
 
 
 def test_shared_gate_bytes_would_false_pass_the_new_cfg_ic(tmp_path: Path) -> None:
-    """Pins WHY the per-side override exists: without it the same pair passes.
+    """Pins WHY the per-side override exists: shared bytes admit the same pair.
 
-    Same fixture as the test above, but the ``m0_*`` overrides are omitted --
-    the pre-change behavior, in which the target's bytes stand in for both
-    sides. The clone is then admitted despite M1' shipping a new cfg.ic. This
-    test documents the false pass; the test above is the contract.
+    Same fixture as the test above, but the ``m0_*`` overrides carry the
+    TARGET's bytes -- byte-for-byte what the pre-change implementation fed both
+    sides of the gate. The clone is then admitted despite M1' shipping a new
+    cfg.ic. This test documents the false pass; the test above is the contract.
+
+    The overrides are supplied explicitly rather than omitted because omitting
+    them no longer reaches this path: in recalibration mode a ``None`` override
+    now refuses with ``degenerate_gate_inputs``
+    (``test_recalibration_refuses_degenerate_gate_inputs``), so the false pass
+    is unreachable by omission. Feeding the shared bytes by hand keeps the
+    mechanism under test identical while closing the by-default trapdoor.
     """
 
     pair = _build_pair(tmp_path, target_ic=_IC_V2)
 
     result, _repository, _audit = _run_recalibration_clone(
         pair,
-        m0_state_schema_bytes=None,
-        m0_solver_config_bytes=None,
+        m0_state_schema_bytes=pair["target_ic"],
+        m0_solver_config_bytes=_PARA_V2,
     )
 
     assert result.refused is False
@@ -373,12 +381,19 @@ def test_recalibration_still_refuses_a_legacy_target(tmp_path: Path) -> None:
         {"solver_config_bytes": b""},
         {"m0_state_schema_bytes": b""},
         {"m0_solver_config_bytes": b""},
+        # OMITTED per-side overrides are degenerate in recalibration mode too:
+        # the ``None`` -> "reuse the target bytes" fallback would compare the
+        # state_schema surface against itself. The signature DEFAULTS both to
+        # ``None``, so this is the by-omission trapdoor, not a mis-supplied
+        # value.
+        {"m0_state_schema_bytes": None},
+        {"m0_solver_config_bytes": None},
     ],
 )
 def test_recalibration_refuses_degenerate_gate_inputs(
     tmp_path: Path, override: dict[str, Any]
 ) -> None:
-    """Empty gate bytes -- required OR per-side override -- refuse fail-closed."""
+    """Empty OR omitted gate bytes -- required or per-side -- refuse fail-closed."""
 
     pair = _build_pair(tmp_path)
 
