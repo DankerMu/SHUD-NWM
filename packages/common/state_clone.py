@@ -45,7 +45,32 @@ the clone was blocked. The six distinguished refusal scopes are:
 * ``evidence_fingerprint_mismatch`` — the recomputed ``M1`` fingerprint
   passes the equality gate but does NOT match the value recorded in the
   ``M1`` mapping evidence package, so the core-invariance claim the clone
-  relies on is not proven for the supplied inputs.
+  relies on is not proven for the supplied inputs. In
+  ``transfer_mode='fix_forward'`` an ABSENT or empty recorded value also
+  refuses here — the fix-forward cross-check obligation does not weaken.
+
+Change ``recalibration-state-carryover`` adds a seventh scope, reachable
+only from the opt-in ``transfer_mode='recalibration'`` route:
+
+* ``state_compatibility_unequal`` — the eight-surface
+  ``STATE_COMPATIBILITY_SURFACES`` gate found the two packages unequal, or
+  a hydrologic-core file declared by the enumeration is present on exactly
+  one side (``MissingPackageFileError``). A file present on one side and
+  absent on the other IS surface inequality, so both map to this one
+  scope; the audit record carries the missing side and relative path so an
+  operator can locate the file.
+
+Transfer modes
+--------------
+``transfer_mode='fix_forward'`` (the default) is the ten-surface
+package-identity gate — every existing caller keeps byte-identical
+behavior. ``transfer_mode='recalibration'`` engages the eight-surface
+state-TRANSFERABILITY gate: the ten G10 labels minus ``calibration``
+(``cfg.calib`` + ``CALIB/*``) and ``solver_config`` (``cfg.para``), so a
+calibration-parameter-only ``M1 -> M1'`` update carries its state over
+instead of cold-starting. Every other surface — mesh, river, lake, soil,
+geol, land, ``.sp.att`` non-``FORC``, and the ``cfg.ic`` state schema —
+still refuses on any drift.
 
 The refusal is fail-closed: no ``(M1, source, t*)`` row is written; no
 physical file is touched.
@@ -58,8 +83,15 @@ The three ``hydro.state_snapshot`` columns added by migration ``000046`` —
 
 * ``cloned_from_state_id`` = the source ``M0`` snapshot ``state_id``.
 * ``cloned_from_model_id`` = the source ``M0`` ``model_id``.
-* ``clone_gate_fingerprint`` = the ``hydrologic_core_fingerprint`` hash the
-  equality gate accepted on for this clone (docs §Gate G10 authority).
+* ``clone_gate_fingerprint`` = the fingerprint hash the equality gate
+  accepted on for this clone (docs §Gate G10 authority for the
+  ten-surface gate).
+
+Migration ``000053`` adds a fourth: ``clone_gate_kind`` names WHICH gate
+admitted the row — ``"hydrologic_core"`` on a ``fix_forward`` clone and
+``"state_compatibility"`` on a ``recalibration`` clone — so an auditor can
+tell from the row alone which surface set was proven equal, and so the two
+kinds' ``clone_gate_fingerprint`` values are never compared to each other.
 
 The MUST-level attribution rule: a warm-start-lineage read attributes the
 state to ``M1`` via ``model_id`` + ``cloned_from_*`` — never via
@@ -74,7 +106,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from packages.common.state_manager import (
     StateSnapshot,
@@ -85,12 +117,18 @@ from workers.forcing_producer.direct_grid_contract import (
     load_forcing_mapping_contract_from_manifest,
 )
 from workers.mapping_builder.rewrite import (
+    HYDROLOGIC_CORE_FINGERPRINT_LABELS,
+    STATE_COMPATIBILITY_SURFACES,
     HydrologicCoreFingerprintMismatchError,
+    MissingPackageFileError,
     verify_hydrologic_core_fingerprint_equal,
 )
 
 __all__ = [
+    "CLONE_GATE_KIND_HYDROLOGIC_CORE",
+    "CLONE_GATE_KIND_STATE_COMPATIBILITY",
     "STATE_CLONE_COLD_START_APPROVAL_REQUIRED",
+    "STATE_COMPATIBILITY_UNEQUAL",
     "StateCloneAuditRecorder",
     "StateCloneRepository",
     "StateCloneResult",
@@ -111,6 +149,18 @@ _QUALIFIED_LEAD_HOURS = 12
 # constant so downstream audit-consumer tests can key on the exact literal
 # and cannot silently diverge on typo.
 _REVERSE_CLONE_TARGET_NOT_DIRECT_GRID = "reverse_clone_target_not_direct_grid"
+
+# Change `recalibration-state-carryover` refusal scope: the eight-surface
+# state-compatibility gate found the two packages unequal (or a declared
+# hydrologic-core file present on exactly one side). Module-level so
+# downstream audit consumers key on the exact literal.
+STATE_COMPATIBILITY_UNEQUAL = "state_compatibility_unequal"
+
+# `clone_gate_kind` values (migration 000053 / D6). The clone row names the
+# gate that admitted it so the recorded `clone_gate_fingerprint` is
+# self-describing.
+CLONE_GATE_KIND_HYDROLOGIC_CORE = "hydrologic_core"
+CLONE_GATE_KIND_STATE_COMPATIBILITY = "state_compatibility"
 
 
 class StateCloneRepository(Protocol):
@@ -166,8 +216,10 @@ class StateCloneResult:
     is ``False``. On refusal ``cloned_row`` is ``None``, ``refused`` is
     ``True``, ``refusal_code`` is
     :data:`STATE_CLONE_COLD_START_APPROVAL_REQUIRED`, and
-    ``refusal_scope`` names one of the six distinguished scopes
-    documented in this module's docstring.
+    ``refusal_scope`` names one of the distinguished scopes documented in
+    this module's docstring — the six fix-forward scopes plus
+    :data:`STATE_COMPATIBILITY_UNEQUAL`, which is reachable only from
+    ``transfer_mode='recalibration'``.
     """
 
     cloned_row: StateSnapshot | None
@@ -189,12 +241,15 @@ def fingerprint_gated_state_clone(
     m0_sp_att_path: Path,
     m1_sp_att_path: Path,
     m1_category_files: Mapping[str, Sequence[str]],
-    m1_recorded_hydrologic_core_fingerprint: str,
+    m1_recorded_hydrologic_core_fingerprint: str | None,
     state_schema_bytes: bytes,
     solver_config_bytes: bytes,
     m1_forcing_mapping_manifest: Mapping[str, Any],
     repository: StateCloneRepository,
     audit_recorder: StateCloneAuditRecorder,
+    transfer_mode: Literal["fix_forward", "recalibration"] = "fix_forward",
+    m0_state_schema_bytes: bytes | None = None,
+    m0_solver_config_bytes: bytes | None = None,
 ) -> StateCloneResult:
     """Clone the qualified ``(M0, source, t*)`` snapshot into ``(M1, source, t*)``.
 
@@ -265,7 +320,90 @@ def fingerprint_gated_state_clone(
     override. This defense-in-depth check at the clone signature
     guarantees that no future caller can bypass Change 4's
     legacy-reactivation guard by driving the clone at a legacy target.
+
+    Transfer modes (change ``recalibration-state-carryover`` D2)
+    -----------------------------------------------------------
+    ``transfer_mode='fix_forward'`` (default) runs every check above, in
+    the order above, over the ten-surface
+    :data:`workers.mapping_builder.rewrite.HYDROLOGIC_CORE_FINGERPRINT_LABELS`.
+    Behavior is byte-identical to the pre-change function for every
+    existing caller.
+
+    ``transfer_mode='recalibration'`` runs the same pre-gate checks
+    unconditionally — the no-reverse-clone guard, the degenerate-inputs
+    refusal (which still requires BOTH byte inputs non-empty even though
+    ``solver_config`` does not enter the eight-surface hash: one
+    unconditional check, no mode-conditional branch, no drift) and the
+    qualified-source lookup — and then gates on
+    :data:`workers.mapping_builder.rewrite.STATE_COMPATIBILITY_SURFACES`.
+    A ``HydrologicCoreFingerprintMismatchError`` OR a
+    :class:`~workers.mapping_builder.rewrite.MissingPackageFileError`
+    refuses with ``refusal_scope='state_compatibility_unequal'``: a
+    hydrologic-core file present on one side and absent on the other IS
+    surface inequality. ``fix_forward`` keeps propagating
+    ``MissingPackageFileError`` to its caller, byte-identically.
+
+    Parameter reading under each mode (D8 naming note)
+    --------------------------------------------------
+    The ``m0_*`` / ``m1_*`` parameters originally meant "baseline" /
+    "variant". Under ``transfer_mode='recalibration'`` they mean transfer
+    **source** (``M1``) / transfer **target** (``M1'``). The parameters
+    are NOT renamed, so both readings are stated here: ``m0_*`` is always
+    the package the state comes FROM and ``m1_*`` is always the package
+    the state is carried TO; the clone row takes the ``m1_*`` identity and
+    records ``cloned_from_model_id = m0_model_id``.
+
+    Per-side gate bytes (D3)
+    ------------------------
+    ``state_schema_bytes`` / ``solver_config_bytes`` are the ``m1``
+    (target) side's bytes and stay required. ``m0_state_schema_bytes`` /
+    ``m0_solver_config_bytes`` are optional per-side overrides for the
+    ``m0`` side; when either is ``None`` the target's bytes are used for
+    both sides, which is exactly today's behavior and is correct for the
+    July baseline→variant cutover (the variant copies the baseline's
+    ``cfg.ic`` verbatim, so the bytes are genuinely shared).
+
+    Under ``M1 -> M1'`` that fallback would be a FALSE PASS: if ``M1'``
+    ships a new ``cfg.ic``, feeding ``M1'``'s bytes to both sides makes
+    the ``state_schema`` surface compare equal and admits a clone this
+    change explicitly must refuse. A recalibration caller therefore always
+    supplies both overrides, read per package root. A supplied-but-empty
+    override is refused with ``degenerate_gate_inputs`` like the required
+    inputs.
+
+    Evidence cross-check waiver (D5)
+    --------------------------------
+    ``m1_recorded_hydrologic_core_fingerprint`` is the value recorded in
+    the ``M1`` mapping evidence package. In ``fix_forward`` it stays
+    REQUIRED: an absent or empty value refuses with the existing
+    ``evidence_fingerprint_mismatch`` scope, so the fix-forward contract
+    does not weaken. In ``recalibration`` it MAY be ``None`` — the
+    direct-grid variants that route operates on are produced by
+    ``scripts/provision_direct_grid_scheduler_registry.py``, which records
+    no ``hydrologic_core_fingerprint`` at all — in which case the
+    cross-check is SKIPPED rather than satisfied vacuously by the caller
+    echoing back the value the gate just computed. A recalibration caller
+    that does supply a recorded value has it cross-checked against this
+    mode's own eight-surface recompute.
+
+    ``clone_gate_kind``
+    -------------------
+    The persisted row records which gate admitted it:
+    :data:`CLONE_GATE_KIND_HYDROLOGIC_CORE` for ``fix_forward`` and
+    :data:`CLONE_GATE_KIND_STATE_COMPATIBILITY` for ``recalibration``.
     """
+
+    recalibration = transfer_mode == "recalibration"
+    gate_surfaces = (
+        STATE_COMPATIBILITY_SURFACES
+        if recalibration
+        else HYDROLOGIC_CORE_FINGERPRINT_LABELS
+    )
+    clone_gate_kind = (
+        CLONE_GATE_KIND_STATE_COMPATIBILITY
+        if recalibration
+        else CLONE_GATE_KIND_HYDROLOGIC_CORE
+    )
 
     audit_context = _build_audit_context(
         m0_model_id=m0_model_id,
@@ -297,8 +435,24 @@ def fingerprint_gated_state_clone(
     # 1. Degenerate gate inputs. Empty state_schema_bytes / solver_config_bytes
     #    on both sides would collapse to a shared trivial hash (SHA-256 of
     #    the empty string) and false-pass the equality gate; refuse before
-    #    invoking the fingerprint computation.
+    #    invoking the fingerprint computation. The check is unconditional in
+    #    both modes — solver_config does not enter the eight-surface hash,
+    #    but one unconditional check cannot drift out of sync with a mode
+    #    branch. A supplied-but-empty m0 override is degenerate for the same
+    #    reason; ``None`` means "reuse the target bytes" and is not empty.
     if not state_schema_bytes or not solver_config_bytes:
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope="degenerate_gate_inputs",
+        )
+    if m0_state_schema_bytes is not None and not m0_state_schema_bytes:
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope="degenerate_gate_inputs",
+        )
+    if m0_solver_config_bytes is not None and not m0_solver_config_bytes:
         return _refuse(
             audit_recorder,
             audit_context,
@@ -332,8 +486,11 @@ def fingerprint_gated_state_clone(
             scope="missing_qualified_source",
         )
 
-    # 3. Fingerprint equality gate. Reuse the pinned guard — never
-    #    reimplement the fingerprint rule (docs §Gate G10 authority).
+    # 3. Fingerprint equality gate over the mode's surface set. Reuse the
+    #    pinned guard — never reimplement the fingerprint rule (docs §Gate
+    #    G10 authority). The m0 side takes its own bytes when the caller
+    #    supplied per-side overrides (D3); otherwise both sides take the
+    #    target's bytes, which is the pre-change behavior.
     try:
         shared_fingerprint = verify_hydrologic_core_fingerprint_equal(
             m0_package_root,
@@ -341,23 +498,71 @@ def fingerprint_gated_state_clone(
             baseline_sp_att_path=m0_sp_att_path,
             variant_sp_att_path=m1_sp_att_path,
             category_files=m1_category_files,
-            baseline_state_schema_bytes=state_schema_bytes,
+            baseline_state_schema_bytes=(
+                state_schema_bytes
+                if m0_state_schema_bytes is None
+                else m0_state_schema_bytes
+            ),
             variant_state_schema_bytes=state_schema_bytes,
-            baseline_solver_config_bytes=solver_config_bytes,
+            baseline_solver_config_bytes=(
+                solver_config_bytes
+                if m0_solver_config_bytes is None
+                else m0_solver_config_bytes
+            ),
             variant_solver_config_bytes=solver_config_bytes,
+            surfaces=gate_surfaces,
         )
     except HydrologicCoreFingerprintMismatchError:
+        if recalibration:
+            return _refuse(
+                audit_recorder,
+                audit_context,
+                scope=STATE_COMPATIBILITY_UNEQUAL,
+            )
         return _refuse(
             audit_recorder,
             audit_context,
             scope="unequal_fingerprint",
         )
+    except MissingPackageFileError as error:
+        # A hydrologic-core file declared by the enumeration but present on
+        # exactly one side IS surface inequality — the recalibration route
+        # enumerates the union of both package roots precisely so an added
+        # or removed file lands here. Fix-forward keeps propagating this to
+        # its caller, byte-identically: there the enumeration comes from the
+        # M1 mapping evidence package and a missing file is a caller /
+        # evidence bug, not a gate outcome.
+        if not recalibration:
+            raise
+        return _refuse(
+            audit_recorder,
+            audit_context,
+            scope=STATE_COMPATIBILITY_UNEQUAL,
+            extra={
+                "missing_category": error.category,
+                "missing_relative_path": error.relative_path,
+                "missing_side": error.missing_side,
+                "missing_package_root": str(error.package_root),
+            },
+        )
 
     # 4. Cross-check the recomputed variant fingerprint against the
     #    evidence-recorded value. A gate that passes with equal-but-drifted
     #    inputs would silently break the core-invariance claim; refuse
-    #    fail-closed instead.
-    if shared_fingerprint.hash != m1_recorded_hydrologic_core_fingerprint:
+    #    fail-closed instead. In fix_forward an absent/empty recorded value
+    #    refuses here too (``hash != None`` is True), so the cross-check
+    #    obligation cannot be waived by simply omitting the argument. In
+    #    recalibration ``None`` skips the cross-check explicitly (D5): the
+    #    dg variants this route operates on carry no recorded value, and
+    #    accepting the caller's echo of the value the gate just computed
+    #    would be a vacuous self-supply, not evidence.
+    skip_evidence_cross_check = (
+        recalibration and m1_recorded_hydrologic_core_fingerprint is None
+    )
+    if (
+        not skip_evidence_cross_check
+        and shared_fingerprint.hash != m1_recorded_hydrologic_core_fingerprint
+    ):
         return _refuse(
             audit_recorder,
             audit_context,
@@ -371,6 +576,7 @@ def fingerprint_gated_state_clone(
         m1_model_package_version=m1_model_package_version,
         m1_model_package_checksum=m1_model_package_checksum,
         clone_gate_fingerprint=shared_fingerprint.hash,
+        clone_gate_kind=clone_gate_kind,
     )
     persisted = repository.upsert_state_snapshot(clone_row)
     return StateCloneResult(
@@ -411,6 +617,7 @@ def _build_clone_row(
     m1_model_package_version: str,
     m1_model_package_checksum: str,
     clone_gate_fingerprint: str,
+    clone_gate_kind: str = CLONE_GATE_KIND_HYDROLOGIC_CORE,
 ) -> StateSnapshot:
     """Compose the ``(M1, source, t*)`` row with the pinned column disposition.
 
@@ -421,7 +628,9 @@ def _build_clone_row(
     SUB-3: ``cloned_from_state_id`` / ``cloned_from_model_id`` name the
     ``M0`` origin row + model, and ``clone_gate_fingerprint`` records the
     accepted equality-gate hash so downstream audit can pin exactly which
-    ``hydrologic_core_fingerprint`` proved core-invariance for this row.
+    fingerprint proved core-invariance for this row. Migration ``000053``'s
+    ``clone_gate_kind`` names the gate that hash belongs to, so an auditor
+    never compares a ten-surface value against an eight-surface one.
     """
 
     return StateSnapshot(
@@ -448,6 +657,7 @@ def _build_clone_row(
         cloned_from_state_id=source_snapshot.state_id,
         cloned_from_model_id=source_snapshot.model_id,
         clone_gate_fingerprint=clone_gate_fingerprint,
+        clone_gate_kind=clone_gate_kind,
     )
 
 
@@ -471,12 +681,23 @@ def _refuse(
     audit_context: Mapping[str, Any],
     *,
     scope: str,
+    extra: Mapping[str, Any] | None = None,
 ) -> StateCloneResult:
+    """Record a refusal audit record and return the fail-closed result.
+
+    ``extra`` is merged into the record so a scope that has locating
+    information to offer — the state-compatibility scope carries the
+    missing side and relative path — can supply it WITHOUT changing the
+    record shape of any existing refusal, all of which pass ``extra=None``
+    and therefore emit exactly the record they emitted before.
+    """
+
     audit_recorder.record_refusal(
         {
             "refusal_code": STATE_CLONE_COLD_START_APPROVAL_REQUIRED,
             "refusal_scope": scope,
             **audit_context,
+            **(dict(extra) if extra else {}),
         }
     )
     return StateCloneResult(
