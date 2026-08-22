@@ -38104,6 +38104,654 @@ def test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision(
     assert evidence["candidate_state"]["init_state_id"] == selected_state_id
 
 
+_ID_ONLY_LADDER_UNSET = object()
+
+
+def _proving_run_manifest(selected_state: Mapping[str, Any]) -> dict[str, Any]:
+    """The four-field ``run_manifest_initial_state`` a forecast run records.
+
+    Measured on node-22: the manifest carries ``checksum`` / ``ic_file_uri`` /
+    ``valid_time`` alongside the id, which is exactly the proof the id-only
+    ``hydro_run`` row lacks.
+    """
+
+    return {
+        "quality": "fresh",
+        "state_id": selected_state["state_id"],
+        "checksum": selected_state["checksum"],
+        "ic_file_uri": selected_state["state_uri"],
+        "valid_time": selected_state["valid_time"],
+    }
+
+
+def _id_only_hydro_run_identity(selected_state: Mapping[str, Any]) -> dict[str, Any]:
+    """The shape every file-journal writer produces (``file_orchestration_journal.py:1490``/``:1526``)."""
+
+    return {"init_state_id": selected_state["state_id"]}
+
+
+def _wide_hydro_run_identity(selected_state: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "init_state_id": selected_state["state_id"],
+        "init_state_checksum": selected_state["checksum"],
+        "init_state_uri": selected_state["state_uri"],
+        "init_state_valid_time": selected_state["valid_time"],
+    }
+
+
+def _db_free_id_only_terminal_ladder(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    hydro_run_identity: Any = _id_only_hydro_run_identity,
+    run_manifest_initial_state: Any = _ID_ONLY_LADDER_UNSET,
+    successor_state: Any = _ID_ONLY_LADDER_UNSET,
+) -> dict[str, Any]:
+    """#1736 seam harness: the db-free candidate ladder on a terminal-success row.
+
+    Same wiring as
+    ``test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision``
+    -- a real published state index, the real strict warm-start resolution, and
+    a repository whose ``candidate_state`` reports a completed ``hydro_run`` --
+    with the three knobs the decision table varies: the identity fields recorded
+    on the ``hydro_run`` row, ``run_manifest_initial_state``, and the
+    successor-state verdict.
+
+    ``hydro_run_identity`` and ``run_manifest_initial_state`` may be callables
+    taking the published state-index entry, because the fixture only learns the
+    selected checksum/uri/valid_time after publishing it.  Leaving
+    ``run_manifest_initial_state`` unset omits the key entirely (the shape that
+    must stay on the budgeted mismatch route); leaving ``successor_state`` unset
+    keeps the real db-free successor provider.
+
+    Everything is driven through ``_build_candidates`` -- the public admission
+    boundary -- never through the private predicates.
+    """
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    selected_state = dict(state_fixture["entries"][0])
+    selected_state_id = str(selected_state["state_id"])
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+
+    class CompletedLegacyRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    identity_fields = (
+        hydro_run_identity(selected_state) if callable(hydro_run_identity) else dict(hydro_run_identity)
+    )
+    state: dict[str, Any] = {
+        "hydro_status": "published",
+        "hydro_run": {
+            "run_id": run_id,
+            "status": "published",
+            **identity_fields,
+            "output_uri": f"s3://nhms/runs/{run_id}/output/",
+        },
+    }
+    if run_manifest_initial_state is not _ID_ONLY_LADDER_UNSET:
+        state["run_manifest_initial_state"] = (
+            run_manifest_initial_state(selected_state)
+            if callable(run_manifest_initial_state)
+            else dict(run_manifest_initial_state)
+        )
+    repository = CompletedLegacyRepository(state)
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+    if successor_state is not _ID_ONLY_LADDER_UNSET:
+        monkeypatch.setattr(
+            scheduler,
+            "_successor_warm_start_state_for_candidate",
+            lambda _candidate, _cycle: dict(successor_state) if successor_state is not None else None,
+        )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(model)],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+    return {
+        "candidates": candidates,
+        "blocked": blocked,
+        "skipped": skipped,
+        "duplicate_exclusions": duplicate_exclusions,
+        "slurm_sync": slurm_sync,
+        "selected_state": selected_state,
+        "selected_state_id": selected_state_id,
+    }
+
+
+def _sole_reopened_candidate_evidence(result: Mapping[str, Any]) -> dict[str, Any]:
+    assert result["blocked"] == []
+    assert result["skipped"] == []
+    assert len(result["candidates"]) == 1
+    return dict(result["candidates"][0].state_evidence)
+
+
+def test_db_free_id_only_terminal_row_is_reused_when_run_manifest_proves_the_init_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 positive row: the perpetual recompute stops when the manifest proves the quadruple.
+
+    node-22 pass ``scheduler_2026082207_dc7374b257be`` decided 30/30 candidates
+    ``strict_warm_start_terminal_init_state_mismatch`` with
+    ``skipped_candidate_count: 0`` and resubmitted 1.82 h of SHUD for models that
+    had been ``succeeded`` since 2026-08-13.  The recorded row carries the
+    selected state id and nothing else, so the selected-driven equality fails on
+    ``checksum``; ``run_manifest_initial_state`` carries all four fields and is
+    what admits the existing terminal reuse exit.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    assert result["blocked"] == []
+    assert result["candidates"] == []
+    assert result["duplicate_exclusions"] == []
+    assert len(result["skipped"]) == 1
+    skipped = result["skipped"][0]
+    assert skipped["reason"] == "terminal_hydro_success"
+    state_evidence = skipped["state_evidence"]
+    assert state_evidence["decision"] == "skip_terminal"
+    assert state_evidence["native_shud_resubmitted"] is False
+    assert state_evidence["candidate_state"]["init_state_id"] == result["selected_state_id"]
+    # The two decisions this row must never reach.
+    assert state_evidence["reason"] != "strict_warm_start_terminal_init_state_mismatch"
+    assert state_evidence["reason"] != "strict_warm_start_terminal_run_manifest_missing"
+
+
+def test_db_free_id_only_terminal_row_without_run_manifest_keeps_the_budgeted_mismatch(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 negative pin 1 (budget bypass): no manifest, no reuse -- and no reroute.
+
+    Reusing on the id alone would reopen the repaired-checkpoint hole
+    (``3b587c55``) AND would push this row into the call site's true branch,
+    where the inner run-manifest check converts it into the UNBUDGETED
+    ``strict_warm_start_terminal_run_manifest_missing`` retry.  The manifest
+    proof therefore gates the leg's own answer, so this shape never leaves the
+    budgeted ``strict_warm_start_terminal_init_state_mismatch`` route (#1173).
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["reason"] != "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["decision"] != "retry_strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+    assert evidence["candidate_state"]["init_state_id"] == result["selected_state_id"]
+    assert evidence["strict_warm_start"]["ready"] is True
+
+
+def test_db_free_id_only_terminal_row_with_disagreeing_manifest_checksum_is_recomputed(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 negative pin 2 (repaired checkpoint, ``3b587c55``): same id, different checksum.
+
+    A repaired checkpoint keeps its deterministic ``state_id`` while its
+    checksum changes.  The manifest's ``checksum`` is the only field that can
+    tell the two apart on an id-only row, so a disagreement there must still
+    recompute through the budgeted route.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        run_manifest_initial_state=lambda selected_state: {
+            **_proving_run_manifest(selected_state),
+            "checksum": "sha256:" + "f" * 64,
+        },
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["reason"] != "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+
+
+def test_db_free_id_only_terminal_row_admitted_by_manifest_still_obeys_the_successor_gate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736: the new reuse row does not bypass the successor readiness gate.
+
+    The upgrade admits the row through the EXISTING terminal reuse exit, so
+    every gate that already follows that exit still applies -- an id-only row
+    with a proving manifest whose successor checkpoint is missing yields
+    ``strict_warm_start_successor_checkpoint_missing``, exactly as a wide row
+    matching on all four of its own fields does.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={
+            "ready": False,
+            "status": "missing",
+            "reason": "state_snapshot_index_exact_checkpoint_missing",
+        },
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_successor_checkpoint_missing"
+    assert evidence["decision"] == "retry_strict_warm_start_successor_checkpoint_missing"
+    assert evidence["restart_stage"] == "state_save_qc"
+    assert evidence["native_shud_resubmitted"] is False
+    assert evidence["successor_state"]["reason"] == "state_snapshot_index_exact_checkpoint_missing"
+
+
+@pytest.mark.parametrize(
+    ("identity", "run_manifest", "case"),
+    [
+        pytest.param(
+            lambda selected_state: {
+                "init_state_id": selected_state["state_id"],
+                "init_state_checksum": "sha256:" + "f" * 64,
+            },
+            _proving_run_manifest,
+            "present_field_disagrees",
+            id="present_field_disagrees",
+        ),
+        pytest.param(
+            lambda selected_state: {"init_state_checksum": selected_state["checksum"]},
+            _proving_run_manifest,
+            "identity_without_state_id",
+            id="identity_without_state_id",
+        ),
+        pytest.param(
+            lambda _selected_state: {},
+            _proving_run_manifest,
+            "no_identity_fields",
+            id="no_identity_fields",
+        ),
+        pytest.param(
+            lambda selected_state: {
+                "init_state_id": selected_state["state_id"],
+                "init_state_checksum": "sha256:[redacted]",
+            },
+            _ID_ONLY_LADDER_UNSET,
+            "redacted_field_without_manifest",
+            id="redacted_field_without_manifest",
+        ),
+    ],
+)
+def test_db_free_terminal_rows_the_run_manifest_may_not_upgrade(
+    monkeypatch: Any,
+    tmp_path: Path,
+    identity: Any,
+    run_manifest: Any,
+    case: str,
+) -> None:
+    """#1736: only ABSENCE is upgradable -- conflict and emptiness are not.
+
+    ``present_field_disagrees`` and ``identity_without_state_id`` classify as
+    ``conflict``, ``no_identity_fields`` as ``absent``; a fully proving manifest
+    upgrades none of them.  ``redacted_field_without_manifest`` is the redaction
+    corner: a withheld value is skipped rather than compared, which must not make
+    the row *upgradable without proof* -- with no manifest it still recomputes.
+    """
+
+    del case
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        hydro_run_identity=identity,
+        run_manifest_initial_state=run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["reason"] != "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["native_shud_resubmitted"] is True
+
+
+def _partially_recorded_agreeing_identity(selected_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Id plus ONE agreeing non-id field; ``uri``/``valid_time`` still absent."""
+
+    return {
+        "init_state_id": selected_state["state_id"],
+        "init_state_checksum": selected_state["checksum"],
+    }
+
+
+def test_db_free_partially_recorded_agreeing_terminal_row_is_reused_when_manifest_proves_it(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736: partial-but-agreeing is absence, not disagreement, so the manifest may prove it.
+
+    The decision table's reuse row names the id-only shape; this row is one step
+    wider -- ``init_state_id`` AND an agreeing ``init_state_checksum``, with
+    ``uri``/``valid_time`` still absent.  ``_warm_state_record_matches`` fails it
+    (the selected state names a ``uri`` the record does not), while
+    ``terminal_init_state_match`` answers ``match`` because no PRESENT field
+    disagrees, so the run manifest decides -- and a four-field manifest proves
+    the governing invariant just as it does for the id-only row.
+
+    Narrowing the leg to "every non-id field must be missing" would also split it
+    from the verdict side on a shape where the two must agree, which is the drift
+    this change exists to close.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        hydro_run_identity=_partially_recorded_agreeing_identity,
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    assert result["blocked"] == []
+    assert result["candidates"] == []
+    assert len(result["skipped"]) == 1
+    skipped = result["skipped"][0]
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert skipped["state_evidence"]["decision"] == "skip_terminal"
+    assert skipped["state_evidence"]["native_shud_resubmitted"] is False
+
+
+def test_db_free_partially_recorded_disagreeing_terminal_row_stays_on_the_budgeted_mismatch(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736: the negative twin of the row above -- present and DISAGREEING is never upgradable.
+
+    Same geometry (id plus one non-id field, remainder absent, four-field
+    manifest), except the recorded ``init_state_checksum`` disagrees.  That is
+    ``conflict``, so the manifest never gets consulted and the decision stays on
+    the budgeted ``strict_warm_start_terminal_init_state_mismatch`` route.  This
+    is the pair that makes "absence vs disagreement" the actual discriminator
+    rather than "how many fields happen to be recorded"; the
+    ``present_field_disagrees`` case of
+    ``test_db_free_terminal_rows_the_run_manifest_may_not_upgrade`` asserts the
+    same conclusion and is kept as the parametrized sweep.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        hydro_run_identity=lambda selected_state: {
+            "init_state_id": selected_state["state_id"],
+            "init_state_checksum": "sha256:" + "f" * 64,
+        },
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["reason"] != "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+
+
+def test_db_free_wide_matching_hydro_run_row_keeps_the_run_manifest_missing_route(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 must-preserve: the wide-row path is byte-identical, manifest gate included.
+
+    A row recording all four fields matches selected-driven and therefore takes
+    the true branch WITHOUT the new upgrade; with no manifest it must still be
+    converted into ``strict_warm_start_terminal_run_manifest_missing`` by the
+    call site, exactly as before.  The new path never reaches that decision, but
+    the old one still must.
+    """
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        hydro_run_identity=_wide_hydro_run_identity,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    evidence = _sole_reopened_candidate_evidence(result)
+    assert evidence["reason"] == "strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_run_manifest_missing"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["native_shud_resubmitted"] is True
+    assert evidence["durable_output_reused"] is False
+
+
+def test_db_free_wide_matching_hydro_run_row_with_manifest_still_reuses(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 must-preserve: the pre-existing reuse exit is untouched."""
+
+    result = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path,
+        hydro_run_identity=_wide_hydro_run_identity,
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+
+    assert result["blocked"] == []
+    assert result["candidates"] == []
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "terminal_hydro_success"
+    assert result["skipped"][0]["state_evidence"]["decision"] == "skip_terminal"
+
+
+def test_candidate_and_verdict_paths_agree_a_manifest_proven_id_only_row_is_current(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1736 parity guard: agreement where it is mandatory, divergence where it is contract.
+
+    For a terminal ``hydro_run`` row whose ``init_state_id`` matches and whose
+    run manifest proves all four fields, the candidate ladder and the
+    cycle-completion verdict must reach the same conclusion -- the row is
+    current.  Before this change one pass held two truths for one row: the
+    verdict completed it while the ladder recomputed it.
+
+    Outside that shape the two paths are ALLOWED to differ, and the design says
+    so: the ``candidate_state`` terminal-source branch and the
+    ``COLD_START_QUARANTINED`` escape are candidate-side short-circuits the
+    verdict must never inherit (#1183).  The guard asserts those divergences
+    rather than forbidding them.
+    """
+
+    # Verdict side first: the db-free env the ladder installs must not colour it.
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path / "verdict",
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        },
+        successor_state={"ready": True, "status": "ready"},
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+    # Candidate side: the ladder reuses instead of resubmitting.
+    ladder = _db_free_id_only_terminal_ladder(
+        monkeypatch,
+        tmp_path / "ladder",
+        run_manifest_initial_state=_proving_run_manifest,
+        successor_state={"ready": True, "status": "ready"},
+    )
+    assert ladder["candidates"] == []
+    assert [row["reason"] for row in ladder["skipped"]] == ["terminal_hydro_success"]
+
+    # The intentional divergences, asserted as divergences.
+    strict_evidence = {"ready": True, "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE)}
+    divergent_shapes = (
+        {
+            "terminal_source": "pipeline_job",
+            "terminal_status": "succeeded",
+            "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
+        },
+        {
+            "terminal_source": "pipeline_job",
+            "terminal_status": "succeeded",
+            "hydro_run": {
+                "status": "failed",
+                "init_state_id": None,
+                "error_code": "COLD_START_QUARANTINED",
+            },
+        },
+    )
+    for terminal_evidence in divergent_shapes:
+        assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+            terminal_evidence,
+            strict_evidence,
+        )
+        assert (
+            scheduler_discovery_module._terminal_init_state_verdict(terminal_evidence, strict_evidence)
+            == "absent"
+        )
+
+
+def test_duplicate_pipeline_dedup_gates_are_kept_for_repositories_without_candidate_state(
+    tmp_path: Path,
+) -> None:
+    """#1736 acceptance item 5: the three ``not callable(state_provider)`` gates are KEPT.
+
+    ``build_candidates`` reads the state provider defensively --
+    ``getattr(active_repository, "candidate_state", None)``
+    (``scheduler_candidates.py:239``) -- and three dedup exits are conjoined
+    with ``not callable(state_provider)``:
+    ``active_duplicate_pipeline`` via ``has_active_orchestration`` (``:391-397``),
+    ``active_duplicate_pipeline`` via ``has_active_pipeline`` (``:398-409``), and
+    ``completed_duplicate_pipeline`` (``:414-424``).
+
+    Audit (line-level instrumentation of all three bodies over the nine
+    orchestrator suites; full record in
+    ``.workplans/1736/dead-gate-verdict.md``): every PRODUCTION repository
+    implements ``candidate_state``, so all three gates are indeed unreachable in
+    every supported deployment -- but nine exercised test functions
+    (17 invocations) reach them through repositories that do not implement it.
+    The design's decision rule counts exercised fixtures, so the issue's
+    "delete" option is REFUSED and the gates stay.  This test names both sides
+    so a future deletion reddens here with the reason attached.
+    """
+
+    from services.orchestrator import chain_repository as chain_repository_module
+
+    # Production side: gates are dead because every real repository implements it.
+    for repository_cls in (
+        chain_repository_module.PsycopgOrchestratorRepository,
+        file_orchestration_journal_module.FileOrchestrationJournalRepository,
+        scheduler_file_providers_module.FileRawHandoffCandidateRepository,
+    ):
+        assert callable(getattr(repository_cls, "candidate_state", None)), repository_cls
+
+    # Fixture side: these three shapes carry no ``candidate_state`` and are the
+    # only reason the gates survive.
+    for repository_cls in (
+        FakeActiveRepository,
+        FakeActiveCycleOrchestrationRepository,
+        FakeHydroStateRepository,
+    ):
+        assert getattr(repository_cls, "candidate_state", None) is None, repository_cls
+
+    def _run(active_repository: Any) -> list[str]:
+        scheduler = ProductionScheduler(
+            _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+            registry=FakeRegistry([_model("model_a", "basin_a")]),
+            adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+            active_repository=active_repository,
+        )
+        result = scheduler.run_once()
+        assert result.evidence["candidates"] == []
+        return [row["reason"] for row in result.evidence["skipped_candidates"]]
+
+    # :391-397 -- cycle-level active orchestration.
+    assert _run(FakeActiveCycleOrchestrationRepository()) == ["active_duplicate_pipeline"]
+    # :398-409 -- per-model active pipeline.
+    assert _run(FakeActiveRepository(active=True)) == ["active_duplicate_pipeline"]
+    # :414-424 -- per-model completed pipeline.
+    assert _run(FakeActiveRepository(active=False, completed=True)) == ["completed_duplicate_pipeline"]
+
+    # The conjunct is what selects: the same completed answer from a repository
+    # that DOES implement ``candidate_state`` takes the candidate-state ladder
+    # instead, which is why the gates are production-dead.
+    class CompletedCandidateStateRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    assert _run(
+        CompletedCandidateStateRepository(
+            {
+                "hydro_status": "published",
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "run_manifest_initial_state": {
+                    "quality": "fresh",
+                    "state_id": "state_gfs_model_a_2026052106_gfs_2026052100_f006",
+                },
+            }
+        )
+    ) == ["terminal_hydro_success"]
+
+
 def test_db_free_strict_warm_start_resubmits_completed_cold_start_terminal(
     monkeypatch: Any,
     tmp_path: Path,
