@@ -671,6 +671,57 @@ under the autonomous default; no policy change. Any future reversal still
 requires the recorded attribution schema/round-role fixes plus maintainer
 review.
 
+## Revisit 2026-08-22 (after #1664 / PR #1708)
+
+Attribution at 430 log lines: core=54, rotated=258 across 102 multi-round merged
+PRs. The DECIDABLE trigger fired again; the decision is again **Keep rotation**,
+with no change to the policy.
+
+What this PR adds is not another tally point but a **new failure shape the
+rotation caught, and the round-1 mix could not have**.
+
+Round 1 ran three lenses (runtime/DB semantics, oracle strength via executed
+mutation, contracts/systemd/docs). The runtime lens returned no P1 and no P2 —
+the `lock_timeout` wiring, the SQL interpolation, and the `pgcode` predicate
+were all correct on first delivery. Every one of the thirteen verified findings
+came from the two rotated-in lenses.
+
+Round 2 rotated again, into "did the round-1 fixes land correctly, and did they
+break anything" plus an adversarial/deployment lens. That first lens found a
+defect **in the orchestrator's own round-1 fix**: widening the alert wrapper's
+soft-exit surface from three paths to seven (each a deliberate `exit 0`) made
+the Evidence Floor's channel-smoke criterion — "unit `Result=success` and the
+mail channel reported no error" — satisfiable by every silent-failure state it
+existed to detect. A missing env variable would have recorded PASS on an alert
+lane that mails nothing, and that criterion was the only live-channel check
+before the post-merge receipt.
+
+The generalisable point: **a fix pass mutates the very surface the prior round
+just certified, and the lens that authored the fix is the worst-placed one to
+re-certify it.** Here the author was the orchestrator, so no reviewer had a
+stake in defending the change — and it still took a lens explicitly pointed at
+the fix delta to see it. This is the same asymmetry recorded in the 2026-08-22
+(#1660) revisit, one level up: there, a lens that had just proved behaviour
+correct was ill-placed to ask whether the behaviour was pinned; here, the actor
+that just repaired a surface is ill-placed to ask whether the repair widened it.
+
+The same round's adversarial lens produced the other independent catch: the new
+per-chunk timing `print` sits after a completed `drop_chunks`, so an `OSError`
+on the log volume — the disk-full condition retention exists to relieve — would
+escape into the uncaught-error path and publish a `refused` receipt that the
+schema forbids from recording `dropped_chunks`. A deletion that really happened
+would have been recorded nowhere. No correctness- or coverage-shaped lens asks
+"what does the failure of a diagnostic do to the evidence record".
+
+Measurement caveats from every prior revisit stand unchanged (fixture and
+final-review role contamination, lens-name variants, subset rounds). Off-
+vocabulary fixture labels remain excluded from the keep/cut buckets and are
+still eight distinct historical spellings; `evidence_check --loop-log-entry`
+rejects new ones, so that contamination is bounded and shrinking in share.
+**Keep rotation** under the autonomous default. Any future reversal still
+requires the recorded attribution-schema and round-role fixes plus maintainer
+review.
+
 ## Revisit 2026-08-22 (after #1326 / PR #1680)
 
 Auditor now reports 103 multi-round merged PRs, later-round catches

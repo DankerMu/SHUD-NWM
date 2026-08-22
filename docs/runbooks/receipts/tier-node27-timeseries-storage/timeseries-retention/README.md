@@ -93,6 +93,16 @@ contention. Remediation: stop `nhms-node27-autopipe.timer`, let the
 in-flight pass finish (~10 min), enforce in the quiet window, restart
 the timer.
 
+**Scope of that remediation: the 2026-07-25 bringup only.** It was written
+when retention was run by hand and there was no daily timer, so nothing would
+have retried. Since the 13:15 CST scheduled tick exists, a contention refusal
+on a SCHEDULED tick self-heals on the next tick and the guidance is the
+opposite — see runbook §8.6 items 5-7
+(`docs/runbooks/tier-node27-timeseries-storage.md`): do **not** force a manual
+enforce run to catch up, because a manual wrapper invocation is a live
+production delete. Escalate on the pattern (3+ consecutive days, or 4+ ticks
+in a week), not on the single event.
+
 ### `first-enforce-20260725T061740Z.json`
 
 First live enforce (Step C, #1072; human go recorded on the issue).

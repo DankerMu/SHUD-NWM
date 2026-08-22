@@ -22,6 +22,37 @@ NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=14
 # compression sibling per-tick bound).
 NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND=5
 
+# Drop-phase lock budget in milliseconds (issue #1664). Applied as
+# `SET lock_timeout` in the same session as `drop_chunks`, so a drop blocked
+# behind a concurrent writer refuses as SQLSTATE 55P03 (reported as
+# `lock-contention(55P03)` in refusal_reason) with a BOUNDED wait, instead of
+# burning the whole 300 s statement budget and returning an unattributable
+# 57014. Leave it unset to take the pinned default 240000.
+#
+# HARD BOUND: the value must be an integer strictly greater than 0 and
+# strictly less than the drop-phase statement_timeout (`_DROP_TIMEOUT_MS`
+# = 300000 in scripts/node27_timeseries_retention.py). 0, a negative number,
+# 300000, anything above it, or a non-integer aborts the tick with
+# RETENTION_CONFIG_INVALID, exit 2, no receipt and no DB connection. An empty
+# assignment is treated as unset (default applies), matching the WINDOW_DAYS /
+# PER_TICK_BOUND convention.
+#
+# Why 240000 and NOT the 2-5 s the issue suggested (recorded deviation,
+# OpenSpec design D3): a successful 08-19 tick spent ~182 s of wall clock that
+# its 0.638 GB of delete work does not explain (08-17 / 08-20 freed ~11 GB in
+# 23 s / 1 s). That number is the wrapper's `elapsed_sec`, which brackets the
+# WHOLE run (watermark + enumeration + per-chunk measurement, none of them
+# lock-bounded), so it CANNOT be read as a measured lock wait. The decision
+# rests on the cost asymmetry and the attribution gap instead, and the
+# per-chunk drop timing (#1664, runbook 8.6 item 6) exists to replace this
+# inference with a measurement. The cost is
+# asymmetric (this is the only lane with delete authority; nothing waits on
+# it — TimeoutStartSec=0, no `timeout(1)`, next tick 24 h later), and the
+# 60 s gap between 240 s and 300 s keeps 55P03 (lock bound) and 57014
+# (statement bound) unambiguous. Lowering it does NOT make failures rarer —
+# see runbook §8.2 on what this bound does and does not buy.
+#NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS=240000
+
 # Archive-gate mode (issue #1369, completed by #1370). REQUIRED, and the only
 # accepted value is "disabled". The archive lane is permanently retired by
 # docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11

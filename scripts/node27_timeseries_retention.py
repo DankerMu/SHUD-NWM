@@ -40,7 +40,10 @@ the archive-lane retirement:
   strict ``<`` — a chunk with ``range_end == cutoff`` has all row times
   strictly less than cutoff, satisfying "entire range older than window").
 - H10 lock path byte-identical with runbook §8 + ``.example``.
-- H12 statement timeouts: 60 s for catalog enumeration, 300 s per ``drop_chunks``.
+- H12 statement timeouts: 60 s for catalog enumeration, 300 s per
+  ``drop_chunks``; the drop session additionally carries a configurable
+  per-acquisition ``lock_timeout`` (#1664, default 240 s) so a blocked drop
+  refuses as lock contention rather than as a generic statement timeout.
 - H13 env prefix ``NODE27_TIMESERIES_RETENTION_*``.
 
 ADR 0001 display carve-out: no imports touching ``apps/api`` or
@@ -50,12 +53,14 @@ ADR 0001 display carve-out: no imports touching ``apps/api`` or
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
 import re
 import stat
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -113,6 +118,37 @@ _DEFAULT_PER_TICK_BOUND = 5
 _QUERY_TIMEOUT_MS = 60_000
 _DROP_TIMEOUT_MS = 300_000
 
+# #1664 drop-phase lock budget. Bounds ONE lock acquisition inside the
+# drop session so a blocked drop refuses as ``55P03`` (lock not available)
+# instead of as a generic ``57014`` statement timeout that cannot be told
+# apart from "the delete itself was slow". Env override:
+# ``NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS`` (strictly between 0 and
+# ``_DROP_TIMEOUT_MS``; out of range refuses with RETENTION_CONFIG_INVALID
+# before any DB call).
+#
+# RECORDED DEVIATION from issue #1664's suggested 2-5 s. Three grounds
+# (design D3); note that (1) is UNEXPLAINED TIME, not a measured lock wait:
+#  1. A successful 08-19 tick spent ~=182 s of wall clock that its 0.638 GB of
+#     delete work does not explain (08-17 / 08-20 freed ~11 GB in 23 s / 1 s).
+#     The wrapper's `elapsed_sec` brackets the WHOLE Python invocation —
+#     watermark + enumeration + per-chunk measurement all sit inside it and
+#     none is lock-bounded — so it cannot attribute those seconds to the drop
+#     session, let alone to one lock acquisition. The decision therefore rests
+#     on (2) and (3), and the per-chunk timing added by this change exists to
+#     replace this inference with a measurement.
+#  2. Cost asymmetry. Too small = turning success into failure on the only
+#     lane with delete authority; too large = off-peak wall-clock latency
+#     nobody waits on (``TimeoutStartSec=0``, no ``timeout(1)`` in the
+#     wrapper, next tick 24 h away).
+#  3. The 60 s gap between 240 s and the 300 s ``_DROP_TIMEOUT_MS`` keeps
+#     ``55P03`` (hit the lock bound) and ``57014`` (hit the statement bound)
+#     unambiguous in the receipt.
+#
+# Written as a literal ON PURPOSE: it is NOT derived from
+# ``_DROP_TIMEOUT_MS``. The two bounds are independently operable operator
+# knobs and a derivation would weld them together.
+_DEFAULT_LOCK_TIMEOUT_MS = 240_000
+
 # TARGET_HYPERTABLES — the two D3 detail hypertables. Metadata/coverage
 # tables (`hydro_run`, `run_display_coverage`, `forcing_version`,
 # `state_snapshot`, QC/lineage) MUST NEVER appear here. Structural
@@ -150,6 +186,34 @@ WIRE_CODES: frozenset[str] = frozenset(
     }
 )
 
+# #1664 lock-contention classification (design D4). NOT wire codes — these are
+# PostgreSQL SQLSTATEs read off the driver exception, and adding a wire code
+# was rejected on purpose (``WIRE_CODES`` is byte-identical across four
+# surfaces, one of them an unarchived fixture, and the receipt schema's
+# ``oneOf`` would move with it).
+#
+# The classification is rendered as a ``lock-contention(<pgcode>): `` segment
+# inserted AFTER the ``RETENTION_DROP_FAILED:<hypertable_schema>.<chunk_name>:``
+# prefix and BEFORE the redacted driver text, so the #1213 operator-grep
+# contract on that prefix stays byte-unchanged.
+#
+# Default-deny: only an exact ``error.pgcode`` match classifies. Message-text
+# matching is FORBIDDEN — ``_redact_error_text`` output is not a stable
+# contract — and a missing / unknown ``pgcode`` keeps the pre-change reason
+# text byte for byte.
+LOCK_CONTENTION_PGCODES: frozenset[str] = frozenset({"55P03", "40P01"})
+
+# Operator-grep anchors for the two #1664 stderr/receipt surfaces, hoisted out
+# of the emit sites so the runbook §8.6 procedures that grep for them are
+# pinned by a test instead of by two independent literals drifting apart. Same
+# discipline as ``_MEASURE_WARNING`` and its §8.6 item 5 fence.
+#
+# ``LOCK_CONTENTION_MARKER_PREFIX`` is the segment head only: the rendered
+# segment is ``f"{LOCK_CONTENTION_MARKER_PREFIX}{pgcode}): "``, and the
+# operator greps the open-paren head because the code varies.
+DROP_TIMING_DIAGNOSTIC = "per-chunk drop timing"
+LOCK_CONTENTION_MARKER_PREFIX = "lock-contention("
+
 _ROOT = Path(__file__).resolve().parents[1]
 _RECEIPT_SCHEMA_PATH = _ROOT / "schemas/timeseries_retention_receipt.schema.json"
 
@@ -185,6 +249,9 @@ class RetentionConfig:
     admits nothing else (#1370). It is carried on the config (rather than
     assumed) because every receipt must record the deletion authority in
     force when it was written.
+
+    ``lock_timeout_ms`` (#1664) is the drop session's per-acquisition lock
+    budget; it trails ``archive_gate`` only because both carry defaults.
     """
 
     database_url: str
@@ -194,6 +261,7 @@ class RetentionConfig:
     lock_path: Path
     enforce: bool
     archive_gate: str = ARCHIVE_GATE_DISABLED
+    lock_timeout_ms: int = _DEFAULT_LOCK_TIMEOUT_MS
 
 
 @dataclass(frozen=True)
@@ -253,6 +321,42 @@ def _optional_positive_int(raw: str | None, *, name: str, default: int) -> int:
     if raw is None or raw == "":
         return default
     return _parse_positive_int(raw, name=name, minimum=1)
+
+
+def _optional_bounded_int(
+    raw: str | None, *, name: str, default: int, exclusive_maximum: int
+) -> int:
+    """Parse an optional int constrained to ``0 < value < exclusive_maximum``.
+
+    #1664: deliberately NOT :func:`_optional_positive_int`, which has no upper
+    bound. A lock budget at or above the drop-phase ``statement_timeout`` is
+    inert — the statement wall fires first, so the failure comes back as a
+    generic ``57014`` and the whole point of the knob (attributing the failure
+    to lock contention) is lost. Such a value is a misconfiguration, not a
+    conservative choice, and refuses fail-closed with
+    ``RETENTION_CONFIG_INVALID`` before any DB call.
+
+    Absent or empty follows the in-module convention of
+    :func:`_optional_positive_int`: treated as unset, take the default.
+    """
+    if raw is None or raw == "":
+        return default
+    stripped = raw.strip()
+    if stripped == "" or stripped != raw:
+        raise RetentionConfigError(f"{name} must not contain leading/trailing whitespace")
+    try:
+        value = int(stripped)
+    except ValueError as error:
+        raise RetentionConfigError(
+            f"{name} must be an integer strictly greater than 0 and strictly less "
+            f"than {exclusive_maximum}, got {raw!r}"
+        ) from error
+    if value <= 0 or value >= exclusive_maximum:
+        raise RetentionConfigError(
+            f"{name} must be strictly greater than 0 and strictly less than "
+            f"{exclusive_maximum}, got {value}"
+        )
+    return value
 
 
 def _resolve_path(
@@ -324,6 +428,13 @@ def config_from_args(
         name="NODE27_TIMESERIES_RETENTION_PER_TICK_BOUND",
         default=_DEFAULT_PER_TICK_BOUND,
     )
+    # #1664: drop-phase lock budget. Strictly inside (0, _DROP_TIMEOUT_MS).
+    lock_timeout_ms = _optional_bounded_int(
+        env.get("NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS"),
+        name="NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS",
+        default=_DEFAULT_LOCK_TIMEOUT_MS,
+        exclusive_maximum=_DROP_TIMEOUT_MS,
+    )
     # #1370: the two archive receipt paths and their two max-age variables are
     # gone with the gates. A box whose env file still carries them keeps
     # working — the runner simply never reads those keys.
@@ -353,6 +464,7 @@ def config_from_args(
         lock_path=lock_path,
         enforce=enforce,
         archive_gate=archive_gate,
+        lock_timeout_ms=lock_timeout_ms,
     )
 
 
@@ -675,6 +787,18 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
     incomplete evidence: an upper-bound-only call would cascade through that
     protected chunk. Server-side ``drop_chunks`` returns one row per dropped
     chunk; any count other than one fails closed.
+
+    #1664: the session carries TWO bounds, both set before ``drop_chunks``.
+    ``statement_timeout`` walls the whole statement; ``lock_timeout`` walls a
+    single lock acquisition, so a drop blocked behind a concurrent writer
+    (``drop_chunks`` on a FK-referenced hypertable takes an
+    ``AccessExclusiveLock``) refuses as ``55P03`` with a bounded wait instead
+    of burning the entire statement budget and returning an unattributable
+    ``57014``. It is per-acquisition, not cumulative: a drop taking several
+    locks can still exhaust ``statement_timeout`` with each wait under the
+    lock bound, and it does not prevent ``40P01`` — the deadlock detector
+    aborts a cycle regardless. The enumeration and measurement sessions get
+    no lock bound (their 60 s ``_QUERY_TIMEOUT_MS`` is unchanged).
     """
     import psycopg2  # type: ignore[import-untyped]
 
@@ -683,6 +807,7 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
         with connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SET statement_timeout = {_DROP_TIMEOUT_MS}")
+                cursor.execute(f"SET lock_timeout = {config.lock_timeout_ms}")
                 cursor.execute(
                     "SELECT drop_chunks("
                     "older_than := (%s::timestamptz + INTERVAL '1 microsecond'), "
@@ -887,6 +1012,49 @@ class _RunnerTrace:
         self.steps.append((name, value))
 
 
+def _emit_drop_timing(chunk: ChunkRow, started: float, *, dropped_ok: bool) -> None:
+    """#1664 design D3a: one stderr JSON line per drop attempt (no receipt change).
+
+    Emitted on BOTH paths so a refused tick still reports how long the failing
+    drop waited — that number is what tells "blocked on a lock" apart from
+    "the delete itself was slow", and it is the only measurement that can tune
+    ``NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS``.
+
+    The line carries NO error text (design D3a / 3.3): chunk name plus a
+    number have no credential surface, so this does not cross
+    :func:`_redact_error_text`, and the failure cause keeps travelling only
+    through the redacted ``refusal_reason``. Shape follows the existing
+    measurement warning line (sorted-key JSON on stderr, captured into
+    ``retention.log`` by the wrapper).
+
+    Best-effort ON PURPOSE, and the guard lives here so BOTH call sites get
+    it. ``sys.stderr`` stays line-buffered under the wrapper's redirection, so
+    this write really can fail — e.g. ENOSPC on ``retention.log``, which on
+    node-27 shares the same volume as the database. Unguarded, that ``OSError``
+    would escape ``run_retention`` into :func:`main`'s uncaught-error arm and
+    publish a ``refused`` / ``RETENTION_UNCAUGHT_ERROR`` receipt: on the
+    success path the schema's ``refused`` branch forbids ``dropped_chunks``, so
+    a chunk that WAS deleted would be recorded nowhere; on the failure path it
+    would replace an already-classified ``lock-contention(<pgcode>)`` reason
+    with a generic one. Losing a diagnostic line is strictly better than
+    misreporting deletion state. Only this write is suppressed — the
+    ``drop_chunk`` call itself keeps raising.
+    """
+    with contextlib.suppress(OSError):
+        print(
+            json.dumps(
+                {
+                    "chunk": chunk.qualified_name,
+                    "diagnostic": DROP_TIMING_DIAGNOSTIC,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000.0, 3),
+                    "outcome": "dropped" if dropped_ok else "failed",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+
+
 def run_retention(
     config: RetentionConfig,
     now: datetime,
@@ -951,20 +1119,41 @@ def run_retention(
 
     dropped: list[dict[str, Any]] = []
     for chunk in selected:
+        # #1664 design D3a: time EVERY drop attempt, both outcomes. Without it
+        # a sub-timeout slow tick cannot be told apart from a lock wait, and
+        # `_DEFAULT_LOCK_TIMEOUT_MS` can never be tuned from measurement. The
+        # timer wraps the injected `drop_chunk` seam (not the driver call
+        # inside `_default_drop_chunk`) so it also measures a substituted
+        # implementation. Receipt shape unchanged: this is stderr only.
+        started = time.monotonic()
         try:
             drop_chunk(config, chunk)
         except Exception as error:
+            _emit_drop_timing(chunk, started, dropped_ok=False)
             # H5 whole-tick fail-closed: subsequent chunks NOT attempted.
             # #1213: the driver text is credential-redacted before it reaches
             # the receipt file and the wrapper log; the wire-code +
             # `<hypertable_schema>.<chunk_name>` prefix is byte-unchanged so
             # operator greps keep matching.
+            # #1664 (design D4): a lock-contention SQLSTATE additionally
+            # names itself in a segment inserted between that prefix and the
+            # redacted text. Default-deny on `pgcode` alone — no message-text
+            # matching — so an absent or unlisted code keeps the pre-#1664
+            # reason byte for byte.
+            pgcode = getattr(error, "pgcode", None)
+            classification = (
+                f"{LOCK_CONTENTION_MARKER_PREFIX}{pgcode}): "
+                if pgcode in LOCK_CONTENTION_PGCODES
+                else ""
+            )
             reason = (
                 f"{CODE_RETENTION_DROP_FAILED}:"
                 f"{chunk.hypertable_schema}.{chunk.chunk_name}: "
+                f"{classification}"
                 f"{_redact_error_text(error, config.database_url)}"
             )
             return _build("refused", refusal_reason=reason)
+        _emit_drop_timing(chunk, started, dropped_ok=True)
         dropped.append(
             {
                 "name": chunk.qualified_name,
