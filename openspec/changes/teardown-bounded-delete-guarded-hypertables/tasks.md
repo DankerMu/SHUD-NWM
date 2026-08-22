@@ -60,8 +60,10 @@
       restore.
 - [x] E4 `uv run ruff check .` clean.
 - [x] E5 `git diff --stat origin/master...HEAD` — the only non-`openspec/` paths
-      are `tests/integration_helpers.py`, the new test module, and
-      `tests/test_river_ts_text_identity_cleanup.py` (T5b only).
+      are `tests/integration_helpers.py`, the new test module,
+      `tests/test_river_ts_text_identity_cleanup.py` (T5b only), and
+      `.review-gate-issues.json` (inert gate accounting carried over from
+      #1707's close, not code).
 - [x] E6 `openspec validate teardown-bounded-delete-guarded-hypertables --strict --no-interactive`.
 - [ ] E7 **node-27 receipt**, the terminal oracle:
       `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=... uv run pytest -q -m integration
@@ -101,8 +103,55 @@
 - E4 `uv run ruff check .` -> `All checks passed!`
 - E5 non-`openspec/` paths: `tests/integration_helpers.py`,
   `tests/test_integration_helpers_bounded_teardown.py` (new),
-  `tests/test_river_ts_text_identity_cleanup.py`.
+  `tests/test_river_ts_text_identity_cleanup.py`, and `.review-gate-issues.json`.
+  The first draft of this receipt omitted the last one and was corrected in
+  round 1 — it is inert bookkeeping, not code, but the receipt was not literally
+  true as written.
 - E6 `openspec validate ... --strict --no-interactive` -> valid.
 - Recorded deviation: the implementer ran one text edit through a bare `python3`
   heredoc before switching back to `uv run python`. Pure string replacement on a
   test file, result verified by the E1 run under `uv`. No impact.
+
+## 5. Round-1 fix receipts
+
+Round 1 returned no P0/P1/P2 from either lens. Two P3s were fixed rather than
+deferred; a P3-only result does not buy a fix pass, but one of them was a false
+Evidence Floor receipt and the other was a line that cannot fail in a test module
+this PR introduces.
+
+- F1 `tests/test_integration_helpers_bounded_teardown.py:126` carried
+  `assert order == sorted(order)`, where `order` is built by filtering an
+  `enumerate()` in traversal order — ascending by construction, so the assertion
+  could not fail for any input. Replaced with the assertion it was pretending to
+  be: the river probe's index is strictly less than the river DELETE's, each
+  located by content.
+- F2 the recording fake answers a probe by matching the table name and returns a
+  dict keyed from the test's own configuration, never reading the `AS` aliases in
+  the SQL. A mutation swapping the aliases **in the SQL** while the Python still
+  read the right keys would be backwards under a real `RealDictCursor` and stay
+  green. Now pinned statically for both tables.
+- G1 `uv run pytest -q` on the three files -> `52 passed`.
+- G2(i) the strongest receipt of the round: with the river DELETE moved ahead of
+  its probe, the **old** tautological assertion stays green (`order = [4, 5]` is
+  still ascending, and `max(order) < run_delete` still holds) while the new
+  assertion is the only one that bites (`assert 5 < 4`). Restored byte-identical,
+  verified by `cmp` and an empty `git diff`.
+- G2(ii) swapping the two `AS` aliases in the river probe turns only the new
+  alias assertion red — every behavioral assertion stays green, which is exactly
+  the blind spot F2 names. Restored byte-identical, checksum matched against the
+  pre-edit value.
+- G3 `uv run ruff check .` -> `All checks passed!`
+- G4 the fix pass touched one file, `+21/-1`.
+- Recorded deviation: one shell invocation left an empty `python3` heredoc stub
+  in front of the real command — nothing executed through it, and every actual
+  Python ran under `uv run`.
+
+### Still open
+
+E7 remains unchecked. node-27's **root filesystem is 100% full** (98G, 0
+available; `/tmp/pytest-of-nwm` alone holds 27G of accumulated pytest temp
+trees), so the integration lane cannot create its throwaway database or write
+its temp files. Production is unaffected — the PG data lives on `/home`, which
+has 517G free, and the container is up and answering. The cleanup is a
+destructive action on a production host and is awaiting the operator's decision;
+this PR does not merge before E7 lands.

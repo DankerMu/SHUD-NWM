@@ -92,6 +92,17 @@ def test_river_delete_is_bounded_to_the_probed_window() -> None:
     probes = _statements(cursor, RIVER_TABLE, kind="SELECT")
     assert len(probes) == 1
     assert probes[0][1] == (FORECAST_RUN_ID, HINDCAST_RUN_ID)
+    # Pin the aliases in the SQL text. The fake answers a probe by matching the
+    # table name and returns keys it chose itself, so it would stay green if the
+    # aliases were swapped in the SQL while the Python still read the right
+    # keys — under a real RealDictCursor that yields max as the lower bound and
+    # a backwards, row-leaking DELETE window.
+    assert "min(valid_time) AS valid_time_min" in probes[0][0]
+    assert "max(valid_time) AS valid_time_max" in probes[0][0]
+    # What remains uncovered here is the fake-vs-real cursor gap — psycopg2
+    # raises ProgrammingError on an out-of-sequence fetchone(), which the
+    # helper's ``cursor.fetchone() or {}`` would absorb. That is closed by the
+    # node-27 ``-m integration`` receipt, not by this file.
 
     deletes = _statements(cursor, RIVER_TABLE, kind="DELETE")
     assert len(deletes) == 1
@@ -108,6 +119,9 @@ def test_forcing_delete_is_bounded_to_the_probed_window() -> None:
     probes = _statements(cursor, FORCING_TABLE, kind="SELECT")
     assert len(probes) == 1
     assert probes[0][1] == (f"{ISSUE_126_PREFIX}%",)
+    # Same alias pin, same mutation, as for the river probe above.
+    assert "min(valid_time) AS valid_time_min" in probes[0][0]
+    assert "max(valid_time) AS valid_time_max" in probes[0][0]
 
     deletes = _statements(cursor, FORCING_TABLE, kind="DELETE")
     assert len(deletes) == 1
@@ -123,7 +137,13 @@ def test_the_probe_precedes_the_delete_and_the_hydro_run_deletion() -> None:
     order = [index for index, (sql, _) in enumerate(cursor.calls) if RIVER_TABLE in sql]
     run_delete = next(index for index, (sql, _) in enumerate(cursor.calls) if "DELETE FROM hydro.hydro_run" in sql)
 
-    assert order == sorted(order)
+    # Identify the two statements by content, not by their position in the list:
+    # the DELETE's bounds come from the probe's result, so emitting the DELETE
+    # first would read a window that was never measured.
+    probes = [index for index, (sql, _) in enumerate(cursor.calls) if RIVER_TABLE in sql and "min(valid_time)" in sql]
+    deletes = [index for index, (sql, _) in enumerate(cursor.calls) if f"DELETE FROM {RIVER_TABLE}" in sql]
+    assert len(probes) == 1 and len(deletes) == 1
+    assert probes[0] < deletes[0]
     assert max(order) < run_delete
 
 
