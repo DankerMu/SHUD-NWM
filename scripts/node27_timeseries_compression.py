@@ -121,6 +121,10 @@ _DEFAULT_SYSTEMD_WALL_SECONDS = 3_940
 _CLEANUP_MARGIN_SECONDS = 60
 _SYSTEMD_MARGIN_SECONDS = 40
 _CONNECT_TIMEOUT_SECONDS = 10
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-ts-compression"
 _MAX_CATALOG_ROWS = 50_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _MAX_CANDIDATES = 10_000
@@ -480,6 +484,7 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
         database_url,
         connect_timeout=_CONNECT_TIMEOUT_SECONDS,
         cursor_factory=psycopg2.extras.RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
     )
     try:
         with connection:
@@ -520,7 +525,11 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
 def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: bool = False) -> int:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -570,7 +579,11 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_time
     # no injection surface. ``CompressChunk`` stays a two-argument protocol.
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -589,7 +602,11 @@ def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
 
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         connection.set_session(readonly=True, autocommit=True)
         with connection.cursor() as cursor:

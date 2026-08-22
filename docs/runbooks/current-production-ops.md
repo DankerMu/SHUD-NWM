@@ -2207,6 +2207,52 @@ group by 1
 order by 1;
 ```
 
+### 9.1 `pg_stat_activity` 归因与 cancel 纪律（#1714）
+
+2026-08-22 事故：`pg_stat_activity` 里一条 `state=active`、`dur=00:06:59` 的
+`SELECT h.run_id, ...` 被判为「自己的 pytest 慢查询」并 `pg_cancel_backend`，
+实际打掉的是每 10 分钟一次的生产 ingest tick（autopipe `rc=1`，本轮 ingest 未完成）。
+当时全库应用连接的 `application_name` 都是空串，唯一的信号 `usename` 又被
+autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自带默认标识。
+
+| `application_name` | 归属 |
+|---|---|
+| `nhms-autopipe` | `scripts/node27_autopipeline.py`（`nhms-node27-autopipe.timer`，每 10 分钟）|
+| `nhms-ingest-run` | `scripts/node27_ingest_run.py`（autopipe 子进程）|
+| `nhms-output-parser` | `workers/output_parser`（autopipe 子进程）|
+| `nhms-refresh-coverage` | `scripts/node27_refresh_coverage.py`（autopipe 子进程）|
+| `nhms-display-api` | `apps/api/routes/hydro_display.py`（display API 只读连接池）|
+| `nhms-ts-retention` | `scripts/node27_timeseries_retention.py`（retention timer）|
+| `nhms-ts-compression` | `scripts/node27_timeseries_compression.py`（compression timer）|
+| `psql` | 人工会话 |
+| `TimescaleDB Background Worker Scheduler` | TimescaleDB 后台 worker，不要动 |
+| 空串 | 未在册的连接面（`packages/common/*`、qhh 系脚本等）；先查清来源再处置 |
+
+处置纪律：
+
+- **执行 `pg_cancel_backend` / `pg_terminate_backend` 之前，先用
+  `application_name` 归因。** 归因不出来就别取消。
+
+  ```sql
+  select pid, usename, application_name, client_addr, state,
+         now() - query_start as dur, left(query, 80)
+  from pg_stat_activity
+  where datname = 'nhms'
+  order by query_start;
+  ```
+
+- **生产 tick（`nhms-autopipe` / `nhms-ingest-run` / `nhms-output-parser` /
+  `nhms-refresh-coverage` / `nhms-ts-retention` / `nhms-ts-compression`）不得随手取消。**
+  它们本来就有分钟级的正常时长。要停就停对应的 systemd unit（`systemctl --user stop
+  nhms-node27-autopipe.timer` 等）并在日志里留痕；慢查询本身属于容量/计划问题，
+  走 issue，不走 cancel。
+- **integration 测试一律经 `NHMS_INTEGRATION_DATABASE_URL`**（`tests/conftest.py`
+  无该 opt-in 时无条件 skip 全部 integration，并且每次建 `nhms_it_<uuid>` throwaway 库
+  再 drop）。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
+  混在一张 `pg_stat_activity` 里的起点。
+- 运维需要临时覆写标识时，在 DSN 上写 `?application_name=<name>`：代码给的是
+  libpq `fallback_application_name`，显式值永远优先。
+
 ## 10. 前沿停摆告警（frontier stall alert）
 
 2026-08-12 事故：scheduler pass 在 forcing 阶段被 NFS 锁挂死，unit 恒

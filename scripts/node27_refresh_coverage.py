@@ -54,6 +54,11 @@ from packages.common.display_coverage import (
 
 LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
 
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-refresh-coverage"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Refresh hydro.run_display_coverage materialization.")
@@ -80,7 +85,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL") or LOCAL_DEFAULT)
     args = parser.parse_args(argv)
 
-    connection = psycopg2.connect(args.database_url)
+    connection = psycopg2.connect(
+        args.database_url, fallback_application_name=_APPLICATION_NAME
+    )
     try:
         with connection.cursor() as cursor:
             if not run_display_coverage_available(cursor):

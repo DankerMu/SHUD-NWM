@@ -62,6 +62,9 @@
     "workers/mapping_builder/rewrite.py",
     "tests/test_mapping_builder_rewrite.py",
     "tests/test_state_clone_cutover_hook.py",
+    "scripts/node27_autopipeline.py",
+    "tests/test_node27_autopipeline_handoff.py",
+    "tests/test_node27_autopipeline_preflight.py",
     ".review-gate-issues.json"
   ]
 }

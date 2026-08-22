@@ -859,7 +859,7 @@ def test_activate_model_preserves_existing_active_sibling(
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr(autopipe.psycopg2, "connect", lambda _url: Connection())
+    monkeypatch.setattr(autopipe.psycopg2, "connect", lambda _url, **_kwargs: Connection())
 
     assert autopipe._activate_model(NODE27_DATABASE_URL, "dg_source_variant") == 0
     assert len(executed) == 1

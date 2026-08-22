@@ -872,8 +872,26 @@ def _basin_key_set(value: str | None) -> set[str]:
 # --------------------------------------------------------------------------- #
 # DB helpers
 # --------------------------------------------------------------------------- #
+# #1714: every connection this script opens must be attributable in
+# pg_stat_activity. libpq treats fallback_application_name as a DEFAULT only --
+# an operator who writes ?application_name=... into DATABASE_URL still wins --
+# so the code never takes that override away.
+_APPLICATION_NAME = "nhms-autopipe"
+
+
+def _connect(database_url: str, **kwargs: Any) -> Any:
+    """Single connect surface for this script, tagged with _APPLICATION_NAME.
+
+    The only thing this adds over ``psycopg2.connect`` is the attribution
+    kwarg; every caller's other connect parameters pass through untouched.
+    """
+    return psycopg2.connect(
+        database_url, fallback_application_name=_APPLICATION_NAME, **kwargs
+    )
+
+
 def _basin_seeded(database_url: str, basin_id: str) -> bool:
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM core.basin WHERE basin_id = %s", (basin_id,))
@@ -919,7 +937,7 @@ def _already_ingested_runs(
     """
     if not run_ids:
         return set()
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1035,7 +1053,7 @@ def _activate_model(database_url: str, model_id: str) -> int:
     would violate the one-active-model-per-basin-version invariant and must not
     prevent those runs from reaching the display ingest phase.
     """
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -1062,7 +1080,7 @@ def _activate_model(database_url: str, model_id: str) -> int:
 
 
 def _model_river_network_version_id(database_url: str, model_id: str) -> str | None:
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1110,7 +1128,7 @@ def _backfill_output_geometry(database_url: str, river_network_version_id: str) 
         _backfill_output_segment_geometry,
     )
 
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -1143,7 +1161,7 @@ def _publish_display_runs(database_url: str) -> int:
     recompute each freshly published run for nothing. The MVT tile revision
     still rotates on publish because its digest basis includes ``status``
     (apps/api/routes/hydro_display.py ``_run_source_version``)."""
-    conn = psycopg2.connect(database_url)
+    conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -1356,7 +1374,7 @@ def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
     }
     conn = None
     try:
-        conn = psycopg2.connect(database_url)
+        conn = _connect(database_url)
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(_STATS_GUARD_CANDIDATES_SQL, (STATS_GUARD_MIN_MODS,))
@@ -1402,7 +1420,7 @@ def _analyze_unanalyzed_authority_tables(database_url: str) -> dict[str, Any]:
     }
     conn = None
     try:
-        conn = psycopg2.connect(database_url)
+        conn = _connect(database_url)
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(_STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
@@ -1548,7 +1566,7 @@ def _apply_object_store_forcing_handoff(
     object_store_prefix: str,
     database_url: str,
 ) -> dict[str, Any]:
-    connection = psycopg2.connect(database_url)
+    connection = _connect(database_url)
     try:
         return apply_forcing_domain_handoff_path(
             handoff_manifest,

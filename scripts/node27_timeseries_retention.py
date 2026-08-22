@@ -114,6 +114,11 @@ _DEFAULT_LOCK_PATH_STR = "/tmp/nhms-node27-timeseries-retention.lock"
 _DEFAULT_WINDOW_DAYS = DEFAULT_RETENTION_WINDOW_DAYS
 _DEFAULT_PER_TICK_BOUND = 5
 
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-ts-retention"
+
 # H12 statement timeouts.
 _QUERY_TIMEOUT_MS = 60_000
 _DROP_TIMEOUT_MS = 300_000
@@ -613,7 +618,9 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
     import psycopg2.extras  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
-        config.database_url, cursor_factory=psycopg2.extras.RealDictCursor
+        config.database_url,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
     )
     try:
         with connection:
@@ -738,7 +745,9 @@ def _default_measure_chunk_bytes(
     result: dict[str, int] = {}
     for chunk in chunks:
         try:
-            connection = psycopg2.connect(config.database_url)
+            connection = psycopg2.connect(
+                config.database_url, fallback_application_name=_APPLICATION_NAME
+            )
             try:
                 with connection:
                     with connection.cursor() as cursor:
@@ -802,7 +811,9 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
     """
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(config.database_url)
+    connection = psycopg2.connect(
+        config.database_url, fallback_application_name=_APPLICATION_NAME
+    )
     try:
         with connection:
             with connection.cursor() as cursor:

@@ -61,6 +61,11 @@ from services.tiles.mvt import (
 
 router = APIRouter(tags=["hydro-display"])
 
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-display-api"
+
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
 HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v3"
 RIVER_NETWORK_NATIONAL_SOURCE_ID = "river-network-national"
@@ -137,6 +142,7 @@ def _engine(database_url: str) -> Engine:
     return create_engine(
         database_url,
         future=True,
+        connect_args={"fallback_application_name": _APPLICATION_NAME},
         pool_pre_ping=True,
         pool_size=_bounded_env_int("NHMS_DISPLAY_DB_POOL_SIZE", default=4, minimum=1, maximum=16),
         max_overflow=_bounded_env_int("NHMS_DISPLAY_DB_MAX_OVERFLOW", default=2, minimum=0, maximum=16),

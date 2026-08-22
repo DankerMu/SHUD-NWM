@@ -6,6 +6,11 @@
 NHMS_NODE27_INGEST_ROLE=node27_data_plane_ingest
 
 # Writer-capable node-27 PostgreSQL URL. Do not use the display_readonly role.
+# #1714: the autopipe tick and its subprocesses ship their own default
+# application_name (nhms-autopipe / nhms-ingest-run / nhms-output-parser /
+# nhms-refresh-coverage, via libpq fallback_application_name) so
+# pg_stat_activity can attribute them. To override, append
+# ?application_name=<name> to the DSN below; an explicit value always wins.
 DATABASE_URL=postgresql://nhms_ingest_rw:change-me@127.0.0.1:55432/nhms
 # Positive endpoint allowlist for node-27 ingest destinations. Keep the default
 # unless this host intentionally exposes the node-27 writer on a different local
