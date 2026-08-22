@@ -1015,3 +1015,22 @@ means the 66-vs-264 aggregate should not be read as a clean lens-vs-lens
 experiment. Fourth measurement gap, alongside the three already logged.
 
 Neither observation moves the keep/cut call, which stays on the aggregate.
+
+### Revisit 2026-08-22 — PR #1750 (#1646, pytest thread-exception policy)
+
+`loop_log_audit` reports **109 multi-round merged PRs**, with later-round catches
+**core=66 vs rotated=264**. PR #1750 itself is a single-round clean review:
+six Round 1 lenses returned zero candidate findings, no verifier batch existed,
+and the independent Phase 7 Gap Sweep was also clean. It therefore enters
+neither the multi-round denominator nor either later-round catch counter.
+
+This sample has **zero information about rotation**: no follow-up comprehensive
+round ran, so neither a rotated free slot nor a pinned-core recheck was applied.
+Treating the extra merged-PR/log denominator as evidence for keep or cut would
+repeat the measurement error already documented throughout this ADR—confusing
+"treatment not applied" with "treatment applied and found nothing."
+
+**Keep rotation remains unchanged.** The cumulative ratio still rules out an
+autonomous cut, but this PR adds no evidentiary strength in either direction.
+Any future reversal still requires the recorded attribution-schema and
+round-role fixes plus maintainer review.

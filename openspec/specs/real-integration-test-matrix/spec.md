@@ -246,12 +246,12 @@ main-thread deadline assertion and still exits while its injected writer remains
 permanently blocked. Controlled in-process blockers SHALL still be released and
 joined; daemon status does not excuse cleanup.
 
-Both the `finally` and the captured-exception assertion are required in
-that implementation; neither alone suffices. The `finally` alone
-converts the hang into a silent pass or a misattributed failure, because
-`threading.Thread` swallows exceptions, pytest downgrades them to
-`PytestUnhandledThreadExceptionWarning`, and this repo declares no
-`filterwarnings`, so that warning fails nothing.
+Both the `finally` and the captured-exception assertion remain required in that
+implementation. Repository pytest now escalates an escaped
+`PytestUnhandledThreadExceptionWarning` as defense in depth, but that global
+boundary does not prove the helper's direct-call semantics, cause-before-result
+ordering, resource cleanup, peer release, or whole-process terminability. A
+warning failure therefore cannot substitute for either local leg.
 
 This governs the test harness only. It places no requirement on the
 production code under test, and it does not authorize weakening a
@@ -259,19 +259,20 @@ concurrency oracle: iteration counts, real (non-doubled) calls into the
 code under test, and the substantive assertions about observed state are
 unaffected by conforming a harness to this shape.
 
-Adjacent hazards are routed rather than grandfathered. The
-`Barrier`-mediated variant — a worker that raises before reaching an unbounded
-`threading.Barrier`, stranding its peers — is the same hang family but not a
-spin-wait completion harness; #1645 tracks it. Until #1645 lands, those tests can
-still strand non-daemon peers and hang the run.
+Adjacent hazards are governed rather than grandfathered. The
+`Barrier`-mediated variant — a worker that raises before reaching a Barrier,
+stranding its peers — is the same hang family but not a spin-wait completion
+harness; the adjacent Barrier requirement governs its pre-arrival and partial
+launch paths.
 
-#1648 tracks diagnostic quality in three tests that poll production state
-(`heartbeat_seq`, `lost`, terminal-intent path) rather than a dedicated harness
-completion sentinel. They are outside this requirement, not exceptions to it.
-In particular, production `_LeaseHeartbeat._run` catches renew exceptions and
-maps them to `lost = True`, so this requirement SHALL NOT claim all three are
-uncaught-thread-exception paths. The repo-wide warning/timeout backstops that
-operate independently of harness shape are tracked in #1646.
+The adjacent production-state polling requirement governs diagnostic quality
+for `heartbeat_seq`, `lost`, and terminal-intent polls rather than a dedicated
+harness completion sentinel. Those polls are outside this requirement, not
+exceptions to it. In particular, production `_LeaseHeartbeat._run` catches renew
+exceptions and maps them to `lost = True`, so this requirement SHALL NOT claim
+all three are uncaught-thread-exception paths. The repository-wide exact warning
+escalation and evidence prerequisites for any universal timeout are governed by
+this change's adjacent requirements.
 
 #### Scenario: A worker that raises produces a bounded, attributed failure
 
@@ -407,4 +408,61 @@ This requirement governs only `test_lease_heartbeat_advances_then_detects_takeov
 
 - **WHEN** repository-wide `PytestUnhandledThreadExceptionWarning`, pytest timeout, or cancellation policy is considered
 - **THEN** this change does not edit that policy, dependency, or configuration because #1646 owns the shape-independent backstop
+
+### Requirement: Repository pytest MUST fail on unhandled worker-thread exceptions
+
+Repository pytest configuration SHALL treat `pytest.PytestUnhandledThreadExceptionWarning` as an error. The policy SHALL target that exact category, preserve unrelated warning behavior, retain the worker's original cause in failure output, and execute in local, targeted, full, and real-integration pytest lanes installed from the repository development dependencies. Changes to either the pytest configuration or dependency lock SHALL select and execute the dedicated semantic policy suite in PR CI.
+
+This repository-wide boundary is defense in depth. It SHALL NOT replace harness-owned exception capture, cause-before-result ordering, peer release, bounded joins/waits, cleanup, or whole-process terminability proof where an issue-specific harness contract requires those stronger outcomes.
+
+#### Scenario: Unhandled worker exception fails with its cause
+
+- **WHEN** a throwaway test starts and joins a worker that raises a unique `RuntimeError` while the test body otherwise returns normally under repository pytest configuration
+- **THEN** pytest exits nonzero and reports both the unique cause and `PytestUnhandledThreadExceptionWarning`
+- **AND** the same config with only the exact filter removed exits zero with a passing test plus that warning, proving the shipping policy is load-bearing
+
+#### Scenario: Unrelated warnings and baseline failures retain their behavior
+
+- **WHEN** a test emits an unrelated `UserWarning` under repository configuration
+- **THEN** the test remains passing with a warning rather than failing
+- **AND** repository configuration adds no broad all-warning error filter or custom thread-exception hook
+- **AND** final-head tracked tests and `conftest.py` files contain no explicit warning-filter override of this policy
+- **AND** ordinary pytest markers or executed Python warning-filter calls are documented as intentional, reviewable overrides rather than claimed to be statically impossible
+- **AND** a pre-existing non-thread-policy test failure is reported against its owning issue rather than suppressed, fixed out of scope, or counted as thread-warning debt
+
+#### Scenario: Config and lock changes execute the policy owner
+
+- **WHEN** `pyproject.toml` or `uv.lock` changes in a pull request
+- **THEN** the targeted selector includes the dedicated thread-exception policy suite and selector meta-guard while retaining its prior core-smoke ownership
+- **AND** final-head CI executes those assertions rather than reporting only a collect-only smoke
+
+#### Scenario: Existing harness contracts remain stronger
+
+- **WHEN** an issue-owned harness captures/re-raises a worker cause, releases peers, joins workers, cleans resources, or proves process termination
+- **THEN** those local assertions remain required and unchanged
+- **AND** a globally escalated warning cannot be used to waive a missing release, ordering, cleanup, or termination leg
+
+### Requirement: Universal pytest timeout policy MUST be evidence-calibrated
+
+A universal per-test timeout plugin/configuration SHALL NOT be adopted from whole-job duration evidence. Before any future global timeout is enabled, the repository SHALL have per-test setup/body/teardown distributions for every affected marker lane, SHALL select and prove a timeout method against the required process-termination and teardown/reporting contract, and SHALL separately cover hangs that begin after a passing test's timer is canceled plus any child-process boundary. Until those prerequisites exist, issue-owned local protocol bounds and CI job-level timeouts remain the explicit hang backstops.
+
+This decision adds no `pytest-timeout` dependency, no global `timeout`/`timeout_method`/timeout addopts, no marker-only `@pytest.mark.timeout` annotations, and no CI job-timeout change. The marker-only path still needs the same dependency plus calibrated per-test values/methods; current known concurrency harnesses already carry more precise local bounds, while annotating an incomplete subset would make an unsupported coverage claim. This decision does not weaken #1633/#1645/#1648 local harness requirements, solve #1671's slow full-job lane, or treat #1632's marker-lane umask work as duration evidence.
+
+#### Scenario: Whole-job timing does not set a per-test bound
+
+- **WHEN** a full pytest job is measured as slow-but-finite near its CI `timeout-minutes` boundary
+- **THEN** that session-total measurement is not used as a universal per-test timeout value
+- **AND** no marker expression, test selection, or assertion is removed to manufacture a safe-looking bound
+
+#### Scenario: Timeout method trade-offs are explicit
+
+- **WHEN** a future timeout proposal chooses a signal-based method that interrupts a test or a thread-based method that hard-exits the process
+- **THEN** it proves the required termination behavior and explicitly accepts or preserves fixture teardown, cleanup, JUnit/evidence output, and remaining-test semantics
+- **AND** platform fallback behavior is covered rather than assumed equivalent
+
+#### Scenario: Warning escalation makes no hang claim
+
+- **WHEN** a worker blocks without raising, or a test returns while a live non-daemon worker later strands interpreter shutdown
+- **THEN** the warning-as-error policy makes no claim to catch that condition
+- **AND** the applicable local harness/process bound or CI job timeout remains necessary
 
