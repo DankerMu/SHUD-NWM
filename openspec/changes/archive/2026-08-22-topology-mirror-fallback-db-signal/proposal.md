@@ -56,10 +56,11 @@ be red anyway.
   wording, and one that removes explicit "there is no database here" assertions
   before the database signal is measured.
 - `_topology_line_mentions_mirror` is **not** touched — six call sites depend on
-  its current meaning. At HEAD they are `:1934`, `:1939`, `:2020`, `:2311`,
-  `:2609`, `:2613` (this change's insertion shifted five of the six; the count is
-  what the constraint is about, and `grep -n _topology_line_mentions_mirror` is
-  the durable way to recheck it).
+  its current meaning. Absolute positions are deliberately not quoted here: three
+  fix rounds shifted them twice and the numbers went stale twice, which is the
+  whole point. The count is what the constraint is about, and
+  `grep -n _topology_line_mentions_mirror scripts/governance/audit_repo_entropy.py`
+  is the durable way to recheck it.
 - `_topology_mentions_database` is **not** touched either — three other callers
   (`:1725`, `:1758`, `:1844`; these sit above the insertion point and are
   unshifted) depend on it. The DB-absence handling is applied at
