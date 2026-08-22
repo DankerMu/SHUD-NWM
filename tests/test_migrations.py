@@ -992,6 +992,119 @@ def test_state_snapshot_clone_provenance_migration_is_column_only_forward_upgrad
         )
 
 
+def test_state_snapshot_clone_gate_kind_migration_is_column_only_forward_upgrade() -> None:
+    """000053 follows 000046's column-only house style, one column instead of three.
+
+    Same static shape contract as
+    ``test_state_snapshot_clone_provenance_migration_is_column_only_forward_upgrade``:
+    a live ``hydro.state_snapshot`` with pre-existing rows means a single typo
+    (DROP COLUMN, UPDATE, ALTER COLUMN, …) would destroy or rewrite the warm
+    states the whole carry-over mechanism depends on, and only a static check
+    can see that without a database.
+    """
+
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration_name = "000053_state_snapshot_clone_gate_kind.sql"
+
+    assert migration_name in migration_sql, (
+        f"{migration_name} must exist as the clone-gate-kind migration for the "
+        "recalibration-state-carryover change"
+    )
+    assert migration_names.index("000046_state_snapshot_clone_provenance.sql") < (
+        migration_names.index(migration_name)
+    )
+
+    migration = migration_sql[migration_name]
+
+    normalized = migration.strip()
+    assert normalized, f"{migration_name} is empty"
+    assert normalized.lower().endswith(";"), f"{migration_name} should end with a SQL terminator"
+
+    # Exactly the one nullable gate-kind column is added, TEXT DEFAULT NULL, so
+    # every pre-existing row keeps its identity and is not rewritten.
+    assert "ADD COLUMN IF NOT EXISTS clone_gate_kind TEXT DEFAULT NULL" in migration, (
+        f"{migration_name} must add clone_gate_kind as TEXT DEFAULT NULL"
+    )
+
+    code_lines = [
+        line
+        for line in migration.splitlines()
+        if not line.lstrip().startswith("--")
+    ]
+    code_body = "\n".join(code_lines)
+    forbidden_token_patterns = (
+        r"\bDROP\s+INDEX\b",
+        r"\bDROP\s+CONSTRAINT\b",
+        r"\bDROP\s+COLUMN\b",
+        r"\bDROP\s+TABLE\b",
+        r"\bDROP\s+TRIGGER\b",
+        r"\bCREATE\s+INDEX\b",
+        r"\bCREATE\s+UNIQUE\s+INDEX\b",
+        r"\bCREATE\s+TABLE\b",
+        r"\bCREATE\s+TRIGGER\b",
+        r"\bCREATE\s+FUNCTION\b",
+        r"\bALTER\s+COLUMN\b",
+        r"\bALTER\s+INDEX\b",
+        r"\bTRUNCATE\b",
+        r"\bRENAME\b",
+        r"\bGRANT\b",
+        r"\bREVOKE\b",
+        r"\bUPDATE\b",
+        r"\bINSERT\b",
+        r"\bDELETE\b",
+        r"\bCOMMENT\s+ON\b",
+    )
+    for token_pattern in forbidden_token_patterns:
+        matches = [
+            line
+            for line in code_lines
+            if re.search(token_pattern, line, re.IGNORECASE)
+        ]
+        assert not matches, (
+            f"Forbidden DDL matching {token_pattern!r} found in {migration_name}: {matches}"
+        )
+
+    add_column_stmts = re.findall(r"\bADD\s+COLUMN\b", code_body, re.IGNORECASE)
+    assert len(add_column_stmts) == 1, (
+        f"Migration {migration_name} must add exactly 1 column, "
+        f"found {len(add_column_stmts)}"
+    )
+    alter_table_stmts = re.findall(r"\bALTER\s+TABLE\b", code_body, re.IGNORECASE)
+    assert len(alter_table_stmts) == 1, (
+        f"Migration {migration_name} must have exactly 1 ALTER TABLE statement, "
+        f"found {len(alter_table_stmts)}"
+    )
+
+    altered_tables = re.findall(
+        r"\bALTER\s+TABLE\s+(\S+)", code_body, re.IGNORECASE
+    )
+    assert altered_tables == ["hydro.state_snapshot"], (
+        f"Migration {migration_name} must ONLY touch hydro.state_snapshot, "
+        f"found altered tables: {altered_tables}"
+    )
+
+    # The per-source warm-state identity index must survive untouched. The name
+    # may appear in the header comment as documentation of what stays intact,
+    # but no DDL statement may act on it.
+    for line in migration.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("--"):
+            continue
+        if "state_snapshot_model_source_valid_time_key" in stripped:
+            raise AssertionError(
+                f"{migration_name} must never touch "
+                f"state_snapshot_model_source_valid_time_key in DDL; "
+                f"offending line: {line!r}"
+            )
+
+    # No references to future migration objects (000054..000099).
+    for future in [f"{n:06d}" for n in range(54, 100)]:
+        assert future not in migration, (
+            f"{migration_name} must not reference future migration {future}"
+        )
+
+
 def test_authority_stats_hygiene_migration_splits_into_the_expected_statements() -> None:
     """000052 mixes a DO block with four CONCURRENTLY statements (issue #1468).
 

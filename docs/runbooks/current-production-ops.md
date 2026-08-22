@@ -1329,6 +1329,110 @@ ssh -p 32099 nwm@210.77.77.27 \
    但尚未跑出 SHUD run 时，应先出现在普通 `/api/v1/basins` 和 scheduler
    registry 中，等 22 产出 run、27 autopipe ingest 后再进入展示产品列表。
 
+### 5.7 率定参数更新（recalibration）的 warm carry-over
+
+**适用**：某流域只改了率定参数（`cfg.calib` + `CALIB/*` + `cfg.para`），mesh /
+river / gis / `cfg.ic` 全不变，需要让新包 `M1'` **接着** 老包 `M1` 的状态算下去，
+而不是冷启动。任何其他 hydrologic-core 面（mesh / river / lake / soil / geol /
+land / `.sp.att` 非 `FORC` 字段 / `cfg.ic`）有变化，工具会 fail-closed 拒绝——这是
+对的，新 `cfg.ic` 意味着建模侧声明了新起点。
+
+**执行节点：node-22（唯一）。** 它是唯一同时能访问 NFS canonical state index 与
+node-22 本地 scratch mirror 的机器；node-22 本身 DB-free，recalibration 模式只写
+文件索引、不取任何 DB 句柄。不要在 node-27 上跑这个工具。
+
+**必须一次写两份索引。** canonical（`/ghdc/data/nwm/object-store/scheduler/state-index/`）
+与 scratch mirror（`/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/`）
+在同一次调用里写入同一个行对象，两份序列化字节完全相同——这正是后续 copyback merge
+能走 `current == source_entry` 无冲突分支的前提。只写一份会在 effective cycle 之前
+留下两份不一致的索引。
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22   # 必须是 provider 属主 frd_muziyao
+cd /scratch/frd_muziyao/NWM
+export PATH=$HOME/.local/bin:$PATH
+
+CANONICAL=/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
+MIRROR=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
+REGISTRY=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/registry/manifest-last.json
+RECEIPT_DIR=/scratch/frd_muziyao/nhms-prod/workspace/recalibration
+RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，receipt 路径不得重复
+
+# 1) dry-run：跑完全部校验与八面门，但不写任何索引行
+uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+  --transfer-mode recalibration \
+  --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
+  --state-index "$CANONICAL" \
+  --mirror-state-index "$MIRROR" \
+  --variant-registry "$REGISTRY" \
+  --pairs huai_dg_gfs_v1:huai_dg_gfs_v2,huai_dg_ifs_v1:huai_dg_ifs_v2 \
+  --cutover-time 2026081512 \
+  --receipt "$RECEIPT_DIR/$RUN_TAG-dry-run.json"
+
+# 2) 逐项核对 dry-run receipt 后再执行（--apply）
+uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+  ... 同上 ... --apply \
+  --receipt "$RECEIPT_DIR/$RUN_TAG-apply.json"
+```
+
+判读口径：
+
+- `--pairs` 是 `<M1_model_id>:<M1prime_model_id>` 列表，按 **model_id** 直接在
+  registry payload 里解析。**不要**指望按 baseline 索引的 variant map：重跑
+  provision 脚本产出的 `M1'`，其 `resource_profile.baseline_model_id` 仍指向最初的
+  baseline，压根表达不了 `M1→M1'` 这一对。
+- 每对都在写任何行之前 fail-closed 校验：两侧 model 行存在、两侧包根解析为目录、
+  两侧都判定为 direct-grid、两侧 `direct_grid_source_id` 归一化后相等、`M1 != M1'`。
+  GFS/IFS 是两个 model_id，写成两对。
+- receipt 就是这次 carry-over 的**声明凭证**：含 pairs、`t*`、`transfer_mode`、每对的
+  八面指纹、`clone_gate_kind=state_compatibility`、两侧的
+  `model_package_version`/`checksum`、两份索引路径与各自写入结果，以及
+  `evidence_fingerprint_cross_check=skipped_no_recorded_value`（provision 脚本不记录
+  `hydrologic_core_fingerprint`，因此交叉校验显式豁免而非拿刚算出的值自证）。
+  receipt 以 `O_EXCL` 写入，路径已存在会直接失败——不要覆盖旧 receipt。
+- **每次调用必须用互不相同的 receipt 路径**（按流域 + `t*` 命名，如
+  `huai-2026081512-dry-run.json`）：`O_EXCL` 下重复路径会让一次本来干净的调用直接失败
+  （post-loop 写 receipt 时 `FileExistsError`），而实际上什么问题都没有。逐流域跑、
+  同一流域 dry-run 与 `--apply` 各一次，路径都要各自唯一。
+- **先看 `invocation_outcome`**：`complete` = 每一对都跑到了记录结果；`aborted` = 中途
+  停了，`failed_pair` 指名是哪一对、`failure_kind` 是 `pair_not_completed`（该对被拒
+  或报错）还是 `mirror_write_failed`，`error` 带原文。`declared_pair_count` vs
+  `cloned_pair_count` 给出写了几行。
+  `pairs` 里是每个「跑到记录结果」的对各一条记录：
+  - `failure_kind=pair_not_completed`（loop body 内任何异常：registry 行缺失、包根解析
+    失败、非 direct-grid、跨 source、门拒绝、rewrite 报错）：失败那对**不在** `pairs`
+    里——异常发生在 append 之前。这种 receipt 只有在更早的对已经写入时才会存在。
+  - `failure_kind=mirror_write_failed`：失败那对**在** `pairs` 里，是**最后一条**，
+    `state_index_outcomes.canonical.outcome=written` + `mirror.outcome=not_written` 带错
+    误文本，**并且计入 `cloned_pair_count`**（canonical 行已经落地）。这种失败只可能在
+    `--apply` 下出现（mirror 写入本身由 `args.apply` 把关）。
+  - 因此：判断单对成败一律看 `failed_pair` / `failure_kind` 与 `state_index_outcomes`，
+    **不要**用「在不在 `pairs` 里」推断。
+- **spin-up 失真告知义务保留**：warm carry-over 的失真小于冷启动但不为零，receipt
+  里的 `spin_up_distortion_announcement` 是这条义务的落点。
+- 被拒绝时（`refusal_scope=state_compatibility_unequal`）工具非零退出，**索引状态取决
+  于这对是第几对**：
+  - 第一对（或唯一一对）被拒：两份索引都没有写入，也不产出 receipt——干净重来即可。
+  - 前面已经有对写成功、后面某对被拒：**前面那些对的克隆行已经真实落在两份索引里**，
+    工具照样写 receipt（`invocation_outcome=aborted`，`pairs` 列出已写入的对，
+    `failed_pair` 记录被拒的对与原因）。这时**不要**当成"什么都没发生"：要么按 receipt
+    修好被拒那对后补跑（`--pairs` 只写剩下的对，receipt 换新路径），要么显式决定让已写
+    入的对生效。dry-run（不带 `--apply`）中途被拒则两份索引都没动，同样不产出 receipt。
+  审计记录里带 `missing_category`/`missing_relative_path`/`missing_side` 时，说明某个
+  hydrologic-core 文件只存在于一侧（新增或删除都算面不相等），按该路径定位后再决定是修
+  包还是走冷启动 + approval。
+- **mirror 写失败**（canonical 已写成功）：工具非零退出，receipt 里该对的
+  `state_index_outcomes.canonical.outcome=written` 而
+  `...mirror.outcome=not_written` 并带错误文本，顶层同时是
+  `invocation_outcome=aborted` + `failed_pair.failure_kind=mirror_write_failed`。
+  必须在 `t*` 之前修好 mirror；在
+  `NHMS_REQUIRE_FORECAST_WARM_START=true` 下，未修好的后果是本轮停摆（fail-safe），
+  不是算错。
+- 调度准入侧**零改动**：克隆行带 `M1'` 的 `model_id` + `model_package_version` +
+  `model_package_checksum`，`_validate_state_lineage` 按既有口径接收。
+
+背景与被否决的替代方案见 [`docs/adr/0005-recalibration-state-carryover.md`](../adr/0005-recalibration-state-carryover.md)。
+
 ## 6. 如何判断是否卡住
 
 先分清三种状态：

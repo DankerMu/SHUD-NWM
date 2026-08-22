@@ -1824,6 +1824,7 @@ def test_compute_hydrologic_core_fingerprint_signature_pinned() -> None:
         "state_schema_bytes",
         "solver_config_bytes",
         "side_label",
+        "surfaces",
     ]
     for kwarg in (
         "sp_att_path",
@@ -1831,6 +1832,7 @@ def test_compute_hydrologic_core_fingerprint_signature_pinned() -> None:
         "state_schema_bytes",
         "solver_config_bytes",
         "side_label",
+        "surfaces",
     ):
         assert (
             sig.parameters[kwarg].kind == inspect.Parameter.KEYWORD_ONLY
@@ -1838,6 +1840,12 @@ def test_compute_hydrologic_core_fingerprint_signature_pinned() -> None:
     # side_label defaults to "package" for standalone callers; the paired
     # equality gate overrides it to "baseline" / "variant".
     assert sig.parameters["side_label"].default == "package"
+    # surfaces defaults to the full ten-label set, so every pre-existing
+    # caller computes the identical ten-surface fingerprint it always did
+    # (change `recalibration-state-carryover` D1 behavior-preservation).
+    assert (
+        sig.parameters["surfaces"].default is HYDROLOGIC_CORE_FINGERPRINT_LABELS
+    )
     hints = typing.get_type_hints(compute_hydrologic_core_fingerprint)
     assert hints["package_root"] is pathlib.Path
     assert hints["sp_att_path"] is pathlib.Path
@@ -1860,6 +1868,7 @@ def test_verify_hydrologic_core_fingerprint_equal_signature_pinned() -> None:
         "variant_state_schema_bytes",
         "baseline_solver_config_bytes",
         "variant_solver_config_bytes",
+        "surfaces",
     ]
     for kwarg in (
         "baseline_sp_att_path",
@@ -1869,10 +1878,16 @@ def test_verify_hydrologic_core_fingerprint_equal_signature_pinned() -> None:
         "variant_state_schema_bytes",
         "baseline_solver_config_bytes",
         "variant_solver_config_bytes",
+        "surfaces",
     ):
         assert (
             sig.parameters[kwarg].kind == inspect.Parameter.KEYWORD_ONLY
         )
+    # Same behavior-preserving default as the computation: an existing
+    # caller keeps the ten-surface package-identity gate untouched.
+    assert (
+        sig.parameters["surfaces"].default is HYDROLOGIC_CORE_FINGERPRINT_LABELS
+    )
     hints = typing.get_type_hints(verify_hydrologic_core_fingerprint_equal)
     assert hints["baseline_package_root"] is pathlib.Path
     assert hints["variant_package_root"] is pathlib.Path

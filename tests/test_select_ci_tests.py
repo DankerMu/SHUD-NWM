@@ -3059,6 +3059,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
+    (
+        "tests/state_clone_recalibration_fixtures.py",
+        "tests/test_state_clone_recalibration.py",
+    ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
     # The literal-path half (#1498): this pair exists only because

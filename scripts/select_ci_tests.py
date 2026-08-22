@@ -304,6 +304,19 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # The recalibration carry-over package fixtures, fakes AND the
+        # independent fingerprint oracle (#1697). The oracle is why this rule
+        # matters more than a fixture-builder rule usually does: it re-implements
+        # the documented hash format from the fixture bytes, so a change here can
+        # flip both suites from "gate proven" to "gate agreeing with itself"
+        # without touching a line of production code. Both are sub-second.
+        "tests/state_clone_recalibration_fixtures.py",
+        (
+            "tests/test_state_clone_recalibration.py",
+            "tests/test_state_clone_recalibration_cli.py",
+        ),
+    ),
+    PathTestRule(
         # Pins the modes `provider_atomic`'s two fail-closed gates inspect, for
         # tests that PRE-create a lock parent or a provider destination (#1513).
         # Its whole purpose is to make those tests independent of the ambient

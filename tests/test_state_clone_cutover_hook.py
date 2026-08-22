@@ -237,6 +237,13 @@ class _FakeCursor:
             "cloned_from_state_id": params[13],
             "cloned_from_model_id": params[14],
             "clone_gate_fingerprint": params[15],
+            # Migration 000053 / change `recalibration-state-carryover` D6.
+            # Read POSITIONALLY out of the params tuple on purpose: a column
+            # added to the hook's INSERT list without the matching parameter
+            # (or the reverse) shifts every index after it and detonates here,
+            # which is what keeps the hook's independently maintained copy of
+            # the upsert SQL in lockstep with `state_manager.py`'s.
+            "clone_gate_kind": params[16],
             "created_at": datetime(2026, 7, 10, 0, 0, tzinfo=UTC),
         }
         self._staged[self._key(row)] = row
@@ -1621,3 +1628,111 @@ def test_module_imports_shared_constants() -> None:
     """
     assert isinstance(CYCLE_ID, str) and CYCLE_ID
     assert isinstance(Path(str(CUTOVER_VALID_TIME)), Path)
+
+
+# --- clone_gate_kind on the hook (DB) write plane --------------------------
+#
+# Change `recalibration-state-carryover` §6.6b / Invariant Matrix rows 12-13.
+
+
+def test_hook_driven_clone_persists_clone_gate_kind_hydrologic_core(
+    m0_m1_equal_packages: dict[str, Any],
+) -> None:
+    """A hook-driven clone row stores ``clone_gate_kind='hydrologic_core'``.
+
+    The hook is one of the only two production callers of
+    ``fingerprint_gated_state_clone`` and it runs INSIDE the cutover lifecycle
+    transaction through its own, independently maintained copy of the
+    ``hydro.state_snapshot`` upsert SQL. If that copy is not extended with the
+    new provenance column, every hook-driven clone row stores ``NULL`` while the
+    in-memory row says otherwise -- the exact silent drop migration 000046's
+    three columns already had to be threaded through both copies to avoid.
+
+    ``_FakeCursor`` reads the column positionally out of the params tuple, so a
+    column added to the SQL without the matching parameter fails here.
+    """
+
+    cursor = _FakeCursor(initial_rows=[_seed_source_snapshot(source_id="gfs")])
+    hook = build_state_clone_cutover_hook(
+        audit_recorder=_FakeAuditRecorder(),
+        fingerprint_inputs_provider=lambda _ctx, _source: _make_fingerprint_inputs(
+            m0_m1_equal_packages
+        ),
+    )
+
+    hook(cursor, _make_ctx(source_scope=("gfs",), previous_active_model=_previous_active_row()))
+    cursor.commit()
+
+    clone_rows = [row for row in cursor.all_committed_rows() if row["model_id"] == M1_MODEL_ID]
+    assert len(clone_rows) == 1
+    # The hook keeps `transfer_mode` at its fix_forward default, so the row
+    # names the ten-surface gate.
+    assert clone_rows[0]["clone_gate_kind"] == "hydrologic_core"
+    assert clone_rows[0]["clone_gate_fingerprint"] == m0_m1_equal_packages["fingerprint_hash"]
+
+    # The clone row that came back out of the adapter's `RETURNING *` hydration
+    # carries the same value, so an in-transaction reader does not see NULL.
+    upsert_sql = [
+        sql for sql, _params in cursor.executed if sql.startswith("INSERT INTO hydro.state_snapshot")
+    ]
+    assert len(upsert_sql) == 1
+
+
+def _upsert_sql_fragments(source: str) -> tuple[str, str, str, str]:
+    """Split one ``upsert_state_snapshot`` body into its four column-bearing parts.
+
+    Returns ``(insert_column_list, values_clause, do_update_set, params_tuple)``
+    sliced out of the module source text, so the check reads the SQL the
+    repository actually emits rather than a copy maintained by the test.
+    """
+
+    # Anchor on the SQL itself: `state_manager.py` also declares the method on
+    # a Protocol and on the file-index repository, neither of which emits SQL.
+    start = source.index("INSERT INTO hydro.state_snapshot")
+    end = source.index("return _snapshot_from_row(row)", start)
+    body = source[start:end]
+    insert_columns = body[
+        body.index("INSERT INTO hydro.state_snapshot") : body.index("VALUES (")
+    ]
+    values_clause = body[body.index("VALUES (") : body.index("ON CONFLICT")]
+    do_update = body[body.index("DO UPDATE SET") : body.index("RETURNING *")]
+    params = body[body.index("RETURNING *") :]
+    return insert_columns, values_clause, do_update, params
+
+
+def test_both_state_snapshot_upsert_sql_copies_name_clone_gate_kind_in_lockstep() -> None:
+    """The two independently maintained upsert SQL copies stay in lockstep.
+
+    ``state_manager.py::PsycopgStateSnapshotRepository`` and
+    ``state_clone_hook.py::_CursorBoundStateSnapshotRepository`` each carry a
+    full copy of the ``hydro.state_snapshot`` INSERT ... ON CONFLICT statement.
+    Deduplicating them is out of scope; proving they agree is not. Each copy
+    must name ``clone_gate_kind`` exactly once in the INSERT column list, once
+    in the ``DO UPDATE SET`` list and once in the parameter tuple, with a
+    ``VALUES`` placeholder count matching the INSERT column count.
+    """
+
+    sources = {
+        "state_manager": Path("packages/common/state_manager.py").read_text(encoding="utf-8"),
+        "state_clone_hook": Path("packages/common/state_clone_hook.py").read_text(encoding="utf-8"),
+    }
+    for name, source in sources.items():
+        insert_columns, values_clause, do_update, params = _upsert_sql_fragments(source)
+        assert insert_columns.count("clone_gate_kind") == 1, name
+        assert do_update.count("clone_gate_kind = EXCLUDED.clone_gate_kind") == 1, name
+        assert params.count("snapshot.clone_gate_kind") == 1, name
+
+        # VALUES arity must match the INSERT column count in the SAME copy: a
+        # column added without its placeholder is a runtime SQL error, and a
+        # placeholder added without its parameter shifts every later value.
+        columns = [
+            line.strip().rstrip(",")
+            for line in insert_columns.splitlines()
+            if line.strip()
+            and not line.strip().startswith("INSERT INTO")
+            and line.strip() not in ("(", ")")
+        ]
+        assert columns[-1] == "clone_gate_kind", name
+        assert values_clause.count("%s") == len(columns), (name, len(columns))
+        # And the params tuple carries one `snapshot.<attr>` per column.
+        assert params.count("snapshot.") == len(columns), (name, len(columns))
