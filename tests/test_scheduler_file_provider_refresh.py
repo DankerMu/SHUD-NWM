@@ -689,22 +689,71 @@ def test_provider_snapshot_rejects_replacement_between_metadata_and_read(
 ) -> None:
     destination = tmp_path / "index-last.json"
     destination.write_bytes(b"generation-a")
+    seed = os.stat(destination)
     real_read = provider_atomic_module.read_bytes_limited_no_follow
-    replaced = False
+    calls = 0
 
-    def replace_before_read(*args: object, **kwargs: object) -> bytes:
-        nonlocal replaced
-        if not replaced:
-            replaced = True
-            destination.write_bytes(b"generation-b")
-        return real_read(*args, **kwargs)
+    # ``read_provider_snapshot`` reads three times through this one name: the
+    # ``before`` capture, the payload read, the ``after`` capture.  Firing on
+    # call 2 is what puts the replacement strictly BETWEEN the two captures.
+    def replace_during_payload_read(*args: object, **kwargs: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls != 2:
+            return real_read(*args, **kwargs)
+        destination.write_bytes(b"generation-b")
+        content = real_read(*args, **kwargs)
+        # ABA: restore the bytes, THEN re-stamp the original mtime_ns.  The
+        # order is load-bearing — writing after the utime would leave a fresh
+        # mtime_ns and make `before != after` fire from the metadata disjunct
+        # instead.  This restore is the deterministic stand-in for ext4's 4 ms
+        # timestamp tick (CONFIG_HZ=250, measured in #1717): a same-size
+        # replacement inside one tick leaves every ProviderPreimage metadata
+        # field identical, so the content-digest comparison in
+        # `read_provider_snapshot` is the guard's only remaining defense.
+        destination.write_bytes(b"generation-a")
+        os.utime(destination, ns=(seed.st_atime_ns, seed.st_mtime_ns))
+        return content
 
-    monkeypatch.setattr(provider_atomic_module, "read_bytes_limited_no_follow", replace_before_read)
+    monkeypatch.setattr(
+        provider_atomic_module, "read_bytes_limited_no_follow", replace_during_payload_read
+    )
     with pytest.raises(ProviderAtomicError) as error_info:
         read_provider_snapshot(destination, max_bytes=1024)
 
     assert error_info.value.reason == "provider_preimage_changed"
-    assert destination.read_bytes() == b"generation-b"
+    assert destination.read_bytes() == b"generation-a"
+    assert calls == 3
+
+
+def test_provider_snapshot_rejects_replacement_left_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "index-last.json"
+    destination.write_bytes(b"generation-a")
+    real_read = provider_atomic_module.read_bytes_limited_no_follow
+    calls = 0
+
+    # Unlike the ABA test above this one does NOT isolate a single disjunct:
+    # with the replacement left in place, both `before != after` and the
+    # content-digest comparison fire.  Its value is that the divergence rides
+    # on `size`, not on mtime_ns granularity, so it is deterministic on ext4
+    # and APFS alike (#1717).
+    def replace_during_payload_read(*args: object, **kwargs: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            destination.write_bytes(b"generation-b-longer")
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        provider_atomic_module, "read_bytes_limited_no_follow", replace_during_payload_read
+    )
+    with pytest.raises(ProviderAtomicError) as error_info:
+        read_provider_snapshot(destination, max_bytes=1024)
+
+    assert error_info.value.reason == "provider_preimage_changed"
+    assert calls == 3
 
 
 def test_provider_atomic_postread_failure_restores_validated_previous_bytes(
