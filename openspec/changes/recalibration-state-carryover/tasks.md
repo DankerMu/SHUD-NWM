@@ -136,9 +136,16 @@ Every row below is a required test with named input and expected output.
   contains `lake:<basin>.sp.mesh`. (Rows 4, 5.)
 - [x] 6.5 Fix-forward regression: `uv run pytest -q tests/test_state_clone.py
   tests/test_state_clone_cutover_hook.py tests/test_mapping_builder_rewrite.py` green
-  with no test edits; all six existing refusal scopes still reachable; the
-  ten-label coverage assertion at `tests/test_mapping_builder_rewrite.py:1342`
-  untouched. Plus a new test: `fix_forward` with
+  with **no pre-existing test modified or weakened** — two of those three files
+  do gain lines in this change, and both additions are purely additive and
+  strengthen the behavior-preservation claim rather than relaxing it:
+  `tests/test_state_clone_cutover_hook.py` (+115) is what row 6.6b of this same
+  document mandates, and `tests/test_mapping_builder_rewrite.py` (+15) extends
+  the two signature-pin tests to assert `surfaces`' default IS
+  `HYDROLOGIC_CORE_FINGERPRINT_LABELS`. All six existing refusal scopes still
+  reachable; the ten-label coverage assertion at
+  `tests/test_mapping_builder_rewrite.py:1342` is byte-identical to
+  `origin/master`. Plus a new test: `fix_forward` with
   `m1_recorded_hydrologic_core_fingerprint=None` → refused
   `evidence_fingerprint_mismatch`. (Rows 6, 7, 11.)
 - [x] 6.6 **Published-artifact / display-identity pack** —
@@ -255,6 +262,47 @@ comprehensive round 3 is bought. Dispositions:
   per-test discrimination, so no oracle rung was violated; a clarifying clause
   rode along in 6.10 anyway. The dry-run test stays — it is the only test that
   catches a `len(pair_records) > 0` mis-implementation of the guard.
+
+### 6.16 — Phase 7 final gap sweep 裁决（PR #1706）
+
+Gap sweep 结论为 **no blocking findings**，两条 finding：
+
+- [x] 6.16a **`--receipt` 未进 recalibration 的 required-flags（F1，P2）— DEFERRED
+  with routing。** `_REQUIRED_FLAGS_BY_MODE[TRANSFER_MODE_RECALIBRATION]`
+  (`scripts/node22_clone_direct_grid_cutover_states.py:741-745`；receipt 守卫在
+  `:571`，`enforce_mode_flags` 在 `:779-790`) 列了
+  `--variant-registry` / `--pairs` / `--mirror-state-index` 而没有 `--receipt`，
+  于是 `--apply` 不带 `--receipt` 是合法调用：门放行、克隆行写进两份索引、exit 0，
+  而**没有落盘的** receipt。本 PR 自己的两条 spec SHALL（spin-up 失真告知义务的落点、
+  D5 跨校验 skip 的记录点）都以 receipt 存在为前提。
+  **纠正 reviewer 的一处过度陈述**：`main()` (`:804`) **无条件**把整份 receipt JSON
+  打到 stdout，所以不是「零证据」，缺的是**持久化产物**——伤害比报告的轻，
+  但「声明凭证不落盘」这一条仍然成立。
+  修法是一行（把 `("receipt", "--receipt")` 加进那个元组）+ 6 处测试调用点补 `--receipt`
+  + 扩 `test_recalibration_refuses_its_missing_flags` 的参数化。
+  **不在本 PR 做的理由**：本 fixture 带 Governing invariant + Invariant Matrix，
+  即 `high`/`broad-expanded` 修复强度；`phase-flow.md:414` 规定该强度下
+  **只有 test/evidence-only 改动**能算 `local-repair`，任何源码行为改动都是 `semantic`，
+  而 `semantic` 会触发第三轮 comprehensive round——severity-rationing 规则明令
+  不得为 P2 单独买轮（与 R2-A 同一裁决链）。缓解：runbook §5.7 的标准命令块
+  dry-run 与 `--apply` 两步都带 `--receipt`，且第 2 步的前提就是「逐项核对 dry-run receipt」。
+  与 #1709 / #1713 不同源（那两条是「receipt 被请求了但写失败/顶掉原因」，
+  这条是「从未被要求请求」），三者同属一个 harm family——一份 live clone 行存在于
+  一份或两份 state index 中却无持久声明证据——按兄弟项同批修。
+  立单：https://github.com/DankerMu/SHUD-NWM/issues/1715
+  （scribe 复核更正了两处：六个省略 `--receipt` 的 `--apply` 调用点里只有**四个**
+  真的写行——`:418`/`:445`/`:769`/`:936`，`:779`/`:791` 在 `pytest.raises` 拒绝测试里
+  写前即拒；成因实证——`git show master:` 下 `_REQUIRED_FLAGS_BY_MODE` 与
+  `TRANSFER_MODE_RECALIBRATION` 两个符号计数均为 0，确属 `169db5b1` 引入。）
+- [x] 6.16b **6.5 的「with no test edits」措辞与同文档 6.6b 自相矛盾（F2，P3）**
+  — 已就地改为「no pre-existing test modified or weakened」并写明两处增量的性质。
+  与 C4 / R2-C 同一 evidence-integrity 类，evidence-only，按 Phase 7 `local-repair` 处理。
+
+Gap sweep 另外确认了三件事（均为 PASS，不产生 finding）：`fix_forward` 默认路径
+与 `origin/master` **实测**同值（同一 fixture 下十面指纹两侧均为
+`d777a2d0…`，且全仓无 golden hash 字面量可依赖，故必须实测）；
+`services/orchestrator/chain.py` 与调度准入零触碰、无任何消费方读 `clone_gate_kind`；
+D7 的 `current == source_entry` 快路径在对象级成立且有真实反向对照。
 
 ## 7. Verification commands
 
