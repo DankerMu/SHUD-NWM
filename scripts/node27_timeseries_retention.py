@@ -53,6 +53,7 @@ ADR 0001 display carve-out: no imports touching ``apps/api`` or
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -1025,19 +1026,33 @@ def _emit_drop_timing(chunk: ChunkRow, started: float, *, dropped_ok: bool) -> N
     through the redacted ``refusal_reason``. Shape follows the existing
     measurement warning line (sorted-key JSON on stderr, captured into
     ``retention.log`` by the wrapper).
+
+    Best-effort ON PURPOSE, and the guard lives here so BOTH call sites get
+    it. ``sys.stderr`` stays line-buffered under the wrapper's redirection, so
+    this write really can fail — e.g. ENOSPC on ``retention.log``, which on
+    node-27 shares the same volume as the database. Unguarded, that ``OSError``
+    would escape ``run_retention`` into :func:`main`'s uncaught-error arm and
+    publish a ``refused`` / ``RETENTION_UNCAUGHT_ERROR`` receipt: on the
+    success path the schema's ``refused`` branch forbids ``dropped_chunks``, so
+    a chunk that WAS deleted would be recorded nowhere; on the failure path it
+    would replace an already-classified ``lock-contention(<pgcode>)`` reason
+    with a generic one. Losing a diagnostic line is strictly better than
+    misreporting deletion state. Only this write is suppressed — the
+    ``drop_chunk`` call itself keeps raising.
     """
-    print(
-        json.dumps(
-            {
-                "chunk": chunk.qualified_name,
-                "diagnostic": DROP_TIMING_DIAGNOSTIC,
-                "elapsed_ms": round((time.monotonic() - started) * 1000.0, 3),
-                "outcome": "dropped" if dropped_ok else "failed",
-            },
-            sort_keys=True,
-        ),
-        file=sys.stderr,
-    )
+    with contextlib.suppress(OSError):
+        print(
+            json.dumps(
+                {
+                    "chunk": chunk.qualified_name,
+                    "diagnostic": DROP_TIMING_DIAGNOSTIC,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000.0, 3),
+                    "outcome": "dropped" if dropped_ok else "failed",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
 
 
 def run_retention(

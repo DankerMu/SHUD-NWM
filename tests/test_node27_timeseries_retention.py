@@ -2963,12 +2963,28 @@ def test_lock_contention_drop_failure_names_itself_in_refusal_reason(
             "could not serialize access",
             id="unrelated-sqlstate",
         ),
-        # DISCRIMINATING ROW: PostgreSQL's REAL `lock_timeout` cancellation is
-        # SQLSTATE 57014 carrying the text "canceling statement due to lock
-        # timeout" — the exact string a message-text refactor would match. It
-        # must stay unclassified (57014 is the statement wall, indistinguishable
-        # from "the delete itself was slow"), so this row is what a mis-refactor
-        # would break FIRST, on live errors.
+        # DISCRIMINATING ROW — SYNTHETIC BY CONSTRUCTION, no live error looks
+        # like this: `statement_timeout`'s SQLSTATE 57014 deliberately paired
+        # with the message text that a REAL `lock_timeout` cancellation
+        # carries. It is the pair that separates "read the pgcode" from "grep
+        # the message": a message-text refactor would classify this row, the
+        # pgcode predicate must not.
+        #
+        # The real shapes, so nobody reads this row backwards:
+        #   * `lock_timeout` fires → SQLSTATE 55P03
+        #     (`psycopg2.errorcodes.LOCK_NOT_AVAILABLE`) with exactly
+        #     "canceling statement due to lock timeout" — and IS classified
+        #     (design.md / runbook §8.2.2 render it as
+        #     `lock-contention(55P03): canceling statement due to lock
+        #     timeout`; the sibling contention table's first row pins it). The
+        #     55P03 member of `LOCK_CONTENTION_PGCODES` is live behavior, NOT
+        #     dead code.
+        #   * `statement_timeout` fires → SQLSTATE 57014 with "canceling
+        #     statement due to statement timeout" (this table's first row),
+        #     which stays unclassified: the statement wall is
+        #     indistinguishable from "the delete itself was slow".
+        # This row asserts the second rule holds on `pgcode` ALONE — a 57014
+        # stays unclassified no matter what text it carries.
         pytest.param(
             _SyntheticDriverError("canceling statement due to lock timeout", "57014"),
             "canceling statement due to lock timeout",
@@ -3058,6 +3074,94 @@ def test_drop_timing_reports_the_measured_interval_not_a_placeholder(
     assert [t["elapsed_ms"] for t in timings] == [125.0]
     with pytest.raises(StopIteration):
         next(ticks)
+
+
+class _ExplodingStderr:
+    """A ``sys.stderr`` stand-in whose every write fails with ``OSError``.
+
+    Models the shape the wrapper actually exposes the runner to: stderr is
+    redirected into a long-lived ``retention.log`` on the SAME volume as the
+    database and stays line-buffered, so an ENOSPC there surfaces as an
+    ``OSError`` raised out of ``print`` at emission time, not at exit.
+    """
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def write(self, _data: str) -> int:
+        self.attempts += 1
+        raise OSError(28, "No space left on device")
+
+    def flush(self) -> None:  # pragma: no cover — never reached after write()
+        raise OSError(28, "No space left on device")
+
+
+def test_drop_timing_write_failure_cannot_downgrade_a_completed_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The diagnostic is best-effort: a failed write must not rewrite history.
+
+    The success-path emission runs AFTER ``drop_chunk`` returned and outside
+    its ``try``. Unguarded, an ``OSError`` there escapes ``run_retention`` into
+    ``main``'s uncaught arm and publishes ``refused`` /
+    RETENTION_UNCAUGHT_ERROR — whose schema branch FORBIDS ``dropped_chunks``,
+    so a chunk that was really deleted would be recorded nowhere. With stub
+    seams nothing else in ``run_retention`` touches stderr, so ``attempts``
+    counts exactly the emission under test and pins the test non-vacuous.
+    """
+    exploder = _ExplodingStderr()
+    monkeypatch.setattr(sys, "stderr", exploder)
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks)
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert exploder.attempts >= 1
+    assert receipt["outcome"] == "enforced"
+    assert receipt["dropped_chunks"] == [
+        {"name": "_timescaledb_internal.chk-a", "freed_bytes": 10_000}
+    ]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_drop_timing_write_failure_preserves_a_classified_refusal_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guard, failure call site: the classification must survive.
+
+    The failure-path emission runs after the SQLSTATE has been classified but
+    before the refusal is built. An escaping ``OSError`` would replace
+    ``lock-contention(55P03)`` — this change's entire output — with a generic
+    RETENTION_UNCAUGHT_ERROR. Expected string spelled out by hand, matching
+    the sibling classification tests' independent-oracle style.
+    """
+    exploder = _ExplodingStderr()
+    monkeypatch.setattr(sys, "stderr", exploder)
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(
+        chunks,
+        drop_error={
+            "chk-a": _SyntheticDriverError("canceling statement due to lock timeout", "55P03")
+        },
+    )
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert exploder.attempts >= 1
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == (
+        "RETENTION_DROP_FAILED:hydro.chk-a: lock-contention(55P03): "
+        "canceling statement due to lock timeout"
+    )
+    jsonschema.validate(receipt, _load_schema())
 
 
 # --- #1664 operator-grep anchors vs the runbook ----------------------------

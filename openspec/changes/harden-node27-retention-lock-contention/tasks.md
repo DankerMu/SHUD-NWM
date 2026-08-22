@@ -5,8 +5,12 @@
 ## 1. 配置：`lock_timeout` 旋钮（`scripts/node27_timeseries_retention.py`）
 
 - [x] 1.1 在 `_QUERY_TIMEOUT_MS` / `_DROP_TIMEOUT_MS`（`:113-114`）旁新增
-      `_DEFAULT_LOCK_TIMEOUT_MS = 240_000`。注释逐字带上 design D3 的三条依据
-      （观测成功等待下界 ≈182 s；成本不对称；240/300 之间的 60 s 归因间隙），
+      `_DEFAULT_LOCK_TIMEOUT_MS = 240_000`。注释带上 design D3 的**终态**措辞：
+      08-19 的 ≈182 s 是一趟成功 tick 的 wrapper 墙钟，其 0.638 GB 删除量解释不了，
+      但 `elapsed_sec` **归因不到 drop 会话**（watermark + 枚举 + 每块测量均无锁上界，
+      2 块即可占 ~190 s），**不得**表述为「观测到的锁等待下界」；
+      240 s 立得住的依据只有成本不对称与 240/300 之间的 60 s 归因间隙两条，
+      per-chunk 计时（§3）正是为把这条推断换成实测。
       并写明**这是对 issue #1664 建议的 2–5 s 的记录在案偏离**。
       **不得**写成 `_DROP_TIMEOUT_MS` 的派生式。
 - [x] 1.2 `RetentionConfig` 冻结 dataclass 末尾新增
@@ -147,7 +151,14 @@
       'nhms-node27-unit-failure-alert@smoke.service'` 或 `systemctl --user cat` 该实例。
 - [ ] E5.5 node-27 通道 smoke（**不碰 DB**）：
       `systemctl --user start nhms-node27-unit-failure-alert@smoke.service`，
-      确认单元 `Result=success` 且邮件通道未报错。
+      随即读 handler 自己的 journal，断言出现 **`SENT unit=… to=…`**
+      且**不出现任何 `SKIPPED`**。
+      **`Result=success` 单独不是判据**——wrapper 有 7 条软退出路径
+      （`NO_UNIT_ARGUMENT` / `*_UNSET` / `*_UNSAFE` / `SENDMAIL_UNCONFIGURED` /
+      `SENDMAIL_UNAVAILABLE`）全部 `exit 0` 且不触碰传输，配合单元的
+      `EnvironmentFile=-`（吞掉缺文件），「一封信都没发」会被记成 PASS。
+      这与 E1 的「收集用例数 > 0」、E6 的「`len(dropped_chunks) >= 1`」是同一条反空转纪律。
+      更强的确认（收件箱到达）若可得则一并记录。
 - [ ] E6 node-27 **enforce 实机 receipt**：merge + 7.1 部署后，读**第一个实际删了 chunk
       的排程趟**（13:15 CST）的 `retention-*.json`，断言
       `outcome == "enforced"` **且** `len(dropped_chunks) >= 1`
