@@ -597,3 +597,47 @@ self-inflicted — four of them chased a recurring defect in the fixture's own
 meta-checklist, not in the deliverable.
 
 **Keep rotation**, and record the sharper form above as the reason.
+
+## Revisit 2026-08-22 (after #1660 / PR #1696)
+
+Aggregate moved to core=53 rotated=258 (was 53/257). One rotated catch — a
+rounding-error contribution to the count. The value of this PR to the decision
+is not the count but a clean instance of the mechanism, in a shape the ledger
+did not previously contain.
+
+Round 1 ran two lenses on the same 72-line diff. The correctness/concurrency
+lens went deep: it measured attempt accounting across six values of `attempts`,
+drove 320 iterations of a *real* `os.replace` race to count file descriptors,
+and enumerated seven exception shapes against the retry predicate. It returned
+clean on every axis, and it was right — the shipped code was correct, and two
+later rounds plus a final review never found otherwise.
+
+The rotated-in test-evidence lens looked at the same diff and asked a different
+question: not "does the retry work" but "would anything notice if it stopped".
+The answer was no. Two mutants that switch the feature off in production —
+the module constant set to 1, and the sole production call site pinned to one
+attempt — both left the suite fully green, because every test that exercised the
+retry injected its own bound and every test that used the default took a
+non-retrying path. `grep` for the constant across `tests/` returned nothing.
+
+That is the distinction worth recording: **verifying behavior and verifying that
+the behavior is pinned are different questions, and a lens that has just
+convinced itself the code is correct is the worst-placed one to ask the second.**
+It is the same structural argument as the 2026-08-21 entry (rotate off the
+surface your own previous round produced), reached from the opposite direction —
+there the risk was auditing your own artifact, here it is auditing your own
+conclusion.
+
+Round 2 then rotated both lenses again, onto the corrective action itself and
+onto the integration boundary. The audit lens caught a one-word fidelity drift
+in the round-1 spec fix that would have been silently folded into the base spec
+on `openspec archive`; the integration lens found that the diagnostic token this
+PR introduced never reaches server logs, which is where an operator would look
+for it (routed to #1704). Neither surface had a prior owner.
+
+Counter-note: two rounds is a cheap sample, and the round-2 findings were P3 and
+out-of-scope respectively — neither would have blocked a merge. The honest claim
+is about the round-1 coverage gap, which was real, was P2, and was invisible to
+the lens best acquainted with the code.
+
+**Keep rotation.** No change to the recorded rule.

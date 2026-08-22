@@ -6,7 +6,10 @@ issue #1660 正文的行号锚在更早的 commit。
 ## 风险分级（本地 triage，非上游给定）
 
 issue #1660 是手填 issue，**不带** `Suggested fixture level` / `Minimal mergeable slice`，
-因此 fixture 级别由本 change 自行裁定：**standard**。理由：改动面只有一个函数、
+因此 fixture 级别由本 change 自行裁定：**expanded**。触发项是 `issue-risk-contract.md:63` 的
+「shared entrypoint / public API / 高用户可见风险」——本 change 改的是对外 HTTP 错误行为。
+（本 fixture 初版把该字段写成 `standard`，那是 `issue-risk-contract.md:67` 明令拒绝的 ad-hoc 标签，
+已于合并后订正；交付的始终是 expanded 的全套产物。）理由：改动面只有一个函数、
 无 schema/迁移/配置变更，但触碰的是**生产对外 API 的并发语义**与一条共享安全原语的消费方式，
 错误的重试范围会把真实损坏当成竞态吞掉。
 
