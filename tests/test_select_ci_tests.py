@@ -313,6 +313,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_monitoring_api.py",
         "tests/test_orchestration_chain.py",
         "tests/test_orchestrator.py",
+        "tests/test_orchestrator_demote_cli_security.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+        "tests/test_orchestrator_demote_projection_faults.py",
+        "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
         "tests/test_publish_scheduler_file_registry.py",
@@ -3920,6 +3924,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # derivation that loses the consumption edge empties this anchor and reds
     # here rather than quietly re-collapsing the module.
     ("tests/mock_shud_omp.py", "tests/test_shud_runtime.py"),
+    # The #1564 split-demote suites' shared fixture module.
+    (
+        "tests/orchestrator_demote_reserved_job_helpers.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+    ),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
