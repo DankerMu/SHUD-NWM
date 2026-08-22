@@ -317,6 +317,20 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # The #1735 lineage index builders: every lineage suite publishes REAL
+        # index entries through `publish_state_snapshot_index`, so a change to
+        # the builder shape (clone provenance pass-through, `usable_flag`)
+        # silently changes what the resolver reads. Only the two file-level
+        # importers are routed; `test_scheduler_generation.py` and
+        # `test_state_manager_generation_history.py` import the builders inside
+        # a function and are therefore outside the non-gated closure.
+        "tests/lineage_state_index_fixtures.py",
+        (
+            "tests/test_scheduler_backfill.py",
+            "tests/test_scheduler_lineage.py",
+        ),
+    ),
+    PathTestRule(
         # Pins the modes `provider_atomic`'s two fail-closed gates inspect, for
         # tests that PRE-create a lock parent or a provider destination (#1513).
         # Its whole purpose is to make those tests independent of the ambient
@@ -626,6 +640,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_scheduler_backfill_predecessor.py",
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_scheduler_generation.py",
+            # #1735: the lineage resolver suite imports `services.orchestrator`
+            # (hence `__init__.py`, which has no same-name suite of its own), so
+            # the directory rule is where its importer gap closes. It IS an
+            # orchestrator suite and it is sub-second, so it rides the directory
+            # list rather than earning a narrow rule.
+            "tests/test_scheduler_lineage.py",
             "tests/test_scheduler_timing.py",
             "tests/test_source_cycle_raw_manifest.py",
             "tests/test_source_scoped_dispatch.py",

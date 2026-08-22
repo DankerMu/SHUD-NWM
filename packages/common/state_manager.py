@@ -865,7 +865,11 @@ class PsycopgStateSnapshotRepository:
         Same shadow-proof ``clone_gate_fingerprint IS NOT NULL`` filter as the
         publisher's reader, plus ``cloned_from_model_id IS NOT NULL``: lineage
         is established by the predecessor id being present (D2), and the
-        scoped-out evidence annotation always names it.  No ``usable_flag``
+        scoped-out evidence annotation always names it.  A row naming ITSELF
+        as its own predecessor is rejected (``cloned_from_model_id <>
+        model_id``): the spec defines lineage as a clone from a *predecessor*
+        model, and an identity is not its own predecessor, so such a row is
+        corrupt provenance rather than an existence-start.  No ``usable_flag``
         filter — an unusable clone row still proves the identity started then,
         and skipping it would move the boundary later (the silent-hide
         direction).
@@ -881,6 +885,7 @@ class PsycopgStateSnapshotRepository:
               AND source_id = %s
               AND clone_gate_fingerprint IS NOT NULL
               AND cloned_from_model_id IS NOT NULL
+              AND cloned_from_model_id <> model_id
             ORDER BY valid_time ASC, created_at ASC
             LIMIT 1
             """,
@@ -1607,6 +1612,9 @@ class FileStateSnapshotIndexRepository:
         - ``clone_gate_kind`` refines WHY the clone was admitted, not
           WHETHER it happened: both kinds — and an absent/unrecognised kind —
           confer lineage when ``cloned_from_model_id`` is present.
+        - A self-referential row (``cloned_from_model_id == model_id``)
+          confers NO lineage: lineage is a clone from a *predecessor*, and an
+          identity is not its own predecessor.
         - No ``usable_flag`` filter: an unusable clone row still proves the
           identity started then, and skipping it would move the boundary
           later, which is the silent-hide direction.
@@ -2696,19 +2704,39 @@ def _clone_entries_for_model_source(
 ) -> list[Mapping[str, Any]]:
     """Clone-provenance entries for one ``(model_id, source_id)``, EARLIEST first.
 
-    ``cloned_from_model_id`` is the db-free equivalent of the DB reader's
-    ``clone_gate_fingerprint IS NOT NULL`` shadow-proof filter: only the
+    ``cloned_from_model_id`` carries the db-free shadow-proof filter: only the
     state-clone hook writes it, so forecast / save-state entries can never
-    shadow a clone written at a backdated ``t*``.  Ordering is ``(valid_time,
-    created_at)`` ASC — see :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal`
-    for why existence-start rather than the newest row is the boundary.
+    shadow a clone written at a backdated ``t*``.
+
+    This is NOT literally the same predicate as the DB reader's
+    (:meth:`PsycopgStateSnapshotRepository.get_earliest_clone_row_for_model_source`
+    requires BOTH ``clone_gate_fingerprint`` and ``cloned_from_model_id`` to
+    be non-NULL; this filters on ``cloned_from_model_id`` alone).  They select
+    the same rows for everything the sole writer produces —
+    :func:`packages.common.state_clone._build_clone_row` writes both fields
+    together and takes ``clone_gate_fingerprint`` as a required ``str`` — and
+    diverge only on a partially written or corrupt row, where the DB plane is
+    the stricter of the two.  Tightening this plane up to match would move
+    ``t*`` LATER on such a row, which is the silent-hide direction the design
+    forbids, and the spec scenario keys "no lineage" on the absence of
+    ``cloned_from_model_id``, never on the fingerprint.  So the divergence is
+    deliberate and stays.
+
+    A row naming ITSELF as its own predecessor is rejected on both planes:
+    lineage is a clone from a *predecessor* model, and an identity is not its
+    own predecessor.
+
+    Ordering is ``(valid_time, created_at)`` ASC — see
+    :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal` for why
+    existence-start rather than the newest row is the boundary.
     """
 
     matched: list[Mapping[str, Any]] = []
     for key, entry in entries.items():
         if key[0] != str(model_id) or key[1] != str(source_id):
             continue
-        if not str(entry.get("cloned_from_model_id") or "").strip():
+        cloned_from = str(entry.get("cloned_from_model_id") or "").strip()
+        if not cloned_from or cloned_from == key[0]:
             continue
         matched.append(entry)
     epoch = datetime.min.replace(tzinfo=UTC)

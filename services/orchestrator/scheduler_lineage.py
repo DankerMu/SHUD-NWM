@@ -30,6 +30,13 @@ Boundaries (change ``lineage-scoped-cycle-completion``):
 - Absent provenance — and an unreadable index or an absent provider — mean
   "no lineage", never an error.  A model with no lineage keeps today's
   behavior byte-for-byte.
+- A clone row naming ITSELF as its predecessor (``cloned_from_model_id ==
+  model_id``) is corrupt provenance, not an existence-start, and confers no
+  lineage.  Both planes reject it at the reader; this module rejects it again
+  at the boundary so a provider that has not been tightened (a stub, a stale
+  deployment, a future reader) cannot mint a ``t*`` out of nothing.  Honoring
+  such a row would scope every earlier cycle out on the strength of a row that
+  proves nothing — the silent direction, since the gap simply disappears.
 
 The resolution result is a scoping input; the ``lineage_scoped_out_pre_cutover``
 record it produces is an ANNOTATION and is never read back as a decision input.
@@ -99,6 +106,8 @@ def _from_index_signal(
     cutover_time = _parse_utc(signal.get("cutover_valid_time"))
     if not predecessor_model_id or cutover_time is None:
         return None
+    if predecessor_model_id == str(model_id):
+        return None
     clone_gate_kind = signal.get("clone_gate_kind")
     return LineageCutover(
         model_id=str(model_id),
@@ -113,6 +122,8 @@ def _from_clone_row(row: Any, *, model_id: str, source_id: str) -> LineageCutove
     predecessor_model_id = str(getattr(row, "cloned_from_model_id", "") or "").strip()
     cutover_time = _parse_utc(getattr(row, "valid_time", None))
     if not predecessor_model_id or cutover_time is None:
+        return None
+    if predecessor_model_id == str(model_id):
         return None
     clone_gate_kind = getattr(row, "clone_gate_kind", None)
     return LineageCutover(

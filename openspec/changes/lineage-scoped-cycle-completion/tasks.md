@@ -106,6 +106,32 @@ Each of these is a deadlock re-entry path; each needs its own test.
       actually ran are never scoped out.
 - [x] 5.9 Per-source `t*`: GFS and IFS cutting over at different instants are
       scoped independently.
+- [x] 5.10 **Trap 4 — self-referential clone row.** A row whose
+      `cloned_from_model_id` equals its own `model_id` confers NO lineage on
+      either plane (index reader, DB SQL, and the resolver's belt-and-braces
+      guard on both duck-typed accessors): the model stays in scope and is
+      scored exactly as one that never cloned. Corner case pinned too — a
+      self-row EARLIER than a legitimate clone row leaves `t*` at the
+      legitimate row, which is the true existence-start.
+- [x] 5.11 **Trap 5 — the deliberate `usable_flag` inclusion.** An UNUSABLE
+      earliest clone row still resolves lineage on both planes, and the DB
+      statement test asserts `usable_flag` does NOT appear in the SQL. The
+      negative pin is the load-bearing half: without it, adding
+      `AND usable_flag = true` moves `t*` later (the silent-hide direction) with
+      the whole suite still green.
+- [x] 5.12 **DB-plane provider construction arm.** `_lineage_provider`'s
+      `db_free_required=False` branch with `_lineage_provider_cache` unset:
+      `from_env` raising ⇒ `None` + `False` sentinel + no retry; `from_env`
+      succeeding ⇒ provider memoized and reused. Both resolutions use DISTINCT
+      `(model_id, source_id)` keys, otherwise `_lineage_cutover_cache`
+      short-circuits first and the test is vacuous.
+- [x] 5.13 **Trap 1, leg 3 — mixed empty scope.** Source scope removes some
+      models AND the lineage filter removes the entire remainder ⇒ `complete`,
+      cycle not selected. The `direct_grid_forcing` contract must be
+      well-formed, asserted mechanically via
+      `_direct_grid_model_source_is_out_of_scope` on the registered model, or a
+      malformed contract blocks instead of scoping out and the test proves
+      something else.
 
 ## 6. Docs
 

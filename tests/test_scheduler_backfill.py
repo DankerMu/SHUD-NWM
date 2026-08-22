@@ -8,10 +8,12 @@ from typing import Any
 
 import pytest
 
+from packages.common import state_manager as state_manager_module
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.state_manager import state_snapshot_id
+from packages.common.state_manager import StateSnapshot, state_snapshot_id
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from tests.lineage_state_index_fixtures import index_entry as _lineage_index_entry
 from tests.lineage_state_index_fixtures import index_repository as _lineage_index_repository
@@ -2096,6 +2098,124 @@ def _lineage_scheduler(
     return scheduler
 
 
+class _StubEarliestCloneRowRepository:
+    """A DB-plane provider shaped like ``PsycopgStateSnapshotRepository``'s reader."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def get_earliest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> Any:
+        self.calls.append((model_id, source_id))
+        return StateSnapshot(
+            state_id=f"state_db_clone_{model_id}",
+            model_id=model_id,
+            run_id="clone_run",
+            valid_time=_dt(_LINEAGE_CUTOVER),
+            state_uri=f"s3://nhms/states/{source_id}/{model_id}/state.cfg.ic",
+            checksum="sha256:" + "e" * 64,
+            usable_flag=True,
+            source_id=source_id,
+            cloned_from_model_id=f"{model_id}_legacy",
+            clone_gate_fingerprint="sha256:" + "d" * 64,
+            clone_gate_kind="state_compatibility",
+        )
+
+
+def _db_plane_lineage_scheduler(tmp_path: Path) -> ProductionScheduler:
+    """A scheduler on the DB plane with the lineage provider NOT pre-seeded.
+
+    Every other lineage test seeds ``_lineage_provider_cache`` and therefore
+    short-circuits before ``_lineage_provider``'s construction arm ever runs.
+    This one deliberately leaves it unset so that arm is the thing under test.
+    """
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=PerModelCompletionRepository(set()),
+        models=[_model("model_a", "basin_a")],
+    )
+    # Preconditions, not decoration: on the db-free plane the `else` arm is
+    # never reached, and a pre-seeded cache short-circuits above it.
+    assert scheduler.config.db_free_required is False
+    assert scheduler._lineage_provider_cache is None
+    return scheduler
+
+
+def test_db_plane_provider_construction_failure_is_remembered(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """B2 case A: ``from_env`` raising ⇒ no lineage, and no retry per (model, cycle).
+
+    The two resolutions use DISTINCT ``(model_id, source_id)`` keys on purpose:
+    with the same key ``_lineage_cutover_cache`` short-circuits first and the
+    test would pass even with the provider memoization deleted.
+    """
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    calls = 0
+
+    def _exploding_from_env() -> Any:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("DATABASE_URL is not set")
+
+    monkeypatch.setattr(
+        state_manager_module.PsycopgStateSnapshotRepository,
+        "from_env",
+        staticmethod(_exploding_from_env),
+        raising=True,
+    )
+    scheduler = _db_plane_lineage_scheduler(tmp_path)
+
+    assert scheduler._lineage_cutover_for_model_source("model_a", "gfs") is None
+    assert scheduler._lineage_provider_cache is False
+    assert calls == 1
+
+    # A DIFFERENT key: the cutover cache cannot answer, so the provider path is
+    # entered again — and must not re-attempt construction.
+    assert scheduler._lineage_cutover_for_model_source("model_b", "gfs") is None
+    assert calls == 1
+
+
+def test_db_plane_provider_is_constructed_once_and_memoized(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """B2 case B: a usable ``from_env`` is built once and reused for later keys."""
+    monkeypatch.delenv("NHMS_SCHEDULER_DB_FREE_REQUIRED", raising=False)
+    provider = _StubEarliestCloneRowRepository()
+    calls = 0
+
+    def _stub_from_env() -> Any:
+        nonlocal calls
+        calls += 1
+        return provider
+
+    monkeypatch.setattr(
+        state_manager_module.PsycopgStateSnapshotRepository,
+        "from_env",
+        staticmethod(_stub_from_env),
+        raising=True,
+    )
+    scheduler = _db_plane_lineage_scheduler(tmp_path)
+
+    first = scheduler._lineage_cutover_for_model_source("model_a", "gfs")
+    assert calls == 1
+    assert scheduler._lineage_provider_cache is provider
+    assert first is not None
+    assert first.predecessor_model_id == "model_a_legacy"
+    assert first.cutover_time == _dt(_LINEAGE_CUTOVER)
+
+    second = scheduler._lineage_cutover_for_model_source("model_b", "gfs")
+    assert calls == 1
+    assert second is not None
+    assert second.predecessor_model_id == "model_b_legacy"
+    assert provider.calls == [("model_a", "gfs"), ("model_b", "gfs")]
+
+
 def test_pre_cutover_cycle_scores_complete_for_a_lineage_bearing_model(tmp_path: Path) -> None:
     """5.1: the cycles that predate ``M'`` are decided by the remaining models."""
     models = [_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")]
@@ -2261,6 +2381,132 @@ def test_scope_emptied_by_the_lineage_filter_is_not_a_gap(tmp_path: Path) -> Non
 
     assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "complete"
     assert _selected_backfill_cycles(scheduler) == []
+
+
+_LINEAGE_GRID_ID = "grid_lineage_demo"
+
+
+def _direct_grid_forcing_contract(*, applicable_source_ids: Sequence[str]) -> dict[str, Any]:
+    """A WELL-FORMED direct-grid contract scoped to ``applicable_source_ids``.
+
+    Well-formedness is load-bearing, not cosmetic: only the parser's precise
+    source-scope mismatch makes ``_direct_grid_model_source_is_out_of_scope``
+    return ``True`` (`scheduler_candidates.py:1229-1232`).  A malformed contract
+    falls through to ``_direct_grid_source_scope_block`` and BLOCKS the model
+    instead of scoping it out — a test built on one would stay green while
+    proving something else entirely.  The probe assertions below check this
+    mechanically rather than trusting this literal.
+    """
+    return {
+        "forcing_mapping_mode": "direct_grid",
+        "binding_uri": "s3://nhms/models/lineage-demo/direct-grid/binding.json",
+        "binding_checksum": "sha256:binding-lineage",
+        "model_input_package_id": "model-input-lineage-v1",
+        "sp_att_path": "input/lineage.sp.att",
+        "sp_att_checksum": "sha256:sp-att-lineage",
+        "applicable_source_ids": list(applicable_source_ids),
+        "grid_id": _LINEAGE_GRID_ID,
+        "grid_signature": "grid-signature-lineage",
+        "station_bindings": [
+            {
+                "station_id": "lineage_forc_001",
+                "shud_forcing_index": 1,
+                "forcing_filename": "X100.95Y36.25.csv",
+                "longitude": 100.95,
+                "latitude": 36.25,
+                "x": 1,
+                "y": 2,
+                "z": 3657,
+                "grid_id": _LINEAGE_GRID_ID,
+                "grid_cell_id": "cell-001",
+            },
+            {
+                "station_id": "lineage_forc_002",
+                "shud_forcing_index": 2,
+                "forcing_filename": "X101.05Y36.25.csv",
+                "longitude": 101.05,
+                "latitude": 36.25,
+                "x": 2,
+                "y": 3,
+                "z": 3600,
+                "grid_id": _LINEAGE_GRID_ID,
+                "grid_cell_id": "cell-002",
+            },
+        ],
+    }
+
+
+def _source_scoped_model(model_id: str, basin_id: str, *, source_ids: Sequence[str]) -> Mapping[str, Any]:
+    return _model(
+        model_id,
+        basin_id,
+        resource_profile={
+            "runnable": True,
+            "memory_gb": 8,
+            "display_capabilities": {"tiles": True},
+            "canonical_grid_key": "canonical-grid-lineage",
+            "direct_grid_forcing": _direct_grid_forcing_contract(
+                applicable_source_ids=list(source_ids)
+            ),
+        },
+    )
+
+
+def test_scope_emptied_by_lineage_after_a_partial_source_scope_is_not_a_gap(
+    tmp_path: Path,
+) -> None:
+    """5.4 leg 3 (D5): the MIXED leg — source scope removes some, lineage the rest.
+
+    Production hangs both filters on the same context
+    (`scheduler_core.py:535-543`), and `_completion_scope` short-circuits only
+    when the source scope is EMPTY — a partially emptied one still reaches the
+    lineage filter.  The spec scenario is worded over the cycle's *source
+    scope*, not the raw model list, so this leg is `complete` for the same
+    reason leg 1 is; leg 1 only covers the degenerate instance where the source
+    scope happens to equal the whole model set.
+
+    The `{X}` alone ⇒ `gap` / `{X, A'}` ⇒ `complete` asymmetry this exposes is
+    prescribed by D5 (empty BEFORE the lineage filter is a misconfiguration
+    guard) and must not be "fixed".
+    """
+    models = [
+        _source_scoped_model("model_x_ifs_only", "basin_x", source_ids=["ifs"]),
+        _model("model_a_prime", "basin_a"),
+    ]
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(
+            {
+                (_LINEAGE_CUTOVER, "model_a_prime"),
+                (_LINEAGE_POST_CUTOVER_CYCLE, "model_a_prime"),
+            }
+        ),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+    )
+    adapter = scheduler.adapters["gfs"]
+    discovery = _discovery_for_time(adapter, _LINEAGE_PRE_CUTOVER_CYCLE)
+    registered = {model.model_id: model for model in scheduler._discover_models()[0]}
+
+    # Trap guard, on the model object the scheduler actually passes in: the
+    # IFS-only variant must be SCOPED OUT of a gfs cycle (not blocked), and the
+    # other model must not be touched by the source filter at all.
+    out_of_scope = scheduler_candidates_module._direct_grid_model_source_is_out_of_scope
+    assert out_of_scope(registered["model_x_ifs_only"], discovery) is True
+    assert out_of_scope(registered["model_a_prime"], discovery) is False
+    # And the lineage filter removes the entire remainder.
+    assert scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs") is not None
+    assert scheduler._lineage_cutover_for_model_source("model_x_ifs_only", "gfs") is None
+
+    assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "complete"
+    assert _LINEAGE_PRE_CUTOVER_CYCLE not in _selected_backfill_cycles(scheduler)
 
 
 def test_scope_empty_before_the_lineage_filter_is_still_a_gap(tmp_path: Path) -> None:

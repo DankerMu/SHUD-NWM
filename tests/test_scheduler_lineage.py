@@ -18,6 +18,7 @@ production deadlock:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,126 @@ def test_clone_lineage_signal_without_clone_provenance_is_no_lineage(tmp_path: P
     assert (
         scheduler_lineage.resolve_lineage_cutover(repo, model_id="model_a", source_id="gfs") is None
     )
+
+
+def test_self_referential_clone_row_confers_no_lineage_on_the_db_free_plane(
+    tmp_path: Path,
+) -> None:
+    """A1: a row naming ITSELF as predecessor is corrupt provenance, not a ``t*``.
+
+    Honoring it would mint a cutover out of nothing and scope every earlier
+    cycle out of completion and cohort admission on the strength of a row that
+    proves no predecessor ever existed — the silent direction: the gap simply
+    stops being reported.  The model must be scored exactly as one that never
+    cloned.
+    """
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True)
+    repo = _repository(
+        tmp_path,
+        [
+            _entry(
+                object_root=object_root,
+                model_id="model_a_prime",
+                valid_time="2026-08-21T12:00:00Z",
+                cloned_from_model_id="model_a_prime",
+            )
+        ],
+    )
+
+    signal = repo.clone_lineage_signal(model_id="model_a_prime", source_id="gfs")
+
+    assert signal["ready"] is True
+    assert signal["has_lineage"] is False
+    assert signal["predecessor_model_id"] is None
+    assert signal["cutover_valid_time"] is None
+    assert signal["clone_entry_count"] == 0
+    assert (
+        scheduler_lineage.resolve_lineage_cutover(
+            repo, model_id="model_a_prime", source_id="gfs"
+        )
+        is None
+    )
+
+
+def test_self_referential_row_earlier_than_a_real_clone_does_not_move_the_boundary(
+    tmp_path: Path,
+) -> None:
+    """A1 corner case: the LEGITIMATE row is the existence-start, so ``t*`` is its own.
+
+    Rejecting the earlier self-row moves the boundary LATER, which superficially
+    resembles the silent-hide direction.  It is not: the direction heuristic
+    arbitrates genuine ambiguity between real clone rows (D4), and a self-row is
+    not a real clone row.  ``model_a_prime`` came into existence when it was
+    cloned FROM ``model_a``, not when a corrupt row named itself.
+    """
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True)
+    repo = _repository(
+        tmp_path,
+        [
+            _entry(
+                object_root=object_root,
+                model_id="model_a_prime",
+                valid_time="2026-08-20T00:00:00Z",
+                cloned_from_model_id="model_a_prime",
+                state_id="state_self_referential",
+            ),
+            _entry(
+                object_root=object_root,
+                model_id="model_a_prime",
+                valid_time="2026-08-21T12:00:00Z",
+                cloned_from_model_id="model_a",
+                state_id="state_real_clone",
+            ),
+        ],
+    )
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a"
+    assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
+
+
+def test_unusable_earliest_clone_row_still_resolves_lineage_on_the_db_free_plane(
+    tmp_path: Path,
+) -> None:
+    """A2: ``usable_flag`` is deliberately NOT part of the existence question.
+
+    A clone row is mutable after birth — ``run_qc`` / ``mark_init_state_corrupted``
+    flip ``usable_flag`` to ``False`` on any ``state_id``, and the clone row is
+    exactly the init state the first post-cutover cycle warm-starts from.  An
+    unusable row still proves the identity started then; skipping it would move
+    ``t*`` later, which is the silent-hide direction.
+    """
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True)
+    repo = _repository(
+        tmp_path,
+        [
+            _entry(
+                object_root=object_root,
+                model_id="model_a_prime",
+                valid_time="2026-08-21T12:00:00Z",
+                cloned_from_model_id="model_a",
+                usable_flag=False,
+            )
+        ],
+    )
+
+    signal = repo.clone_lineage_signal(model_id="model_a_prime", source_id="gfs")
+    assert signal["has_lineage"] is True
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a"
+    assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
 
 
 def test_clone_lineage_signal_resolves_from_loaded_index_without_extra_read(tmp_path: Path) -> None:
@@ -370,6 +491,64 @@ def test_db_plane_never_consults_the_publishers_latest_row_reader() -> None:
     assert repo.calls == []
 
 
+def test_db_plane_self_referential_clone_row_confers_no_lineage() -> None:
+    """A1, DB plane: the resolver rejects it even if a reader hands it over.
+
+    Both plane readers now filter self-referential rows out, so this pins the
+    belt-and-braces guard at the resolver boundary: a stub, a stale deployment
+    or a future reader that has not been tightened still cannot mint a ``t*``.
+    """
+    row = replace(
+        _clone_snapshot("2026-08-21T12:00:00Z"), cloned_from_model_id="model_a_prime"
+    )
+    repo = _EarliestCloneRowRepo(row)
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert repo.calls == [("model_a_prime", "gfs")]
+    assert cutover is None
+
+
+def test_index_signal_plane_self_referential_predecessor_confers_no_lineage() -> None:
+    """A1, index-signal branch: same guard on the other duck-typed accessor."""
+
+    class _SelfReferentialSignalRepo:
+        def clone_lineage_signal(self, *, model_id: str, source_id: str) -> dict[str, Any]:
+            return {
+                "ready": True,
+                "has_lineage": True,
+                "model_id": model_id,
+                "source_id": source_id,
+                "predecessor_model_id": model_id,
+                "cutover_valid_time": "2026-08-21T12:00:00Z",
+                "clone_gate_kind": "state_compatibility",
+            }
+
+    assert (
+        scheduler_lineage.resolve_lineage_cutover(
+            _SelfReferentialSignalRepo(), model_id="model_a_prime", source_id="gfs"
+        )
+        is None
+    )
+
+
+def test_db_plane_unusable_clone_row_still_resolves_lineage() -> None:
+    """A2, DB plane: an unusable earliest clone row is still the existence-start."""
+    repo = _EarliestCloneRowRepo(
+        replace(_clone_snapshot("2026-08-21T12:00:00Z"), usable_flag=False)
+    )
+
+    cutover = scheduler_lineage.resolve_lineage_cutover(
+        repo, model_id="model_a_prime", source_id="gfs"
+    )
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a"
+    assert cutover.cutover_time == _dt("2026-08-21T12:00:00Z")
+
+
 def test_db_plane_no_clone_row_is_no_lineage() -> None:
     assert (
         scheduler_lineage.resolve_lineage_cutover(
@@ -384,7 +563,15 @@ def test_db_plane_no_clone_row_is_no_lineage() -> None:
 
 
 def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any) -> None:
-    """D3/D4: existence-start ordering, with the shadow-proof clone filters kept."""
+    """D3/D4: existence-start ordering, with the shadow-proof clone filters kept.
+
+    The NEGATIVE pin is the load-bearing half.  Omitting ``usable_flag`` from
+    this statement is a deliberate decision (#1735 A2): an unusable clone row
+    still proves the identity started then, and filtering it would move ``t*``
+    LATER — the silent-hide direction the design forbids.  Without an explicit
+    absence assertion, adding ``AND usable_flag = true`` here keeps every other
+    test in this suite green while silently reintroducing that regression.
+    """
     captured: dict[str, Any] = {}
 
     def _fake_fetch_optional(self: Any, statement: str, parameters: Any) -> None:
@@ -404,6 +591,10 @@ def test_earliest_clone_row_query_is_ascending_and_clone_scoped(monkeypatch: Any
     assert "ORDER BY valid_time ASC, created_at ASC" in captured["statement"]
     assert "clone_gate_fingerprint IS NOT NULL" in captured["statement"]
     assert "cloned_from_model_id IS NOT NULL" in captured["statement"]
+    # A1: a row naming itself is not a predecessor and confers no lineage.
+    assert "cloned_from_model_id <> model_id" in captured["statement"]
+    # A2 negative pin: no usable_flag filter, in any spelling.
+    assert "usable_flag" not in captured["statement"]
     assert captured["parameters"] == ("model_a_prime", "gfs")
 
 

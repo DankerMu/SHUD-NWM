@@ -64,8 +64,17 @@ def index_entry(
     created_at: str | None = None,
     lead_hours: int = 12,
     state_id: str | None = None,
+    usable_flag: bool = True,
 ) -> dict[str, Any]:
-    """One index row; a clone row when ``cloned_from_model_id`` is given."""
+    """One index row; a clone row when ``cloned_from_model_id`` is given.
+
+    ``usable_flag`` defaults to how the clone hook writes a fresh row, but is
+    settable because a clone row is MUTABLE after birth: ``run_qc`` and
+    ``mark_init_state_corrupted`` flip it to ``False`` on any ``state_id``,
+    and the clone row is exactly the init state the first post-cutover cycle
+    warm-starts from.  The lineage resolvers deliberately do NOT filter on it
+    (#1735), so the db-free plane must be able to express the case.
+    """
 
     stamp = valid_time.replace("-", "").replace(":", "").replace("T", "")[:10]
     resolved_state_id = state_id or f"state_{source_id}_{model_id}_{stamp}"
@@ -88,7 +97,7 @@ def index_entry(
         "valid_time": valid_time,
         "state_uri": state_uri,
         "checksum": f"sha256:{sha256_bytes(content)}",
-        "usable_flag": True,
+        "usable_flag": bool(usable_flag),
         "cycle_id": producer_cycle_id,
         "lead_hours": lead_hours,
         "model_package_version": f"s3://nhms/models/{model_id}/package/",
