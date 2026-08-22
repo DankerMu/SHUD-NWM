@@ -914,3 +914,52 @@ run", even though only the former is evidence about review sufficiency. Both rem
 measurement gaps, not decision inputs.
 
 **Keep rotation** unchanged.
+
+## Revisit 2026-08-22 (after #1702 item 4 / PR #1731)
+
+Docs-only PR, `rounds: 0` — no cross-review loop ran, so it enters neither the
+multi-round denominator nor either catch counter. Aggregate stays **107 multi-round
+merged PRs, core=66 vs rotated=264**. **Keep rotation** unchanged.
+
+Recorded rather than skipped because the audit re-raises DECIDABLE on every line, and a
+silent skip is indistinguishable from an overlooked obligation. The `rounds: 0` /
+review-exempt shape is already separated above; this line adds no new information about
+rotation and is logged only to keep the per-merge revisit chain unbroken.
+
+## Revisit 2026-08-22 (after #1717 / PR #1730)
+
+`rounds: 1`, clean on the first round, so this line contributes to neither
+later-round catch counter. Aggregate is unchanged at **107 multi-round merged
+PRs, core=66 vs rotated=264**. **Keep rotation** unchanged.
+
+One observation worth logging, because it is the same measurement gap seen from
+a new angle. Both round-1 lenses here were *core* lenses (oracle-integrity and
+correctness/portability/spec-fidelity), chosen because the PR's literal shape
+was "a test red on the production oracle is edited until it is green" — a shape
+where the governing risk is knowable in advance. The round returned clean, and
+the two P3 notes it did produce came from the core lenses, not from anything a
+rotated-in lens would have covered.
+
+That is a case where **not rotating was the right call**, and the schema cannot
+record it: `round_lenses` shows which lenses ran, but nothing distinguishes
+"core-only because the risk was known and narrow" from "core-only by default".
+The previous two revisits logged that the schema cannot tell rotated-in from
+narrowed re-runs, and cannot tell "no later round needed" from "no later round
+run". This adds a third: it cannot tell a deliberate core-only selection from an
+unconsidered one. All three are measurement gaps, not decision inputs; none of
+them moves the keep/cut call, which stays on the 66-vs-264 aggregate.
+
+## Revisit 2026-08-22 (after #1472 / PR #1722)
+
+`rounds: 1`, clean on the first comprehensive round, with zero candidate findings
+and therefore zero verifier batches. This line enters neither the multi-round
+denominator nor either later-round catch counter. Aggregate remains **107
+multi-round merged PRs, core=66 vs rotated=264**. **Keep rotation** unchanged.
+
+The operational wrinkle is reviewer availability, not lens attribution: the
+original Integration and Test & Evidence invocations produced no text report,
+so fresh replacements ran the same two lenses on the same SHA and returned
+clean. Those replacements complete Round 1; they are not a later round and must
+not be interpreted as rotation. The accountability schema records the effective
+lens mix once, correctly. This adds no keep/cut evidence, but keeps tooling
+failure separate from the experiment being measured.
