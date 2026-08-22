@@ -27,6 +27,10 @@ UNIT_M3S = "m3/s"
 UNIX_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
 AUTO_TIME_BASIS_MAX_RELATIVE_DAYS = 366
 AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS = 1
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-output-parser"
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
 IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
@@ -1298,6 +1302,7 @@ class PsycopgOutputParserRepository:
             self.database_url,
             connect_timeout=self.connect_timeout_seconds,
             options=f"-c statement_timeout={self.statement_timeout_ms}",
+            fallback_application_name=_APPLICATION_NAME,
         )
 
     @staticmethod

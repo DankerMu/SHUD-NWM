@@ -6,6 +6,9 @@
 NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 
 # Node-27 primary Postgres (writer role — compression is DDL/DML)
+# #1714: the compression runner ships a default application_name `nhms-ts-compression` (libpq
+# fallback_application_name) so pg_stat_activity can attribute it. To override,
+# append ?application_name=<name> to the DSN below; an explicit value always wins.
 DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The runner uses this connection read-only first to resolve the display
 # business-time watermark, then applies the 7-day lag to that watermark.

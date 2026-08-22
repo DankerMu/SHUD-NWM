@@ -121,6 +121,10 @@ _DEFAULT_SYSTEMD_WALL_SECONDS = 3_940
 _CLEANUP_MARGIN_SECONDS = 60
 _SYSTEMD_MARGIN_SECONDS = 40
 _CONNECT_TIMEOUT_SECONDS = 10
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-ts-compression"
 _MAX_CATALOG_ROWS = 50_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _MAX_CANDIDATES = 10_000
@@ -472,6 +476,24 @@ CompressChunk = Callable[[str, ChunkRow], None]
 ReconcileChunkState = Callable[[str, ChunkRow], bool]
 
 
+def _attributed_connect(*args: Any, **kwargs: Any) -> Any:
+    """``psycopg2.connect`` with this component's #1714 identity attached.
+
+    Injected into helpers that open their OWN connection on this runner's
+    behalf (``packages.common.display_watermark.fetch_display_watermark``),
+    so the delegated connection is attributed too. That watermark read is the
+    FIRST database touch of every production tick; unattributed it shows an
+    empty ``application_name`` and routes an operator to "unregistered
+    connection" instead of "production tick, do not cancel".
+
+    psycopg2 is imported lazily here, matching every other connect site in
+    this module.
+    """
+    import psycopg2  # type: ignore[import-untyped]
+
+    return psycopg2.connect(*args, fallback_application_name=_APPLICATION_NAME, **kwargs)
+
+
 def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
     import psycopg2  # type: ignore[import-untyped]
     import psycopg2.extras  # type: ignore[import-untyped]
@@ -480,6 +502,7 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
         database_url,
         connect_timeout=_CONNECT_TIMEOUT_SECONDS,
         cursor_factory=psycopg2.extras.RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
     )
     try:
         with connection:
@@ -520,7 +543,11 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
 def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: bool = False) -> int:
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -570,7 +597,11 @@ def _default_compress_chunk(database_url: str, chunk: ChunkRow, *, compress_time
     # no injection surface. ``CompressChunk`` stays a two-argument protocol.
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:
@@ -589,7 +620,11 @@ def _default_reconcile_chunk_state(database_url: str, chunk: ChunkRow) -> bool:
 
     import psycopg2  # type: ignore[import-untyped]
 
-    connection = psycopg2.connect(database_url, connect_timeout=_CONNECT_TIMEOUT_SECONDS)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         connection.set_session(readonly=True, autocommit=True)
         with connection.cursor() as cursor:
@@ -1137,7 +1172,9 @@ def main(
         # ``now_utc`` is retained as the receipt's legacy field name, but the
         # production value is the node-27 display business-time watermark.
         # Tests and controlled replays may inject it explicitly.
-        now = now_utc or fetch_display_watermark(config.database_url)
+        now = now_utc or fetch_display_watermark(
+            config.database_url, connect=_attributed_connect
+        )
     except DisplayWatermarkError as error:
         _replace_stale_with_failure(
             config,

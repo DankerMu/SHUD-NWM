@@ -283,7 +283,7 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     connect_calls, statements = _install_fake_psycopg2(monkeypatch)
-    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
     monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
     chunk = _chunk("hydro", "river_timeseries", "oversized", delta_days=9)
 
@@ -367,7 +367,7 @@ def test_main_accepts_the_exact_budget_chain_equality(tmp_path: Path, monkeypatc
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     connect_calls, _statements = _install_fake_psycopg2(monkeypatch)
-    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: _NOW)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
     monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
     chunk = _chunk("hydro", "river_timeseries", "at-the-boundary", delta_days=9)
 
@@ -573,7 +573,7 @@ def test_main_uses_display_watermark_as_compression_reference(
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     reference_time = datetime(2026, 7, 11, 12, tzinfo=UTC)
-    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn: reference_time)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: reference_time)
     monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
     chunk = _chunk(
         "hydro", "river_timeseries", "watermark-old", now=reference_time, delta_days=8

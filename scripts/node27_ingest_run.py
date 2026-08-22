@@ -36,6 +36,11 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 
+# #1714: default pg_stat_activity attribution for this component. libpq
+# treats fallback_application_name as a default only, so an operator's
+# explicit ?application_name=... in DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-ingest-run"
+
 
 def _manifest_path(object_store_root: Path, run_id: str) -> Path:
     return object_store_root / "runs" / run_id / "input" / "manifest.json"
@@ -232,7 +237,11 @@ def ingest_run(database_url: str, object_store_root: Path, run_id: str) -> dict[
     manifest = _load_manifest(manifest_path)
     source_id = _source_id(manifest)
 
-    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection = psycopg2.connect(
+        database_url,
+        cursor_factory=RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
+    )
     try:
         with connection:
             with connection.cursor() as cursor:

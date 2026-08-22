@@ -1228,7 +1228,7 @@ def _install_fake_drop_psycopg2(
     monkeypatch.setitem(
         sys.modules,
         "psycopg2",
-        types.SimpleNamespace(connect=lambda _url: _FakeConn()),
+        types.SimpleNamespace(connect=lambda _url, **_kwargs: _FakeConn()),
     )
     return probe
 
@@ -1416,7 +1416,7 @@ def test_default_measure_chunk_bytes_isolates_per_chunk_failure(
 
     connect_calls: list[str] = []
 
-    def _fake_connect(url: str) -> _FakeConn:
+    def _fake_connect(url: str, **_kwargs: Any) -> _FakeConn:
         connect_calls.append(url)
         return _FakeConn()
 
@@ -1581,7 +1581,7 @@ def _install_fake_measure_psycopg2(
         def close(self) -> None:
             return None
 
-    def _fake_connect(url: str) -> _FakeConn:
+    def _fake_connect(url: str, **_kwargs: Any) -> _FakeConn:
         probe.connect_calls.append(url)
         if connect_error is not None and len(probe.connect_calls) == 1:
             raise connect_error
@@ -3264,7 +3264,7 @@ def test_out_of_range_lock_timeout_fails_closed_before_any_db_call(
     monkeypatch.setitem(
         sys.modules,
         "psycopg2",
-        types.SimpleNamespace(connect=lambda url: connects.append(url)),
+        types.SimpleNamespace(connect=lambda url, **_kwargs: connects.append(url)),
     )
     env = _base_env(tmp_path, **{_LOCK_TIMEOUT_ENV_KEY: raw})
 

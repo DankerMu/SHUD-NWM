@@ -45,6 +45,28 @@ ANCHOR_MODE = "display_watermark"
 ANCHOR_DECISION = "issue-1407-keep-watermark-anchor"
 ANCHOR_RESIDUAL_RISK = "backfill cycles older than watermark - retention_days are unprotected"
 
+# #1714: default pg_stat_activity attribution for this component. libpq treats
+# fallback_application_name as a default only, so an operator's explicit
+# ?application_name=... in NODE27_DISPLAY_WATERMARK_DATABASE_URL still wins.
+_APPLICATION_NAME = "nhms-raw-retention"
+
+
+def _attributed_connect(*args: Any, **kwargs: Any) -> Any:
+    """``psycopg2.connect`` with this component's #1714 identity attached.
+
+    This runner never opens a connection itself; its ONLY database touch is
+    the watermark read delegated to
+    ``packages.common.display_watermark.fetch_display_watermark``. Injecting
+    this callable is what keeps that delegated connection attributable in
+    ``pg_stat_activity``.
+
+    psycopg2 is imported lazily so importing this module stays possible without
+    the driver, exactly as ``display_watermark`` does it.
+    """
+    import psycopg2  # type: ignore[import-untyped]
+
+    return psycopg2.connect(*args, fallback_application_name=_APPLICATION_NAME, **kwargs)
+
 
 @dataclass(frozen=True)
 class RawRetentionConfig:
@@ -380,7 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         reference_time = (
             _parse_reference_time(args.reference_time)
             if args.reference_time is not None
-            else fetch_display_watermark(os.getenv("NODE27_DISPLAY_WATERMARK_DATABASE_URL", ""))
+            else fetch_display_watermark(
+                os.getenv("NODE27_DISPLAY_WATERMARK_DATABASE_URL", ""),
+                connect=_attributed_connect,
+            )
         )
     except Exception as error:
         payload = _blocked_payload(

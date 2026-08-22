@@ -593,7 +593,7 @@ def _install_fake_db(
     )
     per_chunk_errors = dict(analyze_errors or {})
 
-    def connect(database_url: str) -> _FakeConnection:
+    def connect(database_url: str, **_kwargs: Any) -> _FakeConnection:
         dsns.append(database_url)
         connection = _FakeConnection(
             _FakeCursor(
@@ -849,7 +849,7 @@ def test_stats_guard_connect_failure_is_reported_without_the_dsn_password(
     and the JSON summary: libpq echoes the whole conninfo (password included)
     into its message, so the handler has to redact, not merely record."""
 
-    def explode(_database_url: str) -> object:
+    def explode(_database_url: str, **_kwargs: Any) -> object:
         raise RuntimeError("could not connect to server: password=hunter2secret host=127.0.0.1 port=55432")
 
     monkeypatch.setattr(autopipe.psycopg2, "connect", explode)
