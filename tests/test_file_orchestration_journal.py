@@ -1905,20 +1905,19 @@ def test_foreign_model_completion_row_leaves_the_duplicate_submission_gates_unch
     ] == [foreign_active["job_id"]]
 
 
-def test_foreign_model_completion_row_suppresses_the_hydro_active_arm(tmp_path: Path) -> None:
-    """Behaviour anchor for a master-side hole this change deliberately leaves open.
+def test_foreign_model_completion_row_no_longer_suppresses_the_hydro_active_arm(tmp_path: Path) -> None:
+    """#1470 freeze / #1472 unfreeze: foreign completion no longer suppresses hydro-active.
 
-    ``has_active_pipeline`` keeps its own local ``has_terminal_completion``
-    (``file_orchestration_journal.py:534-540``) over the UNnarrowed shared row
-    predicate, so another model's completion row suppresses the hydro-active arm
-    and this candidate's ACTIVE hydro run answers ``False`` — while the DB
-    counterpart (``chain_repository.py:57-95``) is a plain UNION with no
-    suppression clause and answers ``True``.  The hole predates #1302 (which only
-    narrowed ``has_completed_pipeline``); before it, the completion gate's wrong
-    ``True`` happened to mask the shape.
-
-    This assertion PINS the current behaviour, it does not endorse it.  The fix
-    is issue #1472 — flip this assertion to ``True`` there, do not delete it.
+    #1470 pinned the then-current behaviour — another model's named exact
+    cycle-run completion suppressed this candidate's ACTIVE hydro arm, because
+    ``has_active_pipeline`` kept its own local ``has_terminal_completion`` over
+    the UNnarrowed shared row predicate.  #1472 unfreezes it: the foreign row
+    stays visible to the wide duplicate-submission scans but is not this
+    candidate's completion evidence, so the ACTIVE hydro run answers ``True``
+    — matching the DB counterpart (``chain_repository.py:57-95``), a plain
+    UNION with no suppression clause.  ``has_completed_pipeline`` on the same
+    fixture stays ``False``: this is the active gate's verdict, not the
+    completion gate's.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -1940,8 +1939,166 @@ def test_foreign_model_completion_row_suppresses_the_hydro_active_arm(tmp_path: 
     )
     repository = FileOrchestrationJournalRepository(journal_root)
 
-    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
     assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+@pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
+def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
+    tmp_path: Path, hydro_status: str, stage: str
+) -> None:
+    """#1472 main discriminator matrix: foreign completion never suppresses ACTIVE hydro.
+
+    Every ACTIVE hydro status of the default terminal contract (``created``,
+    ``staged``, ``submitted``, ``running``) crossed with every completion stage
+    (``state_save_qc``, ``publish``, ``parse``): the candidate has no active
+    pipeline-job row, so the answer must come from the hydro-active arm alone —
+    the foreign row is excluded from the suppression conjunction by identity,
+    not by stage or status.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status=hydro_status, jobs=[]),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage=stage,
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hydro_status: str,
+) -> None:
+    """Same verdict under the production ``forecast_state_save_qc`` terminal contract.
+
+    Under that contract ``has_terminal_completion`` accepts only
+    ``state_save_qc`` completion rows; the foreign ``state_save_qc`` row must
+    still not suppress the ACTIVE hydro arm.
+    """
+
+    monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status=hydro_status, jobs=[]),
+    )
+    _write_direct_pipeline_job(
+        journal_root,
+        _cycle_run_id_job(
+            cycle_time,
+            model_id="model_b",
+            stage="state_save_qc",
+            status="succeeded",
+            retry_count=0,
+        ),
+        cycle_time=cycle_time,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged"])
+def test_candidate_own_completion_rows_still_suppress_stale_active_hydro(
+    tmp_path: Path, hydro_status: str
+) -> None:
+    """Negative regression: the candidate's own completion still suppresses stale hydro.
+
+    Both own-evidence arms of the suppression conjunction — the candidate's own
+    ``fcst_...`` run-id row and its own NAMED exact cycle-run row — keep their
+    suppression authority over a stale ``created``/``staged`` hydro placeholder
+    (#1472 must not delete suppression, only the foreign exclusion).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    cycle_stamp = format_cycle_time(cycle_time)
+    own_run_id_row = _own_failed_forecast_job(cycle_time)
+    own_run_id_row.update(
+        {
+            "job_id": f"job_fcst_gfs_{cycle_stamp}_model_a_state_save_qc",
+            "idempotency_key": f"gfs:{cycle_id_for('gfs', cycle_time)}:model_a:state_save_qc",
+            "stage": "state_save_qc",
+            "status": "succeeded",
+            "retry_count": 0,
+        }
+    )
+    own_named_cycle_row = _cycle_run_id_job(
+        cycle_time,
+        model_id="model_a",
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+    )
+    shapes: dict[str, dict[str, Any]] = {
+        "own_run_id_row": {"jobs": [own_run_id_row], "hydro_status": hydro_status},
+        "own_named_cycle_row": {"jobs": [own_named_cycle_row], "hydro_status": hydro_status},
+    }
+
+    for name, shape in shapes.items():
+        journal_root = tmp_path / name
+        _write_json(
+            journal_root / f"latest/gfs/{cycle_stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, hydro_status=shape["hydro_status"], jobs=shape["jobs"]),
+        )
+        repository = FileOrchestrationJournalRepository(journal_root)
+
+        assert (
+            repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
+        ), name
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged"])
+@pytest.mark.parametrize("run_id_suffix", ["", "_state_save_qc_cohort_abc123"])
+def test_model_less_cohort_completion_rows_still_suppress_stale_active_hydro(
+    tmp_path: Path, hydro_status: str, run_id_suffix: str
+) -> None:
+    """Negative regression: model-less cohort completion keeps cycle-wide suppression.
+
+    Both cohort run-id shapes — the exact cycle run id and the journal-only
+    suffix widening — still suppress a stale ACTIVE hydro placeholder for the
+    candidate (#1472 only excludes the foreign NAMED row; model-less cohort
+    completion remains cycle-wide suppression authority).
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    cohort = _cycle_run_id_job(
+        cycle_time,
+        model_id=None,
+        stage="state_save_qc",
+        status="succeeded",
+        retry_count=0,
+        run_id_suffix=run_id_suffix,
+    )
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status=hydro_status, jobs=[]),
+    )
+    if run_id_suffix:
+        _write_journal_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    else:
+        _write_direct_pipeline_job(journal_root, cohort, cycle_time=cycle_time)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
 def test_file_orchestration_journal_write_strips_redaction_placeholders(tmp_path: Path) -> None:
