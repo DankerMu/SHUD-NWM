@@ -84,7 +84,7 @@ patch `safe_fs` 原处**不会生效**）。
   **此项不可省**：没有它，「把重试范围从 open 扩到整个 parse」是一个**等价变异体**
   （判据仍是 kind，而 parse 正常只抛 `ValueError`/`OSError`，永不命中判据），
   5.3 的 M4 格将结构性不可能转红。
-- [ ] 3.9 **生产默认值下的重试可达性**（route 级，写在
+- [x] 3.9 **生产默认值下的重试可达性**（route 级，写在
   `tests/test_forecast_api_met_station_series.py`）：spy 注入一次 `identity_changed`
   后放行，**不注入 `attempts=`**，断言公开入口返回 HTTP 200 且序列正常。
   **此项不可省**：3.1–3.8 全部要么显式注入 `attempts=`、要么走不重试路径，
@@ -106,9 +106,9 @@ patch `safe_fs` 原处**不会生效**）。
 以下每一条都必须**实跑并贴出输出**，不得以论证替代测量。
 issue #1660 未给 `Verification:` 字段，本节由本 change 自行裁定。
 
-- [ ] 5.1 `uv run pytest -q tests/test_object_store_forcing.py tests/test_object_store_forcing_real_disk.py tests/test_forecast_api_met_station_series.py`
+- [x] 5.1 `uv run pytest -q tests/test_object_store_forcing.py tests/test_object_store_forcing_real_disk.py tests/test_forecast_api_met_station_series.py`
   —— 全绿；新增用例数与名称列进 PR。
-- [ ] 5.2 `uv run pytest -q $(grep -rl --include='*.py' object_store_forcing tests/)` —— 全绿。
+- [x] 5.2 `uv run pytest -q $(grep -rl --include='*.py' object_store_forcing tests/)` —— 全绿。
   **`--include='*.py'` 不可省**：node-27 的工作树留有 `tests/__pycache__/*.pyc`，
   裸 `grep -rl` 会把它们选进来，pytest 收到 `.pyc` 后**零测试静默退出**
   （node-27 实测 `no tests ran in 0.34s`）——这正是本仓禁止的零断言冒烟。
@@ -118,7 +118,7 @@ issue #1660 未给 `Verification:` 字段，本节由本 change 自行裁定。
   `test_direct_grid_display_cutover_model_resolution.py`、
   `test_forecast_api_met_station_series.py`、
   `test_node27_autopipeline_handoff.py` 里）。
-- [ ] 5.3 变异矩阵，逐个给出**实测**红/绿（凡填「预期红」而未实测的格子必须标明是推断）：
+- [x] 5.3 变异矩阵，逐个给出**实测**红/绿（凡填「预期红」而未实测的格子必须标明是推断）：
 
   | # | 变异体 | 应由哪条转红 |
   |---|---|---|
@@ -135,9 +135,9 @@ issue #1660 未给 `Verification:` 字段，本节由本 change 自行裁定。
   | M9 | 在重试循环里插入 `time.sleep` | 3.7 |
   | M10 | helper 忽略 `attempts` 入参、硬用模块常量 | 3.1 + 3.2 |
 
-- [ ] 5.4 `uv run ruff check $(git ls-files '*.py')` —— clean。
+- [x] 5.4 `uv run ruff check $(git ls-files '*.py')` —— clean。
   （**不要跑 `uv run ruff check .`**，会命中本地未跟踪的 `skills/` 工具。）
-- [ ] 5.5 `openspec validate station-forcing-csv-concurrent-replace-retry --strict --no-interactive` —— valid。
+- [x] 5.5 `openspec validate station-forcing-csv-concurrent-replace-retry --strict --no-interactive` —— valid。
 - [ ] 5.6 按 `CLAUDE.md` 的 oracle 路由，5.1/5.2 在 **node-27** 上复跑一遍并贴 receipt。
   实测 @ `c7944458`：5.1 `75 passed, 4 skipped`；5.2 `159 passed, 4 skipped`——与本地逐项一致。
   跑完已 `git checkout master` 还原生产树，`git status --porcelain` 空。
