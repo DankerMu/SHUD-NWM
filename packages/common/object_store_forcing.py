@@ -33,6 +33,17 @@ MAX_STATION_FORCING_CSV_ROWS = 10_000
 MAX_STATION_FORCING_CSV_BYTES = 8 * 1024 * 1024
 MAX_STATION_FORCING_CSV_LINE_BYTES = 64 * 1024
 STATION_FORCING_CSV_READ_CHUNK_BYTES = 64 * 1024
+# Total attempts INCLUDING the first one: 3 = the initial open plus 2 retries
+# (NOT 3 retries).  Mirrors the journal chokepoint's
+# MAX_FILE_JOURNAL_IDENTITY_RETRY_ATTEMPTS so both consumers of the same
+# no-follow primitive absorb the same race with the same bound, and — like the
+# journal — without sleeping between attempts.
+MAX_STATION_FORCING_IDENTITY_RETRY_ATTEMPTS = 3
+# Stable leading token on details.parse_reason when the bounded retry is
+# exhausted by a concurrent atomic replacement, so operators can tell that case
+# apart from a genuine content defect with a startswith() instead of parsing
+# prose.
+CONCURRENT_REPLACE_REASON_PREFIX = "concurrent-replace: "
 _SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ABSOLUTE_POSIX_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[^\s:'\"),;]+/?)+")
 _ABSOLUTE_WINDOWS_PATH = re.compile(r"\b[A-Za-z]:\\[^\s:'\"),;]+")
@@ -487,6 +498,42 @@ def _raise_missing_required_filter_if_needed(
     )
 
 
+def _open_station_csv_no_follow(
+    expected_path: Path,
+    *,
+    object_store_root: Path,
+    attempts: int = MAX_STATION_FORCING_IDENTITY_RETRY_ATTEMPTS,
+) -> int:
+    """Open the station CSV no-follow, absorbing a concurrent atomic replace.
+
+    The producer publishes each ``shud/<station>.csv`` with ``os.replace``,
+    which swaps the target inode; the no-follow primitive refuses exactly that
+    swap with ``kind="identity_changed"``.  At this layer that refusal is an
+    ordinary consequence of a production write, so it is retried a bounded
+    number of times, selected on the structured ``kind`` field — never on
+    message text — and with no sleep.  Every other refusal (symlink,
+    non-regular target, containment violation, I/O, any other kind) and every
+    non-``SafeFilesystemError`` exception propagates on the first attempt, and
+    an exhausted bound re-raises the last exception unchanged.
+
+    Only the open is retried.  Parsing stays outside this helper: once the
+    descriptor exists it is bound to the pre-replacement inode, whose bytes are
+    a complete snapshot, so any parse failure is a genuine content defect.
+    """
+
+    last_attempt = max(attempts, 1)
+    attempt = 1
+    while True:
+        try:
+            return open_file_no_follow(expected_path, containment_root=object_store_root)
+        except SafeFilesystemError as error:
+            if error.kind != "identity_changed":
+                raise
+            if attempt >= last_attempt:
+                raise
+            attempt += 1
+
+
 def _read_csv_lines(
     expected_path: Path,
     *,
@@ -498,9 +545,14 @@ def _read_csv_lines(
     cycle_time: datetime,
     model_id: str,
     active_flag: bool | None = None,
+    attempts: int = MAX_STATION_FORCING_IDENTITY_RETRY_ATTEMPTS,
 ) -> list[str]:
     try:
-        file_fd = open_file_no_follow(expected_path, containment_root=object_store_root)
+        file_fd = _open_station_csv_no_follow(
+            expected_path,
+            object_store_root=object_store_root,
+            attempts=attempts,
+        )
         try:
             file_size = os.fstat(file_fd).st_size
             if file_size > MAX_STATION_FORCING_CSV_BYTES:
@@ -552,7 +604,7 @@ def _read_csv_lines(
         raise StationForcingFileMalformedError(
             station_id=station_id,
             expected_path=expected_storage_key,
-            parse_reason=_public_error_reason(error),
+            parse_reason=_station_csv_failure_reason(error),
         ) from error
 
 
@@ -693,6 +745,22 @@ def _public_error_reason(error: BaseException) -> str:
     reason = str(error) or error.__class__.__name__
     reason = _ABSOLUTE_POSIX_PATH.sub("<path>", reason)
     reason = _ABSOLUTE_WINDOWS_PATH.sub("<path>", reason)
+    return reason
+
+
+def _station_csv_failure_reason(error: BaseException) -> str:
+    """Public parse_reason for a station CSV read failure.
+
+    A mid-open identity refusal that survived the bounded retry gets a stable
+    leading token so operators can separate a concurrent atomic replacement
+    from a content defect.  The token is derived from the structured ``kind``,
+    never from the refusal's message text.  Every other failure keeps exactly
+    the operator-useful text it carried before this change.
+    """
+
+    reason = _public_error_reason(error)
+    if isinstance(error, SafeFilesystemError) and error.kind == "identity_changed":
+        return f"{CONCURRENT_REPLACE_REASON_PREFIX}{reason}"
     return reason
 
 
