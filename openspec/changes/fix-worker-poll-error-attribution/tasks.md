@@ -35,3 +35,9 @@ Selected packs: Concurrency/shared state/ordering; Resource limits/time bounds; 
 - [x] 4.1 Do not reclassify these production-state polls under #1633's dedicated completion-sentinel contract or mechanically apply the stale issue-body `errors` prescription to production `_LeaseHeartbeat`.
 - [x] 4.2 Do not adopt repository-wide warning-as-error, pytest-timeout, or arbitrary-thread cancellation policy; #1646 remains the owner.
 - [x] 4.3 Audit sibling test-owned production-state polls for the same cause-first invariant and report matching out-of-scope hazards; no matching out-of-scope hazard was found, and implementation stayed within the two issue-owned tests.
+
+## 5. Round 1 verified-finding closure
+
+- [x] 5.1 Remove the post-takeover regression's worker-side lock-file parse so it cannot observe the parent `write_text` truncate window or turn torn JSON into the wrong exception/`False` outcome.
+- [x] 5.2 Make the injection deterministic: exactly one real renewal returns `True`, every later worker call bounded-waits an event set only after the stolen-token write returns, and the unique injected cause follows that event.
+- [x] 5.3 Prove the fixed node in 200 isolated pytest processes, re-run the seven-node warning-strict matrix and full scheduler suite, and keep Ruff, strict OpenSpec and diff checks green.

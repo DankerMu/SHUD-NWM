@@ -45011,29 +45011,64 @@ def test_lease_heartbeat_shipping_test_rejects_post_takeover_renew_exception_as_
     """A renew() raise after the stolen token must not false-green as the takeover oracle (#1648).
 
     The real first renewal succeeds and the shipping test replaces the token;
-    the observed seam then raises instead of returning False. Production maps
-    the raise to ``lost=True``, but the repaired shipping test rejects the
+    the observed seam then raises instead of returning False, so production
+    maps the raise to ``lost=True`` but the repaired shipping test rejects the
     exception rather than accepting it as the expected takeover result (which
     pre-fix let this row pass green).
+
+    The daemon must never parse the lock file concurrently with the parent's
+    truncate-then-write: the real renew would swallow a torn read into a False,
+    and ``_LeaseHeartbeat._run`` exits permanently on any False. So the
+    injection is gated by a deterministic rendezvous -- exactly one real
+    renewal first, then the next call waits (without touching the file) on an
+    event set only after the stolen-token ``write_text`` returns.
     """
+    import threading
+
+    lock_path = tmp_path / "scheduler.lock"
     real_renew = FileSchedulerLease.renew
+    real_write_text = Path.write_text
+    first_real_renewed = threading.Event()
+    stolen_token_written = threading.Event()
     calls: list[str] = []
+    first_renew_return: list[bool] = []
+
+    def observe_write_text(self: Path, data: str, **kwargs: Any) -> Any:
+        result = real_write_text(self, data, **kwargs)
+        if self == lock_path and '"lease_token": "stolen"' in data:
+            stolen_token_written.set()
+        return result
 
     def fail_after_takeover(self: Any, *, pass_id: str) -> bool:
-        payload = _read_lock(self.lock_path)
-        if payload["lease_token"] == "stolen":
-            calls.append("raised")
-            raise InjectedHeartbeatRenewFailure("injected post-takeover renew failure")
-        calls.append("real")
-        return real_renew(self, pass_id=pass_id)
+        if not first_real_renewed.is_set():
+            calls.append("real")
+            renewed = real_renew(self, pass_id=pass_id)
+            first_renew_return.append(renewed)
+            if renewed:
+                first_real_renewed.set()
+            return renewed
+        # The first real renewal already ran; wait out the parent's stolen-token
+        # write instead of calling real_renew, which would re-read the file.
+        if not stolen_token_written.wait(timeout=2.5):
+            raise AssertionError(
+                "post-takeover injected renew timed out waiting for the stolen-token write"
+            )
+        calls.append("raised")
+        raise InjectedHeartbeatRenewFailure("injected post-takeover renew failure")
 
+    monkeypatch.setattr(Path, "write_text", observe_write_text)
     monkeypatch.setattr(FileSchedulerLease, "renew", fail_after_takeover)
     with pytest.raises(
         InjectedHeartbeatRenewFailure,
         match="injected post-takeover renew failure",
     ):
         test_lease_heartbeat_advances_then_detects_takeover(tmp_path)
-    assert calls and calls[-1] == "raised", "injection must execute after the stolen token"
+    assert stolen_token_written.is_set(), "the stolen-token write must have executed"
+    assert first_real_renewed.is_set(), "the first real renewal must have succeeded"
+    assert first_renew_return == [True], "the single real renewal must return True"
+    assert calls == ["real", "raised"], (
+        "exactly one real renewal, then the injected raise after the write-complete event"
+    )
 
 
 def test_lease_heartbeat_production_run_maps_renew_exception_to_lost_without_escape(
