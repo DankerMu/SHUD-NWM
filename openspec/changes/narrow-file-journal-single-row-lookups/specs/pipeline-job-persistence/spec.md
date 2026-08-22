@@ -6,9 +6,9 @@
 
 A single-row journal lookup SHALL read only the cycle that owns the row.
 Concretely: the file journal's single-row lookup entrypoints whose argument
-carries a derivable `(source_id, cycle)` — lookup by cycle id, by run id, and
-by idempotency key — SHALL resolve that pair from the argument and read only
-that cycle's record sources: that cycle's `latest/<source>/<cycle>` views, that
+carries a derivable `(source_id, cycle)` — lookup by cycle id, by run id, by
+idempotency key, and by job id — SHALL resolve that pair from the argument and
+read only that cycle's record sources: that cycle's `latest/<source>/<cycle>` views, that
 cycle's `journal/<source>/<cycle>` segments, and the direct records. They SHALL
 NOT read any other cycle's files.
 
@@ -38,7 +38,16 @@ whole-tree scan, with its semantics unchanged.
 The by-cycle direct partition SHALL NOT be used as the sole record source for
 any of these lookups, because it holds only the subset of rows that are current
 accepted-submit candidate rows; every other row, including cohort master rows
-and rows from non-forecast stages, is written outside it.
+and rows from non-forecast stages, is written outside it, in an unpartitioned
+flat directory.
+
+That flat direct directory SHALL be filtered by file name rather than read in
+full, because it retains a row per job for all retained history and reading it
+whole would leave the lookup's cost growing without bound. A file SHALL be
+skipped only when its name resolves to a `(source_id, cycle)` other than the
+one being looked up. A file whose name does not resolve to a `(source_id,
+cycle)` at all SHALL be read, so that the filename filter fails toward reading
+too much rather than toward missing a row.
 
 #### Scenario: A lookup by cycle id reads only that cycle's files
 
@@ -55,6 +64,24 @@ and rows from non-forecast stages, is written outside it.
   a non-forecast stage, which is not written into the by-cycle direct partition
 - **THEN** the narrowed lookup still returns it, because it reads that cycle's
   view and journal record sources and not the direct partition alone.
+
+#### Scenario: A lookup by job id reads only that cycle's files
+
+- **WHEN** a lookup is issued by a job id whose shape encodes a source and a
+  cycle, and the direct record for it is absent so the lookup must fall through
+  to a record replay
+- **THEN** the replay reads only that cycle's record sources
+- **THEN** it returns the same row the whole-tree replay would have returned
+- **THEN** whether direct records participate in that replay is governed by the
+  same flag, with the same meaning, as before this change.
+
+#### Scenario: An unrecognised flat direct file name is read, not skipped
+
+- **WHEN** the flat direct directory holds a file whose name does not resolve to
+  any `(source_id, cycle)`
+- **THEN** the lookup reads that file rather than skipping it
+- **THEN** a file whose name resolves to a different `(source_id, cycle)` than
+  the one being looked up is skipped.
 
 #### Scenario: A source spelled in the other case still resolves
 

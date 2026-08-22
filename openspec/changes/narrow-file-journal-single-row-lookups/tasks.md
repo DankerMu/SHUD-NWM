@@ -25,8 +25,17 @@
         the key is still returned by the entrypoints that must return it (or,
         where it must not be, the exclusion is asserted explicitly).
 - [ ] **`include_direct=False` parity**: the `_pipeline_job_for_id_unlocked`
-      fallback keeps excluding direct records in the narrowed path, with a test
-      that would show duplication if the flag were dropped.
+      fallback keeps excluding direct records **in its narrowed path** (not only
+      in the shared iterator), with a test that would show duplication if the
+      flag were dropped.
+- [ ] **Flat-surface containment**: a narrowed lookup opens no flat
+      `pipeline-jobs/*.json` file belonging to another cycle, and DOES open one
+      whose name is unparseable.
+- [ ] **Re-pointed whole-tree probes**: each existing discovery-hardening test
+      that used a now-narrowed entrypoint as a whole-tree vehicle still asserts
+      its property, through a path that still full-scans — preferably an
+      underivable key through the same public entrypoint (fall-open reaches the
+      full scan). Per-class justification recorded in the PR's 偏离记录.
 - [ ] **Concurrency**: any new per-cycle cache is exercised by the existing
       shared-instance concurrency test shape (spec
       `pipeline-job-persistence` "Journal read caches are safe under concurrent
@@ -67,8 +76,13 @@ three-part, all three required:
       alone — see design.md "Forbidden implementation").
 - [ ] Key -> (source, cycle) derivation reusing the existing run-id/path helpers
       and `normalize_source_id`; no fresh parser.
-- [ ] Wire the derivable entrypoints; leave `query_pipeline_job_by_slurm_id`
-      on the full scan.
+- [ ] Wire the derivable entrypoints, **including `_pipeline_job_for_id_unlocked`
+      per D1a** (derive via `_CANDIDATE_JOB_ID_RE` / the `job_cycle_` shape,
+      fall open otherwise, `include_direct=False` preserved). Leave
+      `query_pipeline_job_by_slurm_id` on the full scan.
+- [ ] Filter the flat `pipeline-jobs/` direct surface by filename per D2a:
+      skip only names parsing to a different `(source, cycle)`; read unparseable
+      names.
 - [ ] Fall-open fallback on any derivation failure.
 
 ## 3. Spec + docs

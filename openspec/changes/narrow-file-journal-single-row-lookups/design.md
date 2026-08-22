@@ -15,7 +15,7 @@ to an entrypoint**, so the attribution below is static call-graph evidence.
 | `query_pipeline_jobs_by_run` (def `:1162`, replay `:1166`) | ~11 combined | yes — `run_id` regexes | **narrow** |
 | `query_candidate_state` (def `:1051`, replay `:1053`) | ~4 | yes — key is `run_id:stage` | **narrow** |
 | `_candidate_job_for_idempotency_unlocked` (def `:1060`, replay `:1061`) | same order | yes — same key | **narrow** |
-| `_pipeline_job_for_id_unlocked` (def `:1075`, replay `:1099`) | most call sites | **no** — `job_id` carries no cycle | **leave** |
+| `_pipeline_job_for_id_unlocked` (def `:1075`, replay `:1099`) | most call sites | **yes** — see D1a | **narrow** |
 | `query_pipeline_job_by_slurm_id` (def `:1174`, replay `:1176`) | **zero production callers** | no | **leave** |
 
 Evidence for the two hot ones:
@@ -46,23 +46,45 @@ either way — but they are NOT strong enough to satisfy tasks.md Task 1, which
 gates implementation on real attribution. Task 1 is not discharged by this
 section.
 
-Evidence for the two left alone:
+### D1a. Correction: `job_id` IS cycle-derivable (this reverses an earlier ruling)
 
-- `_pipeline_job_for_id_unlocked` (`:1075-1102`, replay at `:1099`) already tries
-  `_direct_pipeline_job_record()` first and only replays when that misses. The
-  flat `pipeline-jobs/<job_id>.json` file is written for every row that is not
-  an accepted-submit candidate (`:6429` else branch), so the fast path covers
-  the common case. Its argument also carries no cycle: narrowing it would
-  require a new persisted index.
+An earlier draft of this table ruled `_pipeline_job_for_id_unlocked` "leave", on
+the stated ground that `job_id` carries no cycle. **That was wrong**, and the
+proof is in this same file: `_CANDIDATE_JOB_ID_RE` (`:195`) is
+
+```python
+_CANDIDATE_JOB_ID_RE = re.compile(r"^job_fcst_([^_]+)_(\d{10})_.+$")
+```
+
+— group 1 is the source, group 2 the cycle — and `_direct_pipeline_job_record`
+(`:4794-4810`) already uses it to route a by-cycle partition read. Cohort rows
+use the sibling `job_cycle_{source}_{cycle}_{stage}...` shape. So both live job
+id shapes carry `(source, cycle)`.
+
+The correction was forced by measurement, not by re-reading. Task 1(b)'s
+instrumented run put only **83.4%** of replays on the narrowed path (654/784),
+with **130 of the 142 surviving full-tree replays (91.5%)** coming from this
+entrypoint's direct-miss fallback. That is below the >=90% criterion, so
+tasks.md Task 1(c)'s pre-declared fallback ruling fires: the "leave" decision is
+void and is revisited **inside this change**. It is hereby reversed.
+
+`_pipeline_job_for_id_unlocked` therefore derives `(source, cycle)` from the job
+id, narrows its fallback replay, and falls open per D4 on any id shape that does
+not parse. Its `include_direct=False` semantics are unchanged (D6), and the
+narrowed variant must be covered by the parity test, not only the shared
+iterator.
+
+Evidence for the one left alone:
+
 - `query_pipeline_job_by_slurm_id` has **no production call sites at all** —
   only its own definition (`:1176`), the abstract declarations
   (`chain.py:469`, `chain_repository.py:826`), and `chain_compat_static.py`
   export lists. Leaving it on the full scan costs production nothing.
 
-**Consequence for the >=90% `rchar` criterion**: the two dominant entrypoints
-are both narrowed, so the criterion is reachable. Had the dominant caller been
-`query_pipeline_job_by_slurm_id`, this ruling would have been void — that is
-why Task 1 gates implementation on the attribution rather than assuming it.
+**Consequence for the >=90% `rchar` criterion**: after the D1a correction all
+five entrypoints with production callers are narrowed, and the only remaining
+full-scan surface is `query_pipeline_job_by_slurm_id`, which production never
+calls. Task 1(b)'s 83.4% is what forced D1a — the gate did its job.
 
 ## D2. Forbidden implementation: routing to the direct partition alone
 
@@ -90,6 +112,52 @@ that cycle's `journal/<source>/<cycle>*.jsonl` segments, and the direct records,
 applied via the same `_apply_journal_record` last-write-wins ordering, producing
 rows in the same `_db_compatible_pipeline_job_order_key` order, and raising the
 same blocked-row error shape. Only the set of files opened changes.
+
+## D2a. The flat `pipeline-jobs/` surface is filtered by filename, with fall-open
+
+The cycle-scoped iterator must also read direct records. Those live in two
+places, and only one is partitioned:
+
+- `pipeline-jobs/by-cycle/<source>/<cycle>/` — accepted-submit candidate rows,
+  already cycle-partitioned, trivially scoped.
+- `pipeline-jobs/<job_id>.json` — **flat**, holding every cohort master row and
+  every non-forecast-stage row, for **all retained history**.
+
+Reading the flat directory unrestricted would leave the growth law half
+repaired. Measured on node-22 (2026-08-22):
+
+```
+pipeline-jobs/*.json          4,303 files   12,889,597 B = 12.29 MiB
+pipeline-jobs/by-cycle/**     7,225 files
+pipeline-jobs/ total                          40 MiB
+```
+
+12.29 MiB per lookup would **dominate** the 1.79 MiB cycle slice (D8) and grows
+with `cycles x models x stages`, unbounded — and 4,303 files on its own already
+exceeds the 4,096-entry cache cap. That is the very law this change exists to
+repair.
+
+**Ruling: filter the flat directory by filename, and fall open on any name that
+does not parse.** Skip a file only when its name parses as a *different*
+`(source, cycle)`; read it whenever the name does not parse. This keeps the D4
+fall-open shape at the filename level: an unrecognised name is read, never
+skipped.
+
+This is effective, and measured rather than assumed. Both live shapes carry the
+pair — `job_fcst_{source}_{cycle}_...` and `job_cycle_{source}_{cycle}_{stage}...`
+— so on node-22:
+
+```
+total 4,303   parseable 4,301 (100.0%)   unparseable 2
+distinct (source, cycle) keys                        230
+worst single cycle                             233 files
+unparseable bytes                             2,941 B
+```
+
+The two unparseable names (`cycle_gfs_..._retry_active`, `cycle_gfs_..._retry_2`
+— missing the `job_` prefix) are read under fall-open, costing 2.9 KB. So the
+flat surface goes from 4,303 files to at most 233 + 2, and stops growing with
+retained history.
 
 ## D3. Key -> (source, cycle) derivation
 

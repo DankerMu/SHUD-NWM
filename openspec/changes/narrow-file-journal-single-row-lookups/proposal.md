@@ -56,9 +56,15 @@ models), and the scheduler interval is 300 s.
   that misses a row is the silent direction (a missed dedup hit double-submits;
   a missed reconcile row mints a wrong retry), so uncertainty resolves to
   slow-but-correct, never to "not found".
+- The **flat `pipeline-jobs/` direct surface is filtered by filename** rather
+  than read whole: a file is skipped only when its name parses as a different
+  `(source, cycle)`, and read whenever the name does not parse. Without this the
+  growth law is only half repaired — that directory is 4,303 files / 12.29 MiB
+  on node-22 today and would dominate the 1.79 MiB cycle slice.
 - `query_pipeline_job_by_slurm_id` **keeps the full scan** — its argument
-  carries no derivable cycle, and minting a persisted by-slurm index is new
-  durable state plus a backfill, out of proportion to this change.
+  carries no derivable cycle, minting a persisted by-slurm index is new durable
+  state plus a backfill, and it has **no production callers at all**, so the
+  full scan costs production nothing.
 - A recorded **retention ruling** for `latest/` / `journal/` (the working-set
   upper bound the issue's acceptance criteria require), with implementation
   routed to a follow-up issue rather than executed here.
