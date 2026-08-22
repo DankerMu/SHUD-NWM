@@ -1059,3 +1059,50 @@ Caveat carried forward unchanged: the attribution schema still cannot separate
 observation. The keep ruling continues to rest on the cumulative ratio plus the
 absence of a recorded cut rationale; any future reversal still requires the
 attribution-schema and round-role fixes plus maintainer review.
+
+## Revisit 2026-08-22 — PR #1759 (#1734)
+
+Audit at 446 lines / 442 merged: 111 multi-round merged PRs, later-round catches
+`core=68 rotated=264`. **Keep** — unchanged in direction.
+
+This revisit is the first to weaken, rather than strengthen, confidence in the
+number the keep ruling rests on.
+
+**An attribution schema gap was found while filing this line.**
+`loop_log_audit.rotation_attribution` reads `catch["round"]` and `catch["lens"]`.
+The `catches` objects in this log are, in practice, written with `phase` only —
+so `catch.get("round", 1)` defaults to 1 and every such catch is **skipped by the
+counter entirely**. This line was rewritten to carry explicit `round`/`lens` keys
+(which is why `core` moved 66 → 68); most earlier lines do not.
+
+The immediate consequence is that the cumulative `core=68 rotated=264` ratio is
+computed from an **unknown subset** of the log, not from all of it. Worse, it
+falsifies a claim made in this very ADR: the **2026-08-22 revisit for PR #1751**
+narrates a rotated later-round lens that caught a P2 and records it as "the
+cleanest instance so far of the mechanism the ADR claims" — but that entry uses
+`phase` keys, so the counter never counted it. The narrative and the number have
+been drifting apart, in the direction of the ADR's own prior.
+
+**Attribution for this PR is `core=2, rotated=0`**, and the reason matters more
+than the count. Both later-round catches came from lenses already present in the
+round-1 mix — `test-oracle-integrity` in round 2, `spec-conformance` in round 3.
+They were invisible to round 1 not because a lens rotated in, but because **the
+defects did not exist yet**: the round-2 coverage gap and the round-3 false spec
+clause were each introduced by the preceding fix pass.
+
+That is evidence for **later rounds** earning their keep. It is not evidence for
+**lens rotation** earning its keep. The two have been conflated throughout this
+ADR by an attribution schema that cannot separate "a rotated lens found it" from
+"a lens ran after the defect was created" — a caveat every prior revisit has
+carried forward verbatim, and which this PR now shows is not merely theoretical:
+under a correct-key reading, the strongest instance recorded so far attributes to
+core, not rotated.
+
+**Ruling: keep, but the basis is narrower than previously recorded.** Keep still
+follows from the absence of a recorded cut rationale, not from the ratio — the
+ratio should not be cited as independent support until the key-mismatch is fixed
+and the log is re-attributed. Reported, not fixed: `loop_log_audit.py` lives in
+the shared `subagent-workflow` skill, and repairing it plus back-filling
+attribution across ~440 lines is its own change, tracked separately. Any future
+reversal continues to require the attribution-schema and round-role fixes plus
+maintainer review.
