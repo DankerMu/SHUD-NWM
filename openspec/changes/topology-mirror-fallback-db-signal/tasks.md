@@ -45,8 +45,8 @@
       whole lexeme — `roll back`, `rolled back`, `rolling back`, `rolls back`,
       hyphenated and spaced — plus `回退` alongside `回滚`. design.md D3/D10.
 - [x] T11 (round 2 fix) Extend the fallback's own vocabulary with the standard
-      database-role nouns: `replica`, `secondary`, `从库`, `备库`, `主库`,
-      `生产库`. Still at the call site; `_topology_mentions_database` stays
+      database-role nouns: `replica`, `secondary`, `从库`, `备库`, `生产库`
+      (`主库` was proposed and removed in round 3 as dead — D10). Still at the call site; `_topology_mentions_database` stays
       untouched. design.md D9/D10.
 - [x] T12 (round 2 fix) Extend the must-still-flag test with the six round-2
       lines quoted in design.md D1.
@@ -101,8 +101,12 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
   (`4 failed, 13 passed`) while every must-still-flag case stays green;
   restoring the implementation returns `13 passed`.
 - E4 `uv run ruff check .` -> `All checks passed!`
-- E5 `git diff --stat` -> only `scripts/governance/audit_repo_entropy.py` (+26/-1)
-  and `tests/test_entropy_audit_script.py` (+89).
+- E5 `git diff --stat` at the round-0 SHA `2d842981` -> only
+  `scripts/governance/audit_repo_entropy.py` (+26/-1) and
+  `tests/test_entropy_audit_script.py` (+89). **Cumulative final total** across
+  all three rounds, measured on the merge base: `audit_repo_entropy.py` +52/-1
+  and `test_entropy_audit_script.py` +117/-0. The per-round numbers in §4 and §5
+  are deltas, not totals; this line is the total.
 - E6 `openspec validate topology-mirror-fallback-db-signal --strict --no-interactive` -> valid.
 - E7 `uv run pytest -q` -> `13 failed, 13499 passed, 201 skipped in 2812.39s`.
   Nothing attributable to this change: 12 are `tests/test_state_clone_recalibration_cli.py`
@@ -113,8 +117,11 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
 
 ## 4. Round-1 fix receipts (D9)
 
-- T8 landed at `scripts/governance/audit_repo_entropy.py:1943-1949`, fallback call
-  site only. `_topology_mentions_database`, `_topology_line_mentions_mirror`,
+- T8 landed in the fallback call site of
+  `_topology_line_has_node22_local_postgres_or_mirror_drift` in
+  `scripts/governance/audit_repo_entropy.py` (the `return any(token in stripped ...)`
+  block; two later fix rounds shifted its absolute position twice, so it is cited
+  by symbol here rather than by line). `_topology_mentions_database`, `_topology_line_mentions_mirror`,
   `_topology_local_postgres_context_is_allowed` and the three positive branches
   are byte-unchanged.
 - E8 whole-repo hard-gate audit, pre-fix vs post-fix: `total 753 / topology 0`
@@ -136,7 +143,8 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
   helper has exactly one caller (the fallback leg at `:1941`), verified, so the
   widening does not leak into any other check.
 - T11 fallback token tuple (`:1946-1965`) gains `replica`, `secondary`, `从库`,
-  `备库`, `主库`, `生产库`. `_topology_mentions_database`,
+  `备库`, `生产库` (`主库` proposed here and removed in round 3 as dead, see §6).
+  `_topology_mentions_database`,
   `_topology_line_mentions_mirror`, `_topology_local_postgres_context_is_allowed`
   and the three positive branches are byte-unchanged.
 - E10a whole-repo hard gate: `total 753 / topology 0`, identical to the pre-fix
@@ -160,3 +168,33 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
   helper's single-caller property was verified first and both stubs only
   *narrow* the predicate, so no new finding is reachable; the full-file 373 pass
   is recorded separately at the final state.
+
+## 6. Round-3 fix receipts
+
+Round 3 returned no P0/P1. Two P2s were fixed as ride-alongs rather than
+deferred, because one of them made a decision record false; four P3s were
+citation staleness in this fixture and were corrected by the orchestrator.
+
+- F1 `主库` removed from the fallback token tuple. It is already in
+  `_topology_mentions_database`'s list, and the tuple is only reached after that
+  helper returns False, so the entry could never decide anything. Nine tokens
+  remain. Behavior pinned by a new must-still-flag case at the behavior level.
+- F2 `_topology_line_mentions_rollback` gains a **left** word boundary:
+  `\broll(?:ed|ing|s)?[\s-]?back|回滚|回退`. `scrollback`, `payrollbacklog`,
+  `controllback` no longer match; `rollbacks` still does, which is why there is
+  no right boundary. Pinned by a new must-not-flag case.
+- G1 whole-repo hard gate pre and post: `total 753 / topology 0` both times.
+- G2 the four real findings, read verbatim from disk: all four still `False`.
+- G3 revert receipts. (i) Putting `主库` back leaves the new 主库 test **green** —
+  which is the proof that the token was dead, since the database leg returns
+  before the tuple is reached. (ii) Dropping the `\b` turns exactly the new
+  scrollback case red (`1 failed, 374 passed`) and nothing else.
+- G4 `uv run pytest -q tests/test_entropy_audit_script.py` -> `375 passed in 284.86s`
+  (373 -> 375).
+- G5 `uv run ruff check .` -> `All checks passed!`
+- G6 `git diff --stat` -> the same two non-`openspec/` files.
+- Recorded deviation: the implementer added decision comments not asked for in
+  the brief, matching the `#1707 D3/D9/D10` commentary style already in the file.
+  Behavior unaffected, ruff clean, and the 主库 test is otherwise inexplicable to
+  a future reader since it pins behavior no longer routed through the token it
+  names.

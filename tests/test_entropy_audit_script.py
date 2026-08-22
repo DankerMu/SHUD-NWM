@@ -5037,12 +5037,17 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         "    node-22-local scratch mirror -- in one invocation.",
         # scripts/node22_clone_direct_grid_cutover_states.py:28
         "NFS canonical index and the node-22-local ``/scratch`` mirror, and it is",
+        # The rollback leg recognises a lexeme, not a bare substring: scrollback is a
+        # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
+        # over-match here cannot be suppressed by a same-line no-database disclaimer.
+        "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
     ],
     ids=[
         "runbook-state-index-mirror",
         "spec-mirrored-verbatim",
         "clone-script-scratch-mirror",
         "clone-script-canonical-index",
+        "ci-scrollback-buffer-not-rollback",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_lines(line: str) -> None:
@@ -5070,6 +5075,10 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "node-22 hosts a read replica that mirrors production writes from node-27",
         "node-22 的从库通过 mirror 对外提供读服务",
         "node-22 的备库通过 mirror 同步给 node-27",
+        # 主库 is already a _topology_mentions_database token, so the database leg catches
+        # this before the fallback tuple is reached. Pinned anyway: the behaviour must hold
+        # whichever leg fires, so a future narrowing of that helper cannot silently drop it.
+        "node-22 的主库通过 mirror 同步给 node-27",
     ],
     ids=[
         "archived-port",
@@ -5090,6 +5099,7 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "read-replica-mirrors-production-writes",
         "chinese-congku-mirror-serves-reads",
         "chinese-beiku-mirror-syncs-to-node27",
+        "chinese-zhuku-mirror-syncs-to-node27",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(

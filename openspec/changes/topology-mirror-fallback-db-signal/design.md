@@ -90,7 +90,7 @@ because after D9 these lines become live triggers:
 
 ```text
 # check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
-# "node-22 本地库通过 mirror 实时同步给 node-27,生产查询直接读取该镜像"
+# "node-22 本地库通过 mirror 实时同步给 node-27，生产查询直接读取该镜像"
 ```
 
 ```text
@@ -197,7 +197,7 @@ moves them (D6), and a document *about* this check unavoidably quotes the
 wording the check looks for.
 
 The repository already has the mechanism for this: the meta-context allowlist
-`_topology_context_is_guardrail_or_test_meta` (`:2471`) recognises, among other
+`_topology_context_is_guardrail_or_test_meta` (`:2522` at this change's final HEAD) recognises, among other
 tokens, the literal check id. Its window is the surrounding non-blank block
 (6 lines before, 10 after, stopping at blank lines — `:1673`, `:1681`). So the
 rule this fixture follows is: **any block that quotes drift wording also names
@@ -313,6 +313,21 @@ The boundary this change ships with:
 
 - **In scope, and pinned by tests**: rollback wording in any inflection of the
   lexeme, plus the database-role nouns enumerated in D9 as amended.
+- **Amended in round 3**: `主库` was proposed for the fallback tuple and then
+  removed, because it is already a member of `_topology_mentions_database`'s own
+  token list. The tuple is only reached after that helper has returned False, so
+  the entry could never be the deciding token — dead code wearing the costume of
+  a widening, and it made the "every token here was measured free" claim above
+  literally untrue for one entry. The behavior is still pinned by a
+  must-still-flag test, deliberately at the behavior level rather than the leg
+  level, so that removing the token from the shared helper later cannot silently
+  drop it. Nine tokens remain. Six of them — `本地库`, `standby`, `instance`,
+  `replica`, `从库`, `备库` — are the deciding leg for a pinned must-still-flag
+  line. The other three, `本机库`, `secondary` and `生产库`, are not separately
+  pinned: they are near-synonyms carried on the same evidence as their pinned
+  counterparts, and like every token here they were measured to add zero findings
+  repo-wide. Stated plainly so the claim above is not read as stronger than it
+  is.
 - **Out of scope, known limit**: any other synonym for the same relationship.
   No token set here has demonstrable completeness, and the widenings that landed
   are justified specifically because they were *free* — each was measured to add
@@ -320,6 +335,14 @@ The boundary this change ships with:
 - A future candidate arguing for tokens that **do** change the repo-wide finding
   count is a different proposition and must be adjudicated on its own evidence,
   not folded in as more vocabulary.
+
+Round 3 also closed an **over-match** on the rollback lexeme, which is a
+different axis from the synonym question this decision bounds: the pattern had
+no left word boundary, so `scrollback` — a realistic CI/terminal term — matched
+inside a longer token. That matters because the rollback leg deliberately
+bypasses DB-absence stripping (D3), so a "this host has no database" disclaimer
+on the same line cannot suppress it. Fixed with a left boundary only; `rollbacks`
+must keep matching, so no right boundary. Pinned by a must-not-flag test.
 
 Recorded rather than fixed, from the same round: `_topology_strip_db_absence_claims`
 matches the `no database handle` shape but not `no database at all`, so a line

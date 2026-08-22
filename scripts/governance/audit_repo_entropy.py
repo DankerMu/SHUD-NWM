@@ -1959,7 +1959,6 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
             "secondary",
             "从库",
             "备库",
-            "主库",
             "生产库",
         )
     )
@@ -2005,9 +2004,11 @@ def _topology_line_mentions_mirror(text: str) -> bool:
 def _topology_line_mentions_rollback(text: str) -> bool:
     # #1707 D3/D10: the fixture commits to rollback wording as a concept, so recognise the
     # whole lexeme - rollback / roll back / roll-back / rolled back / rolling back / rolls
-    # back - plus both Chinese surface forms 回滚 and 回退.
+    # back - plus both Chinese surface forms 回滚 and 回退. The left \b keeps it a lexeme
+    # rather than a substring: scrollback (a CI/terminal log buffer) is not a rollback.
+    # There is deliberately no right boundary, so rollbacks still matches.
     lowered = _topology_normalized(text)
-    return bool(re.search(r"roll(?:ed|ing|s)?[\s-]?back|回滚|回退", lowered))
+    return bool(re.search(r"\broll(?:ed|ing|s)?[\s-]?back|回滚|回退", lowered))
 
 
 def _topology_strip_db_absence_claims(text: str) -> str:
