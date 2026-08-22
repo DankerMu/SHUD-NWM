@@ -9,8 +9,16 @@ Concretely: the file journal's single-row lookup entrypoints whose argument
 carries a derivable `(source_id, cycle)` — lookup by cycle id, by run id, by
 idempotency key, and by job id — SHALL resolve that pair from the argument and
 read only that cycle's record sources: that cycle's `latest/<source>/<cycle>` views, that
-cycle's `journal/<source>/<cycle>` segments, and the direct records. They SHALL
-NOT read any other cycle's files.
+cycle's `journal/<source>/<cycle>` segments, and the direct records. That
+narrowed replay SHALL NOT read any other cycle's files.
+
+This requirement is scoped to that narrowed replay deliberately, and SHALL NOT
+be read as a promise about every read reachable from these entrypoints. Where
+an entrypoint satisfies a lookup from a pre-existing cycle-scoped direct reader
+that establishes identity from record **content** rather than from a file name,
+that reader is outside this requirement's scope and SHALL retain its existing
+content-authoritative behaviour. Its own read cost is governed elsewhere, not
+by this requirement.
 
 The narrowed read SHALL be a restriction of the input set only. Its result
 SHALL be identical to the result of the whole-tree scan filtered by the same
@@ -41,13 +49,31 @@ accepted-submit candidate rows; every other row, including cohort master rows
 and rows from non-forecast stages, is written outside it, in an unpartitioned
 flat directory.
 
-That flat direct directory SHALL be filtered by file name rather than read in
-full, because it retains a row per job for all retained history and reading it
-whole would leave the lookup's cost growing without bound. A file SHALL be
+When the narrowed replay reads that flat direct directory, it SHALL filter by
+file name rather than read the directory in full, because it retains a row per
+job for all retained history and reading it whole would leave the lookup's cost
+growing without bound. This obligation binds the narrowed replay only; it is
+NOT a general instruction to prefilter that directory by file name, and in
+particular it SHALL NOT be applied to a reader whose identity check is
+content-authoritative, where a filename prefilter would change behaviour for a
+name that contradicts its own content. A file SHALL be
 skipped only when its name resolves to a `(source_id, cycle)` other than the
 one being looked up. A file whose name does not resolve to a `(source_id,
 cycle)` at all SHALL be read, so that the filename filter fails toward reading
 too much rather than toward missing a row.
+
+The filename rule above and the whole-tree parity guarantee stated earlier are
+in tension for exactly one input: a flat direct file whose name resolves to a
+`(source_id, cycle)` that contradicts the row's own content. The filename rule
+governs that case — such a file SHALL be skipped — and the parity guarantee is
+correspondingly read as holding for rows whose file name agrees with their
+content. This residual is declared rather than closed: no write path produces a
+contradicting row, because every job identifier is derived from a run identifier
+that is itself pinned to the row's own source and cycle, and the source token is
+drawn from a closed allowlist containing no separator character. Nothing at the
+write boundary *enforces* that agreement, so a file introduced onto disk by any
+means other than these writers is outside the parity guarantee, with the
+whole-tree scan as the recovery path.
 
 #### Scenario: A lookup by cycle id reads only that cycle's files
 

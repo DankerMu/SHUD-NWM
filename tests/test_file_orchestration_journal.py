@@ -6616,11 +6616,16 @@ def test_file_orchestration_journal_resource_limits_fail_closed(
         # #1734: the depth budget is still enforced on the narrowed walk, but
         # it is now measured from the cycle directory rather than from
         # ``latest/``. Nest below the cycle directory so the walk recurses, and
-        # move the budget accordingly; the assertion is unchanged.
+        # move the budget accordingly.
         (journal_root / "latest/gfs/2026062800/nested").mkdir(parents=True, exist_ok=True)
         repository = FileOrchestrationJournalRepository(journal_root, max_depth=0)
         query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
         assert query[0]["error_code"] == expected_reason
+        # `error_code` alone cannot discriminate: max_depth=0 trips one level
+        # below whatever the walk root is. The reported path is what pins WHERE
+        # the budget fired -- from ``latest/`` it would fire at ``latest/gfs``.
+        assert query[0]["file_journal"]["field"] == "latest/gfs/2026062800/nested"
+        assert query[0]["file_journal"]["evidence"] == {"max_depth": 0}
         return
     if case_name == "json_nodes":
         repository = FileOrchestrationJournalRepository(journal_root, max_json_nodes=2)
@@ -6726,12 +6731,27 @@ def test_file_orchestration_journal_pipeline_query_has_aggregate_record_budget(
         ],
     )
 
-    query = FileOrchestrationJournalRepository(journal_root, max_records=1).query_pipeline_jobs_by_cycle(
-        cycle_id_for("gfs", first_cycle_time)
-    )
+    repository = FileOrchestrationJournalRepository(journal_root, max_records=1)
 
-    assert query[0]["error_code"] == "file_journal_record_limit_exceeded"
-    assert query[0]["file_journal"]["field"] == "pipeline_job_records"
+    # #1734: the aggregate record budget guards the WHOLE-TREE replay, and a
+    # derivable cycle id no longer reaches it. The property is kept through the
+    # same public entrypoint with an underivable cycle id, which falls open to
+    # the full scan (D4) and there still sees both cycles' records.
+    assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026062800") is None
+    blocked = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
+
+    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert blocked[0]["file_journal"]["field"] == "pipeline_job_records"
+
+    # The narrowed half, asserted so the pair is self-discriminating: the same
+    # budget over the narrowed read sees one cycle's single record, does not
+    # trip, and the real row comes back. Re-widening this lookup would make the
+    # budget trip here too and turn this row into a blocked row.
+    narrowed = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", first_cycle_time))
+
+    assert [job["job_id"] for job in narrowed] == [_active_job(first_cycle_time)["job_id"]]
+    assert "error_code" not in narrowed[0]
+    assert "file_journal" not in narrowed[0]
 
 
 def test_file_orchestration_journal_equal_timestamp_tiebreak_matches_db_ordering(tmp_path: Path) -> None:
@@ -12438,6 +12458,104 @@ def test_narrowed_journal_lookup_resolves_source_case_mismatch(tmp_path: Path) -
     cycle_id = cycle_id_for("IFS", cycle_time)
     assert cycle_id.startswith("ifs_")
     assert repository.query_pipeline_jobs_by_cycle(cycle_id) == _whole_tree_filtered(repository, "cycle_id", cycle_id)
+
+def _filesystem_is_case_sensitive(tmp_path: Path) -> bool:
+    probe = tmp_path / "case_probe" / "gfs"
+    probe.mkdir(parents=True)
+    return not (probe.parent / "GFS").exists()
+
+
+def test_narrowed_journal_lookup_reads_each_source_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1734: case aliases must not enumerate ONE directory twice.
+
+    ``_cycle_read_source_segments`` offers both spellings of the source so a
+    case-sensitive filesystem holding ``journal/IFS`` and ``journal/ifs`` side
+    by side is read whole. On a case-insensitive filesystem both spellings name
+    the same directory, and reading both would replay every record twice --
+    inflating record/file budgets and making local budget assertions pass for
+    the wrong reason.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    touched: list[Path] = []
+    real_read_json = FileOrchestrationJournalRepository._read_optional_json
+    real_read_jsonl = FileOrchestrationJournalRepository._read_jsonl
+
+    def record_json(self: Any, path: Path) -> Any:
+        touched.append(path)
+        return real_read_json(self, path)
+
+    def record_jsonl(self: Any, path: Path, **kwargs: Any) -> Any:
+        touched.append(path)
+        return real_read_jsonl(self, path, **kwargs)
+
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_optional_json", record_json)
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_jsonl", record_jsonl)
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("IFS", cycle_time))
+    assert touched
+
+    spellings_by_identity: dict[tuple[int, int], set[str]] = {}
+    for path in touched:
+        path_stat = os.stat(path, follow_symlinks=False)
+        spellings_by_identity.setdefault((path_stat.st_dev, path_stat.st_ino), set()).add(str(path))
+    duplicated = {
+        identity: sorted(spellings)
+        for identity, spellings in spellings_by_identity.items()
+        if len(spellings) > 1
+    }
+    assert not duplicated, duplicated
+
+
+def test_narrowed_journal_lookup_still_reads_distinct_case_source_directories(tmp_path: Path) -> None:
+    """#1734: the identity dedup must not collapse two REAL directories.
+
+    Only reachable where the filesystem is case sensitive; that is exactly the
+    filesystem the alias list exists for.
+    """
+
+    if not _filesystem_is_case_sensitive(tmp_path):
+        pytest.skip("case-insensitive filesystem cannot hold both spellings")
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    lower_job = _active_job(cycle_time)
+    upper_job = _active_job(cycle_time)
+    upper_job.update(
+        {
+            "job_id": "job_cycle_gfs_2026062800_convert",
+            "idempotency_key": "cycle_gfs_2026062800:convert",
+            "stage": "convert",
+            "job_type": "convert_grib",
+        }
+    )
+    for segment, job in (("gfs", lower_job), ("GFS", upper_job)):
+        _write_jsonl(
+            journal_root / f"journal/{segment}/2026062800.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=job,
+                )
+            ],
+        )
+
+    assert journal_module._cycle_read_source_segments(
+        source_id="gfs",
+        source_segment_override=None,
+        root=journal_root,
+    ) == ("gfs", "GFS")
+    rows = FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle(
+        cycle_id_for("gfs", cycle_time)
+    )
+
+    assert {row["job_id"] for row in rows} == {lower_job["job_id"], upper_job["job_id"]}
+
 
 
 @pytest.mark.parametrize(

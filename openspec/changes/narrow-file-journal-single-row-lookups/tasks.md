@@ -52,8 +52,29 @@
       relaunches immediately, so a `pgrep` sampler silently follows the next
       pass — this happened during baseline capture):
       primary criterion `rchar / candidate_count <= 0.32 GB` (>=90% below the
-      3.18 GB baseline); secondary `read_bytes` rate not above 48.5 MB/min and
-      `rchar` rate not above 38 MB/min.
+      3.18 GB baseline).
+      Secondary criteria, both stated in the **same口径 as the baseline sample
+      above** (elapsed 116.77 min): `rchar` rate not above 38 MB/min (10% of the
+      baseline's 380 MB/min) and `read_bytes` rate not above **0.89 MB/min**
+      (10% of the baseline's `1,043,906,560 B / 116.77 min` = 8.94 MB/min).
+      **Correction:** an earlier draft set the `read_bytes` bound at 48.5
+      MB/min. That number is `proposal.md`'s raw, already-regressed rate from a
+      different ~20.8-minute sample — not a reduction of anything. It would have
+      been satisfied by post-change IO running ~5.4x *worse* than the baseline
+      sample, on the very metric the proposal calls the real cost. It is retained
+      nowhere as a target; if quoted at all it is an absolute non-regression
+      ceiling, never evidence of improvement.
+      `read_bytes` is page-cache-sensitive and noisier than `rchar`, so the
+      primary criterion remains the decider: a `read_bytes` miss with the primary
+      met does not void D1 by itself, but SHALL be recorded with its cause rather
+      than waved through.
+      **The receipt MUST record `syscr` alongside `rchar`.** The D2a
+      filename prefilter cuts bytes read, but `_iter_discovered_files`
+      still `lstat`s every directory entry *before* the filename filter
+      runs, so metadata-RPC count does not fall with it. Recording only
+      `rchar` would let the measurement declare victory on bytes while
+      `lstat` count keeps growing with retained history. (Residual
+      reported, not fixed — routed to #1758.)
 - [x] Retention ruling recorded in `design.md` with its working-set bound
       rationale, and a follow-up issue filed for its implementation.
 
@@ -105,3 +126,11 @@ three-part, all three required:
       D2a's clause does not name. Reported, not fixed, because content is
       identity-authoritative there and a filename prefilter would change
       behaviour for a name that contradicts its content.
+- [x] #1760 — write-boundary invariant: nothing enforces that a row's `job_id`
+      agrees with its own `source_id`/`cycle_time`, yet D2a makes the file NAME
+      authoritative for cycle scoping. Verified not producible by any existing
+      writer (run ids are content-pinned; `normalize_source_id` is a closed
+      allowlist with no `_`; 0 divergent rows in 4,309 production files), and a
+      hand-planted divergent row is still recovered via the content-derived
+      journal partition. Declared as a residual in the delta rather than closed;
+      the fail-closed `job_id` decomposition check is tracked there.

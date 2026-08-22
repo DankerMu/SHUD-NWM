@@ -3606,6 +3606,7 @@ class FileOrchestrationJournalRepository:
             source_segments = _cycle_read_source_segments(
                 source_id=source_id,
                 source_segment_override=None,
+                root=self.root,
             )
             cycle_segment = format_cycle_time(cycle_time)
             for model_id, rows in model_rows.items():
@@ -4133,6 +4134,7 @@ class FileOrchestrationJournalRepository:
             source_id=source_id,
             source_segment_override=source_segment_override,
             source_segment_overrides=source_segment_overrides,
+            root=self.root,
         )
         cycle_segment = format_cycle_time(cycle_time)
         cache_key = (source_id, cycle_segment, model_id, source_segments)
@@ -4246,6 +4248,7 @@ class FileOrchestrationJournalRepository:
         source_segments = _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=None,
+            root=self.root,
         )
         cycle_segment = format_cycle_time(cycle_time)
         for source_segment in source_segments:
@@ -4978,6 +4981,7 @@ class FileOrchestrationJournalRepository:
         source_segments = _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=None,
+            root=self.root,
         )
         cycle_segment = format_cycle_time(cycle_time)
         for path in sorted(
@@ -6839,7 +6843,7 @@ class FileOrchestrationJournalRepository:
     def _next_sequence_unlocked(self, *, source_id: str, cycle_time: datetime) -> int:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)
-        source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
+        source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None, root=self.root)
         sequences: list[int] = []
         # Public contract for the insert_pipeline_event lane, which computes the
         # sequence floor before any precondition read; for the other write lanes
@@ -6875,7 +6879,11 @@ class FileOrchestrationJournalRepository:
     ) -> list[int]:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         if source_segments is None:
-            source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None)
+            source_segments = _cycle_read_source_segments(
+                source_id=source_id,
+                source_segment_override=None,
+                root=self.root,
+            )
         sequences: list[int] = []
         cycle_segment = format_cycle_time(cycle_time)
         for source_segment in source_segments:
@@ -6945,6 +6953,7 @@ class FileOrchestrationJournalRepository:
         for source_segment in _cycle_read_source_segments(
             source_id=source_id,
             source_segment_override=None,
+            root=self.root,
         ):
             for surface in ("journal", "pipeline-events"):
                 for record in self._read_cycle_segments(
@@ -10137,11 +10146,57 @@ def _cycle_read_source_segment(*, source_id: str, source_segment_override: str |
     return source_segment
 
 
+_SOURCE_SEGMENT_SURFACES: tuple[str, ...] = (
+    "latest",
+    "journal",
+    "pipeline-events",
+    "pipeline-jobs/by-cycle",
+)
+
+
+def _source_segment_directory_identities(root: Path, segment: str) -> dict[str, tuple[int, int]]:
+    """`(st_dev, st_ino)` of every per-source directory this segment names."""
+
+    identities: dict[str, tuple[int, int]] = {}
+    for surface in _SOURCE_SEGMENT_SURFACES:
+        try:
+            entry_stat = os.stat(root.joinpath(*surface.split("/"), segment), follow_symlinks=False)
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISDIR(entry_stat.st_mode):
+            identities[surface] = (entry_stat.st_dev, entry_stat.st_ino)
+    return identities
+
+
+def _names_same_directory(
+    root: Path,
+    segment: str,
+    other_identities: Mapping[str, tuple[int, int]],
+) -> bool:
+    """True only when a surface proves both segments name ONE directory.
+
+    On a case-insensitive filesystem (macOS) ``gfs`` and ``GFS`` resolve to
+    the same inode, so reading both would enumerate every record twice and
+    silently inflate record/file budgets.  On a case-sensitive filesystem the
+    two directories are genuinely distinct (or one is absent) and no surface
+    can prove identity, so both segments are kept and both are read.
+    Symlinked aliases keep a distinct inode under ``follow_symlinks=False``
+    and therefore stay in the list, where the read path's containment
+    discipline still fails them closed.
+    """
+
+    if not other_identities:
+        return False
+    identities = _source_segment_directory_identities(root, segment)
+    return any(identities.get(surface) == identity for surface, identity in other_identities.items())
+
+
 def _cycle_read_source_segments(
     *,
     source_id: str,
     source_segment_override: str | None,
     source_segment_overrides: tuple[str, ...] | None = None,
+    root: Path | None = None,
 ) -> tuple[str, ...]:
     if source_segment_overrides is not None:
         segments: list[str] = []
@@ -10162,10 +10217,18 @@ def _cycle_read_source_segments(
     if source_segment_override is not None:
         return (primary,)
     segments = [primary]
+    kept_identities: list[dict[str, tuple[int, int]]] = (
+        [_source_segment_directory_identities(root, primary)] if root is not None else []
+    )
     for alias in (source_id.lower(), source_id.upper()):
         segment = _safe_segment(alias)
-        if segment not in segments:
-            segments.append(segment)
+        if segment in segments:
+            continue
+        if root is not None:
+            if any(_names_same_directory(root, segment, identities) for identities in kept_identities):
+                continue
+            kept_identities.append(_source_segment_directory_identities(root, segment))
+        segments.append(segment)
     return tuple(segments)
 
 

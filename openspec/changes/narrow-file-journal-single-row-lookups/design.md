@@ -77,7 +77,7 @@ here are the correct ones.)
 
 After the reversal and D2a, the same instrumented driver reports:
 
-| entrypoint | calls | cycle-scoped | full-tree |
+| entrypoint | entrypoint calls | cycle-scoped | full-tree |
 |---|---|---|---|
 | `query_pipeline_jobs_by_run` | 408 | 408 | 0 |
 | `_pipeline_job_for_id_unlocked` | 947 | 123 | 7 |
@@ -86,6 +86,15 @@ After the reversal and D2a, the same instrumented driver reports:
 | `query_pipeline_jobs_by_cycle` | 28 | 28 | 0 |
 | `query_pipeline_job_by_slurm_id` | 0 | 0 | 0 |
 | **total** | | **777** | **19** |
+
+**Reading the table**: the last two columns count *iterator* calls, and they sum
+to 796. The first column counts *entrypoint* calls, which is the same number on
+every row except `_pipeline_job_for_id_unlocked`: 947 calls reach that
+entrypoint, but 817 of them are satisfied by a direct-record hit before the
+iterator is ever entered, leaving 123 + 7 = 130 iterator calls. So the total row
+is deliberately blank in the first column — 947 and 130 are different quantities
+and must not be added to the others. The 97.6% below is computed from the
+iterator columns only.
 
 **777/796 = 97.6% narrowed**, up from 82.2%. The 19 residual full scans are all
 deliberate D4 fall-opens: 7 unparseable job-id shapes and 12 per-candidate
@@ -109,7 +118,7 @@ Evidence for the one left alone:
 **Consequence for the >=90% `rchar` criterion**: after the D1a correction all
 five entrypoints with production callers are narrowed, and the only remaining
 full-scan surface is `query_pipeline_job_by_slurm_id`, which production never
-calls. Task 1(b)'s 83.4% is what forced D1a — the gate did its job.
+calls. Task 1(b)'s 82.2% is what forced D1a — the gate did its job.
 
 ## D2. Forbidden implementation: routing to the direct partition alone
 
