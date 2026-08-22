@@ -948,3 +948,18 @@ narrowed re-runs, and cannot tell "no later round needed" from "no later round
 run". This adds a third: it cannot tell a deliberate core-only selection from an
 unconsidered one. All three are measurement gaps, not decision inputs; none of
 them moves the keep/cut call, which stays on the 66-vs-264 aggregate.
+
+## Revisit 2026-08-22 (after #1472 / PR #1722)
+
+`rounds: 1`, clean on the first comprehensive round, with zero candidate findings
+and therefore zero verifier batches. This line enters neither the multi-round
+denominator nor either later-round catch counter. Aggregate remains **107
+multi-round merged PRs, core=66 vs rotated=264**. **Keep rotation** unchanged.
+
+The operational wrinkle is reviewer availability, not lens attribution: the
+original Integration and Test & Evidence invocations produced no text report,
+so fresh replacements ran the same two lenses on the same SHA and returned
+clean. Those replacements complete Round 1; they are not a later round and must
+not be interpreted as rotation. The accountability schema records the effective
+lens mix once, correctly. This adds no keep/cut evidence, but keeps tooling
+failure separate from the experiment being measured.
