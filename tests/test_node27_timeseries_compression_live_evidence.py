@@ -24,7 +24,8 @@ import pytest
 
 from apps.api.routes.hydro_display import _postgis_tile_params
 from packages.common import compression_terminal_state as terminal_state
-from packages.common.evidence_io import resolve_artifact_closure
+from packages.common.evidence_io import BoundedEvidenceError, resolve_artifact_closure
+from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_timeseries_compression_benchmark as benchmark
 from scripts import node27_timeseries_compression_bundle_author as bundle_author
 from scripts import node27_timeseries_compression_live_evidence as evidence
@@ -7208,3 +7209,274 @@ def test_verify_bundle_keeps_the_frozen_2_0_semantic_pin() -> None:
     source = (ROOT / "scripts/node27_timeseries_compression_live_evidence.py").read_text(encoding="utf-8")
     assert 'dry["schema_version"] != "2.0"' in source
     assert 'enforce["schema_version"] != "2.0"' in source
+
+
+def test_evidence_schema_annotates_every_invocation_slot_with_its_truth_source() -> None:
+    """Every surviving `*_invocation` artifact slot must name `execution.ledger` as its source.
+
+    #1398 (方案 a): the five v3-required invocation slots stay, so the schema has to
+    say what they actually are -- the verifier re-derives all five from the ledger
+    reference, and a reader who sees five separately named "invocation" fields would
+    otherwise infer five distinct launch records.  The slot list is DERIVED from the
+    schema rather than hardcoded so a future sixth slot cannot be added undescribed
+    (a hardcoded pair list would stay green on it), and the derived set is asserted
+    against the five known slots so a removed slot fails loudly instead of silently
+    shrinking the oracle to nothing.
+
+    The derivation matches on POSITION, not on declaration style: a slot is any
+    property declared under a `properties` map whose name ends in `invocation`,
+    however its artifact-ref shape is reached.  An earlier draft additionally
+    required `$ref == "#/$defs/artifact_ref"` directly on the property object, which
+    round-1 review showed would stay green on a sixth undescribed slot wrapped in
+    `allOf`, `anyOf`, or an inline object -- it defended only against a slot written
+    in the identical style, while the requirement says "every".
+
+    The two load-bearing tokens are pinned as substrings, not full text, so the
+    prose can still be improved without red CI.
+    """
+
+    def _invocation_slots(node: object, path: tuple[str, ...]) -> dict[str, object]:
+        slots: dict[str, object] = {}
+        if isinstance(node, dict):
+            declared_properties = bool(path) and path[-1] == "properties"
+            for key, value in node.items():
+                if declared_properties and key.endswith("invocation"):
+                    owner = [part for part in path if part != "properties"][-1:]
+                    slots[".".join([*owner, key])] = value
+                slots.update(_invocation_slots(value, (*path, key)))
+        elif isinstance(node, list):
+            for item in node:
+                slots.update(_invocation_slots(item, path))
+        return slots
+
+    slots = _invocation_slots(EVIDENCE_SCHEMA, ())
+    # The plural `authorization.*_invocations` const integers end in `invocations`, and
+    # the `required` entries are list items rather than property keys, so neither is
+    # swept in by the positional match.
+    assert set(slots) == {
+        "recovery.invocation",
+        "migration.first_invocation",
+        "migration.second_invocation",
+        "receipts.dry_run_invocation",
+        "receipts.enforce_invocation",
+    }
+    for name, slot in slots.items():
+        description = slot.get("description", "") if isinstance(slot, dict) else ""
+        assert isinstance(description, str) and description.strip(), f"{name} has no description"
+        assert "execution.ledger" in description, f"{name} does not name execution.ledger"
+        assert "re-derive" in description.lower(), f"{name} does not say the verifier re-derives it"
+
+
+# --- #1398 G2/G3: what the five `*_invocation` slots are actually enforced as ----------
+# The schema `description` these tests back is a contract claim in three parts, and each
+# part gets its own oracle here.  G1 above pins that the claim is *present*; G2 pins the
+# enforcement boundary (a well-formed `{path, sha256, bytes}` slot is a closure node; a
+# value of any other shape is not itself one, though a well-formed reference nested inside
+# it still is), and G3 pins that a well-formed authored reference
+# survives into the terminal `source_manifest`, deduplicated by path.  None of the three
+# borrows credit from `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`,
+# which covers only the "semantics are never interpreted" half.
+
+_INVOCATION_SLOTS = (
+    ("recovery", "invocation"),
+    ("migration", "first_invocation"),
+    ("migration", "second_invocation"),
+    ("receipts", "dry_run_invocation"),
+    ("receipts", "enforce_invocation"),
+)
+# Absent on purpose: the closure must fail on the read, not earlier on metadata shape.
+# `sha256`/`bytes` are therefore syntactically valid so the reference clears
+# `resolve_artifact_closure`'s pre-read validity gate and reaches the file open.
+_MISSING_INVOCATION_REF = {"path": "/nonexistent/issue-1398-nope.json", "sha256": "0" * 64, "bytes": 1}
+
+# The shapes that genuinely escape are exactly those carrying NO nested reference.  A
+# fourth key takes the value out of `artifact_references`' exact-key set so the mapping is
+# not itself collected (`packages/common/evidence_io.py:192`), but the same branch then
+# descends into its values (`:195`), so the extra key MUST hold a scalar -- a wrapper whose
+# extra key holds a well-formed reference does not escape, and is pinned separately by
+# `test_invocation_shape_wrapping_a_reference_is_still_closure_checked`.
+_UNCHECKED_INVOCATION_SHAPES = {
+    "extra-key": lambda ref: {**ref, "authored_by": "supervisor"},
+    "string": lambda ref: ref["path"],
+    "null": lambda ref: None,
+}
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_wellformed_invocation_reference_at_a_missing_path_fails_closed(
+    tmp_path: Path, owner: str, key: str
+) -> None:
+    """A `{path, sha256, bytes}` slot IS enforced: it is an artifact-closure node.
+
+    #1398: the schema description says the value is "not otherwise inert".  This is the
+    half that bites -- an authored reference naming a file that is not there stops the
+    run, even though nothing ever reads argv or the exit code out of that file.
+    """
+
+    bundle = _bundle(tmp_path)
+    bundle[owner][key] = dict(_MISSING_INVOCATION_REF)
+    with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_wellformed_invocation_reference_naming_a_symlink_fails_closed(
+    tmp_path: Path, owner: str, key: str
+) -> None:
+    """Second branch of the same clause: an *existing* path can still be unsafe.
+
+    The absent-path test above cannot tell "the file is not there" from "the file is
+    there but is not a thing we are willing to read" -- both wrap into the same
+    `artifact closure node is unavailable or unsafe` label
+    (`packages/common/evidence_io.py:361`).  So the slot here names a symlink whose
+    target is a real regular file with the *matching* `sha256`/`bytes`: existence,
+    metadata validity and declared identity all check out, and the run must still fail
+    closed purely because `open_file_no_follow` refuses the symlink
+    (`packages/common/safe_fs.py:290`).  The `__cause__` assertion is the load-bearing
+    half -- without it this test would pass even if the symlink had merely been absent.
+    """
+
+    bundle = _bundle(tmp_path)
+    authored = dict(bundle[owner][key])
+    link = tmp_path / f"{owner}-{key}-symlinked-invocation.json"
+    link.symlink_to(Path(authored["path"]))
+    bundle[owner][key] = {**authored, "path": str(link)}
+
+    with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe") as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    cause = raised.value.__cause__
+    assert isinstance(cause, SafeFilesystemError), f"expected the no-follow guard, got {cause!r}"
+    assert "must not be a symlink" in str(cause), cause
+
+
+@pytest.mark.parametrize("field", ("sha256", "bytes"))
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_wellformed_invocation_reference_whose_identity_disagrees_fails_closed(
+    tmp_path: Path, owner: str, key: str, field: str
+) -> None:
+    """Third branch: the path is a readable regular file, but the slot lies about it.
+
+    Deliberately aimed past `resolve_artifact_closure`'s *pre-read* metadata gate
+    (`packages/common/evidence_io.py:248`, "reference metadata is invalid"), which only
+    inspects the shape of the declared values: the mutated `sha256` stays 64 lowercase
+    hex and the mutated `bytes` stays a small non-negative int, so both clear that gate
+    and the failure can only come from the *post-read* comparison against the file the
+    verifier actually opened (`:253`).  The two failures are different verdicts and the
+    scenario means this one; matching the exact message is what keeps them apart.
+    """
+
+    bundle = _bundle(tmp_path)
+    authored = dict(bundle[owner][key])
+    if field == "sha256":
+        authored["sha256"] = "1" * 64
+    else:
+        authored["bytes"] = authored["bytes"] + 1
+    assert authored[field] != bundle[owner][key][field], "the mutation must actually disagree"
+    bundle[owner][key] = authored
+
+    with pytest.raises(BoundedEvidenceError, match="artifact closure reference identity differs"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+@pytest.mark.parametrize("shape", sorted(_UNCHECKED_INVOCATION_SHAPES))
+def test_non_reference_invocation_shapes_escape_closure_and_still_qualify(
+    tmp_path: Path, shape: str
+) -> None:
+    """A shape carrying no nested reference is NOT enforced, not even for existence.
+
+    The mirror image of the test above, and the clause two earlier drafts of this
+    description got wrong by claiming existence/hash enforcement applies unconditionally.
+    Closure collection is gated on the value being *exactly* a three-key mapping, and the
+    evidence schema is applied to the terminal document rather than to the input bundle
+    (`scripts/node27_timeseries_compression_live_evidence.py:4208`), so all five slots can
+    name the very same absent path in a non-reference shape and the bundle still qualifies.
+
+    The escape is narrower than "any other shape", which is what a fourth draft of the
+    description claimed: it holds only for the shapes parametrized here, none of which
+    contains a nested reference -- a mapping whose extra key is a scalar, a bare string,
+    `null`.  A mapping that *wraps* a well-formed reference is still closure-checked; that
+    is `test_invocation_shape_wrapping_a_reference_is_still_closure_checked` below.
+    """
+
+    bundle = _bundle(tmp_path)
+    for owner, key in _INVOCATION_SLOTS:
+        bundle[owner][key] = _UNCHECKED_INVOCATION_SHAPES[shape](dict(_MISSING_INVOCATION_REF))
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert terminal["qualifies_task_4_5"] is True
+    # The terminal slots are re-derived, so the unreadable authored shapes never surface.
+    ledger_ref = bundle["execution"]["ledger"]
+    for owner, key in _INVOCATION_SLOTS:
+        assert terminal[owner][key] == ledger_ref
+    assert not any(
+        node["path"] == _MISSING_INVOCATION_REF["path"] for node in terminal["source_manifest"]
+    )
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_invocation_shape_wrapping_a_reference_is_still_closure_checked(
+    tmp_path: Path, owner: str, key: str
+) -> None:
+    """A wrapper mapping does NOT escape: the reference nested inside it is a closure node.
+
+    The caveat that refuted a fourth draft's "a value of any other shape is not
+    closure-checked at all".  `artifact_references` does not collect a non-three-key
+    mapping itself, but the same branch descends into that mapping's values
+    (`packages/common/evidence_io.py:189-197`, `stack.extend(current.values())`), so a
+    nested `{path, sha256, bytes}` is collected as a root-level closure node in its own
+    right and an unavailable path inside it still fails the run closed.  This is why the
+    escape shapes above are exactly the ones carrying no nested reference.
+    """
+
+    bundle = _bundle(tmp_path)
+    bundle[owner][key] = {"note": dict(_MISSING_INVOCATION_REF)}
+    with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe"):
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+
+def test_wellformed_authored_invocations_are_retained_in_the_terminal_manifest(tmp_path: Path) -> None:
+    """Legacy shape: five distinct authored references, all five retained in the manifest.
+
+    The description's "retained ... in the terminal `source_manifest`" clause.  The slot
+    itself is re-derived from `execution.ledger`, so the authored reference is reachable
+    only through the manifest -- which is exactly why the earlier "the authored value
+    never reaches the terminal state" draft was false.
+    """
+
+    bundle = _bundle(tmp_path)
+    ledger_ref = bundle["execution"]["ledger"]
+    authored = {(owner, key): dict(bundle[owner][key]) for owner, key in _INVOCATION_SLOTS}
+    assert len({ref["path"] for ref in authored.values()}) == 5, "fixture must use five distinct files"
+    assert all(ref != ledger_ref for ref in authored.values())
+
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+    assert terminal["qualifies_task_4_5"] is True
+    manifest = terminal["source_manifest"]
+    for (owner, key), ref in authored.items():
+        assert ref in manifest, f"{owner}.{key} authored reference is not retained in source_manifest"
+        assert terminal[owner][key] == ledger_ref
+        assert terminal[owner][key] != ref
+    assert ledger_ref in manifest
+
+
+def test_bundle_author_shape_carries_the_ledger_reference_once_in_the_manifest(tmp_path: Path) -> None:
+    """Author shape: all five slots ARE the ledger reference, and it is deduplicated.
+
+    Built by the committed author rather than by hand, so the shape cannot drift away
+    from what production emits.  On this shape the authored and terminal slot values are
+    byte-identical -- the fact that refuted the "never the authored reference" draft --
+    and `resolve_artifact_closure` skips the repeat, so the manifest carries one node.
+    """
+
+    built = _author_bundle_from_workdir(tmp_path, _bundle(tmp_path))
+    ledger_ref = built["execution"]["ledger"]
+    for owner, key in _INVOCATION_SLOTS:
+        assert built[owner][key] == ledger_ref, f"{owner}.{key} is not the author's ledger reference"
+
+    terminal = evidence.verify_bundle(built, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+
+    assert terminal["qualifies_task_4_5"] is True
+    for owner, key in _INVOCATION_SLOTS:
+        assert terminal[owner][key] == ledger_ref
+    ledger_nodes = [node for node in terminal["source_manifest"] if node["path"] == ledger_ref["path"]]
+    assert ledger_nodes == [ledger_ref]

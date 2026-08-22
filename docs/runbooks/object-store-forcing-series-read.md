@@ -94,6 +94,22 @@ station-series reader 只读 forcing producer 已发布到共享 object-store mi
 
 旧 DB-backed 路径上的 `FORCING_VERSION_NOT_FOUND` / `FORCING_VERSION_NOT_FINALIZED` 不应再从该 station-series route 产生。新路径不查 `met.forcing_version` readiness，所以不要用这些 code 排查 disk 读问题。
 
+### `parse_reason` 的 `concurrent-replace` 前缀
+
+producer 用 `os.replace` 原子换入新 inode 发布 `shud/*.csv`，读侧的 no-follow open 在
+pre-open stat 与 post-open fstat 之间比对 inode 身份，命中替换窗口就拒绝。读侧对这类拒绝做**有界重试**
+（上限 3 次尝试 = 首次 open 加 2 次重试；只重试 open，不重试 parse；不 sleep）。若重试次数用尽仍每次都撞上替换窗口，接口仍按原样返回
+HTTP 500 `STATION_FORCING_FILE_MALFORMED`（状态码与错误码都不变），但
+`details.parse_reason` 会以固定 token `concurrent-replace:` 加一个空格开头。
+
+排查动作：
+
+- **看到该前缀** = 该次请求读到了 producer 的原子替换窗口且重试耗尽，**不是文件损坏**，不要按坏 CSV 去查
+  header/列数/数值。先看该 cycle 的 producer 是否正在写同一批 `shud/` 文件；偶发一两次属预期，重试即可自愈。
+- 若持续复现（同一 station 在无 producer 活动的时段仍带该前缀），才升级排查：确认是否有计划外进程在反复重写该路径。
+- 该前缀是**单向**判据：有前缀说明命中的是替换窗口；**不能**反过来把「没有该前缀」读成「文件已损坏」——
+  没有前缀只表示这次失败不是耗尽的 inode 竞态，其余成因（权限、I/O、CSV 契约违例、bounded-read 越界）仍需按上表逐项排查。
+
 `PsycopgForecastStore.station_series()` 仍保留在 `packages/common/forecast_store.py`，
 但它现在是 legacy/internal DB helper：只用于保留历史 DB 合同测试和 ADR 0001 所述的
 长期历史 API 设计，不是当前 display station-series route 的实现。生产 route/service

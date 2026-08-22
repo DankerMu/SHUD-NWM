@@ -767,8 +767,27 @@ Referenced JSON contracts are:
 - `execution.run_plan` is the immutable concrete command/checkpoint plan and
   `execution.ledger` is the append-only producer truth. The verifier recomputes
   the plan hash, exact event state machine, cursor continuity and every
-  produced artifact association from ledger events. Legacy authored invocation
-  JSON may remain in a historical input envelope but contributes no v3 fact.
+  produced artifact association from ledger events. The five `*_invocation`
+  keys are mandatory v3 bundle contents, not optional legacy leftovers:
+  `recovery.invocation`, `migration.first_invocation`,
+  `migration.second_invocation`, `receipts.dry_run_invocation` and
+  `receipts.enforce_invocation`. Each carries the contract its schema
+  `description` states.
+  Required — by the verifier's exact-key check on the input bundle, and by
+  this schema in a v3 qualifying (non-failure) terminal document. The
+  invocation semantics inside the value — argv, exit code, timings — are
+  never interpreted, and the verifier re-derives this slot from
+  `execution.ledger` rather than copying what was authored here; the
+  committed bundle author already writes that same ledger reference into
+  this slot, so on its output the authored and terminal values coincide. The
+  value is not otherwise inert: when it is exactly a `{path, sha256, bytes}`
+  mapping it becomes an artifact-closure node — the file must exist as a
+  regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON
+  it is complexity-bounded and its own nested artifact references are
+  resolved transitively — and it is retained, deduplicated by normalized
+  path, in the terminal `source_manifest`. A value of any other shape is not
+  itself a closure node, though any well-formed reference nested inside it
+  still is, collected in its own right.
 - `recovery.preflight`: separately authorized replay preflight with capture
   time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
   `before_compressed=true`, positive row count, and the exact six-field target

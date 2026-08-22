@@ -44,6 +44,88 @@ def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
     assert select_tests(["tests/test_example.py"], repo_root=tmp_path) == ["tests/test_example.py"]
 
 
+def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
+    # #1644: an OpenAPI-only PR must run the drift + API-contract + 3.1-contract
+    # assertions, not the collect-only smoke. The exact set is required, no
+    # core-smoke fallback and no other suites.
+    assert Path("openapi/nhms.v1.yaml").is_file()
+
+    selected = select_tests(["openapi/nhms.v1.yaml"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_api_contract.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+    ]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> None:
+    # #1644: the runtime schema owner adds the drift + 3.1-contract suites to
+    # its existing broad API consumers (the three contract suites that already
+    # covered apps/api/**). A patch-owner-only PR must reach both the drift and
+    # the finalizer/security truth assertions.
+    selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+    ]
+    # tests/test_api.py is both a core-smoke member and a legitimate API
+    # consumer here; the fallback-only remainder must stay out.
+    fallback_only = set(CORE_SMOKE_TESTS) - {"tests/test_api.py"}
+    assert not fallback_only & set(selected)
+
+
+def test_select_tests_openapi_routing_reds_when_the_rule_leg_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constructed rule table, tracked tree untouched: dropping the `openapi/**`
+    # rule must make the OpenAPI-only selection empty (the artifact is not a
+    # backend python path, so without the explicit rule nothing asserts drift).
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import OPENAPI_CONTRACT_TESTS
+
+    stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != "openapi/**")
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", stripped)
+
+    selected = select_tests(["openapi/nhms.v1.yaml"], repo_root=Path("."))
+
+    assert selected == []
+    assert not set(OPENAPI_CONTRACT_TESTS) & set(selected)
+
+
+def test_select_tests_openapi_patch_owner_routing_reds_when_a_contract_leg_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constructed rule table: removing the drift suite OR the 3.1-contract suite
+    # from the patch-owner rule's targets must drop it from the selection for a
+    # patch-owner-only PR — both legs are load-bearing contract oracles.
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import PathTestRule
+
+    for removed in ("tests/test_openapi_drift.py", "tests/test_openapi_31_contract.py"):
+        patched = tuple(
+            PathTestRule(
+                rule.pattern,
+                tuple(t for t in rule.tests if t != removed),
+                rule.stop_on_match,
+                rule.only_when_any_changed,
+            )
+            if rule.pattern == "apps/api/openapi_patching.py"
+            else rule
+            for rule in PATH_TEST_RULES
+        )
+        monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+        selected = select_tests(["apps/api/openapi_patching.py"], repo_root=Path("."))
+
+        assert removed not in selected, removed
+
+
 def test_select_tests_maps_adapter_changes_to_adapter_tests() -> None:
     selected = select_tests(
         ["workers/data_adapters/gfs_adapter.py", "workers/data_adapters/cycle_hours.py"],
@@ -302,11 +384,13 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
     assert selected == [
         "tests/test_api_contract.py",
         # #1597: the closure guard (direct UNION one hop over
-        # services.tiles.mvt) put these seven in the rule. This pin is the
+        # services.tiles.mvt) put these eight in the rule. This pin is the
         # complement of the guard — the guard forbids missing suites, the pin
         # forbids extra ones — so it is updated from the selector's own output,
-        # never hand-assembled. The three cutover suites are the one-hop
-        # contribution through apps/api/routes/hydro_display.py.
+        # never hand-assembled. The three cutover suites and
+        # test_openapi_31_contract.py are the one-hop contributions through
+        # apps/api/routes/hydro_display.py and
+        # apps/api/openapi_patching.py respectively.
         "tests/test_direct_grid_display_cutover_flip.py",
         "tests/test_direct_grid_display_cutover_history.py",
         "tests/test_direct_grid_display_cutover_model_resolution.py",
@@ -316,6 +400,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_migrations.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
+        "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
@@ -3485,6 +3570,33 @@ def test_ci_workflow_self_change_opens_the_backend_targeted_gate() -> None:
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
 
     assert "              - '.github/workflows/ci.yml'\n" in _backend_filter_block(workflow)
+
+
+def test_ci_openapi_change_opens_the_backend_targeted_gate() -> None:
+    # #1644 self-routing, backend-filter leg: an OpenAPI-only PR must start the
+    # targeted Unit Tests job so the drift/API-contract assertions run, not just
+    # the OpenAPI Validate job. The exact literal must sit inside the `backend:`
+    # filter block — `openapi/**` already sits under the `frontend:` and
+    # `openapi:` filters, and a mention under those opens no targeted job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert "              - 'openapi/**'\n" in _backend_filter_block(workflow)
+
+
+def test_ci_openapi_backend_gate_reds_when_the_path_leaves_the_backend_block() -> None:
+    # Constructed workflow text, so the tracked ci.yml is untouched: moving
+    # `openapi/**` under another filter (or deleting it) must red the pin, since
+    # `openapi/**` under `frontend:`/`openapi:` opens no targeted Unit Tests job.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    entry = "              - 'openapi/**'\n"
+    assert entry in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(entry, "")
+    assert entry not in _backend_filter_block(deleted)
+
+    moved_to_frontend = deleted.replace("            frontend:\n", "            frontend:\n" + entry)
+    assert entry in moved_to_frontend
+    assert entry not in _backend_filter_block(moved_to_frontend)
 
 
 def test_ci_workflow_self_change_gate_reds_when_the_path_leaves_the_backend_block() -> None:

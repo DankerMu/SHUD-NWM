@@ -300,6 +300,20 @@ def _river_table_mentions(source: str) -> int:
     )
 
 
+def _text_identity_predicate(sql: str, column: str, *, resolves_keys_inline: bool = False) -> re.Match[str] | None:
+    """The first bare comparison of ONE text identity column, or ``None``.
+
+    The single-column half of :func:`_assert_no_text_identity_predicate`, split
+    out (#1681) because the parser's probe and window read now retain exactly
+    one sanctioned aid (``run_id``) and must still be pinned zero-text on every
+    OTHER identity column. Sharing the regex keeps the two statements of "no
+    text predicate here" from drifting apart: a loosened pattern reddens both.
+    """
+    reduced = strip_all_subqueries(sql) if resolves_keys_inline else strip_scalar_subqueries(sql)
+    outer = re.sub(r"\s+", " ", strip_comments(reduced))
+    return re.search(rf"(?<![.\w]){re.escape(column)}\s*(=|<>|!=|\bIN\b|\bLIKE\b|=\s*ANY)", outer)
+
+
 def _assert_no_text_identity_predicate(sql: str, label: str, *, resolves_keys_inline: bool = False) -> None:
     """No unaliased text identity column is compared to anything.
 
@@ -318,10 +332,8 @@ def _assert_no_text_identity_predicate(sql: str, label: str, *, resolves_keys_in
     must NOT use it: one of them is a CTE, whose body that stripper would delete
     along with the very predicates under test.
     """
-    reduced = strip_all_subqueries(sql) if resolves_keys_inline else strip_scalar_subqueries(sql)
-    outer = re.sub(r"\s+", " ", strip_comments(reduced))
     for column in TEXT_IDENTITY_COLUMNS:
-        match = re.search(rf"(?<![.\w]){re.escape(column)}\s*(=|<>|!=|\bIN\b|\bLIKE\b|=\s*ANY)", outer)
+        match = _text_identity_predicate(sql, column, resolves_keys_inline=resolves_keys_inline)
         assert match is None, f"{label}: text identity predicate on {column} -> {match.group(0)!r}"
 
 
@@ -856,6 +868,31 @@ def test_autopipeline_ingest_criterion_joins_by_key_with_no_aid() -> None:
     assert "ON rt.run_key = h.run_key" in sql
 
 
+def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
+    """#1674: 'published' is complete on its own; 'parsed' still needs key rows.
+
+    Sits beside the #1442 shape pin rather than in a new file because
+    ``scripts/select_ci_tests.py`` maps the autopipeline script to exactly this
+    oracle (``test_select_ci_tests.py`` asserts that set by equality), so a new
+    file would either never run on the PR that changes the script or redden the
+    selector's own guard.
+
+    The negatives are the load-bearing half. ``COALESCE`` would mean someone
+    gave ``parsed_at`` a fallback, and ``updated_at`` would mean that fallback
+    is ``hydro_run.updated_at`` -- which every tick's register upsert bumps, so
+    it is a false parse timestamp that would make recompute detection claim a
+    currency it does not have (design D1).
+    """
+    sql = _autopipeline_statement("_already_ingested_runs")
+
+    assert "LEFT JOIN hydro.river_timeseries rt" in sql
+    assert "ON rt.run_key = h.run_key" in sql
+    assert "HAVING h.status = 'published' OR COUNT(rt.run_key) > 0" in sql
+    assert "MAX(rt.created_at) AS parsed_at" in sql
+    assert "COALESCE" not in sql
+    assert "updated_at" not in sql
+
+
 def test_autopipeline_publish_criterion_correlates_by_key_with_no_aid() -> None:
     sql = _autopipeline_statement("_publish_display_runs")
 
@@ -893,22 +930,101 @@ def test_parser_replace_chain_has_exactly_three_read_statements_plus_the_insert(
     assert statements[3].strip().startswith("INSERT INTO hydro.river_timeseries")
 
 
-def test_parser_probe_window_and_delete_all_locate_rows_by_key() -> None:
-    probe, window, delete, _insert = _parser_river_statements()
+# The three-line shape the probe and the window read must both carry (#1681):
+# the key predicate, the removal marker, then the aid — so the aid is separated
+# from `run_key` by exactly one AND and the marker is on the line immediately
+# above the line #1342 has to delete. Whitespace between lines is free; the
+# ORDER is not.
+_PARSER_AID_ADJACENCY = re.compile(
+    rf"WHERE run_key = %s[ \t]*\n[ \t]*{re.escape(PUSHDOWN_AID_MARKER)}[ \t]*\n[ \t]*AND run_id = %s"
+)
+# Text identity columns the read statements must STILL have no predicate on:
+# every text identity column other than the sanctioned `run_id` aid, which is
+# asserted positively above. DERIVED from the shared register rather than
+# listed, so this test keeps the same coverage
+# `_assert_no_text_identity_predicate` gave these statements before #1681 split
+# `run_id` out of it, and a column added to 000050's text set is covered here
+# the day it is classified. (A hand-written list dropped `unit` and
+# `quality_flag` — the two columns the pre-#1681 check did cover.)
+_PARSER_READ_FORBIDDEN_TEXT_COLUMNS: tuple[str, ...] = tuple(
+    column for column in TEXT_IDENTITY_COLUMNS if column != "run_id"
+)
 
-    for label, sql in (("probe", probe), ("window", window), ("delete", delete)):
+
+def test_parser_probe_and_window_locate_rows_by_key_with_one_marked_run_id_aid() -> None:
+    """Probe + window read: key predicates plus the sanctioned `run_id` aid (#1681).
+
+    #1442 left these two statements key-only on the reasoning that
+    ``check_batch_targets_uncompressed`` guarantees the target chunk is
+    uncompressed. That argument holds for the DELETE (which is valid_time
+    bounded) and NOT for these two: they carry no valid_time constraint by
+    design — their whole job is to find this key's rows OUTSIDE the incoming
+    window — so their plan necessarily reaches compressed chunks, where
+    ``run_key`` is not a segmentby column and has no access path at all. The
+    retained ``run_id`` is a bound parameter that reaches 000047's segmentby
+    index, i.e. exactly the "literal/bound parameter AND the plan can reach a
+    compressed chunk" condition this file's header sanctions.
+
+    Asserted as a bare-column surface (these statements give the fact table no
+    alias, so the shared alias machinery has nothing to qualify on):
+
+    * the aid is conjoined with its counterpart AND carries an adjacent marker,
+      pinned in one cross-line regex — the bare-column equivalent of
+      ``assert_aid_is_conjoined_with_its_counterpart`` plus
+      ``_assert_aids_are_marked``;
+    * exactly one ``run_id`` occurrence and exactly one marker, so a second,
+      unconjoined predicate on the same column cannot hide behind the first;
+    * every text identity column OTHER than the sanctioned `run_id` aid is
+      still predicate-free — the whole set 000050 defines, minus that one aid.
+    """
+    probe, window, _delete, _insert = _parser_river_statements()
+
+    # Self-check on the derivation: the forbidden set is the complete text
+    # identity register minus the single sanctioned aid. Pinned here so the
+    # tuple above cannot silently shrink back to a partial hand-written list
+    # (which is how `unit` and `quality_flag` fell out of this test's reach).
+    assert set(_PARSER_READ_FORBIDDEN_TEXT_COLUMNS) == set(TEXT_IDENTITY_COLUMNS) - {"run_id"}
+
+    for label, sql in (("probe", probe), ("window", window)):
         assert "WHERE run_key = %s" in sql, label
         assert "AND river_network_version_key = %s" in sql, label
         assert "AND variable_e = %s" in sql, label
-        _assert_no_text_identity_predicate(sql, f"parser {label}")
-        assert PUSHDOWN_AID_MARKER not in sql, f"parser {label}: no aid is sanctioned here"
+        assert _PARSER_AID_ADJACENCY.search(sql) is not None, (
+            f"parser {label}: expected `WHERE run_key = %s` / {PUSHDOWN_AID_MARKER!r} / "
+            f"`AND run_id = %s` on three consecutive lines, got:\n{sql}"
+        )
+        assert len(re.findall(r"(?<![.\w])run_id\b", sql)) == 1, (
+            f"parser {label}: `run_id` must appear exactly once — the marked aid"
+        )
+        assert sql.count(PUSHDOWN_AID_MARKER) == 1, f"parser {label}: exactly one removal marker"
+        for column in _PARSER_READ_FORBIDDEN_TEXT_COLUMNS:
+            match = _text_identity_predicate(sql, column)
+            assert match is None, f"parser {label}: text identity predicate on {column} -> {match.group(0)!r}"
+    # The MATERIALIZED fence stays: without it the planner turns the window read
+    # back into a per-chunk min/max walk.
+    assert "WITH existing AS MATERIALIZED" in window
+
+
+def test_parser_delete_locates_rows_by_key_with_no_aid() -> None:
+    """The DELETE stays zero-text: the guard really does close it (#1442 D1, F).
+
+    Unlike the two read statements it is valid_time bounded and runs only after
+    ``check_batch_targets_uncompressed`` passed, so every chunk it can touch is
+    uncompressed and 000051's key index is a complete access path. No aid is
+    sanctioned here, and the marker's absence is asserted so #1681's aid cannot
+    be copied into this statement without a decision.
+    """
+    _probe, _window, delete, _insert = _parser_river_statements()
+
+    assert "WHERE run_key = %s" in delete
+    assert "AND river_network_version_key = %s" in delete
+    assert "AND variable_e = %s" in delete
+    _assert_no_text_identity_predicate(delete, "parser delete")
+    assert PUSHDOWN_AID_MARKER not in delete, "parser delete: no aid is sanctioned here"
     # The window predicate is untouched: replace semantics depend on it, and the
     # guard's compressed-chunk verdict is computed from what this returns.
     assert "AND valid_time >= %s" in delete
     assert "AND valid_time <= %s" in delete
-    # The MATERIALIZED fence stays: without it the planner turns the window read
-    # back into a per-chunk min/max walk.
-    assert "WITH existing AS MATERIALIZED" in window
 
 
 def test_parser_dual_write_insert_still_writes_both_representations() -> None:
