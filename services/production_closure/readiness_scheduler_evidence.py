@@ -84,6 +84,9 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "submitted_partial",
         "partial",
         "partially_failed",
+        # #1326: a reconciling pass is review-blocked until the exact outcome is
+        # known — it is review-visible vocabulary, never a passed status.
+        "reconciling",
     }
 )
 
@@ -104,6 +107,13 @@ SCHEDULER_PARTIAL_MODEL_RUN_STATUSES = frozenset(
         "partially_failed",
         "submitted_partial",
     }
+)
+# #1326: the governed reconciliation-pending family on the readiness plane.
+# The cycle terminal ``reconciling`` and the two stage terminals it collapses
+# to are partial (incomplete-accounting) rows on both recount predicates, but
+# never failed, blocked, or submitted-compatible.
+SCHEDULER_RECONCILIATION_PENDING_STATUSES = frozenset(
+    {"reconciling", "submit_result_ambiguous", "reconcile_unverified"}
 )
 SCHEDULER_FAILED_MODEL_RUN_STATUSES = frozenset({"failed", "permanently_failed", "submission_failed"})
 SCHEDULER_BLOCKED_MODEL_RUN_STATUSES = frozenset(
@@ -1161,9 +1171,12 @@ def _scheduler_model_run_failed_status(status: str) -> bool:
 def _scheduler_model_run_partial_status(status: str) -> bool:
     # #1202: a duplicate-submission skip makes the producer count the candidate
     # as partial, so the readiness recount must recognise the same row.
+    # #1326: the reconciliation-pending family is partial (incomplete-accounting)
+    # on the same predicate.
     return (
         status in SCHEDULER_PARTIAL_MODEL_RUN_STATUSES
         or status == "skipped_duplicate_submission"
+        or status in SCHEDULER_RECONCILIATION_PENDING_STATUSES
         or status.endswith("_partial")
     )
 
@@ -1182,6 +1195,9 @@ def _scheduler_model_run_producer_partial_status(status: str) -> bool:
         # #1202: keep producer partial-counting and readiness recount in
         # agreement for skip-carrying passes.
         or status == "skipped_duplicate_submission"
+        # #1326: same producer/readiness agreement for reconciliation-pending
+        # rows — the producer counts them partial, so the recount must too.
+        or status in SCHEDULER_RECONCILIATION_PENDING_STATUSES
         or status.endswith(("_blocked", "_cancelled", "_failed", "_unavailable"))
     )
 

@@ -39,22 +39,25 @@ _CANONICAL_TIMING_STAGES = frozenset(
     ("convert", "forcing", "forecast", "parse", "state_save_qc")
 )
 
-# #1322: nested statuses returned by ``_submit_and_wait_cycle_stage`` inside
-# ``_retry_partial_array_stage`` that mean "this pass did no work" rather than
-# "the tasks failed". They are DEFERRALS: the retry helper stops immediately
-# (no pending-task stamping, no duplicate durable failed write, no attempt
-# N+1) and the status propagates to the cycle loop, which terminates on the
-# dedicated non-success terminal the top-level path already has.
+# #1322/#1326: nested statuses returned by ``_submit_and_wait_cycle_stage``
+# inside ``_retry_partial_array_stage`` that mean "this pass did no work" rather
+# than "the tasks failed". They are DEFERRALS: the retry helper stops
+# immediately (no pending-task stamping, no duplicate durable failed write, no
+# attempt N+1) and the status propagates to the cycle loop, which terminates on
+# the governed non-success terminal the top-level path already has.
 #
-# Deliberately a set with one member today: the reconciliation-pending family
-# (``submit_result_ambiguous`` / ``reconcile_unverified``) shares the collapse
-# defect but cannot be deferred until its ``reconciling`` terminal is
-# first-class on the evidence/readiness planes (issue #1326). Widening
-# membership is NOT text-only: the call site below routes every member to the
-# hardcoded ``skipped_duplicate_submission`` terminal, while the top-level door
-# routes the reconciliation family to ``reconciling`` — so a second member also
-# needs a status -> terminal mapping at the call site (issue #1326).
-NESTED_RETRY_DEFER_STATUSES = {"skipped_duplicate_submission"}
+# The status -> cycle-terminal mapping is the SINGLE source of truth: the
+# public defer set is derived from its keys, so widening membership (or
+# changing a terminal) necessarily changes the mapping, and the helper below
+# has no catch-all arm that could silently map an ungoverned status. The
+# reconciliation-pending members land the ``reconciling`` terminal (the same
+# one the top-level door uses) instead of the duplicate-skip terminal.
+_NESTED_RETRY_DEFER_TERMINALS: dict[str, str] = {
+    "skipped_duplicate_submission": "skipped_duplicate_submission",
+    "submit_result_ambiguous": "reconciling",
+    "reconcile_unverified": "reconciling",
+}
+NESTED_RETRY_DEFER_STATUSES = frozenset(_NESTED_RETRY_DEFER_TERMINALS)
 
 AnalysisRunContext = _chain.AnalysisRunContext
 ArrayAggregation = _chain.ArrayAggregation
@@ -164,6 +167,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                 retry_attempts = 0
                 retry_pipeline_job_id: str | None = None
                 pipeline_result: PipelineResult | None = None
+                confirmed_master = _ConfirmedMasterOwner(stage.stage)
                 while True:
                     existing_job = self._find_existing_stage_job(existing_jobs, stage, context=context)
                     if (
@@ -205,12 +209,26 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
 
                     if stage_results and len(stage_results) > stage_index:
+                        # #1326 Round 2 depth: an outer same-stage retry may
+                        # return a raw reconciliation-pending result whose empty
+                        # Slurm identity would erase a confirmed dispatch seen
+                        # ANYWHERE earlier in this stage loop (including across
+                        # empty-ID intermediate failures). The stage-loop owner
+                        # records every same-stage concrete master; the raw
+                        # pending terminal/errors stay, inheriting the owner.
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
                         stage_results[stage_index] = result
                         result_slot = stage_index
                     elif stage_results and stage_results[-1].stage == result.stage:
+                        # Same rule for the trailing same-stage replacement form.
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
                         stage_results[-1] = result
                         result_slot = len(stage_results) - 1
                     else:
+                        confirmed_master.observe(result)
+                        result = confirmed_master.project(result)
                         stage_results.append(result)
                         result_slot = len(stage_results) - 1
 
@@ -274,21 +292,35 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                             aggregation,
                             had_partial_before_stage,
                             last_partial_before_stage,
+                            confirmed_master=confirmed_master,
                         )
                         if retried is not None:
                             result, aggregation = retried
+                            # #1326 Round 1/2 depth: a raw reconciliation-pending
+                            # result may carry no Slurm identity (ambiguous arm)
+                            # or a concrete retry-master identity (unverified
+                            # arm). The nested helper observes every concrete
+                            # master and returns the projected raw pending
+                            # result; the stage-loop owner retains the confirmed
+                            # full-array dispatch across empty-ID hops.
                             stage_results[-1] = result
                             result_slot = len(stage_results) - 1
                             if result.status in NESTED_RETRY_DEFER_STATUSES:
-                                # #1322: the NESTED resubmission was deferred by
-                                # the reserve gate — the same fact the top-level
-                                # branch above handles, arriving through the
-                                # retry helper's second door. Route it to the
-                                # identical terminal instead of letting the
-                                # allowlist tail treat it as an unrecognized
-                                # status. ``aggregation`` is ``None`` here and no
-                                # consumer that requires it is reached.
-                                pipeline_result = _skip_terminal_pipeline_result(context, stage_results)
+                                # #1322/#1326: the NESTED resubmission was
+                                # deferred — either the reserve gate proved
+                                # another pass owns this stage in flight, or the
+                                # nested submit result is pending
+                                # reconciliation. Both are the same fact the
+                                # top-level branches above handle, arriving
+                                # through the retry helper's second door. Route
+                                # each member to its governed terminal instead
+                                # of letting the allowlist tail treat it as an
+                                # unrecognized status. ``aggregation`` is
+                                # ``None`` here and no consumer that requires it
+                                # is reached.
+                                pipeline_result = _nested_defer_terminal_pipeline_result(
+                                    context, stage_results, result.status
+                                )
                                 break
 
                     # Fail-closed tail (#1202): advancement is an ALLOWLIST —
@@ -395,6 +427,95 @@ def _skip_terminal_pipeline_result(
     )
 
 
+class _ConfirmedMasterOwner:
+    """Stage-loop-local confirmed-master provenance (D6, Round 2 depth).
+
+    One owner is created per stage execution loop and observes every same-stage
+    ``StageRunResult`` produced during outer AND nested retry history. It is
+    updated ONLY from a non-empty/whitespace-trimmed concrete ``slurm_job_id``;
+    an empty-ID intermediate result never clears it. The latest non-empty raw
+    retry master becomes the owner, so a confirmed dispatch survives any number
+    of empty-ID hops (e.g. confirmed -> empty-ID ``submission_failed`` ->
+    empty-ID pending). The owner is module-private and stage-loop-local: it is
+    never added to the public context, schema, durable journal, or
+    cross-invocation state, and scheduler evidence performs no journal lookup.
+
+    ``project`` applies the governed preservation rule to one raw result:
+    inherit the owner identity ONLY when the raw stage matches the owner stage,
+    ``_NESTED_RETRY_DEFER_TERMINALS`` maps the raw status to the ``reconciling``
+    cycle terminal, and the raw id is empty/whitespace. The raw
+    ``pipeline_job_id``/``status``/``exit``/``error``/``log``/``accounting``/
+    ``task_results`` are preserved unchanged. A non-empty raw retry master
+    remains authoritative; unknown/non-pending/cross-stage raw results are
+    returned unchanged.
+    """
+
+    __slots__ = ("stage", "value")
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.value = ""
+
+    def observe(self, result: StageRunResult) -> None:
+        if result.stage != self.stage:
+            return
+        if _nonempty_master_id(result.slurm_job_id):
+            self.value = str(result.slurm_job_id).strip()
+
+    def project(self, raw: StageRunResult) -> StageRunResult:
+        if raw.stage != self.stage:
+            return raw
+        if _NESTED_RETRY_DEFER_TERMINALS.get(raw.status) != "reconciling":
+            return raw
+        if not _nonempty_master_id(self.value) or _nonempty_master_id(raw.slurm_job_id):
+            return raw
+        return replace(raw, slurm_job_id=self.value)
+
+
+def _nonempty_master_id(value: str | None) -> bool:
+    return bool(value and str(value).strip())
+
+
+def _nested_defer_terminal_pipeline_result(
+    context: CycleOrchestrationContext,
+    stage_results: list[StageRunResult],
+    status: str,
+) -> PipelineResult:
+    """Map a nested defer status to its governed cycle terminal.
+
+    The mapping is CLOSED over exactly the keys of
+    ``_NESTED_RETRY_DEFER_TERMINALS`` (which is also the public
+    ``NESTED_RETRY_DEFER_STATUSES``): ``skipped_duplicate_submission`` keeps
+    its dedicated skip terminal (the reservation-holding pass owns cycle
+    progress), and the reconciliation-pending family
+    (``submit_result_ambiguous`` / ``reconcile_unverified``) terminates the
+    cycle on ``reconciling`` — the same terminal and candidate-outcome
+    derivation the top-level door builds, so the raw ambiguous / unverified
+    stage result is preserved. ANY status absent from the mapping (a
+    ``submission_failed`` leak or a typo from a future defer-set widening)
+    fails closed instead of silently collapsing into ``reconciling`` or the
+    skip terminal.
+    """
+
+    try:
+        terminal = _NESTED_RETRY_DEFER_TERMINALS[status]
+    except KeyError:
+        raise _chain.OrchestratorError(
+            "UNGOVERNED_NESTED_DEFER_STATUS",
+            f"Nested defer status {status!r} has no governed cycle terminal mapping.",
+            {"status": status, "governed_statuses": sorted(NESTED_RETRY_DEFER_STATUSES)},
+        ) from None
+    if terminal == "skipped_duplicate_submission":
+        return _skip_terminal_pipeline_result(context, stage_results)
+    return PipelineResult(
+        context.run_id,
+        context.cycle_id,
+        terminal,
+        tuple(stage_results),
+        _candidate_outcomes(context, final_status=terminal),
+    )
+
+
 def _open_stage_timing_span(
     collector: Any | None,
     stage: StageDefinition,
@@ -448,6 +569,11 @@ def _populate_stage_span_counters(
       any basin: ``submitted_count == 0`` AND ``failed_count == 0``. Counting the
       entering basins as failed (the pre-#1202 ``else`` behaviour) would report a
       deferral as an all-basin failure.
+    - ``submit_result_ambiguous`` / ``reconcile_unverified`` (#1326 D7) — a
+      reconciliation-pending terminal is a defer, not an all-basin failure: the
+      final stage span attributes zero submitted and zero failed, matching the
+      duplicate-skip convention. The earlier confirmed dispatch remains
+      represented by the returned stage identity and scheduler proof.
     - Everything else (``failed`` / ``submission_failed`` / ``permanently_failed``
       / ``cancelled`` / etc.) — none of the entering basins reached a successful
       terminal state at this stage.
@@ -457,7 +583,7 @@ def _populate_stage_span_counters(
     if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES or result.status == "partially_failed":
         span.set_submitted_count(basin_count_at_entry)
         span.set_failed_count(0)
-    elif result.status == "skipped_duplicate_submission":
+    elif result.status in NESTED_RETRY_DEFER_STATUSES:
         span.set_submitted_count(0)
         span.set_failed_count(0)
     else:
@@ -519,6 +645,7 @@ def _retry_partial_array_stage(
     aggregation: ArrayAggregation,
     had_partial_before_stage: bool,
     last_partial_before_stage: str | None,
+    confirmed_master: _ConfirmedMasterOwner | None = None,
 ) -> tuple[StageRunResult, ArrayAggregation | None] | None:
     if self.retry_service is None:
         return None
@@ -557,17 +684,25 @@ def _retry_partial_array_stage(
                 pipeline_job_id=retry_pipeline_job_id,
             )
 
+            if confirmed_master is not None:
+                confirmed_master.observe(latest_result)
             if retry_aggregation is None:
                 if latest_result.status in NESTED_RETRY_DEFER_STATUSES:
-                    # #1322 defer: the nested resubmission did no work (the
-                    # reserve gate proved another pass holds this stage in
-                    # flight). Collapsing it to per-task ``failed`` would stamp
-                    # pending tasks, re-write durable run statuses the other
-                    # pass owns, and — under a permissive retry adjudicator —
-                    # derive attempt N+1 and really double-submit. Return the
-                    # raw nested result so the caller lands the dedicated skip
-                    # terminal. ``context.active_basins`` is restored by the
+                    # #1322/#1326 defer: the nested resubmission did no work —
+                    # either the reserve gate proved another pass holds this
+                    # stage in flight, or the submit result is pending
+                    # reconciliation (``submit_result_ambiguous`` /
+                    # ``reconcile_unverified``). Collapsing it to per-task
+                    # ``failed`` would stamp pending tasks, re-write durable run
+                    # statuses another pass or reconciliation owns, and — under
+                    # a permissive retry adjudicator — derive attempt N+1 and
+                    # really double-submit. Return the projected raw nested
+                    # result so the caller lands the governed terminal (skip or
+                    # ``reconciling``) with the stage-loop confirmed master
+                    # preserved. ``context.active_basins`` is restored by the
                     # enclosing ``finally``.
+                    if confirmed_master is not None:
+                        latest_result = confirmed_master.project(latest_result)
                     return latest_result, None
                 retry_status = "succeeded" if latest_result.status == "succeeded" else "failed"
                 for task_id in pending_task_ids:
