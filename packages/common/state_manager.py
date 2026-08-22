@@ -82,6 +82,14 @@ class StateSnapshot:
     cloned_from_state_id: str | None = None
     cloned_from_model_id: str | None = None
     clone_gate_fingerprint: str | None = None
+    # Which gate admitted the clone (change `recalibration-state-carryover`
+    # D6, migration 000053): `"hydrologic_core"` for a ten-surface
+    # fix-forward clone, `"state_compatibility"` for an eight-surface
+    # recalibration clone, `None` on every pre-existing and non-clone row.
+    # `clone_gate_fingerprint` records the accepted value OF THIS GATE, so
+    # the pair is self-describing and the two kinds' hashes are never
+    # compared to each other.
+    clone_gate_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -715,9 +723,10 @@ class PsycopgStateSnapshotRepository:
                 original_shud_filename,
                 cloned_from_state_id,
                 cloned_from_model_id,
-                clone_gate_fingerprint
+                clone_gate_fingerprint,
+                clone_gate_kind
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (model_id, (COALESCE(source_id, ''::text)), valid_time) DO UPDATE SET
                 state_id = EXCLUDED.state_id,
                 run_id = EXCLUDED.run_id,
@@ -733,6 +742,7 @@ class PsycopgStateSnapshotRepository:
                 cloned_from_state_id = EXCLUDED.cloned_from_state_id,
                 cloned_from_model_id = EXCLUDED.cloned_from_model_id,
                 clone_gate_fingerprint = EXCLUDED.clone_gate_fingerprint,
+                clone_gate_kind = EXCLUDED.clone_gate_kind,
                 created_at = now()
             RETURNING *
             """,
@@ -753,6 +763,7 @@ class PsycopgStateSnapshotRepository:
                 snapshot.cloned_from_state_id,
                 snapshot.cloned_from_model_id,
                 snapshot.clone_gate_fingerprint,
+                snapshot.clone_gate_kind,
             ),
         )
         return _snapshot_from_row(row)
@@ -2469,6 +2480,7 @@ def _state_index_entry_from_snapshot(snapshot: StateSnapshot) -> dict[str, Any]:
         "cloned_from_state_id": snapshot.cloned_from_state_id,
         "cloned_from_model_id": snapshot.cloned_from_model_id,
         "clone_gate_fingerprint": snapshot.clone_gate_fingerprint,
+        "clone_gate_kind": snapshot.clone_gate_kind,
     }
 
 
@@ -2496,6 +2508,7 @@ def _state_snapshot_from_index_entry(entry: Mapping[str, Any]) -> StateSnapshot:
         cloned_from_state_id=_optional_str(entry.get("cloned_from_state_id")),
         cloned_from_model_id=_optional_str(entry.get("cloned_from_model_id")),
         clone_gate_fingerprint=_optional_str(entry.get("clone_gate_fingerprint")),
+        clone_gate_kind=_optional_str(entry.get("clone_gate_kind")),
     )
 
 
@@ -3378,6 +3391,7 @@ def _snapshot_from_row(row: Mapping[str, Any]) -> StateSnapshot:
         cloned_from_state_id=_optional_str(row.get("cloned_from_state_id")),
         cloned_from_model_id=_optional_str(row.get("cloned_from_model_id")),
         clone_gate_fingerprint=_optional_str(row.get("clone_gate_fingerprint")),
+        clone_gate_kind=_optional_str(row.get("clone_gate_kind")),
     )
 
 
@@ -3400,6 +3414,7 @@ def _snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
         "cloned_from_state_id": snapshot.cloned_from_state_id,
         "cloned_from_model_id": snapshot.cloned_from_model_id,
         "clone_gate_fingerprint": snapshot.clone_gate_fingerprint,
+        "clone_gate_kind": snapshot.clone_gate_kind,
     }
 
 

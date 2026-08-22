@@ -670,6 +670,26 @@ HYDROLOGIC_CORE_FINGERPRINT_LABELS: tuple[str, ...] = (
     "state_schema",
 )
 
+# The 8 covered surfaces of the ``state_compatibility_fingerprint`` (change
+# ``recalibration-state-carryover`` D1): the ten G10 labels minus
+# ``calibration`` and ``solver_config``.
+#
+# G10's ten surfaces answer "is this the SAME model package?". State
+# transferability is a narrower question: changing a calibration parameter
+# (``cfg.calib`` / ``CALIB/*``) or a solver-relevant configuration value
+# (``cfg.para``) changes how the model steps FORWARD from a state; it does
+# not change what the state vector IS, nor the mesh/river/soil/geol/land/lake
+# geometry the state lives on, nor the ``.sp.att`` non-``FORC`` fields, nor
+# the initial-condition schema (``cfg.ic``).
+#
+# Restricting the surface set — NOT introducing a second hash format — keeps
+# one hashing algorithm. An 8-surface fingerprint is a different value from a
+# 10-surface one by construction (a different line set feeds the top-level
+# buffer); the two are never compared to each other.
+STATE_COMPATIBILITY_SURFACES: tuple[str, ...] = tuple(
+    sorted(set(HYDROLOGIC_CORE_FINGERPRINT_LABELS) - {"calibration", "solver_config"})
+)
+
 
 # --- §3.5 legacy weather path patterns (G4 no-legacy-weather-path) --------
 
@@ -1524,6 +1544,46 @@ def _canonicalize_sp_att_non_forc(sp_att_path: pathlib.Path) -> str:
     return _sha256_bytes(joined)
 
 
+def _validate_surface_set(surfaces: Sequence[str]) -> tuple[str, ...]:
+    """Validate a fingerprint surface set and return it in alphabetical order.
+
+    A surface set MUST be a non-empty, duplicate-free subset of
+    :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS`. An empty set would produce
+    the SHA-256 of the empty buffer for every package — a degenerate value
+    that would false-pass any equality gate — and a duplicate would silently
+    double-weight one surface, so both are refused fail-closed before any
+    file bytes are read.
+
+    Returning the alphabetically sorted tuple pins the domain-separation
+    order at one place: the caller's argument order can never perturb the
+    hash. For the pre-sorted ten-label default this is a no-op, so the
+    default fingerprint value is byte-identical to the pre-change one.
+    """
+    ordered = tuple(surfaces)
+    if not ordered:
+        raise SpAttRewriteError(
+            "surfaces must be a non-empty subset of "
+            f"{list(HYDROLOGIC_CORE_FINGERPRINT_LABELS)!r}; got an empty set"
+        )
+    duplicates = tuple(
+        sorted({label for label in ordered if ordered.count(label) > 1})
+    )
+    if duplicates:
+        raise SpAttRewriteError(
+            f"surfaces contains duplicate labels {list(duplicates)!r}; each "
+            "covered surface must contribute exactly one fingerprint line"
+        )
+    unknown = tuple(
+        sorted(set(ordered) - set(HYDROLOGIC_CORE_FINGERPRINT_LABELS))
+    )
+    if unknown:
+        raise SpAttRewriteError(
+            f"surfaces contains unknown labels {list(unknown)!r}; expected a "
+            f"subset of {list(HYDROLOGIC_CORE_FINGERPRINT_LABELS)!r}"
+        )
+    return tuple(sorted(ordered))
+
+
 def compute_hydrologic_core_fingerprint(
     package_root: pathlib.Path,
     *,
@@ -1532,6 +1592,7 @@ def compute_hydrologic_core_fingerprint(
     state_schema_bytes: bytes,
     solver_config_bytes: bytes,
     side_label: str = "package",
+    surfaces: tuple[str, ...] = HYDROLOGIC_CORE_FINGERPRINT_LABELS,
 ) -> HydrologicCoreFingerprint:
     """§3.4 / docs §G10 ten-surface ``hydrologic_core_fingerprint`` computation.
 
@@ -1590,6 +1651,24 @@ def compute_hydrologic_core_fingerprint(
         callers; :func:`verify_hydrologic_core_fingerprint_equal` overrides
         this to ``"baseline"`` / ``"variant"`` so paired equality errors
         name the correct side.
+    surfaces:
+        The surface set the fingerprint covers. Defaults to the full ten
+        :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS` (package identity).
+        :data:`STATE_COMPATIBILITY_SURFACES` restricts it to the eight
+        state-transferability surfaces (change
+        ``recalibration-state-carryover`` D1). MUST be a non-empty,
+        duplicate-free subset of the ten labels.
+
+        The hashing algorithm is IDENTICAL for any surface set — one
+        ``f"{label}\\t{hash}\\n"`` line per covered surface in alphabetical
+        label order, SHA-256 of the joined buffer. Because the line SET
+        differs, an 8-surface value is never equal to a 10-surface value
+        for the same package; the two are never compared to each other.
+
+        ``required_categories`` for the file-category portion derives from
+        this set, so in 8-surface mode ``calibration`` is neither required
+        nor accepted in ``category_files`` and ``cfg.calib`` / ``CALIB/*``
+        are never enumerated. ``sp_att_path`` is required in both sets.
 
     Returns
     -------
@@ -1600,18 +1679,21 @@ def compute_hydrologic_core_fingerprint(
     Raises
     ------
     UnknownCategoryError
-        ``category_files`` contains a category not in
-        :data:`NON_SP_ATT_CATEGORIES`.
+        ``category_files`` contains a category not in the file categories
+        derived from ``surfaces``.
     MissingCategoryError
-        ``category_files`` is missing a required category from
-        :data:`NON_SP_ATT_CATEGORIES`.
+        ``category_files`` is missing a required category from the file
+        categories derived from ``surfaces``.
     MissingPackageFileError
         A declared relative path is absent from ``package_root``.
         ``missing_side`` reflects ``side_label``.
     SpAttRewriteError
         ``package_root`` is not a directory, ``sp_att_path`` is missing
-        or unparseable, or a category maps to an empty sequence.
+        or unparseable, a category maps to an empty sequence, or
+        ``surfaces`` is empty / contains duplicates / names a label
+        outside :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS`.
     """
+    covered_surfaces = _validate_surface_set(surfaces)
     if not package_root.is_dir():
         raise SpAttRewriteError(
             f"package_root {package_root} is not a directory"
@@ -1620,13 +1702,19 @@ def compute_hydrologic_core_fingerprint(
         raise SpAttRewriteError(
             f"sp_att_path {sp_att_path} does not exist or is not a file"
         )
+    # The file categories in scope are exactly the covered surfaces that name
+    # a non-``.sp.att`` file category; in 8-surface mode ``calibration`` drops
+    # out of both the required set and the accepted set.
+    required_categories = tuple(
+        label for label in covered_surfaces if label in NON_SP_ATT_CATEGORIES
+    )
     _validate_category_files(
-        category_files, required_categories=NON_SP_ATT_CATEGORIES
+        category_files, required_categories=required_categories
     )
     # Per-surface hashes and descriptors. Descriptors feed covered_paths.
     per_surface_hash: dict[str, str] = {}
     per_surface_descriptor: dict[str, str] = {}
-    for category in NON_SP_ATT_CATEGORIES:
+    for category in required_categories:
         relative_paths = tuple(sorted(category_files[category]))
         per_surface_hash[category] = _compute_file_category_hash(
             package_root,
@@ -1635,30 +1723,32 @@ def compute_hydrologic_core_fingerprint(
             side_label=side_label,
         )
         per_surface_descriptor[category] = ";".join(relative_paths)
-    per_surface_hash["sp_att_non_forc"] = _canonicalize_sp_att_non_forc(
-        sp_att_path
-    )
-    per_surface_descriptor["sp_att_non_forc"] = str(sp_att_path.name)
-    per_surface_hash["state_schema"] = _sha256_bytes(state_schema_bytes)
-    per_surface_descriptor["state_schema"] = "<bytes>"
-    per_surface_hash["solver_config"] = _sha256_bytes(solver_config_bytes)
-    per_surface_descriptor["solver_config"] = "<bytes>"
+    if "sp_att_non_forc" in covered_surfaces:
+        per_surface_hash["sp_att_non_forc"] = _canonicalize_sp_att_non_forc(
+            sp_att_path
+        )
+        per_surface_descriptor["sp_att_non_forc"] = str(sp_att_path.name)
+    if "state_schema" in covered_surfaces:
+        per_surface_hash["state_schema"] = _sha256_bytes(state_schema_bytes)
+        per_surface_descriptor["state_schema"] = "<bytes>"
+    if "solver_config" in covered_surfaces:
+        per_surface_hash["solver_config"] = _sha256_bytes(solver_config_bytes)
+        per_surface_descriptor["solver_config"] = "<bytes>"
 
-    # Sanity: every declared label appears exactly once.
-    assert set(per_surface_hash) == set(HYDROLOGIC_CORE_FINGERPRINT_LABELS)
+    # Sanity: every covered label appears exactly once.
+    assert set(per_surface_hash) == set(covered_surfaces)
 
-    # Domain-separated top-level hash. Iterate labels in alphabetical order
-    # (already the case in HYDROLOGIC_CORE_FINGERPRINT_LABELS) so the
-    # fingerprint is byte-identical across runs.
+    # Domain-separated top-level hash. Iterate labels in alphabetical order so
+    # the fingerprint is byte-identical across runs and independent of the
+    # order the caller happened to list ``surfaces`` in.
     top_lines = [
-        f"{label}\t{per_surface_hash[label]}\n"
-        for label in HYDROLOGIC_CORE_FINGERPRINT_LABELS
+        f"{label}\t{per_surface_hash[label]}\n" for label in covered_surfaces
     ]
     fingerprint_hash = _sha256_bytes("".join(top_lines).encode("utf-8"))
     covered_paths = tuple(
         sorted(
             f"{label}:{per_surface_descriptor[label]}"
-            for label in HYDROLOGIC_CORE_FINGERPRINT_LABELS
+            for label in covered_surfaces
         )
     )
     return HydrologicCoreFingerprint(
@@ -1677,6 +1767,7 @@ def verify_hydrologic_core_fingerprint_equal(
     variant_state_schema_bytes: bytes,
     baseline_solver_config_bytes: bytes,
     variant_solver_config_bytes: bytes,
+    surfaces: tuple[str, ...] = HYDROLOGIC_CORE_FINGERPRINT_LABELS,
 ) -> HydrologicCoreFingerprint:
     """§3.4 G4 fingerprint-equality gate + shared-fingerprint return.
 
@@ -1713,6 +1804,14 @@ def verify_hydrologic_core_fingerprint_equal(
     baseline_solver_config_bytes, variant_solver_config_bytes:
         Per-package solver-relevant configuration bytes (see
         :func:`compute_hydrologic_core_fingerprint`).
+    surfaces:
+        The surface set both sides are fingerprinted over. Defaults to the
+        ten :data:`HYDROLOGIC_CORE_FINGERPRINT_LABELS` (package identity).
+        Pass :data:`STATE_COMPATIBILITY_SURFACES` for the eight-surface
+        state-transferability gate. Both sides ALWAYS use the same set —
+        the returned value is only meaningful relative to that set, so a
+        caller must never compare fingerprints computed over different
+        sets.
 
     Returns
     -------
@@ -1742,6 +1841,7 @@ def verify_hydrologic_core_fingerprint_equal(
         state_schema_bytes=baseline_state_schema_bytes,
         solver_config_bytes=baseline_solver_config_bytes,
         side_label="baseline",
+        surfaces=surfaces,
     )
     variant_fp = compute_hydrologic_core_fingerprint(
         variant_package_root,
@@ -1750,6 +1850,7 @@ def verify_hydrologic_core_fingerprint_equal(
         state_schema_bytes=variant_state_schema_bytes,
         solver_config_bytes=variant_solver_config_bytes,
         side_label="variant",
+        surfaces=surfaces,
     )
     if baseline_fp.hash != variant_fp.hash:
         raise HydrologicCoreFingerprintMismatchError(
