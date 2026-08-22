@@ -120,7 +120,7 @@ The reader SHALL parse the per-station shud CSV with the documented two-row head
 
 #### Scenario: CSV file is read through no-follow descriptor-bound open
 
-- **WHEN** the expected station CSV path is a symlink, is not a regular file, or violates the reader's containment root
+- **WHEN** the expected station CSV path is a symlink or is otherwise rejected by no-follow filesystem checks
 - **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
 - **AND** it SHALL NOT follow the symlink target
 - **AND** a refusal raised because the target's inode changed while the file was being opened SHALL be excluded from this scenario, being governed instead by the requirement covering concurrent atomic replacement

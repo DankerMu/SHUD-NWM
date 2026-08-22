@@ -100,7 +100,7 @@ producer 用 `os.replace` 原子换入新 inode 发布 `shud/*.csv`，读侧的 
 pre-open stat 与 post-open fstat 之间比对 inode 身份，命中替换窗口就拒绝。读侧对这类拒绝做**有界重试**
 （只重试 open，不重试 parse；不 sleep）。若重试次数用尽仍每次都撞上替换窗口，接口仍按原样返回
 HTTP 500 `STATION_FORCING_FILE_MALFORMED`（状态码与错误码都不变），但
-`details.parse_reason` 会以固定 token `concurrent-replace: ` 开头。
+`details.parse_reason` 会以固定 token `concurrent-replace:` 加一个空格开头。
 
 排查动作：
 

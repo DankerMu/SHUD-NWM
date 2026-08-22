@@ -168,3 +168,19 @@ RESULT=READ_OK tail_bytes=299996 total=300012 fstat_ino=12474865 nlink=0
 
 审查的另一半仍被采纳：runbook 措辞**不得**写成「无 `concurrent-replace` 前缀 = 文件损坏」，
 只写「有前缀 = 读到了原子替换窗口且重试耗尽」（见 tasks 4.1）。
+
+## D9 —— 已裁定的审查发现：no-sleep oracle 的拼法依赖（CONFIRMED 但按重要性丢弃）
+
+交叉审查发现测试 3.7 的 no-sleep 断言依赖 sleep 的**书写方式**：
+`monkeypatch.setattr(time, "sleep", ...)` 打的是模块属性，因此
+`import time` + `time.sleep(...)` 会被抓到（实测红），而
+`from time import sleep as _backoff_sleep` + `_backoff_sleep(...)` 逃逸（实测全绿）——
+模块级 `from ... import` 绑定在 import 期解析，早于 patch。
+
+verifier 判 **CONFIRMED 但丢弃**，理由是可观测影响为零：
+`object_store_forcing.py` 根本不 import `time`，交付的重试循环里没有任何 sleep，
+而 tasks §5.3 的 M9 格点名的那个惯用拼法**确实被杀掉**。逃逸变体需要有人先加一个
+仓里并不存在的模块级别名 import。
+
+**记为已知残留，不修**：若将来这条 oracle 需要与拼法无关，正解是把断言换成
+`time.monotonic()` 的耗时差，而不是继续打属性补丁。
