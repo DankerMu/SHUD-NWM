@@ -491,7 +491,13 @@ class _CursorBoundStateSnapshotRepository:
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         # Same INSERT ... ON CONFLICT template as
         # ``PsycopgStateSnapshotRepository.upsert_state_snapshot`` (SUB-1
-        # migration 000046 columns + SUB-2 SQL contract). The upsert
+        # migration 000046 columns, SUB-2 SQL contract, and migration
+        # 000053's ``clone_gate_kind``). This is the SECOND, independently
+        # maintained copy of that SQL and it is the in-cutover-transaction
+        # production write path: a provenance column added to the other copy
+        # but not to this one would store NULL on every hook-driven clone
+        # row. The two copies are updated in lockstep -- INSERT column list,
+        # VALUES arity, ON CONFLICT DO UPDATE SET, and the params tuple. The upsert
         # branch flips ``usable_flag`` to false to mirror the QC
         # re-derivation semantics of the connection-owning path — the
         # clone core supplies ``usable_flag=True`` on a fresh row, so
@@ -514,9 +520,10 @@ class _CursorBoundStateSnapshotRepository:
                 original_shud_filename,
                 cloned_from_state_id,
                 cloned_from_model_id,
-                clone_gate_fingerprint
+                clone_gate_fingerprint,
+                clone_gate_kind
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (model_id, (COALESCE(source_id, ''::text)), valid_time) DO UPDATE SET
                 state_id = EXCLUDED.state_id,
                 run_id = EXCLUDED.run_id,
@@ -532,6 +539,7 @@ class _CursorBoundStateSnapshotRepository:
                 cloned_from_state_id = EXCLUDED.cloned_from_state_id,
                 cloned_from_model_id = EXCLUDED.cloned_from_model_id,
                 clone_gate_fingerprint = EXCLUDED.clone_gate_fingerprint,
+                clone_gate_kind = EXCLUDED.clone_gate_kind,
                 created_at = now()
             RETURNING *
             """,
@@ -552,6 +560,7 @@ class _CursorBoundStateSnapshotRepository:
                 snapshot.cloned_from_state_id,
                 snapshot.cloned_from_model_id,
                 snapshot.clone_gate_fingerprint,
+                snapshot.clone_gate_kind,
             ),
         )
         row = self._cursor.fetchone()

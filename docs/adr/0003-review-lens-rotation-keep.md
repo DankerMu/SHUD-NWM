@@ -722,11 +722,50 @@ rejects new ones, so that contamination is bounded and shrinking in share.
 requires the recorded attribution-schema and round-role fixes plus maintainer
 review.
 
+- 2026-08-22（PR #1706 / issue #1697 合并后 audit 再次 DECIDABLE）：样本扩至 **103** 个
+  多轮 merged PR，later-round catches **core=58 vs rotated=261**。本 PR 边际为
+  **core +4 / rotated +3**。
+
+  **维持 keep。但本数据点对轮换零信息量**，理由与 #1626 同型且同样是**两个伪影
+  同时出现在一个 PR 上**——这已是该组合的第二次实测，不是推测：
+
+  - round-2 用的是与 round-1 **完全相同的六镜**（correctness / integration /
+    security-perf / test-evidence / spec-compliance / invariant-state）。这 4 条
+    later-round catches 因此全被判进 `core`——与 #1602 同一伪影。
+  - Phase 7 独立终审及其两次 rerun（`round_lenses` 记作 `final-gap-sweep`）贡献的
+    3 条被判进 `rotated`——与 #1624 同一伪影。
+
+  即 **这 7 条里没有一条来自「轮换与否」的对照**。
+
+  比前几条多出的一点是**为什么没轮换**：这不是编排习惯，而是**规则逼出来的**。
+  round-1 的 5 条 verified 里有 P1，按 severity-rationing 买下了修复 pass，
+  于是 round-2 的任务被定义为「同一批面的修复是否落对、有没有带坏别的」——
+  一个**验证性**而非**探索性**的轮次。对同一组面做再验证时复用同一组镜是正确的选择，
+  换镜反而会丢掉「这条修复动的正是我上轮认证过的那处」这个上下文。
+
+  这对已登记的工具缺口是一条**新的限定**：`rotation_attribution()` 不只分不清
+  「没轮换」与「轮换了但没抓到」，它还分不清**「不该轮换」**——修复验证轮复用镜集是
+  按门规则的正确行为，却被记成轮换失利的证据。修复方向因此再扩一条：除
+  「`round_lenses` 为 round-1 子集/相同时不计入分母」「Phase 7 终审轮排除出轮换归因」
+  外，还应能标注轮次意图（探索 vs 修复验证），否则**越是严格执行 severity-rationing
+  的项目，越会自动积累 `core`**，把这条比值推向一个由门规则而非由证据驱动的翻转。
+  在修好之前，基于该比值的 keep/cut 翻转仍须 maintainer 人的裁定，不走 autonomous default。
+
+  附本 PR 与 keep 之实质相关的证据分布（与上面那个被污染的比值无关）：round-1 六镜里
+  真正 load-bearing 的是 correctness 镜的一条 P1（中途 abort 后已写入的克隆行无 receipt，
+  verifier 实跑 repro 确认）。更值得记的是 **verifier 两次推翻了 reviewer 的支撑论证
+  而结论存活**——C1 上 invariant-state 镜断言 `run()` 会预校验整批因而与本缺口不同，
+  verifier 证明 `run()` 的循环前检查只校验 warm/cold 划分的**形状**、不校验门结果；
+  C3 上 test-evidence 镜断言某测试覆盖「循环内 `M1 == M1'` 检查」，而循环里根本没有该
+  检查。这两条支持的不是「轮换」，而是**「reviewer 出候选、verifier 独立裁决」这层分工**：
+  镜的数量买不到这个，独立裁决才买得到。
+
 ## Revisit 2026-08-22 (after #1326 / PR #1680)
 
-Auditor now reports 103 multi-round merged PRs, later-round catches
-**core=55 rotated=261** (was 102 / 54 / 258 after PR #1689). PR #1680 is the
-entire delta: **core +1, rotated +3**.
+Integrated audit now reports 104 multi-round merged PRs, later-round catches
+**core=59 rotated=264**. The branch-local observation before #1697 merged was
+103 / 55 / 261 from the shared 102 / 54 / 258 baseline; #1326's contribution
+remains **core +1, rotated +3**, while #1697 independently added +4 / +3.
 
 The raw ratio again overstates rotation. Two of the three entries counted as
 `rotated` came from the Phase 6.2 `invariant-audit` gate, not from a

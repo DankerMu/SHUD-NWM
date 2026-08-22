@@ -59,6 +59,9 @@
     "tests/test_state_manager.py",
     "tests/test_select_ci_tests.py",
     "tests/test_tile_publisher.py",
+    "workers/mapping_builder/rewrite.py",
+    "tests/test_mapping_builder_rewrite.py",
+    "tests/test_state_clone_cutover_hook.py",
     ".review-gate-issues.json"
   ]
 }
