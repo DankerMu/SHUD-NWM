@@ -32,6 +32,14 @@
       rollback leg (design.md D3, and the second half of the ADDED requirement's
       third scenario).
 - [x] T7 Leave the four flagged source files untouched.
+- [x] T8 (round 1 fix) Add the fallback's own database vocabulary at the call
+      site — compound `本地库`/`本机库`, plus `standby` and `instance` — measured
+      on the same DB-absence-stripped text as the existing token leg. Do **not**
+      widen `_topology_mentions_database`, and do not use a bare `库`. See
+      design.md D9.
+- [x] T9 (round 1 fix) Extend the must-still-flag test with the three recovered
+      drift lines quoted in design.md D1. The fourth constructed line is
+      deliberately not pinned in either direction (D9).
 
 ## 2. Verification (Evidence Floor)
 
@@ -50,6 +58,10 @@
       are `scripts/governance/audit_repo_entropy.py` and
       `tests/test_entropy_audit_script.py`.
 - [x] E6 `openspec validate topology-mirror-fallback-db-signal --strict --no-interactive`.
+- [x] E8 (round 1 fix) Re-run E1 after T8: whole-repo audit still reports **0**
+      `production-topology-*` findings and the same total finding count as the
+      pre-T8 HEAD — the widening must add nothing.
+- [x] E9 (round 1 fix) Re-run E2, E3, E4, E6.
 - [x] E7 `uv run pytest -q` full local suite — the audit script is imported by
       more than one test module; confirm nothing else moved.
 
@@ -84,3 +96,21 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
   `tests/test_integration_gate.py::test_integration_database_name_uses_high_entropy_uuid`,
   which passes in isolation (`4 passed`) and is a probabilistic assertion, routed
   separately.
+
+## 4. Round-1 fix receipts (D9)
+
+- T8 landed at `scripts/governance/audit_repo_entropy.py:1943-1949`, fallback call
+  site only. `_topology_mentions_database`, `_topology_line_mentions_mirror`,
+  `_topology_local_postgres_context_is_allowed` and the three positive branches
+  are byte-unchanged.
+- E8 whole-repo hard-gate audit, pre-fix vs post-fix: `total 753 / topology 0`
+  both times. The widening adds nothing, and design.md's new quotes do not
+  self-trigger.
+- E9a `uv run pytest -q tests/test_entropy_audit_script.py` -> `367 passed in 275.39s`
+  (was 364; +3 must-still-flag cases).
+- E9b revert receipt: replacing only the new token check with `return False`
+  turns exactly the three new cases red (`3 failed, 13 passed`) while all four
+  must-not-flag cases stay green; restoring returns `16 passed`.
+- E9c `uv run ruff check .` -> `All checks passed!`
+- E9d `git diff --stat` -> `audit_repo_entropy.py` (+8/-1),
+  `test_entropy_audit_script.py` (+6), plus this change's own fixture.

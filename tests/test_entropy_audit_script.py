@@ -5061,6 +5061,9 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "当前手册：node-27 ingest 前先跑 node-22 回滚 mirror。",
         "node-22 hosts the active primary postgresql mirror, and that subsystem is DB-free.",
         "The node-22 rollback mirror is DB-free and takes no DB handle.",
+        "node-22 本地库通过 mirror 实时同步给 node-27，生产查询直接读取该镜像",
+        "node-22 hosts the warm standby that mirrors production writes from node-27",
+        "node-22's local instance mirrors node-27 and is queried when the primary is busy",
     ],
     ids=[
         "archived-port",
@@ -5072,6 +5075,9 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "bare-chinese-rollback-mirror",
         "fused-clause-real-db-token-plus-db-absence",
         "rollback-plus-db-absence",
+        "chinese-local-db-mirror-read-as-production",
+        "warm-standby-mirrors-production-writes",
+        "local-instance-mirrors-and-is-queried",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(

@@ -1940,7 +1940,13 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
         return False
     if _topology_line_mentions_rollback(lowered):
         return True
-    return _topology_mentions_database(_topology_strip_db_absence_claims(lowered))
+    stripped = _topology_strip_db_absence_claims(lowered)
+    if _topology_mentions_database(stripped):
+        return True
+    # #1707 D9: fallback-only database vocabulary. _topology_mentions_database has three
+    # other callers and is pinned must-preserve, so the widening lives here. 库 must stay
+    # compound - 仓库/代码库/图库 are ordinary words in this repository.
+    return any(token in stripped for token in ("本地库", "本机库", "standby", "instance"))
 
 
 def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -> bool:

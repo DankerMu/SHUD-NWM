@@ -17,10 +17,12 @@
 
 - The three positive branches of
   `_topology_line_has_node22_local_postgres_or_mirror_drift` above the fallback
-  stay byte-identical: the port branch (`:1913-1914`), the local-postgres-token
-  branch (`:1915-1927`), and the DSN-token branch (`:1928-1934`).
+  stay byte-identical: the port branch (`:1914-1915`), the local-postgres-token
+  branch (`:1916-1928`), and the DSN-token branch (`:1929-1935`) — each range
+  includes its own `return True`.
 - `_topology_line_mentions_mirror` (6 call sites) and
-  `_topology_mentions_database` (3 other callers) keep their current meaning.
+  `_topology_mentions_database` (3 other callers) keep their current meaning —
+  including under D9, which adds vocabulary at the fallback's call site only.
 - Every other `check_id` in the hard gate keeps its current finding set.
 - The four flagged source files are not edited.
 
@@ -80,6 +82,25 @@ Must keep firing:
 #   -> the postgresql token survives DB-absence removal -> still reported
 #   (meta line for production-topology-node22-db-writer, whose context window is
 #    0 before / 2 after, so its token must sit within two lines of the quote)
+```
+
+Round-1 cross-review added three more, in the vocabulary band D9 covers. Each is
+quoted on its own line under a meta comment naming both sibling check ids,
+because after D9 these lines become live triggers:
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22 本地库通过 mirror 实时同步给 node-27,生产查询直接读取该镜像"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22 hosts the warm standby that mirrors production writes from node-27"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22's local instance mirrors node-27 and is queried when the primary is busy"
 ```
 
 ### D2 — Reject the alternative (grow the exemption list)
@@ -180,10 +201,52 @@ then naming a mirror. Stripping the literal phrase takes the only database token
 with it.
 
 Not handled, deliberately. Detecting negations of negations in mixed-language
-prose costs far more than it buys, and the construction does not occur in this
-repository's writing — its Chinese technical prose is declarative rather than
-double-negated around an English suffix. Recorded so that a future reader finds
-the decision instead of rediscovering the hole.
+prose costs far more than it buys, and the construction does not occur on any
+surface this check scans. It does occur once in the repository —
+`services/orchestrator/retention.py:414` reads "that is not db-free" — but
+`services/` is outside `_production_topology_scan_files`'s roots, so that line
+never reaches this check. Recorded so that a future reader finds the decision
+instead of rediscovering the hole.
+
+### D9 — The fallback carries its own database vocabulary
+
+Round-1 cross-review measured a real recall hole in D1 as first implemented:
+after narrowing, the only surviving database signal is
+`_topology_mentions_database`, whose token set predates this change and is
+narrower than the phrasings real drift uses. Four constructed drift lines were
+checked against both revisions; all four are True on master and False at the
+first HEAD — the loss is created by this diff, not inherited, so it is fixed
+here rather than routed to a follow-up.
+
+The fix adds vocabulary **at the fallback's own call site**, not to
+`_topology_mentions_database`. That helper has three other callers and is pinned
+must-preserve above; widening it would change checks this change has no mandate
+over. The fallback already applies its own call-site rule (DB-absence removal),
+so a call-site token list is the established shape here.
+
+Tokens added, applied to the same DB-absence-stripped text the existing leg
+measures:
+
+- `本地库` and `本机库` — compound only. A bare `库` is unusable: `仓库`,
+  `代码库`, `图库` are ordinary words in this repository.
+- `standby` and `instance` — bare is acceptable here. They are reached only
+  after the `node-22` and mirror terms have both matched, and a whole-repo run
+  with them present produced zero new findings.
+
+Receipt, measured before implementation on the widened predicate: whole-repo
+audit stays at **0** topology findings and **753** total, identical to the
+un-widened HEAD, while three of the four constructed lines come back. None of
+the four false positives this change removes contains any added token, so the
+widening cannot resurrect them, and the must-not-flag tests guard that direction
+automatically.
+
+The fourth constructed line — a compute node whose written output reaches the
+production node through a file mirror, phrased without any database word — is
+**deliberately not pinned in either direction**. It is near-verbatim the
+legitimate state-index file-mirror phrasing this change exists to stop flagging,
+so pinning it either way would encode a debatable adjudication as a test. It is
+the boundary this vocabulary approach cannot decide, and belongs beside D8 as a
+known limit rather than as an assertion.
 
 ## Evidence mapping
 
