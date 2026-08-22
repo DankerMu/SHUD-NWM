@@ -1681,6 +1681,13 @@
           "rounds": 3
         }
       ]
+    },
+    "1398": {
+      "ceilingPrs": [
+        1690
+      ],
+      "gateEntries": 2,
+      "closed": []
     }
   }
 }
