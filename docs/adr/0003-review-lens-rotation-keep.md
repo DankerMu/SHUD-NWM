@@ -562,3 +562,38 @@ grinding, which is the behavior the ceiling exists to protect.
 supporting sample under the auditor's own attribution rule, and the stricter
 reading noted so a future revisit can re-litigate the rule rather than the
 decision.
+
+## Revisit 2026-08-22 (after #1398 / PR #1690)
+
+Auditor now reports 100 multi-round merged PRs, later-round catches
+**core=53 rotated=257** (was 99 / 46 / 250 at the last revisit). PR #1690 is
+the entire delta: 5 comprehensive rounds, the longest loop on record here, and
+it hit the 5-round ceiling.
+
+This sample answers the previous revisit's open question directly, and in
+rotation's favour. Rounds 2 and 3 were focused fix-delta passes — the case the
+stricter reading says should not count as a lens rotation. Rounds 4 and 5 were
+genuine subject-matter rotations, and the decisive catch came from one of them:
+the `oracle-integrity / regression-safety / script-correctness` lens found a
+**P1 in the corrective machinery the documentation lens had just written and
+signed off** — a sweep script that silently dropped a declared carrier and still
+exited 0, while the Evidence Floor item's pass condition was literally "the
+script exits 0". The documentation lens, run in parallel on the same head, read
+that same script and reported its self-description accurate. A single-lens loop
+would have merged an Evidence Floor oracle that reports PASS with its own stated
+scope unmet.
+
+So: under the stricter reading, this PR contributes 2 rounds of *real* rotation
+and 1 P1 that only the rotated-in lens could have found, because the lens that
+would otherwise own the surface was the same one that authored it. That is the
+strongest single argument in the ledger for rotation, and it is a specific
+mechanism rather than a count: **rotate at least one lens off the surface its
+own previous round produced.**
+
+Counter-note, recorded so the numbers are not read as stronger than they are:
+one PR moving the aggregate by 7 core / 7 rotated shows how thin the
+multi-round sample still is, and #1690's five rounds were themselves partly
+self-inflicted — four of them chased a recurring defect in the fixture's own
+meta-checklist, not in the deliverable.
+
+**Keep rotation**, and record the sharper form above as the reason.
