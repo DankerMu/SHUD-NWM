@@ -759,3 +759,59 @@ review.
   C3 上 test-evidence 镜断言某测试覆盖「循环内 `M1 == M1'` 检查」，而循环里根本没有该
   检查。这两条支持的不是「轮换」，而是**「reviewer 出候选、verifier 独立裁决」这层分工**：
   镜的数量买不到这个，独立裁决才买得到。
+
+## Revisit 2026-08-22 (after #1326 / PR #1680)
+
+Integrated audit now reports 104 multi-round merged PRs, later-round catches
+**core=59 rotated=264**. The branch-local observation before #1697 merged was
+103 / 55 / 261 from the shared 102 / 54 / 258 baseline; #1326's contribution
+remains **core +1, rotated +3**, while #1697 independently added +4 / +3.
+
+The raw ratio again overstates rotation. Two of the three entries counted as
+`rotated` came from the Phase 6.2 `invariant-audit` gate, not from a
+comprehensive-review free slot. The script sees only a lens name absent from
+Round 1 and therefore folds a different workflow role into rotation, the same
+role-attribution defect already recorded for fixture and final-review gates.
+Only one rotated catch is a genuine reviewer-lens sample: the Round 2
+`invariant-state-machine-compatibility` lens found the P1 multi-hop path where
+an empty-ID `submission_failed` hop erased an earlier confirmed Slurm master.
+
+The `core +1` is also real: pinned `test-evidence` found that the production-
+reachable normal-start indexed replacement had no committed oracle even though
+the restart-at-forecast trailing form did. Both catches bought necessary work:
+the first forced the depth redesign from adjacent-result copying to a
+stage-loop provenance owner; the second forced a distinct indexed real-path
+test so the redesign could not mask caller wiring.
+
+This is a clean argument for the **additive** policy the ADR actually chose:
+keep the core pinned for fix-regression/coverage recall, and rotate a free slot
+for sibling-state/history depth. It is not evidence that `261 / 55` is a
+trustworthy effect size; two-thirds of this PR's apparent rotated increment is
+a gate-role classification artifact.
+
+**Keep rotation.** No policy change. The same prerequisites remain before any
+autonomous reversal: normalize the `round_lenses` schema, define core from the
+first comprehensive round, and exclude or separately bucket fixture,
+Phase 6.2 invariant-audit, and Phase 7 final-review roles.
+
+## Revisit 2026-08-22 (after #1648 / PR #1710)
+
+The audit now reports **105** multi-round merged PRs and later-round catches
+**core=59 / rotated=264**. Compared with the immediately preceding #1326
+receipt (104 / 59 / 264), #1648 adds one PR to the denominator and **zero** to
+either catch bucket.
+
+That zero is expected and carries no keep/cut information. #1648's only verified
+catch was a Round 1 `concurrency` finding: the newly added post-takeover
+regression could parse a lock file during its parent's truncate/write window.
+Round 2 was a fix-verification pass using only the selected-risk pinned core and
+returned no candidates. No free-slot lens was rotated in, and no later-round
+catch exists to attribute.
+
+Therefore this data point is neither evidence that rotation failed nor new
+evidence that it worked; treating the added denominator as either would repeat
+the measurement error documented above (conflating "no rotation applied" with
+"rotation applied and found nothing"). The cumulative counts still rule out a
+cut under the ADR's default, so **keep rotation** remains unchanged. Any future
+reversal still requires the recorded schema repair and maintainer review; this
+revisit adds no policy change.
