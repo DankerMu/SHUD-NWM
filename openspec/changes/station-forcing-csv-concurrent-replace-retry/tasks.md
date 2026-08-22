@@ -138,9 +138,11 @@ issue #1660 未给 `Verification:` 字段，本节由本 change 自行裁定。
 - [x] 5.4 `uv run ruff check $(git ls-files '*.py')` —— clean。
   （**不要跑 `uv run ruff check .`**，会命中本地未跟踪的 `skills/` 工具。）
 - [x] 5.5 `openspec validate station-forcing-csv-concurrent-replace-retry --strict --no-interactive` —— valid。
-- [ ] 5.6 按 `CLAUDE.md` 的 oracle 路由，5.1/5.2 在 **node-27** 上复跑一遍并贴 receipt。
-  实测 @ `c7944458`：5.1 `75 passed, 4 skipped`；5.2 `159 passed, 4 skipped`——与本地逐项一致。
-  跑完已 `git checkout master` 还原生产树，`git status --porcelain` 空。
+- [x] 5.6 按 `CLAUDE.md` 的 oracle 路由，5.1/5.2 在 **node-27** 上复跑一遍并贴 receipt。
+  round-1 审查修复后重测 @ `88b92d89`：5.1 `86 passed, 4 skipped`；5.2 `160 passed, 4 skipped`
+  ——与本地逐项一致。（修复前 @ `c7944458` 为 5.1 `75`/5.2 `159`；差额 = 5.1 命令新纳入
+  `tests/test_forecast_api_met_station_series.py` 的 10 个既有 route 用例 + 新增的 3.9。）
+  两次跑完均已 `git checkout master` 还原生产树，`git status --porcelain` 空。
   **本 change 不欠 node-27 C1-C4 live receipt**：改动落在共享库的读路径语义上，
   不涉及 display 生产化、只读边界或 cross-plane identity（`docs/runbooks/node-27-bringup-checklist.md`
   C1-C4 的触发条件），evidence 以真机 pytest 为准。
