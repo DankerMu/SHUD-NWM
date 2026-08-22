@@ -1647,8 +1647,25 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   必须在 `t*` 之前修好 mirror；在
   `NHMS_REQUIRE_FORECAST_WARM_START=true` 下，未修好的后果是本轮停摆（fail-safe），
   不是算错。
-- 调度准入侧**零改动**：克隆行带 `M1'` 的 `model_id` + `model_package_version` +
+- 调度**准入**侧零改动：克隆行带 `M1'` 的 `model_id` + `model_package_version` +
   `model_package_checksum`，`_validate_state_lineage` 按既有口径接收。
+- **rollout 不再重开 backfill 窗口**（#1735，2026-08-22 事故的修复）：`M1'` 是新的
+  content-derived `model_id`，`t*` 之前它没有任何 pipeline 历史。修复前每个
+  completeness 判据都只按 `model_id` 匹配，于是 336h lookback 里的全部 cycle 从
+  `complete` 翻成 `gap`，backfill 把自己钉在一个 `M1'` 永远关不掉的 cycle 上，前向
+  lane 饿死。现在 scheduler 会读克隆行的 `cloned_from_model_id` / `valid_time`：
+  **cycle_time < t\* 的 cycle 不把 `M1'` 计入完成度、也不为它建 candidate**（按
+  `(model_id, source_id)` 各自解析，GFS/IFS 可以在不同时刻切换；边界严格，
+  `cycle_time == t*` 照常打分、照常从克隆行 warm start）。
+  - 值守判读：pass evidence 里出现 `type=lineage_scoped_out_pre_cutover` 的条目，
+    带被排除的 `model_id`、`predecessor_model_id` 和 `cutover_valid_time` ——
+    这是「因为还不存在而没被打分」，不是「所有模型都真的跑完了」。它只是注记，
+    不参与任何判定。
+  - 不需要清理旧数据：停摆期间写下的 `M1'` journal 行会因为出了 scope 而自然失效，
+    没有迁移动作。
+  - 一个**已接受**的取舍：`t*` 之前由已退休的 `M` 遗留的真实缺口，切换后不再显示为
+    gap（`M` 已不在 active model set，`M1'` 被 scope 掉）。反正调度器两边都关不掉它，
+    而钉死的 cycle 会饿死前向 lane；上面那条 evidence 注记就是它的可见性落点。
 
 背景与被否决的替代方案见 [`docs/adr/0005-recalibration-state-carryover.md`](../adr/0005-recalibration-state-carryover.md)。
 

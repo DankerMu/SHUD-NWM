@@ -1340,3 +1340,146 @@ def test_cutover_boundary_predecessor_admitted_despite_operator_action_flag(
     assert (
         records[0]["predecessor_cycle_time"] == predecessor_cycle_time.isoformat()
     ), records
+
+
+# ---------------------------------------------------------------------------
+# #1735 trap 3: the emitter must not prepend a candidate at a cycle that
+# predates that model's own state-lineage cutover.  A recalibrated model's
+# clone row makes ``exists_any_generation`` True at EVERY cycle, so a pre-``t*``
+# submission blocks as ``block_predecessor_pending`` and this path answers by
+# synthesizing a candidate at an even earlier cycle — the backward-recursion
+# dead chain observed on node-22 (four ``M1'`` blocks at ``2026080700``, a
+# cycle outside the 336h window and reachable only by prepending).
+# ---------------------------------------------------------------------------
+
+
+def _lineage_resolver(cutover_time: datetime, *, model_id: str = "model_a", source_id: str = "gfs") -> Any:
+    from services.orchestrator import scheduler_lineage
+
+    def _resolve(requested_model_id: str, requested_source_id: str) -> Any:
+        if requested_model_id != model_id or requested_source_id != source_id:
+            return None
+        return scheduler_lineage.LineageCutover(
+            model_id=model_id,
+            source_id=source_id,
+            predecessor_model_id="model_a_legacy",
+            cutover_time=cutover_time,
+            clone_gate_kind="state_compatibility",
+        )
+
+    return _resolve
+
+
+def test_emit_predecessor_refuses_a_prepend_before_the_models_own_cutover(
+    monkeypatch: Any,
+) -> None:
+    """5.6: cycle ``t*`` selected ⇒ no prepend of ``M'`` at ``t*-12h``."""
+    _wire_manifest_ready(monkeypatch)
+    cutover_time = _dt("2026-07-06T12:00:00Z")
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=cutover_time,
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [successor]
+
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        lineage_cutover_for_model_source=_lineage_resolver(cutover_time),
+    )
+
+    assert candidates == []
+    assert [entry.candidate_id for entry in blocked] == ["cand_gfs_2026070612_model_a"]
+    assert [record["status"] for record in evidence] == ["skipped"]
+    assert evidence[0]["reason"] == "lineage_scoped_out_pre_cutover"
+    assert evidence[0]["predecessor_cycle_time"] == _dt("2026-07-06T00:00:00Z").isoformat()
+    assert evidence[0]["lineage"]["predecessor_model_id"] == "model_a_legacy"
+    assert evidence[0]["lineage"]["cutover_valid_time"] == "2026-07-06T12:00:00Z"
+
+
+def test_emit_predecessor_without_a_resolver_still_prepends(monkeypatch: Any) -> None:
+    """Fixture guard for the test above: the prepend is what the guard removes."""
+    _wire_manifest_ready(monkeypatch)
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+
+    _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=[successor],
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]
+
+
+def test_emit_predecessor_at_or_after_the_cutover_is_unchanged(monkeypatch: Any) -> None:
+    """The boundary is strict: a predecessor cycle AT ``t*`` is still emitted."""
+    _wire_manifest_ready(monkeypatch)
+    predecessor_cycle_time = _dt("2026-07-06T00:00:00Z")
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=[successor],
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        lineage_cutover_for_model_source=_lineage_resolver(predecessor_cycle_time),
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [predecessor_cycle_time]
+    assert [record["status"] for record in evidence] == ["emitted"]
+
+
+def test_emit_predecessor_lineage_guard_is_scoped_to_the_matching_model(
+    monkeypatch: Any,
+) -> None:
+    """A cutover on a different model must not suppress this model's prepend."""
+    _wire_manifest_ready(monkeypatch)
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+
+    _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=[successor],
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        lineage_cutover_for_model_source=_lineage_resolver(
+            _dt("2026-07-06T12:00:00Z"), model_id="model_b"
+        ),
+    )
+
+    assert [entry.cycle_time_utc for entry in candidates] == [_dt("2026-07-06T00:00:00Z")]

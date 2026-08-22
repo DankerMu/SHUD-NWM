@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_generation as _scheduler_generation
+from services.orchestrator import scheduler_lineage as _scheduler_lineage
 from services.orchestrator.chain_source_cycle import (
     RAW_MANIFEST_READY_CYCLE_STATUSES,
     _raw_manifest_uri_matches_source_cycle,
@@ -195,6 +196,14 @@ class SchedulerCandidateConstructionContext:
         [SchedulerCandidateLike, SchedulerSourceCycleLike],
         int,
     ] | None = None
+    # #1735: same resolver the completion scope uses, applied symmetrically at
+    # cohort construction so a model is never submitted for a cycle that
+    # predates its own state-lineage cutover.  Optional — ``None`` means no
+    # lineage is resolvable here and every model is admitted as before.
+    lineage_cutover_for_model_source: Callable[
+        [str, str],
+        _scheduler_lineage.LineageCutover | None,
+    ] | None = None
     max_candidates: int = MAX_CANDIDATES
 
 
@@ -272,6 +281,33 @@ def build_candidates(
                 duplicate_exclusions.append({"type": "candidate", **exclusion})
                 continue
             seen_candidate_ids.add(candidate.candidate_id)
+            # #1735 §3.1: symmetric with the completion-scope filter — a model
+            # whose own state-lineage cutover ``t*`` for this source is later
+            # than the cycle time did not exist yet, so it must not be
+            # submitted for that cycle.  Without this the pre-``t*`` candidate
+            # lands on ``block_predecessor_pending`` (its clone row makes
+            # ``exists_any_generation`` True at EVERY cycle) and §8.6 prepends
+            # a predecessor at an even earlier cycle — the backward-recursion
+            # dead chain.  Strict boundary: ``cycle_time == t*`` is admitted.
+            lineage_cutover = _model_lineage_cutover(context, model, discovery)
+            if lineage_cutover is not None and _scheduler_lineage.is_pre_cutover(
+                lineage_cutover, discovery.cycle_time
+            ):
+                skipped.append(
+                    {
+                        **candidate.to_dict(),
+                        "status": "excluded",
+                        "reason": _scheduler_lineage.LINEAGE_SCOPED_OUT_REASON,
+                        "state_evidence": _evidence_safe(
+                            _scheduler_lineage.lineage_scoped_out_record(
+                                lineage_cutover,
+                                cycle_time=discovery.cycle_time,
+                                cycle_id=discovery.cycle_id,
+                            )
+                        ),
+                    }
+                )
+                continue
             raw_candidate_state: Mapping[str, Any] | None = None
             state_decision: CandidateStateDecision | None = None
             candidate_state_classified = False
@@ -1088,6 +1124,10 @@ def build_candidates(
         # cap projection matches ``candidates + blocked + skipped`` at line
         # 185; otherwise admitted predecessors can silently breach the cap.
         skipped=skipped,
+        # #1735 §3.2: the emitter must never prepend a predecessor candidate
+        # at a cycle earlier than that model's own cutover — that prepend is
+        # what recurses backward out of the window.
+        lineage_cutover_for_model_source=context.lineage_cutover_for_model_source,
     )
     if predecessor_emission_evidence:
         _bf.attach_emission_summary_to_blocked(
@@ -1137,6 +1177,23 @@ def _source_blocked_evidence(candidate: SchedulerCandidateLike, discovery: Cycle
     if discovery.evidence:
         evidence["source_discovery"] = _source_discovery_evidence_safe(discovery.evidence)
     return _evidence_safe(evidence)
+
+
+def _model_lineage_cutover(
+    context: SchedulerCandidateConstructionContext,
+    model: SchedulerModelLike,
+    discovery: CycleDiscovery,
+) -> _scheduler_lineage.LineageCutover | None:
+    """This model's own state-lineage cutover for this cycle's source (#1735).
+
+    ``None`` — no resolver wired, or the model never cloned — leaves the
+    model admitted exactly as before this change.
+    """
+
+    resolver = context.lineage_cutover_for_model_source
+    if not callable(resolver):
+        return None
+    return resolver(str(model.model_id), str(discovery.source_id))
 
 
 def _direct_grid_model_source_is_out_of_scope(

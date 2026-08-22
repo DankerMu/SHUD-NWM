@@ -3,6 +3,7 @@ from __future__ import annotations
 from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_generation as _generation
 from services.orchestrator import scheduler_generation_gate as _generation_gate
+from services.orchestrator import scheduler_lineage as _scheduler_lineage
 
 # Issue #1081 §8.1: sentinel that separates "declaration not yet loaded" from
 # "loaded and returned ``None``" (env unset — no declaration configured).
@@ -139,6 +140,18 @@ class ProductionScheduler:
         # Sentinel ``_UNLOADED`` distinguishes "not yet loaded" from "loaded
         # and returned None" (env unset — no declaration configured).
         self._cutover_declaration_cache: _scheduler.Any = _CUTOVER_DECLARATION_UNLOADED
+        # #1735: per-``(model_id, source_id)`` state-lineage cutover, memoized
+        # for the pass.  The discovery / candidate contexts are rebuilt per
+        # call, so the cache must live on the scheduler; it is cleared with
+        # the other file-provider caches so a recalibration landing mid-run
+        # is picked up on the next pass rather than at process restart.
+        self._lineage_cutover_cache: dict[
+            tuple[str, str], _scheduler_lineage.LineageCutover | None
+        ] = {}
+        # Sentinel-free: ``None`` means "not yet resolved"; a failed build is
+        # remembered as ``False`` so a missing DATABASE_URL is not retried
+        # once per (model, cycle).
+        self._lineage_provider_cache: _scheduler.Any = None
 
     @classmethod
     def from_env(cls, config: _scheduler.ProductionSchedulerConfig | None = None) -> _scheduler.ProductionScheduler:
@@ -310,6 +323,11 @@ class ProductionScheduler:
         # aligned with a single-pass reload while ``run_once`` remains the
         # planning boundary.
         self._cutover_declaration_cache = _CUTOVER_DECLARATION_UNLOADED
+        # #1735: the lineage cutover is derived from the same file state index
+        # that was just refreshed, so it must not outlive it — otherwise a
+        # recalibration landing mid-``run_continuous`` stays invisible until
+        # process restart and the next rollout re-wedges the scheduler.
+        self._lineage_cutover_cache = {}
 
     def _produce_forcing_for_candidates(
         self, candidates: _scheduler.Sequence[_scheduler.SchedulerCandidate]
@@ -522,6 +540,7 @@ class ProductionScheduler:
             discover_source_window_provider=self._discover_source_window,
             cycle_completion_status_provider=self._cycle_completion_status,
             required_lead_hours_for_candidate=self._required_warm_start_lead_hours,
+            lineage_cutover_for_model_source=self._lineage_cutover_for_model_source,
         )
 
     def _cycle_completion_status(
@@ -677,6 +696,47 @@ class ProductionScheduler:
         return _scheduler.OrchestratorConfig.from_env().strict_forecast_warm_start_required_for(
             candidate.cycle_time_utc
         )
+
+    def _lineage_provider(self) -> _scheduler.Any | None:
+        """The plane-appropriate source of clone provenance for #1735.
+
+        db-free: the file state-snapshot index repository the pass has
+        already loaded.  DB plane: the state-snapshot repository's
+        earliest-clone-row read.  A DB plane without a usable connection
+        yields ``None`` — "no lineage resolvable", which leaves every model
+        scored exactly as before this change — and the failure is remembered
+        so it is not retried once per (model, cycle).
+        """
+        if self._lineage_provider_cache is False:
+            return None
+        if self._lineage_provider_cache is not None:
+            return self._lineage_provider_cache
+        if self.config.db_free_required:
+            provider: _scheduler.Any | None = self._db_free_state_index_provider()
+        else:
+            from packages.common.state_manager import PsycopgStateSnapshotRepository
+
+            try:
+                provider = PsycopgStateSnapshotRepository.from_env()
+            except Exception:  # noqa: BLE001 — no DB reachable means no lineage
+                provider = None
+        if provider is None:
+            self._lineage_provider_cache = False
+            return None
+        self._lineage_provider_cache = provider
+        return provider
+
+    def _lineage_cutover_for_model_source(
+        self, model_id: str, source_id: str
+    ) -> _scheduler_lineage.LineageCutover | None:
+        key = (str(model_id), str(source_id))
+        if key in self._lineage_cutover_cache:
+            return self._lineage_cutover_cache[key]
+        cutover = _scheduler_lineage.resolve_lineage_cutover(
+            self._lineage_provider(), model_id=key[0], source_id=key[1]
+        )
+        self._lineage_cutover_cache[key] = cutover
+        return cutover
 
     def _db_free_state_index_provider(self) -> _scheduler.FileStateSnapshotIndexRepository:
         if self._db_free_state_index_repository is None:
@@ -891,6 +951,7 @@ class ProductionScheduler:
             repaired_state_audit_evidence_builder=_scheduler._candidate_repaired_state_audit_evidence,
             successor_state_for_candidate=self._successor_warm_start_state_for_candidate,
             required_lead_hours_for_candidate=self._required_warm_start_lead_hours,
+            lineage_cutover_for_model_source=self._lineage_cutover_for_model_source,
             max_candidates=_scheduler.MAX_CANDIDATES,
         )
 

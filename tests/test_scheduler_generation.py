@@ -4906,3 +4906,71 @@ def test_readable_warm_start_env_logs_no_unreadable_warning(
         for record in caplog.records
         if _UNREADABLE_TOKEN in record.getMessage()
     ] == []
+
+
+# ---------------------------------------------------------------------------
+# #1735 (`lineage-scoped-cycle-completion`) 5.3, generation surface: a model
+# with no clone lineage must keep its history-existence signal and its
+# first-cycle / cold-start admission byte-for-byte.  The change touches
+# completion scope and cohort membership only — ``generation_scoped_history_
+# signal`` is explicitly NOT touched.
+# ---------------------------------------------------------------------------
+
+
+def test_model_without_clone_lineage_keeps_the_first_cycle_cold_start_branch(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import scheduler_lineage
+    from tests.lineage_state_index_fixtures import index_entry as _lineage_entry
+    from tests.lineage_state_index_fixtures import index_repository as _lineage_repository
+
+    object_root = tmp_path / "lineage" / "objects"
+    repo = _lineage_repository(
+        tmp_path / "lineage",
+        [
+            # Someone else's recalibration sits in the very same index.
+            _lineage_entry(
+                object_root=object_root,
+                model_id="model_other_prime",
+                valid_time="2026-07-06T00:00:00Z",
+                cloned_from_model_id="model_other",
+            )
+        ],
+        generated_at="2026-07-06T00:00:00Z",
+        now="2026-07-06T12:00:00Z",
+    )
+
+    # No lineage for this model — resolution yields None, never an error.
+    assert (
+        scheduler_lineage.resolve_lineage_cutover(repo, model_id="model_new", source_id="gfs")
+        is None
+    )
+
+    signal_evidence = repo.generation_scoped_history_signal(
+        model_id="model_new",
+        source_id="gfs",
+        before_time=_dt("2026-07-06T12:00:00Z"),
+        current_package_checksum=NEW_CHECKSUM,
+    )
+    assert signal_evidence["ready"] is True
+    assert signal_evidence["history_exists_any_generation"] is False
+    assert signal_evidence["history_exists_current_generation"] is False
+
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_new",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=generation._HistorySignal(
+            exists_current_generation=bool(
+                signal_evidence.get("history_exists_current_generation")
+            ),
+            exists_any_generation=bool(signal_evidence.get("history_exists_any_generation")),
+        ),
+        declaration=None,
+    )
+
+    assert evaluation.decision == generation.TransitionDecision.COLD_NEW_MODEL
+    assert evaluation.cold_start_reason == "no_prior_history"
+    assert evaluation.typed_reason is None
