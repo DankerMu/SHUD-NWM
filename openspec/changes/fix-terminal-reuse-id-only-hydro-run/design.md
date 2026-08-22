@@ -130,10 +130,20 @@ guard asserts the divergence rather than forbidding it.
 
 ## Dead dedup gates verdict (issue acceptance item 5)
 
-The three duplicate-pipeline dedup gates in `scheduler_candidates.py` — the two
-`active_duplicate_pipeline` gates and the `completed_duplicate_pipeline` gate,
-located by those reason strings inside `build_candidates` — each carry a
-`not callable(state_provider)` conjunct. `state_provider` is
+Three duplicate-pipeline dedup gates in `build_candidates`
+(`scheduler_candidates.py`) each carry a `not callable(state_provider)`
+conjunct. They sit in the discovery loop **ahead of** the strict-warm-start
+resolution, and are identified by their guards, not by line number:
+
+1. `has_active_orchestration and not cancel_active_slurm and not callable(state_provider)` → `active_duplicate_pipeline`
+2. `not cancel_active_slurm and not callable(state_provider) and active_repository.has_active_pipeline(...)` → `active_duplicate_pipeline`
+3. `completed_provider(...) and strict_warm_start is None and not callable(state_provider) and _successor_state_terminal_can_skip(...)` → `completed_duplicate_pipeline`
+
+A **fourth** site (`cycle_active_blocks_candidate`) also combines
+`not callable(state_provider)` with the `active_duplicate_pipeline` reason
+string, but sits **after** the strict-warm-start resolution and is guarded
+additionally by `candidate_state_scoped_retry_detector`. It is a different gate,
+explicitly **out of scope** here — neither audited nor changed. `state_provider` is
 `getattr(active_repository, "candidate_state", None)` (`:239`). Both production
 planes implement it — DB `chain_repository.py:113`, file
 `file_orchestration_journal.py:824` / `scheduler_file_providers.py:535` — so all
