@@ -592,8 +592,23 @@ class FileOrchestrationJournalRepository:
             for job in _current_terminal_jobs(rows.pipeline_jobs.values())
             if _job_matches_candidate(job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
         ]
+        # Visibility stays WIDE (candidate_jobs still includes the foreign
+        # named exact cycle-run row, keeping duplicate-submission scans broad),
+        # but terminal-completion suppression authority is candidate-scoped:
+        # only the candidate's own or model-less cohort completion may mark a
+        # stale ACTIVE hydro placeholder as superseded.  A foreign named
+        # completion is not this candidate's completion, so it cannot suppress
+        # the hydro-active arm — the DB counterpart's source/cycle/model ACTIVE
+        # hydro arm is a plain `UNION ALL` member with no terminal-suppression
+        # clause (`chain_repository.py:57-96`) and answers True on the same
+        # shape (#1472).
         has_terminal_completion = any(
-            _job_is_terminal_success(job) and _job_is_current_terminal_completion(job) for job in candidate_jobs
+            _job_is_terminal_success(job)
+            and _job_is_current_terminal_completion(job)
+            and not _is_foreign_model_cycle_scope_job(
+                job, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id
+            )
+            for job in candidate_jobs
         )
         hydro_run = rows.hydro_run
         if _row_matches_candidate(hydro_run, source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id):
@@ -881,17 +896,19 @@ class FileOrchestrationJournalRepository:
         # duplicate-submission gates (`has_active_pipeline`,
         # `active_slurm_jobs`), whose DB counterparts match the cycle run id
         # UNCONDITIONALLY (`chain_repository.py:74-79` and `:177-181`), so those
-        # two gates keep answering wide.  That wide visibility is NOT uniformly
-        # permissive, and this paragraph is no warrant for leaving the active
-        # side alone: `has_active_pipeline` runs its own local
-        # `has_terminal_completion` over the same unnarrowed rows (`:534-536`),
-        # so on the composite shape — a foreign model's completion row beside
-        # this candidate's ACTIVE hydro run — the wide visibility INVERTS into a
-        # suppression of the hydro-active arm and the gate answers False, where
-        # the DB counterpart's plain UNION (`chain_repository.py:57-95`) has no
-        # such clause and answers True.  That divergence is issue #1472, pinned
-        # by `test_foreign_model_completion_row_suppresses_the_hydro_active_arm`.
-        # `has_completed_pipeline` has no DB
+        # two gates keep answering wide.
+        #
+        # Row visibility and suppression authority are two different axes.  The
+        # duplicate-submission gates' wide ROW VISIBILITY is deliberate: an exact
+        # cycle-run row of another model must keep entering `candidate_jobs` /
+        # `active_slurm_jobs` so a duplicate submission is still detected.  But
+        # terminal-completion SUPPRESSION AUTHORITY is candidate-scoped: a
+        # foreign named exact cycle-run completion is not this candidate's
+        # completion, so `has_active_pipeline`'s local terminal-completion
+        # conjunction excludes it — the DB counterpart's source/cycle/model
+        # ACTIVE hydro arm is a plain `UNION ALL` member with no terminal-
+        # suppression clause (`chain_repository.py:57-96`), and answers True on
+        # the composite shape (#1472).  `has_completed_pipeline` has no DB
         # job-row counterpart at all (`chain_repository.py:98-111` reads
         # `hydro.hydro_run` only) — but that DB gate's source/cycle/model
         # three-key restriction fixes the DIRECTION the journal side must answer
