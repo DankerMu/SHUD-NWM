@@ -135,7 +135,7 @@ Every row below is a required test with named input and expected output.
   single-root enumeration; (c) absent on both → admitted and `covered_paths`
   contains `lake:<basin>.sp.mesh`. (Rows 4, 5.)
 - [x] 6.5 Fix-forward regression: `uv run pytest -q tests/test_state_clone.py
-  tests/test_state_clone_hook.py tests/test_mapping_builder_rewrite.py` green
+  tests/test_state_clone_cutover_hook.py tests/test_mapping_builder_rewrite.py` green
   with no test edits; all six existing refusal scopes still reachable; the
   ten-label coverage assertion at `tests/test_mapping_builder_rewrite.py:1342`
   untouched. Plus a new test: `fix_forward` with
@@ -179,7 +179,13 @@ Every row below is a required test with named input and expected output.
   names pair 2 in `failed_pair`, carries `invocation_outcome="aborted"`, and the
   original exception still propagates. Plus: a first/only-pair refusal still
   writes NO receipt (`cloned_pair_count == 0`), and a dry-run mid-batch refusal
-  writes neither index nor receipt. The guarantee is control-flow-shaped — the
+  writes neither index nor receipt. Discrimination is carried by the bundle, not
+  by every test in it: three of these four outcome tests are red against the
+  pre-fix source, while the dry-run one is green pre-fix by construction — it
+  pins the *guard's key* (`cloned_pair_count > 0`, i.e. "a pair was applied",
+  not "a pair was processed") and is the only test in the CLI suite that catches
+  a `len(pair_records) > 0` mis-implementation. The guarantee is
+  control-flow-shaped — the
   loop body is wrapped whole, exception types are NOT enumerated — because the
   refusal branch is only one of several in-loop raisers (empty non-lake category
   union, `DirectGridProvisionError`, `UnknownCategoryError`/`SpAttRewriteError`
@@ -213,6 +219,42 @@ Every row below is a required test with named input and expected output.
   `000046`'s column-only-forward-upgrade test: exactly one `ADD COLUMN`, one
   `ALTER TABLE`, only `hydro.state_snapshot` touched, no destructive DDL tokens,
   and the `state_snapshot_model_source_valid_time_key` unique index untouched.
+
+### 6.15 — round-2 cross-review 裁决（PR #1706）
+
+Round 2 (6 reviewers, head `2b9facee`) verified four candidates; highest severity
+P2, so the round records **clean** under the severity-rationing rule and no
+comprehensive round 3 is bought. Dispositions:
+
+- [x] 6.15a **Receipt-write masking (R2-A, CONFIRMED P2) — DEFERRED with
+  routing, not fixed here.** `_write_receipt`'s `O_EXCL` failure can displace
+  the abort reason because the write at
+  `scripts/node22_clone_direct_grid_cutover_states.py:567-568` precedes
+  `raise aborted_error`; the mirror branch is unguarded by `cloned_pair_count`
+  and reproduces with a single pair. Introduced by round-1 commit `2b9facee`. A
+  code fix to that abort path is `semantic`, and buying a comprehensive round
+  for a P2 alone is forbidden by the rule, so it is routed to a tracked issue
+  (sibling of the `run()` gap) and mitigated here doc-only: the runbook's
+  canonical command block no longer hardcodes a fixed receipt path, killing the
+  most likely collision trigger — and with it the clean-run `FileExistsError`
+  trip hazard on #1698's second per-basin invocation.
+- [x] 6.15b **Receipt `pairs` membership rule corrected (R2-B, CONFIRMED P3).**
+  The runbook's "`pairs` 里只有已完成的对" is false for
+  `failure_kind=mirror_write_failed`: that pair IS appended (`:478-501` runs
+  before the mirror flag is read back at `:520-531`) and IS counted in
+  `cloned_pair_count`. The runbook and the in-code comment at `:551` now state
+  one rule covering both failure kinds, and direct the operator to judge per-pair
+  success from `failed_pair`/`failure_kind` + `state_index_outcomes`, never from
+  membership in `pairs`.
+- [x] 6.15c **Row 6.5's verification command was unrunnable (R2-C, CONFIRMED
+  P3).** `tests/test_state_clone_hook.py` never existed on any ref; the real
+  file is `tests/test_state_clone_cutover_hook.py`. Corrected above — the fixed
+  command runs 127 passed.
+- [x] 6.15d **Row 6.10 non-discriminating sub-claim (R2-D, CONFIRMED but
+  DISCARDed, P4/Note).** No sentence in 6.10 was false and the row never claimed
+  per-test discrimination, so no oracle rung was violated; a clarifying clause
+  rode along in 6.10 anyway. The dry-run test stays — it is the only test that
+  catches a `len(pair_records) > 0` mis-implementation of the guard.
 
 ## 7. Verification commands
 

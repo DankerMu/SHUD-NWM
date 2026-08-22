@@ -1355,6 +1355,8 @@ export PATH=$HOME/.local/bin:$PATH
 CANONICAL=/ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
 MIRROR=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
 REGISTRY=/scratch/frd_muziyao/nhms-prod/object-store/scheduler/registry/manifest-last.json
+RECEIPT_DIR=/scratch/frd_muziyao/nhms-prod/workspace/recalibration
+RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，receipt 路径不得重复
 
 # 1) dry-run：跑完全部校验与八面门，但不写任何索引行
 uv run python -m scripts.node22_clone_direct_grid_cutover_states \
@@ -1365,12 +1367,12 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   --variant-registry "$REGISTRY" \
   --pairs huai_dg_gfs_v1:huai_dg_gfs_v2,huai_dg_ifs_v1:huai_dg_ifs_v2 \
   --cutover-time 2026081512 \
-  --receipt /scratch/frd_muziyao/nhms-prod/workspace/recalibration/dry-run.json
+  --receipt "$RECEIPT_DIR/$RUN_TAG-dry-run.json"
 
 # 2) 逐项核对 dry-run receipt 后再执行（--apply）
 uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   ... 同上 ... --apply \
-  --receipt /scratch/frd_muziyao/nhms-prod/workspace/recalibration/apply.json
+  --receipt "$RECEIPT_DIR/$RUN_TAG-apply.json"
 ```
 
 判读口径：
@@ -1388,10 +1390,24 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   `evidence_fingerprint_cross_check=skipped_no_recorded_value`（provision 脚本不记录
   `hydrologic_core_fingerprint`，因此交叉校验显式豁免而非拿刚算出的值自证）。
   receipt 以 `O_EXCL` 写入，路径已存在会直接失败——不要覆盖旧 receipt。
+- **每次调用必须用互不相同的 receipt 路径**（按流域 + `t*` 命名，如
+  `huai-2026081512-dry-run.json`）：`O_EXCL` 下重复路径会让一次本来干净的调用直接失败
+  （post-loop 写 receipt 时 `FileExistsError`），而实际上什么问题都没有。逐流域跑、
+  同一流域 dry-run 与 `--apply` 各一次，路径都要各自唯一。
 - **先看 `invocation_outcome`**：`complete` = 每一对都跑到了记录结果；`aborted` = 中途
   停了，`failed_pair` 指名是哪一对、`failure_kind` 是 `pair_not_completed`（该对被拒
-  或报错）还是 `mirror_write_failed`，`error` 带原文。`pairs` 数组里**只有已完成的
-  对**，失败的那对不在里面；`declared_pair_count` vs `cloned_pair_count` 给出写了几行。
+  或报错）还是 `mirror_write_failed`，`error` 带原文。`declared_pair_count` vs
+  `cloned_pair_count` 给出写了几行。
+  `pairs` 里是每个「跑到记录结果」的对各一条记录：
+  - `failure_kind=pair_not_completed`（loop body 内任何异常：registry 行缺失、包根解析
+    失败、非 direct-grid、跨 source、门拒绝、rewrite 报错）：失败那对**不在** `pairs`
+    里——异常发生在 append 之前。这种 receipt 只有在更早的对已经写入时才会存在。
+  - `failure_kind=mirror_write_failed`：失败那对**在** `pairs` 里，是**最后一条**，
+    `state_index_outcomes.canonical.outcome=written` + `mirror.outcome=not_written` 带错
+    误文本，**并且计入 `cloned_pair_count`**（canonical 行已经落地）。这种失败只可能在
+    `--apply` 下出现（mirror 写入本身由 `args.apply` 把关）。
+  - 因此：判断单对成败一律看 `failed_pair` / `failure_kind` 与 `state_index_outcomes`，
+    **不要**用「在不在 `pairs` 里」推断。
 - **spin-up 失真告知义务保留**：warm carry-over 的失真小于冷启动但不为零，receipt
   里的 `spin_up_distortion_announcement` 是这条义务的落点。
 - 被拒绝时（`refusal_scope=state_compatibility_unequal`）工具非零退出，**索引状态取决

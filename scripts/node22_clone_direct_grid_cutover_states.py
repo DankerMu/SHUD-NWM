@@ -548,7 +548,11 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
         # clean one: ``complete`` means every declared pair ran through to a
         # recorded outcome, ``aborted`` means the loop stopped early and
         # ``failed_pair`` names the pair that stopped it. ``pairs`` below carries
-        # COMPLETED pair records only.
+        # one record per pair that reached a recorded outcome: a
+        # ``mirror_write_failed`` pair IS there (last record, canonical
+        # ``written``, so it also counts in ``cloned_pair_count``), while a
+        # ``pair_not_completed`` pair is NOT -- it raised before its record was
+        # appended. Never infer a single pair's fate from membership in ``pairs``.
         "invocation_outcome": (
             "aborted" if (aborted_error is not None or mirror_failure is not None) else "complete"
         ),
