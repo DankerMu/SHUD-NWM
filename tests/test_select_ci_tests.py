@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from scripts.select_ci_tests import (
+    BACKEND_PYTHON_SOURCE_PREFIXES,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
@@ -325,6 +326,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_timing.py",
+        # The selector meta-guard joins because retry.py has a same-name
+        # tests/test_retry.py and every same-name source route now schedules it
+        # (round-1 fix: the collision/import contract must run in the PR lane).
+        "tests/test_select_ci_tests.py",
         "tests/test_source_cycle_raw_manifest.py",
         "tests/test_source_scoped_dispatch.py",
         "tests/test_state_clone.py",
@@ -636,57 +641,613 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
-def test_select_tests_same_name_derivation_is_scoped_to_scripts_paths() -> None:
-    # packages/common/state_qc.py has a same-name tests/test_state_qc.py, but the
-    # derivation is scripts/-only: this path must keep today's fallback behavior.
+def test_select_tests_same_name_derivation_covers_all_backend_prefixes() -> None:
+    # Every backend Python prefix gets the basename-derived mapping now, not just
+    # scripts/. packages/common/state_qc.py selects its same-name suite and does
+    # NOT fall back to unknown-backend core smoke; a backend source with no
+    # same-name suite (packages/common/auth_policy.py) keeps the fallback.
     assert Path("tests/test_state_qc.py").is_file()
+    assert not Path("tests/test_auth_policy.py").exists()
 
     selected = select_tests(["packages/common/state_qc.py"], repo_root=Path("."))
 
-    assert "tests/test_state_qc.py" not in selected
+    assert "tests/test_state_qc.py" in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+    fallback = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
+
     for test_path in CORE_SMOKE_TESTS:
-        assert test_path in selected
+        assert test_path in fallback
 
 
-def _tracked_script_same_name_pairs() -> list[tuple[str, str]]:
-    listing = subprocess.run(
-        ["git", "ls-files", "--", "scripts"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+# --------------------------------------------------------------------------
+# Independent exact-prefix boundary oracle (round-1 fix, CAND-01/C-R1-TE-01).
+#
+# The production constant feeds classification, same-name derivation, the
+# tracked-pair completeness guard and the collision scan; a wrong prefix edit
+# shrinks or widens ALL of them together, and the existing direct pins only
+# exercised `packages/`. This matrix independently fixes the contract
+# membership to exactly these five prefixes — no `db/`, no arbitrary `.py`.
+# It is ASSERT-ONLY: it never feeds production derivation, the tracked-tree
+# pathspecs, or any other guard. Each case uses a tmp_path repo_root with a
+# present same-name target, so the derivation must land the same-name route
+# rather than being masked by the unknown-backend core-smoke fallback.
+# --------------------------------------------------------------------------
+SAME_NAME_ROUTING_PREFIX_CONTRACT: tuple[str, ...] = (
+    "apps/api/",
+    "packages/",
+    "services/",
+    "workers/",
+    "scripts/",
+)
+
+
+@pytest.mark.parametrize("prefix", SAME_NAME_ROUTING_PREFIX_CONTRACT)
+def test_each_exact_backend_prefix_routes_a_present_same_name_target_without_core_smoke(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    probe = f"{prefix}surface/same_name_probe.py"
+    suite = "tests/test_same_name_probe.py"
+    suite_path = tmp_path / suite
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    suite_path.write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    selected = select_tests([probe], repo_root=tmp_path)
+
+    assert selected == [suite], f"{prefix}: expected only the same-name suite, got {selected}"
+
+
+def test_prefix_contract_membership_is_exactly_the_five_backend_prefixes() -> None:
+    # The oracle's contract membership must equal the production authority:
+    # the moment the production tuple and this matrix disagree, one side has
+    # drifted and the assertion names which side moved.
+    assert tuple(BACKEND_PYTHON_SOURCE_PREFIXES) == SAME_NAME_ROUTING_PREFIX_CONTRACT
+
+
+@pytest.mark.parametrize(
+    ("probe", "suite", "prefix_label"),
+    [
+        # A .py OUTSIDE the five prefixes with its own present same-name suite.
+        # Widening the domain to any `.py` must red here (the derivation would
+        # otherwise land this route instead of the empty selection).
+        (
+            "infra/probe/outside_domain_probe.py",
+            "tests/test_outside_domain_probe.py",
+            "py-outside-five-prefixes",
+        ),
+        # A non-Python path INSIDE a backend prefix — the derivation must stay
+        # Python-only even though its same-name suite exists.
+        (
+            "workers/surface/same_name_probe.sql",
+            "tests/test_same_name_probe.py",
+            "non-py-inside-backend-prefix",
+        ),
+    ],
+)
+def test_target_present_negative_cases_never_same_name_route(
+    tmp_path: Path,
+    probe: str,
+    suite: str,
+    prefix_label: str,
+) -> None:
+    suite_path = tmp_path / suite
+    suite_path.parent.mkdir(parents=True, exist_ok=True)
+    suite_path.write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    selected = select_tests([probe], repo_root=tmp_path)
+
+    # Both fixture paths match no explicit rule and are not backend shell, so
+    # the honest existing empty-selection semantics hold despite the present
+    # same-name target — and any widening of the backend-python domain that
+    # would route either probe reds here.
+    assert selected == [], f"{prefix_label}: expected empty selection, got {selected}"
+    assert suite not in selected, f"{prefix_label}: same-name suite wrongly selected for {probe}"
+
+
+def test_same_name_victim_pin_is_live_without_fallback() -> None:
+    # The round-1 blind spot, anchored as a direct pin: `workers/` was the
+    # prefix whose removal left every guard green while this real path selected
+    # nothing. The path has no explicit rule and no other rule matches it, so
+    # the pin is exactly the same-name derivation plus the meta-guard rider.
+    source = "workers/grid_registry/shared_binding_eligibility.py"
+    suite = "tests/test_shared_binding_eligibility.py"
+    assert Path(source).is_file()
+    assert Path(suite).is_file()
+    assert not [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(source, rule.pattern)]
+
+    selected = select_tests([source], repo_root=Path("."))
+
+    assert suite in selected
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
+    # The explicit-rule AND same-name scenario (spec "explicit and derived
+    # mappings form a union"): apps/api/runtime_mode.py matches the broad
+    # `apps/api/**` rule AND has a same-name tests/test_runtime_mode.py, so the
+    # selection must be the union — the explicit targets surviving alongside
+    # the derived suite, never replaced by it. The explicit side is read from
+    # the one matching live rule (rather than a frozen list) so the two target
+    # sets cannot drift from the rule table.
+    path = "apps/api/runtime_mode.py"
+    same_name_target = "tests/test_runtime_mode.py"
+    assert Path(same_name_target).is_file()
+    matching = [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(path, rule.pattern)]
+    assert len(matching) == 1, f"expected exactly one explicit rule for {path}, got {matching}"
+
+    selected = select_tests([path], repo_root=Path("."))
+
+    # SET union, mirroring the caller's deduplicating semantics: the derived
+    # target must not replace the explicit ones, and an explicit rule that later
+    # also names it must not false-red the pin. The selector meta-guard joins
+    # every same-name source route, so it is part of the union here.
+    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST})
+
+
+# The `git ls-files` pathspecs for the same-name derivation are derived from the
+# selector's OWN backend-prefix authority (`BACKEND_PYTHON_SOURCE_PREFIXES`,
+# imported from scripts/select_ci_tests.py) by stripping the trailing `/` — not
+# a second five-prefix tuple. A prefix added or removed on the production side
+# moves the tracked-tree derivation with it.
+_SAME_NAME_LS_FILES_PATHSPECS: tuple[str, ...] = tuple(
+    prefix.removesuffix("/") for prefix in BACKEND_PYTHON_SOURCE_PREFIXES
+)
+
+
+def _tracked_same_name_pairs() -> list[tuple[str, str]]:
+    """Tracked (source, existing same-name suite) pairs under the five prefixes.
+
+    Derived from `git ls-files`, never frozen: a source/suite pair added to any
+    backend prefix is covered the moment it lands.
+    """
     pairs: list[tuple[str, str]] = []
-    for line in listing.stdout.splitlines():
-        script_path = line.strip()
-        if not script_path.endswith(".py"):
-            continue
-        same_name_test = f"tests/test_{PurePosixPath(script_path).stem}.py"
-        if Path(same_name_test).is_file():
-            pairs.append((script_path, same_name_test))
+    for pathspec in _SAME_NAME_LS_FILES_PATHSPECS:
+        for source_path in _tracked_python_files(pathspec):
+            same_name_test = f"tests/test_{PurePosixPath(source_path).stem}.py"
+            if Path(same_name_test).is_file():
+                pairs.append((source_path, same_name_test))
     return pairs
 
 
-def test_every_tracked_script_with_a_same_name_suite_selects_it_without_core_smoke() -> None:
-    # Mechanized completeness guard: the pair list is derived from the tracked
-    # tree, never frozen here, so a newly added script/test pair is covered the
-    # moment it lands instead of silently falling into the core-smoke fallback.
-    pairs = _tracked_script_same_name_pairs()
-    assert pairs, "expected tracked scripts/<name>.py <-> tests/test_<name>.py pairs"
+def _effective_explicit_targets(path: str, *, rules: Sequence[PathTestRule] = PATH_TEST_RULES) -> set[str]:
+    """The explicit-rule targets ``select_tests`` actually contributes for ``path``.
 
+    Mirrors the production PATH_TEST_RULES loop exactly (fnmatch match, then
+    ``stop_on_match`` break), so a target listed on a rule behind an earlier
+    stop match is never counted as independently owned: "independently owned"
+    means "would still be selected without the same-name derivation".
+    """
+    targets: set[str] = set()
+    for rule in rules:
+        if fnmatch.fnmatch(path, rule.pattern):
+            targets.update(rule.tests)
+            if rule.stop_on_match:
+                break
+    return targets
+
+
+def _unowned_smoke_overlap(
+    selected: set[str],
+    *,
+    accepted_same_name_test: str,
+    source_path: str,
+    rules: Sequence[PathTestRule] = PATH_TEST_RULES,
+) -> set[str]:
+    """CORE_SMOKE targets in ``selected`` that are neither the current pair's
+    accepted derived target nor independently owned by an effective explicit
+    rule for ``source_path``.
+
+    The completeness guard's smoke clause must distinguish unknown-fallback
+    leakage from targets that legitimately reach the selection another way:
+    the broad `apps/api/**` rule owns `tests/test_api.py` on API PRs (also a
+    CORE_SMOKE member), and the `services/orchestrator/**` /
+    `workers/data_adapters/**` rules carry `tests/test_production_scheduler.py`.
+    The current pair's OWN ``accepted_same_name_test`` is the reason the route
+    is a known mapping, not fallback — even when that suite is itself a
+    CORE_SMOKE member (an unruled future `workers/surface/api.py` pair). Every
+    OTHER unowned smoke target is exactly what unknown-backend fallback would
+    have added, so it stays red; no whole-pair exemption exists.
+
+    ``rules`` is the injection seam for constructed stop-on-match topology:
+    ownership is judged through ``_effective_explicit_targets``, which mirrors
+    the production ``stop_on_match`` break, so a target owned only by a rule
+    behind an earlier stop match is unowned (and thus leakage). Defaults to the
+    live ``PATH_TEST_RULES``.
+    """
+    owned = _effective_explicit_targets(source_path, rules=rules)
+    return {
+        target
+        for target in set(CORE_SMOKE_TESTS) & selected
+        if target != accepted_same_name_test and target not in owned
+    }
+
+
+def _same_name_completeness_offenders(
+    pairs: Sequence[tuple[str, str]],
+    *,
+    repo_root: Path = Path("."),
+    select: Callable[[str], set[str]] | None = None,
+    rules: Sequence[PathTestRule] = PATH_TEST_RULES,
+) -> list[str]:
+    """Same-name route violations for ``pairs``: missing suite, lost meta-guard
+    rider, or drag-along of unowned core smoke.
+
+    ``repo_root`` and ``select`` are seams so the same guard body runs against
+    a hermetic tracked tree and against constructed fallback-leaking selections
+    (red evidence) without touching a tracked file or a module global.
+    ``rules`` passes through to the smoke-overlap ownership check (see
+    ``_unowned_smoke_overlap``), so a constructed stop-on-match topology can
+    drive the downstream provenance composition without a second production
+    selector implementation.
+    """
+    resolve = select if select is not None else lambda path: set(select_tests([path], repo_root=repo_root))
     offenders: list[str] = []
-    for script_path, same_name_test in pairs:
-        selected = select_tests([script_path], repo_root=Path("."))
+    for source_path, same_name_test in pairs:
+        selected = resolve(source_path)
         if same_name_test not in selected:
-            offenders.append(f"{script_path}: {same_name_test} not selected (got {selected})")
+            offenders.append(f"{source_path}: {same_name_test} not selected (got {sorted(selected)})")
             continue
-        if same_name_test in CORE_SMOKE_TESTS:
-            # Exemption: a same-name test that IS a core-smoke file makes the
-            # no-smoke clause meaningless. No such pair exists today.
+        # Every same-name source route also schedules the selector meta-guard,
+        # so the collision/import contract and the tracked-tree guards run in
+        # the PR lane (a source-only PR can create a new collision). A pair
+        # that stops dragging the meta-guard has lost that reachability.
+        if SELECTOR_META_GUARD_TEST not in selected:
+            offenders.append(f"{source_path}: same-name route no longer schedules the selector meta-guard")
             continue
-        smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
+        smoke_overlap = sorted(
+            _unowned_smoke_overlap(
+                selected,
+                accepted_same_name_test=same_name_test,
+                source_path=source_path,
+                rules=rules,
+            )
+        )
         if smoke_overlap:
-            offenders.append(f"{script_path}: still drags core smoke {smoke_overlap}")
-    assert not offenders, "script/test same-name mapping incomplete: " + "; ".join(offenders)
+            offenders.append(f"{source_path}: still drags unowned core smoke {smoke_overlap}")
+    return offenders
+
+
+def test_every_tracked_backend_source_with_a_same_name_suite_selects_it_without_core_smoke() -> None:
+    # Mechanized completeness guard: the pair list is derived from the tracked
+    # tree, never frozen here, so a newly added source/test pair under any of
+    # the five backend prefixes is covered the moment it lands instead of
+    # silently falling into the core-smoke fallback.
+    pairs = _tracked_same_name_pairs()
+    assert pairs, "expected tracked backend-prefix source/test same-name pairs"
+
+    offenders = _same_name_completeness_offenders(pairs)
+    assert not offenders, "backend same-name mapping incomplete: " + "; ".join(offenders)
+
+
+# --------------------------------------------------------------------------
+# Derived same-name target that is itself a CORE_SMOKE member (CAND-R2-01).
+#
+# The completeness guard must distinguish WHY a smoke target sits in the
+# selection: the current pair's own ACCEPTED same-name target (a known
+# mapping, not leakage — even when it happens to be a core-smoke file) versus
+# the fallback leaking smoke targets the rules do not own. Each valid row below
+# is a hermetic tracked repo whose same-name suite is one of the five
+# CORE_SMOKE basenames under an unruled backend prefix, so the production
+# derivation routes it with no explicit-rule ownership at all.
+# --------------------------------------------------------------------------
+DERIVED_SMOKE_STEM_TARGETS: tuple[tuple[str, str], ...] = (
+    ("api", "tests/test_api.py"),
+    ("gateway", "tests/test_gateway.py"),
+    ("migrations", "tests/test_migrations.py"),
+    ("orchestration_chain", "tests/test_orchestration_chain.py"),
+    ("production_scheduler", "tests/test_production_scheduler.py"),
+)
+
+
+@pytest.mark.parametrize(
+    ("stem", "suite"),
+    DERIVED_SMOKE_STEM_TARGETS,
+    ids=[stem for stem, _ in DERIVED_SMOKE_STEM_TARGETS],
+)
+def test_unruled_core_smoke_stem_pair_passes_the_completeness_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stem: str,
+    suite: str,
+) -> None:
+    # The CAND-R2-01 scenario, hermetic: an unruled future source under an
+    # unruled backend prefix whose same-name suite is a CORE_SMOKE file. The
+    # production derivation must land the pair with exactly {same_name, meta},
+    # and the completeness oracle must pass — the accepted derived target is
+    # not fallback leakage.
+    source = f"workers/future_surface/{stem}.py"
+    (tmp_path / "workers" / "future_surface").mkdir(parents=True)
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / source).write_text("MARKER = 1\n", encoding="utf-8")
+    (tmp_path / suite).write_text("def test_probe(): pass\n", encoding="utf-8")
+    (tmp_path / SELECTOR_META_GUARD_TEST).write_text("def test_probe(): pass\n", encoding="utf-8")
+    assert not [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(source, rule.pattern)], source
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    selected = set(select_tests([source], repo_root=tmp_path))
+    assert selected == {suite, SELECTOR_META_GUARD_TEST}, f"{source}: expected {{suite, meta}}, got {selected}"
+
+    offenders = _same_name_completeness_offenders([(source, suite)], repo_root=tmp_path)
+    assert not offenders, f"{source}: completeness guard rejected a conforming derived CORE_SMOKE pair"
+
+
+def test_completeness_guard_reds_on_true_fallback_leak_of_unowned_smoke() -> None:
+    # The red half of CAND-R2-01: the four OTHER unowned smoke targets are
+    # still leakage. The current pair's own same_name_test (services/slurm_gateway/gateway.py
+    # -> tests/test_gateway.py, itself a CORE_SMOKE member) is accepted, while
+    # the constructed selection drags the four it does not own — a selection a
+    # fallback that also kept the derived route would produce. Restoring a
+    # whole-pair exemption would make this green; the per-target exemption must
+    # not.
+    source = "services/slurm_gateway/gateway.py"
+    same_name_test = "tests/test_gateway.py"
+    unowned = sorted(set(CORE_SMOKE_TESTS) - {same_name_test})
+    assert len(unowned) == 4
+    assert _effective_explicit_targets(source) & set(CORE_SMOKE_TESTS) == {same_name_test}
+
+    def leaked_selection(path: str) -> set[str]:
+        selection = set(select_tests([path], repo_root=Path(".")))
+        return selection | set(unowned)
+
+    offenders = _same_name_completeness_offenders(
+        [(source, same_name_test)],
+        select=leaked_selection,
+    )
+
+    assert offenders == [f"{source}: still drags unowned core smoke {unowned}"]
+
+
+def test_effective_explicit_targets_respects_stop_on_match_break() -> None:
+    # The stop-mirror closure (Phase 6.2): `_effective_explicit_targets` must
+    # mirror production's PATH_TEST_RULES loop INCLUDING the `stop_on_match`
+    # break — a target owned only by a rule behind an earlier stop match is NOT
+    # independently owned. Built on constructed rules so the invariant is
+    # standing, not coupled to today's live shadow topology (e.g.
+    # `services/orchestrator/file_orchestration_journal.py` — exact stop rule
+    # before the broad `services/orchestrator/**` — which is a real instance of
+    # this shape but must not be the sole oracle).
+    path = "services/orchestrator/file_orchestration_journal.py"
+    target_a = "tests/test_file_orchestration_journal.py"
+    target_b = "tests/test_production_scheduler.py"  # a CORE_SMOKE member
+    assert target_b in CORE_SMOKE_TESTS
+    constructed = (
+        PathTestRule(path, (target_a,), stop_on_match=True),
+        # Broad rule that ALSO matches ``path`` but is unreachable behind the
+        # stop match.
+        PathTestRule("services/orchestrator/**", (target_b,)),
+    )
+
+    assert _effective_explicit_targets(path, rules=constructed) == {target_a}
+
+
+def test_stop_mirror_composes_into_downstream_provenance() -> None:
+    # Downstream composition of the stop mirror, on a DISTINGUISHABLE
+    # topology: `apps/api/runtime_mode.py` — under the constructed rules the
+    # broad `apps/api/**` owns the shadowed CORE_SMOKE target only BEHIND the
+    # exact stop match, so it is unowned leakage; under the DEFAULT live rules
+    # the same `apps/api/**` rule (stop=False) legitimately owns it, so the
+    # same selection reports NO offender. That contrast is what proves the
+    # `rules=rules` forwarding edges (offenders -> overlap -> helper) are
+    # load-bearing: if either edge is dropped, the constructed-rules assertion
+    # falls back to the live rules and greens the shadowed target.
+    source = "apps/api/runtime_mode.py"
+    same_name_test = "tests/test_runtime_mode.py"
+    shadowed = "tests/test_api.py"
+    assert shadowed in CORE_SMOKE_TESTS
+    assert same_name_test not in CORE_SMOKE_TESTS
+    constructed = (
+        PathTestRule(source, (same_name_test,), stop_on_match=True),
+        PathTestRule("apps/api/**", (shadowed,)),
+    )
+    selection = {same_name_test, SELECTOR_META_GUARD_TEST, shadowed}
+
+    assert _unowned_smoke_overlap(
+        selection,
+        accepted_same_name_test=same_name_test,
+        source_path=source,
+        rules=constructed,
+    ) == {shadowed}
+
+    offenders = _same_name_completeness_offenders(
+        [(source, same_name_test)],
+        select=lambda _path: selection,
+        rules=constructed,
+    )
+    assert offenders == [f"{source}: still drags unowned core smoke {[shadowed]}"]
+
+    # Contrast leg: the DEFAULT live rules (stop=False `apps/api/**`) own
+    # `tests/test_api.py` for this source, so the same constructed selection
+    # must report no offender — proving the fixture distinguishes the two rule
+    # sets rather than both classifying the target as unowned.
+    assert _effective_explicit_targets(source) & {shadowed} == {shadowed}
+    assert not _same_name_completeness_offenders(
+        [(source, same_name_test)],
+        select=lambda _path: selection,
+    )
+
+
+def _collision_stem_map() -> dict[str, list[str]]:
+    """Mapped stems whose same-name suite is shared by more than one source.
+
+    Keyed by basename stem, values are the colliding source paths. Reuses the
+    tree-derived pair list, so a new cross-prefix collision is picked up the
+    moment it lands.
+    """
+    stems: dict[str, list[str]] = {}
+    for source_path, _ in _tracked_same_name_pairs():
+        stems.setdefault(PurePosixPath(source_path).stem, []).append(source_path)
+    return {stem: sources for stem, sources in stems.items() if len(sources) > 1}
+
+
+def _collision_missing_imports(
+    collisions: dict[str, list[str]],
+    *,
+    imported: Callable[[str], set[str]] | None = None,
+) -> list[str]:
+    """Colliding source modules a shared same-name suite fails to import.
+
+    A basename collision routes every colliding source to ONE suite, so that
+    suite must actually exercise each of them: requiring it to import every
+    colliding module at top level makes convergence a checked compatibility
+    boundary instead of a silent unrelated-basename match. The dotted module
+    name reuses `_dotted_module_name`, the same top-level-import semantics the
+    importer-closure guards use — no second parser. ``imported`` is the seam for
+    constructed red evidence (default: the real suite's top-level imports).
+    """
+    resolve = imported if imported is not None else lambda suite: _top_level_imported_module_names(
+        suite, _parse_tracked(suite)
+    )
+    missing: list[str] = []
+    for stem, sources in collisions.items():
+        suite = f"tests/test_{stem}.py"
+        imported_names = resolve(suite)
+        for source in sources:
+            if _dotted_module_name(source) not in imported_names:
+                missing.append(f"{source} -> {suite}")
+    return missing
+
+
+def test_cross_prefix_stem_collisions_require_their_shared_suite_to_import_every_source() -> None:
+    # Two backend sources can map to one basename suite. The derivation is
+    # tree-derived, never name-locked: a current collision must be semantically
+    # bound (its shared suite imports every colliding source), a new collision
+    # reddens by naming the missing source, and a tree with NO collision at all
+    # is a legal state that must not red. Hard-coding `best_available` or banning
+    # collisions is less faithful.
+    collisions = _collision_stem_map()
+
+    missing = _collision_missing_imports(collisions)
+
+    assert not missing, "colliding same-name suite must import every colliding source: " + "; ".join(missing)
+
+
+def test_zero_collision_tracked_tree_is_a_legal_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CAND-R2-03: a tracked tree with NO cross-prefix basename collision is a
+    # legal terminal state (the guard's own comment says so) but was never
+    # exercised — the live tree carries one collision and every synthetic case
+    # feeds nonempty maps, so an empty-map rejection stayed green. Hermetic
+    # tracked repo with only noncolliding source/suite pairs: the derivation
+    # must return exactly `{}` and the missing-import helper `[]`.
+    pairs = [
+        ("packages/common/single_a.py", "tests/test_single_a.py"),
+        ("workers/surface/single_b.py", "tests/test_single_b.py"),
+        ("apps/api/routes/single_c.py", "tests/test_single_c.py"),
+    ]
+    (tmp_path / "tests").mkdir(parents=True)
+    for source, suite in pairs:
+        (tmp_path / source).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / source).write_text("MARKER = 1\n", encoding="utf-8")
+        (tmp_path / suite).write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    assert sorted(_tracked_same_name_pairs()) == sorted(pairs)
+    assert _collision_stem_map() == {}
+    assert _collision_missing_imports({}) == []
+
+
+def test_collision_guard_rejects_an_empty_collision_map() -> None:
+    # The mutation the zero-collision pin exists to catch: a guard that raises
+    # (or otherwise rejects) an empty collision result would false-red the
+    # legal zero-collision state above. `_collision_missing_imports` must be
+    # total over the empty map, not just over nonempty ones.
+    assert _collision_missing_imports({}) == []
+
+
+def test_same_name_source_routes_schedule_the_collision_guard_in_the_pr_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A source-only PR can ADD a second source sharing a stem with an existing
+    # suite, which is exactly the change class that can create a new collision —
+    # so every existing same-name route must carry the selector meta-guard that
+    # runs the collision/import contract in the targeted lane. Fully synthetic
+    # on a temporary git repo, so the real tree is never required to contain a
+    # collision (a zero-collision repo is a legal terminal state). The same
+    # synthetic collision exercises BOTH legs: route reachability (the second
+    # source's selection includes the shared suite and the meta-guard) and
+    # collision detection (the tree derivation names the missing import).
+    first = "apps/api/routes/collision_probe.py"
+    second = "services/surface/collision_probe.py"
+    suite = "tests/test_collision_probe.py"
+    (tmp_path / "apps/api/routes").mkdir(parents=True)
+    (tmp_path / "services/surface").mkdir(parents=True)
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / first).write_text("MARKER = 'first'\n", encoding="utf-8")
+    (tmp_path / second).write_text("MARKER = 'second'\n", encoding="utf-8")
+    # The shared suite imports ONLY the first source module; the second source's
+    # import edge is absent, which is exactly what the collision contract must
+    # name.
+    (tmp_path / suite).write_text(
+        f"from {_dotted_module_name(first)} import MARKER\n", encoding="utf-8"
+    )
+    # A dummy meta-guard target so _test_target_exists preserves the rider.
+    (tmp_path / SELECTOR_META_GUARD_TEST).write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    selected = select_tests([second], repo_root=tmp_path)
+    assert selected == sorted([suite, SELECTOR_META_GUARD_TEST]), (
+        f"second collision source must select the shared suite plus the meta-guard, got {selected}"
+    )
+
+    collisions = _collision_stem_map()
+    assert collisions == {"collision_probe": [first, second]}, f"unexpected collisions: {collisions}"
+    missing = _collision_missing_imports(collisions)
+    assert missing == [f"{second} -> {suite}"], (
+        f"collision guard must name the second source's missing import, got {missing}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("collision", "imported_by_suite", "expected_missing"),
+    [
+        # Two sources, the shared suite imports neither -> both named.
+        (
+            {"probe": ["packages/common/probe.py", "apps/api/routes/probe.py"]},
+            {"tests/test_probe.py": set()},
+            ["apps/api/routes/probe.py -> tests/test_probe.py", "packages/common/probe.py -> tests/test_probe.py"],
+        ),
+        # Three sources, the shared suite imports exactly one -> only the other
+        # two named. Exercises the collision-not-name-locked property: the suite
+        # is free to cover multiple sources.
+        (
+            {
+                "probe": [
+                    "packages/common/probe.py",
+                    "apps/api/routes/probe.py",
+                    "workers/probe.py",
+                ]
+            },
+            {"tests/test_probe.py": {"packages.common.probe"}},
+            ["apps/api/routes/probe.py -> tests/test_probe.py", "workers/probe.py -> tests/test_probe.py"],
+        ),
+    ],
+)
+def test_collision_guard_reds_when_a_colliding_source_import_is_missing(
+    collision: dict[str, list[str]],
+    imported_by_suite: dict[str, set[str]],
+    expected_missing: list[str],
+) -> None:
+    # The red arm, fully synthetic so the tracked tree and the real collision
+    # suite are untouched: the import resolution is injected as a mapping, so
+    # the derivation is exercised on constructed stem/source/import sets and
+    # names exactly the sources whose top-level import is absent. Guards the
+    # derivation against rotting into always-empty.
+    missing = _collision_missing_imports(collision, imported=imported_by_suite.get)
+
+    assert sorted(missing) == sorted(expected_missing)
 
 
 CONTRACT_SOURCE_PATH = "packages/common/node27_container_contract.py"
@@ -1667,10 +2228,15 @@ def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
+    # Byte-exact no-suite fallback compatibility (CAND-R2-02): an unknown
+    # backend Python path selects exactly the five core-smoke suites and NO
+    # meta-guard rider. D6 deliberately adds the rider only to same-name
+    # routes, so a refactor that gains a sixth target on every unknown route
+    # reds here before it silently costs ~15 s across the whole tree.
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
-    for test_path in CORE_SMOKE_TESTS:
-        assert test_path in selected
+    assert selected == sorted(CORE_SMOKE_TESTS)
+    assert SELECTOR_META_GUARD_TEST not in selected
 
 
 def test_select_tests_adds_core_smoke_for_unknown_backend_path_mixed_with_known_path() -> None:
@@ -1682,6 +2248,185 @@ def test_select_tests_adds_core_smoke_for_unknown_backend_path_mixed_with_known_
     assert "tests/test_gfs_adapter.py" in selected
     for test_path in CORE_SMOKE_TESTS:
         assert test_path in selected
+
+
+def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None:
+    # Mixed fallback state (CAND-R2-02): one KNOWN same-name source (no
+    # explicit rule) plus one unknown backend path in one PR. The union keeps
+    # the known route's suite AND its D6 meta-guard rider, and adds the unknown
+    # path's core-smoke fallback — the rider is not lost and the smoke is not
+    # suppressed just because they share a change set.
+    known = "workers/grid_registry/shared_binding_eligibility.py"
+    suite = "tests/test_shared_binding_eligibility.py"
+    assert Path(known).is_file()
+    assert Path(suite).is_file()
+    assert not [rule for rule in PATH_TEST_RULES if fnmatch.fnmatch(known, rule.pattern)]
+
+    selected = select_tests([known, "services/new_surface/new_module.py"], repo_root=Path("."))
+
+    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST}) == selected
+
+
+def test_fallback_rider_mutant_reds_the_exact_no_suite_fallback_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CAND-R2-02 red arm, on a constructed module copy so the tracked source is
+    # untouched: adding the meta-guard rider inside the unknown-backend fallback
+    # branch must red the exact no-suite pin above (and the mixed union pin) —
+    # the mutation that previously left all 186 tests green.
+    source = Path("scripts/select_ci_tests.py").read_text(encoding="utf-8")
+    mutated = source.replace(
+        "    if unknown_backend_path:\n        selected.update(CORE_SMOKE_TESTS)\n",
+        "    if unknown_backend_path:\n        selected.update(CORE_SMOKE_TESTS)\n"
+        "        selected.add(SELECTOR_META_GUARD_TEST)\n",
+    )
+    assert mutated != source
+
+    probe = tmp_path / "scripts" / "select_ci_tests.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(mutated, encoding="utf-8")
+    (tmp_path / "tests").mkdir(parents=True)
+    for suite in (*CORE_SMOKE_TESTS, SELECTOR_META_GUARD_TEST):
+        (tmp_path / suite).write_text("def test_probe(): pass\n", encoding="utf-8")
+
+    # Built with types.ModuleType + exec rather than sys.path injection (which
+    # would trip the module's own AST-mutation scan); registered in sys.modules
+    # via monkeypatch.setitem (a call, not a subscript store) so dataclass
+    # decoration inside the loaded module can resolve its own module dict while
+    # the real selector stays untouched in sys.modules.
+    import types
+
+    mutated_selector = types.ModuleType("select_ci_tests_mutant")
+    mutated_selector.__dict__.update({"__file__": str(probe), "__package__": None})
+    monkeypatch.setitem(sys.modules, "select_ci_tests_mutant", mutated_selector)
+    exec(compile(probe.read_text(encoding="utf-8"), str(probe), "exec"), mutated_selector.__dict__)
+
+    selection = mutated_selector.select_tests(["services/new_surface/new_module.py"], repo_root=tmp_path)
+
+    assert sorted(CORE_SMOKE_TESTS) != selection
+    assert SELECTOR_META_GUARD_TEST in selection
+
+
+# --------------------------------------------------------------------------
+# Closed state matrix over target provenance, same-name class, fallback, and
+# collision cardinality. Exact five-prefix membership vs target-present
+# nonbackend/non-Python negatives is already covered by the independent
+# assert-only boundary oracle above (SAME_NAME_ROUTING_PREFIX_CONTRACT); the
+# rows here cover the remaining provenance and cardinality states, each
+# asserting exact selections whose per-row provenance is derived in the test,
+# never frozen.
+# --------------------------------------------------------------------------
+def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # (c) Explicit-only differently named (row 5) FIRST: it reads the real tree
+    # via repo_root=Path("."), before the chdir into the hermetic repo. The
+    # explicit target survives, the derived same-name suite is absent (no such
+    # file), and no smoke/no rider leaks.
+    explicit = "scripts/validate_readonly_db_boundary.py"
+    assert not Path(f"tests/test_{PurePosixPath(explicit).stem}.py").exists()
+    explicit_sel = set(select_tests([explicit], repo_root=Path(".")))
+    assert explicit_sel == {"tests/test_readonly_db_validation.py"}
+
+    # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
+    # a CORE_SMOKE member (row 4) both route; provenance — accepted derived —
+    # is asserted per row, never frozen.
+    ordinary = ("workers/future_surface/ordinary_probe.py", "tests/test_ordinary_probe.py")
+    smoke = ("workers/future_surface/api.py", "tests/test_api.py")
+    (tmp_path / "tests").mkdir(parents=True)
+    for source, suite in (ordinary, smoke):
+        (tmp_path / source).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / source).write_text("MARKER = 1\n", encoding="utf-8")
+        (tmp_path / suite).write_text("def test_probe(): pass\n", encoding="utf-8")
+    (tmp_path / SELECTOR_META_GUARD_TEST).write_text("def test_probe(): pass\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    ordinary_sel = set(select_tests([ordinary[0]], repo_root=tmp_path))
+    assert ordinary_sel == {ordinary[1], SELECTOR_META_GUARD_TEST}
+    assert not _unowned_smoke_overlap(ordinary_sel, accepted_same_name_test=ordinary[1], source_path=ordinary[0])
+
+    smoke_sel = set(select_tests([smoke[0]], repo_root=tmp_path))
+    assert smoke_sel == {smoke[1], SELECTOR_META_GUARD_TEST}
+    assert not _unowned_smoke_overlap(smoke_sel, accepted_same_name_test=smoke[1], source_path=smoke[0])
+
+
+def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
+    # (c) Explicit rule AND same-name derivation forming a set union, with the
+    # rider — apps/api/runtime_mode.py under the broad `apps/api/**` rule. The
+    # explicit side is read from the one matching effective rule, never frozen.
+    path = "apps/api/runtime_mode.py"
+    same_name_target = "tests/test_runtime_mode.py"
+    assert Path(same_name_target).is_file()
+    assert len(_effective_explicit_targets(path)) == 3
+
+    selected = set(select_tests([path], repo_root=Path(".")))
+
+    assert selected == _effective_explicit_targets(path) | {same_name_target, SELECTOR_META_GUARD_TEST}
+
+
+def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # (d) Missing same-name target does not schedule the rider (row 6): a
+    # backend source with no same-name suite keeps the byte-exact fallback and
+    # no meta-guard rider — D6 arms the rider only on an ACCEPTED derived
+    # target. Missing meta-guard target under a temporary root is dropped with
+    # a warning (row 7), not special-cased.
+    no_suite = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
+    assert sorted(no_suite) == sorted(CORE_SMOKE_TESTS)
+    assert SELECTOR_META_GUARD_TEST not in no_suite
+
+    test_path = tmp_path / "tests" / "test_example.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_example(): pass\n", encoding="utf-8")
+    assert not (tmp_path / "tests" / "test_select_ci_tests.py").exists()
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    assert select_tests(["tests/test_example.py"], repo_root=tmp_path) == ["tests/test_example.py"]
+
+
+def test_live_collision_sources_select_their_shared_suite_without_missing_imports() -> None:
+    # The live-tree collision leg of the cardinality matrix. This is deliberately
+    # cardinality/name AGNOSTIC: a zero-collision live tree is a legal terminal
+    # state (proved hermetically by
+    # test_zero_collision_tracked_tree_is_a_legal_terminal_state), and a newly
+    # introduced collision with a missing import is proved by the generic
+    # `collision_probe` tracked repo and the synthetic red arms
+    # (test_collision_guard_reds_when_a_colliding_source_import_is_missing). So
+    # this test asserts only the properties that hold for EVERY legal cardinality
+    # of the current tree: every derived collision (possibly none) has no missing
+    # imports, and every colliding source selects its derived shared suite plus
+    # the meta-guard rider.
+    collisions = _collision_stem_map()
+    assert not _collision_missing_imports(collisions)
+
+    for stem, sources in collisions.items():
+        suite = f"tests/test_{stem}.py"
+        assert Path(suite).is_file()
+        for source in sources:
+            selected = set(select_tests([source], repo_root=Path(".")))
+            assert suite in selected
+            assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> None:
+    # (f) Multiple changed paths accumulate their known/rider targets and one
+    # unknown path arms the fallback WITHOUT erasing them.
+    known = "workers/grid_registry/shared_binding_eligibility.py"
+    suite = "tests/test_shared_binding_eligibility.py"
+    selected = select_tests(
+        [known, "packages/common/auth_policy.py", "services/new_surface/new_module.py"],
+        repo_root=Path("."),
+    )
+
+    assert suite in selected
+    assert SELECTOR_META_GUARD_TEST in selected
+    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST}) == selected
 
 
 def test_select_tests_ignores_docs_only_changes() -> None:
