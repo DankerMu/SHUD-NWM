@@ -5246,8 +5246,12 @@ def test_file_orchestration_journal_discovery_blocks_symlink_parent(tmp_path: Pa
         cycle_id_for("gfs", cycle_time)
     )
 
+    # #1734: the containment fault is unchanged -- same error_code, raised by
+    # the same stat_no_follow containment check. Only the reported path
+    # deepened, because the narrowed lookup enters the tree at the cycle
+    # directory instead of at ``latest/``.
     assert query[0]["error_code"] == "file_journal_unsafe_scanned_entry"
-    assert query[0]["file_journal"]["field"] == "latest"
+    assert query[0]["file_journal"]["field"] == "latest/gfs/2026062800"
 
 
 @pytest.mark.parametrize(
@@ -5364,12 +5368,23 @@ def test_file_orchestration_journal_scoped_cycle_ignores_global_replay_scan(tmp_
     assert state is not None
     assert state["pipeline_jobs"][0]["status"] == "succeeded"
 
+    # #1734: ``query_pipeline_jobs_by_cycle`` joined the scoped-reader class.
+    # The spec delta requires it ("SHALL NOT read any other cycle's files"), so
+    # the foreign ERA5 view no longer blocks a GFS lookup -- exactly the
+    # behaviour the three scoped assertions above already demanded of the other
+    # readers on this same fixture.
     query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
-    assert query == [
+    assert [row["job_id"] for row in query] == [scoped_job["job_id"]]
+    assert query[0]["status"] == "succeeded"
+
+    # The whole-tree fail-closed property still has a home: an underivable
+    # cycle id falls open to the full scan, which does read the foreign view.
+    blocked = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
+    assert blocked == [
         {
             "job_id": "file_journal_read_blocked",
             "idempotency_key": None,
-            "cycle_id": cycle_id_for("gfs", cycle_time),
+            "cycle_id": "unknown-source_2026062800",
             "run_id": None,
             "slurm_job_id": "unknown_after_attempt",
             "status": "running",
@@ -6216,9 +6231,18 @@ def test_file_orchestration_journal_scoped_direct_snapshot_discovery_fails_close
     assert state["file_journal"]["reason"] == "file_journal_malformed_json"
     assert state["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
 
+    # #1734 D2a: the flat direct surface is filtered by file name, and this
+    # file's name resolves to IFS/2026062812 -- a different cycle -- so a GFS
+    # lookup no longer opens (or is blocked by) it. The scoped reader above
+    # still fails closed on it, unchanged.
     query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
-    assert query[0]["error_code"] == "file_journal_malformed_json"
-    assert query[0]["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
+    assert [row["job_id"] for row in query] == [scoped_job["job_id"]]
+    assert "error_code" not in query[0]
+
+    # The whole-tree fail-closed property keeps a home on the fall-open path.
+    blocked = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
+    assert blocked[0]["error_code"] == "file_journal_malformed_json"
+    assert blocked[0]["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
 
 
 @pytest.mark.parametrize("authoritative_surface", ["latest", "journal"])
@@ -6442,14 +6466,22 @@ def test_file_orchestration_journal_unknown_path_source_blocks_query_helpers(
             ],
         )
 
-    query = FileOrchestrationJournalRepository(journal_root).query_pipeline_jobs_by_cycle(
-        cycle_id_for("gfs", cycle_time)
-    )
+    # #1734: a derivable cycle id no longer walks foreign source directories at
+    # all, so the probe uses an underivable one. That still enters this same
+    # public entrypoint and still reaches the whole-tree scan, via the D4
+    # fall-open path production itself relies on.
+    repository = FileOrchestrationJournalRepository(journal_root)
+    assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026062800") is None
+    query = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
 
     assert query[0]["status"] == "running"
     assert query[0]["stage"] == "file_journal_read"
     assert query[0]["error_code"] == "file_journal_invalid_identity"
     assert query[0]["file_journal"]["field"] == "source_id"
+
+    # And the narrowed lookup for a real cycle is not blocked by that foreign
+    # directory -- the decoupling this change requires.
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time)) == []
 
 
 @pytest.mark.parametrize("surface", ["latest", "journal", "direct"])
@@ -6581,7 +6613,12 @@ def test_file_orchestration_journal_resource_limits_fail_closed(
         assert query[0]["error_code"] == expected_reason
         return
     if case_name == "depth":
-        repository = FileOrchestrationJournalRepository(journal_root, max_depth=1)
+        # #1734: the depth budget is still enforced on the narrowed walk, but
+        # it is now measured from the cycle directory rather than from
+        # ``latest/``. Nest below the cycle directory so the walk recurses, and
+        # move the budget accordingly; the assertion is unchanged.
+        (journal_root / "latest/gfs/2026062800/nested").mkdir(parents=True, exist_ok=True)
+        repository = FileOrchestrationJournalRepository(journal_root, max_depth=0)
         query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
         assert query[0]["error_code"] == expected_reason
         return
@@ -6606,12 +6643,15 @@ def test_file_orchestration_journal_non_matching_directory_entries_count_toward_
     (latest_dir / "note_one.txt").write_text("not json", encoding="utf-8")
     (latest_dir / "note_two.txt").write_text("not json", encoding="utf-8")
 
-    query = FileOrchestrationJournalRepository(journal_root, max_files=3).query_pipeline_jobs_by_cycle(
+    # #1734: non-matching entries still count toward the scan budget; the walk
+    # root moved from ``latest/`` to the cycle directory, so the budget that
+    # trips on these two entries moved with it.
+    query = FileOrchestrationJournalRepository(journal_root, max_files=1).query_pipeline_jobs_by_cycle(
         cycle_id_for("gfs", cycle_time)
     )
 
     assert query[0]["error_code"] == "file_journal_file_limit_exceeded"
-    assert query[0]["file_journal"]["field"] == "latest"
+    assert query[0]["file_journal"]["field"] == "latest/gfs/2026062800"
 
 
 def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_bounded(
@@ -6620,7 +6660,9 @@ def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_
 ) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
-    (journal_root / "latest").mkdir(parents=True)
+    # #1734: the narrowed walk enters at the cycle directory, so that is the
+    # directory whose listing must stay bounded.
+    (journal_root / "latest/gfs/2026062800").mkdir(parents=True)
     max_files = 3
     consumed_entries = 0
 
@@ -6652,7 +6694,7 @@ def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_
 
     assert consumed_entries == max_files + 1
     assert query[0]["error_code"] == "file_journal_file_limit_exceeded"
-    assert query[0]["file_journal"]["field"] == "latest"
+    assert query[0]["file_journal"]["field"] == "latest/gfs/2026062800"
 
 
 def test_file_orchestration_journal_pipeline_query_has_aggregate_record_budget(
@@ -12087,3 +12129,693 @@ def test_journal_records_have_exactly_one_construction_site() -> None:
 
     assert [name for name, _line in sites] == ["_journal_record_for_write"], sites
     assert len(definitions) == 1, definitions
+
+
+# ---------------------------------------------------------------------------
+# #1734: cycle-scoped single-row journal lookups
+# ---------------------------------------------------------------------------
+
+_NARROWING_CYCLES: tuple[tuple[str, str], ...] = (
+    ("gfs", "2026-06-28T00:00:00Z"),
+    ("gfs", "2026-06-28T12:00:00Z"),
+    ("IFS", "2026-06-28T00:00:00Z"),
+    ("IFS", "2026-06-28T12:00:00Z"),
+)
+
+
+def _narrowing_row(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    job_id: str,
+    run_id: str,
+    stage: str,
+    idempotency_key: str,
+    model_id: str | None,
+    job_type: str,
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id_for(source_id, cycle_time),
+        "job_type": job_type,
+        "model_id": model_id,
+        "status": "reserved",
+        "stage": stage,
+        "idempotency_key": idempotency_key,
+        "candidate_id": "candidate_a",
+    }
+
+
+def _populate_narrowing_journal(tmp_path: Path) -> Any:
+    """Populate one journal across several cycles and both sources.
+
+    Every row goes in through the production writers, so the on-disk layout is
+    the real one: cohort master rows and non-forecast-stage rows land in the
+    flat ``pipeline-jobs/`` file (never the by-cycle partition), and only
+    model-scoped rows materialise a ``latest/`` view.
+    """
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    for source_id, cycle_text in _NARROWING_CYCLES:
+        cycle_time = _dt(cycle_text)
+        segment = source_id.lower()
+        stamp = format_cycle_time(cycle_time)
+        cohort_run_id = f"cycle_{segment}_{stamp}"
+        rows = [
+            # Cohort master shape: no model_id, so no latest/ view is written
+            # and the direct row lands in the flat pipeline-jobs/ file.
+            _narrowing_row(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                job_id=f"job_{cohort_run_id}_forecast",
+                run_id=cohort_run_id,
+                stage="forecast",
+                idempotency_key=f"{cohort_run_id}:forecast",
+                model_id=None,
+                job_type="run_shud_forecast_array",
+            ),
+            # Non-forecast stage: also outside the by-cycle partition.
+            _narrowing_row(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                job_id=f"job_{cohort_run_id}_convert",
+                run_id=cohort_run_id,
+                stage="convert",
+                idempotency_key=f"{cohort_run_id}:convert",
+                model_id="model_a",
+                job_type="convert_grib",
+            ),
+            # Per-candidate forecast row: forecast run-id shape, and a
+            # per-candidate idempotency key that carries no run id at all.
+            _narrowing_row(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                job_id=f"job_fcst_{segment}_{stamp}_model_a",
+                run_id=f"fcst_{segment}_{stamp}_model_a",
+                stage="forecast",
+                idempotency_key=f"{segment}:{cycle_id_for(source_id, cycle_time)}:basin_a:forecast",
+                model_id="model_a",
+                job_type="run_shud_forecast",
+            ),
+        ]
+        for row in rows:
+            assert repository.reserve_pipeline_job(dict(row)) is not None
+        # Drive a second write for one row per cycle so the narrowed replay has
+        # a real last-write-wins merge to resolve, not a single record.
+        assert (
+            repository.bind_pipeline_job_reservation(
+                f"{cohort_run_id}:convert",
+                slurm_job_id=f"7{stamp[-5:]}",
+            )
+            is not None
+        )
+        repository.update_pipeline_job_status(f"job_{cohort_run_id}_convert", "running")
+    return repository
+
+
+def _whole_tree_rows(repository: Any) -> list[dict[str, Any]]:
+    return [journal_module._public_scheduler_row(job) for job in repository._iter_pipeline_job_records()]
+
+
+def _whole_tree_filtered(repository: Any, field: str, value: str) -> list[dict[str, Any]]:
+    rows = [row for row in _whole_tree_rows(repository) if str(row.get(field) or "") == value]
+    rows.sort(key=journal_module._db_compatible_pipeline_job_order_key)
+    return rows
+
+
+def _narrowing_keys(repository: Any) -> tuple[list[str], list[str], list[str]]:
+    rows = _whole_tree_rows(repository)
+    cycle_ids = sorted({str(row["cycle_id"]) for row in rows})
+    run_ids = sorted({str(row["run_id"]) for row in rows})
+    keys = sorted({str(row["idempotency_key"]) for row in rows if row.get("idempotency_key")})
+    return cycle_ids, run_ids, keys
+
+
+def test_narrowed_journal_lookups_equal_the_whole_tree_scan_filtered(tmp_path: Path) -> None:
+    """#1734 I1: narrowing is a restriction of the INPUT SET, never a new merge.
+
+    For every key reachable by each narrowed entrypoint, the cycle-scoped
+    answer must be list-equal to the whole-tree answer filtered by that key —
+    same rows, same last-write-wins resolution, same
+    ``_db_compatible_pipeline_job_order_key`` ordering.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_ids, run_ids, idempotency_keys = _narrowing_keys(repository)
+    assert len(cycle_ids) == len(_NARROWING_CYCLES)
+    assert len(run_ids) == 2 * len(_NARROWING_CYCLES)
+    assert len(idempotency_keys) == 3 * len(_NARROWING_CYCLES)
+
+    for cycle_id in cycle_ids:
+        assert repository.query_pipeline_jobs_by_cycle(cycle_id) == _whole_tree_filtered(
+            repository, "cycle_id", cycle_id
+        )
+    for run_id in run_ids:
+        assert repository.query_pipeline_jobs_by_run(run_id) == _whole_tree_filtered(repository, "run_id", run_id)
+    for idempotency_key in idempotency_keys:
+        expected = _whole_tree_filtered(repository, "idempotency_key", idempotency_key)
+        assert len(expected) == 1
+        assert repository.query_candidate_state(idempotency_key) == expected[0]
+        unlocked = repository._candidate_job_for_idempotency_unlocked(idempotency_key)
+        assert unlocked is not None
+        assert journal_module._public_scheduler_row(unlocked) == expected[0]
+
+    # D1a: the by-job-id entrypoint is narrowed too. Blind its direct probe so
+    # every id is answered by the narrowed replay, which is the path under test.
+    job_ids = sorted({str(row["job_id"]) for row in _whole_tree_rows(repository)})
+    assert len(job_ids) == 3 * len(_NARROWING_CYCLES)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            FileOrchestrationJournalRepository,
+            "_direct_pipeline_job_record",
+            lambda self, expected_job_id: None,
+        )
+        for job_id in job_ids:
+            expected = _whole_tree_filtered(repository, "job_id", job_id)
+            assert len(expected) == 1
+            replayed = repository._pipeline_job_for_id_unlocked(job_id)
+            assert replayed is not None, job_id
+            assert journal_module._public_scheduler_row(replayed) == expected[0]
+
+
+def test_narrowed_journal_lookup_touches_no_foreign_cycle_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1734 I2: a narrowed single-key lookup opens no other cycle's files."""
+
+    repository = _populate_narrowing_journal(tmp_path)
+    touched: list[Path] = []
+    real_read_json = FileOrchestrationJournalRepository._read_optional_json
+    real_read_jsonl = FileOrchestrationJournalRepository._read_jsonl
+
+    def record_json(self: Any, path: Path) -> Any:
+        touched.append(path)
+        return real_read_json(self, path)
+
+    def record_jsonl(self: Any, path: Path, **kwargs: Any) -> Any:
+        touched.append(path)
+        return real_read_jsonl(self, path, **kwargs)
+
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_optional_json", record_json)
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_jsonl", record_jsonl)
+
+    target_source, target_cycle_text = _NARROWING_CYCLES[0]
+    target_cycle = _dt(target_cycle_text)
+    target_stamp = format_cycle_time(target_cycle)
+    foreign_stamps = {
+        format_cycle_time(_dt(cycle_text))
+        for source_id, cycle_text in _NARROWING_CYCLES
+        if (source_id, cycle_text) != (target_source, target_cycle_text)
+    } - {target_stamp}
+    assert foreign_stamps
+
+    # D2a: a flat direct file whose NAME does not resolve to any (source,
+    # cycle) must still be read -- the filename filter falls open.
+    unparseable_flat = repository.root / "pipeline-jobs" / "cycle_gfs_2026062800_retry_active.json"
+    unparseable_flat.write_text(
+        json.dumps(
+            {
+                "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+                "sequence": 1,
+                "record_type": "pipeline_job",
+                "source_id": "gfs",
+                "cycle_time": target_cycle.isoformat(),
+                "payload": {
+                    **_active_job(target_cycle),
+                    "job_id": "cycle_gfs_2026062800_retry_active",
+                    "idempotency_key": "cycle_gfs_2026062800:retry_active",
+                },
+            },
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    assert journal_module._cycle_scope_from_job_id(unparseable_flat.stem) is None
+
+    # A flat file that names a DIFFERENT cycle must never be opened.
+    foreign_flat = repository.root / "pipeline-jobs" / "job_cycle_ifs_2026062812_forecast.json"
+    assert foreign_flat.is_file()
+
+    convert_job_id = f"job_cycle_{target_source.lower()}_{target_stamp}_convert"
+
+    def by_job_id_replay() -> Any:
+        # Blind the exact-path direct probe so the narrowed REPLAY is what runs;
+        # that is the path D1a changed. (The probe's own hit path delegates to
+        # the pre-existing cached ``_cycle_rows`` reader, which is not part of
+        # this change.)
+        with pytest.MonkeyPatch.context() as blind:
+            blind.setattr(
+                FileOrchestrationJournalRepository,
+                "_direct_pipeline_job_record",
+                lambda self, expected_job_id: None,
+            )
+            return repository._pipeline_job_for_id_unlocked(convert_job_id)
+
+    for lookup in (
+        lambda: repository.query_pipeline_jobs_by_cycle(cycle_id_for(target_source, target_cycle)),
+        lambda: repository.query_pipeline_jobs_by_run(f"cycle_{target_source.lower()}_{target_stamp}"),
+        lambda: repository.query_candidate_state(f"cycle_{target_source.lower()}_{target_stamp}:forecast"),
+        by_job_id_replay,
+    ):
+        touched.clear()
+        assert lookup()
+        relatives = [path.relative_to(repository.root).as_posix() for path in touched]
+        assert relatives, "the lookup must still read something"
+        for relative in relatives:
+            assert relative.startswith(("latest/", "journal/", "pipeline-jobs/")), relative
+            if relative.startswith("pipeline-jobs/"):
+                continue
+            assert target_stamp in relative, relative
+        # The decisive assertion: not one file of another cycle, on any of the
+        # three surfaces -- flat direct included, per D2a.
+        assert not [
+            relative for relative in relatives if any(stamp in relative for stamp in foreign_stamps)
+        ], relatives
+        assert foreign_flat.relative_to(repository.root).as_posix() not in relatives
+
+    # The unparseable name is read by the replaying lookups (fall open), even
+    # though the by-cycle/by-run lookups filter its row out of the answer.
+    touched.clear()
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for(target_source, target_cycle))
+    assert unparseable_flat.relative_to(repository.root).as_posix() in [
+        path.relative_to(repository.root).as_posix() for path in touched
+    ]
+
+
+def test_narrowed_journal_lookup_resolves_source_case_mismatch(tmp_path: Path) -> None:
+    """#1734 I4: run ids spell ``ifs`` while the directory is ``IFS``.
+
+    A derivation that used the raw run-id segment would look in
+    ``journal/ifs/``, find nothing and answer "no rows" — a silent miss on
+    every non-GFS source.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T12:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    assert (repository.root / "journal" / "IFS" / f"{stamp}.jsonl").is_file()
+    # macOS journals live on a case-insensitive filesystem, so directory
+    # absence cannot carry this pin. The derivation itself is what must
+    # normalise, and that is filesystem independent.
+    run_id = f"cycle_ifs_{stamp}"
+    assert run_id.islower()
+    assert journal_module._cycle_scope_from_file_run_id(run_id) == ("IFS", cycle_time)
+    assert journal_module._cycle_scope_from_idempotency_key(f"{run_id}:forecast") == ("IFS", cycle_time)
+    assert "IFS" in journal_module._cycle_read_source_segments(
+        source_id="IFS",
+        source_segment_override=None,
+    )
+    rows = repository.query_pipeline_jobs_by_run(run_id)
+    assert rows == _whole_tree_filtered(repository, "run_id", run_id)
+    assert rows
+
+    state = repository.query_candidate_state(f"{run_id}:forecast")
+    assert state is not None
+    assert state["job_id"] == f"job_{run_id}_forecast"
+
+    cycle_id = cycle_id_for("IFS", cycle_time)
+    assert cycle_id.startswith("ifs_")
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id) == _whole_tree_filtered(repository, "cycle_id", cycle_id)
+
+
+@pytest.mark.parametrize(
+    "underivable_key",
+    [
+        "gfs:gfs_2026062800:basin_a:forecast",
+        "cycle_gfs_20260628zz:forecast",
+        "cycle_mars_2026062800:forecast",
+        "not-a-run-id",
+    ],
+)
+def test_underivable_idempotency_key_falls_open_to_the_whole_tree_scan(
+    tmp_path: Path,
+    underivable_key: str,
+) -> None:
+    """#1734 I3: derivation failure costs the old full scan, never a false miss.
+
+    The per-candidate key shape carries no run id, so it is the production case
+    that must keep working through the fallback. A narrowed lookup that
+    answered ``None`` here would double-submit a cohort.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    assert journal_module._cycle_scope_from_idempotency_key(underivable_key) is None
+
+    expected = _whole_tree_filtered(repository, "idempotency_key", underivable_key)
+    observed = repository.query_candidate_state(underivable_key)
+    if expected:
+        assert observed == expected[0]
+        assert observed is not None
+    else:
+        assert observed is None
+
+    # The production per-candidate key is one of the rows this journal holds,
+    # so at least that parametrisation proves the fallback returns a real row.
+    if underivable_key.startswith("gfs:"):
+        assert observed is not None
+        assert observed["job_id"] == "job_fcst_gfs_2026062800_model_a"
+
+
+@pytest.mark.parametrize(
+    "underivable_cycle_id",
+    ["mars_2026062800", "2026062800", "GFS_2026062800", "gfs_20260628zz"],
+)
+def test_underivable_cycle_id_falls_open_instead_of_reporting_a_blocked_read(
+    tmp_path: Path,
+    underivable_cycle_id: str,
+) -> None:
+    """#1734 I3: derivation runs OUTSIDE the blocked-row handler.
+
+    ``_source_cycle_from_cycle_id`` raises ``FileOrchestrationJournalError`` on
+    an unknown source or a failed round trip. If the derivation ran inside
+    ``query_pipeline_jobs_by_cycle``'s ``except`` clause, these keys would come
+    back as a synthetic ``file_journal_read_blocked`` row instead of the
+    whole-tree answer.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    assert journal_module._cycle_scope_from_cycle_id(underivable_cycle_id) is None
+
+    rows = repository.query_pipeline_jobs_by_cycle(underivable_cycle_id)
+    assert rows == _whole_tree_filtered(repository, "cycle_id", underivable_cycle_id)
+    assert rows == []
+    assert [row.get("job_id") for row in rows] != ["file_journal_read_blocked"]
+
+
+def test_narrowed_lookup_returns_cohort_master_and_non_forecast_rows(tmp_path: Path) -> None:
+    """#1734 I5 / D2: the by-cycle direct partition is a STRICT SUBSET.
+
+    ``_write_pipeline_job_direct_unlocked`` only routes current accepted-submit
+    *candidate* rows into ``pipeline-jobs/by-cycle/``; cohort master rows and
+    every non-forecast-stage row go to the flat file. A narrowing implemented
+    as "read the by-cycle partition" would drop exactly the rows asserted here.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    cohort_run_id = f"cycle_gfs_{stamp}"
+
+    partition = repository.root / "pipeline-jobs" / "by-cycle" / "gfs" / stamp
+    partition_job_ids = {path.stem for path in partition.glob("*.json")} if partition.is_dir() else set()
+    master_job_id = f"job_{cohort_run_id}_forecast"
+    convert_job_id = f"job_{cohort_run_id}_convert"
+    assert master_job_id not in partition_job_ids
+    assert convert_job_id not in partition_job_ids
+
+    rows = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    assert master_job_id in {row["job_id"] for row in rows}
+    assert convert_job_id in {row["job_id"] for row in rows}
+
+    by_run = repository.query_pipeline_jobs_by_run(cohort_run_id)
+    assert {row["job_id"] for row in by_run} == {master_job_id, convert_job_id}
+
+    master_state = repository.query_candidate_state(f"{cohort_run_id}:forecast")
+    assert master_state is not None
+    assert master_state["job_id"] == master_job_id
+    convert_state = repository.query_candidate_state(f"{cohort_run_id}:convert")
+    assert convert_state is not None
+    # The merged last write, not the reservation record.
+    assert convert_state["status"] == "running"
+    assert convert_state["slurm_job_id"] == f"7{stamp[-5:]}"
+
+
+def test_cycle_scoped_replay_include_direct_false_still_excludes_direct_records(
+    tmp_path: Path,
+) -> None:
+    """#1734 I6 / D6: the flag keeps its exact meaning in the shared merge path.
+
+    ``_pipeline_job_for_id_unlocked`` relies on ``include_direct=False`` so its
+    fallback never re-counts the direct record it already probed. The direct
+    surface is pinned to a job id that no view or journal segment of this cycle
+    carries, so dropping the flag would surface it here.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    orphan_job_id = "job_cycle_gfs_2026062800_direct_only"
+    orphan_record = {
+        "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+        "sequence": 1,
+        "record_type": "pipeline_job",
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "payload": {
+            **_active_job(cycle_time),
+            "job_id": orphan_job_id,
+            "idempotency_key": "cycle_gfs_2026062800:direct_only",
+        },
+    }
+    _write_json(repository.root / "pipeline-jobs" / f"{orphan_job_id}.json", orphan_record)
+
+    def replayed_job_ids(*, include_direct: bool) -> list[str]:
+        return [
+            str(job["job_id"])
+            for job in repository._iter_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                include_direct=include_direct,
+            )
+        ]
+
+    with_direct = replayed_job_ids(include_direct=True)
+    without_direct = replayed_job_ids(include_direct=False)
+    assert orphan_job_id in with_direct
+    assert orphan_job_id not in without_direct
+    # D2a filters the flat surface to this cycle, so the flag is now the ONLY
+    # difference between the two replays.
+    assert [job_id for job_id in with_direct if job_id != orphan_job_id] == without_direct
+
+    # Same meaning as the whole-tree scan it shares the merge path with.
+    whole_tree = [str(job["job_id"]) for job in repository._iter_pipeline_job_records(include_direct=False)]
+    assert orphan_job_id not in whole_tree
+    # And no duplication: a job id appears at most once either way.
+    assert len(set(with_direct)) == len(with_direct)
+
+    # D1a/D6: the parity must hold for _pipeline_job_for_id_unlocked's OWN
+    # narrowed fallback, not only for the shared iterator. The orphan row lives
+    # solely on the direct surface, so the fallback replay (include_direct=
+    # False) must not find it there -- only the direct probe ahead of the
+    # replay may return it, exactly once and unduplicated.
+    resolved = repository._pipeline_job_for_id_unlocked(orphan_job_id)
+    assert resolved is not None
+    assert resolved["job_id"] == orphan_job_id
+    assert journal_module._cycle_scope_from_job_id(orphan_job_id) == ("gfs", cycle_time)
+
+    replay_only: list[str] = []
+    real_direct = FileOrchestrationJournalRepository._direct_pipeline_job_record
+
+    def blind_direct(self: Any, expected_job_id: str) -> Any:
+        replay_only.append(expected_job_id)
+        return None
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FileOrchestrationJournalRepository, "_direct_pipeline_job_record", blind_direct)
+        # With the direct probe blinded the entrypoint has only its narrowed
+        # replay left, and include_direct=False keeps the direct surface out of
+        # it -- so a direct-only row is genuinely unreachable.
+        assert repository._pipeline_job_for_id_unlocked(orphan_job_id) is None
+        # A row the cycle's journal carries is still found by that same replay.
+        assert repository._pipeline_job_for_id_unlocked("job_cycle_gfs_2026062800_convert") is not None
+    assert replay_only
+    assert real_direct is FileOrchestrationJournalRepository._direct_pipeline_job_record
+
+
+def test_cycle_scoped_replay_keeps_the_blocked_row_error_shape(tmp_path: Path) -> None:
+    """#1734 I1: a blocked row inside the owning cycle raises identically."""
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    corrupt = repository.root / "latest" / "gfs" / stamp / "model_a.json"
+    assert corrupt.is_file()
+    corrupt.write_text("{ not json", encoding="utf-8")
+
+    cycle_id = cycle_id_for("gfs", cycle_time)
+    rows = repository.query_pipeline_jobs_by_cycle(cycle_id)
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "file_journal_read_blocked"
+    assert rows[0]["cycle_id"] == cycle_id
+    assert rows[0]["error_code"] == "file_journal_malformed_json"
+
+    state = repository.query_candidate_state(f"cycle_gfs_{stamp}:forecast")
+    assert state is not None
+    assert state["job_id"] == "file_journal_read_blocked"
+    assert state["error_code"] == "file_journal_malformed_json"
+
+    with pytest.raises(journal_module.FileOrchestrationJournalError) as caught:
+        repository._candidate_job_for_idempotency_unlocked(f"cycle_gfs_{stamp}:forecast")
+    assert caught.value.reason == "file_journal_malformed_json"
+
+
+def test_untouched_journal_entrypoints_still_replay_the_whole_tree(tmp_path: Path) -> None:
+    """#1734 D1a / I8: only ``query_pipeline_job_by_slurm_id`` still full-scans.
+
+    Its argument carries no derivable cycle and it has zero production callers
+    (Task 1(b) measured 0), so it stays on the whole-tree replay and remains
+    everyone's fall-open path.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    calls: list[str] = []
+    real_full = FileOrchestrationJournalRepository._iter_pipeline_job_records
+    real_scoped = FileOrchestrationJournalRepository._iter_pipeline_job_records_for_cycle
+
+    def full(self: Any, **kwargs: Any) -> Any:
+        calls.append("full")
+        return real_full(self, **kwargs)
+
+    def scoped(self: Any, **kwargs: Any) -> Any:
+        calls.append("scoped")
+        return real_scoped(self, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FileOrchestrationJournalRepository, "_iter_pipeline_job_records", full)
+        patch.setattr(FileOrchestrationJournalRepository, "_iter_pipeline_job_records_for_cycle", scoped)
+
+        assert repository.query_pipeline_job_by_slurm_id("no-such-slurm-id") is None
+        assert calls == ["full"]
+
+        calls.clear()
+        assert repository.query_pipeline_jobs_by_cycle("gfs_2026062800")
+        assert calls == ["scoped"]
+
+        # D1a: a parseable job id narrows its direct-miss fallback too.
+        calls.clear()
+        with pytest.MonkeyPatch.context() as blind:
+            blind.setattr(
+                FileOrchestrationJournalRepository,
+                "_direct_pipeline_job_record",
+                lambda self, expected_job_id: None,
+            )
+            assert repository._pipeline_job_for_id_unlocked("job_cycle_gfs_2026062800_convert") is not None
+            assert calls == ["scoped"]
+
+            # An unparseable job id falls open to the whole-tree replay (D4).
+            calls.clear()
+            assert repository._pipeline_job_for_id_unlocked("cycle_gfs_2026062800_retry_active") is None
+            assert calls == ["full"]
+
+
+@pytest.mark.parametrize(
+    ("job_id", "expected_scope"),
+    [
+        ("job_fcst_gfs_2026062800_model_a", ("gfs", "2026-06-28T00:00:00Z")),
+        ("job_fcst_ifs_2026062812_model_a", ("IFS", "2026-06-28T12:00:00Z")),
+        ("job_cycle_gfs_2026062800_forecast", ("gfs", "2026-06-28T00:00:00Z")),
+        ("job_cycle_ifs_2026062800_convert_retry_2", ("IFS", "2026-06-28T00:00:00Z")),
+        # Fall open (D4): no ``job_`` prefix, unknown source, bad cycle token,
+        # and a bare shape with nothing after the cycle.
+        ("cycle_gfs_2026062800_retry_active", None),
+        ("job_cycle_mars_2026062800_forecast", None),
+        ("job_fcst_gfs_20260628zz_model_a", None),
+        ("job_fcst_gfs_2026062800", None),
+    ],
+)
+def test_job_id_cycle_scope_derivation_covers_both_shapes_and_falls_open(
+    job_id: str,
+    expected_scope: tuple[str, str] | None,
+) -> None:
+    """#1734 D1a: both live job id shapes carry ``(source, cycle)``.
+
+    The reversed ruling rests on this. ``job_fcst_`` is already used by
+    ``_direct_pipeline_job_record`` to route a by-cycle partition read, and
+    ``job_cycle_`` is the cohort master shape. Anything else falls open.
+    """
+
+    observed = journal_module._cycle_scope_from_job_id(job_id)
+    if expected_scope is None:
+        assert observed is None
+    else:
+        assert observed == (expected_scope[0], _dt(expected_scope[1]))
+
+
+def test_flat_direct_surface_is_filtered_by_filename_with_fall_open(tmp_path: Path) -> None:
+    """#1734 D2a: skip only names resolving to a DIFFERENT (source, cycle).
+
+    The flat directory holds one file per cohort master and per non-forecast
+    stage row for all retained history (4,303 files / 12.29 MiB on node-22), so
+    reading it whole would dominate the cycle slice and leave the growth law
+    intact. The filter fails toward reading too much: an unresolvable name is
+    read, never skipped.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    flat = repository.root / "pipeline-jobs"
+
+    unparseable = flat / "cycle_gfs_2026062800_retry_active.json"
+    unparseable.write_text(
+        json.dumps(
+            {
+                "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+                "sequence": 1,
+                "record_type": "pipeline_job",
+                "source_id": "gfs",
+                "cycle_time": cycle_time.isoformat(),
+                "payload": {
+                    **_active_job(cycle_time),
+                    "job_id": "cycle_gfs_2026062800_retry_active",
+                    "idempotency_key": "cycle_gfs_2026062800:retry_active",
+                },
+            },
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    all_flat = sorted(path.name for path in flat.glob("*.json"))
+    assert len(all_flat) > 4, all_flat
+    assert any(name.startswith("job_cycle_ifs_") for name in all_flat)
+
+    scoped = list(
+        repository._iter_flat_direct_pipeline_job_records_for_cycle(
+            source_id="gfs",
+            cycle_time=cycle_time,
+        )
+    )
+    scoped_ids = {str(job["job_id"]) for job in scoped}
+
+    # Read: this cycle's rows, plus the unresolvable name under fall-open.
+    assert "job_cycle_gfs_2026062800_forecast" in scoped_ids
+    assert "cycle_gfs_2026062800_retry_active" in scoped_ids
+    # Skipped: every name that resolves to another (source, cycle).
+    assert not [job_id for job_id in scoped_ids if "2026062812" in job_id]
+    assert not [job_id for job_id in scoped_ids if job_id.startswith("job_cycle_ifs_")]
+
+    # A malformed foreign-cycle file is skipped by name and never decoded, so
+    # it cannot block this cycle's lookup.
+    (flat / "job_cycle_ifs_2026062812_forecast.json").write_text("{not-json", encoding="utf-8")
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    # ... while the same malformed content inside THIS cycle still fails closed.
+    (flat / "job_cycle_gfs_2026062800_forecast.json").write_text("{not-json", encoding="utf-8")
+    blocked = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    assert blocked[0]["error_code"] == "file_journal_malformed_json"
+
+
+@pytest.mark.parametrize(
+    ("stem", "in_scope"),
+    [
+        ("2026062800", True),
+        ("2026062800.1", True),
+        ("2026062800.x", True),
+        # ``parse_cycle_time`` reads this as 2026-06-28T01:00 -- the whole-tree
+        # scan attributes it to that other cycle, so skipping it is equivalence,
+        # not a silent drop.
+        ("20260628001", False),
+        ("not-a-cycle", True),
+        ("2026062812", False),
+        ("2026062812.2", False),
+    ],
+)
+def test_journal_segment_name_filter_falls_open_on_unresolvable_stems(stem: str, in_scope: bool) -> None:
+    """#1734: the D2a fall-open shape applied to the cycle event-log surface.
+
+    A stem that resolves to another cycle is skipped; one that resolves to
+    nothing is handed to ``_journal_identity_from_path`` so it fails closed with
+    the same reason the whole-tree scan raises.
+    """
+
+    assert journal_module._journal_segment_stem_in_cycle_scope(stem, "2026062800") is in_scope

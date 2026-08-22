@@ -112,6 +112,9 @@ from services.orchestrator.retry_identity import (
     split_retry_job_identity,
 )
 from services.orchestrator.run_identity import (
+    ANALYSIS_RUN_ID_RE as _ANALYSIS_RUN_ID_RE,
+)
+from services.orchestrator.run_identity import (
     CYCLE_COHORT_RUN_ID_RE as _CYCLE_COHORT_RUN_ID_RE,
 )
 from services.orchestrator.run_identity import (
@@ -1049,8 +1052,12 @@ class FileOrchestrationJournalRepository:
             ) from error
 
     def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        # Derivation runs OUTSIDE the blocked-row handler on purpose: an
+        # underivable key must fall open to the whole-tree scan, not be
+        # reported as a blocked read.
+        cycle_scope = _cycle_scope_from_idempotency_key(idempotency_key)
         try:
-            for job in self._iter_pipeline_job_records():
+            for job in self._iter_pipeline_job_records_scoped(cycle_scope):
                 if str(job.get("idempotency_key") or "") == idempotency_key:
                     return _public_scheduler_row(job)
         except FileOrchestrationJournalError as error:
@@ -1058,7 +1065,8 @@ class FileOrchestrationJournalRepository:
         return None
 
     def _candidate_job_for_idempotency_unlocked(self, idempotency_key: str) -> dict[str, Any] | None:
-        for job in self._iter_pipeline_job_records():
+        cycle_scope = _cycle_scope_from_idempotency_key(idempotency_key)
+        for job in self._iter_pipeline_job_records_scoped(cycle_scope):
             if str(job.get("idempotency_key") or "") == idempotency_key:
                 return dict(job)
         return None
@@ -1096,7 +1104,11 @@ class FileOrchestrationJournalRepository:
                     )
             replayed = rows.pipeline_jobs.get(expected_job_id)
             return dict(replayed or direct_job)
-        for job in self._iter_pipeline_job_records(include_direct=False):
+        # D1a: the job id carries (source, cycle) for both live shapes, so the
+        # direct-miss fallback is narrowed too. include_direct stays False so
+        # the replay never re-counts the direct record probed above.
+        cycle_scope = _cycle_scope_from_job_id(expected_job_id)
+        for job in self._iter_pipeline_job_records_scoped(cycle_scope, include_direct=False):
             if str(job.get("job_id") or "") == expected_job_id:
                 return dict(job)
         return None
@@ -1148,10 +1160,11 @@ class FileOrchestrationJournalRepository:
         return row
 
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
+        cycle_scope = _cycle_scope_from_cycle_id(cycle_id)
         try:
             jobs = [
                 _public_scheduler_row(job)
-                for job in self._iter_pipeline_job_records()
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope)
                 if str(job.get("cycle_id") or "") == cycle_id
             ]
             jobs.sort(key=_db_compatible_pipeline_job_order_key)
@@ -1160,10 +1173,11 @@ class FileOrchestrationJournalRepository:
             return [_blocked_query_job(error, cycle_id=cycle_id)]
 
     def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
+        cycle_scope = _cycle_scope_from_file_run_id(run_id)
         try:
             jobs = [
                 _public_scheduler_row(job)
-                for job in self._iter_pipeline_job_records()
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope)
                 if str(job.get("run_id") or "") == run_id
             ]
             jobs.sort(key=_db_compatible_pipeline_job_order_key)
@@ -4781,6 +4795,44 @@ class FileOrchestrationJournalRepository:
             if payload is not None:
                 yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
 
+    def _iter_flat_direct_pipeline_job_records_for_cycle(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> Iterable[dict[str, Any]]:
+        """Flat ``pipeline-jobs/`` records for one cycle, filtered by file name.
+
+        The flat directory is not partitioned: it holds one file per cohort
+        master row and per non-forecast-stage row for ALL retained history
+        (4,303 files / 12.29 MiB on node-22), so reading it whole would dominate
+        the cycle slice and keep the growth law intact — the very thing this
+        change repairs (design D2a).
+
+        The filter fails toward reading too much: a file is skipped ONLY when
+        its name resolves to a different ``(source_id, cycle)``. A name that
+        does not resolve at all is read, which is D4's fall-open pushed down to
+        the filename level.
+        """
+
+        cycle_segment = format_cycle_time(cycle_time)
+        for path in sorted(
+            _iter_regular_json_files(
+                self.root / "pipeline-jobs",
+                root=self.root,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        ):
+            name_scope = _cycle_scope_from_job_id(path.stem)
+            if name_scope is not None and (
+                name_scope[0] != source_id or format_cycle_time(name_scope[1]) != cycle_segment
+            ):
+                continue
+            payload = self._read_optional_json(path)
+            if payload is not None:
+                yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
+
     def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
         payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
         if payload is None:
@@ -4884,6 +4936,131 @@ class FileOrchestrationJournalRepository:
                 budget.consume()
                 _insert_missing_by_key(jobs, job, key="job_id")
         yield from jobs.values()
+
+    def _iter_pipeline_job_records_for_cycle(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        include_direct: bool = True,
+    ) -> Iterable[dict[str, Any]]:
+        """Replay one cycle's pipeline jobs through the whole-tree merge path.
+
+        This is a narrowing of the INPUT SET only (#1734 design D2): the same
+        record sources as ``_iter_pipeline_job_records``, restricted to the
+        cycle that owns the row — that cycle's ``latest/<segment>/<cycle>/``
+        views, that cycle's ``journal/<segment>/<cycle>*.jsonl`` segments and
+        the same flat ``pipeline-jobs/`` direct records — merged by the same
+        ``_apply_journal_record`` last-write-wins ordering and yielding rows in
+        the same order, so the result is the whole-tree answer filtered by the
+        owning cycle.
+
+        It deliberately does NOT route to
+        ``_direct_pipeline_job_records_for_cycle_cached``: the
+        ``pipeline-jobs/by-cycle/`` partition holds only current
+        accepted-submit *candidate* rows (``_write_pipeline_job_direct_unlocked``),
+        so every cohort master row and every non-forecast-stage row would be
+        silently dropped.
+
+        The flat ``pipeline-jobs/`` direct source is filtered by file name
+        (design D2a) rather than read whole, with the filter falling open on
+        any name it cannot parse — see
+        ``_iter_flat_direct_pipeline_job_records_for_cycle``.
+
+        Source segment aliases are resolved through
+        ``_cycle_read_source_segments`` because run identifiers spell the
+        source lower case while ``latest/``/``journal/`` carry the normalised
+        casing (``gfs`` but ``IFS``/``ERA5``).
+        """
+
+        jobs: dict[str, dict[str, Any]] = {}
+        budget = _RecordBudget(max(self.max_records, 1), "pipeline_job_records")
+        source_segments = _cycle_read_source_segments(
+            source_id=source_id,
+            source_segment_override=None,
+        )
+        cycle_segment = format_cycle_time(cycle_time)
+        for path in sorted(
+            path
+            for segment in source_segments
+            for path in _iter_regular_json_files(
+                self.root / "latest" / segment / cycle_segment,
+                root=self.root,
+                recursive=True,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        ):
+            payload = self._read_optional_json(path)
+            if payload is None:
+                continue
+            path_source_id, path_cycle_time, model_id = _latest_identity_from_path(path, root=self.root)
+            rows = _CycleRows()
+            self._apply_latest_view(
+                rows,
+                payload,
+                source_id=path_source_id,
+                cycle_time=path_cycle_time,
+                expected_model_id=model_id,
+            )
+            for job in rows.pipeline_jobs.values():
+                budget.consume()
+                _upsert_by_key(jobs, job, key="job_id")
+        for path in sorted(
+            (
+                path
+                for segment in source_segments
+                for path in _iter_jsonl_files(
+                    self.root / "journal" / segment,
+                    root=self.root,
+                    max_files=self.max_files,
+                    max_depth=self.max_depth,
+                )
+                if _journal_segment_stem_in_cycle_scope(path.stem, cycle_segment)
+            ),
+            key=lambda candidate: _journal_segment_sort_key(candidate, root=self.root, surface="journal"),
+        ):
+            path_source_id, path_cycle_time = _journal_identity_from_path(path, root=self.root, surface="journal")
+            for record in self._read_jsonl(path):
+                budget.consume()
+                rows = _CycleRows()
+                self._apply_journal_record(
+                    rows,
+                    record,
+                    source_id=path_source_id,
+                    cycle_time=path_cycle_time,
+                )
+                for job in rows.pipeline_jobs.values():
+                    _upsert_by_key(jobs, job, key="job_id")
+        if include_direct:
+            for job in self._iter_flat_direct_pipeline_job_records_for_cycle(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            ):
+                budget.consume()
+                _insert_missing_by_key(jobs, job, key="job_id")
+        yield from jobs.values()
+
+    def _iter_pipeline_job_records_scoped(
+        self,
+        cycle_scope: tuple[str, datetime] | None,
+        *,
+        include_direct: bool = True,
+    ) -> Iterable[dict[str, Any]]:
+        """Cycle-scoped replay when the key named a cycle, whole tree otherwise.
+
+        ``cycle_scope is None`` is the fall-open path (#1734 design D4): an
+        underivable key costs the old full scan, never a false "not found".
+        """
+
+        if cycle_scope is None:
+            return self._iter_pipeline_job_records(include_direct=include_direct)
+        source_id, cycle_time = cycle_scope
+        return self._iter_pipeline_job_records_for_cycle(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            include_direct=include_direct,
+        )
 
     def _iter_reconcile_pipeline_job_records(self) -> Iterable[dict[str, Any]]:
         """Yield restart work from the durable inventory only.
@@ -8866,6 +9043,97 @@ def _source_cycle_from_file_run_id(run_id: str) -> tuple[str, datetime]:
         raise FileOrchestrationJournalError("file_journal_invalid_cycle_time", field="run_id") from error
 
 
+def _cycle_scope_from_file_run_id(run_id: Any) -> tuple[str, datetime] | None:
+    """Derive ``(source_id, cycle_time)`` from a run id, or ``None``.
+
+    ``None`` means "not derivable with certainty" and its only legal
+    consequence is falling back to the whole-tree scan (#1734 design D4). It is
+    never a "row not found": a narrowed lookup that misses a row double-submits
+    a cohort or mints a wrong retry, whereas the fallback is merely as slow as
+    the prior behaviour.
+
+    The forecast and cohort shapes are adjudicated by the existing
+    ``_source_cycle_from_file_run_id``; the analysis shape (whose cycle is its
+    start timestamp) is added here from the same canonical regex module. No
+    fresh parser, and the source segment always goes through
+    ``_normalize_file_source_id`` because run ids spell the source lower case
+    while the on-disk directory carries the normalised casing.
+    """
+
+    try:
+        return _source_cycle_from_file_run_id(str(run_id))
+    except FileOrchestrationJournalError:
+        pass
+    try:
+        safe_run_id = _safe_identity_text(str(run_id), field="run_id")
+    except FileOrchestrationJournalError:
+        return None
+    match = _ANALYSIS_RUN_ID_RE.fullmatch(safe_run_id)
+    if match is None:
+        return None
+    try:
+        return _normalize_file_source_id(match.group(1), field="run_id"), parse_cycle_time(match.group(2))
+    except (TypeError, ValueError, FileOrchestrationJournalError):
+        return None
+
+
+def _cycle_scope_from_job_id(job_id: Any) -> tuple[str, datetime] | None:
+    """Derive ``(source_id, cycle_time)`` from a job id, or ``None`` (D1a).
+
+    Both live job id shapes carry the pair: ``_CANDIDATE_JOB_ID_RE``
+    (``job_fcst_{source}_{cycle}_...``), which
+    ``_direct_pipeline_job_record`` already uses to route a by-cycle partition
+    read, and ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE``
+    (``job_cycle_{source}_{cycle}_{stage}...``) for cohort rows. An earlier
+    ruling held that ``job_id`` carried no cycle; Task 1(b)'s measurement
+    forced that ruling's reversal and this function is the correction.
+
+    ``None`` is the D4 fall-open signal, never "row not found". It is also the
+    filename-level filter for the flat direct surface (D2a): a name that does
+    not parse is read rather than skipped.
+    """
+
+    try:
+        safe_job_id = _safe_identity_text(str(job_id), field="job_id")
+    except FileOrchestrationJournalError:
+        return None
+    match = _CANDIDATE_JOB_ID_RE.fullmatch(safe_job_id) or _ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(safe_job_id)
+    if match is None:
+        return None
+    try:
+        return _normalize_file_source_id(match.group(1), field="job_id"), parse_cycle_time(match.group(2))
+    except (TypeError, ValueError, FileOrchestrationJournalError):
+        return None
+
+
+def _cycle_scope_from_idempotency_key(idempotency_key: Any) -> tuple[str, datetime] | None:
+    """Derive ``(source_id, cycle_time)`` from ``run_id:stage[:suffix]``.
+
+    ``chain_runtime_utils._cycle_stage_idempotency_key`` builds the key by
+    prefixing the run id, and run ids never contain ``:``. Any other key shape
+    falls open to the whole-tree scan.
+    """
+
+    run_id, separator, _rest = str(idempotency_key).partition(":")
+    if not separator or not run_id:
+        return None
+    return _cycle_scope_from_file_run_id(run_id)
+
+
+def _cycle_scope_from_cycle_id(cycle_id: Any) -> tuple[str, datetime] | None:
+    """Derive ``(source_id, cycle_time)`` from ``{source_lower}_{cycle}``.
+
+    Round-trip mismatch, unknown source and unparseable cycle token all fall
+    open rather than raising: the caller's blocked-row handler must stay
+    reserved for genuine read faults.
+    """
+
+    try:
+        return _source_cycle_from_cycle_id(str(cycle_id))
+    except FileOrchestrationJournalError:
+        return None
+
+
 def _source_cycle_from_cycle_id(cycle_id: str) -> tuple[str, datetime]:
     source, separator, cycle_stamp = str(cycle_id).rpartition("_")
     if not separator:
@@ -10487,6 +10755,27 @@ def _journal_segment_names(cycle_segment: str) -> tuple[str, ...]:
         _journal_segment_name(cycle_segment, index)
         for index in range(MAX_FILE_JOURNAL_CYCLE_SEGMENTS + 1)
     )
+
+
+def _journal_segment_stem_in_cycle_scope(stem: str, cycle_segment: str) -> bool:
+    """Does this segment file name belong to (or fail to disclaim) one cycle?
+
+    Same fall-open shape D2a fixes on the flat direct surface: skip a name ONLY
+    when it resolves to a *different* cycle, exactly as the whole-tree scan
+    would attribute it. A name that resolves to nothing — ``<cycle>.x.jsonl``,
+    ``not-a-cycle.jsonl`` — is handed to ``_journal_identity_from_path`` so it
+    fails closed with the same reason the whole-tree scan raises, instead of
+    being quietly skipped.
+    """
+
+    base, _segment_index = _split_journal_segment_stem(stem)
+    if base == cycle_segment:
+        return True
+    try:
+        parse_cycle_time(_safe_segment(base))
+    except (TypeError, ValueError, FileOrchestrationJournalError):
+        return True
+    return False
 
 
 def _split_journal_segment_stem(stem: str) -> tuple[str, int]:
