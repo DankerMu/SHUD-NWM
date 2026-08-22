@@ -184,32 +184,159 @@ direct-only candidate。候选必须满足：18 个现有流域加新增流域�
 require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror 与 shared canonical，
 并重建 canonical readiness。任何一步失败都保留上一份 canonical，不允许退回 IDW。
 
-**当前 authority（2026-07-18 node-22 现场）**：共有以下 18 个业务流域，口径为
-12 个旧流域加 6 个新流域；每个流域有 GFS、IFS 两个 source-scoped direct-grid
-model variant，所以 scheduler registry 是 36 行，不再是下面 baseline ID 的 18 行：
+#### 3.1.1 新流域上线四跳（2026-08-22 #1699 实战 receipt，7 个流域）
+
+上面那段是骨架，下面是走通一次之后每一跳的实际口径与坑。四跳顺序不可换。
+
+**三个根必须分清**（同名不同物，弄混必错）：
+
+| 角色 | 路径 | 说明 |
+|---|---|---|
+| node-22 计算侧 Basins 源 | `/volume/nwm/Basins`（本地 175T `/dev/sda`） | 流域原始目录，用**原名** |
+| node-27 `BASINS_ROOT` = NFS Basins | 22 侧 `/ghdc/data/nwm/Basins` = 27 侧 `/home/ghdc/nwm/Basins` | seed 的 inventory 源，用**已定名** |
+| NFS object store | 22 侧 `/ghdc/data/nwm/object-store` = 27 侧 `/home/ghdc/nwm/object-store` | node-27 `OBJECT_STORE_ROOT`；baseline 包与 dg 变体落这里 |
+| node-22 调度器私有 object store | `/scratch/frd_muziyao/nhms-prod/object-store` | **调度器只认这个根**，dg 变体必须回拷 |
+
+**hop 1 — baseline 发布（node-22）。**
+
+```bash
+PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
+uv run python scripts/publish_scheduler_file_registry.py \
+  --basins-root /ghdc/data/nwm/Basins \
+  --basin-slug <每个新流域重复> \
+  --object-store-root /ghdc/data/nwm/object-store --object-store-prefix s3://nhms \
+  --registry-manifest /ghdc/data/nwm/object-store/scheduler/baseline-registry/manifest-last.json \
+  --work-dir <workspace>/work --output <workspace>/receipts/baseline-publish.json
+```
+
+- **必须显式传 `--registry-manifest`**：默认值取 `NHMS_SCHEDULER_REGISTRY_MANIFEST`，
+  也就是**生产 canonical**。忘了就是直接往生产写 baseline/IDW 行。
+- `baseline-registry/` 目录 2026-08-22 前不存在，首次需 `mkdir -p`。
+- 缺 `PYTHONPATH` 会在 `_build_manual_cutover_gate` 处
+  `ModuleNotFoundError: No module named 'scripts'`——门是默认开的，不是没跑。
+- **`--basins-root` 要指向持久路径，不要指向临时 staging 目录。** 包版本号是纯内容派生、
+  与路径无关（实测同一批树从 scratch staging 和从 NFS Basins 发布，7 个版本号逐字相同，
+  第二次全部 `already_done`），但 registry 行会把 `source_path` 钉死成发布时的路径。
+  #1698 就留下了 `source_path=/scratch/.../recalibration-1698/basins-staging/jialingjiang`
+  这样指向临时目录的生产行。
+  该字段**不参与运行期解析**（实证：`basins_dth_ls_shud` 的
+  `source_path=/volume/nwm/Basins/DTH_LS` 根本不存在——真实目录叫 `CJ-DTH-LS`——
+  而 DTH_LS 每日照常出 96 个 run），但它是唯一的 provenance，指向会被清理的目录等于自毁溯源。
+
+**hop 1b — 把 staged 树拷进 NFS Basins（零 run 流域的 seed 前提）。**
+拷**staging 副本**（含 IC 修复、含有意剔除的目录），不是源；两边必须 `diff -rq` 为空，
+因为 publisher 与 seed 各自对同一棵树跑 `discover_basins_inventory`，身份一致是靠内容相同保证的。
+拷完 `chmod -R a+rX`（22 侧 uid 1103 建的目录，27 侧 uid 1005 要读）。
+
+**hop 2 — node-27 登记 baseline。** 就是 autopipeline 的 seed：
+
+```bash
+PYTHONPATH=/home/nwm/NWM uv run python scripts/node27_autopipeline.py --seed-only --only-basin <slug>
+```
+
+零 run 流域**只能**从 `BASINS_ROOT` inventory seed（`node27_autopipeline.py` 的 phase-1
+先取 `_discover_seed_basin_identities(basins_root)`，run manifest 存在时才 override）。
+`basin_id` 由**根目录名**推：`basins_{_slug_id(basin_slug)}`——改名就是在定 `basin_id`。
+seed 写出的 `model_package_uri` 版本段是占位的
+`vbasins-{slug_id}-production`（模板不含内容哈希），与 hop 1 发布的内容寻址版本**天然不同**，
+这是既有形状（`basins_tailanhe_shud` 至今如此）、**不是错误**：
+provision 只读该行的 `river_network_version_id / mesh_version_id /
+calibration_version_id / shud_code_version`，不读 `model_package_uri`。
+
+**hop 3 — provision dg 变体（node-27）。** `--source-grid` 用默认
+`GFS=gfs_0p25 / IFS=ifs_0p25` 即可：`normalize_source_id` 走 `_STORAGE_SOURCE_IDS[upper()]`，
+产出生产在用的 `gfs`（小写）与 `IFS`（大写）——这个不对称是规范化结果，别去"修正"。
+两个坑：
+
+- `direct_grid_variants/<baseline_model_id>/` 的父目录属 `frd_muziyao:huser` 且带 sticky，
+  node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在 node-22 侧建好并放权**：
+  `mkdir -p <dir> && chgrp nwmuser <dir> && chmod 2775 <dir>`（两个账号共有组 `nwmuser`/1107）。
+- `--output-registry` 的**父目录不能组可写**，否则 `provider_lock_parent_unsafe`
+  （`provider_atomic.py` 要求 `st_uid == geteuid()` 且 `mode & 0o022 == 0`）。`chmod 755` 即可。
+
+**hop 3b — 变体包回拷 node-22 scratch。** 用 `cp -r`，**不要 `cp -a`**：
+flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
+`preserving permissions ... Operation not supported` 并以非零码退出，配 `set -e` 会中途断掉
+（数据其实已拷完，容易误判）。拷完 `diff -rq` 对齐。
+
+**发布前的硬闸：packaged-IC 探针必须对每一行 qualified。** dg 变体 manifest 只有
+`direct_grid_forcing` 键、没有 `included_files`，走 tier (b) 对象探针，URI 由
+`{model_package_uri}{shud_input_name}.cfg.ic` 推出并在 **scratch 根**上解析。用现成工具，别手搓：
+
+```bash
+PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_initial_state.py \
+  --registry-manifest <candidate>.json \
+  --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
+  --object-store-prefix s3://nhms --workspace-root /scratch/frd_muziyao/nhms-prod/workspace \
+  --receipt-path <receipts>/ic-audit.json
+```
+
+判据是每行 `ic_status=qualified`；`verdict=undetermined` 在还没有 run 时是正常的。
+`shud_input_name` 来自**内层 `input/<Name>/` 目录名**，only-root 改名后与 `basin_slug` 不同
+（实战：`SHJ-2SHJ` 的 `shud_input_name` 是 `2SHJ`，`DTH_XJ` 的是 `CJ-DTH-XJ`）——
+任何假设 `name == slug` 的推导都会在这类行上断。
+
+> `/ghdc/data/nwm/object-store/scheduler/direct-grid-candidates/`（world-writable + sticky）
+> 是 provision 候选产物的**共享落点**，实测长期为空——#1698 与 #1699 都把 `--output-registry`
+> 写在各自 workspace 里，因为共享目录的组可写属性会触发 `provider_lock_parent_unsafe`。
+> 它不是遗留垃圾、也不参与任何自动流程，保留即可；候选放哪儿由 `--output-registry` 决定。
+
+**hop 4 — 合并发布。** 机制与 5.7.1 相同（直接调 `publish_scheduler_registry_manifest`、
+两份共用同一 `generated_at`、CAS）。新流域上线是 **add-only**，发布前断言：
+行数 = 旧 + 2×新流域数、无重复 `model_id`、新 slug 与既有 slug 不相交、全部 `direct_grid`、
+每流域恰好一条 gfs 一条 IFS、每行都带 `shud_input_name` 与 `model_package_uri`。
+备份 stamp 每次换新，否则脚本会因备份已存在而拒跑。
+
+**发布后必须手动跑一趟 refresh 重建 readiness。** readiness 索引条目与 registry identity
+是**逐一相等**关系（`validate_readiness_registry_model_set`），48 行 registry 配 34 行 readiness
+会被拒。好在 refresh 是从当前 `registry_models` **现推**再自校验
+（`derive_catalog_bound_readiness_entries`），不加载旧条目，所以不存在死锁——但
+`nhms-scheduler-file-provider-refresh.timer` 实测是**天级**周期（下次触发可能在 26 小时后），
+**不能等它**。触发方式与判据见 5.7.1（`latest.json` 的 `started_at` 变新；
+refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
+而一趟 pass 可以跑一小时以上）。
+
+**一条 provenance 备注**：publisher 会对越界标定参数在隔离副本上自动修复后再打包
+（`basins.calibration_repair.v1`）。2026-08-22 上线的 `SHJ-2SHJ` 触发了 SOIL_ALPHA 修复
+（multiplier 3.29079 → 2.29593，calibrated alpha max 28.6648 → 19.999，上界 20.0），
+**因此它的包内容与 Basins 树里的 `2SHJ.cfg.calib` 有意不同**。日后 diff 包与树的人别当成损坏，
+依据在发布 receipt 的 `repairs[]` 里。
+
+**当前 authority（2026-08-22 node-22 实测 canonical manifest）**：共 24 个业务流域，
+口径为 17 个既有流域加 #1699 上线的 7 个；每个流域有 GFS、IFS 两个 source-scoped
+direct-grid model variant，所以 scheduler registry 是 **48 行**，不是下面 baseline ID 的 24 行。
+（此前文档写的「18 流域 / 36 行」在 2026-08-22 前就已 stale：`basins_hhe_shud`
+早已不在 registry 中，实际是 17 流域 34 行。数量一律以
+`jq '.models|length' manifest-last.json` 实测为准。）
 
 ```text
 basins_dth_ls_shud
+basins_dth_xj_shud
+basins_dth_yj_shud
 basins_dth_zj_shud
-basins_hhe_shud
-basins_huai_main_shud
-basins_lh_gl_shud
 basins_heihe_shud
 basins_hetianhe_shud
+basins_huai_main_shud
+basins_huaiyss_shud
 basins_jialingjiang_shud
 basins_kashigeer_shud
 basins_keliya_shud
+basins_lh_gl_shud
+basins_lh_ldbd_shud
+basins_lh_lxyh_shud
+basins_lh_ylj_shud
 basins_qhh_shud
 basins_qinyijiang_shud
+basins_shj_2shj_shud
+basins_tailanhe_shud
 basins_weiganhe_shud
 basins_xinanjiang_upstream_shud
 basins_zhaochen_bst_shud
 basins_zhaochen_mc_shud
 basins_zhaochen_wem_shud
-basins_tailanhe_shud
 ```
 
-因此 GFS/IFS 各有 18 个 source-model candidate，共 36 个候选执行单元。
+因此 GFS/IFS 各有 24 个 source-model candidate，共 48 个候选执行单元。
 调度器在 candidate 构造前按 direct-grid contract 的 `applicable_source_ids` 投影模型；
 不得把 36 个 variant 与两个 source 做 72 行笛卡尔积，也不得把预期的异源不适配记成
 pass-blocking failure。合同缺失或损坏仍须 fail closed。
@@ -238,7 +365,7 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 若只读 Basins 源中某个模型仅缺 `*.tsd.rl`，脚本会在私有 scratch copy
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
-#### 3.1.1 DB-free scheduler 的受支持回滚/前滚
+#### 3.1.2 DB-free scheduler 的受支持回滚/前滚
 
 禁止直接把 `/scratch/frd_muziyao/NWM` checkout 到 pre-inventory writer 后启动。
 受支持流程必须保留当前版本作为 rollback controller，并为目标 SHA 创建一个临时、
@@ -424,9 +551,12 @@ source/cycle、统一 lineage identity、forecast hours、catalog row、canonica
 全验证，并按 direct-grid `applicable_source_ids` 为每个适用的 source/model 生成一条只含
 `catalog_uri + catalog_sha256 + catalog_row_count` 绑定的 entry；不得生成异源不适配的
 readiness 行。
-2026-07-18 当前 authority 为 18 个模型，因此每个 source 必须恰有 18 条、
-总计 36 条。2026-07-15 在移除被 `HHe` 完整覆盖的重复目录
-`HHe-MAIN-02` 后得到的 19 模型、每源 19 条、共 38 条，只是当日历史证据。
+条数不写死：readiness 条目与 registry identity 是**逐一相等**关系
+（`validate_readiness_registry_model_set`），所以每个 source 的条数恒等于该 source 适用的
+registry 模型数，总条数恒等于 registry 行数——一律以
+`jq '.models|length' manifest-last.json` 与 readiness index 实测为准，不引用文档里的历史数字。
+（历史证据留档：2026-07-15 为 19 模型 / 每源 19 条 / 共 38 条，2026-07-18 为 18 / 18 / 36，
+2026-08-22 #1699 上线后为 24 / 24 / 48。这三个数只说明它会变，不构成断言。）
 最新 catalog
 invalid 时禁止回退旧 cycle；consumer identity mismatch 必须重读同一绑定 catalog 后重算。
 State index 才允许仅绕过年龄并重验 checkpoint object。任何 missing/invalid 引用或
@@ -1492,11 +1622,17 @@ skip）。判据只有一个：`latest.json` 的 `started_at` 变新。**不要*
 选择键是 `bv.basin_id`、无 model_id 谓词。提前标就是让该流域前端立刻空窗，
 直到新 run 落地。等新行 published 之后再标，连续性由 `cycle_time DESC` 自然接上。
 
-**node-27 侧不需要 staging Basins。** `node27_autopipeline.py` 的 seed 遍历的是从
-object store 发现的 run（身份取 `_basin_identity(object_store_root, first_run)`），
-`BASINS_ROOT` 只是兜底预种子；docstring 明说 run manifest 会 override inventory 派生的身份。
-实证：node-27 的 `/home/ghdc/nwm/Basins/` 只有 10 个原始流域、没有 Huai-MAIN 与
+**node-27 侧不需要 staging Basins——但这只对已有 run 的流域成立。**
+`node27_autopipeline.py` 的 seed 对**已有 run** 的流域用
+`_basin_identity(object_store_root, first_run)` 取身份，run manifest 会 override
+inventory 派生的身份，此时 `BASINS_ROOT` 里有没有该流域都无所谓。
+实证：node-27 的 `/home/ghdc/nwm/Basins/` 当时只有 10 个原始流域、没有 Huai-MAIN 与
 jialingjiang，而这两个流域各已有 73 条 published run。
+
+> **不要把这条推广到新流域上线。** 零 run 流域**没有** run manifest 可用，
+> 唯一的身份来源就是 `BASINS_ROOT` inventory（`node27_autopipeline.py` phase-1 的
+> `_discover_seed_basin_identities`），所以新流域**必须**把 staged 树放进 NFS Basins。
+> 2026-08-22 的 #1699 上线即走此路；见上文「新流域上线四跳」hop 1b/hop 2。
 （另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
 与 NFS `/ghdc/data` 不是同一个文件系统。）
 
