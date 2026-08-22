@@ -39,6 +39,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from services.orchestrator import scheduler_lineage as _scheduler_lineage
 from services.orchestrator.scheduler_discovery import SchedulerResourceLimitError
 from workers.data_adapters.base import CycleDiscovery
 
@@ -67,8 +68,19 @@ def _predecessor_key(source_id: str, cycle_time: datetime, model_id: str) -> tup
 
 def _extract_pending_predecessors(
     blocked: Sequence[Any],
+    lineage_cutover_for_model_source: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one dict per §8.6 predecessor-pending block."""
+    """Return one dict per §8.6 predecessor-pending block.
+
+    #1735: when a lineage resolver is supplied, a record whose predecessor
+    cycle predates the model's OWN state-lineage cutover ``t*`` is marked
+    ``lineage_scoped_out`` so :func:`emit_predecessor_candidates` refuses the
+    prepend.  A recalibrated model's clone row makes ``exists_any_generation``
+    True at every cycle, so a pre-``t*`` submission blocks as
+    ``block_predecessor_pending`` and this path would answer by synthesizing a
+    candidate at an EVEN EARLIER cycle — walking backward out of the window
+    with no reachable base case.  Default ``None`` keeps legacy behavior.
+    """
     pending: list[dict[str, Any]] = []
     for entry in blocked:
         evidence = getattr(entry, "state_evidence", None)
@@ -93,16 +105,25 @@ def _extract_pending_predecessors(
             continue
         if lead_hours <= 0:
             continue
-        pending.append(
-            {
-                "source_id": source_id,
-                "cycle_time": cycle_time,
-                "lead_hours": lead_hours,
-                "generation": str(selected.get("generation") or ""),
-                "model_id": model_id,
-                "successor_candidate_id": getattr(entry, "candidate_id", ""),
-            }
+        record: dict[str, Any] = {
+            "source_id": source_id,
+            "cycle_time": cycle_time,
+            "lead_hours": lead_hours,
+            "generation": str(selected.get("generation") or ""),
+            "model_id": model_id,
+            "successor_candidate_id": getattr(entry, "candidate_id", ""),
+        }
+        cutover = (
+            lineage_cutover_for_model_source(model_id, source_id)
+            if callable(lineage_cutover_for_model_source)
+            else None
         )
+        if cutover is not None and _scheduler_lineage.is_pre_cutover(cutover, cycle_time):
+            record["lineage_scoped_out"] = _scheduler_lineage.lineage_scoped_out_record(
+                cutover,
+                cycle_time=cycle_time,
+            )
+        pending.append(record)
     return pending
 
 
@@ -212,6 +233,7 @@ def emit_predecessor_candidates(
     active_repository: Any | None = None,
     max_candidates: int | None = None,
     skipped: Sequence[Any] | None = None,
+    lineage_cutover_for_model_source: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Emit predecessor candidates for §8.6 predecessor-pending blocks.
 
@@ -248,9 +270,17 @@ def emit_predecessor_candidates(
         at :func:`services.orchestrator.scheduler_candidates.build_candidates`
         line 185.  Omitting it silently let admitted predecessors breach the
         cap by up to ``len(skipped)``.
+
+    ``lineage_cutover_for_model_source``:
+        Optional #1735 resolver — ``(model_id, source_id)`` to that model's
+        own state-lineage cutover ``t*``.  A predecessor cycle earlier than
+        ``t*`` is refused with a ``lineage_scoped_out_pre_cutover`` evidence
+        record instead of being prepended: the model did not exist then, so
+        the emitted candidate could never run and the recursion would only
+        walk further backward.  ``None`` keeps legacy behavior.
     """
     skipped_count = len(skipped) if skipped is not None else 0
-    pending = _extract_pending_predecessors(blocked)
+    pending = _extract_pending_predecessors(blocked, lineage_cutover_for_model_source)
     if not pending:
         return []
 
@@ -312,6 +342,23 @@ def emit_predecessor_candidates(
             truncated = True
             break
         total_attempted += 1
+        # #1735 §3.2: refuse the prepend BEFORE any dedup / manifest / gate
+        # work — the cycle predates this model's own existence, so nothing
+        # downstream could turn it into runnable work.
+        lineage_scoped_out = record.get("lineage_scoped_out")
+        if isinstance(lineage_scoped_out, Mapping):
+            emission_evidence.append(
+                {
+                    "status": "skipped",
+                    "reason": _scheduler_lineage.LINEAGE_SCOPED_OUT_REASON,
+                    "successor_candidate_id": record["successor_candidate_id"],
+                    "predecessor_source_id": record["source_id"],
+                    "predecessor_cycle_time": record["cycle_time"].isoformat(),
+                    "predecessor_model_id": record["model_id"],
+                    "lineage": dict(lineage_scoped_out),
+                }
+            )
+            continue
         key = _predecessor_key(
             record["source_id"], record["cycle_time"], record["model_id"]
         )

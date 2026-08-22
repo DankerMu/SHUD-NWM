@@ -13,6 +13,8 @@ from packages.common.state_manager import state_snapshot_id
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from tests.lineage_state_index_fixtures import index_entry as _lineage_index_entry
+from tests.lineage_state_index_fixtures import index_repository as _lineage_index_repository
 
 # Reuse the project's existing journal-seeding pattern verbatim.
 from tests.test_file_orchestration_journal import _latest_view as _journal_latest_view
@@ -1963,3 +1965,557 @@ def _clear_backfill_env(monkeypatch: Any) -> None:
     monkeypatch.delenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", raising=False)
     yield
     os.environ.pop("NHMS_SCHEDULER_BACKFILL_ENABLED", None)
+
+
+# ---------------------------------------------------------------------------
+# #1735 lineage-scoped cycle completion: a recalibrated model must not gap the
+# cycles that predate its own existence.  A recalibration mints a new
+# content-derived ``model_id``; every completeness predicate is keyed strictly
+# by ``model_id``, so without scoping every cycle in the lookback flips
+# ``complete`` -> ``gap`` and the backfill lane pins itself on a cycle that can
+# never close.
+# ---------------------------------------------------------------------------
+
+#: ``t*`` for the recalibrated model in these fixtures — the middle cycle of
+#: ``_IDENTITY_CYCLE_TIMES``, so the window carries one pre-``t*`` cycle, the
+#: cutover cycle itself, and one post-``t*`` cycle.
+_LINEAGE_CUTOVER = "2026-05-21T06:00:00Z"
+_LINEAGE_PRE_CUTOVER_CYCLE = "2026-05-21T00:00:00Z"
+_LINEAGE_POST_CUTOVER_CYCLE = "2026-05-21T12:00:00Z"
+
+
+class PerModelCompletionRepository(FakeActiveRepository):
+    """``has_completed_pipeline`` keyed per ``(cycle_time, model_id)``.
+
+    The production predicate is per-model — the db-free journal explicitly
+    excludes another model's job rows (#1302) — so a lineage fixture keyed by
+    cycle alone would score ``complete`` for the wrong reason.
+    """
+
+    def __init__(self, completed: set[tuple[str, str]]) -> None:
+        super().__init__(active=False, completed=False)
+        self._completed = {
+            (scheduler_module._format_utc(_dt(cycle_time)), model_id)
+            for cycle_time, model_id in completed
+        }
+        self.completion_queries: list[tuple[str, str]] = []
+
+    def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id
+        key = (scheduler_module._format_utc(cycle_time), model_id)
+        self.completion_queries.append(key)
+        return key in self._completed
+
+
+class PredecessorJournalIdentityRepository(PerModelCompletionRepository):
+    """Per-model completion PLUS a journal whose identity tokens are the predecessor's.
+
+    Models the §8.7 trap: after the cutover the journal still holds the retired
+    predecessor ``M``'s rows for the pre-``t*`` cycles, carrying ``M``'s
+    ``init_state_id`` tokens.  The breaker must not re-flip a cycle that now
+    scores ``complete`` by lineage scoping.
+    """
+
+    def __init__(
+        self,
+        completed: set[tuple[str, str]],
+        *,
+        recorded_init_state_id: str,
+        occurrences: int,
+    ) -> None:
+        super().__init__(completed)
+        self._recorded_init_state_id = recorded_init_state_id
+        self._occurrences = occurrences
+        self.identity_queries: list[tuple[str, str]] = []
+
+    def completed_pipeline_init_state_id(
+        self, *, source_id: str, cycle_time: datetime, model_id: str
+    ) -> str | None:
+        del source_id
+        self.identity_queries.append((scheduler_module._format_utc(cycle_time), model_id))
+        return self._recorded_init_state_id
+
+    def completed_pipeline_init_state_id_occurrences(
+        self, *, source_id: str, cycle_time: datetime, model_id: str, init_state_id: str
+    ) -> int:
+        del source_id, cycle_time, model_id, init_state_id
+        return self._occurrences
+
+
+def _lineage_clone_entry(
+    tmp_path: Path,
+    *,
+    model_id: str,
+    valid_time: str,
+    cloned_from_model_id: str,
+    source_id: str = "gfs",
+    clone_gate_kind: str | None = "state_compatibility",
+) -> dict[str, Any]:
+    return _lineage_index_entry(
+        object_root=tmp_path / "lineage-index" / "objects",
+        model_id=model_id,
+        valid_time=valid_time,
+        source_id=source_id,
+        cloned_from_model_id=cloned_from_model_id,
+        clone_gate_kind=clone_gate_kind,
+    )
+
+
+def _lineage_scheduler(
+    tmp_path: Path,
+    *,
+    models: Sequence[Mapping[str, Any]],
+    active_repository: Any,
+    clone_entries: Sequence[Mapping[str, Any]],
+    cycle_times: Sequence[str] = _IDENTITY_CYCLE_TIMES,
+) -> ProductionScheduler:
+    """A backfill scheduler whose lineage resolver reads a REAL state index.
+
+    Only the provider construction is bypassed (the db-free path builds it from
+    env); the resolution itself runs through the production
+    ``clone_lineage_signal`` -> ``resolve_lineage_cutover`` seam, so the
+    earliest-row and no-ancestry-walk rules are genuinely exercised.
+    """
+
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(cycle_times),
+        backfill_enabled=True,
+        max_cycles_per_source=len(cycle_times),
+        active_repository=active_repository,
+        models=list(models),
+    )
+    if clone_entries:
+        scheduler._lineage_provider_cache = _lineage_index_repository(
+            tmp_path / "lineage-index",
+            [dict(entry) for entry in clone_entries],
+            generated_at=_IDENTITY_NOW,
+            now=_IDENTITY_NOW,
+        )
+    return scheduler
+
+
+def test_pre_cutover_cycle_scores_complete_for_a_lineage_bearing_model(tmp_path: Path) -> None:
+    """5.1: the cycles that predate ``M'`` are decided by the remaining models."""
+    models = [_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")]
+    completed = {
+        (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"),
+        (_LINEAGE_CUTOVER, "model_a"),
+        (_LINEAGE_CUTOVER, "model_a_prime"),
+    }
+    clone_entries = [
+        _lineage_clone_entry(
+            tmp_path,
+            model_id="model_a_prime",
+            valid_time=_LINEAGE_CUTOVER,
+            cloned_from_model_id="model_a_legacy",
+        )
+    ]
+
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(completed),
+        clone_entries=clone_entries,
+    )
+    # Fixture guard: without the lineage resolver this very cycle is the
+    # unclosable gap the change exists to remove.
+    unscoped = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(completed),
+        clone_entries=[],
+    )
+
+    assert _completion_status(unscoped, _LINEAGE_PRE_CUTOVER_CYCLE) == "gap"
+    assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "complete"
+    # The frontier is no longer pinned on a cycle that predates ``M'``.
+    assert _selected_backfill_cycles(scheduler) == [_LINEAGE_POST_CUTOVER_CYCLE]
+
+
+def test_pre_cutover_cycle_records_the_lineage_exclusion_in_evidence(tmp_path: Path) -> None:
+    """4.1: the annotation names the model, its predecessor, and ``t*``."""
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")],
+        active_repository=PerModelCompletionRepository(
+            {
+                (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"),
+                (_LINEAGE_CUTOVER, "model_a"),
+                (_LINEAGE_CUTOVER, "model_a_prime"),
+            }
+        ),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+    )
+
+    _selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    scoped_out = [
+        item for item in evidence if item.get("type") == "lineage_scoped_out_pre_cutover"
+    ]
+    assert [item["cycle_time_utc"] for item in scoped_out] == [_LINEAGE_PRE_CUTOVER_CYCLE]
+    assert scoped_out[0]["model_id"] == "model_a_prime"
+    assert scoped_out[0]["predecessor_model_id"] == "model_a_legacy"
+    assert scoped_out[0]["cutover_valid_time"] == _LINEAGE_CUTOVER
+    assert scoped_out[0]["reason"] == "lineage_scoped_out_pre_cutover"
+
+
+def test_cutover_cycle_itself_still_requires_genuine_completion(tmp_path: Path) -> None:
+    """5.2: the boundary is STRICT — ``C == t*`` is scored exactly as any cycle."""
+    models = [_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")]
+    clone_entries = [
+        _lineage_clone_entry(
+            tmp_path,
+            model_id="model_a_prime",
+            valid_time=_LINEAGE_CUTOVER,
+            cloned_from_model_id="model_a_legacy",
+        )
+    ]
+    incomplete = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(
+            {(_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"), (_LINEAGE_CUTOVER, "model_a")}
+        ),
+        clone_entries=clone_entries,
+    )
+    complete = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(
+            {
+                (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"),
+                (_LINEAGE_CUTOVER, "model_a"),
+                (_LINEAGE_CUTOVER, "model_a_prime"),
+            }
+        ),
+        clone_entries=clone_entries,
+    )
+
+    assert _completion_status(incomplete, _LINEAGE_CUTOVER) == "gap"
+    assert _completion_status(complete, _LINEAGE_CUTOVER) == "complete"
+    # And the cutover cycle is the frontier while it is genuinely incomplete.
+    assert _selected_backfill_cycles(incomplete) == [_LINEAGE_CUTOVER]
+
+
+def test_model_without_lineage_is_scored_exactly_as_before(tmp_path: Path) -> None:
+    """5.3 (scoring surface): no clone row ⇒ in scope for every cycle."""
+    models = [_model("model_a", "basin_a"), _model("model_b", "basin_b")]
+    completed = {
+        (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"),
+        (_LINEAGE_CUTOVER, "model_a"),
+        (_LINEAGE_CUTOVER, "model_b"),
+    }
+    # An index that carries a clone row for a DIFFERENT model: the resolver is
+    # wired and reads real data, and still says "no lineage" for these two.
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=models,
+        active_repository=PerModelCompletionRepository(completed),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_z_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_z",
+            )
+        ],
+    )
+
+    assert (
+        scheduler._lineage_cutover_for_model_source("model_b", "gfs") is None
+    )
+    assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "gap"
+    assert _completion_status(scheduler, _LINEAGE_CUTOVER) == "complete"
+    assert _selected_backfill_cycles(scheduler) == [_LINEAGE_PRE_CUTOVER_CYCLE]
+
+
+def test_scope_emptied_by_the_lineage_filter_is_not_a_gap(tmp_path: Path) -> None:
+    """5.4 leg 1 (D5): every model scoped out ⇒ not a gap, not selected."""
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a_prime", "basin_a")],
+        active_repository=PerModelCompletionRepository(
+            {
+                (_LINEAGE_CUTOVER, "model_a_prime"),
+                (_LINEAGE_POST_CUTOVER_CYCLE, "model_a_prime"),
+            }
+        ),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+    )
+
+    assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "complete"
+    assert _selected_backfill_cycles(scheduler) == []
+
+
+def test_scope_empty_before_the_lineage_filter_is_still_a_gap(tmp_path: Path) -> None:
+    """5.4 leg 2 (D5): the unconfigured-models misconfiguration guard is untouched.
+
+    Same scheduler, same wired resolver — only the model set is empty.  The
+    two empty causes must not share a verdict.
+    """
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a_prime", "basin_a")],
+        active_repository=PerModelCompletionRepository(set()),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+    )
+    adapter = scheduler.adapters["gfs"]
+    discovery = _discovery_for_time(adapter, _LINEAGE_PRE_CUTOVER_CYCLE)
+
+    assert (
+        scheduler._cycle_completion_status(
+            discovery,
+            (),
+            horizon=scheduler_module._source_horizon_metadata(discovery, adapter),
+        )
+        == "gap"
+    )
+
+
+def test_predecessor_journal_identity_does_not_reengage_the_breaker(tmp_path: Path) -> None:
+    """5.5 / trap 2: ``M``'s stale tokens must not re-flip a lineage-scoped cycle."""
+    # ``M``'s token for the pre-``t*`` cycle: a different base key from any
+    # expectation composed for ``model_a`` / ``model_a_prime``.
+    predecessor_token = _init_state_id_for(
+        _LINEAGE_PRE_CUTOVER_CYCLE, lead_hours=6, model_id="model_a_legacy"
+    )
+    repository = PredecessorJournalIdentityRepository(
+        {(_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"), (_LINEAGE_CUTOVER, "model_a")},
+        recorded_init_state_id=predecessor_token,
+        # Far above the breaker threshold: if the breaker were reachable it
+        # would engage, so "not engaged" cannot pass for a trivial reason.
+        occurrences=99,
+    )
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")],
+        active_repository=repository,
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=_LINEAGE_CUTOVER,
+                cloned_from_model_id="model_a_legacy",
+            )
+        ],
+    )
+
+    status = _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE)
+    selected, evidence = _discover_cycles_with_evidence(scheduler)
+
+    assert status == "complete"
+    assert selected == [_LINEAGE_CUTOVER]
+    assert not any(
+        item.get("selection_reason") == "journal_predecessor_identity_quarantine_breaker_engaged"
+        for item in evidence
+    )
+    # The scoped-out model never reaches the identity gate for that cycle.
+    assert (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a_prime") not in repository.identity_queries
+
+
+def test_twice_recalibrated_model_is_scoped_by_its_own_cutover(tmp_path: Path) -> None:
+    """5.7: ``M -> M' @ t1 -> M'' @ t2`` — the boundary is ``t2``, never ``t1``.
+
+    Scoping on the chain's earliest ``t*`` would leave ``M''`` in scope for the
+    ``[t1, t2)`` cycles that ``M'`` ran — an unclosable gap identical in shape
+    to the incident this change fixes.
+    """
+    t1 = _LINEAGE_PRE_CUTOVER_CYCLE
+    t2 = _LINEAGE_POST_CUTOVER_CYCLE
+    in_between = _LINEAGE_CUTOVER
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a", "basin_a"), _model("model_a_prime_prime", "basin_b")],
+        active_repository=PerModelCompletionRepository(
+            {(t1, "model_a"), (in_between, "model_a"), (t2, "model_a")}
+        ),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=t1,
+                cloned_from_model_id="model_a_legacy",
+            ),
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime_prime",
+                valid_time=t2,
+                cloned_from_model_id="model_a_prime",
+            ),
+        ],
+    )
+
+    cutover = scheduler._lineage_cutover_for_model_source("model_a_prime_prime", "gfs")
+    assert cutover is not None
+    assert cutover.cutover_time == _dt(t2)
+    assert cutover.predecessor_model_id == "model_a_prime"
+    # ``[t1, t2)`` — the cycles ``M'`` ran — are scoped out for ``M''`` too.
+    assert _completion_status(scheduler, t1) == "complete"
+    assert _completion_status(scheduler, in_between) == "complete"
+    # At its own ``t*`` it is in scope and has not completed.
+    assert _completion_status(scheduler, t2) == "gap"
+    assert _selected_backfill_cycles(scheduler) == [t2]
+
+
+def test_backdated_reactivation_does_not_scope_out_cycles_the_identity_ran(
+    tmp_path: Path,
+) -> None:
+    """5.8: two clone rows under one ``model_id`` ⇒ the boundary is the earliest."""
+    t_a = _LINEAGE_CUTOVER
+    t_b = _LINEAGE_POST_CUTOVER_CYCLE
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a", "basin_a"), _model("model_a_prime", "basin_b")],
+        active_repository=PerModelCompletionRepository(
+            {
+                (_LINEAGE_PRE_CUTOVER_CYCLE, "model_a"),
+                (t_a, "model_a"),
+                (t_b, "model_a"),
+            }
+        ),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=t_a,
+                cloned_from_model_id="model_a_legacy",
+            ),
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=t_b,
+                cloned_from_model_id="model_a_legacy",
+            ),
+        ],
+    )
+
+    cutover = scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs")
+    assert cutover is not None
+    assert cutover.cutover_time == _dt(t_a)
+    # Before the earliest clone row: scoped out.
+    assert _completion_status(scheduler, _LINEAGE_PRE_CUTOVER_CYCLE) == "complete"
+    # The cycles the identity actually ran stay in scope and must complete.
+    assert _completion_status(scheduler, t_a) == "gap"
+    assert _selected_backfill_cycles(scheduler) == [t_a]
+
+
+def test_lineage_cutover_is_scoped_per_source(tmp_path: Path) -> None:
+    """5.9 / D3: GFS and IFS cut over independently."""
+    gfs_cutover = _LINEAGE_CUTOVER
+    ifs_cutover = _LINEAGE_POST_CUTOVER_CYCLE
+    scheduler = _lineage_scheduler(
+        tmp_path,
+        models=[_model("model_a_prime", "basin_a")],
+        active_repository=PerModelCompletionRepository(set()),
+        clone_entries=[
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=gfs_cutover,
+                cloned_from_model_id="model_a_legacy",
+                source_id="gfs",
+            ),
+            _lineage_clone_entry(
+                tmp_path,
+                model_id="model_a_prime",
+                valid_time=ifs_cutover,
+                cloned_from_model_id="model_a_legacy",
+                source_id="IFS",
+            ),
+        ],
+    )
+    context = scheduler._discovery_context()
+    models = scheduler._discover_models()[0]
+    gfs_discovery = _discovery_for_time(scheduler.adapters["gfs"], gfs_cutover)
+    ifs_discovery = scheduler_module.CycleDiscovery(
+        cycle_id=cycle_id_for("IFS", _dt(gfs_cutover)),
+        source_id="IFS",
+        cycle_time=_dt(gfs_cutover),
+        cycle_hour=6,
+        available=True,
+        status="discovered",
+    )
+    scope = scheduler_module._scheduler_discovery._models_in_completion_scope
+
+    # Same instant, two sources: in scope for GFS (``C == t*``), scoped out
+    # for IFS (``C < t*``).
+    assert [model.model_id for model in scope(context, gfs_discovery, models)] == [
+        "model_a_prime"
+    ]
+    assert scope(context, ifs_discovery, models) == ()
+
+
+def test_db_free_lineage_resolver_reads_the_published_state_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """1.2: production wiring — the db-free plane resolves from the loaded index.
+
+    No fake provider: the scheduler builds its own
+    ``FileStateSnapshotIndexRepository`` from env exactly as a node-22 pass
+    does.  Also pins that the per-pass memo is cleared with the other file
+    providers, so a recalibration landing mid-run is not invisible until
+    process restart.
+    """
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    clone_entry = _db_free_state_index_entry(
+        roots,
+        valid_time=_dt(_LINEAGE_CUTOVER),
+        producer_cycle_time=_dt(_LINEAGE_PRE_CUTOVER_CYCLE),
+        model_id="model_a_prime",
+    )
+    clone_entry["cloned_from_model_id"] = "model_a_legacy"
+    clone_entry["cloned_from_state_id"] = "state_of_model_a_legacy"
+    clone_entry["clone_gate_fingerprint"] = "sha256:" + "d" * 64
+    clone_entry["clone_gate_kind"] = "state_compatibility"
+    _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=_dt(_LINEAGE_CUTOVER),
+        package_checksum=_DB_FREE_PACKAGE_CHECKSUM,
+        generated_at=_dt(_IDENTITY_NOW),
+        entries=[clone_entry],
+    )
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=_dt(_IDENTITY_NOW),
+        cycle_times=list(_IDENTITY_CYCLE_TIMES),
+        backfill_enabled=True,
+        max_cycles_per_source=len(_IDENTITY_CYCLE_TIMES),
+        active_repository=PerModelCompletionRepository(set()),
+        models=[_model("model_a_prime", "basin_a")],
+    )
+
+    cutover = scheduler._lineage_cutover_for_model_source("model_a_prime", "gfs")
+
+    assert cutover is not None
+    assert cutover.predecessor_model_id == "model_a_legacy"
+    assert cutover.cutover_time == _dt(_LINEAGE_CUTOVER)
+    assert scheduler._lineage_cutover_for_model_source("model_a", "gfs") is None
+    assert ("model_a_prime", "gfs") in scheduler._lineage_cutover_cache
+    scheduler._refresh_db_free_file_providers()
+    assert scheduler._lineage_cutover_cache == {}

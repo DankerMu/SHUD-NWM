@@ -140,6 +140,10 @@ class StateSnapshotRepository(Protocol):
         self, *, model_id: str, source_id: str
     ) -> StateSnapshot | None: ...
 
+    def get_earliest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None: ...
+
     def list_state_snapshots(
         self,
         *,
@@ -836,6 +840,48 @@ class PsycopgStateSnapshotRepository:
               AND source_id = %s
               AND clone_gate_fingerprint IS NOT NULL
             ORDER BY valid_time DESC, created_at DESC
+            LIMIT 1
+            """,
+            (model_id, source_id),
+        )
+        return _snapshot_from_row(row) if row is not None else None
+
+    def get_earliest_clone_row_for_model_source(
+        self, *, model_id: str, source_id: str
+    ) -> StateSnapshot | None:
+        """Return the EARLIEST clone row for a ``(model_id, source_id)`` pair (#1735).
+
+        The scheduler's lineage-scoped completion filter asks a different
+        question from the index publisher above: not "which clone row did we
+        just commit?" but "when did this ``model_id`` come into existence for
+        this source?".  That is the model's existence-start, so the ordering
+        is ``(valid_time, created_at) ASC`` — deliberately the opposite of
+        :meth:`get_latest_clone_row_for_model_source`, which serves the
+        publisher's mirror-the-just-committed-row job.  Reusing the ``DESC``
+        reader here would let a backdated re-activation retroactively scope
+        the identity out of cycles it actually ran (change
+        ``lineage-scoped-cycle-completion`` D4).
+
+        Same shadow-proof ``clone_gate_fingerprint IS NOT NULL`` filter as the
+        publisher's reader, plus ``cloned_from_model_id IS NOT NULL``: lineage
+        is established by the predecessor id being present (D2), and the
+        scoped-out evidence annotation always names it.  No ``usable_flag``
+        filter — an unusable clone row still proves the identity started then,
+        and skipping it would move the boundary later (the silent-hide
+        direction).
+
+        Returns ``None`` when the pair has no clone row — cold start, fresh
+        basin, or legacy target — which the caller reads as "no lineage".
+        """
+        row = self._fetch_optional(
+            """
+            SELECT *
+            FROM hydro.state_snapshot
+            WHERE model_id = %s
+              AND source_id = %s
+              AND clone_gate_fingerprint IS NOT NULL
+              AND cloned_from_model_id IS NOT NULL
+            ORDER BY valid_time ASC, created_at ASC
             LIMIT 1
             """,
             (model_id, source_id),
@@ -1539,6 +1585,86 @@ class FileStateSnapshotIndexRepository:
                     "history_entry_count_current": len(current_entries),
                     "expected_key_predecessor_quarantined": expected_key_predecessor_quarantined,
                 },
+            }
+        )
+
+    def clone_lineage_signal(self, *, model_id: str, source_id: str) -> dict[str, Any]:
+        """Return this model's own state-lineage cutover for a source (#1735).
+
+        Answers "when did ``model_id`` come into existence for ``source_id``?"
+        from clone provenance the index already carries: an entry with
+        ``cloned_from_model_id`` set was written by the state-clone hook, and
+        its ``valid_time`` is the cutover instant ``t*``.
+
+        Resolution rules (change ``lineage-scoped-cycle-completion``, D2/D4):
+
+        - ``t*`` is the **earliest** clone entry by ``(valid_time,
+          created_at)`` under the model's OWN ``(model_id, source_id)`` — its
+          existence-start.  A later clone row (backdated re-activation) must
+          not retroactively disown cycles this identity actually ran.
+        - No ancestry walk: a chain ancestor's cutover never participates.
+          ``M → M' → M''`` scopes ``M''`` by ``M''``'s own cutover only.
+        - ``clone_gate_kind`` refines WHY the clone was admitted, not
+          WHETHER it happened: both kinds — and an absent/unrecognised kind —
+          confer lineage when ``cloned_from_model_id`` is present.
+        - No ``usable_flag`` filter: an unusable clone row still proves the
+          identity started then, and skipping it would move the boundary
+          later, which is the silent-hide direction.
+
+        Reads the already-loaded (cached) index snapshot, so a scheduling
+        pass that has touched the index issues no additional read.  Never
+        raises: an absent clone entry, and an index that cannot be loaded,
+        both yield ``has_lineage=False`` — "no lineage", which leaves the
+        model scored exactly as a model that never cloned.
+        """
+        try:
+            index_snapshot = self._load_index_snapshot(allow_empty=False)
+        except StateManagerError as error:
+            index_evidence = self._blocked_index_evidence(error)
+            reason = _first_state_index_blocker_reason(index_evidence) or "state_snapshot_index_unavailable"
+            return _state_index_evidence_safe(
+                {
+                    "status": "blocked",
+                    "ready": False,
+                    "reason": reason,
+                    "model_id": model_id,
+                    "source_id": source_id,
+                    "has_lineage": False,
+                    "predecessor_model_id": None,
+                    "cutover_valid_time": None,
+                    "clone_gate_kind": None,
+                    "clone_entry_count": 0,
+                    "state_snapshot_index": index_evidence,
+                }
+            )
+        source = _normalize_state_index_source_id(source_id, field="identity.source_id")
+        clone_entries = _clone_entries_for_model_source(
+            index_snapshot.entries,
+            model_id=str(model_id),
+            source_id=source,
+        )
+        earliest = clone_entries[0] if clone_entries else None
+        return _state_index_evidence_safe(
+            {
+                "status": "ready",
+                "ready": True,
+                "reason": None,
+                "model_id": model_id,
+                "source_id": source,
+                "has_lineage": earliest is not None,
+                "predecessor_model_id": (
+                    _optional_str(earliest.get("cloned_from_model_id")) if earliest is not None else None
+                ),
+                "cutover_valid_time": (
+                    _format_time(_parse_state_index_time(earliest["valid_time"], field="valid_time"))
+                    if earliest is not None
+                    else None
+                ),
+                "clone_gate_kind": (
+                    _optional_str(earliest.get("clone_gate_kind")) if earliest is not None else None
+                ),
+                "clone_entry_count": len(clone_entries),
+                "state_snapshot_index": dict(index_snapshot.evidence),
             }
         )
 
@@ -2560,6 +2686,44 @@ def _state_index_identity_key(
         str(cycle_id or ""),
         lead_text,
     )
+
+
+def _clone_entries_for_model_source(
+    entries: Mapping[tuple[str, str, str, str, str], Mapping[str, Any]],
+    *,
+    model_id: str,
+    source_id: str,
+) -> list[Mapping[str, Any]]:
+    """Clone-provenance entries for one ``(model_id, source_id)``, EARLIEST first.
+
+    ``cloned_from_model_id`` is the db-free equivalent of the DB reader's
+    ``clone_gate_fingerprint IS NOT NULL`` shadow-proof filter: only the
+    state-clone hook writes it, so forecast / save-state entries can never
+    shadow a clone written at a backdated ``t*``.  Ordering is ``(valid_time,
+    created_at)`` ASC — see :meth:`FileStateSnapshotIndexRepository.clone_lineage_signal`
+    for why existence-start rather than the newest row is the boundary.
+    """
+
+    matched: list[Mapping[str, Any]] = []
+    for key, entry in entries.items():
+        if key[0] != str(model_id) or key[1] != str(source_id):
+            continue
+        if not str(entry.get("cloned_from_model_id") or "").strip():
+            continue
+        matched.append(entry)
+    epoch = datetime.min.replace(tzinfo=UTC)
+
+    def _order(entry: Mapping[str, Any]) -> tuple[datetime, datetime, str]:
+        valid_time = _parse_state_index_time(entry["valid_time"], field="valid_time")
+        created_at_raw = entry.get("created_at")
+        created_at = (
+            _parse_state_index_time(created_at_raw, field="created_at")
+            if created_at_raw not in (None, "")
+            else epoch
+        )
+        return (valid_time, created_at, str(entry.get("state_id") or ""))
+
+    return sorted(matched, key=_order)
 
 
 def _state_index_base_key(*, model_id: str, source_id: str, valid_time: datetime) -> tuple[str, str, str]:

@@ -62,8 +62,8 @@ audited models retain 97 usable entries each).
 - `_models_in_completion_scope` (`services/orchestrator/scheduler_discovery.py:158`)
   — the single choke point where the filter lands; all three verdict tiers
   consume its output.
-- The lineage resolver — new, pure, per `(model_id, source_id)`, with a
-  visited-set guard.
+- The lineage resolver — new, pure, per `(model_id, source_id)`. No ancestry
+  walk, hence no recursion and no visited-set guard (D4).
 - Cohort/candidate construction — the symmetric suppression site.
 - `_breaker_engaged_gap_identities` (`:364-417`) — interaction seam, assertion
   only, no change intended.
@@ -204,7 +204,8 @@ lineage filter" from "scope was empty before the lineage filter".
 | Empty-scope disambiguation (both causes) | unit, one test each |
 | §8.7 breaker does not re-engage on lineage-scoped cycles | unit |
 | No pre-`t*` predecessor prepend at the `t*` boundary | unit in `tests/test_scheduler_backfill_predecessor.py` |
-| Multi-hop chain + cycle guard | unit on the resolver |
+| Second recalibration is scoped by its own `t*`, not the chain's earliest | unit on the resolver |
+| A backdated re-activation does not retroactively scope out run cycles | unit on the resolver |
 | Whole-system: gaps collapse, forward lane resumes | **node-22 live receipt** (production oracle) |
 | Real-DB parity of the DB-plane resolver | **node-27 real-DB pytest** |
 
