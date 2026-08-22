@@ -44925,12 +44925,34 @@ def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
     lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
     lease.acquire(pass_id="hb", started_at=_dt("2026-05-21T12:00:00Z"))
 
+    # Observe the EXACT bound callable the real heartbeat renews through, so a
+    # renew() exception stays distinguishable from a real token-mismatch False
+    # (design D1/D2). Production _LeaseHeartbeat._run still performs its own
+    # Exception -> lost=True mapping; we only record and re-raise so the parent
+    # can name the cause before it asserts worker-produced state.
+    real_renew = lease.renew
+    renew_error: BaseException | None = None
+
+    def observed_renew(*, pass_id: str) -> bool:
+        nonlocal renew_error
+        try:
+            return real_renew(pass_id=pass_id)
+        except BaseException as error:
+            renew_error = error
+            raise
+
+    lease.renew = observed_renew  # type: ignore[method-assign]
+
     heartbeat = _LeaseHeartbeat(lease, "hb", interval_seconds=0.05)
     heartbeat.start()
     try:
         deadline = time.monotonic() + 2.0
         while _read_lock(lock_path)["heartbeat_seq"] < 1 and time.monotonic() < deadline:
+            if renew_error is not None:
+                break
             time.sleep(0.02)
+        if renew_error is not None:
+            raise renew_error
         assert _read_lock(lock_path)["heartbeat_seq"] >= 1
         assert heartbeat.lost is False
 
@@ -44941,10 +44963,110 @@ def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
 
         deadline = time.monotonic() + 2.0
         while not heartbeat.lost and time.monotonic() < deadline:
+            if renew_error is not None:
+                break
             time.sleep(0.02)
+        if renew_error is not None:
+            raise renew_error
         assert heartbeat.lost is True
+        assert renew_error is None
     finally:
         heartbeat.stop()
+    assert heartbeat._thread is None
+
+
+class InjectedHeartbeatRenewFailure(RuntimeError):
+    """Unique cause identity so an injected renew() raise cannot be confused with a takeover."""
+
+
+def test_lease_heartbeat_shipping_test_reports_first_renew_exception_before_sequence_symptom(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A renew() raise before the first sequence increment must name its cause first (#1648).
+
+    Pre-fix this row failed on the empty ``heartbeat_seq >= 1`` symptom while
+    the cause died in the heartbeat daemon; the repaired shipping test surfaces
+    the injected exception before any sequence assertion.
+    """
+    calls: list[str] = []
+
+    def fail_renew(self: Any, *, pass_id: str) -> bool:
+        calls.append(pass_id)
+        raise InjectedHeartbeatRenewFailure("injected first-renew heartbeat failure")
+
+    monkeypatch.setattr(FileSchedulerLease, "renew", fail_renew)
+    with pytest.raises(
+        InjectedHeartbeatRenewFailure,
+        match="injected first-renew heartbeat failure",
+    ):
+        test_lease_heartbeat_advances_then_detects_takeover(tmp_path)
+    assert calls, "injection must execute against the exact shipping renew seam"
+
+
+def test_lease_heartbeat_shipping_test_rejects_post_takeover_renew_exception_as_success(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A renew() raise after the stolen token must not false-green as the takeover oracle (#1648).
+
+    The real first renewal succeeds and the shipping test replaces the token;
+    the observed seam then raises instead of returning False. Production maps
+    the raise to ``lost=True``, but the repaired shipping test rejects the
+    exception rather than accepting it as the expected takeover result (which
+    pre-fix let this row pass green).
+    """
+    real_renew = FileSchedulerLease.renew
+    calls: list[str] = []
+
+    def fail_after_takeover(self: Any, *, pass_id: str) -> bool:
+        payload = _read_lock(self.lock_path)
+        if payload["lease_token"] == "stolen":
+            calls.append("raised")
+            raise InjectedHeartbeatRenewFailure("injected post-takeover renew failure")
+        calls.append("real")
+        return real_renew(self, pass_id=pass_id)
+
+    monkeypatch.setattr(FileSchedulerLease, "renew", fail_after_takeover)
+    with pytest.raises(
+        InjectedHeartbeatRenewFailure,
+        match="injected post-takeover renew failure",
+    ):
+        test_lease_heartbeat_advances_then_detects_takeover(tmp_path)
+    assert calls and calls[-1] == "raised", "injection must execute after the stolen token"
+
+
+def test_lease_heartbeat_production_run_maps_renew_exception_to_lost_without_escape(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Unchanged production ``_LeaseHeartbeat._run`` maps a renew() Exception to ``lost=True`` (#1648).
+
+    A direct control over the exact bound renew callable the real heartbeat
+    uses: the injected exception must execute, production must set ``lost``
+    without letting the exception escape the daemon thread, and stop/join must
+    complete. No production heartbeat, lease, or scheduler code is edited.
+    """
+    import time
+
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    lease.acquire(pass_id="hb", started_at=_dt("2026-05-21T12:00:00Z"))
+    calls: list[str] = []
+
+    def failing_renew(*, pass_id: str) -> bool:
+        calls.append(pass_id)
+        raise InjectedHeartbeatRenewFailure("injected production control renew failure")
+
+    monkeypatch.setattr(lease, "renew", failing_renew)
+    heartbeat = _LeaseHeartbeat(lease, "hb", interval_seconds=0.01)
+    heartbeat.start()
+    deadline = time.monotonic() + 2.0
+    while not heartbeat.lost and time.monotonic() < deadline:
+        time.sleep(0.02)
+    heartbeat.stop()
+    assert calls, "injection must execute against the bound renew seam"
+    assert heartbeat.lost is True
     assert heartbeat._thread is None
 
 
