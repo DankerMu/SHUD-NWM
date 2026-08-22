@@ -881,21 +881,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_state_qc.py",
             # #1735: the clone-lineage read path (`get_earliest_clone_row_for_
             # model_source`, `clone_lineage_signal`, `_clone_entries_for_model_
-            # source`) lives in this module, but every assertion about it — the
-            # DB-plane SQL shape included — sits in the scheduler lineage
-            # suites. Without these two, the negative pin written to guard that
-            # SQL (`test_earliest_clone_row_query_is_ascending_and_clone_
-            # scoped`, which asserts `usable_flag` never enters the statement)
-            # was not in this module's lane: injecting `AND usable_flag = true`
-            # into the query left the routed lane green. 24 tests in 0.09s and
-            # 52 in 0.82s — under a second together.
+            # source`) lives in this module, but the two suites routed above
+            # assert NOTHING about it — every assertion, the DB-plane SQL shape
+            # included, sits in the scheduler suites. Without these two, the
+            # negative pin written to guard that SQL (`test_earliest_clone_row_
+            # query_is_ascending_and_clone_scoped`, which asserts `usable_flag`
+            # never enters the statement) was not in this module's lane:
+            # injecting `AND usable_flag = true` into the query left the routed
+            # lane green. 24 tests in 0.09s and 52 in 0.82s — under a second.
             "tests/test_scheduler_lineage.py",
             "tests/test_scheduler_backfill.py",
-            # NODE IDS, not the file: `test_production_scheduler.py` asserts on
-            # the same symbols through the scheduler's cohort suppression, but
-            # the whole file is 1870 tests in 186s — far past what this lane can
-            # carry. These three are the only tests in it that exercise the
-            # lineage provider seam, and they measure 0.34s together. Node ids
+            # NODE IDS, not the file: `test_production_scheduler.py` names none
+            # of these symbols directly — it drives the read path through a
+            # duck-typed fake in its cohort suppression, which is the seam a
+            # signature or ordering change breaks. The whole file is 1870 tests
+            # in 186s — far past what this lane can carry. These three are the
+            # only tests in it that exercise that seam, 0.34s together. Node ids
             # are first-class targets here: `_test_target_exists` splits on
             # `::`, ci.yml passes the selection straight to `pytest -q`, and the
             # meta-guard re-checks every pinned node id still names a live
