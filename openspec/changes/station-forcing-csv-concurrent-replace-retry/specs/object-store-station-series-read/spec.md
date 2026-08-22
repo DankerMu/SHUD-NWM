@@ -43,3 +43,90 @@ The path where the file is absent SHALL remain untouched: an atomic replacement 
 
 - **WHEN** the expected station CSV path does not exist
 - **THEN** the reader raises its existing not-found error with no retry
+
+## MODIFIED Requirements
+
+### Requirement: CSV parse and valid_time computation
+
+The reader SHALL parse the per-station shud CSV with the documented two-row header (`nrow ncol start_date end_date` then `Time_Day Precip Temp RH Wind RN`) and emit (variable, valid_time, value) tuples where `valid_time = cycle_time + timedelta(seconds=int(round(Time_Day*86400)))`.
+
+#### Scenario: valid_time of first data row equals cycle_time
+
+- **WHEN** the reader parses a shud CSV whose first data row has `Time_Day=0`
+- **AND** the cycle_time is `2026-06-20T12:00:00Z`
+- **THEN** the emitted `valid_time` of that row SHALL be `2026-06-20T12:00:00Z`
+
+#### Scenario: 3-hour step at Time_Day=0.125
+
+- **WHEN** the second data row has `Time_Day=0.125`
+- **AND** cycle_time is `2026-06-20T12:00:00Z`
+- **THEN** the emitted `valid_time` SHALL be `2026-06-20T15:00:00Z`
+
+#### Scenario: last data row Time_Day=6.5 yields cycle + 6 days 12 hours
+
+- **WHEN** the last data row has `Time_Day=6.5`
+- **AND** cycle_time is `2026-06-20T12:00:00Z`
+- **THEN** the emitted `valid_time` SHALL be `2026-06-27T00:00:00Z` (cycle + 561600 seconds)
+
+#### Scenario: rounding handles non-exact 3h step deterministically
+
+- **WHEN** a Time_Day value such as `0.041666` (≈ 1 hour) is encountered
+- **AND** cycle_time is `2026-06-20T12:00:00Z`
+- **THEN** the reader SHALL emit `valid_time=2026-06-20T13:00:00Z` (using `int(round(Time_Day*86400))=3600`, NOT `int(Time_Day*86400)=3599`)
+
+#### Scenario: variable name mapping per units contract, with `unit` field
+
+- **WHEN** the reader emits rows from a CSV column
+- **THEN** the API `variable` field SHALL be: `Precip→PRCP`, `Temp→TEMP`, `RH→RH`, `Wind→wind`, `RN→Rn`
+- **AND** the corresponding `unit` field SHALL be: `PRCP="mm/day"`, `TEMP="degC"`, `RH="0-1"`, `wind="m/s"`, `Rn="W/m^2"`
+- **AND** the reader SHALL NOT emit a `Press` variable (source CSV has no Press column)
+
+#### Scenario: N data rows produce 5 × N tuples per default request (no row-count hardcoding)
+
+- **WHEN** the CSV header row 1 says `N\t6\t<start_date>\t<end_date>` for some row count N
+- **AND** the data section has N rows
+- **THEN** the reader SHALL emit exactly 5 (variable count) × N (row count) tuples for the default request (all variables)
+
+#### Scenario: malformed CSV raises STATION_FORCING_FILE_MALFORMED
+
+- **WHEN** the CSV is missing the header row or contains a non-numeric value where a numeric is expected
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED` and details `{station_id, expected_path, parse_reason}`
+
+#### Scenario: non-finite numeric CSV values are malformed
+
+- **WHEN** the CSV contains `NaN`, `inf`, or a numeric token whose `Time_Day` conversion overflows the datetime range
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the response SHALL NOT contain non-finite JSON numeric values
+
+#### Scenario: blank row inside declared data section is malformed
+
+- **WHEN** the CSV header declares `nrow=N`
+- **AND** a blank physical row appears inside those N declared data rows
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the reader SHALL NOT skip the blank row and backfill it with a later extra row
+
+#### Scenario: declared nrow mismatch raises STATION_FORCING_FILE_MALFORMED
+
+- **WHEN** the CSV header declares `nrow=N`
+- **AND** the data section contains fewer or more than N data rows
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** `details.parse_reason` SHALL identify the row-count mismatch
+
+#### Scenario: CSV reader enforces hard input bounds
+
+- **WHEN** the CSV file exceeds the configured byte cap, a single line exceeds the configured line cap, or the header `nrow` exceeds the configured row cap
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** the reader SHALL NOT read or parse the full oversized tail after the failure is known
+
+#### Scenario: CSV file is read through no-follow descriptor-bound open
+
+- **WHEN** the expected station CSV path is a symlink, is not a regular file, or violates the reader's containment root
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** it SHALL NOT follow the symlink target
+- **AND** a refusal raised because the target's inode changed while the file was being opened SHALL be excluded from this scenario, being governed instead by the requirement covering concurrent atomic replacement
+
+#### Scenario: file open/read OS errors are mapped to malformed
+
+- **WHEN** opening or reading an existing resolved CSV raises `PermissionError` or a generic `OSError`
+- **THEN** the reader SHALL raise HTTP 500 with code `STATION_FORCING_FILE_MALFORMED`
+- **AND** `details.parse_reason` SHALL preserve operator-useful error text

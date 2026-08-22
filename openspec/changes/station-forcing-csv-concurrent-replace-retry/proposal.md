@@ -4,13 +4,16 @@
 
 display API 的 station-series 直读路径对「写方是原子 replace」这件事不设防，一次瞬时竞态就把对外接口打成 HTTP 500。
 
-写读双方共用一块 NFS（node-22 producer 写 `/ghdc/data/nwm/`，node-27 display API 从 `/home/ghdc/nwm/object-store` 读，拓扑见 `docs/runbooks/object-store-forcing-series-read.md:65-82`）：
+写读双方共用同一份存储，但**不对称**：node-27 的 hostname 即 `ghdc`，它自己跑 NFS server 并导出
+`/home/ghdc`，display API 读的 `/home/ghdc/nwm/object-store` 是**本机 ext4**；node-22 挂载
+`ghdc:/home/ghdc` 到 `/ghdc/data`，producer 是**NFS 客户端**（实测见 design D0，
+拓扑背景 `docs/runbooks/object-store-forcing-series-read.md:65-82`）：
 
 - **写方**：`workers/forcing_producer/producer.py:2101-2105` 对每个 `shud/<station>.csv` 走
   `write_bytes_atomic` → `packages/common/object_store.py:207-214` → `atomic_write_bytes_no_follow`
   （`packages/common/safe_fs.py:138-208`），以 `os.replace` **换入新 inode**。
 - **读方**：`packages/common/object_store_forcing.py:503` 走 `open_file_no_follow`
-  （`safe_fs.py:277-313`）。该原语在 `:285` 的 pre-open stat 与 `:303` 的 post-open fstat 之间比对
+  （`safe_fs.py:277-313`）。该原语在 `:285` 的 pre-open stat 与 `:301` 的 post-open fstat 之间比对
   `(st_dev, st_ino)`；窗内被 `os.replace` 换掉就在 `safe_fs.py:305` 抛
   `SafeFilesystemError(kind="identity_changed")`。
 - **落点**：`object_store_forcing.py:551-556` 的
@@ -36,8 +39,11 @@ chokepoint 做了实现（`services/orchestrator/file_orchestration_journal.py:4
 
 ## Impact
 
-- Affected specs: `object-store-station-series-read`
+- Affected specs: `object-store-station-series-read`（ADDED 一条新 requirement + MODIFIED 既有
+  "CSV parse and valid_time computation"，收窄其 no-follow scenario 的 WHEN——理由见 design D6）
 - Affected code: `packages/common/object_store_forcing.py`（唯一实现文件）、
   `tests/test_object_store_forcing.py`（新增确定性用例）
-- 行为面：`STATION_FORCING_FILE_MALFORMED` 的**触发条件收窄**（并发替换不再首次即 500），
-  HTTP 状态码、错误码、`details` 键集均不变；`FileNotFoundError` → 404 路径完全不动。
+- 行为面：`STATION_FORCING_FILE_MALFORMED` 的**触发条件收窄**——并发替换命中重试窗口时，
+  同一 WHEN 下结果由 500 变为 200，这是一处**可观测的行为变更**（正因如此需要 MODIFIED delta）。
+  错误码、`details` 键集、以及所有其它失败路径的状态码均不变；
+  `FileNotFoundError` → 404 路径完全不动。
