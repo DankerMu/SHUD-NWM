@@ -9,8 +9,7 @@ Concretely: the file journal's single-row lookup entrypoints whose argument
 carries a derivable `(source_id, cycle)` — lookup by cycle id, by run id, by
 idempotency key, and by job id — SHALL resolve that pair from the argument and
 read only that cycle's record sources: that cycle's `latest/<source>/<cycle>` views, that
-cycle's `journal/<source>/<cycle>` segments, that cycle's
-`pipeline-events/<source>/<cycle>` segments, and the direct records. That
+cycle's `journal/<source>/<cycle>` segments, and the direct records. That
 narrowed replay SHALL NOT read any other cycle's files.
 
 This requirement is scoped to that narrowed replay deliberately, and SHALL NOT
