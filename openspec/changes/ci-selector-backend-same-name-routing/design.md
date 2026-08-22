@@ -40,7 +40,7 @@ Two source paths can map to one basename suite. Current master has one such cros
 
 ### D5: Measure both complete and issue-baseline cost
 
-The PR SHALL report current `pytest --collect-only` count and actual wall clock for all 14 unique suites reached by the 15 previously missing source/suite pairs. It SHALL separately report the issue's 13 core-smoke-only suite subtotal so the historical 309-node acceptance baseline is not conflated with the full current 383-node gap set (which also includes `tests/test_runtime_mode.py`). No timeout or marker changes are permitted to make the budget pass.
+The PR SHALL report current `pytest --collect-only` count and actual wall clock for all 14 unique suites reached by the 15 previously missing source/suite pairs. It SHALL separately report the issue's 13 core-smoke-only suite subtotal so the historical 309-node acceptance baseline is not conflated with the current 319-node core subtotal or the full current 393-node gap set (which also includes `tests/test_runtime_mode.py`). No timeout or marker changes are permitted to make the budget pass.
 
 ### D6: Every same-name source route schedules the selector meta-guard
 
