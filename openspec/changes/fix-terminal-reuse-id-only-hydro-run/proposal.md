@@ -14,8 +14,9 @@ exit (`services/orchestrator/scheduler_candidates.py:470-515`) is gated on
 `_terminal_decision_matches_strict_warm_start`, whose `hydro_run` leg is
 `_warm_state_record_matches` (`:2018`) — a **selected-driven** four-field
 equality over `state_id`/`checksum`/`uri`/`valid_time`. The file journal's two
-`hydro_run` writers (`services/orchestrator/file_orchestration_journal.py:1490`,
-`:1526`) persist only `init_state_id` + `quality`. Three of the four fields are
+`hydro_run` writers — `create_hydro_run` and `create_hydro_run_from_basin` in
+`services/orchestrator/file_orchestration_journal.py`, the only two callers of
+`_write_hydro_run` — persist only `init_state_id` + `quality`. Three of the four fields are
 therefore structurally absent on every row this deployment has ever written, so
 the equality fails on `checksum` even when the recorded `state_id` is
 character-for-character the state strict warm start just selected. Mismatch

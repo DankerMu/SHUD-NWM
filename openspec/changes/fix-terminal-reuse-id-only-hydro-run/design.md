@@ -130,7 +130,9 @@ guard asserts the divergence rather than forbidding it.
 
 ## Dead dedup gates verdict (issue acceptance item 5)
 
-`scheduler_candidates.py:389-395`, `:396-407`, `:412-422` each carry a
+The three duplicate-pipeline dedup gates in `scheduler_candidates.py` — the two
+`active_duplicate_pipeline` gates and the `completed_duplicate_pipeline` gate,
+located by those reason strings inside `build_candidates` — each carry a
 `not callable(state_provider)` conjunct. `state_provider` is
 `getattr(active_repository, "candidate_state", None)` (`:239`). Both production
 planes implement it — DB `chain_repository.py:113`, file
@@ -217,7 +219,8 @@ Domain packs (NHMS/NWM profile):
   budgeted path, never through the unbudgeted one.
 - **Source-of-truth identity/contract**: the init-state identity quadruple
   `(state_id, checksum, uri, valid_time)`, read via `init_state_field` aliases.
-- **Producers**: `file_orchestration_journal.py:1490`/`:1526` (id-only
+- **Producers**: `file_orchestration_journal.create_hydro_run` /
+  `create_hydro_run_from_basin` (id-only
   `hydro_run` rows); run manifest writer supplying
   `run_manifest_initial_state`; `chain_repository_state.candidate_state`.
 - **Validators/preflight**: `_terminal_decision_matches_strict_warm_start`,
