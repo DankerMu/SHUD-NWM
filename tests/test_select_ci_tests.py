@@ -30,6 +30,7 @@ from scripts.select_ci_tests import (
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
+    THREAD_EXCEPTION_POLICY_TESTS,
     PathTestRule,
     is_test_suite_path,
     main,
@@ -2439,6 +2440,97 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
 
 def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
+
+
+def test_pyproject_change_selects_policy_core_smoke_and_meta_guard() -> None:
+    # #1646: a pytest-config change must re-prove the thread-exception policy
+    # and keep core smoke plus the selector meta-guard, so a config edit cannot
+    # ship with the exact filter or the no-timeout decision unproven.
+    selected = select_tests(["pyproject.toml"], repo_root=Path("."))
+
+    assert _route_contract(selected)
+
+
+def test_uv_lock_change_selects_policy_core_smoke_and_meta_guard() -> None:
+    # #1646: a dependency-lock change could add pytest-timeout, so the lock rule
+    # must also reach the policy suite (which asserts no such package resolves)
+    # alongside core smoke and the selector meta-guard.
+    selected = select_tests(["uv.lock"], repo_root=Path("."))
+
+    assert _route_contract(selected)
+
+
+def _route_contract(selected: Sequence[str]) -> bool:
+    """The positive contract a config/lock-only PR must satisfy.
+
+    Shared by the positive route tests and the removal mutants so both encode
+    the SAME required set: core smoke plus the thread-exception policy suite
+    plus the selector meta-guard. A removed leg breaks this contract (RED),
+    rather than merely dropping a target from a weaker assertion.
+    """
+    return (
+        THREAD_EXCEPTION_POLICY_TESTS[0] in selected
+        and SELECTOR_META_GUARD_TEST in selected
+        and all(test_path in selected for test_path in CORE_SMOKE_TESTS)
+    )
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "removed_target"),
+    [
+        pytest.param(
+            "pyproject.toml",
+            THREAD_EXCEPTION_POLICY_TESTS[0],
+            id="pyproject-policy",
+        ),
+        pytest.param(
+            "pyproject.toml",
+            SELECTOR_META_GUARD_TEST,
+            id="pyproject-meta-guard",
+        ),
+        pytest.param(
+            "uv.lock",
+            THREAD_EXCEPTION_POLICY_TESTS[0],
+            id="uv-lock-policy",
+        ),
+        pytest.param(
+            "uv.lock",
+            SELECTOR_META_GUARD_TEST,
+            id="uv-lock-meta-guard",
+        ),
+    ],
+)
+def test_config_or_lock_route_reds_when_a_required_leg_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_path: str,
+    removed_target: str,
+) -> None:
+    # Constructed rule table, tracked tree untouched: dropping the policy suite
+    # OR the selector meta-guard from the pyproject/lock rule must break the
+    # positive contract for a config/lock-only PR. The assertion is the shared
+    # `_route_contract` (the same one the positive tests use), so a silent
+    # removal reddens exactly as the shipping route would fail.
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import PathTestRule
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed_target),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == changed_path
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    selected = select_tests([changed_path], repo_root=Path("."))
+
+    assert not _route_contract(selected), (
+        f"{changed_path} route survived removing {removed_target}: {sorted(selected)}"
+    )
 
 
 INTENTIONAL_DUPLICATE_PATTERNS = frozenset({"services/orchestrator/scheduler.py"})

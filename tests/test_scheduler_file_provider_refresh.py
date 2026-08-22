@@ -1098,8 +1098,11 @@ def test_spin_wait_harness_reports_the_writer_exception_not_the_empty_observatio
 
     Pre-fix this shape hung forever; the `finally` alone would have made it
     PASS carrying only a PytestUnhandledThreadExceptionWarning, because
-    `threading.Thread` swallows exceptions and this repo declares no
-    `filterwarnings`. Both halves are needed, so both are asserted here.
+    `threading.Thread` swallows exceptions. The repository now escalates that
+    exact warning to an error (#1646), but the global boundary does not prove
+    this helper's direct-call semantics, cause-before-result ordering, or
+    whole-process terminability, so the local capture and ordering assertions
+    remain mandatory. Both halves are needed, so both are asserted here.
 
     The seam is the harness's own writer-body parameter -- deliberately NOT a
     monkeypatch. Patching `atomic_replace_provider_bytes` on
