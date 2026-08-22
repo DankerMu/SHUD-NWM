@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from packages.common.source_identity import normalize_source_id
-from services.orchestrator.chain_config import scenario_for_source
-from services.orchestrator.reservation import slurm_comment_for
-from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+from .accepted_submit_cohort import (
+    _MEMBER_FIELDS as _MEMBER_FIELDS,
+)
+from .accepted_submit_cohort import (
+    FORECAST_COHORT_STAGE_ALIASES,
+    MAX_FORECAST_COHORT_MEMBERS,
+    canonical_forecast_cohort_members,
+    canonical_forecast_stage,
+    forecast_cohort_digest,
+    forecast_cohort_identity_is_valid,
+    is_forecast_cohort_stage_name,
+    ordered_cohort_members,
+)
 
-FORECAST_COHORT_STAGE_ALIASES = frozenset({"forecast", "run_shud_forecast", "run_shud_forecast_array"})
-MAX_FORECAST_COHORT_MEMBERS = 256
 MAX_ACCEPTED_SUBMIT_TEXT_LENGTH = 256
 ACCEPTED_SUBMIT_CONTRACT_VERSION = "nhms.accepted_submit.v1"
 ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD = "accepted_submit_contract_version"
@@ -31,10 +36,15 @@ ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
         "identity_mismatch_released",
         "matched_bound",
         "multiple_matches_blocked",
+        # Operator-verified absence (#1564): a file-journal-only typed demotion
+        # of the comment-unobservable held shape. Distinct from the automatic
+        # decision; accepted as a reclaimable absence by the two reclaim doors.
+        "operator_verified_absence",
     }
 )
 IDENTITY_MISMATCH_BLOCKED_DECISION = "identity_mismatch_blocked"
 IDENTITY_MISMATCH_RELEASED_DECISION = "identity_mismatch_released"
+OPERATOR_VERIFIED_ABSENCE_DECISION = "operator_verified_absence"
 #: The only decisions allowed to carry a non-zero consecutive-blocked counter.
 _IDENTITY_STREAK_DECISIONS = frozenset(
     {IDENTITY_MISMATCH_BLOCKED_DECISION, IDENTITY_MISMATCH_RELEASED_DECISION}
@@ -170,19 +180,6 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
 # lineage entry copied out of the master map at projection time, and that entry
 # is exactly as un-rewritable as the master's map it came from.
 ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS = (INIT_STATE_IDENTITY_FIELD,)
-
-# Deliberately WITHOUT the init-state identity: member projection feeds
-# ``forecast_cohort_digest``, and adding a field there would recompute every
-# historical row's digest into a mismatch (#1183 F3).
-_MEMBER_FIELDS = (
-    "array_task_id",
-    "candidate_id",
-    "run_id",
-    "model_id",
-    "basin_id",
-    "scenario_id",
-    "restart_stage",
-)
 
 
 class AcceptedSubmitEvidenceError(ValueError):
@@ -955,146 +952,6 @@ def init_state_identity_for_task(value: Any, array_task_id: Any) -> dict[str, An
             return dict(item)
     return None
 
-
-def canonical_forecast_stage(value: Any) -> str | None:
-    return "forecast" if str(value or "").strip() in FORECAST_COHORT_STAGE_ALIASES else None
-
-
-def is_forecast_cohort_stage_name(stage: Any, job_type: Any = None) -> bool:
-    stage_text = str(stage or "").strip()
-    if stage_text:
-        return canonical_forecast_stage(stage_text) is not None
-    return canonical_forecast_stage(job_type) is not None
-
-
-def ordered_cohort_members(value: Any) -> tuple[dict[str, Any], ...]:
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
-        return ()
-    return tuple(
-        {key: item.get(key) for key in _MEMBER_FIELDS}
-        for item in value[:MAX_FORECAST_COHORT_MEMBERS]
-        if isinstance(item, Mapping)
-    )
-
-
-def canonical_forecast_cohort_members(
-    *, source_id: str, cycle_time: Any, basins: Sequence[Mapping[str, Any]]
-) -> tuple[dict[str, Any], ...]:
-    """Build the one canonical accepted-submit member identity projection."""
-    source = normalize_source_id(source_id)
-    parsed_cycle = parse_cycle_time(cycle_time)
-    compact_cycle = format_cycle_time(parsed_cycle)
-    cycle_iso = parsed_cycle.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    scenario_id = scenario_for_source(source)
-    members: list[dict[str, Any]] = []
-    for index, basin in enumerate(basins):
-        model_id = str(basin.get("model_id") or "")
-        members.append(
-            {
-                "array_task_id": int(basin.get("task_id", index)),
-                "candidate_id": f"{source}:{cycle_iso}:{model_id}:{scenario_id}",
-                "run_id": f"fcst_{source.lower()}_{compact_cycle}_{model_id}",
-                "model_id": model_id,
-                "basin_id": str(basin.get("basin_id") or ""),
-                "scenario_id": scenario_id,
-                "restart_stage": "forecast",
-            }
-        )
-    return tuple(members)
-
-
-def forecast_cohort_digest(identity: Mapping[str, Any]) -> str:
-    payload = {
-        "job_id": str(identity.get("job_id") or ""),
-        "run_id": str(identity.get("run_id") or ""),
-        "source_id": str(identity.get("source_id") or ""),
-        "cycle_id": str(identity.get("cycle_id") or ""),
-        "stage": canonical_forecast_stage(identity.get("stage") or identity.get("job_type")),
-        "idempotency_key": str(identity.get("idempotency_key") or ""),
-        "slurm_comment": str(identity.get("slurm_comment") or ""),
-        "cohort_members": ordered_cohort_members(identity.get("cohort_members")),
-        "slurm_ownership_required": bool(identity.get("slurm_ownership_required", False)),
-        "expected_slurm_user": str(identity.get("expected_slurm_user") or ""),
-        "expected_slurm_account": str(identity.get("expected_slurm_account") or ""),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def forecast_cohort_identity_is_valid(identity: Mapping[str, Any]) -> bool:
-    if not is_forecast_cohort_stage_name(identity.get("stage"), identity.get("job_type")):
-        return False
-    try:
-        source_id = normalize_source_id(str(identity.get("source_id") or ""))
-        cycle_id = str(identity.get("cycle_id") or "")
-        cycle_time = parse_cycle_time(cycle_id.split("_", maxsplit=1)[1])
-    except (IndexError, TypeError, ValueError):
-        return False
-    if cycle_id != cycle_id_for(source_id, cycle_time):
-        return False
-
-    run_id = str(identity.get("run_id") or "")
-    expected_run_prefix = f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}"
-    if run_id != expected_run_prefix and not run_id.startswith(f"{expected_run_prefix}_"):
-        return False
-    job_id = str(identity.get("job_id") or "")
-    expected_job_id = f"job_{run_id}_forecast"
-    if job_id == expected_job_id:
-        expected_key = f"{run_id}:forecast"
-    elif job_id.startswith(f"{expected_job_id}_"):
-        retry_suffix = job_id.removeprefix(f"{expected_job_id}_")
-        if not retry_suffix:
-            return False
-        expected_key = f"{run_id}:forecast:{retry_suffix}"
-    else:
-        return False
-    key = str(identity.get("idempotency_key") or "")
-    if key != expected_key or str(identity.get("slurm_comment") or "") != slurm_comment_for(key):
-        return False
-
-    raw_members = identity.get("cohort_members")
-    members = ordered_cohort_members(raw_members)
-    if (
-        not isinstance(raw_members, Sequence)
-        or isinstance(raw_members, str | bytes | bytearray)
-        or not members
-        or len(members) != len(raw_members)
-    ):
-        return False
-
-    scenario_id = scenario_for_source(source_id)
-    cycle_iso = cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    compact_cycle = format_cycle_time(cycle_time)
-    unique_fields = {field: set() for field in ("candidate_id", "run_id", "model_id", "basin_id")}
-    for index, member in enumerate(members):
-        model_id = str(member.get("model_id") or "")
-        basin_id = str(member.get("basin_id") or "")
-        expected_member = {
-            "array_task_id": index,
-            "candidate_id": f"{source_id}:{cycle_iso}:{model_id}:{scenario_id}",
-            "run_id": f"fcst_{source_id.lower()}_{compact_cycle}_{model_id}",
-            "model_id": model_id,
-            "basin_id": basin_id,
-            "scenario_id": scenario_id,
-            "restart_stage": "forecast",
-        }
-        if not model_id or not basin_id or member != expected_member:
-            return False
-        for field, seen in unique_fields.items():
-            value = str(member.get(field) or "")
-            if value in seen:
-                return False
-            seen.add(value)
-
-    if bool(identity.get("slurm_ownership_required", False)) and (
-        not str(identity.get("expected_slurm_user") or "").strip()
-        or not str(identity.get("expected_slurm_account") or "").strip()
-    ):
-        return False
-    digest = str(identity.get("cohort_digest") or "")
-    return bool(digest and digest == forecast_cohort_digest(identity))
-
-
 __all__ = (
     "ACCEPTED_SUBMIT_CANDIDATE_IMMUTABLE_FIELDS",
     "ACCEPTED_SUBMIT_CONTRACT_VERSION",
@@ -1115,6 +972,7 @@ __all__ = (
     "INIT_STATE_IDENTITY_FIELD",
     "JOURNAL_PREDECESSOR_QUARANTINE_RETRY_DECISION",
     "MAX_FORECAST_COHORT_MEMBERS",
+    "OPERATOR_VERIFIED_ABSENCE_DECISION",
     "QUARANTINE_RERUN_PROVENANCE_FIELD",
     "accepted_submit_pipeline_job_model_id",
     "accepted_submit_candidate_immutable_evidence",

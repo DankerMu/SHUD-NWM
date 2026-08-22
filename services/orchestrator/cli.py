@@ -22,6 +22,14 @@ from .file_orchestration_migration import (
     prepare_file_journal_rollback,
     write_migration_receipt,
 )
+from .operator_reserved_demotion import (
+    _demote_reserved_job as _demote_reserved_job,
+)
+from .operator_reserved_demotion import (
+    add_argparse_demote_subparser,
+    register_click_demote_command,
+    run_argparse_demote_command,
+)
 from .retention import RetentionConfig, run_retention
 from .retention_frontier import (
     FrontierReadResult,
@@ -442,71 +450,12 @@ def _plan_production(
     return result.to_dict()
 
 
-_SCHEDULER_STDOUT_SUMMARY_SCALAR_KEYS = (
-    "pass_id",
-    "status",
-    "artifact_path",
-    "started_at",
-    "finished_at",
-    "dry_run",
-    "continuous",
-    "readiness_interpretation",
-    "execution_boundary",
-    "scheduler_state_backend",
-    "scheduler_registry_backend",
-    "scheduler_state_index_backend",
-    "scheduler_journal_backend",
-)
-
-
 def _scheduler_stdout_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    from .cli_scheduler_summary import _scheduler_stdout_summary
+
     if not _env_bool("NHMS_SCHEDULER_STDOUT_SUMMARY_ONLY"):
         return dict(payload)
     return _scheduler_stdout_summary(payload)
-
-
-def _scheduler_stdout_summary(payload: Mapping[str, object]) -> dict[str, object]:
-    passes = payload.get("passes")
-    if isinstance(passes, list):
-        return {
-            "status": payload.get("status", "unknown"),
-            "passes": [
-                _scheduler_pass_stdout_summary(item)
-                for item in passes
-                if isinstance(item, Mapping)
-            ],
-        }
-    return _scheduler_pass_stdout_summary(payload)
-
-
-def _scheduler_pass_stdout_summary(payload: Mapping[str, object]) -> dict[str, object]:
-    summary: dict[str, object] = {
-        key: payload[key]
-        for key in _SCHEDULER_STDOUT_SUMMARY_SCALAR_KEYS
-        if key in payload and _is_json_scalar(payload[key])
-    }
-    for key, value in payload.items():
-        if key.endswith("_count") and _is_json_scalar(value):
-            summary[key] = value
-    for key in ("sources", "model_ids", "basin_ids", "selected_cycle_ids"):
-        value = payload.get(key)
-        if _is_small_scalar_list(value):
-            summary[key] = value
-    if "status" not in summary:
-        summary["status"] = "unknown"
-    return summary
-
-
-def _is_json_scalar(value: object) -> bool:
-    return value is None or isinstance(value, (str, int, float, bool))
-
-
-def _is_small_scalar_list(value: object) -> bool:
-    return (
-        isinstance(value, list)
-        and len(value) <= 32
-        and all(_is_json_scalar(item) for item in value)
-    )
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:
@@ -696,6 +645,8 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
 
+    register_click_demote_command(cli)
+
     @cli.command("plan-production")
     @click.option(
         "--source",
@@ -835,6 +786,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollforward_parser.add_argument("--lock-path")
     rollforward_parser.add_argument("--scheduler-lock-backend", default="file")
     rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
+    add_argparse_demote_subparser(subparsers)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
@@ -948,6 +900,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
+    if args.command == "demote-reserved-job":
+        return run_argparse_demote_command(args)
     if args.command == "plan-production":
         try:
             payload = _plan_production(

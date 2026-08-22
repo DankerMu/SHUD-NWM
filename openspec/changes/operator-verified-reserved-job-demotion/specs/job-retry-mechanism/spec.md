@@ -2,7 +2,7 @@
 
 ### Requirement: Operator-verified absence is a distinct reclaimable file-journal decision
 
-The file-journal reclaim predicate and the forecast-cycle reconcile-verified retry shortcut SHALL recognize exactly two absence decisions, `absence_retry_permitted` and `operator_verified_absence`, while retaining all existing accepted-submit identity, unbound, source, outcome, null-reason, attempt, anchor, and cohort validity checks. `operator_verified_absence` SHALL be an accepted accounting decision but SHALL NOT enter the generic versioned-transition whitelist, the manual-retry source-status set, or the identity-streak decision set. `identity_mismatch_released` and every other `reservation_lost` sub-shape SHALL remain non-reclaimable. A successful reclaim SHALL derive the new attempt from durable state, increment the attempt exactly once, and capture a fresh anchor under the lock rather than reusing the operator's old expected anchor.
+The file-journal reclaim predicate and the forecast-cycle reconcile-verified retry shortcut SHALL widen only their accepted decision membership to exactly two absence decisions, `absence_retry_permitted` and `operator_verified_absence`. The cycle retry door SHALL retain its existing composition: the caller requires an unbound `reservation_lost` row, while the shortcut requires an accepted or ambiguous outcome, exact-comment source, null matched job id, and valid cohort identity; existing marker-free automatic-absence rows satisfying that legacy contract SHALL remain compatible. The file-journal reclaim CAS SHALL additionally retain its current-master/idempotency match, unbound, null-reason/null-match, exact expected attempt and anchor, and immutable cohort-identity predicates. `operator_verified_absence` SHALL be an accepted accounting decision but SHALL NOT enter the generic versioned-transition whitelist, the manual-retry source-status set, or the identity-streak decision set. `identity_mismatch_released` and every other non-absence `reservation_lost` sub-shape SHALL remain non-reclaimable. A successful current-master reclaim SHALL derive the new attempt solely from durable state, increment it exactly once, and capture a fresh anchor under the lock rather than accepting either value from the lock-external request.
 
 #### Scenario: Operator-demoted cohort follows the existing reclaim and submit path
 
@@ -11,8 +11,8 @@ The file-journal reclaim predicate and the forecast-cycle reconcile-verified ret
 
 #### Scenario: Automatic absence reclaim remains unchanged
 
-- **WHEN** a master has the existing `reservation_lost/absence_retry_permitted` shape
-- **THEN** the same shortcut and reclaim behavior continue without output or identity changes
+- **WHEN** a current master has the existing `reservation_lost/absence_retry_permitted` shape, or the cycle shortcut receives a marker-free automatic-absence row satisfying its pre-existing status, binding, accounting, and cohort-identity checks
+- **THEN** the same shortcut behavior remains compatible and current-master reclaim continues without output or identity changes
 
 #### Scenario: Identity release remains a spent non-reclaimable key
 

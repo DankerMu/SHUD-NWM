@@ -17,6 +17,9 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.accepted_submit_identity import (
+    OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
+)
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
 
@@ -914,7 +917,8 @@ def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any
     return bool(
         job.get("submit_outcome") in {"accepted", "submit_result_ambiguous"}
         and job.get("reconciliation_source") == "slurm_exact_comment"
-        and job.get("reconciliation_decision") == "absence_retry_permitted"
+        and job.get("reconciliation_decision")
+        in {"absence_retry_permitted", _OPERATOR_VERIFIED_ABSENCE_DECISION}
         and job.get("matched_slurm_job_id") is None
         and forecast_cohort_identity_is_valid(job)
     )

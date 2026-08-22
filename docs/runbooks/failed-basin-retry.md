@@ -275,7 +275,7 @@ Match by submit time inside the reservation's attempt window and by user/account
 `expected_slurm_user` / `expected_slurm_account`, when `slurm_ownership_required` is set).
 `squeue` covers the still-queued/running half without the accounting propagation lag.
 
-### Disposition — what exists today
+### Disposition — confirmed dead rows: the guarded operator demotion
 
 1. **Fix the cluster — but only after every held row has been through the in-flight
    check above and confirmed dead.** Set `AccountingStoreFlags=job_comment` in
@@ -293,27 +293,80 @@ Match by submit time inside the reservation's attempt window and by user/account
 2. **In flight:** do not touch the row. Let the job reach its terminal state — but be aware
    reconcile still cannot bind it, because binding needs the comment match that this cluster
    cannot serve. The row remains held, so it still ends up in case 3.
-3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window): if the
-   cluster can be reconfigured **and every other held row is also confirmed dead**, case 1
-   is the demotion mechanism — reconfigure and let the next pass demote through the normal
-   absence path. When reconfiguring is not an option (or any other held row may still be
-   alive, making the cluster-wide gate flip unsafe), **there is no safe row-scoped operator
-   mechanism to demote the row today.** Verified against the code:
-   - The manual-retry surface (`POST /api/v1/runs/{run_id}/retry`, `RetryService` /
-     the file journal's `record_manual_repair`) only accepts a latest job whose status is
-     `failed` / `submission_failed` / `partially_failed` / `permanently_failed` /
-     `cancelled` (`retry.py:73-74`); `reserved` is neither that nor an active status, so the
-     call raises `RetryNotFoundError` and writes nothing.
-   - `reclaim_pipeline_job_reservation` requires `status=reservation_lost` with
-     `reconciliation_decision=absence_retry_permitted`
-     (`file_orchestration_journal.py:1711-1720`); it returns `None` for a `reserved` row.
-   - The `nhms-pipeline` CLI has no reservation/status subcommand (`cli.py:742-800`).
+3. **Confirmed dead** (no matching job in `sacct`/`squeue` for the attempt window), when
+   reconfiguring the cluster is not an option (or any other held row may still be alive,
+   making the cluster-wide gate flip unsafe): use the **row-scoped guarded operator
+   command** `nhms-pipeline demote-reserved-job` (#1564). It is the only supported way to
+   convert one held row to the reclaimable `reservation_lost` /
+   `operator_verified_absence` shape — hand-editing the journal is unsupported and remains
+   the exact write this gate exists to prevent.
 
-   The only physical option left is hand-editing the journal, which is unsupported here and
-   is exactly the write this gate exists to prevent. Escalate instead: the missing
-   operator-facing demotion tool is tracked as the #1116 follow-up, and until it lands the
-   affected cycle stays wedged on `PIPELINE_ALREADY_ACTIVE`. A new cycle (new candidate
-   identity) is unaffected and keeps running.
+   The command never asks for interactive confirmation; it requires the explicit
+   non-interactive `--confirm` flag and exact compare-and-swap inputs (the persisted
+   `submission_attempt` and `submission_attempt_started_at`), plus named operator evidence.
+   On node-22:
+
+   ```bash
+   # 1. Independently prove the job dead for THIS attempt window (name/user/account/submit):
+   sacct -a --name nhms_forecast \
+     --starttime <submission_attempt_started_at> --endtime now \
+     --format=JobID,JobName,State,User,Account,Submit
+   squeue -a --name nhms_forecast
+   #    The row is safe to demote only when no matching job survives both queries.
+
+   # 2. Read the exact persisted attempt and anchor off the HELD master row.
+   #    The scheduler pass evidence is NOT authoritative for the pre-state: it is
+   #    only a point-in-time locator/diagnostic. Its
+   #    restart_reconcile.reserved_unbound.outcomes[] entry can help locate the
+   #    held tuple (and its recorded submission_attempt and
+   #    submission_attempt_started_at are a useful cross-check), but the current
+   #    authoritative state — including the attempt and anchor the CAS will
+   #    compare against — must be confirmed by a read-only journal replay / the
+   #    current master row before the command runs. Do NOT treat
+   #    pipeline-jobs/<job_id>.json as authoritative on its own: it is a derived
+   #    direct projection, and after a post-commit projection warning the
+   #    demotion succeeded while that file was left stale. Authority lives in
+   #    the journal batch (journal replay), not in the flat direct file. Take
+   #    submission_attempt and submission_attempt_started_at from the journal
+   #    replay / current master (or a read-only journal inspection), and if a
+   #    previous receipt carried warnings, verify against the journal replay
+   #    before believing any flat file.
+
+   # 3. Demote (both entrypoints behave identically; missing --confirm exits 2 with no write):
+   uv run nhms-pipeline demote-reserved-job \
+     --journal-root <journal-root> \
+     --job-id job_cycle_<source>_<cycle>_forecast[...] \
+     --expected-attempt <attempt> \
+     --expected-attempt-started-at <anchor, timezone-aware> \
+     --checked-by <operator> \
+     --checked-at <now, timezone-aware> \
+     --verification-note "<bounded note: what was verified and how>" \
+     --confirm
+   ```
+
+   Success prints a stable sorted JSON receipt with the job id, prior/new status,
+   `reconciliation_decision=operator_verified_absence`, attempt/anchor, operator fields,
+   and `written_record_count`. The receipt always carries `committed=true` and a
+   `warnings` array. On a clean projection pass the receipt reports
+   `status=demoted` with `warnings=[]`; when a post-commit direct/latest projection
+   fault occurred, it reports `status=demoted_with_warnings` with `warnings=[...]` —
+   the authority append already committed in both cases, so **exit 0 means the demotion
+   is durable and must not be retried as a failure**: verify it by journal replay (the
+   master row / audit event) and the next scheduler pass evidence, and treat any
+   `pipeline-jobs/<job_id>.json` mentioned by a warning as a stale derived hint, not
+   authority. A CAS refusal or validation error prints to stderr and exits 2 **and
+   writes zero journal bytes** — the row keeps its exact held state.
+
+   After demotion, run one scheduler pass. The next pass's reconcile
+   (`query_unavailable` action) is gone from `restart_reconcile.reserved_unbound.outcomes[]`,
+   the forecast-cycle verified-retry shortcut (`_verified_accepted_submit_forecast_retry`)
+   treats the row as retryable, and `reclaim_pipeline_job_reservation` mints one new
+   `submission_attempt` with a fresh lock-owned anchor and resubmits the cohort exactly
+   once — `PIPELINE_ALREADY_ACTIVE` no longer appears for this cycle.
+
+   Never invoke the command on a row that is not confirmed dead, and never reuse it as a
+   replacement for the cluster reconfigure in case 1: a false positive re-`sbatch`es a
+   live cohort.
 
 Verified by:
 
@@ -321,6 +374,11 @@ Verified by:
   — a genuinely in-flight job with an empty `Comment` no longer demotes the reservation.
 - `tests/test_gateway_reconcile.py::test_comment_storage_probe_requires_job_comment_in_accounting_store_flags`
   — the `(null)` / `job_comment` / missing-line parse vectors and the two distinct warnings.
+- `tests/test_orchestrator_demote_core_cas.py`, `tests/test_orchestrator_demote_projection_faults.py`,
+  `tests/test_orchestrator_demote_reclaim_lifecycle.py`, `tests/test_orchestrator_demote_cli_security.py`
+  — typed CAS demotion, byte-identical
+  refusals, atomic master/member/event append, cycle retry shortcut, reclaim chain, and
+  both CLI entrypoints.
 
 ## Missing accounting vs wrong accounting (缺账 vs 错账)
 
