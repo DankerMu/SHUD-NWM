@@ -1433,6 +1433,73 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
 
 背景与被否决的替代方案见 [`docs/adr/0005-recalibration-state-carryover.md`](../adr/0005-recalibration-state-carryover.md)。
 
+#### 5.7.1 整条 rollout 的顺序与 manifest 发布（2026-08-22 实战 receipt）
+
+5.7 只讲克隆工具本身。一次完整的率定切换还要 provision 与 manifest 发布，**顺序是硬约束**：
+
+```text
+provision M1′（node-27，写 core.model_instance）
+  -> 写克隆行（node-22，两份 state-index）
+  -> 最后才发布合并 manifest
+```
+
+倒过来做的后果：`NHMS_REQUIRE_FORECAST_WARM_START=true` 下，manifest 先落地会让 `M1′`
+在 `t*` 没有 warm state 而 block——fail-safe，但白停一个 cycle。
+
+**`t*` 怎么选**：pass evidence 的 `cycle_window` 实测 `cycle_lag_hours=16`、
+`end_time_utc = now − 16h`、cycle 步长 12h。所以 cycle `C` 进入调度窗口的时刻是 `C + 16h`，
+这就是发布截止时间。克隆行的 `valid_time` 必须**等于** `C` 本身（不是 `C − lead`）——
+判据见 `packages/common/state_manager.py` 里 expected-predecessor key 的注释。
+
+**manifest 只能直接发布，没有闸可走。** 生产两个 env 都设了
+`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`，此时 `scheduler_file_provider_refresh.py`
+的 `publish_registry()` 走的是 `precommit_provider_generation(workspace, [], previous_models_snapshot)`
+再重发 `previous_models_snapshot`——**prospective ≡ previous 的纯 renewal**。
+于是 #1080 cutover 闸在这条拓扑上结构性看不到 model set 变更：`added`/`removed`/
+`package_changed` 恒为 0，`declared_retirements` 恒为空。
+
+> **不要为这种切换准备 retire declaration。** 它不会被任何东西匹配（refresh 侧闸看不到
+> 变更；scheduler 侧 §8 因为克隆行制造了同代历史而走 `warm_continue`，该分支根本不读
+> declaration）。而留在 env 里的 declaration 会过期，之后**每一次** refresh 都以
+> `registry_cutover_declaration_invalid` 拒跑，把每日管线拖停。5.x 的
+> 「retire declaration 恢复顺序」适用于非 direct-grid 拓扑，不适用于这里。
+
+做法是直接调 `publish_scheduler_registry_manifest`，两份目标**共用同一个 `generated_at`**
+（这样两份字节相同是结构性的，不依赖事后比对），canonical 侧带 `expected_preimage` 做 CAS：
+
+```text
+合并集合 = 当前 canonical 全量 − 旧 M1 行 + provision 输出的 M1′ 行
+发布前校验：行数不变、无重复 model_id、全部 direct_grid、每流域行数不变
+发布顺序：先备份两份 manifest -> canonical（CAS）-> scratch mirror
+发布后再手动跑一趟 refresh：renewal 重建 canonical readiness 并留下
+  outcome=published / refused=[] 的 receipt
+```
+
+2026-08-22 实测（Huai-MAIN + jialingjiang，各 gfs/IFS 两行，`t*`=2026-08-22T00:00:00Z）：
+34 行进、34 行出；旧四行消失、新四行到位；两份 sha 相同；随后 renewal receipt
+`added:0 removed:0 package_changed:0 refused:0`——`removed:0` 正是上面那段的实证
+（确实删了四个 model_id，闸却看不到）。
+
+**触发手动 refresh 的坑**：refresh 的 unit 带
+`ExecCondition=... ! is-active nhms-compute-scheduler.service`，而 scheduler 每 5 分钟
+跑一趟 oneshot。`systemctl --user start` 返回 0 **不代表跑了**（condition 不满足会静默
+skip）。判据只有一个：`latest.json` 的 `started_at` 变新。**不要**用「receipt 文件数增加」
+判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、反复触发 refresh。
+
+**旧行标 `superseded` 必须等 M1′ 的首个 run 发布之后。** display 候选 SQL
+（`packages/common/forecast_store.py` 的 `_QHH_LATEST_CANDIDATE_RUNS_SQL`）是
+`h.status IN ('succeeded','parsed','published')`，`superseded` **不在**白名单；
+选择键是 `bv.basin_id`、无 model_id 谓词。提前标就是让该流域前端立刻空窗，
+直到新 run 落地。等新行 published 之后再标，连续性由 `cycle_time DESC` 自然接上。
+
+**node-27 侧不需要 staging Basins。** `node27_autopipeline.py` 的 seed 遍历的是从
+object store 发现的 run（身份取 `_basin_identity(object_store_root, first_run)`），
+`BASINS_ROOT` 只是兜底预种子；docstring 明说 run manifest 会 override inventory 派生的身份。
+实证：node-27 的 `/home/ghdc/nwm/Basins/` 只有 10 个原始流域、没有 Huai-MAIN 与
+jialingjiang，而这两个流域各已有 73 条 published run。
+（另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
+与 NFS `/ghdc/data` 不是同一个文件系统。）
+
 ## 6. 如何判断是否卡住
 
 先分清三种状态：
