@@ -100,7 +100,10 @@ issue #1660 未给 `Verification:` 字段，本节由本 change 自行裁定。
 
 - [x] 5.1 `uv run pytest -q tests/test_object_store_forcing.py tests/test_object_store_forcing_real_disk.py`
   —— 全绿；新增用例数与名称列进 PR。
-- [x] 5.2 `uv run pytest -q $(grep -rl object_store_forcing tests/)` —— 全绿。
+- [x] 5.2 `uv run pytest -q $(grep -rl --include='*.py' object_store_forcing tests/)` —— 全绿。
+  **`--include='*.py'` 不可省**：node-27 的工作树留有 `tests/__pycache__/*.pyc`，
+  裸 `grep -rl` 会把它们选进来，pytest 收到 `.pyc` 后**零测试静默退出**
+  （node-27 实测 `no tests ran in 0.34s`）——这正是本仓禁止的零断言冒烟。
   **改了被多个 display 套件共用的读入口，此项为必跑**，不得用 `-k` 替代
   （消费方覆盖分散在 `test_direct_grid_display_cutover_b4_leak.py`、
   `test_direct_grid_display_cutover_history.py`、
