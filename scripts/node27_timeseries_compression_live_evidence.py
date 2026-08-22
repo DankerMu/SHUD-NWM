@@ -3532,6 +3532,7 @@ def verify_bundle(
         validator=_validate_pre_migration_catalog,
     )
     require_observed_artifact(capture_invocation("catalog_before"), "catalog_before", catalog_before_ref)
+    # Slot re-derived from execution.ledger; see scripts/node27_timeseries_compression_bundle_author.py:21-25
     recovery_invocation_ref = execution_summary["ledger"]
     recovery_invocation = ledger_invocation("decompress")
     require_observed_artifact(capture_invocation("recovery_preflight"), "recovery_preflight", recovery_preflight_ref)
@@ -3563,6 +3564,7 @@ def verify_bundle(
     )
     first_ref, first_catalog = _json_artifact(migration.get("catalog_after_first"), "migration.catalog_after_first")
     second_ref, second_catalog = _json_artifact(migration.get("catalog_after_second"), "migration.catalog_after_second")
+    # Slot re-derived from execution.ledger; see scripts/node27_timeseries_compression_bundle_author.py:21-25
     first_invocation_ref = execution_summary["ledger"]
     second_invocation_ref = execution_summary["ledger"]
     first_invocation = ledger_invocation("migration_apply", 0)
@@ -3616,6 +3618,7 @@ def verify_bundle(
     )
     dry_ref, dry = _load_receipt(receipts_bundle.get("dry_run"), "receipts.dry_run", receipt_schema)
     enforce_ref, enforce = _load_receipt(receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema)
+    # Slot re-derived from execution.ledger; see scripts/node27_timeseries_compression_bundle_author.py:21-25
     dry_invocation_ref = execution_summary["ledger"]
     enforce_invocation_ref = execution_summary["ledger"]
     dry_invocation = ledger_invocation("compression_dry_run")
