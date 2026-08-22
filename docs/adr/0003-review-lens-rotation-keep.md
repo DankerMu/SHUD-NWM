@@ -793,3 +793,25 @@ a gate-role classification artifact.
 autonomous reversal: normalize the `round_lenses` schema, define core from the
 first comprehensive round, and exclude or separately bucket fixture,
 Phase 6.2 invariant-audit, and Phase 7 final-review roles.
+
+## Revisit 2026-08-22 (after #1648 / PR #1710)
+
+The audit now reports **105** multi-round merged PRs and later-round catches
+**core=59 / rotated=264**. Compared with the immediately preceding #1326
+receipt (104 / 59 / 264), #1648 adds one PR to the denominator and **zero** to
+either catch bucket.
+
+That zero is expected and carries no keep/cut information. #1648's only verified
+catch was a Round 1 `concurrency` finding: the newly added post-takeover
+regression could parse a lock file during its parent's truncate/write window.
+Round 2 was a fix-verification pass using only the selected-risk pinned core and
+returned no candidates. No free-slot lens was rotated in, and no later-round
+catch exists to attribute.
+
+Therefore this data point is neither evidence that rotation failed nor new
+evidence that it worked; treating the added denominator as either would repeat
+the measurement error documented above (conflating "no rotation applied" with
+"rotation applied and found nothing"). The cumulative counts still rule out a
+cut under the ADR's default, so **keep rotation** remains unchanged. Any future
+reversal still requires the recorded schema repair and maintainer review; this
+revisit adds no policy change.

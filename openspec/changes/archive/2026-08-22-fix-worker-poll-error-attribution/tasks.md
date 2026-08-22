@@ -25,9 +25,9 @@ Selected packs: Concurrency/shared state/ordering; Resource limits/time bounds; 
 
 - [x] 3.1 The two original shipping tests and every new failure-injection/control node pass with the original substantive state/result assertions intact.
 - [x] 3.2 `uv run pytest -q tests/test_production_scheduler.py` and `uv run pytest -q tests/test_node27_timeseries_compression_supervisor.py` pass.
-- [ ] 3.3 Selector probes for both changed test files include their assertion suites plus `tests/test_select_ci_tests.py`; local selector half passes, while final-head PR CI must execute assertions rather than collect-only.
+- [x] 3.3 Selector probes for both changed test files include their assertion suites plus `tests/test_select_ci_tests.py`; final-head CI run `32556000536` executed all three assertion suites (`2219 passed`), not collect-only.
 - [x] 3.4 `uv run ruff check .`, `git diff --check`, and `openspec validate fix-worker-poll-error-attribution --strict --no-interactive` pass.
-- [ ] 3.5 Review and final-head evidence prove no warning-only unexpected worker path, no changed production mapping/domain outcome, no stale SHA, and same-SHA CI/Governance success.
+- [x] 3.5 Review and final-head evidence prove no warning-only unexpected worker path, no changed production mapping/domain outcome, no stale SHA, and same-SHA CI/Governance success (`32556000536` / `32556000535` at `106ba3ec3de76783845d8b72a971c23ede12353e`).
 - [x] 3.6 Node-27/node-22 live receipts are explicitly not applicable because this is test-only and changes no DB/display/Slurm/SHUD production behavior.
 
 ## 4. Non-goals and routing
