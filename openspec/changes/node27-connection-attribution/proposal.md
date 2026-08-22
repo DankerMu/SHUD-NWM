@@ -16,9 +16,18 @@ node-27 生产库的每一条应用连接 `application_name` 都是空串（issu
   - `apps/api/routes/hydro_display.py` → `nhms-display-api`
   - `scripts/node27_timeseries_retention.py` → `nhms-ts-retention`
   - `scripts/node27_timeseries_compression.py` → `nhms-ts-compression`
+  - `scripts/node27_raw_retention.py` → `nhms-raw-retention`（round-2：第 8 个在册组件，
+    自有 `infra/env/node27-raw-retention.example`，唯一 DB 触点是委托出去的 watermark 只读查询）
 - 选用 `fallback_application_name` 而非 `application_name`：libpq 语义下运维在 DSN 里显式写的 `application_name` 仍然优先，代码只提供默认值，**不夺走**运维的覆写能力（实测见 design.md）。
 - `docs/runbooks/current-production-ops.md` 增加一段处置纪律：取消任何 backend 前先按 `application_name` 归因；生产 tick 不得随手取消；integration 测试一律走 `NHMS_INTEGRATION_DATABASE_URL`。
-- `infra/env/node27-*.example` 注释说明该默认值与覆写方式。
+- 在册组件**委托给共享 helper 打开的连接**同样带上组件标识（round-2 修复）：
+  `packages/common/display_watermark.py::fetch_display_watermark`（retention /
+  compression / raw-retention 每个 tick 的第一条连接）与
+  `packages/common/display_coverage.py::refresh_all_run_display_coverage` 的 per-run
+  worker 连接（`--all` 在每个 autopipe tick 上跑，最多 8 条并发）。做法是给这两个既有
+  helper 一个向后兼容的可选 `connect` 参数，由调用方注入自己的具名 connect，**不新增**
+  `packages/common` 模块（D2 不变）。
+- `infra/env/node27-*.example`（含 `node27-raw-retention.example`）注释说明该默认值与覆写方式。
 
 **非破坏性**：零 schema 变更、零 SQL 变更、零 DSN 校验逻辑变更（两个 allowlist 已含这两个 key）。
 
@@ -32,7 +41,7 @@ node-27 生产库的每一条应用连接 `application_name` 都是空串（issu
 
 ## Impact
 
-- 代码：上列 7 个建连面（autopipeline 9 处 connect 走一个模块级 `_connect` 包装；其余各自 1-4 处）。
-- 文档：`docs/runbooks/current-production-ops.md`、`infra/env/node27-{ingest,timeseries-compression,timeseries-retention}.example`、`infra/env/display.example`。
-- 测试：`application_name` 透传与非法 query key 仍被拒的行为测试；建连面 static meta-guard（防止新增/改名建连面漏挂）。
+- 代码：上列 8 个组件的建连面（autopipeline 9 处 connect 走一个模块级 `_connect` 包装；其余各自 0-4 处直连），外加 2 个被在册组件委托的既有 helper（`display_watermark.py` / `display_coverage.py`）新增可选 `connect` 注入参数。
+- 文档：`docs/runbooks/current-production-ops.md`、`infra/env/node27-{ingest,timeseries-compression,timeseries-retention,raw-retention}.example`、`infra/env/display.example`。
+- 测试：`application_name` 透传与非法 query key 仍被拒的行为测试；建连面 static meta-guard（防止新增/改名建连面漏挂）；**委托建连面**的 discovery + classification guard（防止在册组件把连接开在 import 进来的 helper 里而静默失去归因）。
 - 部署：验收标准 1（各 unit 在 `pg_stat_activity` 呈现可区分名字）**是部署门后的收据**，见 design.md「证据分期」。

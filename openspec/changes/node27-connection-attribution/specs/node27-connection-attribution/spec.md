@@ -4,7 +4,9 @@
 
 node-27 上每一个生产数据库组件 SHALL 在建立连接时提供一个唯一标识该组件的默认 `application_name`，使 `pg_stat_activity` 可按组件归因。该默认值 MUST 通过 libpq 的 `fallback_application_name` 提供，因此 MUST NOT 覆盖运维在 `DATABASE_URL` 中显式配置的 `application_name`。
 
-在册组件与标识：`scripts/node27_autopipeline.py` = `nhms-autopipe`；`scripts/node27_ingest_run.py` = `nhms-ingest-run`；`workers/output_parser` = `nhms-output-parser`；`scripts/node27_refresh_coverage.py` = `nhms-refresh-coverage`；`apps/api/routes/hydro_display.py` = `nhms-display-api`；`scripts/node27_timeseries_retention.py` = `nhms-ts-retention`；`scripts/node27_timeseries_compression.py` = `nhms-ts-compression`。
+在册组件与标识：`scripts/node27_autopipeline.py` = `nhms-autopipe`；`scripts/node27_ingest_run.py` = `nhms-ingest-run`；`workers/output_parser` = `nhms-output-parser`；`scripts/node27_refresh_coverage.py` = `nhms-refresh-coverage`；`apps/api/routes/hydro_display.py` = `nhms-display-api`；`scripts/node27_timeseries_retention.py` = `nhms-ts-retention`；`scripts/node27_timeseries_compression.py` = `nhms-ts-compression`；`scripts/node27_raw_retention.py` = `nhms-raw-retention`。
+
+本要求覆盖在册组件的**每一条**连接，包括它委托给共享 helper 打开的连接：范围线是「能否从在册组件的入口到达」，不是「建连代码写在哪个文件」。
 
 #### Scenario: 未配置 application_name 的 DSN 取得组件默认标识
 
@@ -18,10 +20,22 @@ node-27 上每一个生产数据库组件 SHALL 在建立连接时提供一个�
 - **THEN** 连接的 `application_name` 为 `operator-override`
 - **AND** 组件默认值仅作为 `fallback_application_name` 共存，不夺权
 
+#### Scenario: 组件委托给共享 helper 打开的连接同样被归因
+
+- **WHEN** 在册组件在其入口路径上调用一个自己打开数据库连接的共享 helper（如 watermark 只读查询、per-run coverage worker）
+- **THEN** 该连接下发的 conninfo 同样携带 `fallback_application_name=<该组件的在册标识>`
+- **AND** 该 helper 既有的 SQL、只读会话设置、`statement_timeout` 与 `connect_timeout` 逐字不变
+- **AND** 未注入标识的既有调用方行为逐字不变
+
 #### Scenario: 新增或改名建连面被静态守卫拦下
 
 - **WHEN** 在册组件中出现一个未携带组件标识的数据库建连面，或某组件的标识被改成与在册清单不符的值
 - **THEN** 静态守卫测试失败并指出该文件与期望标识
+
+#### Scenario: 新的委托建连面被静态守卫拦下
+
+- **WHEN** 在册组件的 import 闭包里出现一个自带数据库建连面、却未被归类的模块，或某个已归类为「已归因」的委托调用点丢掉了标识注入，或被委托的 helper 移除了注入 seam
+- **THEN** 静态守卫测试失败并指出该组件、该模块，以及应补的归类（已归因 / 够不到）
 
 ### Requirement: DSN 校验面不因归因标识被放松
 

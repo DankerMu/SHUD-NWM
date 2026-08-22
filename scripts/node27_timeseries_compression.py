@@ -476,6 +476,24 @@ CompressChunk = Callable[[str, ChunkRow], None]
 ReconcileChunkState = Callable[[str, ChunkRow], bool]
 
 
+def _attributed_connect(*args: Any, **kwargs: Any) -> Any:
+    """``psycopg2.connect`` with this component's #1714 identity attached.
+
+    Injected into helpers that open their OWN connection on this runner's
+    behalf (``packages.common.display_watermark.fetch_display_watermark``),
+    so the delegated connection is attributed too. That watermark read is the
+    FIRST database touch of every production tick; unattributed it shows an
+    empty ``application_name`` and routes an operator to "unregistered
+    connection" instead of "production tick, do not cancel".
+
+    psycopg2 is imported lazily here, matching every other connect site in
+    this module.
+    """
+    import psycopg2  # type: ignore[import-untyped]
+
+    return psycopg2.connect(*args, fallback_application_name=_APPLICATION_NAME, **kwargs)
+
+
 def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
     import psycopg2  # type: ignore[import-untyped]
     import psycopg2.extras  # type: ignore[import-untyped]
@@ -1154,7 +1172,9 @@ def main(
         # ``now_utc`` is retained as the receipt's legacy field name, but the
         # production value is the node-27 display business-time watermark.
         # Tests and controlled replays may inject it explicitly.
-        now = now_utc or fetch_display_watermark(config.database_url)
+        now = now_utc or fetch_display_watermark(
+            config.database_url, connect=_attributed_connect
+        )
     except DisplayWatermarkError as error:
         _replace_stale_with_failure(
             config,

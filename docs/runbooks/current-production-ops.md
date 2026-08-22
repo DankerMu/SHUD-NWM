@@ -2224,9 +2224,17 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
 | `nhms-display-api` | `apps/api/routes/hydro_display.py`（display API 只读连接池）|
 | `nhms-ts-retention` | `scripts/node27_timeseries_retention.py`（retention timer）|
 | `nhms-ts-compression` | `scripts/node27_timeseries_compression.py`（compression timer）|
+| `nhms-raw-retention` | `scripts/node27_raw_retention.py`（raw-retention timer；只做 watermark 只读查询）|
 | `psql` | 人工会话 |
 | `TimescaleDB Background Worker Scheduler` | TimescaleDB 后台 worker，不要动 |
-| 空串 | 未在册的连接面（`packages/common/*`、qhh 系脚本等）；先查清来源再处置 |
+| 空串 | 未在册的连接面（`packages/common/*` 中在册组件够不到的模块、`services/*`、qhh 系脚本等）；先查清来源再处置 |
+
+在册组件**委托给共享 helper 打开的连接**同样带自己的名字：
+`packages/common/display_watermark.py` 的 watermark 只读查询（retention /
+compression / raw-retention 每个 tick 的第一条连接）与
+`packages/common/display_coverage.py` 的 per-run coverage worker 连接
+（`--all` 下最多 8 条并发，正是最容易被误 cancel 的长连接）。也就是说
+**看到空串就一定不是在册生产 tick**，可以按上表照直处置。
 
 处置纪律：
 
@@ -2242,7 +2250,8 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
   ```
 
 - **生产 tick（`nhms-autopipe` / `nhms-ingest-run` / `nhms-output-parser` /
-  `nhms-refresh-coverage` / `nhms-ts-retention` / `nhms-ts-compression`）不得随手取消。**
+  `nhms-refresh-coverage` / `nhms-ts-retention` / `nhms-ts-compression` /
+  `nhms-raw-retention`）不得随手取消。**
   它们本来就有分钟级的正常时长。要停就停对应的 systemd unit（`systemctl --user stop
   nhms-node27-autopipe.timer` 等）并在日志里留痕；慢查询本身属于容量/计划问题，
   走 issue，不走 cancel。

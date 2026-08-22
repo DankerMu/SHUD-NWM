@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
-from typing import Any
+from typing import Any, Callable
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -684,6 +684,7 @@ def refresh_all_run_display_coverage(
     skip_fresh: bool = False,
     on_progress: Any = None,
     workers: int = 1,
+    connect: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     """Recompute coverage for every parsed/finished forecast run (all basins).
 
@@ -699,6 +700,13 @@ def refresh_all_run_display_coverage(
     timeout) is recorded and skipped so one bad run never aborts the batch. With
     ``skip_fresh`` only runs whose coverage is missing or older than the run's
     ``updated_at`` are recomputed (resumable). Returns counts.
+
+    ``connect`` (#1714) lets the calling component inject its own attributed
+    ``psycopg2.connect`` so the per-run worker connections carry that
+    component's ``fallback_application_name`` in ``pg_stat_activity`` — these
+    are the long-running backends an operator is most likely to see and cancel.
+    Left unset it resolves ``psycopg2.connect`` at call time, so every existing
+    caller keeps today's behaviour byte for byte.
     """
     run_ids = _eligible_run_ids(connection)
     if skip_fresh:
@@ -709,12 +717,17 @@ def refresh_all_run_display_coverage(
     if workers < 1 or workers > 8:
         raise ValueError("coverage workers must be between 1 and 8")
 
+    # Resolved at call time, never bound in the signature default: tests (and
+    # any future shim) patch ``display_coverage.psycopg2.connect`` on the module
+    # object, and an import-time default would silently bypass that patch.
+    open_connection = connect if connect is not None else psycopg2.connect
+
     def refresh_one(run_id: str) -> tuple[str, str]:
         # connect() is inside the try so a connection failure counts as a failed
         # run and the batch continues — one bad run never aborts the whole batch.
         conn = None
         try:
-            conn = psycopg2.connect(dsn)
+            conn = open_connection(dsn)
             present = run_id in _refresh(conn, run_id)
             conn.commit()
             return run_id, "refreshed" if present else "no-row"

@@ -43,6 +43,7 @@ import json
 import os
 import sys
 import time
+from typing import Any
 
 import psycopg2
 
@@ -58,6 +59,16 @@ LOCAL_DEFAULT = "postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms"
 # treats fallback_application_name as a default only, so an operator's
 # explicit ?application_name=... in DATABASE_URL still wins.
 _APPLICATION_NAME = "nhms-refresh-coverage"
+
+
+def _attributed_connect(*args: Any, **kwargs: Any) -> Any:
+    """``psycopg2.connect`` with this component's #1714 identity attached.
+
+    Injected into ``refresh_all_run_display_coverage`` so the per-run worker
+    connections it opens itself (up to 8 concurrently, on every autopipe tick
+    via ``--all``) are attributed too, not just this script's own connection.
+    """
+    return psycopg2.connect(*args, fallback_application_name=_APPLICATION_NAME, **kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,9 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database-url", default=os.environ.get("DATABASE_URL") or LOCAL_DEFAULT)
     args = parser.parse_args(argv)
 
-    connection = psycopg2.connect(
-        args.database_url, fallback_application_name=_APPLICATION_NAME
-    )
+    connection = _attributed_connect(args.database_url)
     try:
         with connection.cursor() as cursor:
             if not run_display_coverage_available(cursor):
@@ -108,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
                 skip_fresh=args.skip_fresh,
                 on_progress=progress,
                 workers=args.workers,
+                connect=_attributed_connect,
             )
             report = {"mode": "all", "skip_fresh": args.skip_fresh, "workers": args.workers, **counts}
         else:
