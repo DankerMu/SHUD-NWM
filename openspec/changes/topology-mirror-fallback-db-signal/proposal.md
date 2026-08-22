@@ -4,8 +4,10 @@
 
 The `production-topology-node22-local-postgres` check exists to catch one thing:
 an active surface that still treats the archived `:55433` rollback database as
-current. Its bare fallback rule (`scripts/governance/audit_repo_entropy.py:1936`)
-is a two-term conjunction, and the second term
+current. Its bare fallback rule (`scripts/governance/audit_repo_entropy.py:1936`
+on `origin/master`; every line number in this **Why** section is a master
+coordinate, because this section describes the state being changed) is a
+two-term conjunction, and the second term
 (`_topology_line_mentions_mirror`, `:1971-1973`) is a plain substring test for
 `"mirror"` / `"镜像"`. So the fallback fires on any line that names the compute
 node and happens to contain that word — with no database signal required at all.
@@ -17,7 +19,8 @@ canonical state index (`services/orchestrator/retry.py:148`,
 `services/slurm_gateway/real_backend.py:996`,
 `services/orchestrator/chain_runtime_utils.py:1036`; introduced in `985b42c6`,
 #874). It is not a database, is not archived, and is not a rollback surface, so
-none of the fallback's archived/stopped-flavored exemptions (`:1989-1998`) can
+none of the fallback's archived/stopped-flavored exemptions
+(`_topology_local_postgres_context_is_allowed`, master `:1989-1998`) can
 truthfully apply to it.
 
 Measured on master `ba783bd1`, with cwd inside the worktree under test — the
@@ -45,17 +48,21 @@ be red anyway.
 
 ## What Changes
 
-- Narrow **only** the bare fallback at `audit_repo_entropy.py:1936`. The
+- Narrow **only** the bare fallback at `audit_repo_entropy.py:1936`
+  (master coordinate; the rewritten `return` block is `:1936-1949` at HEAD). The
   two-term conjunction stops being sufficient; the line must additionally look
   like a rollback surface or carry a real database signal.
 - Add two small line-scoped helpers used only by that fallback: one for rollback
   wording, and one that removes explicit "there is no database here" assertions
   before the database signal is measured.
-- `_topology_line_mentions_mirror` is **not** touched — six call sites
-  (`:1934`, `:1936`, `:1989`, `:2280`, `:2578`, `:2582`) depend on its current
-  meaning.
+- `_topology_line_mentions_mirror` is **not** touched — six call sites depend on
+  its current meaning. At HEAD they are `:1934`, `:1939`, `:2020`, `:2311`,
+  `:2609`, `:2613` (this change's insertion shifted five of the six; the count is
+  what the constraint is about, and `grep -n _topology_line_mentions_mirror` is
+  the durable way to recheck it).
 - `_topology_mentions_database` is **not** touched either — three other callers
-  (`:1725`, `:1758`, `:1844`) depend on it. The DB-absence handling is applied at
+  (`:1725`, `:1758`, `:1844`; these sit above the insertion point and are
+  unshifted) depend on it. The DB-absence handling is applied at
   the fallback's own call site.
 - No exemption-token list grows; see design.md D2 for why the alternative was
   rejected.

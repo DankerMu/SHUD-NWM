@@ -41,6 +41,16 @@
       drift lines quoted in design.md D1. The fourth constructed line is
       deliberately not pinned in either direction (D9).
 
+- [x] T10 (round 2 fix) Generalize `_topology_line_mentions_rollback` to the
+      whole lexeme — `roll back`, `rolled back`, `rolling back`, `rolls back`,
+      hyphenated and spaced — plus `回退` alongside `回滚`. design.md D3/D10.
+- [x] T11 (round 2 fix) Extend the fallback's own vocabulary with the standard
+      database-role nouns: `replica`, `secondary`, `从库`, `备库`, `主库`,
+      `生产库`. Still at the call site; `_topology_mentions_database` stays
+      untouched. design.md D9/D10.
+- [x] T12 (round 2 fix) Extend the must-still-flag test with the six round-2
+      lines quoted in design.md D1.
+
 ## 2. Verification (Evidence Floor)
 
 - [x] E1 Before/after whole-repo audit, run with cwd inside the worktree under
@@ -62,6 +72,10 @@
       `production-topology-*` findings and the same total finding count as the
       pre-T8 HEAD — the widening must add nothing.
 - [x] E9 (round 1 fix) Re-run E2, E3, E4, E6.
+- [x] E10 (round 2 fix) Whole-repo audit after T10+T11 still reports **0**
+      `production-topology-*` findings and total **753** — the widenings must be
+      free. Plus a predicate-level check that none of the four real findings is
+      resurrected, and a revert receipt for each of the two new legs.
 - [x] E7 `uv run pytest -q` full local suite — the audit script is imported by
       more than one test module; confirm nothing else moved.
 
@@ -112,5 +126,37 @@ All commands run with cwd `/Users/danker/Desktop/Hydro-SHUD/NWM/.claude/worktree
   turns exactly the three new cases red (`3 failed, 13 passed`) while all four
   must-not-flag cases stay green; restoring returns `16 passed`.
 - E9c `uv run ruff check .` -> `All checks passed!`
-- E9d `git diff --stat` -> `audit_repo_entropy.py` (+8/-1),
+- E9d `git diff --stat` -> `audit_repo_entropy.py` (+7/-1),
   `test_entropy_audit_script.py` (+6), plus this change's own fixture.
+
+## 5. Round-2 fix receipts (D10)
+
+- T10 `_topology_line_mentions_rollback` (`audit_repo_entropy.py:2005-2010`) now
+  matches the whole lexeme via `roll(?:ed|ing|s)?[\s-]?back|回滚|回退`. The
+  helper has exactly one caller (the fallback leg at `:1941`), verified, so the
+  widening does not leak into any other check.
+- T11 fallback token tuple (`:1946-1965`) gains `replica`, `secondary`, `从库`,
+  `备库`, `主库`, `生产库`. `_topology_mentions_database`,
+  `_topology_line_mentions_mirror`, `_topology_local_postgres_context_is_allowed`
+  and the three positive branches are byte-unchanged.
+- E10a whole-repo hard gate: `total 753 / topology 0`, identical to the pre-fix
+  baseline — **both widenings are free**, and design.md's six new drift quotes
+  do not self-trigger.
+- E10b the four real findings, read verbatim from disk and passed to the
+  predicate: all four `False`. No false positive is resurrected.
+- E10c two independent revert receipts, one per leg: restoring the old
+  three-token rollback body turns exactly the three rollback cases red
+  (`3 failed, 19 passed`); stubbing the T11 tokens turns exactly the three
+  replication cases red (`3 failed, 19 passed`). The red sets are disjoint and
+  the four must-not-flag cases stay green throughout. Restoring each returns
+  `22 passed`, and the restored file diffs byte-identical to the measured state.
+- E10d `uv run pytest -q tests/test_entropy_audit_script.py` -> `373 passed in 285.88s`
+  (367 -> 373).
+- E10e `uv run ruff check .` -> `All checks passed!`
+- E10f `git diff --stat` -> `audit_repo_entropy.py` (+29/-6),
+  `test_entropy_audit_script.py` (+12), plus this change's own fixture.
+- Recorded deviation: the two red receipts were run against the two topology
+  parametrized functions (22 cases) rather than the whole 373-case file. The
+  helper's single-caller property was verified first and both stubs only
+  *narrow* the predicate, so no new finding is reachable; the full-file 373 pass
+  is recorded separately at the final state.

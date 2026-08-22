@@ -1943,10 +1943,26 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
     stripped = _topology_strip_db_absence_claims(lowered)
     if _topology_mentions_database(stripped):
         return True
-    # #1707 D9: fallback-only database vocabulary. _topology_mentions_database has three
-    # other callers and is pinned must-preserve, so the widening lives here. 库 must stay
-    # compound - 仓库/代码库/图库 are ordinary words in this repository.
-    return any(token in stripped for token in ("本地库", "本机库", "standby", "instance"))
+    # #1707 D9 (as amended by D10): fallback-only database vocabulary.
+    # _topology_mentions_database has three other callers and is pinned must-preserve, so
+    # the widening lives here. 库 must stay compound - 仓库/代码库/图库 are ordinary words in
+    # this repository. The list is bounded by decision (D10): every token here was measured
+    # free repo-wide, and further synonyms are a separate proposition.
+    return any(
+        token in stripped
+        for token in (
+            "本地库",
+            "本机库",
+            "standby",
+            "instance",
+            "replica",
+            "secondary",
+            "从库",
+            "备库",
+            "主库",
+            "生产库",
+        )
+    )
 
 
 def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -> bool:
@@ -1987,8 +2003,11 @@ def _topology_line_mentions_mirror(text: str) -> bool:
 
 
 def _topology_line_mentions_rollback(text: str) -> bool:
+    # #1707 D3/D10: the fixture commits to rollback wording as a concept, so recognise the
+    # whole lexeme - rollback / roll back / roll-back / rolled back / rolling back / rolls
+    # back - plus both Chinese surface forms 回滚 and 回退.
     lowered = _topology_normalized(text)
-    return "rollback" in lowered or "roll-back" in lowered or "回滚" in lowered
+    return bool(re.search(r"roll(?:ed|ing|s)?[\s-]?back|回滚|回退", lowered))
 
 
 def _topology_strip_db_absence_claims(text: str) -> str:

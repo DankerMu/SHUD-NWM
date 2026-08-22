@@ -5064,6 +5064,12 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "node-22 本地库通过 mirror 实时同步给 node-27，生产查询直接读取该镜像",
         "node-22 hosts the warm standby that mirrors production writes from node-27",
         "node-22's local instance mirrors node-27 and is queried when the primary is busy",
+        "Operators roll back via the node-22 mirror on demand",
+        "State was rolled back from the node-22 mirror last cycle",
+        "node-27 ingest 前先从 node-22 mirror 回退",
+        "node-22 hosts a read replica that mirrors production writes from node-27",
+        "node-22 的从库通过 mirror 对外提供读服务",
+        "node-22 的备库通过 mirror 同步给 node-27",
     ],
     ids=[
         "archived-port",
@@ -5078,6 +5084,12 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "chinese-local-db-mirror-read-as-production",
         "warm-standby-mirrors-production-writes",
         "local-instance-mirrors-and-is-queried",
+        "spaced-roll-back-mirror",
+        "rolled-back-from-mirror",
+        "chinese-rollback-huitui-mirror",
+        "read-replica-mirrors-production-writes",
+        "chinese-congku-mirror-serves-reads",
+        "chinese-beiku-mirror-syncs-to-node27",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(

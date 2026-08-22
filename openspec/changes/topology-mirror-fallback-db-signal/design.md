@@ -103,6 +103,39 @@ because after D9 these lines become live triggers:
 # "node-22's local instance mirrors node-27 and is queried when the primary is busy"
 ```
 
+Round-2 cross-review added the inflected rollback forms and the standard
+replication nouns, same one-quote-per-block discipline:
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "Operators roll back via the node-22 mirror on demand"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "State was rolled back from the node-22 mirror last cycle"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-27 ingest 前先从 node-22 mirror 回退"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22 hosts a read replica that mirrors production writes from node-27"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22 的从库通过 mirror 对外提供读服务"
+```
+
+```text
+# check_id production-topology-node22-local-postgres / production-topology-node22-db-writer
+# "node-22 的备库通过 mirror 同步给 node-27"
+```
+
 ### D2 — Reject the alternative (grow the exemption list)
 
 `#1707` offers, as a fallback, adding a state-index entry to the mirror branch of
@@ -149,7 +182,8 @@ recommendation, and the call stays a human one.
 `#1707` recorded 7 findings on the pre-merge `#1697` branch. On master there are
 4: archiving that change moved two of the evidence files under
 `openspec/changes/archive/`, which `_topology_path_is_archive_or_generated`
-skips (`audit_repo_entropy.py:1396`) — verified by calling the predicate
+skips (defined at `audit_repo_entropy.py:1554`, called from the scan at
+`:1397`) — verified by calling the predicate
 directly, not inferred. The runbook finding also moved from `:1341` to `:1560`.
 The target is therefore **4 -> 0**, not 7 -> 1.
 
@@ -247,6 +281,51 @@ legitimate state-index file-mirror phrasing this change exists to stop flagging,
 so pinning it either way would encode a debatable adjudication as a test. It is
 the boundary this vocabulary approach cannot decide, and belongs beside D8 as a
 known limit rather than as an assertion.
+
+### D10 — The vocabulary is bounded by decision, and master is not the baseline
+
+Two consecutive review rounds produced findings in the same class: a constructed
+line that the pre-change predicate returned True on and the narrowed one returns
+False on. Round 3 would produce more. That is not a sign the token list is a few
+words short — it is a sign the class is unbounded and needs a declared boundary,
+which is the same mechanism D8 and D9 already use. Evidence that the mechanism
+works: the round-2 reviewer explicitly declined to report the compute-instance
+phrasing family, because D9 had recorded it.
+
+**Master is not a normative recall baseline.** Its fallback was the bare
+`node-22 ∧ mirror` conjunction, so it returned True on every line naming the
+compute node that happened to contain the word — precision 0/4 on real
+repository content, and, as the verifier demonstrated, True on a line about a
+cat photo gallery. A `master=True, head=False` measurement therefore compares
+against a detector with no discriminating power. Matching master's recall means
+restoring master's four false positives, because they are the same behavior. Any
+predicate that discriminates loses to master on some constructible phrasing,
+permanently.
+
+So `master flagged it and head does not` is **not** on its own sufficient to
+establish a regression in this predicate. A finding must additionally show the
+phrasing is one a *discriminating* detector should catch — in practice, that it
+falls inside something this fixture commits to. Both round-2 findings did, which
+is why both were fixed: D3 commits to rollback wording as a concept, and D9's
+recorded limit is explicitly and only the line carrying no database word at all.
+
+The boundary this change ships with:
+
+- **In scope, and pinned by tests**: rollback wording in any inflection of the
+  lexeme, plus the database-role nouns enumerated in D9 as amended.
+- **Out of scope, known limit**: any other synonym for the same relationship.
+  No token set here has demonstrable completeness, and the widenings that landed
+  are justified specifically because they were *free* — each was measured to add
+  zero findings repo-wide and to resurrect none of the four false positives.
+- A future candidate arguing for tokens that **do** change the repo-wide finding
+  count is a different proposition and must be adjudicated on its own evidence,
+  not folded in as more vocabulary.
+
+Recorded rather than fixed, from the same round: `_topology_strip_db_absence_claims`
+matches the `no database handle` shape but not `no database at all`, so a line
+using the latter still reaches the database leg with its token intact. That is a
+precision gap in the opposite direction, master had it too, and it is out of
+this change's scope.
 
 ## Evidence mapping
 
