@@ -62,11 +62,36 @@ use the sibling `job_cycle_{source}_{cycle}_{stage}...` shape. So both live job
 id shapes carry `(source, cycle)`.
 
 The correction was forced by measurement, not by re-reading. Task 1(b)'s
-instrumented run put only **83.4%** of replays on the narrowed path (654/784),
+instrumented run put only **82.2%** of replays on the narrowed path (654/796),
 with **130 of the 142 surviving full-tree replays (91.5%)** coming from this
 entrypoint's direct-miss fallback. That is below the >=90% criterion, so
 tasks.md Task 1(c)'s pre-declared fallback ruling fires: the "leave" decision is
 void and is revisited **inside this change**. It is hereby reversed.
+
+(An earlier revision of this section, and commit `11faf4ac`'s message, cited
+83.4% against a denominator of 784. The denominator was 796; the share was
+82.2%. The ruling is unaffected — both figures are below 90% — but the numbers
+here are the correct ones.)
+
+### D1a result
+
+After the reversal and D2a, the same instrumented driver reports:
+
+| entrypoint | calls | cycle-scoped | full-tree |
+|---|---|---|---|
+| `query_pipeline_jobs_by_run` | 408 | 408 | 0 |
+| `_pipeline_job_for_id_unlocked` | 947 | 123 | 7 |
+| `query_candidate_state` | 116 | 110 | 6 |
+| `_candidate_job_for_idempotency_unlocked` | 114 | 108 | 6 |
+| `query_pipeline_jobs_by_cycle` | 28 | 28 | 0 |
+| `query_pipeline_job_by_slurm_id` | 0 | 0 | 0 |
+| **total** | | **777** | **19** |
+
+**777/796 = 97.6% narrowed**, up from 82.2%. The 19 residual full scans are all
+deliberate D4 fall-opens: 7 unparseable job-id shapes and 12 per-candidate
+idempotency keys of the shape `{source}:{cycle_id}:{basin}:{stage}`, which carry
+no run id. Replay count remains a proxy and the test call mix is not the
+production call mix — Task 1(c)'s node-22 measurement is still the decider.
 
 `_pipeline_job_for_id_unlocked` therefore derives `(source, cycle)` from the job
 id, narrows its fallback replay, and falls open per D4 on any id shape that does
