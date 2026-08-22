@@ -53,9 +53,17 @@ def _discover_basin_gis_dirs(basins_root: Path) -> list[tuple[str, Path]]:
         parts = relative.parts
         if len(parts) < 5 or parts[-4] != "input" or parts[-2] != "gis":
             continue
-        basin_name = parts[0]
-        if basin_name == "zhaochen" and len(parts) >= 6:
+        # The trailing four segments are always input/<child>/gis/<file>, so the number of
+        # container directories above input/ is exactly len(parts) - 4. Derive identity from
+        # that depth instead of matching a directory name (mirrors the depth-1/depth-2 rule in
+        # workers/model_registry/basins_discovery._find_model_dirs).
+        container_depth = len(parts) - 4
+        if container_depth == 1:
+            basin_name = parts[0]
+        elif container_depth == 2:
             basin_name = f"{parts[0]}_{parts[1].lower()}"
+        else:
+            continue  # deeper nesting has no registry identity: skip rather than collapse onto parts[0]
         discovered.append((basin_name, shp.parent))
     return discovered
 
