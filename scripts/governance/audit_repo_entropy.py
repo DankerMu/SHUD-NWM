@@ -1933,7 +1933,14 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
         or "node22_dsn_file" in lowered
     ) and _topology_line_mentions_mirror(lowered):
         return True
-    return _topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)
+    # #1707: node-22 + "mirror" alone is not drift - the state-index file mirror is a
+    # legitimate non-database mirror. Require rollback wording or a database token that
+    # survives removal of explicit "no database here" claims on the same line.
+    if not (_topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)):
+        return False
+    if _topology_line_mentions_rollback(lowered):
+        return True
+    return _topology_mentions_database(_topology_strip_db_absence_claims(lowered))
 
 
 def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -> bool:
@@ -1971,6 +1978,24 @@ def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -
 def _topology_line_mentions_mirror(text: str) -> bool:
     lowered = _topology_normalized(text)
     return "mirror" in lowered or "镜像" in lowered
+
+
+def _topology_line_mentions_rollback(text: str) -> bool:
+    lowered = _topology_normalized(text)
+    return "rollback" in lowered or "roll-back" in lowered or "回滚" in lowered
+
+
+def _topology_strip_db_absence_claims(text: str) -> str:
+    # #1707: strip, do not exclude - a line may deny a database in one clause and name a
+    # real one in another, and only the denied token should stop counting as a signal.
+    lowered = _topology_normalized(text)
+    db = r"(?:postgresql|postgres|database|数据库|db)"
+    stripped = re.sub(
+        rf"no\s+{db}\s+handle|{db}[\s-]?free\b|(?:无|不取任何)\s?{db}",
+        " ",
+        lowered,
+    )
+    return _topology_normalized(stripped)
 
 
 def _topology_local_postgres_context_is_allowed(
