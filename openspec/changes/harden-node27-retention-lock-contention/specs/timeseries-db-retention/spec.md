@@ -118,12 +118,26 @@ blocked one and can tune the lock budget from measurement rather than
 inference. The diagnostic SHALL go to the operator stderr stream only; the
 receipt's `dropped_chunks[]` entry shape SHALL NOT change.
 
+The emission SHALL be best effort: a failed diagnostic write SHALL NOT change
+the tick's outcome. A diagnostic emitted after a completed deletion must never
+be able to escape into the uncaught-error path, because the refused receipt
+that path publishes cannot record `dropped_chunks` — a chunk that really was
+deleted would then be recorded nowhere.
+
 #### Scenario: A successful drop reports its elapsed time
 
 - **WHEN** a selected chunk is dropped successfully
 - **THEN** a diagnostic naming that chunk and its elapsed time SHALL be
   emitted on stderr, and the published receipt SHALL carry the same
   `dropped_chunks[]` keys as before this change
+
+#### Scenario: A failed diagnostic write cannot downgrade a completed drop
+
+- **WHEN** the per-chunk diagnostic cannot be written (for example the log
+  volume is full) after a chunk has already been dropped successfully
+- **THEN** the tick SHALL continue as if the diagnostic had been written, and
+  the published receipt SHALL still record that chunk in `dropped_chunks[]`
+  rather than refusing with an uncaught error
 
 #### Scenario: A failed drop still reports its elapsed time
 

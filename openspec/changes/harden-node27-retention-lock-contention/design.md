@@ -97,7 +97,9 @@ drop 循环 `:950-971` 目前**不产出任何 per-chunk 时间**：全模块的
 运维也无法判断一次 sub-timeout 的慢趟是「等锁」还是「删得慢」。
 
 本 change 在 drop 循环里给每块加一行 stderr 诊断（chunk 名 + 毫秒级 elapsed，
-成功与失败路径都出），**不动 receipt schema**（`schemas/timeseries_retention_receipt.schema.json`
+成功与失败路径都出），**best effort**——写失败一律吞掉：一行诊断丢了，好过让 `OSError` 逃到 `main()` 兜底、
+把一次**已完成的删除**写成禁止携带 `dropped_chunks` 的 refused receipt。
+**不动 receipt schema**（`schemas/timeseries_retention_receipt.schema.json`
 的 `dropped_chunks[]` 形状不变）。纯计时，无凭据面，不经过 `_redact_error_text`。
 
 副产品：`docs/runbooks/tier-node27-timeseries-storage.md:3019-3021` 已经指示运维去看
