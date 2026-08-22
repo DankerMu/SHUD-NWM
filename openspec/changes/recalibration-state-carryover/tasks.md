@@ -263,9 +263,20 @@ comprehensive round 3 is bought. Dispositions:
   necessary but not sufficient).
 - [x] 7.3 `openspec validate recalibration-state-carryover --strict
   --no-interactive` — passes (local).
-- [ ] 7.4 Migration `000053` applied on the node-27 real DB; `\d+
-  hydro.state_snapshot` shows `clone_gate_kind text` nullable; an
-  upsert→re-upsert round trip preserves the value.
+- [x] 7.4 Migration `000053` applied on the node-27 real DB (`nhms-db`,
+  `127.0.0.1:55432/nhms`, PostgreSQL 15.2) **before any code deploy** — both
+  upsert copies reference `clone_gate_kind` unconditionally, so the reverse
+  order would break every `hydro.state_snapshot` write. Applied twice under
+  `ON_ERROR_STOP=1`, second run `NOTICE ... already exists, skipping`, both
+  exit 0. `\d+ hydro.state_snapshot` shows `clone_gate_kind text` nullable, no
+  default, no index change, `state_snapshot_model_source_valid_time_key`
+  intact. upsert→re-upsert round trip run through **both** SQL copies —
+  `PsycopgStateSnapshotRepository` (synthetic row deleted, table asserted back
+  to baseline) and `_CursorBoundStateSnapshotRepository` (inside a rolled-back
+  transaction, zero residue) — 15/15 checks PASS, including negative controls
+  proving the `DO UPDATE SET` branch fired and that it *assigns*
+  `clone_gate_kind` rather than inheriting the INSERT's value. Receipt:
+  `.workplans/pr-1706/node27-receipt.md`.
 
 ## 8. Non-goals (explicit, no test owed)
 
