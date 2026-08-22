@@ -1,5 +1,13 @@
 [Unit]
 Description=NHMS node-27 timeseries retention (gated drop_chunks)
+# #1664: a fail-closed tick must reach an operator instead of sitting in the
+# journal. `%n` expands to the FULL unit name, so the instance is
+# `nhms-node27-unit-failure-alert@nhms-node27-timeseries-retention.service.service`
+# and the handler's $1 carries the `.service` suffix. The handler is a
+# separate unit, so its own exit status cannot change this unit's.
+# Installing the template into ~/.config/systemd/user/ + `daemon-reload` is a
+# MANUAL step on node-27 (`git pull` updates only the ExecStart payload).
+OnFailure=nhms-node27-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

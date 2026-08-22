@@ -1,0 +1,32 @@
+[Unit]
+# Generic node-27 unit-failure alert (issue #1664, design D6).
+#
+# Consumed via `OnFailure=nhms-node27-unit-failure-alert@%n.service` on the
+# unit that must not fail silently. `%n` expands to the FULL unit name
+# (including `.service`), so the instance name reads
+# `...@nhms-node27-timeseries-retention.service.service` and `%i` — the
+# argument the wrapper receives — already carries the `.service` suffix.
+# That is the standard `status-email@%n` shape; verify the INSTANCE, not the
+# bare template (`systemd-analyze --user verify` on the template alone cannot
+# see instantiation errors).
+#
+# As of this change the ONLY consumer is
+# nhms-node27-timeseries-retention.service. The template exists so adding the
+# next consumer is one line in that consumer's unit.
+Description=NHMS node-27 unit failure alert for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+# Reuses the frontier alert lane's already-live mail channel and recipient
+# (NHMS_ALERT_EMAIL_TO / NHMS_ALERT_EMAIL_FROM / NHMS_FRONTIER_SENDMAIL)
+# rather than introducing a second channel. `-` prefix: a box without that env
+# file must still run the handler, which then exits 0 on the unconfigured-
+# recipient path instead of adding a second failed unit.
+EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env
+ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i
+# Bounded: this handler only reads 30 journal lines and hands one message to
+# $NHMS_FRONTIER_SENDMAIL (the authenticated-SMTP shim; node-27's local MTA is
+# null-routed and does not deliver). A wedged alerter must become visible, not
+# hang forever.
+TimeoutStartSec=120

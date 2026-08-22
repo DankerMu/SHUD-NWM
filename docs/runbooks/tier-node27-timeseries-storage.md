@@ -2777,8 +2777,11 @@ current set.
   `/tmp/nhms-node27-timeseries-retention.lock` is already held. Receipt
   published, exit code 1.
 - `RETENTION_DROP_FAILED` — per-chunk `drop_chunks` raised. Suffix
-  `:<hypertable_schema>.<chunk_name>: <error>`. The prefix through the
-  chunk name is byte-unchanged, but `<error>` is credential-redacted
+  `:<hypertable_schema>.<chunk_name>: [lock-contention(<pgcode>): ]<error>`.
+  The prefix through the chunk name is byte-unchanged, and since #1664 a
+  **lock-contention classification segment** may sit between that prefix and
+  the error text (see §8.2.2 — it is present only for SQLSTATE `55P03` /
+  `40P01`, absent for every other failure). `<error>` is credential-redacted
   driver text: DSN / password material and libpq `user "<name>"` /
   `role "<name>"` echoes are replaced by `***`, while the host/port echo is
   deliberately PRESERVED (diagnosability trade-off, #1213). Redaction is
@@ -2831,6 +2834,84 @@ frozenset:
   no warning is emitted at all (design D2 coercion path). §8.6 item 5
   depends on this asymmetry: an absent grep hit does NOT prove the `0` was
   measured.
+
+#### 8.2.2 Lock-contention classification + the drop-phase lock budget (#1664)
+
+Two changes landed together for issue #1664; read them as one mechanism.
+
+**(a) `NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS`** — the drop session now
+executes `SET lock_timeout = <value>` alongside its existing
+`SET statement_timeout = 300000`, both before `drop_chunks`. Default
+**240000** ms; documented (commented, i.e. the default applies) in
+`infra/env/node27-timeseries-retention.example`. The value must be an integer
+**strictly greater than 0 and strictly less than 300000**
+(`_DROP_TIMEOUT_MS`); `0`, a negative number, `300000` itself, anything above
+it, or a non-integer aborts the tick with `RETENTION_CONFIG_INVALID`, exit 2,
+no receipt, **no DB connection**. An empty assignment means "unset" and takes
+the default. Enumeration and per-chunk measurement are untouched — they keep
+the 60 s `_QUERY_TIMEOUT_MS` and get no lock budget at all.
+
+Why 240 s and not the 2–5 s that "just fail fast" intuition suggests. A
+successful 08-19 tick spent **~182 s** of wall clock that its 0.638 GB of
+delete work does not explain (08-17 / 08-20 freed ~11 GB in 23 s / 1 s). Read
+that number carefully: it is the wrapper's `elapsed_sec`, which brackets the
+whole Python invocation — watermark, enumeration, and the per-chunk
+measurement all sit inside it and none of them is lock-bounded — so it
+**cannot** be attributed to the drop session, let alone to a single lock
+acquisition. The choice therefore rests on the other two grounds: the costs are
+asymmetric (this is the only lane with delete authority; nothing waits on its
+wall clock — `TimeoutStartSec=0`, no `timeout(1)` in the wrapper, next tick
+24 h later), and the 60 s gap between 240 s and 300 s keeps the two walls
+distinguishable. The per-chunk drop timing (§8.6 item 6) exists to replace that
+inference with a measurement — tune from it, not from `elapsed_sec`.
+
+**(b) The classification segment.** A drop failure whose driver SQLSTATE is
+`55P03` (lock not available) or `40P01` (deadlock detected) renders as:
+
+```
+RETENTION_DROP_FAILED:hydro._hyper_3_32_chunk: lock-contention(55P03): canceling statement due to lock timeout
+RETENTION_DROP_FAILED:met._hyper_1_70_chunk: lock-contention(40P01): deadlock detected...
+```
+
+Any other failure — including the generic statement timeout `57014` — keeps
+the pre-#1664 shape with **no** segment at all. Classification is
+default-deny on the SQLSTATE alone (no message-text matching), so an
+exception that carries no code is never classified. Operator greps:
+`lock-contention(` for "blocked by a concurrent writer",
+`RETENTION_DROP_FAILED:` (unchanged) for every drop failure.
+
+**What this bound buys, and what it does NOT — read before tuning it.**
+It buys a *bounded* wait and *attribution certainty*: contention now signs its
+own name instead of hiding inside a `57014` that is indistinguishable from
+"the delete itself was slow". It does **not** buy fewer failures. Three hard
+edges:
+
+1. **It does not eliminate `40P01`.** The server's deadlock detector aborts
+   one side of a cycle as soon as it sees one, regardless of any
+   `lock_timeout`. The 2026-08-18 failure shape (retention's `drop_chunks` on
+   `met.forcing_station_timeseries` vs an autopipe
+   `INSERT INTO met.forcing_version`) can still occur exactly as before.
+2. **It is per-acquisition, not cumulative.** One `drop_chunks` call takes
+   several locks in sequence; each may wait < 240 s and the statement can
+   still exhaust its 300 s budget and come back as `57014`. So this raises
+   attribution certainty substantially — it does not guarantee it.
+3. **It reclaims nothing extra.** No chunk that could not be dropped before
+   becomes droppable. Only the *shape* of the failure changes (earlier,
+   signed), not its *frequency*.
+
+Consequence, stated plainly: **`exit 1` will not go to zero.** The steady
+state this lane is designed for is "bounded failure, visible failure, next-day
+idempotent self-heal" — re-entering a drop has no side effect, so the next
+13:15 CST tick simply retries the same chunk. Any statement that adding
+`lock_timeout` stops the failures is wrong.
+
+**Unverified (registered honestly).** The 2026-08-21 failure waited on a
+TimescaleDB catalog *tuple* lock (server log: `while locking tuple (0,18) in
+relation "dimension_slice"`). Whether PostgreSQL's `lock_timeout` covers that
+class of wait is **not** established by offline evidence in this change; only
+the next real contention event can answer it. If a future refusal shows
+`57014` with a `dimension_slice` CONTEXT again despite the bound, that is the
+answer — record it here rather than lowering the budget reflexively.
 
 ### 8.3 Metadata-table exemption + row-count invariant
 
@@ -3019,14 +3100,21 @@ before a receipt exists.
    enumerated in the receipt** (schema `oneOf` forbids `dropped_chunks`
    on refused); those chunks are already gone. To reconstruct what
    actually happened, cross-reference the wrapper's `retention.log`
-   (per-chunk drop timings printed to stderr) with the current
+   (per-chunk drop timings printed to stderr — grep literal
+   `per-chunk drop timing`, item 6 below) with the current
    `timescaledb_information.chunks` state before re-running enforce. If the
    refusal came from a manual direct-`python` run there is no `retention.log`
    entry to cross-reference (item 5's scope note) — use that terminal's stderr
    and the catalog state instead.
    Inspect the offending chunk (the refusal_reason suffix names it
-   `<hypertable_schema>.<chunk_name>`). The cause text AFTER that chunk
-   name is redacted (§8.2), so read it as an intent-preserving summary,
+   `<hypertable_schema>.<chunk_name>`). What follows the chunk name is
+   EITHER the redacted cause directly, OR — since #1664, and only for
+   SQLSTATE `55P03` / `40P01` — a `lock-contention(<pgcode>):` classification
+   segment (with its trailing space) first, and the redacted cause after it
+   (§8.2.2;
+   that segment is a fixed ASCII literal generated locally and is not driver
+   text). The cause text after that point is redacted (§8.2), so read it as
+   an intent-preserving summary,
    not as verbatim driver output; and when it is the withheld literal
    `<error text withheld: redaction unavailable (<Type>)>` the cause is
    absent ENTIRELY — classify from `<Type>` plus the DB side (item 4
@@ -3157,6 +3245,134 @@ before a receipt exists.
 
    No action is required unless the receipt's reclaim total is being
    reconciled against a `pg_database_size` delta.
+6. **Per-chunk drop timings (#1664).** Every drop attempt — success AND
+   failure — emits one sorted-key JSON line on stderr, which the wrapper
+   captures into `retention.log`:
+
+   ```
+   grep 'per-chunk drop timing' ~/node27-timeseries-retention-logs/retention.log
+   ```
+
+   ```json
+   {"chunk": "_timescaledb_internal._hyper_3_32_chunk", "diagnostic": "per-chunk drop timing", "elapsed_ms": 4187.226, "outcome": "dropped"}
+   ```
+
+   `chunk` is the chunk-schema-qualified name (the same key used in the
+   receipt's `dropped_chunks[].name`, NOT the hypertable-qualified name the
+   refusal reason uses). `outcome` is `dropped` or `failed`. The line carries
+   **no error text** by design — the cause travels only through the redacted
+   `refusal_reason` — so it has no credential surface and does not cross the
+   redaction chokepoint. The same bracket-scoping rules as item 5 apply
+   (`retention.log` is cumulative; direct-`python` runs write nothing to it).
+
+   This is the measurement `NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS`
+   should be tuned from: an `elapsed_ms` close to the lock budget on a
+   `lock-contention(55P03)` refusal means the wait was cut off by the bound;
+   an `elapsed_ms` close to 300000 on a `57014` means the statement wall
+   fired. Before #1664 no such line existed at all, although this section
+   already told you to read them.
+7. **Lock-blocked refusal (`lock-contention(55P03)` / `(40P01)`) — when to do
+   nothing, and when to escalate (#1664).**
+
+   ```
+   grep 'lock-contention(' ~/node27-timeseries-retention-logs/retention.log
+   ```
+
+   **A single lock-blocked refused tick is ACCEPTABLE and needs no human
+   intervention.** Nothing was half-done: the drop either happened or did not,
+   the tick refused fail-closed (H5) before attempting later chunks, and the
+   next 13:15 CST tick re-selects the same chunk and retries. Re-entry is
+   idempotent; do NOT force a manual enforce run to "catch up" (§8.4's
+   warnings apply — a wrapper invocation is a live enforcing tick).
+
+   **Escalate when the pattern, not the event, is wrong:** three or more
+   CONSECUTIVE days of lock-blocked refusals, or four or more lock-blocked
+   ticks within one week. That means the retention lane is no longer making
+   progress and the drop backlog is growing — check the candidate backlog and
+   `pg_database_size` before deciding.
+
+   What the forensics (#1664 Phase 0, node-27 receipts + PG server log)
+   established about the counterparty, so it is not re-derived every time:
+
+   - The opponent is the **autopipe ingest** timer
+     (`~/.config/systemd/user/nhms-node27-autopipe.timer`,
+     `OnUnitActiveSec=10min`, i.e. resident). There is **no schedule to move
+     retention to** in order to avoid it.
+   - The conflict surface is the **foreign keys**
+     (`db/migrations/000005_met.sql:100,102` — `met.forcing_station_timeseries`
+     references `met.forcing_version` and `met.met_station`) plus the
+     **TimescaleDB catalog** (`dimension_slice`). `drop_chunks` dropping a
+     chunk is a `DROP TABLE` and must take an `AccessExclusiveLock` on the
+     FK-referenced plain tables.
+   - The "compression window overruns into retention" hypothesis is
+     **refuted**, by a natural control: 2026-08-19 had compression running
+     04:25:00–05:28:53, fully overlapping the retention tick, and retention
+     **succeeded**; the two failing days (08-18, 08-21) had no compression
+     running at all. Do not re-open that hypothesis without new evidence, and
+     do not add `Conflicts=` between the two lanes.
+8. **Failure alerting (`OnFailure=`, #1664).** `nhms-node27-timeseries-retention.service`
+   declares `OnFailure=nhms-node27-unit-failure-alert@%n.service`, so any
+   non-zero exit activates the template unit
+   `infra/systemd/nhms-node27-unit-failure-alert@.service`, which runs
+   `scripts/node27_unit_failure_alert_once.sh` with the failed unit name.
+   `%n` expands to the FULL unit name, so the live instance is
+   `nhms-node27-unit-failure-alert@nhms-node27-timeseries-retention.service.service`
+   — verify the INSTANCE, never the bare template.
+
+   The handler is a dumb shell script: 30 journal lines of context, one
+   message through the **frontier alert lane's existing channel**
+   (`$NHMS_FRONTIER_SENDMAIL -t -i`, `NHMS_ALERT_EMAIL_TO` /
+   `NHMS_ALERT_EMAIL_FROM` from `infra/env/node27-frontier-alert.env`). No
+   second mail channel, no state file, no deduplication — a scheduled unit
+   fails at most once per tick. Soft failures — `NHMS_ALERT_EMAIL_TO` or
+   `NHMS_ALERT_EMAIL_FROM` unset, either of them carrying a CR/LF (rejected,
+   never stripped — header injection), `NHMS_FRONTIER_SENDMAIL` unset or not
+   executable — log a `reason=` token and **exit 0** so the alerter cannot pile
+   a second failed unit on top of the one it is reporting; a transport that is
+   present and rejects the message exits non-zero on purpose, because a
+   silently broken alert lane is worse than a visible one. Neither
+   `NHMS_ALERT_EMAIL_FROM` nor `NHMS_FRONTIER_SENDMAIL` has a default: the
+   authenticated-SMTP shim refuses a From that is not the authenticated
+   account, and node-27's `/usr/sbin/sendmail` accepts with exit 0 and then
+   asynchronously bounces, so either default would manufacture a second failed
+   unit or a "SENT" that never arrived.
+
+   **KNOWN LIMITATION — the mail body does NOT carry `refusal_reason`.** The
+   journal context the handler quotes is systemd **lifecycle lines only**
+   (`Starting…`, `Main process exited, code=exited, status=1/FAILURE`,
+   `Failed with result 'exit-code'`). The runner's own stderr never reaches
+   the journal, for two independent reasons, both pre-existing:
+   `scripts/node27_timeseries_retention_once.sh` redirects the runner's stdout
+   **and** stderr into `retention.log`, and the retention unit writes
+   `StandardOutput=`/`StandardError=append:` files that systemd does not
+   duplicate into the journal. So the alert tells you **that** the tick failed,
+   never **why**. Read the reason out of `retention.log`:
+
+   ```
+   grep 'RETENTION_' ~/node27-timeseries-retention-logs/retention.log | tail -20
+   ```
+
+   Then follow items 1-7 above from whichever wire code that prints.
+
+   **Deployment is MANUAL** — node-27's units are user-scope
+   (`~/.config/systemd/user/`), so `git pull --ff-only` updates only the
+   Python behind `ExecStart`; it installs neither the new template nor the
+   `OnFailure=` line into the live unit:
+
+   ```
+   install -m 0644 ~/NWM/infra/systemd/nhms-node27-unit-failure-alert@.service \
+     ~/.config/systemd/user/
+   install -m 0644 ~/NWM/infra/systemd/nhms-node27-timeseries-retention.service \
+     ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user show nhms-node27-timeseries-retention.service -p OnFailure
+   systemctl --user start nhms-node27-unit-failure-alert@smoke.service   # channel smoke, touches no DB
+   ```
+
+   The `show` output must be non-empty and name the instance. Smoke-testing
+   the ALERT unit is safe; **never** `systemctl --user start` the retention
+   unit to test this wiring — that is a live enforcing tick and irreversibly
+   drops production chunks.
 
 ### 8.7 Salvage-backed windows
 

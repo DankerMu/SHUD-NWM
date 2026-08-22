@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -2071,6 +2072,9 @@ def test_env_example_lists_all_h13_keys() -> None:
         "NODE27_TIMESERIES_RETENTION_LOCK_PATH",
         "NODE27_TIMESERIES_RETENTION_ENFORCE",
         "NODE27_TIMESERIES_RETENTION_ARCHIVE_GATE",
+        # #1664 drop-phase lock budget — ships commented (the default is the
+        # deployed value); the example must still document it.
+        "NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS",
     ):
         assert re.search(rf"^#?{re.escape(key)}=", text, flags=re.MULTILINE), f"missing {key}"
 
@@ -2813,3 +2817,783 @@ def test_runbook_never_uses_the_bare_archive_gate_token() -> None:
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
     bare = re.findall(r"(?<![A-Z0-9_])RETENTION_ARCHIVE_GATE", runbook_text)
     assert not bare, "runbook must spell the env key in full"
+
+
+# ---------------------------------------------------------------------------
+# #1664 — drop-phase lock budget, lock-contention classification, per-chunk
+# drop timing, and the OnFailure= alert wrapper.
+#
+# All rows are injection-driven (fake psycopg2 / stub seams / fake sendmail):
+# no database, no systemctl, no network.
+# ---------------------------------------------------------------------------
+
+
+_ALERT_WRAPPER_PATH = _ROOT / "scripts/node27_unit_failure_alert_once.sh"
+_ALERT_TEMPLATE_UNIT_PATH = _ROOT / "infra/systemd/nhms-node27-unit-failure-alert@.service"
+_LOCK_TIMEOUT_ENV_KEY = "NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS"
+
+
+class _SyntheticDriverError(Exception):
+    """A psycopg2-SHAPED exception whose ``pgcode`` the test can choose.
+
+    Real psycopg2 exceptions cannot be used for these rows: ``pgcode`` is a
+    read-only attribute that is ``None`` on a client-constructed instance
+    (pinned below in
+    ``test_real_psycopg2_exceptions_cannot_carry_a_client_set_pgcode``), so
+    there is no way to synthesise a 55P03/40P01 driver failure from the real
+    class. The runner reads the code with ``getattr(error, "pgcode", None)``,
+    which is exactly what this stand-in satisfies.
+    """
+
+    def __init__(self, message: str, pgcode: str | None) -> None:
+        super().__init__(message)
+        self.pgcode = pgcode
+
+
+def _drop_timing_lines(err: str) -> list[dict[str, Any]]:
+    """Parse the per-chunk drop-timing JSON diagnostics out of stderr."""
+    lines: list[dict[str, Any]] = []
+    for line in err.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("diagnostic") == "per-chunk drop timing":
+            lines.append(payload)
+    return lines
+
+
+def test_real_psycopg2_exceptions_cannot_carry_a_client_set_pgcode() -> None:
+    """Justifies ``_SyntheticDriverError`` rather than the real driver class.
+
+    If this ever stops holding, the synthetic stand-in has become optional —
+    but until then a test that tried to build a 55P03 failure from the real
+    class would either assert nothing (``pgcode is None`` → unclassified) or
+    blow up on assignment.
+    """
+    error = psycopg2.OperationalError("boom")
+    assert error.pgcode is None
+    with pytest.raises(AttributeError):
+        error.pgcode = "55P03"  # type: ignore[misc]
+
+
+def test_lock_contention_pgcodes_match_the_drivers_own_table() -> None:
+    """The two SQLSTATEs are pinned against psycopg2's error-code table, not
+    against a second hand-copied constant in this file.
+    """
+    from psycopg2 import errorcodes
+
+    assert errorcodes.LOCK_NOT_AVAILABLE == "55P03"
+    assert errorcodes.DEADLOCK_DETECTED == "40P01"
+    assert retention.LOCK_CONTENTION_PGCODES == frozenset({"55P03", "40P01"})
+
+
+@pytest.mark.parametrize(
+    ("pgcode", "driver_text"),
+    [
+        ("55P03", "canceling statement due to lock timeout"),
+        ("40P01", "deadlock detected"),
+        # DISCRIMINATING ROW: a contention SQLSTATE whose message carries no
+        # lock vocabulary at all. Together with the `57014` + lock-timeout-text
+        # row in the non-contention table below, this breaks the correlation
+        # that made every other row indifferent between "read the pgcode" and
+        # "grep the message" — the spec's "message-text matching SHALL NOT be
+        # used" rule has no other oracle.
+        ("55P03", "boom"),
+    ],
+    ids=["lock-not-available", "deadlock-detected", "contention-code-without-lock-text"],
+)
+def test_lock_contention_drop_failure_names_itself_in_refusal_reason(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    pgcode: str,
+    driver_text: str,
+) -> None:
+    """T1/T2: a contention SQLSTATE is attributed, under an UNCHANGED prefix.
+
+    The expected string is spelled out by hand (not recomputed from the
+    module) so it is an independent oracle: wire code, then
+    ``<hypertable_schema>.<chunk_name>``, then the classification segment,
+    then the driver text. Any drift in the #1213 operator-grep prefix fails
+    here rather than silently changing what operators grep for.
+    """
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(
+        chunks, drop_error={"chk-a": _SyntheticDriverError(driver_text, pgcode)}
+    )
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == (
+        f"RETENTION_DROP_FAILED:hydro.chk-a: lock-contention({pgcode}): {driver_text}"
+    )
+    assert receipt["refusal_reason"].startswith(
+        f"RETENTION_DROP_FAILED:hydro.chk-a: lock-contention({pgcode}): "
+    )
+    jsonschema.validate(receipt, _load_schema())
+
+    # D3a: the failing drop is still timed, and that diagnostic carries no
+    # error text of its own — the cause travels only through refusal_reason.
+    timings = _drop_timing_lines(capsys.readouterr().err)
+    assert [t["chunk"] for t in timings] == ["_timescaledb_internal.chk-a"]
+    assert timings[0]["outcome"] == "failed"
+    assert isinstance(timings[0]["elapsed_ms"], float)
+    assert timings[0]["elapsed_ms"] >= 0.0
+    assert driver_text not in json.dumps(timings[0])
+    assert "error" not in timings[0]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_tail"),
+    [
+        pytest.param(
+            _SyntheticDriverError("canceling statement due to statement timeout", "57014"),
+            "canceling statement due to statement timeout",
+            id="statement-timeout-57014",
+        ),
+        pytest.param(
+            _SyntheticDriverError("could not serialize access", "40001"),
+            "could not serialize access",
+            id="unrelated-sqlstate",
+        ),
+        # DISCRIMINATING ROW — SYNTHETIC BY CONSTRUCTION, no live error looks
+        # like this: `statement_timeout`'s SQLSTATE 57014 deliberately paired
+        # with the message text that a REAL `lock_timeout` cancellation
+        # carries. It is the pair that separates "read the pgcode" from "grep
+        # the message": a message-text refactor would classify this row, the
+        # pgcode predicate must not.
+        #
+        # The real shapes, so nobody reads this row backwards:
+        #   * `lock_timeout` fires → SQLSTATE 55P03
+        #     (`psycopg2.errorcodes.LOCK_NOT_AVAILABLE`) with exactly
+        #     "canceling statement due to lock timeout" — and IS classified
+        #     (design.md / runbook §8.2.2 render it as
+        #     `lock-contention(55P03): canceling statement due to lock
+        #     timeout`; the sibling contention table's first row pins it). The
+        #     55P03 member of `LOCK_CONTENTION_PGCODES` is live behavior, NOT
+        #     dead code.
+        #   * `statement_timeout` fires → SQLSTATE 57014 with "canceling
+        #     statement due to statement timeout" (this table's first row),
+        #     which stays unclassified: the statement wall is
+        #     indistinguishable from "the delete itself was slow".
+        # This row asserts the second rule holds on `pgcode` ALONE — a 57014
+        # stays unclassified no matter what text it carries.
+        pytest.param(
+            _SyntheticDriverError("canceling statement due to lock timeout", "57014"),
+            "canceling statement due to lock timeout",
+            id="lock-text-but-timeout-sqlstate",
+        ),
+        pytest.param(RuntimeError("drop_chunks blew up"), "drop_chunks blew up", id="no-pgcode"),
+    ],
+)
+def test_non_contention_drop_failure_keeps_its_pre_change_reason(
+    tmp_path: Path, error: Exception, expected_tail: str
+) -> None:
+    """T3/T4: default-deny. 57014 is a TIMEOUT, not contention; an exception
+    with no ``pgcode`` attribute at all is likewise unclassified. Both keep the
+    byte-for-byte pre-#1664 shape.
+    """
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks, drop_error={"chk-a": error})
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == f"RETENTION_DROP_FAILED:hydro.chk-a: {expected_tail}"
+    assert "lock-contention" not in receipt["refusal_reason"]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_successful_drops_emit_per_chunk_timings_without_changing_the_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D3a success path: one timing line per dropped chunk on stderr, and the
+    receipt's ``dropped_chunks[]`` entry keys are exactly what they were.
+    """
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("met", "forcing_station_timeseries", "chk-b", delta_days=61),
+    ]
+    stub = _StubRunner(chunks)
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert receipt["outcome"] == "enforced"
+    assert [set(entry) for entry in receipt["dropped_chunks"]] == [
+        {"name", "freed_bytes"},
+        {"name", "freed_bytes"},
+    ]
+    jsonschema.validate(receipt, _load_schema())
+
+    timings = _drop_timing_lines(capsys.readouterr().err)
+    assert [t["chunk"] for t in timings] == [
+        "_timescaledb_internal.chk-a",
+        "_timescaledb_internal.chk-b",
+    ]
+    assert {t["outcome"] for t in timings} == {"dropped"}
+
+
+def test_drop_timing_reports_the_measured_interval_not_a_placeholder(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``elapsed_ms`` is the actual monotonic delta, to a known value.
+
+    A shape-only oracle (``isinstance(..., float)`` and ``>= 0.0``) is
+    satisfied by a hardcoded ``0.0``, which would make the whole diagnostic
+    useless for the one job it exists to do — telling a lock wait apart from a
+    slow delete, and tuning ``NODE27_TIMESERIES_RETENTION_LOCK_TIMEOUT_MS``
+    from measurement. A two-value fake clock pins the arithmetic exactly; with
+    ONE chunk the runner must call ``monotonic`` exactly twice (loop start,
+    emit), so exhausting the iterator would also fail here.
+    """
+    ticks = iter([1_000.0, 1_000.125])
+    monkeypatch.setattr(retention.time, "monotonic", lambda: next(ticks))
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks)
+
+    retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    timings = _drop_timing_lines(capsys.readouterr().err)
+    assert [t["elapsed_ms"] for t in timings] == [125.0]
+    with pytest.raises(StopIteration):
+        next(ticks)
+
+
+class _ExplodingStderr:
+    """A ``sys.stderr`` stand-in whose every write fails with ``OSError``.
+
+    Models the shape the wrapper actually exposes the runner to: stderr is
+    redirected into a long-lived ``retention.log`` on the SAME volume as the
+    database and stays line-buffered, so an ENOSPC there surfaces as an
+    ``OSError`` raised out of ``print`` at emission time, not at exit.
+    """
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def write(self, _data: str) -> int:
+        self.attempts += 1
+        raise OSError(28, "No space left on device")
+
+    def flush(self) -> None:  # pragma: no cover — never reached after write()
+        raise OSError(28, "No space left on device")
+
+
+def test_drop_timing_write_failure_cannot_downgrade_a_completed_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The diagnostic is best-effort: a failed write must not rewrite history.
+
+    The success-path emission runs AFTER ``drop_chunk`` returned and outside
+    its ``try``. Unguarded, an ``OSError`` there escapes ``run_retention`` into
+    ``main``'s uncaught arm and publishes ``refused`` /
+    RETENTION_UNCAUGHT_ERROR — whose schema branch FORBIDS ``dropped_chunks``,
+    so a chunk that was really deleted would be recorded nowhere. With stub
+    seams nothing else in ``run_retention`` touches stderr, so ``attempts``
+    counts exactly the emission under test and pins the test non-vacuous.
+    """
+    exploder = _ExplodingStderr()
+    monkeypatch.setattr(sys, "stderr", exploder)
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(chunks)
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert exploder.attempts >= 1
+    assert receipt["outcome"] == "enforced"
+    assert receipt["dropped_chunks"] == [
+        {"name": "_timescaledb_internal.chk-a", "freed_bytes": 10_000}
+    ]
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_drop_timing_write_failure_preserves_a_classified_refusal_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guard, failure call site: the classification must survive.
+
+    The failure-path emission runs after the SQLSTATE has been classified but
+    before the refusal is built. An escaping ``OSError`` would replace
+    ``lock-contention(55P03)`` — this change's entire output — with a generic
+    RETENTION_UNCAUGHT_ERROR. Expected string spelled out by hand, matching
+    the sibling classification tests' independent-oracle style.
+    """
+    exploder = _ExplodingStderr()
+    monkeypatch.setattr(sys, "stderr", exploder)
+
+    config = _build_config(tmp_path, enforce=True)
+    chunks = [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)]
+    stub = _StubRunner(
+        chunks,
+        drop_error={
+            "chk-a": _SyntheticDriverError("canceling statement due to lock timeout", "55P03")
+        },
+    )
+
+    receipt = retention.run_retention(
+        config, _NOW, fetch_chunks=stub.fetch, measure_chunk_bytes=stub.measure, drop_chunk=stub.drop
+    )
+
+    assert exploder.attempts >= 1
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == (
+        "RETENTION_DROP_FAILED:hydro.chk-a: lock-contention(55P03): "
+        "canceling statement due to lock timeout"
+    )
+    jsonschema.validate(receipt, _load_schema())
+
+
+# --- #1664 operator-grep anchors vs the runbook ----------------------------
+
+# The literals §8.6 items 6 and 7 tell the operator to grep for, spelled out
+# here by hand so they are an INDEPENDENT oracle for the module constants
+# rather than a re-import of them. Same shape as
+# ``_MEASURE_WARNING_GREP_TOKEN`` / ``_MEASURE_WARNING_GREP_FENCE`` above.
+_DROP_TIMING_GREP_TOKEN = "per-chunk drop timing"
+_LOCK_CONTENTION_GREP_TOKEN = "lock-contention("
+_DROP_TIMING_GREP_FENCE = f"grep '{_DROP_TIMING_GREP_TOKEN}'"
+_LOCK_CONTENTION_GREP_FENCE = f"grep '{_LOCK_CONTENTION_GREP_TOKEN}'"
+
+
+def test_1664_grep_anchors_byte_identical_with_the_runbook() -> None:
+    """Byte-identity: both #1664 stderr anchors are pinned to §8.6.
+
+    Standing requirement in this section (the sibling ``_MEASURE_WARNING``
+    anchor already carries it): a rename on the code side that does not touch
+    the runbook leaves the operator grepping a literal the runner no longer
+    emits and reading "no hit" as "it did not happen". The quoted `grep`
+    form pins §8.6's fenced commands specifically — the same tokens appear in
+    backticks in §8.2.2, which does not match.
+    """
+    assert retention.DROP_TIMING_DIAGNOSTIC == _DROP_TIMING_GREP_TOKEN
+    assert retention.LOCK_CONTENTION_MARKER_PREFIX == _LOCK_CONTENTION_GREP_TOKEN
+
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _DROP_TIMING_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 6 must carry the drop-timing grep command verbatim"
+    )
+    assert _LOCK_CONTENTION_GREP_FENCE in runbook_text, (
+        "runbook §8.6 item 7 must carry the lock-contention grep command verbatim"
+    )
+
+
+# --- config: the lock budget knob -----------------------------------------
+
+
+def test_default_lock_timeout_is_strictly_inside_the_drop_statement_budget() -> None:
+    """T6c: the pinned default must itself satisfy the bound it enforces, and
+    must not have been re-expressed as a derivation of ``_DROP_TIMEOUT_MS``
+    (the two budgets are independent operator knobs — design D3).
+    """
+    assert retention._DEFAULT_LOCK_TIMEOUT_MS == 240_000
+    assert 0 < retention._DEFAULT_LOCK_TIMEOUT_MS < retention._DROP_TIMEOUT_MS
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({_LOCK_TIMEOUT_ENV_KEY: None}, id="missing-assignment"),
+        pytest.param({_LOCK_TIMEOUT_ENV_KEY: ""}, id="empty-value"),
+    ],
+)
+def test_absent_or_empty_lock_timeout_takes_the_pinned_default(
+    tmp_path: Path, override: dict[str, str | None]
+) -> None:
+    """T6 + T5b: an empty assignment is treated as unset, matching the
+    ``_optional_positive_int`` convention the sibling keys already follow.
+    """
+    config = retention.config_from_args(_args(), _base_env(tmp_path, **override))
+
+    assert config.lock_timeout_ms == 240_000
+
+
+def test_lock_timeout_env_value_reaches_the_config(tmp_path: Path) -> None:
+    """T6b (anti-vacuity): a NON-default value must survive the parse.
+
+    Validating the variable and then forgetting to pass it into
+    ``RetentionConfig(...)`` leaves every default-valued assertion green — the
+    frozen dataclass supplies 240000 either way. Only a non-default value
+    catches that.
+    """
+    env = _base_env(tmp_path, **{_LOCK_TIMEOUT_ENV_KEY: "2000"})
+
+    config = retention.config_from_args(_args(), env)
+
+    assert config.lock_timeout_ms == 2000
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["0", "-1", "300000", "300001", "abc"],
+    ids=["zero", "negative", "equal-to-statement-budget", "above-statement-budget", "non-integer"],
+)
+def test_out_of_range_lock_timeout_fails_closed_before_any_db_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """T5: bounds are STRICT on both ends and refuse with
+    RETENTION_CONFIG_INVALID, with zero database contact.
+
+    300000 is refused as well as 300001: a lock budget equal to the drop
+    statement budget is inert — the statement wall fires first and the failure
+    comes back as an unattributable 57014.
+    """
+    import types
+
+    connects: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg2",
+        types.SimpleNamespace(connect=lambda url: connects.append(url)),
+    )
+    env = _base_env(tmp_path, **{_LOCK_TIMEOUT_ENV_KEY: raw})
+
+    with pytest.raises(retention.RetentionConfigError, match="LOCK_TIMEOUT_MS") as excinfo:
+        retention.config_from_args(_args(), env)
+
+    # The message names BOTH bounds so an operator can fix it without reading
+    # the source.
+    assert "0" in str(excinfo.value)
+    assert "300000" in str(excinfo.value)
+    assert connects == []
+
+
+def test_config_invalid_lock_timeout_exits_two_with_no_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal carries the RETENTION_CONFIG_INVALID wire code end to end
+    (``main()``: exit 2, no receipt file).
+    """
+    env = _base_env(tmp_path, **{_LOCK_TIMEOUT_ENV_KEY: "300000"})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    code = retention.main(argv=[], now=_NOW)
+
+    assert code == 2
+    assert not (tmp_path / "receipt.json").exists()
+    payload = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["code"] == retention.CODE_RETENTION_CONFIG_INVALID
+    assert payload["code"] in retention.WIRE_CODES
+
+
+def test_drop_session_sets_both_bounds_before_dropping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7 (anti-vacuity, load-bearing): the lock budget really reaches the SQL.
+
+    Asserted against the statements handed to ``cursor.execute`` — not against
+    ``config.lock_timeout_ms`` — because a hard-coded ``SET lock_timeout =
+    240000`` in the runner would satisfy any config-level assertion. The
+    configured value is deliberately NON-default (1234) for the same reason.
+    Both bounds must precede ``drop_chunks``: a lock budget set afterwards
+    bounds nothing.
+    """
+    chunk = _chunk("hydro", "river_timeseries", "chk-covered", delta_days=53, duration_days=7)
+    probe = _install_fake_drop_psycopg2(monkeypatch, [(chunk.qualified_name,)])
+    config = _build_config(tmp_path, enforce=True, lock_timeout_ms=1234)
+
+    retention._default_drop_chunk(config, chunk)
+
+    statements = [sql for sql, _params in probe.executed]
+    assert "SET lock_timeout = 1234" in statements
+    lock_index = statements.index("SET lock_timeout = 1234")
+    statement_index = next(
+        i for i, sql in enumerate(statements) if sql.startswith("SET statement_timeout = ")
+    )
+    drop_index = next(i for i, sql in enumerate(statements) if "SELECT drop_chunks(" in sql)
+    assert lock_index < drop_index
+    assert statement_index < drop_index
+    # The statement budget is untouched by this change.
+    assert statements[statement_index] == f"SET statement_timeout = {retention._DROP_TIMEOUT_MS}"
+
+
+def test_enumeration_and_measurement_sessions_get_no_lock_budget() -> None:
+    """Non-goal guard: the 60 s ``_QUERY_TIMEOUT_MS`` paths gain no lock bound
+    (issue #1664 scopes the change to the drop phase).
+    """
+    for func in (retention._default_fetch_chunks, retention._default_measure_chunk_bytes):
+        source = inspect.getsource(func)
+        assert "lock_timeout" not in source
+
+
+# --- OnFailure= alert lane -------------------------------------------------
+
+
+_FAKE_JOURNAL_SENTINEL = "FAKE-JOURNALCTL-CONTEXT-LINE"
+
+
+def _write_fake_journalctl(tmp_path: Path) -> Path:
+    """A stand-in ``journalctl`` so the body's journal clause has an oracle.
+
+    A FAKE rather than the missing-binary fallback: the wrapper captures the
+    command with ``2>&1``, so an absent ``journalctl`` puts the shell's
+    "command not found" text into ``$JOURNAL`` — non-empty — and the
+    ``(no journal context available ...)`` branch is not deterministically
+    reachable that way.
+    """
+    script = tmp_path / "journalctl"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s argv=%s\\n" "{_FAKE_JOURNAL_SENTINEL}" "$*"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _alert_env(tmp_path: Path, **overrides: str | None) -> dict[str, str]:
+    """Env-pin shape mirrored from ``tests/test_node27_frontier_stall_alert.py``:
+    the failure-alert wrapper reuses that lane's channel variables verbatim.
+
+    ``PATH`` is prefixed with ``tmp_path`` so the fake ``journalctl`` written
+    beside the fake sendmail wins over any real one (or its absence) — the
+    journal-context clause of the message body then has a deterministic
+    oracle on every host.
+    """
+    _write_fake_journalctl(tmp_path)
+    env: dict[str, str] = {
+        "PATH": f"{tmp_path}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "NHMS_ALERT_EMAIL_TO": "node27-ops@example.invalid",
+        "NHMS_ALERT_EMAIL_FROM": "NHMS Node-27 Alert <alerts@example.invalid>",
+        "NHMS_FRONTIER_SENDMAIL": str(tmp_path / "fake-sendmail.sh"),
+    }
+    for key, value in overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+def _write_fake_sendmail(tmp_path: Path, *, exit_code: int = 0) -> Path:
+    capture = tmp_path / "sendmail-stdin.txt"
+    script = tmp_path / "fake-sendmail.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'cat > "{capture}"\n'
+        f'printf "%s\\n" "$@" > "{capture}.argv"\n'
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return capture
+
+
+def _run_alert_wrapper(unit: str, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(_ALERT_WRAPPER_PATH), unit],
+        env=dict(env),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_alert_wrapper_mails_the_failed_unit_name(tmp_path: Path) -> None:
+    """T8 (a): the message identifies the unit that failed, and goes through
+    the frontier lane's ``sendmail -t -i`` channel.
+    """
+    capture = _write_fake_sendmail(tmp_path)
+    unit = "nhms-node27-timeseries-retention.service"
+
+    result = _run_alert_wrapper(unit, _alert_env(tmp_path))
+
+    assert result.returncode == 0
+    message = capture.read_text(encoding="utf-8")
+    assert unit in message
+    assert f"Subject: [NHMS node-27] unit failed: {unit}" in message
+    assert "To: node27-ops@example.invalid" in message
+    assert "From: NHMS Node-27 Alert <alerts@example.invalid>" in message
+    # `-t` (recipients from the headers) `-i` (a lone dot is not EOF) — the
+    # frontier lane's invocation, unchanged.
+    assert (capture.parent / f"{capture.name}.argv").read_text(encoding="utf-8").split() == [
+        "-t",
+        "-i",
+    ]
+
+    # RFC 5322 headers nothing downstream injects: the transport on node-27 is
+    # the SMTP shim (`scripts/node27_frontier_smtp_sendmail.py`), which passes
+    # the message through, and `smtplib.SMTP.send_message` adds nothing either.
+    # Mirrors `build_message` in the sibling frontier lane. The charset is the
+    # load-bearing one — journal lines can be non-ASCII.
+    assert "MIME-Version: 1.0" in message
+    assert 'Content-Type: text/plain; charset="utf-8"' in message
+    date_header = next(
+        line for line in message.splitlines() if line.startswith("Date: ")
+    )
+    # `date -R` output, parsed by the same stdlib the shim would hand it to.
+    assert parsedate_to_datetime(date_header[len("Date: "):]).tzinfo is not None
+
+    # The journal-context clause is a real clause, not decoration: the count
+    # line AND the captured `journalctl` output must both reach the body.
+    # Without this the entire `journalctl` call, its empty-output fallback and
+    # NHMS_UNIT_FAILURE_JOURNAL_LINES could be deleted with the suite green.
+    assert "Last 30 journal lines:" in message
+    assert _FAKE_JOURNAL_SENTINEL in message
+    assert f"argv=--user -u {unit} -n 30 --no-pager" in message
+
+
+def test_alert_wrapper_exits_zero_when_no_recipient_is_configured(tmp_path: Path) -> None:
+    """T8 (b): an unconfigured recipient must not add a SECOND failed unit on
+    top of the failure being reported.
+    """
+    capture = _write_fake_sendmail(tmp_path)
+
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service",
+        _alert_env(tmp_path, NHMS_ALERT_EMAIL_TO=None),
+    )
+
+    assert result.returncode == 0
+    assert "NHMS_ALERT_EMAIL_TO_UNSET" in result.stderr
+    assert not capture.exists()
+
+
+def test_alert_wrapper_exits_zero_when_the_transport_is_missing(tmp_path: Path) -> None:
+    """T8 (c): same for a configured transport binary that is not there.
+
+    Distinct from the SENDMAIL_UNCONFIGURED row above: here the operator DID
+    set ``NHMS_FRONTIER_SENDMAIL``, and the path simply does not resolve.
+    """
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service",
+        _alert_env(tmp_path, NHMS_FRONTIER_SENDMAIL=str(tmp_path / "no-such-sendmail")),
+    )
+
+    assert result.returncode == 0
+    assert "SENDMAIL_UNAVAILABLE" in result.stderr
+
+
+def test_alert_wrapper_propagates_a_rejecting_transport(tmp_path: Path) -> None:
+    """A transport that is PRESENT and rejects is deliberately NOT soft: the
+    wrapper propagates sendmail's own rc so a silently broken alert lane is
+    itself visible.
+
+    This is the row that consumes ``_write_fake_sendmail(exit_code=...)`` — with
+    every call site on the default 0, the ``SEND_FAILED`` / ``exit "$rc"``
+    branch was never executed.
+    """
+    _write_fake_sendmail(tmp_path, exit_code=1)
+
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service", _alert_env(tmp_path)
+    )
+
+    assert result.returncode == 1
+    assert "SEND_FAILED" in result.stderr
+    assert "rc=1" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_TO": "node27-ops@example.invalid\nBcc: attacker@example.invalid"},
+            "NHMS_ALERT_EMAIL_TO_UNSAFE",
+            id="recipient-carries-a-header-break",
+        ),
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_FROM": "NHMS <alerts@example.invalid>\rX-Injected: 1"},
+            "NHMS_ALERT_EMAIL_FROM_UNSAFE",
+            id="sender-carries-a-header-break",
+        ),
+        pytest.param(
+            {"NHMS_ALERT_EMAIL_FROM": None},
+            "NHMS_ALERT_EMAIL_FROM_UNSET",
+            id="sender-unset",
+        ),
+        pytest.param(
+            {"NHMS_FRONTIER_SENDMAIL": None},
+            "SENDMAIL_UNCONFIGURED",
+            id="transport-unconfigured",
+        ),
+    ],
+)
+def test_alert_wrapper_soft_exits_on_unusable_channel_configuration(
+    tmp_path: Path, overrides: dict[str, str | None], reason: str
+) -> None:
+    """Every unusable-configuration path exits 0 WITHOUT mailing.
+
+    Two distinct hazards, one discipline:
+
+    * CR/LF in either operator-edited address is REJECTED, never stripped. The
+      chain is real — the SMTP shim derives the envelope from the headers, so
+      an injected ``Bcc:`` becomes an extra recipient while ``del
+      message["Bcc"]`` erases it from the delivered copy. Concatenating the
+      two halves into one malformed address (``tr -d``) would be worse than
+      refusing.
+    * Neither ``NHMS_ALERT_EMAIL_FROM`` nor ``NHMS_FRONTIER_SENDMAIL`` may be
+      defaulted: the shim rejects a From that is not the authenticated account
+      (exit 64), and node-27's ``/usr/sbin/sendmail`` accepts with exit 0 and
+      then asynchronously bounces — a derived default turns a misconfiguration
+      into a second failed unit, or into a logged "SENT" that never arrived.
+    """
+    capture = _write_fake_sendmail(tmp_path)
+
+    result = _run_alert_wrapper(
+        "nhms-node27-timeseries-retention.service", _alert_env(tmp_path, **overrides)
+    )
+
+    assert result.returncode == 0
+    assert f"reason={reason}" in result.stderr
+    assert not capture.exists(), "no message may be handed to the transport"
+
+
+def test_alert_wrapper_exits_zero_without_a_unit_argument(tmp_path: Path) -> None:
+    """Broken ``OnFailure=`` wiring (no ``%n``) still must not manufacture a
+    failed unit.
+    """
+    _write_fake_sendmail(tmp_path)
+
+    result = subprocess.run(
+        [str(_ALERT_WRAPPER_PATH)],
+        env=dict(_alert_env(tmp_path)),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert "NO_UNIT_ARGUMENT" in result.stderr
+
+
+def test_retention_unit_declares_the_failure_alert_handler() -> None:
+    """The retention unit is the ONLY consumer wired in this change, and the
+    template it points at exists and runs the wrapper with ``%i``.
+    """
+    service_text = _SERVICE_PATH.read_text(encoding="utf-8")
+    assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in service_text
+
+    template_text = _ALERT_TEMPLATE_UNIT_PATH.read_text(encoding="utf-8")
+    assert "Type=oneshot" in template_text
+    assert "ExecStart=/home/nwm/NWM/scripts/node27_unit_failure_alert_once.sh %i" in template_text
+    assert "TimeoutStartSec=120" in template_text
+    # The leading `-` is load-bearing, not cosmetic: without it a host that
+    # lacks the env file fails the HANDLER unit at start, which is exactly the
+    # "second failed unit" the spec forbids. A substring check on the path
+    # alone passes with the dash deleted, so pin the whole literal.
+    assert (
+        "EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env" in template_text
+    )
+    assert os.access(_ALERT_WRAPPER_PATH, os.X_OK)
