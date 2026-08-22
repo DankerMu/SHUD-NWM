@@ -417,24 +417,63 @@ def _clear_issue_126_rows(connection: Any) -> None:
         cursor.execute("DELETE FROM hydro.state_snapshot WHERE state_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         # #1442: located by surrogate key, resolved from hydro_run — which is
         # only deleted on the next line, so the resolution still sees the runs.
+        # #1640/#1654: river_timeseries is a guarded hypertable, and TimescaleDB
+        # refuses an unbounded DELETE on a hypertable holding any compressed
+        # chunk even when zero rows match. Probe the window the identity
+        # predicate actually covers — not the seeded VALID_TIME_* constants,
+        # which would silently stop deleting a row seeded at a third timestamp
+        # — and skip the DELETE entirely when nothing matched (min over zero
+        # rows is NULL).
         cursor.execute(
             """
-            DELETE FROM hydro.river_timeseries
+            SELECT min(valid_time) AS valid_time_min, max(valid_time) AS valid_time_max
+            FROM hydro.river_timeseries
             WHERE run_key IN (
                 SELECT run_key FROM hydro.hydro_run WHERE run_id IN (%s, %s)
             )
             """,
             (FORECAST_RUN_ID, HINDCAST_RUN_ID),
         )
+        river_window = cursor.fetchone() or {}
+        if river_window.get("valid_time_min") is not None:
+            cursor.execute(
+                """
+                DELETE FROM hydro.river_timeseries
+                WHERE run_key IN (
+                    SELECT run_key FROM hydro.hydro_run WHERE run_id IN (%s, %s)
+                )
+                AND valid_time >= %s AND valid_time <= %s
+                """,
+                (
+                    FORECAST_RUN_ID,
+                    HINDCAST_RUN_ID,
+                    river_window["valid_time_min"],
+                    river_window["valid_time_max"],
+                ),
+            )
         cursor.execute("DELETE FROM hydro.hydro_run WHERE run_id IN (%s, %s)", (FORECAST_RUN_ID, HINDCAST_RUN_ID))
         cursor.execute(
             "DELETE FROM met.forcing_version_component WHERE forcing_version_id LIKE %s",
             (f"{ISSUE_126_PREFIX}%",),
         )
+        # Same bound, same reason (#1640). Here the skip path is the COMMON
+        # case: the session-scoped integration database never seeds this table.
         cursor.execute(
-            "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s",
+            "SELECT min(valid_time) AS valid_time_min, max(valid_time) AS valid_time_max "
+            "FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s",
             (f"{ISSUE_126_PREFIX}%",),
         )
+        forcing_window = cursor.fetchone() or {}
+        if forcing_window.get("valid_time_min") is not None:
+            cursor.execute(
+                "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s "
+                "AND valid_time >= %s AND valid_time <= %s",
+                (
+                    f"{ISSUE_126_PREFIX}%",
+                    forcing_window["valid_time_min"],
+                    forcing_window["valid_time_max"],
+                ),
+            )
         cursor.execute("DELETE FROM met.forcing_version WHERE forcing_version_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM met.forecast_cycle WHERE cycle_id = %s", (CYCLE_ID,))
         # canonical_grid_snapshot is referenced by three nullable FKs
