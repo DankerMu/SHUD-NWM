@@ -19,10 +19,28 @@ Check 2 was written against the test-fixture row shape
 and `array_task_id`. The production writer path
 (`chain_forecast_trigger.trigger_forecast_impl` → `create_hydro_run`) never
 sets those three: the run manifest has no `candidate_id`/`array_task_id`, and
-the run context has no `basin_id` attribute at that point, so
-`file_orchestration_journal.py:1203/1207/1208` persist `None`. The strict
-comparison (`str(None or "")` vs a real member value, `int(None)` →
-`TypeError` → swallowed → `False`) then fails for every real cohort.
+the run context has no `basin_id` attribute at that point, so they persist
+`None`. The strict comparison (`str(None or "")` vs a real member value,
+`int(None)` → `TypeError` → swallowed → `False`) then fails for such rows.
+
+> **Correction (2026-08-23, issue #1749).** The sentence above is true of the
+> `create_hydro_run` path and **false as a statement about production**, which
+> is how it was used to justify the degradation. Array-shaped production
+> cohorts do not go through that writer: they go through
+> `create_hydro_run_from_basin`, called from `chain_manifests.py:386`, and that
+> writer persists **all three** fields. Measured on node-22 (`gfs_2026080712`,
+> 48 `hydro_run` records): every sampled row carries non-null `candidate_id`,
+> `basin_id`, and `array_task_id`. The degradation's `None` branch is therefore
+> dead on production data, and the present-but-different leg — which this
+> change deliberately kept fatal — is the leg that actually runs. For
+> `array_task_id` that leg is a defect, because the value is a per-submission
+> layout index rather than an identity; issue #1749 removes it from the
+> identity projection. The line references `1203/1207/1208` above have also
+> drifted and today land on unrelated code. This correction is recorded in
+> place rather than by rewriting the paragraph, so the reasoning that produced
+> the degradation stays auditable.
+
+
 
 ## Goals / Non-Goals
 

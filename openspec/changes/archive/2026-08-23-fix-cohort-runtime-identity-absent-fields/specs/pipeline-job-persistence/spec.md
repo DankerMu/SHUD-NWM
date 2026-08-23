@@ -12,7 +12,7 @@ source and cycle that strictly matches on `run_id`, `model_id`,
 `candidate_id`, `basin_id`, and `array_task_id` the check SHALL compare
 strictly when the `hydro_run` row carries a value, and SHALL skip the field —
 without failing the check — when the row's value is absent (`None`), because
-the file-journal per-model writers do not persist these fields. A
+some file-journal per-model writer paths do not persist these fields. A
 present-but-different value SHALL remain fatal. The cohort-member side SHALL
 remain fully strict, and the reconcile-side gates (exact master slurm id,
 ownership user/account, stage-family job name, comment-when-stored, and the
@@ -22,7 +22,8 @@ array-task-id bijection against `cohort_members`) SHALL be unchanged.
 
 - **WHEN** an inflight forecast cohort's per-model `hydro_run` rows carry
   `None` for `candidate_id`, `basin_id`, and `array_task_id` (the shape
-  written by the chain per-model trigger) and sacct returns a terminal master
+  written by `create_hydro_run`; array-shaped cohorts written by
+  `create_hydro_run_from_basin` carry all three) and sacct returns a terminal master
   record passing all reconcile-side identity gates with a complete task
   bijection
 - **THEN** restart reconcile SHALL record a `terminal` outcome with
