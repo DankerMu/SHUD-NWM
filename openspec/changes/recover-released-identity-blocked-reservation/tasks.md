@@ -30,12 +30,12 @@
 This section exists because it was absent from the first three drafts, and that
 absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.md`.
 
-- [ ] 4b.1 Name the intended invoker of every mechanism this change adds, and show the path from that invoker to the effect. Mechanisms: the recovery API (invoker: a human operator on node-22), the consuming disjunct (invoker: the ordinary scheduler pass), the release signal (invoker: reconcile; audience: a human reading the journal).
-- [ ] 4b.2 Add a supported operator entry point in `services/orchestrator/cli.py`, following the existing operator-maintenance subcommand convention.
-- [ ] 4b.3 Cover **discovery**: the operator can enumerate rows in the released identity-blocked shape together with the CAS values the action requires. Without this the operator is stopped one step earlier — there is today no supported way to read `expected_submission_attempt` / `expected_submission_attempt_started_at` off a wedged row.
-- [ ] 4b.4 Cover **action**: perform the attestation; idempotent on repeat; refusals name which precondition failed.
-- [ ] 4b.5 Help text states plainly that no Slurm-side liveness check is performed and that invoking it is an operator attestation, not a proof.
-- [ ] 4b.6 No HTTP/API route; CLI only.
+- [x] 4b.1 Name the intended invoker of every mechanism this change adds, and show the path from that invoker to the effect. Mechanisms: the recovery API (invoker: a human operator on node-22), the consuming disjunct (invoker: the ordinary scheduler pass), the release signal (invoker: reconcile; audience: a human reading the journal).
+- [x] 4b.2 Add a supported operator entry point in `services/orchestrator/cli.py`, following the existing operator-maintenance subcommand convention.
+- [x] 4b.3 Cover **discovery**: the operator can enumerate rows in the released identity-blocked shape together with the CAS values the action requires. Without this the operator is stopped one step earlier — there is today no supported way to read `expected_submission_attempt` / `expected_submission_attempt_started_at` off a wedged row.
+- [x] 4b.4 Cover **action**: perform the attestation; idempotent on repeat; refusals name which precondition failed.
+- [x] 4b.5 Help text states plainly that no Slurm-side liveness check is performed and that invoking it is an operator attestation, not a proof.
+- [x] 4b.6 No HTTP/API route; CLI only.
 
 ## 5. Regression Evidence
 
@@ -45,7 +45,9 @@ absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.m
 - [x] 5.4 Test: refusal for each non-owned shape; repeated attestation idempotent.
 - [x] 5.5 Test: both release prior-state shapes emit the token exactly once (keep from `54714525`).
 - [x] 5.6 `tests/test_production_scheduler.py:48632` and `:48681` pass **unweakened** — assertions unchanged.
-- [ ] 5.7 The **operator-facing path itself** is pinned by a test that goes through the entry point, not only the method behind it.
+- [x] 5.7 The **operator-facing path itself** is pinned by a test that goes through the entry point, not only the method behind it.
+- [x] 5.8 CLI tests cover: attest + idempotent repeat (both entrypoints), each refusal naming its failing precondition, help text carrying the attestation-not-a-proof non-goal, `--attest` without `--job-id` refused, and the listing carrying the CAS values.
+- [x] 5.9 The signal names the **invocable command**, not only the Python method, at every emission point — including the degraded failure trace, which is exactly when a human is reading by hand.
 
 ## 6. Verification (Evidence Floor)
 

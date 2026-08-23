@@ -138,6 +138,55 @@ accepted-submit invariant at `accepted_submit_identity.py:646` — surfaced as
 in `upsert_pipeline_job`, which this path never calls.) It would also
 pre-materialize a row, which the invariant above forbids outright.
 
+## D4b. Two decisions inside the operator entry point
+
+**CAS is read off the row, not supplied by the operator.** What that still
+protects: the API re-reads and compares inside `_locked_cycle_write`, so any
+writer that lands between the command's read and the locked write loses the race
+write-free — an attestation can never be stamped onto an attempt that has since
+advanced. What it no longer protects: the window between the operator reading the
+listing or dry-run output and typing `--attest` is invisible, because the command
+re-reads rather than holding the operator to what they saw. That window is empty
+in practice (a released row is never re-entered by the release path, and no
+automatic path can set or clear the attestation), but it is genuinely weaker than
+an operator-supplied expectation, and `--dry-run` then `--attest` narrows it
+rather than closing it. `accepted_submit_contract_version` is taken from the code
+constant and is deliberately not a flag: it guards against stale code, and is not
+something an operator knows or should override.
+
+**Discovery walks the full journal, not the reconcile inventory.** The first
+implementation enumerated through the reconcile inventory and returned **empty**.
+The chain, verified at head:
+`_sync_reconcile_inventory_for_row_unlocked` (`file_orchestration_journal.py:6906`)
+drops the anchor at `:6911` when `_job_blocks_rollback_quiescence` is false; that
+predicate (`:9691-9697`) returns `_job_needs_restart_reconcile(job)` for any status
+in `TERMINAL_PIPELINE_STATUSES` (`:480`), and `reservation_lost` is in that set;
+`_job_needs_restart_reconcile` (`:9656`) then refuses a current-contract terminal
+master whose `submit_outcome != "accepted"` — and release writes exactly
+`submit_outcome="submit_result_ambiguous"`. Anchor removed.
+
+**The pruning is not at fault and must not be "fixed".** The inventory is a
+restart to-do list, not a row index, and by construction it hides *every* terminal
+row that needs no restart reconcile — `succeeded`, `failed`, `permanently_failed`,
+`cancelled`, `submission_failed`, `partially_failed`, and the other
+`reservation_lost` shape (the reclaim door's `absence_retry_permitted`). All of
+those are correctly hidden: they have no to-do, or their to-do is automatic.
+
+The sharp point is narrower and worse: **`identity_mismatch_released` is the only
+pruned terminal that still needs a human.** So inventory-based discovery becomes
+necessary for the first time precisely on the one shape where it is unavailable.
+The property that makes this wedge permanently invisible to the automatic arms —
+terminal, and not awaiting restart — is the same property that removes it from the
+inventory a human would search.
+
+That is a fourth surface of this change's recurring invariant (see D8 and
+`.workplans/pr-1802/review/retro-round-3.md`): the pass could not reach the
+recovery; the signal could silently fail to arrive; the operator could not invoke
+it; and the operator could not even find the row. Each time, a correct mechanism
+with no path from the party it exists for. The full-tree replay is more expensive
+than its `query_*` siblings; that cost is accepted because this is a hand-run
+operator command, never a scheduling path.
+
 ## D5. The signal
 
 Today the wedge is silent: the row freezes and each pass rewrites the same

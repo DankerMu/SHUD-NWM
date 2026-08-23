@@ -35,7 +35,13 @@ indistinguishable, for the operator the requirement exists for, from the silent
 terminal it replaces. The entry point SHALL cover both halves — discovery (which
 rows are in this shape, and the values needed to act on them) and the action —
 because an operator who cannot obtain the action's required inputs is stopped one
-step earlier and no better off. A refusal SHALL name which precondition failed. The recovery API SHALL NOT perform any
+step earlier and no better off. A refusal SHALL name which precondition failed,
+and SHALL be write-free. Repeating the action SHALL be idempotent. The entry point
+SHALL be a command-line surface with **no automatic caller and no HTTP route** —
+the node this runs on is db-free compute and the operator is on a shell there.
+Its help text SHALL state, at the point of use, that no Slurm-side liveness or
+absence check is performed and that invoking it is an attestation, not a proof:
+the one place a human is guaranteed to read this is where they are about to act. The recovery API SHALL NOT perform any
 Slurm-side liveness or absence check, and SHALL NOT be described as one: on a
 cluster whose accounting does not store job comments, absence is not provable.
 Invoking it places that judgement with the operator rather than with the machine.
@@ -126,7 +132,11 @@ makes no release write SHALL remain write-free and signal-free.
   with the values the recovery action requires
 - **AND** SHALL be able to perform the attestation through the same supported
   tooling, with no interactive interpreter and no access to the source tree
-- **AND** a refused attempt SHALL name the precondition that failed
+- **AND** a refused attempt SHALL name the precondition that failed and SHALL
+  write nothing
+- **AND** after the attestation, an ordinary scheduler pass SHALL reach a real
+  submission for that cohort — the operator-facing path SHALL be pinned end to
+  end, not only the method behind it
 
 #### Scenario: a failing signal does not undo or hide the release
 
