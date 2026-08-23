@@ -1167,3 +1167,28 @@ tally while contributing no opportunity for a rotated lens to catch anything. Th
 counter's denominator is multi-round PRs but its `core` numerator admits catches
 from PRs where rotation was never exercised. Anyone using this ratio to argue
 cut should first filter to PRs that actually reached round 2.
+
+## Revisit 2026-08-23 (PR #1773, issue #1743) — keep; a zero-round line cannot move this counter
+
+`loop_log_audit --log docs/review-loop-log.jsonl` returns DECIDABLE at 111
+multi-round merged PRs, later-round catches **core=68 / rotated=264** —
+identical to the previous revisit (PR #1754) in all three numbers.
+
+That identity is the whole content of this revisit. PR #1773 is a `fixture:
+none`, `rounds: 0` line: no cross-review round ran at all, so it contributes to
+neither numerator and does not even enter the multi-round denominator. The
+counter is unchanged because nothing about it was exercised.
+
+Decision unchanged: **keep** the rotation.
+
+Worth recording alongside the five ways this counter can already mislead: the
+audit emits DECIDABLE on every merge once the sample thresholds are met,
+*including* merges that carry zero review evidence in either direction. The
+obligation to record a keep/cut call therefore fires on lines that are, by
+construction, incapable of informing it. That is not an argument to weaken the
+obligation — a cheap recorded "unchanged, and here is why it could not change"
+is exactly what keeps the ledger honest — but a reader scanning revisit headings
+should not mistake the *number* of revisits for the amount of evidence
+accumulated. The prior revisit made the adjacent point about single-round PRs
+inflating `core`; this one makes the stronger version: zero-round PRs inflate the
+revisit count itself.
