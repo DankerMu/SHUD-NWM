@@ -561,3 +561,213 @@ def test_cfg_ic_header_shape_leaves_the_existing_minute_index_helpers_untouched(
     # on the two-token header the new helper rejects.
     assert cfg_ic_header_minute_index(["23106", "6"]) == 1
     assert cfg_ic_header_minute_time(["23106", "6"]) == 6.0
+
+
+def _write_native_ic(
+    path: Path,
+    *,
+    mesh_rows: list[list[float]],
+    river_rows: list[list[float]],
+    lake_rows: list[list[float]] | None = None,
+    minute_time: float = 27000000.0,
+) -> Path:
+    """Write a native sectioned SHUD ``.cfg.ic`` (the production layout).
+
+    The header's second token is the mesh-state COLUMN count, not a river count.
+    """
+
+    lines = [f"{len(mesh_rows)}\t6\t{minute_time:.6f}", "Index\tCanopy\tSnow\tSurface\tUnsat\tGW"]
+    lines.extend("\t".join(f"{value:.6f}" for value in row) for row in mesh_rows)
+    lines.append("Index\tStage")
+    lines.extend("\t".join(f"{value:.6f}" for value in row) for row in river_rows)
+    if lake_rows:
+        lines.append(f"{len(lake_rows)}\t2")
+        lines.append("Index\tLakeStage")
+        lines.extend("\t".join(f"{value:.6f}" for value in row) for row in lake_rows)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _flat_mesh_rows(count: int) -> list[list[float]]:
+    return [[float(index + 1), 0.1, 0.1, 0.1, 0.1, 0.1] for index in range(count)]
+
+
+def _flat_river_rows(count: int) -> list[list[float]]:
+    return [[float(index + 1), 0.5] for index in range(count)]
+
+
+def test_basins_dth_yj_onboarding_river_residuals_are_projected_to_the_dry_bed(
+    tmp_path: Path,
+) -> None:
+    """The exact shape that stalled the #1699 backfill on node-22.
+
+    Five negative ``Stage`` values in an 8,622-reach basin, worst -0.105880 m.
+    """
+
+    mesh_rows = _flat_mesh_rows(9869)
+    river_rows = _flat_river_rows(8622)
+    for reach_index, value in (
+        (1886, -0.087910),
+        (1887, -0.102668),
+        (2196, -0.014297),
+        (5816, -0.027905),
+        (7553, -0.105880),
+    ):
+        river_rows[reach_index][1] = value
+    ic = _write_native_ic(tmp_path / "dth-yj.cfg.ic", mesh_rows=mesh_rows, river_rows=river_rows)
+
+    raw_result = run_state_variable_qc(ic, expected_mesh_count=9869, expected_river_count=8622)
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "dth-yj-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert raw_result.passed is False
+    assert "negative" in (raw_result.reason or "")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_river_row_count == 5
+    assert normalization.river_row_count == 8622
+    assert normalization.max_river_correction_m == pytest.approx(0.105880)
+    assert normalization.mean_river_correction_m == pytest.approx(0.338660 / 8622)
+    assert normalization.normalized_unsat_row_count == 0
+
+    evidence = normalization.evidence()
+    assert evidence["policy"] == "bounded_physical_zero_projection_v3"
+    assert evidence["max_river_negative_repair_m"] == pytest.approx(0.2)
+    assert evidence["max_river_mean_correction_m"] == pytest.approx(2.0e-3)
+    assert evidence["normalized_river_row_fraction"] == pytest.approx(5 / 8622)
+
+    assert run_state_variable_qc(
+        normalized, expected_mesh_count=9869, expected_river_count=8622
+    ).passed is True
+
+
+def test_single_tolerated_river_residual_passes_on_the_smallest_production_basin(
+    tmp_path: Path,
+) -> None:
+    """Denominator pin: 319 reaches is the smallest production river count.
+
+    Mirroring the unsat mean cap (2.0e-4) would give this basin a 0.064 m total
+    budget and fail closed on one tolerated residual. This test reddens if the
+    river mean cap is ever tightened below ``ceiling / min_river_rows``.
+    """
+
+    river_rows = _flat_river_rows(319)
+    river_rows[100][1] = -0.105880
+    ic = _write_native_ic(
+        tmp_path / "small-basin.cfg.ic", mesh_rows=_flat_mesh_rows(50), river_rows=river_rows
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+
+    assert normalization.accepted is True
+    assert normalization.normalized_river_row_count == 1
+    assert normalization.mean_river_correction_m == pytest.approx(0.105880 / 319)
+
+
+def test_river_negative_beyond_repair_ceiling_remains_a_qc_failure(tmp_path: Path) -> None:
+    river_rows = _flat_river_rows(1000)
+    river_rows[10][1] = -0.200001
+    ic = _write_native_ic(
+        tmp_path / "river-over-ceiling.cfg.ic", mesh_rows=_flat_mesh_rows(50), river_rows=river_rows
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "river-over-ceiling-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_river_row_count == 0
+    result = run_state_variable_qc(normalized, expected_mesh_count=50, expected_river_count=1000)
+    assert result.passed is False
+    assert "negative" in (result.reason or "")
+
+
+def test_basin_wide_river_collapse_breaches_the_domain_mean_cap(tmp_path: Path) -> None:
+    """Every reach carrying a within-ceiling negative is a routing failure, not noise."""
+
+    river_rows = _flat_river_rows(1000)
+    for row in river_rows:
+        row[1] = -0.05
+    ic = _write_native_ic(
+        tmp_path / "river-collapse.cfg.ic", mesh_rows=_flat_mesh_rows(50), river_rows=river_rows
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+
+    assert normalization.accepted is False
+    assert "river-stage negative-residual domain-mean correction" in (normalization.reason or "")
+    assert normalization.mean_river_correction_m == pytest.approx(0.05)
+    assert normalization.content == ic.read_text(encoding="utf-8")
+
+
+def test_mesh_columns_keep_the_ten_millimetre_tolerance_under_the_river_relaxation(
+    tmp_path: Path,
+) -> None:
+    """A river-sized negative in ``Surface`` must still fail; only Unsat/Stage relax."""
+
+    mesh_rows = _flat_mesh_rows(50)
+    mesh_rows[7][3] = -0.105880
+    ic = _write_native_ic(
+        tmp_path / "mesh-surface-negative.cfg.ic",
+        mesh_rows=mesh_rows,
+        river_rows=_flat_river_rows(319),
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "mesh-surface-negative-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_value_count == 0
+    result = run_state_variable_qc(normalized, expected_mesh_count=50, expected_river_count=319)
+    assert result.passed is False
+    assert "negative" in (result.reason or "")
+
+
+def test_lake_stage_is_not_relaxed_by_the_river_ceiling(tmp_path: Path) -> None:
+    """The second stage section is lake, and lake has no residual evidence."""
+
+    ic = _write_native_ic(
+        tmp_path / "lake-negative.cfg.ic",
+        mesh_rows=_flat_mesh_rows(2),
+        river_rows=_flat_river_rows(2),
+        lake_rows=[[1.0, -0.05]],
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "lake-negative-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_value_count == 0
+    result = run_state_variable_qc(
+        normalized, expected_mesh_count=2, expected_river_count=2, expected_lake_count=1
+    )
+    assert result.passed is False
+    assert "negative" in (result.reason or "")
+
+
+def test_compatibility_layout_river_rows_get_the_same_relaxation(tmp_path: Path) -> None:
+    """Non-sectioned files derive river rows from the header, not section headers."""
+
+    river_rows = _flat_river_rows(400)
+    river_rows[3][1] = -0.09
+    ic = _write_ic(
+        tmp_path / "compat-river.cfg.ic",
+        mesh=50,
+        river=400,
+        mesh_rows=_flat_mesh_rows(50),
+        river_rows=river_rows,
+    )
+
+    normalization = normalize_state_negative_residuals(ic.read_text(encoding="utf-8"))
+    normalized = tmp_path / "compat-river-normalized.cfg.ic"
+    normalized.write_text(normalization.content, encoding="utf-8")
+
+    assert normalization.accepted is True
+    assert normalization.normalized_river_row_count == 1
+    assert normalization.river_row_count == 400
+    assert run_state_variable_qc(
+        normalized, expected_mesh_count=50, expected_river_count=400
+    ).passed is True
