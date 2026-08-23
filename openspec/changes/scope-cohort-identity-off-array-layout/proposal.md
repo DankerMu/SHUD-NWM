@@ -31,9 +31,13 @@ Remove `array_task_id` from the identity projection of
 `submission_attempt` stay strict, and the `candidate_id` / `basin_id` legs keep
 their present-but-different-is-fatal semantics.
 
-The stale premise that produced the defect is corrected in two places, both
+The stale premise that produced the defect is corrected in three places, each
 recorded in place rather than rewritten away: the comment above the comparison,
-and the donor change's design (`fix-cohort-runtime-identity-absent-fields`).
+and both the design **and the proposal** of the donor change
+(`fix-cohort-runtime-identity-absent-fields`). The donor's proposal carried the
+premise in its own words (`returns False for every inflight forecast cohort`,
+`a shape production never writes`) and was missed by the round-1..Phase-7
+sweeps — see design D9.
 The donor is corrected on this branch but **not** archived here — see design D8
 for why archiving it in this PR would land a clause that this PR's own code
 falsifies. Both changes archive together in the post-merge chore commit, donor

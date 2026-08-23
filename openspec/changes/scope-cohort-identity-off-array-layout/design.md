@@ -101,17 +101,22 @@ identity use is wrong. This is stated explicitly so a reviewer does not read the
 narrowing as a general condemnation of the field, and so the acceptance
 criterion "no implicit divergence between the two uses" has a written ruling.
 
-## D6. Two falsified premises, corrected in place
+## D6. The falsified premise, corrected in place in all three carriers
 
-Both assert that the per-model writers never persist
+Each asserts that the per-model writers never persist
 `candidate_id`/`basin_id`/`array_task_id`, which is what justified treating
 `None` as "not stored" while keeping present-but-different fatal.
 
 1. The comment above the comparison (`~:1813-1818`).
 2. The donor change's design,
    `openspec/changes/fix-cohort-runtime-identity-absent-fields/design.md`.
+3. The donor change's **proposal**, same directory — carrying the premise in
+   its own words ("returns `False` for **every** inflight forecast cohort";
+   the fixture shape is "a shape production never writes"). This section
+   originally enumerated only the first two; the third was found by the
+   invariant-closure audit (D9) after three sweeps had missed it.
 
-Both are false as statements about production: array-shaped cohorts are written
+All are false as statements about production: array-shaped cohorts are written
 by `create_hydro_run_from_basin` (`:1527`, called from `chain_manifests.py:386`),
 which persists all three (`:1553-1554` and siblings), and every sampled
 production row carries non-null values for all three. The `None` branch is dead
@@ -185,43 +190,59 @@ Recorded here rather than only in the loop log because the class has now fired
 three times (twice inside PR #1759, once here) and the first two fixes did not
 prevent the third.
 
-## D9. The same fix-the-named-item-not-the-class failure, three times in one PR
+## D9. The same fix-the-named-item-not-the-class failure, four times in one PR — including once by the sweep meant to end it
 
-Three review passes on this PR each found the same defect in a different file:
+Four passes on this PR each found the same defect in a different file:
 
 | pass | where | what it said |
 |---|---|---|
 | round 1 (P1) | `openspec/specs/` | donor archived here, landing a clause this PR falsifies |
 | round 2 (P2) | `design.md` D6 | "now archived as `archive/2026-08-23-…`" |
 | Phase 7 (P2) | `proposal.md` | "corrected before archive on this branch" |
+| gate retro (invariant-closure audit) | donor `proposal.md`, donor `tasks.md`, `tests/test_gateway_reconcile.py`, the PR body | the falsified premise and the archive-state claim, in the four documents no prior pass had opened |
 
-Each fix corrected **the file it was shown** and left the others. The second and
-third findings are not new defects — they are the first defect, in the two
-places the first fix did not look.
+Each fix corrected **the file it was shown** and left the others. Findings two
+through four are not new defects — they are the first defect, in the places the
+preceding fix did not look.
 
 This is a recorded personal failure mode, not a novel one.
 `docs/review-loop-log.jsonl` carries it against issue #1671 under the class
 `same-defect-class-recurred-after-a-named-fix`, with the note: *"After T10/T10b's
 missing evidence was fixed, T11/T12 were still ticked with nothing pasted — the
 identical defect, one task later. I had fixed the two items that were named
-instead of sweeping the class."* That entry is from the day before this PR.
+instead of sweeping the class."* That entry is dated `2026-08-23` — the **same
+day** as every commit on this PR, not a historical lesson from some earlier era.
+(An earlier revision of this section said "the day before"; that was wrong.)
 
-**What actually closed it here**, and what should have been done at round 1: a
-mechanical sweep rather than a targeted edit —
-`grep -rn "archive\|archived\|before this change\|on this branch"` across every
-document of **both** changes, then adjudicating each hit individually. That pass
-found the live falsehood in `proposal.md`, a second stale claim in `tasks.md`'s
-risk-pack rationale that no reviewer had flagged, and two hits in the donor's
-own proposal that are about an unrelated NFS recovery bundle and correctly need
-no change.
+**The Phase 7 sweep did not close it, and failed for the same reason as the
+fixes it was correcting.** The sweep was
+`grep -rn "archive\|archived\|before this change\|on this branch"` across both
+changes' documents. It found a live falsehood in `proposal.md` and a stale claim
+in `tasks.md` that no reviewer had flagged — real value — but it was scoped to
+the terms of *the assertion it had been shown*. The donor's `proposal.md` and
+`tasks.md` do not carry archive terms; they carry the **premise** terms
+("returns `False` for every inflight forecast cohort", "a shape production never
+writes", "the three degradable fields"). So the sweep walked past them, exactly
+as each targeted edit had walked past the file it was not shown. A grep is only
+as broad as the vocabulary its author already suspects.
 
-Standing rule, phrased so it is checkable rather than aspirational:
+**What actually closed it** was the gate's invariant-closure audit: an
+independent pass that enumerated *every* factual claim in all eight documents of
+both changes plus the PR body, and adjudicated each against head — a closed list,
+not a keyword filter. It returned nine false claims, six of which no reviewer and
+no sweep had seen. That is the second time the closed-list pattern has earned its
+place (PR #1759 was the first).
 
-> When a review finding is "document X asserts something no longer true",
-> the fix is not an edit to X. It is a grep for the assertion's *terms* across
-> every document in the change set, with a recorded ruling on every hit.
-> Fixing only X is how the same finding arrives again next round.
+Standing rule, revised — the earlier phrasing was the one that just failed:
 
-The cost is visible: two extra review passes and two extra commits, on a PR
-whose production change is three deleted lines. Every one of the four verified
-findings on this PR was in orchestrator-authored prose; none was in the code.
+> When a review finding is "document X asserts something no longer true", the
+> fix is neither an edit to X nor a grep for X's wording. It is a closed-list
+> pass: enumerate every claim-bearing document in the change set — both changes,
+> test comments, and the PR body — and rule on each one's claims against head.
+> A grep can only find the vocabulary you already suspect; the claim you missed
+> is by construction phrased in words you did not think to search.
+
+The cost is visible: three extra review passes, a three-round gate entry with a
+persisted retro, and four extra commits, on a PR whose production change is three
+deleted lines. Every verified finding on this PR was in orchestrator-authored
+prose; none was in the code. The code was right at round 1.

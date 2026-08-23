@@ -36,6 +36,26 @@ Existing tests never caught this because the fixture
 (`tests/test_gateway_reconcile.py::_append_cohort_placeholders`) seeds
 `hydro_run` rows **with** all three fields — a shape production never writes.
 
+> **Correction (2026-08-23, issue #1749).** Two premises above were false when
+> written. They are corrected here rather than deleted, so the record of what
+> this change believed stays readable:
+>
+> - "returns `False` for **every** inflight forecast cohort" — false.
+>   `create_hydro_run_from_basin`
+>   (`services/orchestrator/file_orchestration_journal.py:1527`, called from
+>   `chain_manifests.py:386`) does persist all three fields, so cohorts written
+>   through that path never reach the absent-field path at all. The defect was
+>   real but scoped to the `create_hydro_run` writer
+>   (`file_orchestration_journal.py:1685-1716`), not universal.
+> - "a shape production never writes" — false for the same reason:
+>   `create_hydro_run_from_basin` writes exactly that all-three-fields shape in
+>   production, so the fixture was not fictional, only unrepresentative of the
+>   *other* writer.
+>
+> Neither correction changes what this change shipped; both are premises its
+> reasoning did not actually need.
+
+
 ## What Changes
 
 - `forecast_cohort_runtime_identity_matches` degrades per field when the
@@ -53,6 +73,18 @@ Existing tests never caught this because the fixture
   reconciles to `terminal`/`matched_bound`; a row with a
   present-but-different value for any of the three fields stays
   `identity_mismatch_blocked` with zero durable writes.
+
+> **Superseded at head (2026-08-23, issue #1749).** The two bullets above were
+> accurate for what this change shipped; their `array_task_id` half is no
+> longer head behaviour. `array_task_id` is a per-submission layout index, not
+> an identity: any member-set change renumbers every index while the frozen
+> `hydro_run` row keeps the old one, so present-but-different is the *normal*
+> post-renumber state rather than evidence of a mismatch. The
+> `scope-cohort-identity-off-array-layout` change removes that comparison
+> outright; `candidate_id` and `basin_id` keep the absent-is-skip /
+> present-but-different-is-fatal rule described above, and the regression
+> parametrization covers those two fields only.
+
 
 ## Why validator degrade instead of writing the fields
 

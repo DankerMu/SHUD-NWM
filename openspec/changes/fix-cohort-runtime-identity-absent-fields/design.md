@@ -89,6 +89,15 @@ writer, which never carried the three fields anyway.
   (three fewer mandatory comparisons when absent). Accepted: production rows
   never had that strength; the fixture strength was fictional.
 
+> **Superseded at head (2026-08-23, issue #1749).** Both bullets above count
+> three degradable fields, and "the regression tests pin it in both
+> directions" is no longer true of `array_task_id`: the
+> `scope-cohort-identity-off-array-layout` change deleted that comparison, so
+> nothing pins a present-but-different `array_task_id` as fatal — by design,
+> because a renumbered layout index makes that state normal. The claim still
+> holds for `candidate_id` and `basin_id`.
+
+
 ## Migration
 
 None. Behavior change is read-side only; wedged cohorts self-heal on the
