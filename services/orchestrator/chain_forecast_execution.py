@@ -8,6 +8,18 @@ from pathlib import Path
 from typing import Any
 
 from services.orchestrator import chain as _chain
+from services.orchestrator.accepted_submit_identity import (
+    OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
+)
+from services.orchestrator.accepted_submit_identity import (
+    accepted_submit_contract_is_current as _accepted_submit_contract_is_current,
+)
+from services.orchestrator.accepted_submit_identity import (
+    accepted_submit_row_kind as _accepted_submit_row_kind,
+)
+from services.orchestrator.accepted_submit_identity import (
+    forecast_cohort_identity_is_valid as _forecast_cohort_identity_is_valid,
+)
 from services.orchestrator.retry_identity import effective_retry_attempt
 from services.orchestrator.run_tree_copyback import RunTreeCopybackError, copyback_run_trees
 from services.orchestrator.scheduler_timing import (
@@ -196,9 +208,23 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         pipeline_job_id = retry_pipeline_job_id
                         if pipeline_job_id is None and existing_job is not None:
                             pipeline_job_id = (
-                                self._retry_cycle_stage_job_id(context, stage, existing_job)
-                                if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
-                                else str(existing_job["job_id"])
+                                # #1564: a current master demoted by an operator
+                                # (``operator_verified_absence``) must be recovered
+                                # through its OWN id/idempotency key, not a
+                                # retry-suffixed replacement.  Reusing the old id
+                                # makes the reservation INSERT conflict, so the
+                                # existing current-master reclaim CAS runs and
+                                # derives durable attempt+1 and a fresh lock-owned
+                                # anchor while preserving immutable cohort identity.
+                                # Automatic ``absence_retry_permitted`` and ordinary
+                                # terminal retries keep their replacement identity.
+                                str(existing_job["job_id"])
+                                if _operator_verified_absence_recovery(existing_job)
+                                else (
+                                    self._retry_cycle_stage_job_id(context, stage, existing_job)
+                                    if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
+                                    else str(existing_job["job_id"])
+                                )
                             )
                         result, aggregation = self._submit_and_wait_cycle_stage(
                             stage,
@@ -474,6 +500,32 @@ class _ConfirmedMasterOwner:
 
 def _nonempty_master_id(value: str | None) -> bool:
     return bool(value and str(value).strip())
+
+
+def _operator_verified_absence_recovery(job: Mapping[str, Any]) -> bool:
+    """True ONLY for a current master demoted by the operator recovery command.
+
+    The narrowest public identity-selection rule for #1564: exactly the
+    ``reservation_lost`` + unbound + ``operator_verified_absence`` current
+    accepted-submit master is recovered through its own id/idempotency key.
+    Automatic ``absence_retry_permitted``, identity release, forced/manual/
+    ordinary terminal retries, legacy rows, and PostgreSQL repositories never
+    match — they keep their pre-existing identity routing.
+    """
+    if str(job.get("status") or "") != "reservation_lost":
+        return False
+    if job.get("slurm_job_id") not in (None, ""):
+        return False
+    return (
+        _accepted_submit_contract_is_current(job)
+        and _accepted_submit_row_kind(job) == "master"
+        and job.get("submit_outcome") == "submit_result_ambiguous"
+        and job.get("reconciliation_source") == "slurm_exact_comment"
+        and job.get("reconciliation_decision") == _OPERATOR_VERIFIED_ABSENCE_DECISION
+        and job.get("matched_slurm_job_id") is None
+        and job.get("reconciliation_reason_class") is None
+        and _forecast_cohort_identity_is_valid(job)
+    )
 
 
 def _nested_defer_terminal_pipeline_result(

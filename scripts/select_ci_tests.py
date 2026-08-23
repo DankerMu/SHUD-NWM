@@ -407,14 +407,18 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        # The #1564 split-demote suites' shared fixture module. Every split suite
-        # imports it at file level, so a change to it must select all four.
+        # The #1564 split-demote suites' shared fixture module. The four split
+        # suites import it at file level, and the public operator-recovery cycle
+        # tests import it through a local (function-scope) import, which the
+        # derived importer scan does not see — so the rule names all five
+        # consumers explicitly.
         "tests/orchestrator_demote_reserved_job_helpers.py",
         (
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
             "tests/test_orchestrator_demote_projection_faults.py",
             "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+            "tests/test_orchestration_chain.py",
         ),
     ),
 )

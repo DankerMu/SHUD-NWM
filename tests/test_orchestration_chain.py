@@ -12967,6 +12967,281 @@ def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(
     assert repository.jobs[retry_job_id]["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
 
 
+# ---------------------------------------------------------------------------
+# #1564: public operator-recovery cycle must route through current-master reclaim
+# ---------------------------------------------------------------------------
+# A real #1116 held row -> typed operator demotion -> public
+# ``ForecastOrchestrator.orchestrate_cycle`` must REUSE the demoted master's job
+# id and idempotency key, so the reservation INSERT conflicts and the existing
+# current-master ``reclaim_pipeline_job_reservation`` CAS mints durable
+# attempt+1 and a fresh lock-owned anchor while preserving immutable cohort
+# identity.  Automatic ``absence_retry_permitted`` keeps its retry-suffixed
+# replacement behavior unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _operator_demoted_file_journal(
+    tmp_path: Path,
+    *,
+    member_count: int = 2,
+) -> tuple[Any, Any, dict[str, Any], Any]:
+    """Real #1116 held producer -> typed operator demotion on a real journal.
+
+    Returns ``(repository, orchestrator, demoted_row, client)``.  The cycle runs
+    only the ``forecast`` stage (``terminal_stage="forecast"``) so the demoted
+    forecast master is the one public path that must decide whether to reuse its
+    identity — convert/forcing/publish never enter the picture.
+    """
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        STARTED_AT as _DEMOTE_STARTED_AT,
+    )
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _demote_kwargs,
+        _production_faithful_held_cohort_repository,
+    )
+
+    repository = _production_faithful_held_cohort_repository(tmp_path, member_count=member_count)
+    held = repository.get_accepted_submit_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert held["status"] == "reserved"
+    assert repository.demote_operator_verified_reserved_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+        **_demote_kwargs(held),
+    ) is not None
+    demoted = repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    assert demoted["status"] == "reservation_lost"
+    assert demoted["reconciliation_decision"] == "operator_verified_absence"
+    assert demoted["submission_attempt"] == 1
+    assert demoted["submission_attempt_started_at"] == _DEMOTE_STARTED_AT.isoformat().replace("+00:00", "Z")
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast")
+    return repository, orchestrator, demoted, client
+
+
+def _operator_recovery_basins(member_count: int = 2) -> list[dict[str, Any]]:
+    basins = _basins(member_count)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "orchestration_run_id": "cycle_gfs_2026071200_forecast_fixture",
+                "restart_stage": "forecast",
+                "basin_version_id": f"basin_v{index}",
+                "river_network_version_id": f"river_v{index}",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "state_evidence": {"restart_stage": "forecast"},
+            }
+        )
+    return basins
+
+
+def test_public_operator_recovery_reuses_demoted_master_identity_and_reclaims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: public cycle after operator demotion must reclaim the SAME row.
+
+    The old demoted master's job id / idempotency key become the submitted /
+    reclaimed identity; the old row flips to ``reserved`` attempt+1 with a fresh
+    lock-owned anchor (never the cycle's proposed attempt/anchor) and immutable
+    cohort members/digest survive.  Exactly one forecast submission; no
+    ``PIPELINE_ALREADY_ACTIVE``.
+    """
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    old_members = demoted["cohort_members"]
+    old_digest = demoted["cohort_digest"]
+    cycle_proposed_anchor = _dt("2026-07-12T05:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: cycle_proposed_anchor)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+
+    # The public cycle submitted exactly once, through the reclaimed old master.
+    assert result.status == "succeeded"
+    assert len(client.submissions) == 1
+    assert client.submissions[0]["stage"] == "forecast"
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{old_key}"
+    assert result.stages[-1].pipeline_job_id == old_job_id
+
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert current is not None
+    # The reclaimed master was submitted and reached the fake terminal state, so
+    # the durable status is bound/terminal — but the identity is the OLD master's.
+    assert current["job_id"] == old_job_id
+    assert current["idempotency_key"] == old_key
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    # The fresh anchor is lock-owned; the cycle's proposed attempt/anchor cannot
+    # override the durable derivation.
+    assert current["submission_attempt_started_at"] == cycle_proposed_anchor.isoformat().replace("+00:00", "Z")
+    # The operator absence decision was cleared by reclaim; after the fake client
+    # binds the submitted attempt the row is a normal bound master.
+    assert current["reconciliation_decision"] != "operator_verified_absence"
+    assert current["reconciliation_reason_class"] is None
+    # Immutable cohort identity is preserved for the same identity.
+    assert current["cohort_members"] == old_members
+    assert current["cohort_digest"] == old_digest
+
+
+def test_public_operator_recovery_hostile_context_attempt_and_anchor_cannot_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: a hostile cycle-proposed attempt/anchor never replaces durable values."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, _client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    locked_anchor = _dt("2026-07-12T06:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    basins = _operator_recovery_basins()
+    basins[0]["retry_attempt"] = 999
+    basins[0]["manual_retry_attempt"] = 998
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", basins)
+
+    assert result.status == "succeeded"
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    # Durable old attempt + 1 exactly once, never the hostile proposed attempt.
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    assert current["idempotency_key"] == old_key
+
+
+def test_two_concurrent_public_operator_recovery_cycles_submit_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: two concurrent public cycles produce exactly one submission."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.reservation import run_concurrent_submissions
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    locked_anchor = _dt("2026-07-12T07:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    def _cycle() -> Any:
+        return orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+
+    results = run_concurrent_submissions([_cycle, _cycle], max_workers=2)
+    assert [type(result).__name__ for result in results] == ["PipelineResult", "PipelineResult"]
+
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert current is not None
+    assert int(current["submission_attempt"]) == 2
+    assert len(client.submissions) == 1
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+
+
+def test_public_operator_recovery_never_reports_pipeline_already_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: the reclaimed row is a fresh reserved attempt, never a wedge."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, _client = _operator_demoted_file_journal(tmp_path)
+    locked_anchor = _dt("2026-07-12T08:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert result.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in result.stages}
+    # The reclaimed master advanced to a bound terminal; the second cycle resumes
+    # that terminal without submitting (no double submission).
+    client = FakeCycleSlurmClient()
+    second_orchestrator = _orchestrator(tmp_path / "second", repository, client, terminal_stage="forecast")
+    second = second_orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert len(client.submissions) == 0
+    assert second.status == "succeeded"
+    current = repository.get_accepted_submit_pipeline_job(str(demoted["job_id"]))
+    assert int(current["submission_attempt"]) == 2
+
+
+def test_public_operator_recovery_identity_release_stays_non_reclaimable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 6.2: identity release is never selected for operator recovery.
+
+    The released master is a deliberate non-reclaimable terminal.  The public
+    cycle must NOT route it through current-master reclaim: it is never revived,
+    and the flat geometry (no retry-suffixed row) resumes the released terminal
+    and submits nothing — the runbook's documented released-row semantics.
+    """
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    released = repository.release_identity_blocked_reservation(
+        demoted["job_id"],
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=demoted["submission_attempt_started_at"],
+        expected_status="reservation_lost",
+        identity_blocked_streak=3,
+    )
+    assert released == 1
+    current = repository.get_accepted_submit_pipeline_job(demoted["job_id"])
+    assert current["reconciliation_decision"] == "identity_mismatch_released"
+    locked_anchor = _dt("2026-07-12T09:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    # The released master is never revived: it keeps its exact terminal state.
+    released_after = repository.get_accepted_submit_pipeline_job(demoted["job_id"])
+    assert released_after["reconciliation_decision"] == "identity_mismatch_released"
+    assert released_after["status"] == "reservation_lost"
+    assert released_after["submission_attempt"] == 1
+    # Flat geometry: nothing submits, exactly like the runbook documents.
+    assert len(client.submissions) == 0
+    assert result.status == "failed"
+
+
+def test_public_operator_recovery_automatic_absence_keeps_retry_suffix_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.2 sibling: automatic absence_retry_permitted keeps retry-suffix replacement."""
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _held_cohort_repository,
+    )
+
+    repository = _held_cohort_repository(tmp_path / "auto")
+    held = repository.get_accepted_submit_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert repository.permit_pipeline_job_retry(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path / "auto-orch", repository, client, terminal_stage="forecast")
+    locked_anchor = _dt("2026-07-12T10:00:00Z")
+    monkeypatch.setattr("services.orchestrator.file_orchestration_journal._utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert result.status == "succeeded"
+    # Automatic absence keeps the existing retry-suffixed replacement identity.
+    old_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    retry_job_id = f"{old_job_id}_retry_1"
+    retry_key = "cycle_gfs_2026071200_forecast_fixture:forecast:retry_1"
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{retry_key}"
+    assert client.submissions[0]["stage"] == "forecast"
+    assert repository.get_accepted_submit_pipeline_job(retry_job_id) is not None
+
+
 def test_operator_direct_retry_attempt_fields_bypass_manual_retry_claim_judgement() -> None:
     """E3: direct basin fields are the invocation's own input, not a scheduler projection."""
 

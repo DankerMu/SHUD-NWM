@@ -83,6 +83,93 @@ def _held_cohort_repository(
     return repository
 
 
+def _production_faithful_held_cohort_repository(
+    tmp_path: Path,
+    *,
+    member_count: int = 2,
+    source_id: str = "gfs",
+    active_hydro: bool = False,
+) -> Any:
+    """#1564 production-faithful held row for the public operator-recovery tests.
+
+    Production's ``_reserve_cycle_stage`` stamps the master with
+    ``candidate_id=run_id`` and ``native_shud_resubmitted=True``, while the
+    shared ``_file_cohort_repository`` clean-reservation payload carries neither
+    (both stay ``None``).  A public ``orchestrate_cycle`` reclaim compares the
+    full immutable master identity, so only this variant can exercise the real
+    recovery path.  It reuses the gateway suite's private
+    ``_versioned_master_reservation_record`` / ``_append_cohort_placeholders``,
+    fills the two production fields before the first reserve, recomputes
+    ``cohort_digest``, then runs the real repository reserve -> timeout
+    transition -> runtime placeholders -> #1116 reconcile producer chain.
+    """
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+        forecast_cohort_digest,
+    )
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository,
+    )
+    from tests.test_gateway_reconcile import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    canonical_source = normalize_source_id(source_id).lower()
+    record = _versioned_master_reservation_record(
+        created_at=STARTED_AT,
+        member_count=member_count,
+        source_id=canonical_source,
+    )
+    record["candidate_id"] = record["run_id"]
+    record["native_shud_resubmitted"] = True
+    record["cohort_digest"] = forecast_cohort_digest(record)
+    repository.reserve_pipeline_job(record)
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, member_count, source_id=canonical_source)
+    if active_hydro:
+        for index in range(member_count):
+            repository.update_hydro_run_status(
+                f"fcst_{canonical_source}_2026071200_model_{index}",
+                "running",
+            )
+    query_end = STARTED_AT + timedelta(hours=1)
+
+    class _NoCommentQuery:
+        def __call__(self, _key: str, **kwargs: Any) -> Any:
+            del kwargs
+            raise reconcile_module.ReconcileQueryUnavailable(
+                "accounting does not store job comments",
+                reason_class="comment_accounting_unproven",
+            )
+
+    outcomes = reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=_NoCommentQuery(),
+        grace=timedelta(0),
+        now=lambda: query_end,
+    )
+    assert [outcome.action for outcome in outcomes] == ["query_unavailable"]
+    held = repository.get_accepted_submit_pipeline_job(JOB_ID)
+    assert held["status"] == "reserved"
+    assert held["slurm_job_id"] is None
+    assert held["reconciliation_decision"] == "accounting_unavailable"
+    assert held["reconciliation_reason_class"] == "comment_accounting_unproven"
+    assert held["candidate_id"] == record["run_id"]
+    assert held["native_shud_resubmitted"] is True
+    return repository
+
+
 def _journal_bytes(root: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(root)): path.read_bytes()

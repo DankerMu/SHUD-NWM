@@ -4520,6 +4520,29 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     assert selected != {SELECTOR_META_GUARD_TEST}
 
 
+def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
+    # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
+    # through a local (function-scope) import in tests/test_orchestration_chain.py,
+    # which the derived importer scan cannot see. The generic parametrized test
+    # above only checks the `required` table's members are PRESENT in the
+    # selection, so deleting the explicit chain entry there would stay green while
+    # a helper-only PR silently stopped running the public operator-recovery
+    # regression. This exact-set anchor makes the five-consumer contract
+    # load-bearing: it must equal the four split suites + the public chain suite
+    # + the meta-guard, nothing more and nothing less.
+    selected = set(
+        select_tests(["tests/orchestrator_demote_reserved_job_helpers.py"], repo_root=Path("."))
+    )
+    assert selected == {
+        "tests/test_orchestrator_demote_cli_security.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+        "tests/test_orchestrator_demote_projection_faults.py",
+        "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        "tests/test_orchestration_chain.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+
+
 @pytest.mark.parametrize("module_path", _zero_consumer_collapse_params())
 def test_zero_importer_support_modules_keep_the_meta_guard_collapse(module_path: str) -> None:
     # Issue #1487's acceptance named an example set for this route; the fixture

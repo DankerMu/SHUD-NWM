@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+from .chain_types import OrchestratorError
 from .file_orchestration_journal import FileOrchestrationJournalError, FileOrchestrationJournalRepository
 
 
@@ -159,6 +160,9 @@ def register_click_demote_command(cli: Any) -> None:
         except (FileOrchestrationJournalError, ValueError) as error:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
+        except OrchestratorError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
 
 
 def add_argparse_demote_subparser(subparsers: Any) -> None:
@@ -202,3 +206,6 @@ def run_argparse_demote_command(args: Any) -> int:
     except (FileOrchestrationJournalError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 2
+    except OrchestratorError as error:
+        print(f"{error.error_code}: {error.message}", file=sys.stderr)
+        return 1

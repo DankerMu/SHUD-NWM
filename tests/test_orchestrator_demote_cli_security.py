@@ -696,3 +696,102 @@ def test_cli_demote_secret_shaped_projection_fault_warns_with_bounded_non_secret
     expected_count = 3 * len(scenarios)
     assert seen_error_types == ["projection_fault"] * expected_count
     assert seen_reasons == ["projection_fault"] * expected_count
+
+
+# ---------------------------------------------------------------------------
+# 3.2b typed operational errors translate to stable stderr/exit 1 (both entrypoints)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+@pytest.mark.parametrize("site", ["root", "lock", "append"])
+def test_cli_demote_operational_orchestrator_error_exits_1_with_stable_stderr(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    site: str,
+) -> None:
+    """Pre-commit repository operational failures emit ``error_code: message`` / exit 1.
+
+    ``OrchestratorError`` raised during root creation, cycle-lock acquisition, or
+    the authority append must never cross the public CLI as a traceback: both
+    entrypoints emit the stable ``error_code: message`` line to stderr and
+    exit/return 1, with empty stdout and byte-identical authority.
+
+    Each site patches EXACTLY ONE repository boundary and leaves the other two
+    methods real, so the six green cases each prove their own pre-commit boundary
+    was reached.  The fault carries a call counter that must equal 1: if the
+    error surfaced from a different boundary (or from nowhere), the counter would
+    be 0 and the exact stderr line would not match.
+    """
+    from services.orchestrator.chain_types import OrchestratorError
+
+    held_repository = _held_cohort_repository(tmp_path / "held", member_count=2, active_hydro=True)
+    root = held_repository.root
+    held = _held_row(held_repository)
+    before = _journal_bytes(root)
+    args = [*_cli_base_args(held_repository, held), "--confirm"]
+
+    calls: list[str] = []
+
+    def _fail_root(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("root")
+        raise OrchestratorError(
+            "FILE_JOURNAL_ROOT_UNWRITABLE",
+            "cannot create journal root: /private/injected/root",
+        )
+
+    def _fail_lock(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("lock")
+        raise OrchestratorError(
+            "CYCLE_LOCK_ACQUISITION_FAILED",
+            "cannot acquire cycle lock for gfs 2026-07-12T00:00:00Z",
+        )
+
+    def _fail_append(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("append")
+        raise OrchestratorError(
+            "FILE_JOURNAL_WRITE_FAILED",
+            "atomic append replace failed under journal root",
+        )
+
+    # Exactly one target boundary is patched per site; the other two stay real.
+    target_method = {
+        "root": "_ensure_root_unlocked",
+        "lock": "_locked_cycle_write",
+        "append": "_append_journal_records_unlocked",
+    }[site]
+    fault = {"root": _fail_root, "lock": _fail_lock, "append": _fail_append}[site]
+    monkeypatch.setattr(held_repository, target_method, fault)
+    monkeypatch.setattr(
+        "services.orchestrator.operator_reserved_demotion.FileOrchestrationJournalRepository",
+        lambda *a, **k: held_repository,
+    )
+
+    if entrypoint == "click":
+        with pytest.raises(SystemExit) as excinfo:
+            cli._click_main(args)
+        assert excinfo.value.code == 1
+    else:
+        assert cli._argparse_main(args) == 1
+    captured = capsys.readouterr()
+    expected_code = {
+        "root": "FILE_JOURNAL_ROOT_UNWRITABLE",
+        "lock": "CYCLE_LOCK_ACQUISITION_FAILED",
+        "append": "FILE_JOURNAL_WRITE_FAILED",
+    }[site]
+    expected_message = {
+        "root": "cannot create journal root: /private/injected/root",
+        "lock": "cannot acquire cycle lock for gfs 2026-07-12T00:00:00Z",
+        "append": "atomic append replace failed under journal root",
+    }[site]
+    # Load-bearing reachability: the single patched boundary was entered exactly
+    # once (the CLI demotion path hits each at most once before commit).
+    assert calls == [site], f"expected exactly one {site!r} boundary hit, got {calls!r}"
+    # Stable protocol: exactly "<error_code>: <message>" on stderr, empty stdout,
+    # no traceback text.
+    assert captured.err.strip() == f"{expected_code}: {expected_message}"
+    assert captured.out.strip() == ""
+    assert "Traceback" not in captured.err
+    assert "operator_reserved_demotion" not in captured.err
+    # Authority is byte-identical: nothing was committed.
+    assert _journal_bytes(root) == before
