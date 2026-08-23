@@ -1085,12 +1085,12 @@ two data points without measuring the log.** Measured over all 446 lines at
 | carrying `round`+`lens` (counted) | **1314 (98.7%)** |
 | carrying `phase` only (skipped) | **17 (1.3%)** |
 
-The 17 sit in exactly **four** entries — log lines 440, 442, 443, 445 = PRs
-#1730, #1738, #1746, #1751. #1730 is `rounds=1` and never entered the numerator,
+The 17 sit in exactly **four** entries — log lines 440, 442, 443, 445 =
+PRs #1730, #1738, #1746, #1751. #1730 is `rounds=1` and never entered the numerator,
 so the upper bound on later-round catches lost to this is **14 of 332 (≤4.2%)**
 across three multi-round PRs. `phase`-only is a **recent write regression**, not
-a historical baseline: `round`/`lens` has been written continuously since PR
-#1126, and `references/phase-flow.md:566` already specifies `{"round":<n>,
+a historical baseline: `round`/`lens` has been written continuously since
+PR #1126, and `references/phase-flow.md:566` already specifies `{"round":<n>,
 "lens":...}` as the canonical shape — those four entries violate an existing
 convention rather than reveal a missing one.
 

@@ -99,7 +99,7 @@ real: it is a partial index (`WHERE active_flag = true`), so an equality lookup
 `met_station_id_trgm_idx` as the **default plan on first contact** (168.60 ms,
 30,128 buffers), and still chose it with seq/index/index-only scans disabled.
 
-#1669 was implemented as an expression rebuild first, then withdrawn on evidence.
+Issue #1669 was implemented as an expression rebuild first, then withdrawn on evidence.
 With `stats_reset` NULL, `pg_stat_user_indexes` covers the cluster's entire life,
 and `met_station_id_trgm_idx` stood at **500** scans before the issue was touched
 — exactly PR #1666's E4 probe count. Every scan it has ever served is accounted
