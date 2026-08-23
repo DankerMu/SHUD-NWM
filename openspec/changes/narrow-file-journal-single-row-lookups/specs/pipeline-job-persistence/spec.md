@@ -13,12 +13,13 @@ cycle's `journal/<source>/<cycle>` segments, and the direct records. That
 narrowed replay SHALL NOT read any other cycle's files.
 
 This requirement is scoped to that narrowed replay deliberately, and SHALL NOT
-be read as a promise about every read reachable from these entrypoints. Where
-an entrypoint satisfies a lookup from a pre-existing cycle-scoped direct reader
-that establishes identity from record **content** rather than from a file name,
-that reader is outside this requirement's scope and SHALL retain its existing
-content-authoritative behaviour. Its own read cost is governed elsewhere, not
-by this requirement.
+be read as a promise about every read reachable from these entrypoints. It does
+bind every reader of the unpartitioned flat direct directory: the filename rule
+stated below SHALL have exactly one definition, shared by reference, so that a
+second reader of that directory cannot be corrected independently of the first
+or left uncorrected. A reader that establishes a row's identity from record
+**content** SHALL retain that content check; the filename rule is a prefilter
+ahead of it, not a replacement for it.
 
 The narrowed read SHALL be a restriction of the input set only. Its result
 SHALL be identical to the result of the whole-tree scan filtered by the same
@@ -49,16 +50,17 @@ accepted-submit candidate rows; every other row, including cohort master rows
 and rows from non-forecast stages, is written outside it, in an unpartitioned
 flat directory.
 
-When the narrowed replay reads that flat direct directory, it SHALL filter by
-file name rather than read the directory in full, because it retains a row per
-job for all retained history and reading it whole would leave the lookup's cost
-growing without bound. This obligation binds the narrowed replay only; it is
-NOT a general instruction to prefilter that directory by file name, and in
-particular it SHALL NOT be applied to a reader whose identity check is
-content-authoritative, where a filename prefilter would change behaviour for a
-name that contradicts its own content. A file SHALL be
-skipped only when its name resolves to a `(source_id, cycle)` other than the
-one being looked up. A file whose name does not resolve to a `(source_id,
+When a cycle-scoped read of that flat direct directory happens, it SHALL filter
+by file name rather than read the directory in full, because the directory
+retains a row per job for all retained history and reading it whole would leave
+the lookup's cost growing without bound. This obligation binds every
+cycle-scoped reader of that directory, not only the narrowed replay, and the
+filter SHALL be a single shared definition rather than a per-reader copy. The
+comparison SHALL normalise the source token before comparing, because the
+callers spell the source in both the run-identifier casing and the on-disk
+casing, and a raw comparison would skip every file of a source passed in the
+other case. A file SHALL be skipped only when its name resolves to a
+`(source_id, cycle)` other than the one being looked up. A file whose name does not resolve to a `(source_id,
 cycle)` at all SHALL be read, so that the filename filter fails toward reading
 too much rather than toward missing a row.
 
@@ -109,6 +111,15 @@ whole-tree scan as the recovery path.
 - **THEN** a file whose name resolves to a different `(source_id, cycle)` than
   the one being looked up is skipped.
 
+#### Scenario: A malformed flat direct file of another cycle does not block this one
+
+- **WHEN** the flat direct directory holds an unreadable or malformed file whose
+  name resolves to a `(source_id, cycle)` other than the one being looked up
+- **THEN** no cycle-scoped reader of that directory opens it, so the lookup for
+  this cycle succeeds
+- **THEN** a malformed file whose name resolves to the cycle being looked up
+  still fails the lookup closed, with its existing error.
+
 #### Scenario: A source spelled in the other case still resolves
 
 - **WHEN** the key spells the source in lower case while the journal's directory
@@ -129,3 +140,101 @@ whole-tree scan as the recovery path.
   derivable cycle
 - **THEN** the entrypoint behaves exactly as it did before this change,
   returning the same row for the same journal state.
+
+### Requirement: The cycle-scoped replay is memoized with a cycle-scoped invalidation signature
+
+The cycle-scoped replay SHALL be memoized per `(source_id, cycle)` and per the
+flag governing whether direct records participate, so that repeated lookups of
+the same cycle within one orchestration pass do not re-read that cycle's files
+once per lookup.
+
+The memo's invalidation signature SHALL be derived exclusively from the files
+that cycle's replay would itself open. Where a record source lives in a
+directory shared across cycles, the signature SHALL be taken over the matched
+file set rather than over the shared directory, so that a write belonging to a
+different cycle does not invalidate this cycle's entry. A record source that
+cannot be scoped to the cycle SHALL be recorded as a stated limitation of the
+memo rather than covered by a shared directory's stat.
+
+The memo SHALL be bounded in entry count and SHALL be safe under concurrent
+orchestration threads sharing one repository instance, preserving the existing
+single lock order: the signature is computed outside the cache mutex, and no
+code holding the cache mutex acquires the write mutex.
+
+#### Scenario: A write to another cycle does not evict this cycle's memo entry
+
+- **WHEN** a cycle's replay has been memoized, and a row belonging to a
+  different cycle is then written — into the same shared flat direct directory
+  and the same shared per-source journal directory
+- **THEN** a repeat replay of the first cycle opens no file at all
+- **THEN** it returns the same rows as the first replay.
+
+#### Scenario: A write to this cycle invalidates its memo entry
+
+- **WHEN** a row belonging to the memoized cycle is written
+- **THEN** the next replay of that cycle re-reads its files
+- **THEN** it returns the newly written row rather than the stale one.
+
+### Requirement: Journal reads are attributed to their entrypoint in pass evidence
+
+Every read the file journal performs SHALL be counted against the entrypoint
+and the reader lane that drove it, and the per-pass totals SHALL be merged into
+the scheduler pass evidence artifact.
+
+The counter SHALL be always on and SHALL ship in the repository, because the
+production node from which the measurement is taken deploys by pulling the
+repository and has no local-patch path, and because a probe that only runs on a
+planning pass would not observe the writes that drive cache invalidation.
+
+The counter SHALL distinguish bytes actually read from the filesystem from
+reads satisfied by an in-process byte cache, so that its totals can be
+reconciled against the operating system's own read accounting. It SHALL be safe
+under concurrent orchestration threads sharing one repository instance, and it
+SHALL NOT introduce a new lock ordering: its own mutex guards only counter
+increments and is never held while any other lock is acquired.
+
+The counters SHALL be reset at pass entry so their totals are per-pass, and the
+merge into evidence SHALL be idempotent with respect to being invoked more than
+once on a return path.
+
+#### Scenario: A pass artifact carries the per-entrypoint read totals
+
+- **WHEN** a scheduler pass completes, by any return path that writes an
+  evidence artifact
+- **THEN** the artifact carries a read attribution block naming, per
+  entrypoint and reader lane, the number of reads and the number of bytes read
+- **THEN** the totals reconcile against the sum of the per-tag rows.
+
+#### Scenario: The counter is proven accurate, not merely self-consistent
+
+- **WHEN** concurrent orchestration threads sharing one repository instance
+  each perform a known number of reads
+- **THEN** the recorded call count SHALL equal that independently known number,
+  and SHALL NOT be asserted only against a total derived from the same rows it
+  is being compared with — an assertion of the form
+  `totals == sum(per_tag_rows)` is satisfied by construction for any counter
+  content, including one that has silently lost updates under a race, and
+  therefore SHALL NOT stand as the concurrency oracle for this requirement.
+
+#### Scenario: No read escapes attribution
+
+- **WHEN** a pass performs reads through any public journal API, including the
+  cycle-status predicates and the write-path methods that read before they write
+- **THEN** every counted byte SHALL carry both an entrypoint and a lane; a
+  residual bucket for reads that reached no entrypoint SHALL NOT carry a
+  material share of a pass's bytes, because a residual that dominates cannot
+  separate baseline cost from the growth this change exists to measure.
+
+#### Scenario: The by-cycle partition is not attributed to the flat directory
+
+- **WHEN** a direct-record read for one cycle draws from both the unpartitioned
+  flat directory and the already-partitioned by-cycle directory
+- **THEN** the two SHALL be attributed to distinct lanes, so that bytes read
+  from the partitioned tree are never graded against the flat directory's size.
+
+#### Scenario: A narrowed lookup and a whole-tree lookup are told apart
+
+- **WHEN** one lookup is answered by the cycle-scoped replay and another falls
+  open to the whole-tree replay
+- **THEN** the two are attributed to distinct tags, so the cost of the
+  fall-open path is separable from the cost of the narrowed path.

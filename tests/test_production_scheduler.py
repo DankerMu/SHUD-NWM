@@ -22085,6 +22085,17 @@ def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
     assert result.status == "resource_limit_blocked"
     assert result.evidence["limit"]["reason"] == "candidate_limit_exceeded"
     assert result.evidence["candidates"] == []
+    # #1734 D11: the round's deliverable is a receipt read out of the
+    # attribution block on THIS path, and nothing else pins it here — the
+    # evidence-level test calls `_finalize_timing_into_evidence` on a raw dict
+    # and never reaches `run_once`, `_write_evidence` or the bounded payload
+    # (where the key is explicitly poppable). Assert the ON-DISK artifact,
+    # because the bounded path is exactly what could drop it.
+    artifact = json.loads(Path(result.artifact_path).read_text())
+    assert (
+        artifact["journal_read_attribution"]["schema_version"]
+        == file_orchestration_journal_module.JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION
+    ), sorted(artifact)
 
 
 def test_cycle_discovery_limit_blocks_before_candidate_or_duplicate_evidence(tmp_path: Path) -> None:
