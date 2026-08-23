@@ -34880,6 +34880,96 @@ def test_db_free_accepted_submit_owner_exact_config_is_threaded_to_orchestrator(
     assert captured["config"].reconcile_slurm_account == "scheduler-account"
 
 
+# ---------------------------------------------------------------------------
+# #1671: the two production construction sites must PROPAGATE the floored poll
+# interval rather than re-derive it.
+#
+# The floor now lives only on ``OrchestratorConfig.from_env``.  That is safe
+# because ``_default_orchestrator_for`` rebuilds its config from a ``from_env``
+# result and copies ``poll_interval_seconds`` across
+# (``scheduler_core.py:452`` and ``:476``).  These two tests are what makes
+# that argument load-bearing instead of a comment: each pins ONE rebuild
+# branch, so a refactor that stops propagating the floored value fails here
+# rather than shipping a busy-spin against ``sacct``.
+# ---------------------------------------------------------------------------
+
+
+def test_slurm_enabled_orchestrator_rebuild_propagates_env_poll_interval_floor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """``slurm_execution_enabled`` rebuild branch (scheduler_core.py:446).
+
+    ``FORECAST_SOURCE_ID`` is left unset (so ``from_env`` yields ``gfs``) and
+    ``gfs`` is requested, which makes the ``config.source_id != source_id``
+    rebuild at ``:470`` a no-op -- this test exercises the slurm branch alone.
+    """
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "poll-floor-slurm")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "true")
+    monkeypatch.setenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.delenv("FORECAST_SOURCE_ID", raising=False)
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(),
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("gfs", state_manager=None)
+
+    # ``reconcile_slurm_user`` is threaded from the scheduler config only by the
+    # slurm rebuild branch, so its presence proves that branch actually ran.
+    assert captured["config"].reconcile_slurm_user == "scheduler-user"
+    assert captured["config"].source_id == "gfs"
+    assert captured["config"].poll_interval_seconds == 1.0
+
+
+def test_source_mismatch_orchestrator_rebuild_propagates_env_poll_interval_floor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """``config.source_id != source_id`` rebuild branch (scheduler_core.py:470).
+
+    Slurm execution is disabled so the ``:446`` branch cannot run; ``from_env``
+    yields ``gfs`` while ``ifs`` is requested, so only the mismatch rebuild
+    fires.  The resulting ``source_id`` is the proof of which branch ran.
+    """
+    _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "poll-floor-mismatch")
+    monkeypatch.delenv("NHMS_PRODUCTION_SLURM_ENABLED", raising=False)
+    monkeypatch.setenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("FORECAST_SOURCE_ID", "gfs")
+    repository = scheduler_module.FileOrchestrationJournalRepository(paths["NHMS_SCHEDULER_JOURNAL_ROOT"])
+    captured: dict[str, Any] = {}
+
+    class CapturingForecastOrchestrator:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", CapturingForecastOrchestrator)
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(),
+        registry=object(),
+        adapters={},
+        active_repository=repository,
+    )
+
+    scheduler._default_orchestrator_for("ifs", state_manager=None)
+
+    # ``normalize_source_id`` canonicalizes the requested ``ifs`` to ``IFS``;
+    # either way it is not the ``gfs`` ``from_env`` produced, which is the proof
+    # that the mismatch rebuild ran.
+    assert captured["config"].source_id == "IFS"
+    assert captured["config"].poll_interval_seconds == 1.0
+
+
 def _compact_json_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
 
