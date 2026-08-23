@@ -13,7 +13,7 @@
 | pack | why selected |
 |---|---|
 | Slurm production lifecycle / mock-vs-real parity | the whole subject is what happens when Slurm-side truth and our accounting diverge; a wrong recovery re-submits against a possibly-live array |
-| Run manifest / QC provenance | the recovered attempt must inherit the cohort's identity (`cohort_digest`, `cohort_members`) or it silently runs a different member set |
+| Run manifest / QC provenance | the recovered attempt must be built from the **then-current** cohort like any ordinary retry; carrying the released row's stale member set forward would silently re-run a superseded basin manifest (17 basins vs. the current 24) |
 
 ### Not selected
 
@@ -32,11 +32,17 @@
    keep `error_code` null. `tests/test_production_scheduler.py:48632` and
    `:48681` SHALL pass **unweakened** — they are the anti-regression pin for the
    duplicate-submission class, not incidental coverage.
-2. The two reclaim doors are untouched: the reservation reclaim predicate
-   (`file_orchestration_journal.py:2126-2140`) and
+2. **The two door predicates stay byte-identical**: the reservation reclaim
+   predicate (`file_orchestration_journal.py:2126-2140`) and
    `_verified_accepted_submit_forecast_retry`
    (`chain_forecast_orchestrator_cycle.py:911-919`) keep hard-pinning
-   `absence_retry_permitted`.
+   `absence_retry_permitted`. This is **not** the same as "the call sites are
+   untouched": the operator attestation is admitted as an **additional disjunct**
+   at `_terminal_stage_needs_manual_retry`
+   (`chain_forecast_orchestrator_cycle.py:169-171`), whose first arm currently
+   `return`s the door verdict unconditionally for this shape. Reviewers will read
+   that diff; it is stated here rather than glossed. Neither predicate may be
+   widened, weakened, or reordered.
 3. `absence_retry_permitted` semantics, the comment-capability fail-closed gate
    (`reconcile.py:416-422`), and the identity-released invariant
    (`accepted_submit_identity.py:267`, `:646`, "identity released transition
@@ -59,58 +65,78 @@
   `JobName` carries no cohort/candidate identity and cannot support an
   sacct-side absence proof either. Rejected.
 
-## D4. Chosen design
+## D4. Chosen design (revised after the first implementation proved inert)
 
-A typed, operator-gated recovery API on the journal that:
+**The invariant.** The recovery's only durable output must be an *input the
+ordinary submission path already consumes* — never a competing artifact *on* that
+path.
 
-1. accepts only the released shape (`status == "reservation_lost"`,
-   `reconciliation_decision == "identity_mismatch_released"`,
-   `slurm_job_id is None`, `matched_slurm_job_id is None`, current-contract
-   cohort **master**);
-2. mints the next identity through the **existing**
-   `_next_current_master_retry_identity` helper
-   (`file_orchestration_journal.py:8878-8882`), so the retry-suffix derivation
-   stays single-sourced;
-3. carries the cohort identity (`cohort_digest`, `cohort_members`) onto the new
-   row unchanged — a recovered attempt is the same cohort, not a re-picked one;
-4. never consults `should_auto_retry` and writes no `error_code`;
-5. is CAS-guarded on expected attempt + attempt anchor, mirroring
-   `release_identity_blocked_reservation`
-   (`file_orchestration_journal.py:3267-3346`), so a concurrently advanced
-   attempt loses the race rather than producing two keys;
-6. refuses a **repeat** invocation on a row it has already recovered. This is not
-   covered by the CAS guard: minting a successor through
-   `_next_current_master_retry_identity` does not mutate the source row's own
-   `submission_attempt` / `submission_attempt_started_at` (see
-   `file_orchestration_journal.py:7918` and `:7984`, which leave the source row
-   untouched), so a second identical call would pass every shape check and the
-   CAS check and mint a **second** successor for the same cohort — precisely the
-   duplicate-submission class D3 rejects. The implementation SHALL make the
-   second call refuse (the mint collides on the successor `job_id` /
-   idempotency key, or the source row is marked consumed);
-7. performs **no** Slurm-side liveness or absence check. It cannot: see D3. The
-   call is an operator attestation, and this boundary is a stated non-goal, not
-   an oversight.
+The first design violated it by pre-materializing the successor row, and was
+verified INERT and self-blocking. The trace, each predicate opened and checked:
 
-**Why the generic manual channel is not reused.** `_create_pending_manual_retry_job`
-(`file_orchestration_journal.py:8264-8305`) clones the failed row with
-`candidate_id: None` and key `manual_retry:{run_id}:{n}`, then writes through
-`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8298`, `:8302-8304`).
-The clone carries `reconciliation_decision = identity_mismatch_released` over
-unchanged while overriding `status` to `"pending"` (`:8281`), which trips the
-accepted-submit invariant at `accepted_submit_identity.py:646`
-(`if decision == IDENTITY_MISMATCH_RELEASED_DECISION and status !=
-"reservation_lost": raise`) — surfaced as
-`file_journal_evidence_invariant_invalid`. Widening
-`MANUAL_RETRY_SOURCE_STATUSES` alone would therefore route the operator into a
-raise, not a recovery. (The typed-API guard at
-`file_orchestration_journal.py:1913-1918` is **not** what blocks this: it lives
-in `upsert_pipeline_job`, which this path never calls.) The clone would also
-lose the cohort identity.
+- `chain_forecast_cycle.py:503` filters to non-terminal statuses;
+  `reservation_lost` is in `TERMINAL_JOB_STATUSES`
+  (`chain_runtime_utils.py:32-40`) and `pending` is not, so the successor becomes
+  the stage's job.
+- `job_needs_submission` (`chain_forecast_cycle.py:527-528`) is true, so the pass
+  tries to submit it.
+- `_pipeline_job_conflicts_unlocked`'s master branch
+  (`file_orchestration_journal.py:7317-7330`) sees a row already under that
+  `job_id` and refuses the reserve; `reclaim_pipeline_job_reservation` then
+  refuses at `:2135` because the row is `pending`, not `reservation_lost`.
+- `_reservation_already_inflight` therefore fires and the pass calls
+  `_skip_duplicate_submission`, which writes no row; durable cycle status is
+  deliberately not written (`chain_forecast_execution.py:272-285`), so every
+  later pass repeats it. Permanently inert.
+- Self-blocking: `_next_current_master_retry_identity` mints exactly the identity
+  an ordinary retry would have used, so the eager write consumes the one
+  submittable slot.
+
+**The revised design.** The recovery API records a durable operator attestation
+on the released row and writes no successor. The consuming call site
+`_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`)
+gains an additive disjunct for that attestation, after which the ordinary path
+mints `_retry_<n>` via `_retry_cycle_stage_job_id` and
+`_submit_and_wait_cycle_stage` creates a clean reservation on a **free**
+identity, reaching sbatch.
+
+**Why no existing channel was reused (pre-flight, recorded).**
+`_terminal_stage_needs_manual_retry`'s first arm `return`s for this shape, so
+`_terminal_stage_needs_forced_resubmit` (`:883-908`) is unreachable; and
+`manual_retry` is not in `_FORCE_TERMINAL_RESUBMIT_DECISIONS` (`:23-37`), so
+adding it there would change behaviour for every terminal status. The additive
+disjunct is forced, not preferred.
+
+**Attestation carrier.** The carrier must survive
+`normalize_accepted_submit_evidence` and the shape pins at
+`tests/test_production_scheduler.py:48632`/`:48681`. Candidates, in order:
+(a) a field the accepted-submit validators already admit — note the production
+wedged row already carries `manual_retry_marker: False`, so that field is
+admitted on this row kind; (b) a side journal record keyed by job id that the
+chain reads at stage selection. Red-first will settle which survives.
+
+**No member-set carry-forward.** The recovered attempt participates in ordinary
+candidate selection like any retry. `chain_forecast_orchestrator_cycle.py:216-218`
+states the next submit builds a clean reservation from the **then-current** basin
+cohort, and the July production journal shows `cohort_digest` churning per attempt
+(`cf0bba44…` → `0b32b13f…`). With the manifest now at 24 basins instead of 17,
+carrying a stale member set forward would silently re-run a superseded manifest.
 
 **Granularity.** The wedged row's own `run_id` is the cohort pseudo-id
 (`cycle_gfs_2026080712_forecast_cohort_3e066f456290`, verified on node-22), so
 one operator invocation recovers one wedged cohort.
+
+**Why the generic manual channel is not reused.** `_create_pending_manual_retry_job`
+(`file_orchestration_journal.py:8264-8305`) clones the failed row with
+`candidate_id: None` and key `manual_retry:{run_id}:{n}`, writing through
+`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8298`, `:8302-8304`).
+The clone carries `reconciliation_decision = identity_mismatch_released` over
+unchanged while overriding `status` to `"pending"` (`:8281`), tripping the
+accepted-submit invariant at `accepted_submit_identity.py:646` — surfaced as
+`file_journal_evidence_invariant_invalid`. (The typed-API guard at
+`file_orchestration_journal.py:1913-1918` is **not** what blocks this: it lives
+in `upsert_pipeline_job`, which this path never calls.) It would also
+pre-materialize a row, which the invariant above forbids outright.
 
 ## D5. The signal
 
@@ -126,8 +152,12 @@ a different issue.
 
 - `retry.RetryService.should_auto_retry` — asserted still false for the shape.
 - `file_orchestration_journal` typed recovery API — asserted to mint exactly one
-  successor, to preserve `cohort_digest`/`cohort_members`, and to refuse every
-  non-released shape.
+  no pipeline-job row, to leave the `_retry_<n>` identity free, and to refuse
+  every non-released shape.
+- `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`)
+  — asserted to admit the attestation and to be unchanged without it.
+- The ordinary pass, end to end — asserted to reach the stage's submission call
+  after recovery. This is the oracle whose absence let an inert no-op go green.
 - The release write points — asserted to emit the signal at both sites.
 
 ## D7. Evidence mapping
@@ -135,7 +165,9 @@ a different issue.
 | claim | evidence |
 |---|---|
 | released rows stay non-auto-retriable | `tests/test_production_scheduler.py:48632`, `:48681` pass unweakened |
-| recovery mints exactly one successor, cohort identity preserved | new test, red-first against current code |
+| **an ordinary pass submits after recovery** (the oracle whose absence let an inert no-op go green) | new test, red-first, driving a real pass to the submission call |
+| recovery writes no row and leaves the `_retry_<n>` identity free | new test |
+| without the attestation nothing changes | new test |
 | the single release write point signals, for both prior-state shapes | new test driving a fresh reservation and a reclaim re-seeded one |
 | a repeat recovery is refused | new test invoking recovery twice on one row |
 | no lint/spec regression | `uv run ruff check .`, `openspec validate ... --strict` |

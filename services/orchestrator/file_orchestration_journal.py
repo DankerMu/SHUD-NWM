@@ -49,7 +49,6 @@ from services.orchestrator.accepted_submit_identity import (
     accepted_submit_master_ordinary_upsert_state,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
-    forecast_cohort_digest,
     init_state_identity_for_task,
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
@@ -329,6 +328,11 @@ def journal_read_attribution() -> dict[str, Any]:
 # ``event_type`` (not sanitized on the public read path) AND inside the message,
 # so ``grep`` finds the wedge in either rendering.
 IDENTITY_RELEASED_OPERATOR_SIGNAL = "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
+# #1748: the durable operator-recovery attestation.  It is a MARKER on the
+# released row, never a pre-materialized successor: writing the successor eagerly
+# occupies the very job_id/idempotency key the ordinary retry path would mint,
+# and the ordinary path refuses to submit a row it did not itself reserve.
+OPERATOR_RECOVERY_ATTESTATION_FIELD = "operator_recovery_attested_at"
 _RECONCILE_INVENTORY_DIRECTORY = "reconcile-inventory"
 _RECONCILE_INVENTORY_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory.v1"
 _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory_migration.v1"
@@ -1903,6 +1907,15 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        # #1748: the operator-recovery attestation is settable ONLY by the typed
+        # recovery API.  The merge whitelist below already keeps this generic
+        # path from changing it on an existing row; this guard closes the other
+        # half -- forging it on a row this call creates.
+        if record.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, ""):
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field=OPERATOR_RECOVERY_ATTESTATION_FIELD,
+            )
         # Upserts may be partial status transitions for an existing cohort.
         # Validate the accepted-submit contract only after merging with its
         # canonical durable identity; fresh rows still validate in full.
@@ -2049,6 +2062,10 @@ class FileOrchestrationJournalRepository:
                     "reconciliation_decision",
                     "reconciliation_reason_class",
                     "matched_slurm_job_id",
+                    # #1748: a fresh reservation may never carry an operator
+                    # attestation in -- the marker is settable only by the typed
+                    # recovery API, on an already-released row.
+                    OPERATOR_RECOVERY_ATTESTATION_FIELD,
                 )
                 if record.get(field) not in (None, "")
             }
@@ -3438,26 +3455,35 @@ class FileOrchestrationJournalRepository:
         """Operator-gated liveness for one released identity-blocked cohort (#1748).
 
         The released row is a permanent terminal for every AUTOMATIC arm: the
-        release deliberately withholds ``error_code`` so ``should_auto_retry``
-        is false by construction, and reclaim only accepts
-        ``absence_retry_permitted``.  That leaves the cohort with no successor at
-        all, which is what this door fixes -- by minting the next
-        ``_retry_<n>`` identity through the SAME helper the automatic arms use,
-        so the suffix derivation stays single-sourced.
+        release deliberately withholds ``error_code`` so ``should_auto_retry`` is
+        false by construction, and reclaim only accepts
+        ``absence_retry_permitted``.  This door records a durable operator
+        attestation ON THE RELEASED ROW and writes **no** successor pipeline-job
+        row.
+
+        Why a marker and not a row: the successor identity the ordinary retry
+        path mints is exactly ``_next_current_master_retry_identity``'s, so
+        pre-materializing it occupies that ``job_id``/idempotency key,
+        ``_pipeline_job_conflicts_unlocked`` then refuses the ordinary reserve,
+        reclaim refuses too (the row is ``pending``, not ``reservation_lost``),
+        and the pass takes ``_skip_duplicate_submission`` on every later pass --
+        permanently inert.  The recovery's only durable output must be an INPUT
+        the ordinary submission path already consumes; here that consumer is the
+        additive disjunct in
+        ``chain_forecast_orchestrator_cycle._terminal_stage_needs_manual_retry``.
 
         This performs **no** Slurm-side liveness or absence check and must not be
         described as one.  On a cluster whose accounting does not store job
         comments absence is not provable; invoking this is an operator
         attestation, and the judgement deliberately sits with the operator.  For
-        the same reason there is no automatic caller: an automatic one would
-        re-open the duplicate-submission class #1116 closed.
+        the same reason there is no automatic caller, and no automatic path can
+        set the marker (it is outside ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` and
+        rejected by the clean-reservation check).
 
-        ``should_auto_retry`` is never consulted and no ``error_code`` is
-        written, on the source row or the successor.
+        ``should_auto_retry`` is never consulted and no ``error_code`` is written.
 
-        Returns the successor row, or ``None`` when the call is refused.  Refusal
-        is write-free: a wrong shape, a lost CAS race, or a repeat invocation all
-        leave the journal untouched.
+        Returns the attested row, or ``None`` when the call is refused.  Refusal
+        is write-free, and a repeat attestation is an idempotent no-op.
         """
 
         if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
@@ -3492,8 +3518,7 @@ class FileOrchestrationJournalRepository:
             ) not in (None, ""):
                 return None
             # CAS mirrors ``release_identity_blocked_reservation``: a
-            # concurrently advanced attempt loses the race rather than minting a
-            # second key.
+            # concurrently advanced attempt loses the race, write-free.
             if expected_submission_attempt_started_at is None:
                 return None
             try:
@@ -3506,77 +3531,21 @@ class FileOrchestrationJournalRepository:
                 return None
             if existing.get("submission_attempt") != expected_submission_attempt:
                 return None
-            retry_job_id, retry_count = _next_current_master_retry_identity(existing)
-            # Repeat-invocation refusal.  The CAS guard above does NOT cover it:
-            # minting leaves the source row's ``submission_attempt`` and anchor
-            # untouched (same as the automatic arms), so a second identical call
-            # passes every shape and CAS check.  The successor identity is
-            # derived from the unchanged source row, so it collides -- and one
-            # released row can therefore never yield two successors.
-            if (
-                self._accepted_submit_job_for_id_unlocked(
-                    retry_job_id,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                )
-                is not None
-            ):
-                return None
-            successor_key = _next_current_master_retry_idempotency_key(existing, retry_job_id)
-            now = _utcnow()
-            successor_record = {
-                # ``cohort_members`` rides along unchanged: a recovered attempt
-                # is the SAME cohort, never a re-picked one.  So do the
-                # reservation-time captures (#1183/#1157).  ``cohort_digest`` is
-                # identity-bearing and is recomputed below.
+            if existing.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, ""):
+                # Idempotent: a second attestation leaves the row byte-identical
+                # and emits nothing.  At most one recovered attempt still
+                # follows, because the ordinary reservation path's own conflict
+                # gate owns that exclusion, not this call.
+                return _public_scheduler_row(existing)
+            row = {
                 **existing,
-                "job_id": retry_job_id,
-                "idempotency_key": successor_key,
-                "slurm_comment": _slurm_comment_for_key(successor_key),
-                "status": "pending",
-                "retry_count": retry_count,
-                "previous_job_id": job_id,
-                "manual_retry_marker": False,
-                "slurm_job_id": None,
-                "array_task_id": None,
-                "submitted_at": None,
-                "started_at": None,
-                "finished_at": None,
-                "exit_code": None,
-                # No ``error_code`` anywhere on this path: stamping one is
-                # what would hand the shape back to automatic retry.
-                "error_code": None,
-                "error_message": None,
-                "log_uri": None,
-                "submit_outcome": None,
-                "reconciliation_source": None,
-                "reconciliation_decision": None,
-                "reconciliation_reason_class": None,
-                "matched_slurm_job_id": None,
-                "candidate_projections": [],
-                "cancellation_receipt_recorded": False,
-                "identity_blocked_streak": 0,
-                "submission_attempt": 1,
-                "submission_attempt_started_at": now,
-                "created_at": now,
-                "updated_at": now,
+                OPERATOR_RECOVERY_ATTESTATION_FIELD: _format_utc(_utcnow()),
+                "updated_at": _format_utc(_utcnow()),
             }
-            # The digest is IDENTITY-bearing, not cohort-only: it hashes
-            # ``job_id``/``idempotency_key``/``slurm_comment``
-            # (``accepted_submit_identity.forecast_cohort_digest``), all of which
-            # the retry suffix necessarily changes, and every master write
-            # enforces ``cohort_digest == forecast_cohort_digest(row)``.  So it is
-            # recomputed here over the canonical helper -- exactly as the ordinary
-            # attempt path does at
-            # ``chain_forecast_orchestrator_cycle._reserve_cycle_stage``.  What
-            # "same cohort, never re-picked" actually pins is ``cohort_members``,
-            # which rides along byte-for-byte above.
-            successor_record["cohort_digest"] = forecast_cohort_digest(successor_record)
-            successor = self._pipeline_job_row(successor_record)
             return self._write_pipeline_job_unlocked(
-                successor,
-                exclusive_direct=True,
-                model_id=_optional_safe_identity(successor, "model_id"),
+                self._pipeline_job_row(row),
+                exclusive_direct=False,
+                model_id=_optional_safe_identity(row, "model_id"),
             )
 
     def project_forecast_cohort_tasks(
@@ -7183,6 +7152,13 @@ class FileOrchestrationJournalRepository:
                 record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
             ),
             "restart_stage": record.get("restart_stage"),
+            # #1748: the operator-recovery attestation.  Deliberately absent from
+            # ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` so the generic upsert can
+            # neither forge nor strip it -- only the typed recovery API writes it.
+            OPERATOR_RECOVERY_ATTESTATION_FIELD: _optional_format_datetime(
+                record.get(OPERATOR_RECOVERY_ATTESTATION_FIELD),
+                field=OPERATOR_RECOVERY_ATTESTATION_FIELD,
+            ),
             "submission_attempt": record.get("submission_attempt", 1),
             "submission_attempt_started_at": _optional_format_datetime(
                 record.get("submission_attempt_started_at"), field="submission_attempt_started_at"
@@ -9113,35 +9089,6 @@ def _next_current_master_retry_identity(current: Mapping[str, Any]) -> tuple[str
     base_job_id, _suffix_attempt = split_retry_job_identity(job_id)
     retry_count = effective_retry_attempt(job_id, current.get("retry_count")) + 1
     return f"{base_job_id}{RETRY_JOB_ID_MARKER}{retry_count}", retry_count
-
-
-def _next_current_master_retry_idempotency_key(
-    current: Mapping[str, Any], retry_job_id: str
-) -> str | None:
-    """The successor's key, in the shape ``_cycle_stage_idempotency_key`` mints.
-
-    That function renders ``{run_id}:{stage}:{suffix}`` where ``suffix`` is the
-    job id's tail past the base job id, so the recovered attempt's key has to be
-    derived the same way or a later reserve would not recognise it.
-    """
-
-    key = current.get("idempotency_key")
-    if key in (None, ""):
-        return None
-    base_job_id, _suffix_attempt = split_retry_job_identity(str(current.get("job_id") or ""))
-    suffix = retry_job_id.removeprefix(f"{base_job_id}_")
-    if not suffix or suffix == retry_job_id:
-        return str(key)
-    base_key = re.sub(rf":{RETRY_JOB_ID_MARKER.lstrip('_')}\d+$", "", str(key))
-    return f"{base_key}:{suffix}"
-
-
-def _slurm_comment_for_key(idempotency_key: str | None) -> str | None:
-    if idempotency_key in (None, ""):
-        return None
-    from services.orchestrator.reservation import slurm_comment_for
-
-    return slurm_comment_for(str(idempotency_key))
 
 
 def _utcnow() -> datetime:

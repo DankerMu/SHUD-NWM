@@ -1,37 +1,42 @@
 ## 1. Fixture And Contract
 
-- [ ] 1.1 Add the OpenSpec delta requiring an operator-gated recovery path and a mandatory release-time operator signal.
-- [ ] 1.2 Review the fixture for the selected risk packs (Slurm production lifecycle / mock-vs-real parity; run manifest / QC provenance).
-- [ ] 1.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
+- [x] 1.1 Add OpenSpec delta requiring an operator-gated recovery attestation, end-to-end liveness, and a mandatory release-time operator signal.
+- [x] 1.2 Review the fixture for the selected risk packs (Slurm production lifecycle / mock-vs-real parity; run manifest / QC provenance).
+- [x] 1.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
 
-## 2. Recovery Path
+## 2. Recovery Attestation
 
-- [x] 2.1 Add the typed recovery API on the journal, minting through the existing `_next_current_master_retry_identity` helper (no second derivation site).
-- [x] 2.2 CAS-guard it on expected submission attempt + attempt anchor, mirroring `release_identity_blocked_reservation` (`file_orchestration_journal.py:3267-3346`).
-- [x] 2.3 Preserve `cohort_digest` and `cohort_members` onto the successor unchanged.
-- [x] 2.4 Refuse every shape outside released/unbound/current-contract-master.
-- [x] 2.5 Do not consult `should_auto_retry`; do not write `error_code`; leave no automatic caller.
-- [x] 2.6 Refuse a **repeat** invocation on an already-recovered row (the CAS guard does not cover it — minting leaves the source row's attempt fields untouched), so one released row can never yield two successors.
-- [x] 2.7 Perform no Slurm-side liveness/absence check; the call is an operator attestation (stated non-goal).
+- [x] 2.1 Recovery API records a durable operator attestation on the released row and writes **no** successor pipeline-job row.
+- [x] 2.2 Leave the `_retry_<n>` identity the ordinary path would mint **unoccupied**.
+- [x] 2.3 Refuse every shape outside released / unbound / current-contract-master.
+- [x] 2.4 Repeated attestation on the same row is idempotent.
+- [x] 2.5 Do not consult `should_auto_retry`; do not write `error_code`; leave no automatic caller and no automatic way to set the attestation.
+- [x] 2.6 Perform no Slurm-side liveness/absence check; the call is an operator attestation (stated non-goal).
 
-## 3. Operator Signal
+## 3. Consuming The Attestation
 
-- [x] 3.1 Emit the `IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR` record **once**, at the single release write point `release_identity_blocked_reservation` (`file_orchestration_journal.py:3267-3346`, decision at `:3338`).
-- [x] 3.2 Do **not** also instrument the `reconcile.py:2135` caller — it is the sole caller, so a second emission there double-emits on every production release. (See D8: the "two write points" premise of the first draft was false.)
-- [x] 3.3 Record names job id, cohort digest, and `identity_blocked_streak`.
+- [x] 3.1 Admit the attestation as an **additive disjunct** at `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`).
+- [x] 3.2 Leave `_verified_accepted_submit_forecast_retry` (`chain_forecast_orchestrator_cycle.py:911-919`) and the reclaim predicate (`file_orchestration_journal.py:2126-2140`) **byte-identical** — no widening, weakening, or reordering.
+- [x] 3.3 The recovered attempt participates in ordinary candidate selection; do **not** carry the released row's member set forward.
 
-## 4. Regression Evidence
+## 4. Operator Signal
 
-- [x] 4.1 Red-first test: recovery mints exactly one successor with the next `_retry_<n>` identity and preserved cohort identity.
-- [x] 4.2 Test: refusal for each non-owned shape.
-- [x] 4.3 Test: CAS mismatch makes no write.
-- [x] 4.4 Test: the token is emitted for a released row arriving from a **fresh** reservation and for one arriving from a `reclaim_pipeline_job_reservation` **re-seed** — the two prior-state shapes `tests/test_production_scheduler.py:48632`/`:48681` distinguish — and exactly once per release.
-- [x] 4.6 Test: a second recovery invocation on an already-recovered row is refused and writes nothing.
-- [x] 4.5 `tests/test_production_scheduler.py:48632` and `:48681` pass **unweakened** — assertions unchanged.
+- [x] 4.1 Emit `IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR` **once**, at the single release write point `release_identity_blocked_reservation` (`file_orchestration_journal.py:3267-3346`, decision at `:3338`). Already delivered in `54714525` — keep it.
+- [x] 4.2 Do **not** also instrument the `reconcile.py:2135` caller (sole caller — would double-emit).
+- [x] 4.3 Record names job id, cohort digest, and `identity_blocked_streak`.
 
-## 5. Verification (Evidence Floor)
+## 5. Regression Evidence
 
-- [x] 5.1 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py` PASS.
-- [x] 5.2 `uv run ruff check .` PASS.
-- [x] 5.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
-- [ ] 5.4 node-22 runtime receipt: scheduler behavior changed, so a post-deploy pass SHALL be observed on node-22 with the release signal reachable (or an explicit statement that no released row occurred in the window, since the shape is rare — 4 in 4487 rows).
+- [x] 5.1 **Red-first, the decisive one**: after recovery, an ordinary pass mints `_retry_<n>`, creates the reservation (`created=True`, not `already_inflight`), and reaches the submission call. This is the oracle whose absence let the first, inert implementation pass 2377 tests.
+- [x] 5.2 Test: recovery writes no row and leaves the `_retry_<n>` identity free.
+- [x] 5.3 Test: without the attestation, the stage behaves exactly as today and no submission occurs.
+- [x] 5.4 Test: refusal for each non-owned shape; repeated attestation idempotent.
+- [x] 5.5 Test: both release prior-state shapes emit the token exactly once (keep from `54714525`).
+- [x] 5.6 `tests/test_production_scheduler.py:48632` and `:48681` pass **unweakened** — assertions unchanged.
+
+## 6. Verification (Evidence Floor)
+
+- [x] 6.1 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py` PASS.
+- [x] 6.2 `uv run ruff check .` PASS.
+- [x] 6.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
+- [ ] 6.4 node-22 runtime receipt: scheduler behavior changed, so a post-deploy pass SHALL be observed on node-22 (or an explicit statement that no released row occurred in the window — the shape is rare, 4 in 4487 rows).
