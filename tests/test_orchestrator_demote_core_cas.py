@@ -176,15 +176,12 @@ def test_demotion_refuses_a_row_that_left_the_exact_held_state(
 def test_operator_verified_absence_transition_rejects_identity_blocked_streak(
     tmp_path: Path,
 ) -> None:
-    """task 1.1: the operator token can never carry a non-zero blocked streak.
+    """The operator token never carries a non-zero blocked streak (task 1.1).
 
-    ``operator_verified_absence`` is deliberately outside the
-    identity-mismatch streak set, so constructing its typed transition with
-    ``identity_blocked_streak=1`` must raise the existing typed invariant
-    error BEFORE any journal write.  This is the operator-token-specific
-    public-behavior negative the four suites were missing (verified finding
-    cand-te-03); the transition constructor is a pure value seam, so the
-    refusal provably precedes any repository write.
+    ``operator_verified_absence`` sits outside the identity-mismatch streak
+    set, so building its typed transition with ``identity_blocked_streak=1``
+    raises the typed invariant error before any journal write; the
+    constructor is a pure value seam, so the refusal precedes any write.
     """
     repository = _held_cohort_repository(tmp_path)
     before = _journal_bytes(repository.root)
@@ -582,11 +579,9 @@ def test_still_demoted_row_refuses_forbidden_persisted_axis(
 ) -> None:
     """task 2.1: a still-demoted row carrying a forbidden persisted axis refuses.
 
-    The mutated row substitutes exactly the tested axis on the read surface;
-    every other persisted field stays the real clean demotion, so the refusal
-    is caused by that axis alone.  (These shapes are structurally impossible
-    to persist via the typed transitions, so the substitution is the project's
-    lowest test seam that reaches the reclaim CAS without weakening it.)
+    Only the tested axis is substituted on the read surface; every other
+    field stays the real clean demotion, so the refusal is caused by that
+    axis alone (the project's lowest test seam reaching the reclaim CAS).
     """
     repository = _held_cohort_repository(tmp_path)
     demoted = _absence_row(repository, decision=OPERATOR_VERIFIED_ABSENCE_DECISION)
@@ -634,10 +629,9 @@ def test_operator_decision_rejected_by_submit_attempt_commit_writer(
 ) -> None:
     """The commit writer rejects an accepted transition carrying the operator token.
 
-    The forgery is an accepted transition (so the commit's own accepted check
-    passes) that carries ``operator_verified_absence``.  The typed-authority
-    error must fire before any mutation, leaving the journal byte-identical and
-    emitting zero events.
+    The accepted forgery carries ``operator_verified_absence``; the
+    typed-authority error fires before any mutation, leaving the journal
+    byte-identical and emitting zero events.
     """
     repository = _held_cohort_repository(tmp_path)
     row = _held_row(repository)
@@ -696,10 +690,9 @@ def test_operator_decision_rejected_by_cohort_task_projection_writer(
 ) -> None:
     """The cohort task projection writer cannot synthesize the operator decision.
 
-    ``project_forecast_cohort_tasks`` accepts a raw ``reconciliation_decision``
-    but only a bound master reaches the decision gate; there the writer's own
-    evidence gate refuses anything but ``matched_bound``, so the operator token
-    can never reach a durable row through this door.
+    ``project_forecast_cohort_tasks`` takes a raw ``reconciliation_decision``;
+    its own evidence gate refuses anything but ``matched_bound``, so the
+    operator token can never reach a durable row through this door.
     """
     repository = _held_cohort_repository(tmp_path)
     row = _held_row(repository)
@@ -740,11 +733,9 @@ def test_operator_decision_ignored_by_unbound_task_projection_defer(
 ) -> None:
     """A raw operator token on a mismatched-ID master is refused at entry.
 
-    The mismatch defer branch must never silently persist a literal
-    ``identity_mismatch_blocked`` when the caller supplied
-    ``operator_verified_absence``: the typed-authority refusal fires before any
-    lock/mutation/event, on the mismatched-ID branch exactly as on the bound
-    branch.
+    The mismatch defer branch must never silently persist ``identity_mismatch_blocked``
+    when the caller supplied ``operator_verified_absence``; the typed-authority
+    refusal fires before any lock/mutation/event, as on the bound branch.
     """
     repository = _held_cohort_repository(tmp_path)
     row = _held_row(repository)
@@ -798,9 +789,8 @@ def test_legitimate_cohort_projection_decisions_still_apply(
 ) -> None:
     """Legal bound/mismatch projection decisions keep their writers unchanged.
 
-    The operator-token refusal is narrowly scoped: ``matched_bound`` on a bound
-    master and the fixed ``identity_mismatch_blocked`` defer on a mismatched-ID
-    master still apply through the same writer.
+    The operator-token refusal is narrowly scoped: ``matched_bound`` and the
+    fixed ``identity_mismatch_blocked`` defer still apply via their writer.
     """
     repository = _held_cohort_repository(tmp_path)
     row = _held_row(repository)
@@ -853,3 +843,145 @@ def test_legitimate_cohort_projection_decisions_still_apply(
     projected = _held_row(repository)
     assert projected["status"] == "failed"
     assert projected["reconciliation_decision"] == "matched_bound"
+
+
+# ---------------------------------------------------------------------------
+# 1.4 upsert writer-authority (Phase 6.2): the operator decision is never
+# persisted by ordinary pipeline-job upsert, including a marker-free legacy
+# master upgraded to the current contract in one merge
+# ---------------------------------------------------------------------------
+def _legacy_marker_free_master_repository(tmp_path: Path) -> Any:
+    """One marker-free legacy master as pre-contract reserves persist it.
+
+    The current-contract marker is absent (historical compatibility data) and
+    the row is structurally a forecast master — the legacy shape the ordinary
+    upsert may legally upgrade to the current contract in one merge.
+    """
+
+    from tests.test_gateway_reconcile import _file_cohort_repository
+
+    return _file_cohort_repository(tmp_path, member_count=2, versioned=False)
+
+
+def test_upsert_operator_decision_rejected_even_on_marker_free_contract_upgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary upsert refuses a forged operator decision on an upgraded row.
+
+    A marker-free legacy master upgraded in ONE ordinary merge is the path no
+    other guard covers: the existing upsert shape gates fire only on an
+    ALREADY-current master.  Only the dedicated typed demotion may persist
+    ``operator_verified_absence``, so this merge is refused before any row
+    construction, lock, durable mutation, or event — leaving the journal
+    byte-identical and the durable/public legacy row untouched.
+    """
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository = _legacy_marker_free_master_repository(tmp_path)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = _journal_bytes(repository.root)
+    legacy_row = repository.get_pipeline_job(job_id)
+    assert legacy_row["reconciliation_decision"] is None
+    assert legacy_row.get("accepted_submit_contract_version") is None
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    forged = dict(legacy_row)
+    forged["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+    forged["reconciliation_decision"] = OPERATOR_VERIFIED_ABSENCE_DECISION
+    forged["reconciliation_source"] = "slurm_exact_comment"
+    forged["reconciliation_reason_class"] = None
+    forged["submit_outcome"] = "submit_result_ambiguous"
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(forged)
+
+    assert error.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert error.value.field == "reconciliation_decision"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    # The durable legacy row and its public view are unchanged.
+    assert repository.get_pipeline_job(job_id)["reconciliation_decision"] is None
+    assert repository.get_pipeline_job(job_id).get("accepted_submit_contract_version") is None
+    assert _held_row(repository) == legacy_row
+
+
+def test_upsert_operator_decision_rejected_on_current_contract_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already-current master carrying the operator token is also refused."""
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository = _legacy_marker_free_master_repository(tmp_path)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    legacy_row = repository.get_pipeline_job(job_id)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    forged = dict(legacy_row)
+    forged["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+    forged["reconciliation_decision"] = OPERATOR_VERIFIED_ABSENCE_DECISION
+    forged["reconciliation_source"] = "slurm_exact_comment"
+    forged["reconciliation_reason_class"] = None
+    forged["submit_outcome"] = "submit_result_ambiguous"
+
+    # First upsert persists the CURRENT contract marker with the (legal)
+    # automatic decision, so the row is now current-contract.
+    automatic = dict(forged)
+    automatic["reconciliation_decision"] = None
+    automatic["reconciliation_reason_class"] = None
+    automatic["reconciliation_source"] = None
+    written = repository.upsert_pipeline_job(automatic)
+    assert written.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
+    current_before = _journal_bytes(repository.root)
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.upsert_pipeline_job(forged)
+
+    assert error.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert error.value.field == "reconciliation_decision"
+    assert _journal_bytes(repository.root) == current_before
+    assert _durable_event_payloads(repository.root) == []
+    current = repository.get_pipeline_job(job_id)
+    assert current["reconciliation_decision"] is None
+    assert current.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+
+def test_upsert_non_token_legacy_upgrade_still_applies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker-free legacy upgrade WITHOUT the operator token still works.
+
+    The ordinary upsert must keep accepting and persisting the non-token
+    current-contract upgrade exactly as before the closed-world guard — the
+    Phase 6.2 control proving the guard is narrowly scoped to the operator
+    token.
+    """
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository = _legacy_marker_free_master_repository(tmp_path)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    legacy_row = repository.get_pipeline_job(job_id)
+    assert legacy_row.get("accepted_submit_contract_version") is None
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    upgraded = dict(legacy_row)
+    upgraded["accepted_submit_contract_version"] = ACCEPTED_SUBMIT_CONTRACT_VERSION
+    upgraded["submit_outcome"] = "submit_result_ambiguous"
+    upgraded["reconciliation_decision"] = None
+    upgraded["reconciliation_source"] = None
+    upgraded["reconciliation_reason_class"] = None
+
+    written = repository.upsert_pipeline_job(upgraded)
+
+    assert written["status"] == legacy_row["status"]
+    assert written["reconciliation_decision"] is None
+    assert written.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
+    current = repository.get_pipeline_job(job_id)
+    assert current.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
+    assert current["reconciliation_decision"] is None
+    # The upgrade durably landed in the journal.
+    durable = _durable_pipeline_job_payloads(repository.root, job_id)[-1]
+    assert durable.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
+    assert durable["reconciliation_decision"] is None

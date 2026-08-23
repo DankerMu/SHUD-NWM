@@ -1949,6 +1949,17 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # durable provenance granted only by the dedicated typed demotion,
+        # never by an ordinary pipeline-job upsert -- including a marker-free
+        # legacy master upgraded to the current contract in this one merge,
+        # whose explicit raw token no other accepted-submit writer gate would
+        # see.  Refuse before any row construction, lock, mutation, or event.
+        if record.get("reconciliation_decision") == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         # Upserts may be partial status transitions for an existing cohort.
         # Validate the accepted-submit contract only after merging with its
         # canonical durable identity; fresh rows still validate in full.
