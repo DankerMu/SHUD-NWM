@@ -52,4 +52,10 @@ run 277,872 行全 NULL）。键连接对这些早已 `published` 的 run 永远
 
 - 代码：`scripts/node27_autopipeline.py`（一个函数的 SQL 与 docstring）。
 - 测试：新增真实 DB integration 用例 + SQL 形态 pin；既有清零 oracle 不动。
-- 运维：node-27 下一 tick 即恢复 ~4 min rc=0；新预报入库延迟回到分钟级。
+- 运维：node-27 下一 tick 恢复 rc=0，新预报入库延迟回到分钟级。
+  **更正（#1789，2026-08-23）**："下一 tick 即恢复 ~4 min" 是失实预期，未兑现。
+  本单只让 `published` 不再依赖 fact 行可见性，并没有去掉判据里那条
+  `LEFT JOIN hydro.river_timeseries` —— 它仍每 tick 为取一个
+  `MAX(rt.created_at)` 整块解压全部压缩 chunk，`phase=ingest` 停在 ~590 s 且随
+  压缩块增加单调恶化。~240 s 量级要到 #1789 把该 join 删掉、时间戳改由
+  `hydro_run.parsed_at` 承载之后才可能恢复。

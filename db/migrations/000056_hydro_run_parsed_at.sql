@@ -1,0 +1,22 @@
+-- #1789: the parse timestamp, recorded where it is produced.
+--
+-- The autopipe completeness criterion needed one timestamp per run ("when did
+-- this run's output last parse successfully") and, lacking a column, derived it
+-- as MAX(river_timeseries.created_at) through a key join. run_key is neither a
+-- compress_segmentby column nor indexed on the compressed side (000047), so
+-- every tick decompressed every compressed chunk of the fact table to compute
+-- it. The column removes the join outright.
+--
+-- Nullable and WITHOUT a default, deliberately: DEFAULT now() would stamp every
+-- newly registered run at birth and turn parsed_at into a second updated_at --
+-- the exact property that disqualifies updated_at from this role (the register
+-- upsert bumps it every tick). NULL means "no parse timestamp known", which is
+-- what the pre-existing legacy cohort keeps after backfill, and what the
+-- criterion's `status = 'published' OR parsed_at IS NOT NULL` gate tolerates.
+--
+-- ADD COLUMN IF NOT EXISTS so the migration is re-runnable. Backfill is NOT
+-- done here: it is a single expensive full-table aggregate over the compressed
+-- hypertable that needs batching, a statement_timeout and a human watching it
+-- (scripts/backfill_hydro_run_parsed_at.py).
+ALTER TABLE hydro.hydro_run
+  ADD COLUMN IF NOT EXISTS parsed_at TIMESTAMPTZ;
