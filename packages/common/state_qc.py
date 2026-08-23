@@ -73,6 +73,25 @@ _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 MAX_UNSAT_NEGATIVE_REPAIR_M = 5.0e-2
 MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
 
+# River channel stage carries the same class of residual as ``Unsat``: SHUD's
+# channel routing treats a negative stage as the dry bed, but the restart writer
+# still serializes the raw ODE residual. 0.2 m is the recorded numeric reading of
+# the project hydrologist's ruling that decimetre-scale negatives on newly
+# onboarded basins are normal numeric tolerance (worst case observed at
+# onboarding: -0.106 m on ``basins_dth_yj``).
+#
+# The domain-mean cap is the actual safety valve, and its denominator is the
+# RIVER row count, not the mesh count. Its value cannot simply mirror the unsat
+# cap: production river-row counts span 319..43799, so a cap of 2.0e-4 would give
+# the smallest basin a 0.064 m total budget and fail closed on a *single*
+# tolerated residual. The cap must therefore stay above
+# ``MAX_RIVER_NEGATIVE_REPAIR_M / min_river_rows`` (0.2 / 319 = 6.3e-4); 2.0e-3
+# holds ~3x margin over that floor while a 2 mm domain-average stage error stays
+# hydrologically negligible. A basin-wide routing failure exceeds it by orders of
+# magnitude and still fails closed.
+MAX_RIVER_NEGATIVE_REPAIR_M = 2.0e-1
+MAX_RIVER_MEAN_CORRECTION_M = 2.0e-3
+
 
 @dataclass(frozen=True)
 class StateResidualNormalization:
@@ -84,10 +103,14 @@ class StateResidualNormalization:
     mesh_row_count: int
     max_unsat_correction_m: float
     mean_unsat_correction_m: float
+    normalized_river_row_count: int = 0
+    river_row_count: int = 0
+    max_river_correction_m: float = 0.0
+    mean_river_correction_m: float = 0.0
 
     def evidence(self) -> dict[str, Any]:
         return {
-            "policy": "bounded_physical_zero_projection_v2",
+            "policy": "bounded_physical_zero_projection_v3",
             "accepted": self.accepted,
             "reason": self.reason,
             "normalized_value_count": self.normalized_value_count,
@@ -100,6 +123,15 @@ class StateResidualNormalization:
             "mean_unsat_correction_m": self.mean_unsat_correction_m,
             "max_unsat_negative_repair_m": MAX_UNSAT_NEGATIVE_REPAIR_M,
             "max_unsat_mean_correction_m": MAX_UNSAT_MEAN_CORRECTION_M,
+            "normalized_river_row_count": self.normalized_river_row_count,
+            "river_row_count": self.river_row_count,
+            "normalized_river_row_fraction": (
+                self.normalized_river_row_count / self.river_row_count if self.river_row_count else 0.0
+            ),
+            "max_river_correction_m": self.max_river_correction_m,
+            "mean_river_correction_m": self.mean_river_correction_m,
+            "max_river_negative_repair_m": MAX_RIVER_NEGATIVE_REPAIR_M,
+            "max_river_mean_correction_m": MAX_RIVER_MEAN_CORRECTION_M,
         }
 
 
@@ -108,8 +140,11 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
 
     Other state variables retain the existing 10 mm numeric-zero tolerance.
     ``Unsat`` alone receives the 50 mm repair ceiling because SHUD explicitly
-    maps negative unsaturated-zone depth to its dry constitutive branch.  Any
-    value beyond the ceiling remains untouched so normal QC rejects it.
+    maps negative unsaturated-zone depth to its dry constitutive branch, and the
+    river ``Stage`` column receives the 0.2 m ceiling for the same reason on the
+    channel-routing side.  Any value beyond its ceiling remains untouched so
+    normal QC rejects it.  Lake stage is deliberately NOT relaxed: no residual
+    evidence exists for it, so it fails closed on the 10 mm tolerance.
     """
 
     lines = content.splitlines()
@@ -119,18 +154,32 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
     if counts is None:
         return StateResidualNormalization(content, True, None, 0, 0, 0, 0.0, 0.0)
     mesh_count = counts[0]
+    # Only meaningful for compatibility (non-sectioned) files; the native header's
+    # second token is a mesh-state column count, so sectioned files derive river
+    # rows from section boundaries instead.
+    compat_river_count = counts[1]
     sectioned = any(_looks_like_column_header(line) for line in lines[1:])
     normalized_value_count = 0
     normalized_unsat_rows: set[int] = set()
     unsat_correction_sum = 0.0
     max_unsat_correction = 0.0
+    normalized_river_rows = 0
+    river_row_count = 0
+    river_correction_sum = 0.0
+    max_river_correction = 0.0
     mesh_row_index = 0
+    data_row_index = 0
+    stage_section_count = 0
     current_columns: list[str] | None = None
+    current_section: str | None = None
 
     for line_index in range(1, len(lines)):
         line = lines[line_index]
         if _looks_like_column_header(line):
             current_columns = [token.strip().lower() for token in line.split()]
+            current_section = _section_from_column_header(line, stage_section_count=stage_section_count)
+            if current_section in {"river", "lake"}:
+                stage_section_count += 1
             continue
         row = _numeric_row(line)
         if row is None:
@@ -138,49 +187,68 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
 
         is_mesh_row = False
         unsat_index: int | None = None
+        is_river_row = False
+        stage_index: int | None = None
         if sectioned:
             if current_columns is not None and "unsat" in current_columns and mesh_row_index < mesh_count:
                 is_mesh_row = True
                 unsat_index = current_columns.index("unsat")
+            elif current_section == "river" and current_columns is not None:
+                for candidate in ("stage", "river_stage"):
+                    if candidate in current_columns:
+                        is_river_row = True
+                        stage_index = current_columns.index(candidate)
+                        break
         elif mesh_row_index < mesh_count:
             is_mesh_row = True
             unsat_index = 4
+        elif data_row_index < mesh_count + compat_river_count:
+            is_river_row = True
+            stage_index = 1
 
         if is_mesh_row:
             mesh_row_index += 1
+        if is_river_row:
+            river_row_count += 1
+        data_row_index += 1
         tokens = line.split()
         if len(tokens) != len(row):
             continue
         changed = False
+        river_row_repaired = False
         for value_index in range(1, len(row)):
             value = row[value_index]
             if value >= 0.0:
                 continue
-            tolerance = (
-                MAX_UNSAT_NEGATIVE_REPAIR_M
-                if is_mesh_row and unsat_index == value_index
-                else _NEGATIVE_ZERO_TOLERANCE
-            )
+            if is_mesh_row and unsat_index == value_index:
+                tolerance = MAX_UNSAT_NEGATIVE_REPAIR_M
+            elif is_river_row and stage_index == value_index:
+                tolerance = MAX_RIVER_NEGATIVE_REPAIR_M
+            else:
+                tolerance = _NEGATIVE_ZERO_TOLERANCE
             if value < -tolerance:
                 continue
             tokens[value_index] = "0"
             changed = True
             normalized_value_count += 1
+            correction = -value
             if is_mesh_row and unsat_index == value_index:
                 normalized_unsat_rows.add(mesh_row_index - 1)
-                correction = -value
                 unsat_correction_sum += correction
                 max_unsat_correction = max(max_unsat_correction, correction)
+            elif is_river_row and stage_index == value_index:
+                river_row_repaired = True
+                river_correction_sum += correction
+                max_river_correction = max(max_river_correction, correction)
+        if river_row_repaired:
+            normalized_river_rows += 1
         if changed:
             lines[line_index] = "\t".join(tokens)
 
     mean_correction = unsat_correction_sum / mesh_count if mesh_count else 0.0
-    if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
-        reason = (
-            "unsat negative-residual domain-mean correction is "
-            f"{mean_correction:.9f} m, above "
-            f"{MAX_UNSAT_MEAN_CORRECTION_M:.9f} m"
-        )
+    mean_river_correction = river_correction_sum / river_row_count if river_row_count else 0.0
+
+    def _rejected(reason: str) -> StateResidualNormalization:
         return StateResidualNormalization(
             content,
             False,
@@ -190,6 +258,23 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
             mesh_count,
             max_unsat_correction,
             mean_correction,
+            normalized_river_rows,
+            river_row_count,
+            max_river_correction,
+            mean_river_correction,
+        )
+
+    if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
+        return _rejected(
+            "unsat negative-residual domain-mean correction is "
+            f"{mean_correction:.9f} m, above "
+            f"{MAX_UNSAT_MEAN_CORRECTION_M:.9f} m"
+        )
+    if mean_river_correction > MAX_RIVER_MEAN_CORRECTION_M:
+        return _rejected(
+            "river-stage negative-residual domain-mean correction is "
+            f"{mean_river_correction:.9f} m, above "
+            f"{MAX_RIVER_MEAN_CORRECTION_M:.9f} m"
         )
     trailing_newline = "\n" if content.endswith(("\n", "\r")) else ""
     normalized_content = "\n".join(lines) + trailing_newline if normalized_value_count else content
@@ -202,6 +287,10 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
         mesh_count,
         max_unsat_correction,
         mean_correction,
+        normalized_river_rows,
+        river_row_count,
+        max_river_correction,
+        mean_river_correction,
     )
 
 
