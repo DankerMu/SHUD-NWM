@@ -81,5 +81,5 @@
 - [x] T11 （D11）键的 init 分量改为「manifest 有就用它，否则 `''`」，写入侧与读取侧
       共用一个 `_decline_key` helper（消除既有的 `not x` / `is None` 不对称）；
       fail-closed 收窄到 `product_mtime` 取不到与 DB 写入失败。不改迁移。
-- [ ] T10 node-27 实机：apply 迁移、跑双 tick、跑真实 DB pytest、跑 runbook 清单 SQL，
+- [x] T10 node-27 实机：apply 迁移、跑双 tick、跑真实 DB pytest、跑 runbook 清单 SQL，
       全部留档（E2/E4/E5/E9）。
