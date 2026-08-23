@@ -1514,7 +1514,7 @@ orchestrator's own output, on a surface no reviewer is chartered to enumerate
 exhaustively.** Reviewers sample prose for plausibility; nobody was tasked to
 enumerate every claim and rule on each. The closed-list audit is that task, and
 this is the second time it has closed a class no lens closed (the first was
-#1759).
+issue #1759).
 
 Two rules adopted from this run, both cheap:
 
