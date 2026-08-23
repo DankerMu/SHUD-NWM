@@ -772,6 +772,87 @@ def test_scheduler_discovery_compat_forwarders_delegate_to_owner_module(
     assert contexts
 
 
+def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> None:
+    """Every production consumer binds the CURRENT scheduler-discovery owner
+    objects, never a stale copy (issue #1799 Phase 2 durable consumer seam).
+
+    The consumer modules re-export the owner symbols as identity aliases at
+    import time; a drift from the owner (an extracted copy, a redefined
+    symbol, a lost alias) is exactly what this test detects.  Each consumer's
+    assertions are named by that consumer so a failure names the drifted
+    binding.
+    """
+    from services.orchestrator import scheduler_candidate_runtime as candidate_runtime_module
+    from services.orchestrator import scheduler_compat_runtime as compat_runtime_module
+    from services.orchestrator import scheduler_core as scheduler_core_module
+    from services.orchestrator import scheduler_models as scheduler_models_module
+    from services.orchestrator import scheduler_runtime as scheduler_runtime_module
+
+    # scheduler.py facade: the discovery compat alias inventory resolves every
+    # facade alias to the owner object.
+    for facade_name, owner_name in scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items():
+        assert getattr(scheduler_module, facade_name) is getattr(
+            scheduler_discovery_module, owner_name
+        ), f"scheduler.py facade alias {facade_name} is not owner {owner_name}"
+
+    # scheduler_candidates.py: error and redaction helpers are owner aliases.
+    assert scheduler_candidates_module.SchedulerResourceLimitError is (
+        scheduler_discovery_module.SchedulerResourceLimitError
+    ), "scheduler_candidates.py SchedulerResourceLimitError is not owner"
+    assert scheduler_candidates_module._source_discovery_evidence_safe is (
+        scheduler_discovery_module._source_discovery_evidence_safe
+    ), "scheduler_candidates.py _source_discovery_evidence_safe is not owner"
+    assert scheduler_candidates_module._source_secret_text_safe is (
+        scheduler_discovery_module._source_secret_text_safe
+    ), "scheduler_candidates.py _source_secret_text_safe is not owner"
+
+    # scheduler_candidate_runtime.py: the horizon metadata alias is the owner.
+    assert candidate_runtime_module._source_horizon_metadata is (
+        scheduler_discovery_module.source_horizon_metadata
+    ), "scheduler_candidate_runtime.py _source_horizon_metadata is not owner"
+
+    # scheduler_compat_runtime.py: owner/facade missing tuples are empty and
+    # the facade alias map resolves the CURRENT owner objects.
+    assert compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_MISSING == (), (
+        "scheduler_compat_runtime.py discovery owner-missing tuple is non-empty"
+    )
+    assert compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_MISSING == (), (
+        "scheduler_compat_runtime.py discovery facade-missing tuple is non-empty"
+    )
+    for facade_name, owner_name in (
+        compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items()
+    ):
+        assert getattr(
+            compat_runtime_module, facade_name
+        ) is getattr(
+            scheduler_discovery_module, owner_name
+        ), f"scheduler_compat_runtime.py facade alias {facade_name} is not owner {owner_name}"
+
+    # scheduler_runtime.py: the import-time error alias is the owner.
+    assert scheduler_runtime_module.SchedulerResourceLimitError is (
+        scheduler_discovery_module.SchedulerResourceLimitError
+    ), "scheduler_runtime.py SchedulerResourceLimitError is not owner"
+
+    # scheduler_backfill_predecessor.py: the direct from-import error alias is
+    # the owner.
+    assert scheduler_backfill_predecessor_module.SchedulerResourceLimitError is (
+        scheduler_discovery_module.SchedulerResourceLimitError
+    ), "scheduler_backfill_predecessor.py SchedulerResourceLimitError is not owner"
+
+    # scheduler_core.py: its ``_scheduler._scheduler_discovery`` module object
+    # IS the owner module, so its runtime discovery delegation observes owner
+    # monkeypatches (the behavioral delegation itself is covered by
+    # ``test_scheduler_discovery_compat_forwarders_delegate_to_owner_module``).
+    assert scheduler_core_module._scheduler._scheduler_discovery is scheduler_discovery_module, (
+        "scheduler_core.py _scheduler._scheduler_discovery is not the owner module"
+    )
+
+    # scheduler_models.py: the facade error alias is the owner.
+    assert scheduler_models_module._scheduler.SchedulerResourceLimitError is (
+        scheduler_discovery_module.SchedulerResourceLimitError
+    ), "scheduler_models.py facade SchedulerResourceLimitError is not owner"
+
+
 def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -> None:
     alias_owner_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES
     alias_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES
@@ -51803,3 +51884,669 @@ def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path) -> None:
     assert [candidate.model_id for candidate in candidates] == ["model_a"]
     assert blocked == []
     assert skipped == []
+
+
+# ---------------------------------------------------------------------------
+# scheduler-discovery evidence owner compatibility (issue #1799)
+#
+# The source-discovery evidence helpers were extracted to
+# ``services.orchestrator.scheduler_discovery_evidence`` as PURE
+# implementations with their dependencies passed as arguments.  The owner
+# module ``services.orchestrator.scheduler_discovery`` keeps every historical
+# name/signature as either a composite (resolving sibling owner globals at
+# call time), a thin wrapper (injecting the CURRENT owner symbols at call
+# time), or a direct re-export of a dependency-free leaf.  These tests prove
+# (A) default output/schema/error/order parity and (B) that every moved
+# dependency still observes owner-module replacement at the same call
+# boundary as before the split.
+# ---------------------------------------------------------------------------
+
+
+def _discovery_fixture(
+    *,
+    available: bool = True,
+    status: str | None = None,
+    reason: str | None = None,
+    classifier: str | None = None,
+    retryable: bool | None = None,
+    probe_uri: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    cycle_time: str = "2026-05-21T06:00:00Z",
+    source_id: str = "gfs",
+) -> CycleDiscovery:
+    parsed = _dt(cycle_time)
+    return CycleDiscovery(
+        cycle_id=cycle_id_for(source_id, parsed),
+        source_id=source_id,
+        cycle_time=parsed,
+        cycle_hour=parsed.hour,
+        available=available,
+        status=status or ("discovered" if available else "unavailable"),
+        reason=reason,
+        classifier=classifier,
+        retryable=retryable,
+        probe_uri=probe_uri,
+        evidence=dict(evidence or {}),
+    )
+
+
+class _ConfigLessAdapter:
+    """Adapter carrying no ``config`` attribute (source-default horizon branch)."""
+
+    def __init__(self, source_id: str) -> None:
+        self.source_id = source_id
+
+
+class _FixedHourEnsureUtc:
+    """Sentinel ``_ensure_utc`` replacement that pins every cycle to hour 9."""
+
+    def __call__(self, value: datetime) -> datetime:
+        return datetime(2000, 1, 1, 9, tzinfo=UTC)
+
+
+def test_discovery_evidence_historical_signatures_are_preserved() -> None:
+    expected = {
+        "discover_source_window": (
+            "(adapter: 'CycleDiscoveryAdapter', *, source_id: 'str', "
+            "start_time: 'datetime', end_time: 'datetime') -> 'list[CycleDiscovery]'"
+        ),
+        "_filter_allowed_cycle_hours": (
+            "(discoveries: 'Sequence[CycleDiscovery]', *, "
+            "allowed_cycle_hours_utc: 'Sequence[int]') -> 'tuple[list[CycleDiscovery], list[CycleDiscovery]]'"
+        ),
+        "_source_cycle_evidence": (
+            "(discovery: 'CycleDiscovery', *, horizon: 'Mapping[str, Any]') -> 'dict[str, Any]'"
+        ),
+        "_cycle_hour_not_allowed_evidence": "(discovery: 'CycleDiscovery') -> 'dict[str, Any]'",
+        "_source_cycle_status_candidate": "(discovery: 'CycleDiscovery', *, available: 'bool') -> 'str'",
+        "_source_cycle_not_selected_reason": "(discovery: 'CycleDiscovery') -> 'str'",
+        "_source_discovery_evidence_safe": "(value: 'Any') -> 'Any'",
+        "_source_secret_text_safe": "(value: 'str') -> 'str'",
+        "_duplicate_cycle_evidence": "(discovery: 'CycleDiscovery', *, reason: 'str') -> 'dict[str, Any]'",
+        "_backfill_deferred_evidence": "(discovery: 'CycleDiscovery', *, reason: 'str') -> 'dict[str, Any]'",
+        "source_horizon_metadata": (
+            "(discovery: 'CycleDiscovery', adapter: 'CycleDiscoveryAdapter') -> 'dict[str, Any]'"
+        ),
+    }
+    for name, signature in expected.items():
+        assert str(inspect.signature(getattr(scheduler_discovery_module, name))) == signature, name
+
+
+def test_discovery_evidence_moved_names_share_owner_and_facade_identity() -> None:
+    """Every extracted name is still on the owner, with facade aliases identical."""
+    # Names the scheduler facade exposes as direct aliases of the owner object.
+    facade_alias_names = {
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE": "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE": "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        "_source_cycle_status_candidate": "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason": "_source_cycle_not_selected_reason",
+        "_source_discovery_evidence_safe": "_source_discovery_evidence_safe",
+        "_source_secret_text_safe": "_source_secret_text_safe",
+        "_duplicate_cycle_evidence": "_duplicate_cycle_evidence",
+        "_backfill_deferred_evidence": "_backfill_deferred_evidence",
+        "_source_horizon_metadata": "source_horizon_metadata",
+        "_source_cycle_evidence": "_source_cycle_evidence",
+    }
+    for facade_name, owner_name in facade_alias_names.items():
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
+
+    # Names that exist only on the owner (no facade alias): the composite
+    # ``_cycle_hour_not_allowed_evidence`` and the window helpers are reached
+    # through ``ProductionScheduler`` forwarders, never as facade attributes.
+    for owner_name in (
+        "_cycle_hour_not_allowed_evidence",
+        "discover_source_window",
+        "_filter_allowed_cycle_hours",
+    ):
+        assert hasattr(scheduler_discovery_module, owner_name)
+        assert not hasattr(scheduler_module, owner_name)
+
+    # The facade alias inventory still names every discovery compat symbol and
+    # resolves to the owner object.
+    for facade_name, owner_name in (
+        scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items()
+    ):
+        assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
+    assert hasattr(scheduler_module.ProductionScheduler, "_discover_source_window")
+    assert hasattr(scheduler_module.ProductionScheduler, "_discover_cycles")
+
+
+def test_discovery_evidence_default_source_cycle_schema(tmp_path: Path) -> None:
+    discovery = _discovery_fixture(
+        available=False,
+        status="probe_failed",
+        reason="source_cycle_probe_failed",
+        classifier="probe_failed",
+        retryable=True,
+        probe_uri="https://provider.example.test/file",
+        evidence={
+            "probe": {"uri": "https://provider.example.test/file", "retries": 3},
+            "token": "super-secret",
+        },
+    )
+    evidence = scheduler_discovery_module._source_cycle_evidence(discovery, horizon={"max_lead_hours": 168})
+    assert evidence["source_id"] == "gfs"
+    assert evidence["cycle_id"] == "gfs_2026052106"
+    assert evidence["cycle_time_utc"] == "2026-05-21T06:00:00Z"
+    assert evidence["cycle_hour"] == 6
+    assert evidence["horizon"] == {"max_lead_hours": 168}
+    assert evidence["available"] is False
+    assert evidence["status"] == "probe_failed"
+    assert evidence["reason"] == "source_cycle_probe_failed"
+    assert evidence["classifier"] == "probe_failed"
+    assert evidence["retryable"] is True
+    assert evidence["probe_uri"] == "https://provider.example.test/file"
+    assert evidence["db_cycle_status_written"] is None
+    assert evidence["cycle_status_candidate"] == "probe_failed"
+    assert evidence["discovery_evidence"]["probe"]["uri"] == "https://provider.example.test/file"
+    assert evidence["discovery_evidence"]["probe"]["retries"] == 3
+    # The sensitive top-level key is redacted by the key regex.
+    assert evidence["discovery_evidence"] == {
+        "probe": {"uri": "https://provider.example.test/file", "retries": 3},
+        "[redacted_key]": "[redacted]",
+    }
+    # The whole evidence passes through _evidence_safe (a datetime in the
+    # mapping would be normalized).
+    assert "cycle_time_utc" in evidence
+
+
+def test_discovery_evidence_default_redaction_parity() -> None:
+    signed = "https://user:password@provider.example.test/file?token=super-secret&X-Amz-Signature=secret-signature"
+    # redact_payload strips credentials and the whole query; the sensitive-text
+    # regex then finds no remaining marker, so the URI is returned as-is.
+    safe = scheduler_discovery_module._source_secret_text_safe(signed)
+    assert safe == "https://provider.example.test/file"
+    # Sensitive text without a URI/authorization context is fully redacted.
+    assert scheduler_discovery_module._source_secret_text_safe("Authorization: Bearer abc") == (
+        "[redacted]: [redacted] [redacted]"
+    )
+    # Non-sensitive text passes through unchanged.
+    assert scheduler_discovery_module._source_secret_text_safe("plain-cycle-metadata") == (
+        "plain-cycle-metadata"
+    )
+
+
+def test_discovery_evidence_nested_redaction_and_recursive_sanitization() -> None:
+    payload = {
+        "probe": {
+            "uri": "https://user:password@provider.example.test/file",
+            "headers": {"X-Api-Key": "secret-api-key", "X-Amz-Signature": "sig"},
+        },
+        "env_name": "AWS_SECRET_ACCESS_KEY",
+        "env_value": "super-secret",
+    }
+    safe = scheduler_discovery_module._source_discovery_evidence_safe(payload)
+    rendered = json.dumps(safe)
+    assert "super-secret" not in rendered
+    assert "secret-api-key" not in rendered
+    assert "password" not in rendered
+    assert "sig" not in rendered
+    # Sensitive keys are replaced by the key placeholder, not kept.
+    assert "X-Api-Key" not in rendered
+    assert "env_name" not in rendered
+    assert "env_value" not in rendered
+    assert "headers" not in rendered
+    assert safe["probe"] == {"uri": "https://provider.example.test/file", "[redacted_key]": "[redacted]"}
+
+
+def test_discovery_evidence_horizon_defaults_and_precedence() -> None:
+    gfs_06 = _discovery_fixture(source_id="gfs", cycle_time="2026-05-21T06:00:00Z")
+    ifs_06 = _discovery_fixture(source_id="IFS", cycle_time="2026-05-21T06:00:00Z")
+    ifs_00 = _discovery_fixture(source_id="IFS", cycle_time="2026-05-21T00:00:00Z")
+
+    assert scheduler_discovery_module.source_horizon_metadata(gfs_06, _ConfigLessAdapter("gfs")) == {
+        "max_lead_hours": 168,
+        "forecast_horizon_hours": 168,
+        "forecast_start_hour": 0,
+        "forecast_step_hours": None,
+        "policy": "source_cycle",
+    }
+    # IFS 06/18z -> 144, other hours -> 168.
+    assert (
+        scheduler_discovery_module.source_horizon_metadata(ifs_06, _ConfigLessAdapter("IFS"))["max_lead_hours"]
+        == 144
+    )
+    assert (
+        scheduler_discovery_module.source_horizon_metadata(ifs_00, _ConfigLessAdapter("IFS"))["max_lead_hours"]
+        == 168
+    )
+
+    # Adapter config overrides the source default.
+    class ConfigAdapter:
+        config = type("C", (), {"forecast_end_hour": 96, "forecast_step_hours": 3, "forecast_start_hour": 6})()
+
+    configured = scheduler_discovery_module.source_horizon_metadata(gfs_06, ConfigAdapter())
+    assert configured == {
+        "max_lead_hours": 96,
+        "forecast_horizon_hours": 96,
+        "forecast_start_hour": 6,
+        "forecast_step_hours": 3,
+        "policy": "source_cycle",
+    }
+
+
+def test_discovery_evidence_allowed_cycle_hours_filter_order_and_utc() -> None:
+    d06 = _discovery_fixture(cycle_time="2026-05-21T06:00:00Z")
+    d18 = _discovery_fixture(cycle_time="2026-05-21T18:00:00Z")
+    # A naive datetime is normalized to UTC before the hour test.
+    naive = CycleDiscovery(
+        cycle_id="gfs_2026052106",
+        source_id="gfs",
+        cycle_time=datetime(2026, 5, 21, 6, 0, 0),
+        cycle_hour=6,
+        available=True,
+        status="discovered",
+    )
+    selected, excluded = scheduler_discovery_module._filter_allowed_cycle_hours(
+        [d18, naive, d06],
+        allowed_cycle_hours_utc=(6,),
+    )
+    assert selected == [naive, d06]
+    assert excluded == [d18]
+
+
+def test_discovery_evidence_duplicate_and_deferred_shapes_and_cycle_ids() -> None:
+    discovery = _discovery_fixture(available=False, status="unavailable", reason="source_cycle_unavailable")
+    duplicate = scheduler_discovery_module._duplicate_cycle_evidence(discovery, reason="duplicate_source_cycle")
+    assert duplicate == {
+        "type": "source_cycle",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026052106",
+        "cycle_time_utc": "2026-05-21T06:00:00Z",
+        "cycle_hour": 6,
+        "available": False,
+        "status": "excluded",
+        "reason": "duplicate_source_cycle",
+    }
+    deferred = scheduler_discovery_module._backfill_deferred_evidence(
+        discovery,
+        reason="backfill_deferred_waiting_for_prior_cycle",
+    )
+    assert deferred == {
+        "type": "backfill_deferred",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026052106",
+        "cycle_time_utc": "2026-05-21T06:00:00Z",
+        "cycle_hour": 6,
+        "available": False,
+        "status": "gap",
+        "reason": "backfill_deferred_waiting_for_prior_cycle",
+    }
+
+
+def test_discovery_evidence_hour_not_allowed_wraps_source_cycle_evidence() -> None:
+    discovery = _discovery_fixture(available=True, status="discovered")
+    evidence = scheduler_discovery_module._cycle_hour_not_allowed_evidence(discovery)
+    assert evidence["selection_status"] == "excluded"
+    assert evidence["selection_reason"] == "cycle_hour_not_allowed"
+    assert evidence["status"] == "excluded"
+    assert evidence["reason"] == "cycle_hour_not_allowed"
+    assert evidence["cycle_id"] == "gfs_2026052106"
+
+
+class _FixedWindowAdapter:
+    """Returns a fixed daily batch, optionally failing the one-arg call."""
+
+    def __init__(self, daily: int, *, fail_one_arg: bool = False) -> None:
+        self.daily = daily
+        self.fail_one_arg = fail_one_arg
+        self.one_arg_calls = 0
+        self.two_arg_calls = 0
+
+    def discover_cycles(self, *args: Any) -> list[CycleDiscovery]:
+        if len(args) == 1:
+            self.one_arg_calls += 1
+            if self.fail_one_arg:
+                raise TypeError("one-arg not supported")
+        else:
+            self.two_arg_calls += 1
+        return [
+            _discovery_fixture(cycle_time="2026-05-21T06:00:00Z")
+            for _index in range(self.daily)
+        ]
+
+
+def test_discover_source_window_inclusive_order_and_legacy_adapter_fallback() -> None:
+    # Legacy one-argument adapter works.
+    legacy = _FixedWindowAdapter(daily=1)
+    results = scheduler_discovery_module.discover_source_window(
+        legacy,
+        source_id="gfs",
+        start_time=_dt("2026-05-21T00:00:00Z"),
+        end_time=_dt("2026-05-21T02:00:00Z"),
+    )
+    assert len(results) == 1
+    assert legacy.one_arg_calls == 1
+    assert legacy.two_arg_calls == 0
+
+    # Adapter that rejects the one-arg call falls back to (cycle_date, None).
+    fallback = _FixedWindowAdapter(daily=1, fail_one_arg=True)
+    results = scheduler_discovery_module.discover_source_window(
+        fallback,
+        source_id="gfs",
+        start_time=_dt("2026-05-21T00:00:00Z"),
+        end_time=_dt("2026-05-21T02:00:00Z"),
+    )
+    assert len(results) == 1
+    assert fallback.one_arg_calls == 1
+    assert fallback.two_arg_calls == 1
+
+    # A non-TypeError from the one-arg call propagates unchanged.
+    class _FailingAdapter:
+        def discover_cycles(self, cycle_date: Any, end_date: Any = None) -> list[CycleDiscovery]:
+            del end_date
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        scheduler_discovery_module.discover_source_window(
+            _FailingAdapter(),
+            source_id="gfs",
+            start_time=_dt("2026-05-21T00:00:00Z"),
+            end_time=_dt("2026-05-21T02:00:00Z"),
+        )
+
+
+def test_discover_source_window_limit_boundary_is_strictly_greater() -> None:
+    # Exactly MAX_DISCOVERED_CYCLES is allowed.
+    at_limit = _FixedWindowAdapter(daily=MAX_DISCOVERED_CYCLES)
+    results = scheduler_discovery_module.discover_source_window(
+        at_limit,
+        source_id="gfs",
+        start_time=_dt("2026-05-21T00:00:00Z"),
+        end_time=_dt("2026-05-21T02:00:00Z"),
+    )
+    assert len(results) == MAX_DISCOVERED_CYCLES
+
+    # One more than the limit raises the typed error with exact details.
+    over_limit = _FixedWindowAdapter(daily=MAX_DISCOVERED_CYCLES + 1)
+    with pytest.raises(scheduler_module.SchedulerResourceLimitError) as exc_info:
+        scheduler_discovery_module.discover_source_window(
+            over_limit,
+            source_id="gfs",
+            start_time=_dt("2026-05-21T00:00:00Z"),
+            end_time=_dt("2026-05-21T02:00:00Z"),
+        )
+    assert exc_info.value.reason == "cycle_discovery_limit_exceeded"
+    assert exc_info.value.details == {
+        "max_discovered_cycles": MAX_DISCOVERED_CYCLES,
+        "discovered_cycle_count": MAX_DISCOVERED_CYCLES + 1,
+        "source_id": "gfs",
+        "cycle_date": "2026-05-21",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Owner-dependency mutation matrix.  Every row replaces an owner symbol with a
+# distinguishing sentinel and asserts the matching historical helper observes
+# it at call time.  A wrapper that statically captured its dependency (direct
+# alias / re-export) would leave the sentinel unobserved and the row RED.
+# ---------------------------------------------------------------------------
+
+
+def test_mutation_cycle_hour_not_allowed_evidence_observes_owner_source_cycle_evidence(
+    monkeypatch: Any,
+) -> None:
+    discovery = _discovery_fixture(available=True)
+    monkeypatch.setattr(
+        scheduler_discovery_module,
+        "_source_cycle_evidence",
+        lambda _discovery, *, horizon: {"marker": "patched", "horizon": dict(horizon)},
+    )
+    result = scheduler_discovery_module._cycle_hour_not_allowed_evidence(discovery)
+    assert result["marker"] == "patched"
+    assert result["horizon"] == {}
+    assert result["selection_status"] == "excluded"
+    assert result["selection_reason"] == "cycle_hour_not_allowed"
+
+
+def test_mutation_source_cycle_evidence_observes_owner_helpers(monkeypatch: Any) -> None:
+    discovery = _discovery_fixture(
+        available=False,
+        status="forbidden",
+        reason="source_cycle_forbidden",
+        classifier="forbidden",
+        retryable=False,
+        probe_uri="https://provider.example.test/file",
+        evidence={"probe": {"uri": "https://provider.example.test/file"}},
+    )
+    captured = scheduler_discovery_module._source_cycle_evidence
+
+    # _ensure_utc: a fixed-hour replacement flips cycle_hour to the sentinel.
+    monkeypatch.setattr(scheduler_discovery_module, "_ensure_utc", _FixedHourEnsureUtc())
+    assert captured(discovery, horizon={})["cycle_hour"] == 9
+    # _format_utc: a marker replacement is emitted verbatim.
+    monkeypatch.setattr(scheduler_discovery_module, "_format_utc", lambda _value: "MARKER_FORMAT")
+    assert captured(discovery, horizon={})["cycle_time_utc"] == "MARKER_FORMAT"
+    # _source_secret_text_safe: a marker replacement is emitted verbatim.
+    monkeypatch.setattr(scheduler_discovery_module, "_source_secret_text_safe", lambda _value: "MARKER_SECRET")
+    assert captured(discovery, horizon={})["probe_uri"] == "MARKER_SECRET"
+    # _source_cycle_status_candidate: a marker replacement is emitted verbatim.
+    monkeypatch.setattr(scheduler_discovery_module, "_source_cycle_status_candidate", lambda *a, **k: "MARKER_STATUS")
+    assert captured(discovery, horizon={})["cycle_status_candidate"] == "MARKER_STATUS"
+    # _source_discovery_evidence_safe: a marker replacement is emitted verbatim.
+    monkeypatch.setattr(
+        scheduler_discovery_module,
+        "_source_discovery_evidence_safe",
+        lambda _value: {"marker": "discovery"},
+    )
+    assert captured(discovery, horizon={})["discovery_evidence"] == {"marker": "discovery"}
+    # _evidence_safe: a marker replacement makes the whole evidence the marker.
+    monkeypatch.setattr(scheduler_discovery_module, "_evidence_safe", lambda _value: {"marker": "evidence_safe"})
+    assert captured(discovery, horizon={}) == {"marker": "evidence_safe"}
+
+
+def test_mutation_source_discovery_evidence_safe_observes_owner_dependencies(
+    monkeypatch: Any,
+) -> None:
+    captured = scheduler_discovery_module._source_discovery_evidence_safe
+
+    # Sensitive-key regex: a no-match regex keeps the key name instead of
+    # replacing it with the key placeholder.  The value is still redacted by
+    # ``_evidence_safe`` (Authorization is a redact_payload-sensitive key).
+    monkeypatch.setattr(
+        scheduler_discovery_module,
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        re.compile(r"(?!)"),
+    )
+    assert captured({"Authorization": "plain"}) == {"Authorization": "[redacted]"}
+    monkeypatch.undo()
+
+    # _source_secret_text_safe: a marker replacement is emitted verbatim.
+    monkeypatch.setattr(scheduler_discovery_module, "_source_secret_text_safe", lambda _value: "MARKER_STR")
+    assert captured("anything") == "MARKER_STR"
+    monkeypatch.undo()
+
+    # _evidence_safe: a marker replacement is emitted for a scalar leaf.
+    monkeypatch.setattr(scheduler_discovery_module, "_evidence_safe", lambda _value: {"marker": "leaf"})
+    assert captured(123) == {"marker": "leaf"}
+    monkeypatch.undo()
+
+
+def test_mutation_source_discovery_evidence_safe_recursion_resolves_through_owner(
+    monkeypatch: Any,
+) -> None:
+    original = scheduler_discovery_module._source_discovery_evidence_safe
+    calls: list[Any] = []
+
+    def intercept(value: Any) -> Any:
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(scheduler_discovery_module, "_source_discovery_evidence_safe", intercept)
+    result = intercept({"outer": {"inner": {"b": 1}}})
+    # Default behavior is preserved through the interception.
+    assert result == {"outer": {"inner": {"b": 1}}}
+    # The recursive dispatch for the nested mapping went through the owner
+    # symbol, not a captured extracted-module copy.
+    assert any(isinstance(item, Mapping) and "inner" in item for item in calls)
+
+
+def test_mutation_source_secret_text_safe_observes_owner_redact_payload_and_regex(
+    monkeypatch: Any,
+) -> None:
+    captured = scheduler_discovery_module._source_secret_text_safe
+
+    # redact_payload: a non-string replacement is stringified verbatim.
+    monkeypatch.setattr(scheduler_discovery_module, "redact_payload", lambda _value: 12345)
+    assert captured("anything") == "12345"
+    monkeypatch.undo()
+
+    # SOURCE_DISCOVERY_SENSITIVE_TEXT_RE: a no-match regex leaves the
+    # redact_payload result un-substituted, which the default cannot produce.
+    monkeypatch.setattr(
+        scheduler_discovery_module,
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        re.compile(r"(?!)"),
+    )
+    assert captured("Authorization: Bearer abc") == "Authorization: Bearer [redacted]"
+    monkeypatch.undo()
+
+
+def test_mutation_filter_allowed_cycle_hours_observes_owner_ensure_utc(monkeypatch: Any) -> None:
+    discovery = _discovery_fixture(cycle_time="2026-05-21T06:00:00Z")
+    captured = scheduler_discovery_module._filter_allowed_cycle_hours
+    monkeypatch.setattr(scheduler_discovery_module, "_ensure_utc", _FixedHourEnsureUtc())
+    # The real cycle is at hour 6; the sentinel sees hour 9, so it must be
+    # excluded even though 6 is allowed.
+    selected, excluded = captured([discovery], allowed_cycle_hours_utc=(6,))
+    assert selected == []
+    assert excluded == [discovery]
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ["_duplicate_cycle_evidence", "_backfill_deferred_evidence"],
+)
+def test_mutation_duplicate_and_deferred_evidence_observe_owner_dependencies(
+    monkeypatch: Any,
+    helper_name: str,
+) -> None:
+    discovery = _discovery_fixture(available=False, status="unavailable", reason="source_cycle_unavailable")
+    captured = getattr(scheduler_discovery_module, helper_name)
+
+    monkeypatch.setattr(scheduler_discovery_module, "cycle_id_for", lambda *_a, **_k: "SENTINEL_CYCLE")
+    assert captured(discovery, reason="r")["cycle_id"] == "SENTINEL_CYCLE"
+    monkeypatch.undo()
+
+    monkeypatch.setattr(scheduler_discovery_module, "_format_utc", lambda _value: "SENTINEL_TIME")
+    assert captured(discovery, reason="r")["cycle_time_utc"] == "SENTINEL_TIME"
+    monkeypatch.undo()
+
+    monkeypatch.setattr(scheduler_discovery_module, "_ensure_utc", _FixedHourEnsureUtc())
+    assert captured(discovery, reason="r")["cycle_hour"] == 9
+    monkeypatch.undo()
+
+
+def test_mutation_source_horizon_metadata_observes_owner_helpers(monkeypatch: Any) -> None:
+    discovery = _discovery_fixture(source_id="IFS", cycle_time="2026-05-21T06:00:00Z")
+    captured = scheduler_discovery_module.source_horizon_metadata
+
+    # _ensure_utc: a fixed-hour replacement moves an IFS 06z cycle (default
+    # 144) onto the non-6/18 branch (168), which the default cannot produce.
+    monkeypatch.setattr(scheduler_discovery_module, "_ensure_utc", _FixedHourEnsureUtc())
+    assert captured(discovery, _ConfigLessAdapter("IFS"))["max_lead_hours"] == 168
+    monkeypatch.undo()
+
+    # normalize_source_id: an unknown source yields no default horizon branch.
+    monkeypatch.setattr(scheduler_discovery_module, "normalize_source_id", lambda _value: "unknown")
+    assert captured(discovery, _ConfigLessAdapter("gfs"))["max_lead_hours"] is None
+    monkeypatch.undo()
+
+
+def test_mutation_discover_source_window_observes_owner_limit_and_error_class(
+    monkeypatch: Any,
+) -> None:
+    captured = scheduler_discovery_module.discover_source_window
+
+    # MAX_DISCOVERED_CYCLES: a small replacement trips the limit early.
+    monkeypatch.setattr(scheduler_discovery_module, "MAX_DISCOVERED_CYCLES", 1)
+    with pytest.raises(scheduler_module.SchedulerResourceLimitError) as exc_info:
+        captured(
+            _FixedWindowAdapter(daily=2),
+            source_id="gfs",
+            start_time=_dt("2026-05-21T00:00:00Z"),
+            end_time=_dt("2026-05-21T02:00:00Z"),
+        )
+    assert exc_info.value.details["max_discovered_cycles"] == 1
+    monkeypatch.undo()
+
+    # SchedulerResourceLimitError: a replacement class is raised verbatim.
+    class SentinelLimitError(ValueError):
+        def __init__(self, reason: str, details: Mapping[str, Any]) -> None:
+            super().__init__(reason)
+            self.reason = reason
+            self.details = dict(details)
+
+    monkeypatch.setattr(scheduler_discovery_module, "MAX_DISCOVERED_CYCLES", 1)
+    monkeypatch.setattr(scheduler_discovery_module, "SchedulerResourceLimitError", SentinelLimitError)
+    with pytest.raises(SentinelLimitError) as exc_info:
+        captured(
+            _FixedWindowAdapter(daily=2),
+            source_id="gfs",
+            start_time=_dt("2026-05-21T00:00:00Z"),
+            end_time=_dt("2026-05-21T02:00:00Z"),
+        )
+    assert exc_info.value.reason == "cycle_discovery_limit_exceeded"
+    assert exc_info.value.details["max_discovered_cycles"] == 1
+
+
+def test_discovery_evidence_structural_split_module_exists_and_owner_delegates() -> None:
+    """The pure implementations live in the extracted module; the owner keeps
+    every historical name as a wrapper/composite/re-export, never as a copy.
+
+    This is the structural contract that fails when the extraction is absent:
+    without ``scheduler_discovery_evidence`` the owner module is monolithic
+    and its helpers are the extracted ``_impl`` bodies themselves.
+    """
+    from services.orchestrator import scheduler_discovery_evidence as evidence_module
+
+    impl_names = (
+        "_discover_source_window_impl",
+        "_filter_allowed_cycle_hours_impl",
+        "_source_secret_text_safe_impl",
+        "_duplicate_cycle_evidence_impl",
+        "_backfill_deferred_evidence_impl",
+        "source_horizon_metadata_impl",
+        "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason",
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+    )
+    for impl_name in impl_names:
+        assert hasattr(evidence_module, impl_name), impl_name
+
+    # Owner wrappers delegate to the extracted implementations: each
+    # dependency-bearing owner name must NOT be the extracted module's own
+    # function object (a direct re-export would bypass owner monkeypatches).
+    assert scheduler_discovery_module.discover_source_window is not (
+        evidence_module._discover_source_window_impl
+    )
+    assert scheduler_discovery_module._filter_allowed_cycle_hours is not (
+        evidence_module._filter_allowed_cycle_hours_impl
+    )
+    assert scheduler_discovery_module._source_secret_text_safe is not (
+        evidence_module._source_secret_text_safe_impl
+    )
+    assert scheduler_discovery_module._duplicate_cycle_evidence is not (
+        evidence_module._duplicate_cycle_evidence_impl
+    )
+    assert scheduler_discovery_module._backfill_deferred_evidence is not (
+        evidence_module._backfill_deferred_evidence_impl
+    )
+    assert scheduler_discovery_module.source_horizon_metadata is not (
+        evidence_module.source_horizon_metadata_impl
+    )
+    # Dependency-free leaves and the constants ARE direct re-exports (the
+    # owner binds them to the extracted objects).
+    assert scheduler_discovery_module._source_cycle_status_candidate is (
+        evidence_module._source_cycle_status_candidate
+    )
+    assert scheduler_discovery_module._source_cycle_not_selected_reason is (
+        evidence_module._source_cycle_not_selected_reason
+    )
+    assert scheduler_discovery_module.SOURCE_DISCOVERY_SENSITIVE_KEY_RE is (
+        evidence_module.SOURCE_DISCOVERY_SENSITIVE_KEY_RE
+    )
+    assert scheduler_discovery_module.SOURCE_DISCOVERY_SENSITIVE_TEXT_RE is (
+        evidence_module.SOURCE_DISCOVERY_SENSITIVE_TEXT_RE
+    )
