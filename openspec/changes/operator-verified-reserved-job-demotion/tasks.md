@@ -28,13 +28,13 @@
 - [x] 5.2 Produce one batched red proof against pre-change production code for the new public-seam tests, restore production, leave no `red-proof` stash, and record any implementation deviation or state no deviations.
 - [x] 5.3 Run focused pytest covering journal CAS/event/reclaim, cycle integration, both CLI entrypoints, #1116 preservation, and selector importer ownership; run tracked-Python Ruff, strict OpenSpec validation, and `git diff --check`.
 
-## 6. Node-22 live receipt
+## 6. Production-safe runtime evidence
 
-- [ ] 6.1 On node-22, select or safely create one real file-journal `reserved/accounting_unavailable/comment_accounting_unproven` unbound master; record its exact job id, attempt, anchor, cohort identity, journal hashes, and precondition that the target is confirmed dead by name/time/user/account `sacct` plus `squeue` checks.
-- [ ] 6.2 Run the confirmed operator command, capture success JSON and durable audit event, then run one scheduler pass and prove the held row no longer causes `PIPELINE_ALREADY_ACTIVE`, reclaim minted one fresh attempt/anchor, and exactly one cohort resubmission occurred.
-- [ ] 6.3 Capture negative live evidence with a stale anchor or repeated command showing non-zero refusal and byte-identical journal state; record cleanup/rollback boundaries and ensure no unrelated live row was changed.
+- [x] 6.1 Inspect the active node-22 journal and Slurm context read-only for a naturally occurring exact held master; record the census and the shared-identity/global-Slurm/NFS/retention boundaries that make a scratch journal non-isolated. If no eligible row exists, stop without changing scheduler services, gateway reachability, journal authority, or Slurm state.
+- [x] 6.2 Prove the held → typed demotion → verified-retry → reclaim/resubmit chain at the highest deterministic repository/cycle seams, including exact attempt+1/fresh-anchor behavior, no `PIPELINE_ALREADY_ACTIVE`, one resubmission eligibility decision, stale/repeat byte-identical refusals, audit durability, pre-commit atomicity, and post-commit projection faults; bind the evidence to the final head and CI.
+- [x] 6.3 Document the conditional live procedure: only a naturally occurring row independently confirmed dead by name/time/user/account `sacct` plus `squeue` checks may be demoted; that incident SHALL capture the success/event, stale or repeat refusal, fresh attempt/anchor, one cohort resubmission, and cleanup boundaries. Absence of such a row is not a release blocker and SHALL NOT be remedied by manufacturing a production incident.
 
 ## 7. Review boundary
 
 - [x] 7.1 Confirm no changes to the automatic comment-capability gate, manual-retry source statuses, PostgreSQL schema/reclaim, Slurm configuration, generic decision whitelist, or identity-release reclaim behavior.
-- [ ] 7.2 Completion self-audit maps every issue acceptance criterion and selected risk pack to the final diff, local tests, durable audit evidence, or node-22 receipt; record all deviations and route any deferral.
+- [ ] 7.2 Completion self-audit maps every issue acceptance criterion and selected risk pack to the final diff, deterministic tests, durable audit evidence, final-head CI, the node-22 read-only census, and the conditional incident receipt procedure; record all deviations and route any deferral.

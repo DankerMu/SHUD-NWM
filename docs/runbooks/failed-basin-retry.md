@@ -275,6 +275,26 @@ Match by submit time inside the reservation's attempt window and by user/account
 `expected_slurm_user` / `expected_slurm_account`, when `slurm_ownership_required` is set).
 `squeue` covers the still-queued/running half without the accounting propagation lag.
 
+### Production-safe validation rule
+
+A held `reserved` row is a natural production state, not a release-validation fixture —
+it must never be manufactured to produce a receipt. Follow this order, and stop at the
+first step that is not satisfied:
+
+1. **Read-only census first.** Use the evidence and journal reads above (pass evidence,
+   journal replay, `sacct`/`squeue`) to locate held rows. None of these writes anything.
+2. **No natural candidate: stop.** If the census finds no exact held row, there is
+   nothing to validate against a live row. Release then relies on the deterministic
+   highest-seam chain plus the fault/refusal matrix plus final-head CI — a held row is
+   not required.
+3. **Never manufacture one.** For a receipt, do not stop the production scheduler, do
+   not force the gateway or its endpoint unreachable, do not inject or rewrite held
+   authority into the production journal, and do not submit a real cohort. All four are
+   forbidden production mutations.
+4. **Natural accidents proceed normally.** When a held row does appear naturally, run
+   Disposition case 3 below in full — `sacct`/`squeue` proof, typed CAS, receipt, and
+   next-pass verification — and keep the complete receipt.
+
 ### Disposition — confirmed dead rows: the guarded operator demotion
 
 1. **Fix the cluster — but only after every held row has been through the in-flight

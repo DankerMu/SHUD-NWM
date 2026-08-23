@@ -2,7 +2,7 @@
 
 Issue #1564 is the deliberate operational complement to #1116. When `AccountingStoreFlags` lacks `job_comment`, reconcile records a current accepted-submit cohort master as `reserved`, unbound, `submit_result_ambiguous`, `slurm_exact_comment`, `accounting_unavailable`, and `comment_accounting_unproven`. Treating the empty query as absence would risk duplicate submission, so automation must remain fail-closed. After an operator independently proves the job dead with name/time/user/account evidence, however, the file journal has no typed way to record that proof; generic transition, HTTP manual retry, and reclaim all reject the held row.
 
-**Fixture level:** expanded because this changes a production CLI and a persisted state transition. **Repair intensity:** high because a false positive can double-submit a forecast cohort and a partial write can separate durable state from its audit evidence. The NHMS project profile already covers orchestration, Slurm mock-vs-real parity, persisted state, and node-22 runtime receipts; no profile update is needed.
+**Fixture level:** expanded because this changes a production CLI and a persisted state transition. **Repair intensity:** high because a false positive can double-submit a forecast cohort and a partial write can separate durable state from its audit evidence. The NHMS project profile already covers orchestration, Slurm mock-vs-real parity, persisted state, and node-22 runtime evidence; no profile update is needed. Runtime evidence is production-safe: absent a naturally occurring eligible row, node-22 validation stops after a read-only census and does not manufacture a scheduler incident.
 
 ## Goals / Non-Goals
 
@@ -78,6 +78,10 @@ No stdin prompt is used because node-22 automation and receipts must be reproduc
 
 Prefer a focused new CLI test module if it makes click/argparse parity readable; if added, include it in `ORCHESTRATOR_CLI_IMPORTER_TESTS` so a `cli.py`-only PR selects it. Journal tests compare bytes before/after every refusal, inspect the exact master/hydro/event durable rows on success, and drive the real demote → cycle verified-retry → reclaim path. Tests do not hand-build a post-state that bypasses the typed transition.
 
+### D7: Release evidence must not manufacture a production incident
+
+The rare held pre-state is an incident to recover from, not a fixture that release validation must create. Node-22 validation first performs a read-only census of the active journal and Slurm context. If no naturally occurring exact held row exists, that census plus the deterministic full-chain/fault evidence is sufficient for release. Validation SHALL NOT quiesce the production scheduler, force gateway failure, seed or rewrite journal authority, or submit a real cohort merely to create a receipt. When a naturally occurring held row later exists, the operator procedure remains mandatory for that incident: independently prove absence, use the exact typed CAS, retain success/audit/refusal evidence, and verify one reclaim/resubmission. This conditional receipt is operational evidence, not a prerequisite whose absence incentivizes fault injection.
+
 ## Selected Risk Packs
 
 - Public API / CLI / script entry: selected — new `nhms-pipeline` command; both entrypoints, output, stderr, and exits are contract surfaces.
@@ -91,7 +95,7 @@ Prefer a focused new CLI test module if it makes click/argparse parity readable;
 - Config / project setup: not selected — no new configuration key or dependency.
 - Resource limits / large input / discovery: not selected — one bounded row and bounded note; no directory discovery expansion.
 - Release / packaging / dependency compatibility: not selected — existing Python entrypoint and dependencies only.
-- NHMS domain packs: Slurm production lifecycle / mock-vs-real parity selected for the node-22 live receipt; geospatial, forcing windows, numerical runtime, database domain behavior, provider snapshots, and published display identity are not selected.
+- NHMS domain packs: Slurm production lifecycle / mock-vs-real parity selected for deterministic full-chain tests, a read-only node-22 census, and a conditional receipt from a naturally occurring safe target; geospatial, forcing windows, numerical runtime, database domain behavior, provider snapshots, and published display identity are not selected.
 
 ## Invariant Matrix
 
@@ -107,7 +111,7 @@ Prefer a focused new CLI test module if it makes click/argparse parity readable;
 - Public routes/entrypoints: click and argparse `nhms-pipeline demote-reserved-job`.
 - Frontend/downstream consumers: scheduler cycle verified-retry shortcut, reservation reclaim, existing sbatch path; no frontend.
 - Failure/rollback/stale state: wrong row shape, stale attempt/anchor, concurrent bind/permit/reclaim, append failure, event validation failure.
-- Evidence/audit/readiness: success JSON, durable operator event, runbook, focused tests, node-22 live receipt.
+- Evidence/audit/readiness: success JSON, durable operator event, runbook, discriminating deterministic tests, final-head CI, read-only node-22 census, and a conditional live receipt when a naturally occurring safe target exists.
 
 **Regression rows:**
 
@@ -116,6 +120,7 @@ Prefer a focused new CLI test module if it makes click/argparse parity readable;
 - Automatic `absence_retry_permitted` → existing reclaim behavior unchanged.
 - `identity_mismatch_released`, manual retry, generic transition, and PostgreSQL repository → remain outside the new operator reclaim contract.
 - Append/event fault before commit → neither state nor audit becomes durable.
+- No naturally occurring eligible node-22 row → record a read-only census and perform no live demotion/resubmission; deterministic full-chain evidence remains the release oracle. A later natural incident → follow the guarded procedure and retain its receipt as operational evidence.
 
 ## Boundary-Surface Checklist
 
@@ -137,10 +142,10 @@ Prefer a focused new CLI test module if it makes click/argparse parity readable;
 
 ## Migration Plan
 
-1. Deploy code and run focused/local tests.
-2. On node-22, identify one held row and independently prove absence with the documented Slurm queries.
-3. Invoke the command with exact persisted attempt/anchor and operator evidence.
-4. Run one scheduler pass and capture durable event, reclaim/new attempt, disappearance of `PIPELINE_ALREADY_ACTIVE`, and one cohort resubmission.
+1. Deploy code only after the deterministic held → demote → verified-retry → reclaim/resubmit chain, refusal/fault matrix, lint, strict OpenSpec validation, and final-head CI pass.
+2. Inspect node-22 read-only for a naturally occurring held row. If none exists, record the census and stop: release validation SHALL NOT stop the production scheduler, make the gateway unreachable, seed a synthetic held row, rewrite journal authority, or submit a real cohort merely to create evidence.
+3. If a naturally occurring held row exists and an operator independently proves it dead with the documented Slurm queries, invoke the command with the exact persisted attempt/anchor and operator evidence.
+4. After that real operational use, capture the durable event, stale/repeat refusal, reclaim/new attempt, disappearance of `PIPELINE_ALREADY_ACTIVE`, and one cohort resubmission. This receipt validates the incident response in situ but is not a release prerequisite when the required pre-state does not naturally exist.
 5. Rollback is a code rollback only before use. After a successful operator demotion/reclaim, do not rewrite journal history; recover through normal scheduler semantics and the audit trail.
 
 ## Open Questions

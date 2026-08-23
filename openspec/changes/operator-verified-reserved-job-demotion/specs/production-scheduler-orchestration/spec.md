@@ -43,3 +43,13 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI that converts 
 
 - **WHEN** a caller uses the PostgreSQL repository, the HTTP/manual retry API, or a generic file-journal evidence transition
 - **THEN** no `operator_verified_absence` demotion capability is exposed and `reserved` remains outside the manual-retry source statuses
+
+#### Scenario: Release validation does not manufacture a production incident
+
+- **WHEN** a read-only census of the active production file journal finds no naturally occurring master in the exact held pre-state
+- **THEN** release evidence SHALL use the deterministic held-to-reclaim chain, fault/refusal matrix, final-head CI, and recorded census; it SHALL NOT stop the production scheduler, force gateway unavailability, inject or rewrite journal authority, or submit a real cohort merely to create a live receipt
+
+#### Scenario: A natural held-row incident retains an in-situ receipt
+
+- **WHEN** a naturally occurring exact held master is independently confirmed dead with name/time/user/account `sacct` and `squeue` evidence and the guarded command is used operationally
+- **THEN** the incident record SHALL retain the success receipt and durable audit event, a stale or repeated zero-write refusal, the fresh reclaim attempt and anchor, exactly one cohort resubmission, and the cleanup boundary
