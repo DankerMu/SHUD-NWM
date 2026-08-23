@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -8,8 +7,15 @@ from typing import Any, Protocol
 
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id
+from services.orchestrator import scheduler_discovery_evidence as _evidence
 from services.orchestrator import scheduler_generation as _scheduler_generation
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
+from services.orchestrator.scheduler_discovery_evidence import (  # noqa: F401
+    SOURCE_DISCOVERY_SENSITIVE_KEY_RE,
+    SOURCE_DISCOVERY_SENSITIVE_TEXT_RE,
+    _source_cycle_not_selected_reason,
+    _source_cycle_status_candidate,
+)
 from services.orchestrator.scheduler_init_state_match import (
     TERMINAL_INIT_STATE_ABSENT,
     TERMINAL_INIT_STATE_CONFLICT,
@@ -865,26 +871,16 @@ def discover_source_window(
     start_time: datetime,
     end_time: datetime,
 ) -> list[CycleDiscovery]:
-    discoveries: list[CycleDiscovery] = []
-    current_date = start_time.date()
-    while current_date <= end_time.date():
-        try:
-            daily = adapter.discover_cycles(current_date)
-        except TypeError:
-            daily = adapter.discover_cycles(current_date, None)
-        if len(discoveries) + len(daily) > MAX_DISCOVERED_CYCLES:
-            raise SchedulerResourceLimitError(
-                "cycle_discovery_limit_exceeded",
-                {
-                    "max_discovered_cycles": MAX_DISCOVERED_CYCLES,
-                    "discovered_cycle_count": len(discoveries) + len(daily),
-                    "source_id": source_id,
-                    "cycle_date": current_date.isoformat(),
-                },
-            )
-        discoveries.extend(daily)
-        current_date += timedelta(days=1)
-    return discoveries
+    # Thin owner wrapper: passes current owner globals so reassigning
+    # MAX_DISCOVERED_CYCLES / SchedulerResourceLimitError here is observed.
+    return _evidence._discover_source_window_impl(
+        adapter,
+        source_id=source_id,
+        start_time=start_time,
+        end_time=end_time,
+        max_discovered_cycles=MAX_DISCOVERED_CYCLES,
+        resource_limit_error=SchedulerResourceLimitError,
+    )
 
 
 def _filter_allowed_cycle_hours(
@@ -892,15 +888,11 @@ def _filter_allowed_cycle_hours(
     *,
     allowed_cycle_hours_utc: Sequence[int],
 ) -> tuple[list[CycleDiscovery], list[CycleDiscovery]]:
-    allowed = {int(hour) for hour in allowed_cycle_hours_utc}
-    selected: list[CycleDiscovery] = []
-    excluded: list[CycleDiscovery] = []
-    for discovery in discoveries:
-        if _ensure_utc(discovery.cycle_time).hour in allowed:
-            selected.append(discovery)
-        else:
-            excluded.append(discovery)
-    return selected, excluded
+    return _evidence._filter_allowed_cycle_hours_impl(
+        discoveries,
+        allowed_cycle_hours_utc=allowed_cycle_hours_utc,
+        ensure_utc=_ensure_utc,
+    )
 
 
 def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, Any]) -> dict[str, Any]:
@@ -938,36 +930,6 @@ def _cycle_hour_not_allowed_evidence(discovery: CycleDiscovery) -> dict[str, Any
     return evidence
 
 
-def _source_cycle_status_candidate(discovery: CycleDiscovery, *, available: bool) -> str:
-    if available:
-        return "discovered"
-    if discovery.status == "probe_failed" or discovery.reason == "source_cycle_probe_failed":
-        return "probe_failed"
-    if discovery.status == "rate_limited" or discovery.reason == "source_cycle_rate_limited":
-        return "rate_limited"
-    return "unavailable"
-
-
-def _source_cycle_not_selected_reason(discovery: CycleDiscovery) -> str:
-    if discovery.reason == "source_cycle_probe_failed" or discovery.status == "probe_failed":
-        return "source_cycle_probe_failed_does_not_consume_source_budget"
-    if discovery.reason == "source_cycle_rate_limited" or discovery.status == "rate_limited":
-        return "source_cycle_rate_limited_does_not_consume_source_budget"
-    return "source_cycle_unavailable_does_not_consume_source_budget"
-
-
-SOURCE_DISCOVERY_SENSITIVE_KEY_RE = re.compile(
-    r"(authorization|auth|header|env|token|signature|credential|secret|password|passwd|pwd|api[_-]?key|"
-    r"access[_-]?key|session[_-]?key)",
-    re.IGNORECASE,
-)
-SOURCE_DISCOVERY_SENSITIVE_TEXT_RE = re.compile(
-    r"(authorization|bearer|basic|token|signature|credential|secret|password|passwd|pwd|api[_-]?key|"
-    r"access[_-]?key|session[_-]?key)",
-    re.IGNORECASE,
-)
-
-
 def _source_discovery_evidence_safe(value: Any) -> Any:
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
@@ -986,64 +948,37 @@ def _source_discovery_evidence_safe(value: Any) -> Any:
 
 
 def _source_secret_text_safe(value: str) -> str:
-    raw = str(value)
-    safe = redact_payload(raw)
-    if not isinstance(safe, str):
-        return str(safe)
-    if safe == raw and SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.search(safe):
-        return "[redacted]"
-    return SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.sub("[redacted]", safe)
+    return _evidence._source_secret_text_safe_impl(
+        value,
+        redact_payload_fn=redact_payload,
+        sensitive_text_re=SOURCE_DISCOVERY_SENSITIVE_TEXT_RE,
+    )
 
 
 def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
-    return {
-        "type": "source_cycle",
-        "source_id": discovery.source_id,
-        "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
-        "cycle_time_utc": _format_utc(discovery.cycle_time),
-        "cycle_hour": _ensure_utc(discovery.cycle_time).hour,
-        "available": discovery.available,
-        "status": "excluded",
-        "reason": reason,
-    }
+    return _evidence._duplicate_cycle_evidence_impl(
+        discovery,
+        reason=reason,
+        ensure_utc=_ensure_utc,
+        format_utc=_format_utc,
+        cycle_id_for_fn=cycle_id_for,
+    )
 
 
 def _backfill_deferred_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
-    return {
-        "type": "backfill_deferred",
-        "source_id": discovery.source_id,
-        "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
-        "cycle_time_utc": _format_utc(discovery.cycle_time),
-        "cycle_hour": _ensure_utc(discovery.cycle_time).hour,
-        "available": discovery.available,
-        "status": "gap",
-        "reason": reason,
-    }
+    return _evidence._backfill_deferred_evidence_impl(
+        discovery,
+        reason=reason,
+        ensure_utc=_ensure_utc,
+        format_utc=_format_utc,
+        cycle_id_for_fn=cycle_id_for,
+    )
 
 
 def source_horizon_metadata(discovery: CycleDiscovery, adapter: CycleDiscoveryAdapter) -> dict[str, Any]:
-    source_id = normalize_source_id(discovery.source_id)
-    cycle_time = _ensure_utc(discovery.cycle_time)
-    config = getattr(adapter, "config", None)
-    max_lead_hours: int | None = None
-    forecast_step_hours: int | None = None
-    forecast_start_hour = 0
-    if config is not None and hasattr(config, "forecast_end_hour_for_cycle"):
-        max_lead_hours = int(config.forecast_end_hour_for_cycle(cycle_time.hour))
-    elif config is not None and hasattr(config, "forecast_end_hour"):
-        max_lead_hours = int(getattr(config, "forecast_end_hour"))
-    elif source_id == "IFS":
-        max_lead_hours = 144 if cycle_time.hour in {6, 18} else 168
-    elif source_id == "gfs":
-        max_lead_hours = 168
-    if config is not None and hasattr(config, "forecast_step_hours"):
-        forecast_step_hours = int(getattr(config, "forecast_step_hours"))
-    if config is not None and hasattr(config, "forecast_start_hour"):
-        forecast_start_hour = int(getattr(config, "forecast_start_hour"))
-    return {
-        "max_lead_hours": max_lead_hours,
-        "forecast_horizon_hours": max_lead_hours,
-        "forecast_start_hour": forecast_start_hour,
-        "forecast_step_hours": forecast_step_hours,
-        "policy": "source_cycle",
-    }
+    return _evidence.source_horizon_metadata_impl(
+        discovery,
+        adapter,
+        ensure_utc=_ensure_utc,
+        normalize_source_id_fn=normalize_source_id,
+    )

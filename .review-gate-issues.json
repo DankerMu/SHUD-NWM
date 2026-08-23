@@ -1990,6 +1990,17 @@
       "ceilingPrs": [],
       "gateEntries": 1,
       "closed": []
+    },
+    "1799": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1803,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
     }
   },
   "1736": {
