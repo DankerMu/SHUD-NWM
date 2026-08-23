@@ -62,6 +62,25 @@ def test_publish_update_sets_status_only() -> None:
     assert "WHERE h.status = 'parsed'" in statement
 
 
+def test_publish_update_does_not_stamp_parsed_at() -> None:
+    """#1789: ``parsed_at`` belongs to the parser, and to nothing else.
+
+    Same failure class as the ``updated_at`` pin above, one layer down: publish
+    runs every tick, so a ``parsed_at`` bump here would make the column track
+    "last publish attempt" instead of "last successful parse". The autopipe
+    completeness criterion reads it as a parse timestamp to decide whether an
+    object-store product is newer than the ingested data, so a publish-bumped
+    value would claim a currency the data does not have and silently stop
+    re-ingesting genuinely recomputed runs.
+    """
+    publish_source = _publish_display_runs_source()
+    statement = publish_source[
+        publish_source.index("cur.execute(") : publish_source.index("return cur.rowcount")
+    ]
+
+    assert "parsed_at" not in statement
+
+
 def test_run_scoped_mvt_revision_rotates_on_publish_without_an_updated_at_bump() -> None:
     parsed_version = _run_source_version(_run_row("parsed"))
     published_version = _run_source_version(_run_row("published"))

@@ -624,3 +624,108 @@ def _classify(statement: str) -> str:
     if lowered.startswith("delete from hydro.river_timeseries"):
         return "delete"
     return f"other:{statement[:40]}"
+
+
+# ---------------------------------------------------------------------------
+# #1789: hydro_run.parsed_at is stamped by a successful parse, and by nothing
+# else. The recompute detector in scripts/node27_autopipeline.py reads this
+# column instead of aggregating the compressed fact table, so a parse that
+# fails to stamp it is not a cosmetic miss: the run's product mtime then
+# permanently exceeds its parse timestamp and the pipeline re-ingests it every
+# tick, forever.
+# ---------------------------------------------------------------------------
+
+# The status UPDATE's own gate, spelled out rather than imported: asserting the
+# constant against itself would stay green if someone widened it to include
+# 'published' -- which is precisely the change design D2 forbids, because it
+# downgrades a published run back to 'parsed' on every re-parse.
+EXPECTED_PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
+
+
+def _mark_run_parsed_connection() -> _FakeConnection:
+    """Answers only the status UPDATE, so the unconditional write stays visible.
+
+    ``RETURNING *`` on the status UPDATE is what the repository reads; the
+    parsed_at write has no RETURNING and must fall through to the empty
+    response, exactly as psycopg2 reports a statement with no result set.
+    """
+    return _FakeConnection(
+        responses=[("set status = 'parsed'", ["run_id", "status"], [("run_a", "parsed")])]
+    )
+
+
+def test_mark_run_parsed_stamps_parsed_at_unconditionally_before_the_status_gate() -> None:
+    connection = _mark_run_parsed_connection()
+
+    row = _repository(connection).mark_run_parsed("run_a")
+
+    assert row == {"run_id": "run_a", "status": "parsed"}
+    statements = [statement for statement, _params in connection.executions]
+    assert len(statements) == 2, statements
+
+    stamp, stamp_params = connection.executions[0]
+    normalized_stamp = " ".join(stamp.split())
+    assert normalized_stamp == "UPDATE hydro.hydro_run SET parsed_at = now() WHERE run_id = %s"
+    assert stamp_params == ("run_a",)
+    # The whole point (design D2): no status predicate. PARSE_READY_RUN_STATUSES
+    # excludes 'published', and re-parsing a published run is exactly the
+    # population recompute detection exists for. A status-gated stamp matches
+    # zero rows there and leaves parsed_at frozen in the past.
+    assert "status" not in normalized_stamp
+
+
+def test_mark_run_parsed_leaves_the_status_transition_byte_identical() -> None:
+    connection = _mark_run_parsed_connection()
+
+    _repository(connection).mark_run_parsed("run_a")
+
+    transition, params = connection.executions[1]
+    assert " ".join(transition.split()) == (
+        "UPDATE hydro.hydro_run SET status = 'parsed', error_code = NULL, error_message = NULL, "
+        "updated_at = now() WHERE run_id = %s AND status IN %s RETURNING *"
+    )
+    assert params == ("run_a", EXPECTED_PARSE_READY_RUN_STATUSES)
+    # parsed_at must NOT ride along in the gated statement: that is the
+    # half-fix, and it is silent -- the UPDATE simply matches no row.
+    assert "parsed_at" not in transition
+
+
+def test_mark_run_failed_never_stamps_parsed_at() -> None:
+    """A failed parse produced no rows, so it must not claim a parse time."""
+    connection = _FakeConnection(
+        responses=[("set status = 'failed'", ["run_id", "status"], [("run_a", "failed")])]
+    )
+
+    _repository(connection).mark_run_failed("run_a", "BOOM", "boom")
+
+    statements = [statement for statement, _params in connection.executions]
+    assert len(statements) == 1, statements
+    assert "parsed_at" not in statements[0]
+
+
+def test_unbound_mark_run_parsed_puts_both_writes_in_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two statements, one transaction -- or the stamp can commit alone.
+
+    ``_fetch_all`` owns and COMMITS its own connection when the repository is
+    unbound, so two bare calls would be two transactions: a crash between them
+    leaves parsed_at advanced on a run whose status never moved.
+    """
+    from contextlib import contextmanager
+    from dataclasses import replace as dataclass_replace
+
+    connection = _mark_run_parsed_connection()
+
+    @contextmanager
+    def _fake_transaction(self: Any) -> Any:
+        yield dataclass_replace(self, _connection=connection)
+
+    monkeypatch.setattr(PsycopgOutputParserRepository, "transaction", _fake_transaction)
+
+    unbound = PsycopgOutputParserRepository(database_url="postgres://unused")
+    assert unbound._connection is None
+    unbound.mark_run_parsed("run_a")
+
+    assert len(connection.executions) == 2
+    assert connection.commits == 0, "the transaction() context owns the commit, not _fetch_all"

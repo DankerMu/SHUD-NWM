@@ -1080,24 +1080,32 @@ def _already_ingested_runs(
     per-cycle forcing handoff every tick.
 
     Completeness is decided by AUTHORITY STATE first (#1674). A run at status
-    'published' is complete whether or not its river_timeseries rows are
-    key-visible right now: publish only ever happens once rows exist, so a
-    later invisibility has exactly two sources -- NULL-key legacy rows the
-    backfill could not reach inside compressed chunks (a recorded, converging
-    exclusion contract), or a retention-dropped chunk (an intentional
-    deletion). Neither should re-trigger the per-cycle handoff. A run at status
-    'parsed' still requires at least one key-visible row: after dual-write a
-    parsed run always has one, so its absence means the parser chain did not
-    finish and retrying is correct.
+    'published' is complete whether or not its fact rows are key-visible right
+    now: publish only ever happens once rows exist, so a later invisibility has
+    exactly two sources -- NULL-key legacy rows the backfill could not reach
+    inside compressed chunks (a recorded, converging exclusion contract), or a
+    retention-dropped chunk (an intentional deletion). Neither should
+    re-trigger the per-cycle handoff. A run at status 'parsed' still requires
+    evidence that a parse finished, now read as a non-NULL parsed_at.
+
+    This statement touches NO fact table (#1789). parsed_at is a column on
+    hydro_run, stamped by every successful parse; it used to be derived here as
+    MAX(created_at) over the fact rows, which meant decompressing every
+    compressed chunk on every tick to obtain one timestamp per run. The gate is
+    `h.status = 'published' OR h.parsed_at IS NOT NULL` and must stay that way:
+    a bare `parsed_at IS NOT NULL` would judge the legacy cohort incomplete.
 
     If the object-store run was rewritten after DB parse, do not skip it. That
     is the normal recovery path after a cold-start run is replaced by a
-    warm-start recompute with the same run_id. Recorded residual: on a legacy
-    NULL-key run the aggregate yields parsed_at NULL, so recompute detection
-    degrades to the init_state comparison alone -- a rewrite carrying the SAME
-    initial state is not detected on that cohort. hydro_run.updated_at is NOT
-    used as a fallback: publish deliberately leaves it alone while every tick's
-    register upsert bumps it, so it is not a parse timestamp.
+    warm-start recompute with the same run_id. Recorded residual: runs the
+    one-time backfill could not resolve -- the NULL-key legacy cohort, whose
+    fact rows carry no run_key to aggregate by -- keep parsed_at NULL, so
+    recompute detection degrades to the init_state comparison alone and a
+    rewrite carrying the SAME initial state is not detected on that cohort.
+    That is the same degradation, on the same cohort, as the aggregate it
+    replaced -- not a new one. hydro_run.updated_at is NOT used as a fallback:
+    publish deliberately leaves it alone while every tick's register upsert
+    bumps it, so it is not a parse timestamp.
 
     Runs at status 'superseded' are retired: skipped unconditionally (no
     timeseries-row or manifest-currency check), even though their object-store
@@ -1134,22 +1142,18 @@ def _already_ingested_runs(
                 """
                 SELECT h.run_id,
                        h.init_state_id,
-                       MAX(rt.created_at) AS parsed_at
+                       h.parsed_at
                 FROM hydro.hydro_run h
-                -- #1674: completeness is authority-state first. A published run
-                -- is complete whether or not its fact rows are key-visible
-                -- (NULL-key legacy rows in compressed chunks, or
-                -- retention-dropped chunks, must not re-trigger the per-cycle
-                -- handoff); a parsed run still needs at least one key-visible
-                -- row.
-                -- #1442: key-only join, no transitional text aid
-                -- (rt.run_id = h.run_id is the forbidden text fact join).
-                LEFT JOIN hydro.river_timeseries rt
-                  ON rt.run_key = h.run_key
                 WHERE h.run_id = ANY(%s)
                   AND h.status IN ('parsed', 'published')
-                GROUP BY h.run_id, h.init_state_id, h.status
-                HAVING h.status = 'published' OR COUNT(rt.run_key) > 0
+                  -- #1674: completeness is authority-state first. A published
+                  -- run is complete on its own; a parsed run still needs
+                  -- evidence that a parse actually finished. Never a bare
+                  -- `h.parsed_at IS NOT NULL`: the legacy cohort keeps a NULL
+                  -- parsed_at after backfill, and a bare gate would call those
+                  -- published runs incomplete and restart the per-cycle
+                  -- handoff this criterion exists to stop.
+                  AND (h.status = 'published' OR h.parsed_at IS NOT NULL)
                 """,
                 (run_ids,),
             )
