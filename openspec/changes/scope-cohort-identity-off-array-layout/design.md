@@ -137,3 +137,39 @@ merely weak here; it is inert.
 **C — add `array_task_id` to the degradation list.** Self-defeating. The
 degradation only fires when the field is **absent**; the production failure is
 present-but-**stale**. C re-arms the same trap while appearing to disarm it.
+
+## D8. The #1759 standing rule has a hole, found by tripping over it while obeying it
+
+PR #1759's three-round gate produced this standing rule:
+
+> No delta edit lands without a clause-to-code check executed first.
+
+I executed it. On commit `02b52cb4` I checked all of the donor's normative
+clauses against the code and recorded "no clause is false". **That check was
+correct and the rule still failed to protect anything**, because at that instant
+the `array_task_id` comparison was still in the code, so
+"present-but-different SHALL remain fatal" was *true*. Commit `764a1275`, two
+commits later in the same PR, deleted the comparison and falsified it.
+
+The hole is a time index. The rule checks the clause at **edit time**; what
+`openspec archive` welds into `openspec/specs/` is the clause at the **landing
+SHA**. Those are the same instant only when the PR contains no subsequent code
+change to the surface the clause describes — which is exactly the case a fix PR
+is not.
+
+Sharpened rule, which this change now follows:
+
+> A delta may only be archived at a SHA where its clauses are true, and for a PR
+> that changes the behaviour a clause describes, that SHA is the PR's final head
+> — never an intermediate commit. Concretely: **do not archive a change in the
+> same PR that modifies the behaviour its delta asserts.** Defer the archive to
+> the post-merge chore commit, where the code has stopped moving.
+
+This is also why the repo's existing habit of deferring `openspec archive` to a
+post-merge commit — adopted for a different reason, namely waiting on remote
+receipts — turns out to be load-bearing for delta accuracy as well. The donor
+archive was moved into that same post-merge commit for this change.
+
+Recorded here rather than only in the loop log because the class has now fired
+three times (twice inside PR #1759, once here) and the first two fixes did not
+prevent the third.

@@ -126,9 +126,34 @@ comparison reddens exactly the `[submission_attempt]` parameter, deleting the
    `{"array_task_id": 99}` from
    `test_file_cohort_present_but_different_runtime_identity_still_blocks`. It
    pinned exactly the behaviour this change removes, so it must go — delta
-   scenario 1 requires that shape to pass now. This is oracle **narrowing to
-   the new spec**, not weakening: the same input is now asserted by the new
-   tests to pass, so the case is still covered, with the opposite expectation.
+   scenario 1 requires that shape to pass now.
+
+   > **Correction (round 1, verified P3).** This entry originally read "the
+   > same input is now asserted by the new tests to pass, so the case is still
+   > covered, with the opposite expectation." **That was false as written** and
+   > is corrected here rather than rewritten away. Verified out-of-tree: the
+   > deleted parameter's exact input (18 members, `updates_by_index={0:
+   > {"array_task_id": 99}}`, full `reconcile_inflight_jobs`) now yields
+   > `('terminal', 'succeeded')` — so it *behaves* as pass, but **nothing
+   > asserts it**. No test anywhere produces "exactly one member's persisted
+   > `array_task_id` differs while all others match": both new tests use bulk
+   > layouts in which every mapped member is stale (17-of-22 and 15-of-22).
+   >
+   > The accurate statement: the input **class** (present-but-stale
+   > `array_task_id`) is asserted to pass, in bulk form — 17-of-22 through the
+   > full reconcile path and 17/15-of-22 at the gate directly. The deleted
+   > single-member instance is not separately pinned, and does not need to be:
+   > the field is no longer read at all, and **no code branches on the count of
+   > stale rows**, so one-stale and N-stale traverse the identical path. A
+   > regression that tolerated bulk staleness while failing on one stale member
+   > is not expressible in this code.
+   >
+   > Coverage is not net-reduced. The *shape* the deleted parameter tested —
+   > single member differs, full reconcile path, asserting
+   > `identity_mismatch_blocked` with `durable_write_count == 0` — is still
+   > exercised by the two retained parameters in the same parametrize list,
+   > `{"candidate_id": "foreign-candidate"}` and `{"basin_id": "foreign-basin"}`.
+   > The shape was re-pointed to the sibling fields, not orphaned.
 2. `_append_cohort_placeholders` now returns the written rows. Test 2's whole
    discriminating power is asserting the persisted `array_task_id` is
    **non-`None` and different** before asserting the gate passes — without that
