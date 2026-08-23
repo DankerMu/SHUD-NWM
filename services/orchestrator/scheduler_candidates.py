@@ -18,6 +18,7 @@ from services.orchestrator.chain_source_cycle import (
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
+    TERMINAL_INIT_STATE_CONFLICT,
     TERMINAL_INIT_STATE_MATCH,
     init_state_field,
     terminal_init_state_match,
@@ -439,15 +440,40 @@ def build_candidates(
                     state_decision is not None
                     and state_decision.action == "skip"
                     and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
-                    # The successor-continuity gate applies to THIS exit exactly
-                    # as it applies to the sibling terminal exit one branch up
-                    # and to the downstream ladder (:514) this ``continue``
-                    # skips.  Without it a candidate whose successor checkpoint
-                    # is missing/rejected would be reported "done" by the pass
-                    # receipt while ``_cycle_completion_verdict`` scores the same
-                    # (model, cycle) a ``gap``.  Non-conforming rows fall through
-                    # to the ladder and keep their pre-#1775 routing.
-                    and _successor_state_terminal_can_skip(successor_state)
+                    # This exit's ``continue`` bypasses the whole downstream
+                    # terminal ladder, so it has to carry EVERY gate the cycle
+                    # verdict applies past the terminal decision — otherwise the
+                    # pass receipt reports "done" for a (model, cycle) that
+                    # ``_cycle_completion_verdict`` simultaneously scores
+                    # ``gap``: the cycle keeps the source's single oldest-gap
+                    # slot while the ``state_snapshot_index_*`` blocker evidence
+                    # operators relied on disappears from the receipt.
+                    #
+                    # The verdict path has exactly two such gates, and both are
+                    # REFERENCED here rather than re-implemented, so a later
+                    # edit to either cannot desynchronise the two paths again:
+                    #
+                    #   1. the closed not-ready reason allowlist, reached
+                    #      through ``_terminal_init_state_verdict`` — at this
+                    #      exit ``strict_warm_start`` is always not-ready (the
+                    #      enclosing branch guarantees it), so this predicate
+                    #      reduces to the allowlist test and cannot disturb the
+                    #      ``match`` / ``absent`` shapes;
+                    #   2. successor continuity, where ``None`` means "no
+                    #      verdict was reached" and silence is not proof —
+                    #      hence ``_successor_state_proves_continuity`` and NOT
+                    #      the laxer ``_successor_state_terminal_can_skip`` the
+                    #      sibling exit one branch up uses (that exit sits ahead
+                    #      of a strict resolution being required at all).
+                    #
+                    # Non-conforming rows fall through to the existing ladder
+                    # and keep their pre-#1775 routing — blocked with the typed
+                    # strict reason — so this introduces no new wedge.
+                    and _scheduler_discovery._terminal_init_state_verdict(
+                        state_decision.evidence, strict_warm_start
+                    )
+                    != TERMINAL_INIT_STATE_CONFLICT
+                    and _scheduler_discovery._successor_state_proves_continuity(successor_state)
                 ):
                     skipped.append(
                         {

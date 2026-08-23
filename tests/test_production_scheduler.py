@@ -38154,10 +38154,18 @@ def test_candidate_loop_skips_terminal_success_before_warm_admission(
     ("successor_state", "expected_skipped", "expected_blocked"),
     [
         # No successor verdict at all (db-free disabled / no next allowed cycle
-        # / outside the strict window).  ``_successor_state_terminal_can_skip``
-        # treats ``None`` as "no objection", exactly as the sibling terminal
-        # exit one branch up does — so the terminal skip stands.
-        pytest.param(None, ["terminal_hydro_success"], [], id="successor_no_verdict_skips"),
+        # / outside the strict window).  ``None`` is the THIRD state — "no
+        # verdict was reached" — and silence is not proof of continuity, so the
+        # cycle verdict scores this `gap`.  The candidate loop must agree: this
+        # row does NOT take the terminal skip exit.  (It skipped in the first
+        # round-2 revision, which used the laxer
+        # ``_successor_state_terminal_can_skip``; that was the divergence.)
+        pytest.param(
+            None,
+            [],
+            ["state_snapshot_index_exact_checkpoint_missing"],
+            id="successor_no_verdict_blocks",
+        ),
         # A successor checkpoint that exists as a verdict and says NOT ready is
         # an objection.  The row must not take D4's new early exit; it falls
         # through to the warm-admission gate and keeps its pre-#1775 routing.
@@ -38166,6 +38174,16 @@ def test_candidate_loop_skips_terminal_success_before_warm_admission(
             [],
             ["state_snapshot_index_exact_checkpoint_missing"],
             id="successor_not_ready_blocks",
+        ),
+        # The positive half, and the production unblock itself: a usable
+        # successor checkpoint IS the physical proof the cycle ran to
+        # completion, so the terminal skip stands.  All 14 wedged node-22
+        # candidates have this shape.
+        pytest.param(
+            {"ready": True},
+            ["terminal_hydro_success"],
+            [],
+            id="successor_ready_skips",
         ),
     ],
 )
@@ -38176,19 +38194,22 @@ def test_candidate_loop_terminal_skip_exit_still_gates_on_successor_state(
     expected_skipped: list[str],
     expected_blocked: list[str],
 ) -> None:
-    """#1775 D4: the new terminal skip exit carries the successor-continuity gate.
+    """#1775 D4: the terminal skip exit carries the successor-continuity gate.
 
     The exit's ``continue`` bypasses the whole downstream terminal ladder,
     including the successor gate at ``scheduler_candidates.py:514`` that emits
-    ``strict_warm_start_successor_checkpoint_missing``.  Without an explicit
-    ``_successor_state_terminal_can_skip`` clause on the exit itself, a
-    candidate whose successor checkpoint is missing or rejected would be
-    reported "done" by the pass receipt while ``_cycle_completion_verdict``
-    scores the very same (model, cycle) a ``gap`` — and the
-    ``state_snapshot_index_*`` blocker evidence would vanish from the receipt.
+    ``strict_warm_start_successor_checkpoint_missing``.  Without the gate on
+    the exit itself, a candidate whose successor checkpoint is missing,
+    rejected, or simply unadjudicated would be reported "done" by the pass
+    receipt while ``_cycle_completion_verdict`` scores the very same
+    (model, cycle) a ``gap`` — the cycle keeps the source's single oldest-gap
+    slot and the ``state_snapshot_index_*`` blocker evidence operators relied
+    on vanishes from the receipt.
 
-    The two rows are deliberately NOT symmetric: ``None`` means "no verdict was
-    reached", which is not an objection, while ``{"ready": False}`` is one.
+    The predicate is the verdict path's own ``_successor_state_proves_continuity``,
+    NOT the laxer ``_successor_state_terminal_can_skip`` used by the sibling
+    exit one branch up: only ``{"ready": True}`` is proof.  ``None`` means "no
+    verdict was reached", and silence is not proof.
     """
 
     scheduler, discovery, models = _absence_tolerance_scheduler(
@@ -38209,6 +38230,98 @@ def test_candidate_loop_terminal_skip_exit_still_gates_on_successor_state(
     assert candidates == []
     assert [entry["reason"] for entry in skipped] == expected_skipped
     assert [entry.reason for entry in blocked] == expected_blocked
+    # The invariant the divergence broke: what the pass receipt reports and what
+    # the cycle verdict scores are the same fact about the same (model, cycle).
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == (
+        "complete" if expected_skipped else "gap"
+    )
+
+
+@pytest.mark.parametrize(
+    ("not_ready_reason", "expected_skipped", "expected_blocked"),
+    [
+        # The one allowlisted reason — "there is genuinely no predecessor state
+        # here".  With a usable successor this is the production unblock: all
+        # 392 not-ready rows in the node-22 window carry this reason and the 14
+        # wedged candidates have a ready successor, so they still skip.
+        pytest.param(
+            "state_snapshot_index_exact_checkpoint_missing",
+            ["terminal_hydro_success"],
+            [],
+            id="allowlisted_exact_checkpoint_missing_skips",
+        ),
+        # Everything below reports a defect in a state that DOES exist.  The
+        # verdict path classifies these `conflict` and keeps the hard gap, so
+        # the candidate loop must keep its pre-#1775 `blocked` routing with the
+        # typed strict reason — a ready successor does NOT buy them a skip.
+        pytest.param(
+            "state_snapshot_index_prior_checkpoint_missing_after_history",
+            [],
+            ["state_snapshot_index_prior_checkpoint_missing_after_history"],
+            id="not_allowlisted_prior_checkpoint_missing_after_history_blocks",
+        ),
+        pytest.param(
+            "state_snapshot_index_checkpoint_unusable",
+            [],
+            ["state_snapshot_index_checkpoint_unusable"],
+            id="not_allowlisted_checkpoint_unusable_blocks",
+        ),
+        pytest.param(
+            "state_snapshot_index_model_package_checksum_mismatch",
+            [],
+            ["state_snapshot_index_model_package_checksum_mismatch"],
+            id="not_allowlisted_package_checksum_mismatch_blocks",
+        ),
+        pytest.param(
+            "state_snapshot_index_object_unreadable",
+            [],
+            ["state_snapshot_index_object_unreadable"],
+            id="not_allowlisted_object_unreadable_blocks",
+        ),
+    ],
+)
+def test_candidate_loop_terminal_skip_exit_still_gates_on_not_ready_reason_allowlist(
+    monkeypatch: Any,
+    tmp_path: Path,
+    not_ready_reason: str,
+    expected_skipped: list[str],
+    expected_blocked: list[str],
+) -> None:
+    """#1775: the terminal skip exit carries the CLOSED REASON ALLOWLIST too.
+
+    The verdict path gained a second gate past the terminal decision in the
+    same commit as D4 — ``_terminal_init_state_verdict`` classifies a not-ready
+    strict resolution `conflict` unless its reason is allowlisted — and the
+    candidate loop's exit did not carry it.  Every row below with a ready
+    successor was therefore reported "done" by the receipt while the verdict
+    scored it `gap`, a regression from the pre-#1775 `blocked`.
+
+    Successor readiness is held CONSTANT at ``{"ready": True}`` here so the
+    only variable is the reason: this is the dimension the sibling test never
+    varies.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
+        successor_state={"ready": True},
+        strict_evidence={"status": "blocked", "ready": False, "reason": not_ready_reason},
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=models,
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon={}),
+        ],
+    )
+
+    assert candidates == []
+    assert [entry["reason"] for entry in skipped] == expected_skipped
+    assert [entry.reason for entry in blocked] == expected_blocked
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == (
+        "complete" if expected_skipped else "gap"
+    )
 
 
 def test_cycle_completion_verdict_keeps_legacy_id_only_rows_completing(
