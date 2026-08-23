@@ -131,7 +131,12 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_segment_id_trgm_idx",
                 "river_segment_name_trgm_idx",
                 "river_segment_segment_name_trgm_idx",
-                "met_station_id_trgm_idx",
+                # `met_station_id_trgm_idx` is deliberately NOT here: migration
+                # 000054 DROPPED it (issue #1669). The name did not move out of
+                # this file -- it moved to an explicit "must not exist"
+                # assertion in
+                # `test_met_station_trigram_index_is_dropped_and_unreachable`
+                # below, which is strictly stronger than membership in this set.
                 "met_station_name_trgm_idx",
                 "met_station_active_basin_station_idx",
                 "hydro_run_display_product_basin_status_idx",
@@ -762,6 +767,177 @@ def test_identifier_trigram_index_is_an_expression_index_equality_cannot_select(
             # was eligible for `river_segment_id = $1` in the first place, and why
             # 000052 had to move the index onto an expression to make it ineligible.
             assert "=(text,text)" in operators, sorted(operators)
+    finally:
+        # Planner input only: nothing this test seeded outlives it.
+        connection.rollback()
+        connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #1669: `met_station_id_trgm_idx` is GONE. Migration 000054 dropped it
+# instead of rebuilding it on `lower(station_id)`: with `stats_reset` NULL the
+# index had 500 scans in the cluster's entire life (PR #1666's own probe), and
+# its `BitmapOr` sibling `met_station_name_trgm_idx` had zero -- station search's
+# trigram path has never run in production, so there was no consumer to preserve.
+# ---------------------------------------------------------------------------
+
+
+# >= 34 characters, mirroring the production station id families whose shared
+# trigrams made the dropped index's posting lists cover most of the table.
+_SHARED_STATION_PREFIX = "basins_pytest1669_met_station_shared_"
+
+
+def _met_station_index_names(cursor: Any) -> set[str]:
+    cursor.execute(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = 'met' AND tablename = 'met_station'"
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
+def _seed_shared_prefix_station_family(cursor: Any) -> None:
+    """Active stations sharing a >= 34 character id prefix, plus their scope rows.
+
+    Planner input only; the caller rolls back. Every station is
+    ``active_flag = true`` because the dropped index was partial on exactly that
+    predicate -- a probe over inactive rows could never have selected it and so
+    would pass vacuously.
+    """
+
+    cursor.execute(
+        """
+        INSERT INTO core.basin (basin_id, basin_name)
+        VALUES ('it1669_basin', 'Issue 1669 Trigram Basin')
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO core.basin_version (basin_version_id, basin_id, version_label, geom)
+        VALUES (
+            'it1669_basin_v1', 'it1669_basin', 'v1',
+            ST_Multi(ST_GeomFromText('POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))', 4490))
+        )
+        """
+    )
+    cursor.executemany(
+        """
+        INSERT INTO met.met_station (station_id, basin_version_id, station_name, geom, active_flag)
+        VALUES (%s, 'it1669_basin_v1', %s, ST_SetSRID(ST_MakePoint(%s, %s), 4490), true)
+        """,
+        [
+            (
+                f"{_SHARED_STATION_PREFIX}{index:04d}",
+                f"Issue 1669 Station {index:04d}",
+                0.001 * index,
+                0.001 * index,
+            )
+            for index in range(600)
+        ],
+    )
+    # ANALYZE is legal inside a transaction block (VACUUM is not); without it the
+    # planner would work from default estimates and prove nothing about plans.
+    cursor.execute("ANALYZE met.met_station")
+
+
+def test_met_station_trigram_index_is_dropped_and_unreachable(
+    integration_database_url: str,
+) -> None:
+    """000054's claim, in both halves (issue #1669).
+
+    The catalog half is the direct one: the index and both of the rebuild
+    idiom's scratch names are absent, while `met_station_name_trgm_idx` -- out of
+    scope by the issue's boundary, dead weight though it is -- survives
+    untouched.
+
+    The planner half is not redundant with it. `pg_indexes` says an index is not
+    in the catalog; it says nothing about whether the equality shape that used to
+    select it can still reach *something* shaped like it (a leftover under
+    another name, a re-created index from a later migration). Asserting the plan
+    never names it, including with every non-bitmap path disabled so a bitmap
+    scan is all the planner has left, is the assertion that would survive such a
+    regression. That is the shape that measured 168.60 ms / 500 lookups on
+    node-27 before the drop.
+    """
+
+    import psycopg2
+
+    apply_migrations_from_zero(integration_database_url)
+    connection = psycopg2.connect(integration_database_url)
+    try:
+        with connection.cursor() as cursor:
+            index_names = _met_station_index_names(cursor)
+            # The must-not-exist half, paying for the entry removed from the
+            # must-exist set at the top of this file.
+            assert "met_station_id_trgm_idx" not in index_names, sorted(index_names)
+            # The `000052`-shaped rebuild idiom's scratch names: never created
+            # today, but 000054 drops them concurrently so a half-applied earlier
+            # attempt cannot leave one behind.
+            assert "met_station_id_trgm_idx_invalid" not in index_names, sorted(index_names)
+            assert "met_station_id_trgm_idx_legacy" not in index_names, sorted(index_names)
+            # Not touched by 000054, deliberately: out of this issue's boundary.
+            assert "met_station_name_trgm_idx" in index_names, sorted(index_names)
+            cursor.execute(
+                """
+                SELECT indexdef FROM pg_indexes
+                WHERE schemaname = 'met' AND indexname = 'met_station_name_trgm_idx'
+                """
+            )
+            name_indexdef = cursor.fetchone()[0]
+            assert "COALESCE(station_name" in name_indexdef, name_indexdef
+            assert "gin_trgm_ops" in name_indexdef, name_indexdef
+            assert "lower(" not in name_indexdef, name_indexdef
+
+            _seed_shared_prefix_station_family(cursor)
+
+            cursor.execute(
+                """
+                CREATE TEMP TABLE it1669_batch (station_id TEXT) ON COMMIT DROP
+                """
+            )
+            cursor.executemany(
+                "INSERT INTO it1669_batch VALUES (%s)",
+                [(f"{_SHARED_STATION_PREFIX}{index:04d}",) for index in range(0, 600, 6)],
+            )
+            cursor.execute("ANALYZE it1669_batch")
+
+            # The probe shape from the issue receipt. `ms.active_flag = true` is
+            # not decoration: the dropped index was partial on it, so a probe
+            # lacking it could never have selected the index and would pass
+            # vacuously.
+            equality_join = """
+                SELECT ms.station_id
+                FROM met.met_station ms, it1669_batch t
+                WHERE ms.active_flag = true
+                  AND ms.station_id = t.station_id
+            """
+            default_plan = _explain(cursor, equality_join)
+            assert "met_station_id_trgm_idx" not in default_plan, default_plan
+
+            # ... and it is not a sequential scan hiding the result: with every
+            # non-bitmap path disabled a bitmap scan is all the planner has left,
+            # and the trap was a BITMAP Index Scan on the trigram index.
+            cursor.execute("SET LOCAL enable_seqscan = off")
+            cursor.execute("SET LOCAL enable_indexscan = off")
+            cursor.execute("SET LOCAL enable_indexonlyscan = off")
+            bitmap_only_plan = _explain(cursor, equality_join)
+            assert "met_station_id_trgm_idx" not in bitmap_only_plan, bitmap_only_plan
+            # No planner call follows, and the transaction is rolled back below,
+            # so these `SET LOCAL` toggles die with it -- nothing to restore.
+
+            # Search itself is unchanged by 000054 -- no SQL and no Python moved,
+            # only the access path -- so the ILIKE shape still runs and still
+            # returns the seeded family. Cheap, and it is the only assertion here
+            # that would catch the drop breaking the query rather than the plan.
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM met.met_station ms
+                WHERE ms.basin_version_id = 'it1669_basin_v1'
+                  AND ms.active_flag = true
+                  AND (ms.station_id ILIKE %s ESCAPE '\\'
+                       OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')
+                """,
+                ("%MET_STATION_SHARED%".replace("_", "\\_"),) * 2,
+            )
+            assert cursor.fetchone()[0] == 600
     finally:
         # Planner input only: nothing this test seeded outlives it.
         connection.rollback()

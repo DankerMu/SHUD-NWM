@@ -88,19 +88,43 @@ The two name arms (`properties_json->>'name'`, `->>'segment_name'`) keep their
 bare-column indexes and `ILIKE`: they are free-text, not identifiers, and no
 equality consumer exists for them.
 
-`met.met_station`'s same-shaped `met_station_id_trgm_idx` is **out of scope here
-but NOT safe**: it is a partial index (`WHERE active_flag = true`), so an
-equality lookup without that predicate cannot select it structurally (measured:
-`met_station_pkey`, 1.8 ms / 500 lookups) — but an equality join that carries the
-predicate is exposed to the same pg_trgm `=` mechanism, and the planner's choice
-flipped with statistics within one day: 2026-08-21 ~05:50Z it chose
-`met_station_active_basin_station_idx` via a Hash Join (22 ms / 500); at the
-PR #1666 E4 receipt (~08:32Z, after autovacuum refreshed the table's statistics,
-no schema change) it chose a Bitmap Index Scan on `met_station_id_trgm_idx`
-(0.33 ms per lookup, 174 ms / 500, 29.6k buffers) — ~8x, not 2900x, because
-station ids share shorter prefixes, but statistics-dependent exactly as this
-ADR describes. Applying the same expression convention to `met_station_id_trgm_idx`
-(and the `forecast_store` search arm) is routed to #1669.
+`met.met_station`'s same-shaped `met_station_id_trgm_idx` carried the same
+defect, and issue #1669 **dropped it rather than rebuilding it**
+(`db/migrations/000054_met_station_trgm_expression_index.sql`). The trap was
+real: it is a partial index (`WHERE active_flag = true`), so an equality lookup
+*without* that predicate cannot select it structurally (measured:
+`met_station_pkey`, 1.8 ms / 500 lookups) — but the partial predicate is an extra
+*condition* for selecting the index, not an exemption, and on 2026-08-23 a
+500-row equality batch carrying `active_flag = true` chose a Bitmap Index Scan on
+`met_station_id_trgm_idx` as the **default plan on first contact** (168.60 ms,
+30,128 buffers), and still chose it with seq/index/index-only scans disabled.
+
+#1669 was implemented as an expression rebuild first, then withdrawn on evidence.
+With `stats_reset` NULL, `pg_stat_user_indexes` covers the cluster's entire life:
+`met_station_id_trgm_idx` stood at **500** scans before the issue was touched —
+exactly PR #1666's E4 probe count — and `met_station_name_trgm_idx`, which sits
+in the same search `OR` and would be lit by the same `BitmapOr`, has **zero**
+scans ever. Station search's trigram path has never run in production, so the
+index had no consumer to preserve.
+
+**The general lesson, which outlives this table: check whether the index has a
+consumer before applying this ADR's convention to it.** The expression rebuild
+exists to keep a *useful* index while removing the equality trap. When the index
+is not useful, the convention is the wrong tool — it removes the trap while
+continuing to maintain, write to and store an index nothing reads, and the
+cheaper answer that also removes the trap is to drop the index. Measure
+`idx_scan` (and the counters' reset epoch) before reaching for the rebuild.
+
+That question now stands open against `core.river_segment`'s own rebuilt index,
+whose `idx_scan` is **4**. This ADR does not reopen #1468 — that decision shipped
+and is deployed — but a reader applying this convention to a third table should
+know the precedent it is copying has thin usage evidence of its own.
+
+If station search is ever exercised at scale on `met.met_station` and needs an
+index again, the answer is a fresh index built to this ADR's convention
+(`GIN (lower(station_id) gin_trgm_ops) WHERE active_flag = true`, queried as
+`lower(ms.station_id) LIKE`), not a restoration of the bare-column form. The
+dropped definition is preserved verbatim in the 000054 header.
 
 ## Consequences
 

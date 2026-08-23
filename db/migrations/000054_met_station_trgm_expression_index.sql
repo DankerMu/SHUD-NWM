@@ -1,0 +1,98 @@
+-- Change `met-station-trgm-expression-index` (issue #1669). DROPS
+-- `met_station_id_trgm_idx`. It is not rebuilt as an expression index.
+--
+-- ---------------------------------------------------------------------------
+-- WHY THE INDEX GOES AWAY INSTEAD OF BEING REBUILT
+-- ---------------------------------------------------------------------------
+--
+-- Since pg_trgm 1.6 the `gin_trgm_ops` operator class supports `=`, so the
+-- planner treats a trigram GIN as a candidate for EQUALITY lookups, not only
+-- for LIKE/ILIKE (ADR 0004). ADR 0004 recorded this index as safe BECAUSE it is
+-- partial (`WHERE active_flag = true`). Measurement overturned that: the partial
+-- predicate is an extra CONDITION for selecting the index, not an exemption.
+-- node-27 production `nhms`, 2026-08-23, PG 15.2 / pg_trgm 1.6; full transcript
+-- in `.workplans/issue-1669/before-20260823.txt`. A 500-row equality batch of
+-- the shape `ms.active_flag = true AND ms.station_id = t.station_id`:
+--
+--   default planner              Bitmap Index Scan on met_station_id_trgm_idx
+--                                168.60 ms / 500 lookups, shared hit 30,128
+--                                (29,627 of them inside the trigram scan)
+--   enable_seqscan/indexscan/    the SAME index, still chosen
+--   indexonlyscan = off          159.69 ms / 500
+--
+-- The trap needed no statistics flip: it was the default plan on first contact.
+--
+-- #1468 answered the same defect on `core.river_segment` by rebuilding the index
+-- on `lower(river_segment_id)`, which removes the trap while KEEPING an index
+-- the query planner still uses for search. That convention presumes the index is
+-- worth keeping. Here it is not. With `stats_reset` NULL, `pg_stat_user_indexes`
+-- covers this cluster's entire life:
+--
+--   met_station_pkey                      idx_scan 101,500,503   2104 kB
+--   met_station_id_trgm_idx               idx_scan       2,502   1664 kB
+--   met_station_basin_idx                 idx_scan          57   1472 kB
+--   met_station_active_basin_station_idx  idx_scan           8    784 kB
+--   met_station_geom_gix                  idx_scan           0     18 MB
+--   met_station_name_trgm_idx             idx_scan           0   2576 kB
+--
+-- `met_station_id_trgm_idx` stood at 500 scans before this issue was touched --
+-- exactly the lookup count of PR #1666's E4 probe -- and reached 2,502 only from
+-- this change's own 500-iteration baseline loops. The corroboration is the last
+-- row: the id arm and the name arm sit in the same `OR` in the station search
+-- (`packages/common/forecast_store.py`, `list_met_stations`), so a real search
+-- lights BOTH up through a `BitmapOr`, and `met_station_name_trgm_idx` has never
+-- been scanned at all. Station search's trigram path has never run in
+-- production. An index with no evidence of a consumer is not worth rebuilding.
+--
+-- Search is unchanged and keeps returning the same rows: no SQL and no Python
+-- changes, only the access path. Measured on the same day, `station_id ILIKE
+-- '%qhh%'` returned 386 rows in 45.6 ms through this index, and the index-free
+-- path returned the same 386 rows in 7.3 ms via an index-only scan on
+-- `met_station_active_basin_station_idx` plus a Filter. The index was slower.
+--
+-- ---------------------------------------------------------------------------
+-- REBUILD RECIPE (so a future change needs no archaeology)
+-- ---------------------------------------------------------------------------
+--
+-- The definition being dropped, verbatim from
+-- `db/migrations/000031_search_discovery_performance.sql:12-14`:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS met_station_id_trgm_idx
+--     ON met.met_station USING GIN (station_id gin_trgm_ops)
+--     WHERE active_flag = true;
+--
+-- Do NOT restore that form. If station search is ever exercised at scale and
+-- needs an index again, build it on the EXPRESSION per ADR 0004 --
+-- `GIN (lower(station_id) gin_trgm_ops) WHERE active_flag = true` -- and spell
+-- `lower(ms.station_id) LIKE <lowercased pattern> ESCAPE` in the query. The
+-- convention survives this change; only its application to this particular
+-- index does not, because this index has no consumer.
+--
+-- ---------------------------------------------------------------------------
+-- SHAPE: three concurrent drops, deliberately outside any transaction
+-- ---------------------------------------------------------------------------
+--
+-- CONCURRENTLY IS MANDATORY, and it is not the same as "the index has no
+-- readers". A plain `DROP INDEX` takes ACCESS EXCLUSIVE on the TABLE, not merely
+-- on the index. `met.met_station` serves live display and station MVT reads, so
+-- such a lock would queue behind them and then block every new reader until it
+-- was granted. `DROP INDEX CONCURRENTLY` cannot run inside a transaction block,
+-- which is why this file has no BEGIN/COMMIT.
+-- `packages/common/migrate.apply_migration` executes each statement on an
+-- autocommit connection, so each drop arrives as its own top-level statement.
+--
+-- The `..._invalid` and `..._legacy` names cannot exist today -- nothing has ever
+-- created them. They are the scratch names of the `000052`-shaped rebuild idiom,
+-- which this change's own withdrawn first implementation used; a half-applied
+-- attempt at it could have left one behind on a given database. `IF EXISTS`
+-- makes covering that case free, and re-running this whole file is a no-op.
+--
+-- `met_station_name_trgm_idx` is NOT touched here. It is dead weight by the same
+-- evidence, but it is outside this issue's declared boundary; reported, not
+-- fixed.
+
+DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx;
+
+DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx_invalid;
+
+DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx_legacy;

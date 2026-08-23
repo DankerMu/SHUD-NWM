@@ -289,6 +289,8 @@ SURROGATE_KEY_READ_INDEX_MIGRATION = "000051_river_ts_surrogate_key_read_index.s
 
 AUTHORITY_STATS_HYGIENE_MIGRATION = "000052_authority_stats_hygiene_trgm_expression_index.sql"
 
+MET_STATION_TRGM_EXPRESSION_MIGRATION = "000054_met_station_trgm_expression_index.sql"
+
 
 def test_drop_redundant_river_index_migration_drops_exactly_the_two_measured_indexes() -> None:
     migration_sql = dict(_migration_sql())
@@ -1217,6 +1219,107 @@ def test_authority_stats_hygiene_migration_documents_the_trap_and_the_recovery()
         "re-run this file",
     ):
         assert required_note in comment_body, required_note
+
+
+def test_met_station_trgm_expression_migration_splits_into_three_concurrent_drops() -> None:
+    """000054 DROPS the index; it does not rebuild it (issue #1669).
+
+    ``split_sql_statements`` is the splitter ``packages.common.migrate`` applies
+    migrations with, so it is the authoritative statement oracle. Three things
+    must hold at once and only this test can see them without a database:
+
+    * no transaction wrapper, and every drop is its own top-level statement --
+      ``DROP INDEX CONCURRENTLY`` is rejected inside a transaction block and
+      ``apply_migration`` runs one statement per ``cursor.execute`` on an
+      autocommit connection;
+    * every ``DROP INDEX`` carries ``CONCURRENTLY``. ``met.met_station`` serves
+      live display and MVT reads, and a plain ``DROP INDEX`` takes ACCESS
+      EXCLUSIVE on the TABLE, not merely on the index;
+    * nothing is CREATED. The whole point of #1669's reversal is that the index
+      had no consumer (500 lifetime scans, all of them this issue's own probes),
+      so a ``CREATE INDEX`` sneaking back in -- in either the bare-column or the
+      ``lower()`` expression form -- is the regression this file guards against.
+    """
+
+    migration = dict(_migration_sql())[MET_STATION_TRGM_EXPRESSION_MIGRATION]
+
+    # Checked before the statement list, so a `BEGIN;`/`COMMIT;` regression fails
+    # on its own assertion rather than being shadowed by the statement count
+    # changing underneath it. (000052's sibling orders these the other way; the
+    # divergence is deliberate.)
+    upper = migration.upper()
+    assert "BEGIN;" not in upper
+    assert "COMMIT;" not in upper
+
+    statements = split_sql_statements(migration)
+    executables = [
+        "\n".join(line for line in statement.splitlines() if not line.lstrip().startswith("--")).strip()
+        for statement in statements
+    ]
+
+    # Exactly three, in this order: the index itself, then the two scratch names
+    # the `000052`-shaped rebuild idiom creates transiently. The latter two cannot
+    # exist today, but a half-applied attempt at this change's own withdrawn
+    # rebuild could have left one behind, and `IF EXISTS` makes covering it free.
+    assert executables == [
+        "DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx;",
+        "DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx_invalid;",
+        "DROP INDEX CONCURRENTLY IF EXISTS met.met_station_id_trgm_idx_legacy;",
+    ], executables
+
+    # The equality-shaped assertions above pin the exact text; these two are the
+    # properties, stated so a future edit that changes the text still has to keep
+    # them. Checked against comment-stripped statements so the header's prose
+    # about non-concurrent drops and about the rebuild recipe -- which contains a
+    # commented-out `CREATE INDEX` verbatim from 000031 -- can neither satisfy
+    # nor trip them.
+    for statement in executables:
+        for match in re.finditer(r"\bDROP\s+INDEX\b(?!\s+CONCURRENTLY\b)", statement, re.IGNORECASE):
+            raise AssertionError(
+                f"non-concurrent DROP INDEX takes ACCESS EXCLUSIVE on met.met_station: "
+                f"{statement[match.start() : match.start() + 120]!r}"
+            )
+        assert not re.search(r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\b", statement, re.IGNORECASE), statement
+        # `met_station_name_trgm_idx` is out of this issue's boundary and must
+        # not be swept into the drop.
+        assert "met_station_name_trgm_idx" not in statement, statement
+
+
+def test_met_station_trgm_expression_migration_documents_the_reversal_and_the_rebuild_recipe() -> None:
+    """The header is the only place an operator learns why a trigram index was
+    dropped rather than rebuilt, and what to build if search ever needs one.
+
+    The verbatim `000031` definition matters specifically: dropping an index
+    cannot be rolled back, so the recipe to recreate it must not require
+    archaeology through the migration history.
+    """
+
+    migration = dict(_migration_sql())[MET_STATION_TRGM_EXPRESSION_MIGRATION]
+    comment_body = "\n".join(line for line in migration.splitlines() if line.lstrip().startswith("--"))
+
+    for required_note in (
+        "#1669",
+        "pg_trgm 1.6",
+        "gin_trgm_ops",
+        "168.60 ms",
+        "idx_scan",
+        "ACCESS EXCLUSIVE",
+        "000031_search_discovery_performance.sql:12-14",
+    ):
+        assert required_note in comment_body, required_note
+
+    # The dropped definition, verbatim from 000031:12-14, so a rebuild needs no
+    # archaeology. Compared against the real 000031 text rather than a copy typed
+    # into this test, which would rot independently of both files.
+    source = dict(_migration_sql())["000031_search_discovery_performance.sql"]
+    original = re.search(
+        r"CREATE INDEX CONCURRENTLY IF NOT EXISTS met_station_id_trgm_idx.*?;",
+        source,
+        re.DOTALL,
+    )
+    assert original is not None, "000031 no longer defines met_station_id_trgm_idx"
+    for line in original.group(0).splitlines():
+        assert f"--   {line.strip()}" in comment_body or f"--     {line.strip()}" in comment_body, line
 
 
 def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
