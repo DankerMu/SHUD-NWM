@@ -211,6 +211,8 @@ NO_FORCING_HANDOFF_REASON = "OBJECT_STORE_FORCING_HANDOFF_REQUIRED"
 FORCING_HANDOFF_UNAVAILABLE_REASON = "OBJECT_STORE_FORCING_HANDOFF_UNAVAILABLE"
 FORCING_HANDOFF_FAILED_REASON = "OBJECT_STORE_FORCING_HANDOFF_FAILED"
 FORCING_STAGE = "forcing_handoff"
+# #1781: savepoint that scopes the decline read inside the caller's transaction.
+DECLINE_READ_SAVEPOINT_NAME = "nhms_declined_runs_read"
 
 
 @dataclass(frozen=True)
@@ -984,16 +986,34 @@ def _declined_runs(
     """
     if object_store_root is None or not run_ids:
         return set()
-    cur.execute(
-        """
-        SELECT run_id, init_state_id, product_mtime
-        FROM ops.ingest_recompute_decline
-        WHERE run_id = ANY(%s)
-        """,
-        (run_ids,),
-    )
+    # Savepoint, not a bare try/except (#1781): this cursor shares the caller's
+    # non-autocommit transaction with the completeness query that follows, so a
+    # failed statement here poisons it and that query would then raise
+    # InFailedSqlTransaction -- same dead tick, different exception. Scoping the
+    # read lets it degrade to "suppress nothing" on any DB error (missing table
+    # during a deploy window before migration 000055, most concretely), which is
+    # the safe direction: the run is retried, blocked again, and the decline
+    # write fails against the same missing table, so the outcome stays "failed"
+    # and rc stays 1 -- pre-#1781 behaviour, with a valid summary.
+    cur.execute(f"SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+    try:
+        cur.execute(
+            """
+            SELECT run_id, init_state_id, product_mtime
+            FROM ops.ingest_recompute_decline
+            WHERE run_id = ANY(%s)
+            """,
+            (run_ids,),
+        )
+        rows = cur.fetchall()
+    except psycopg2.Error:
+        cur.execute(f"ROLLBACK TO SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+        cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+        return set()
+    cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+
     recorded: dict[str, set[tuple[str, float]]] = {}
-    for row in cur.fetchall():
+    for row in rows:
         recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
 
     declined: set[str] = set()
@@ -1635,6 +1655,28 @@ def _reason_codes(reasons: Any) -> list[str]:
     return codes
 
 
+def _reason_details(reasons: Any) -> dict[str, str]:
+    """First non-empty ``detail`` per reason code (#1781).
+
+    The decline record's ``detail`` column is the only post-hoc handle on a
+    permanently suppressed run, and a bare reason code cannot tell an operator
+    which chunk blocked the write. Values are carried through verbatim: the
+    apply layer already ran them through ``redact_text``, and this must not
+    widen what that narrowed.
+    """
+    details: dict[str, str] = {}
+    if not isinstance(reasons, list):
+        return details
+    for reason in reasons:
+        if not isinstance(reason, dict) or not reason.get("code"):
+            continue
+        code = str(reason["code"])
+        detail = reason.get("detail")
+        if detail and code not in details:
+            details[code] = str(detail)
+    return details
+
+
 def _stable_reason_codes(
     *values: Any,
     default: str = FORCING_HANDOFF_UNAVAILABLE_REASON,
@@ -1666,6 +1708,7 @@ def _forcing_stage_from_handoff(report: dict[str, Any]) -> dict[str, Any]:
             "ready": bool(report.get("ready")),
             "row_counts": dict(report.get("row_counts") or {}),
             "reason_codes": _reason_codes(report.get("unavailable_reasons")),
+            "reason_details": _reason_details(report.get("unavailable_reasons")),
         }
     )
 
@@ -1954,12 +1997,25 @@ def _process_run(
         # decision and terminate it. Every other forcing failure (including
         # HANDOFF_APPLY_SQL_FAILURE and the generic exception path) is
         # potentially transient and MUST keep failing so it keeps retrying.
-        if REASON_APPLY_COMPRESSED_CHUNK_BLOCKED in ((forcing_stage or {}).get("reason_codes") or []):
+        #
+        # What makes this code mean ONLY "a compressed chunk was detected" is
+        # the apply layer's `except CompressedChunkWriteError` / `except
+        # CompressedChunkGuardError` split: the base class -- which also covers
+        # the guard's own catalog SELECT timing out, a transient -- now carries
+        # HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED and never reaches here.
+        forcing_reasons = forcing_stage or {}
+        if REASON_APPLY_COMPRESSED_CHUNK_BLOCKED in (forcing_reasons.get("reason_codes") or []):
             result["outcome"] = _decline_blocked_recompute(
                 run_id,
                 object_store_root=object_store_root,
                 database_url=database_url,
-                detail=result.get("error"),
+                # The guard's own (redacted) message names the offending chunk;
+                # the joined reason codes are only the fallback, and duplicate
+                # the record's own `reason_code` column.
+                detail=(forcing_reasons.get("reason_details") or {}).get(
+                    REASON_APPLY_COMPRESSED_CHUNK_BLOCKED
+                )
+                or result.get("error"),
             )
         return result
 
@@ -2395,7 +2451,11 @@ def main(argv: list[str] | None = None) -> int:
     # ---- phase 3.6: terminal-state accounting (#1781) ------------------------
     declined_results = by("declined")
     declines_active = _active_decline_count(database_url)
-    if args.progress and (declined_results or declines_active):
+    # `declines_active is None` (count read failed) must PRINT, not silence the
+    # line (#1781): a long-standing backlog with no new decline this tick is
+    # exactly the steady state this line exists to surface, and `None` is falsy
+    # like `0`. Only "nothing declined AND zero standing records" stays quiet.
+    if args.progress and (declined_results or declines_active is None or declines_active > 0):
         # Named run_ids, not a bare count: the whole point of a terminal state
         # is that nothing else in the tick will ever mention these runs again.
         print(

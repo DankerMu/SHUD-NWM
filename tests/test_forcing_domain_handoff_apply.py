@@ -675,6 +675,69 @@ def test_compressed_chunk_write_error_produces_dedicated_reason_code(
     assert len(savepoint_rollbacks) == 1
 
 
+def test_guard_internal_failure_gets_its_own_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1781: the guard's BASE class means "the guard could not certify", which
+    includes its own catalog SELECT failing under a 5s statement_timeout — a
+    transient. It MUST NOT share a reason code with the subclass, because the
+    autopipeline terminal-states the subclass code permanently; a DB contention
+    blip must stay retryable.
+    """
+    from packages.common.timescale_write_guard import CompressedChunkGuardError
+
+    def _raise_guard_failure(cursor: Any, forcing_version_id: str, rows: Any) -> None:
+        raise CompressedChunkGuardError(
+            "compressed-chunk guard catalog lookup failed on "
+            "met.forcing_station_timeseries: QueryCanceled: statement timeout"
+        )
+
+    monkeypatch.setattr(
+        apply_module,
+        "_replace_forcing_station_timeseries",
+        _raise_guard_failure,
+    )
+
+    # (a) owns_transaction=True: connection.rollback() branch.
+    connection = _FakeConnection()
+    report = apply_module.apply_forcing_domain_handoff(_parse_complete(), connection=connection)
+    assert report["status"] == "failed"
+    assert report["available"] is False
+    assert report["writes_performed"] is False
+    assert len(report["unavailable_reasons"]) == 1
+    reason = report["unavailable_reasons"][0]
+    # Literal wire value: this is what operators grep for and what the
+    # autopipeline gate must NOT match.
+    assert reason["code"] == "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+    assert reason["exception_type"] == "CompressedChunkGuardError"
+    assert "statement timeout" in reason["detail"]
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
+
+    # (b) caller_owned cursor: savepoint rollback branch, same discipline.
+    caller_connection = _FakeConnection()
+    caller_cursor = caller_connection.cursor()
+    caller_report = apply_module.apply_forcing_domain_handoff(
+        _parse_complete(), cursor=caller_cursor
+    )
+    assert caller_report["status"] == "failed"
+    assert caller_report["unavailable_reasons"][0]["code"] == (
+        "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+    )
+    assert caller_connection.commits == 0
+    assert caller_connection.rollbacks == 0
+    savepoint_rollbacks = [
+        stmt
+        for _, stmt, _ in caller_connection.executions
+        if "rollback to savepoint" in stmt.lower()
+    ]
+    assert len(savepoint_rollbacks) == 1
+
+    assert apply_module.REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED == (
+        "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+    )
+
+
 @pytest.mark.parametrize(
     "stage",
     ["forcing_version", "met_station", "station_timeseries", "interp_weight"],

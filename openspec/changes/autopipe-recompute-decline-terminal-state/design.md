@@ -165,6 +165,37 @@ runbook 清单里写明。
 的 delta 落在 `specs/river-identity-normalization`。本变更**刻意避开**那个 spec 文件，
 delta 只落 `hypertable-compression`，以免两个 open change 改同一 spec 文件。
 
+## D9 — 交叉审查第 1 轮：三条已验证发现改变了设计
+
+**F1（P1）reason code 不足以做判据。** `CompressedChunkWriteError` 是
+`CompressedChunkGuardError` 的**子类**，而 `forcing_domain_handoff_apply.py`
+原先只有一条 `except CompressedChunkGuardError`（基类）分支，把两者打上同一个
+`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED`。基类还覆盖守卫自身 catalog 查询失败
+（它给自己设了 5s `statement_timeout`）、单端点批次窗口、未注册 hypertable。
+即：**一次 DB 争用抖动会被当成"物理上不可写"而永久终态化，并把 tick 刷绿**——
+恰是本变更最该防的失效方向。
+
+裁决还确认 `exception_type` 传不到判据处（`_reason_codes` 只取 `reason["code"]`），
+所以修点必须在 apply 层：拆成 `except CompressedChunkWriteError`（保留
+`..._BLOCKED`）+ `except CompressedChunkGuardError`（新码
+`HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED`，保持 failed 重试）。
+同时把 reason 的 `detail`（已 `redact_text`）带到 decline 行的 `detail` 列——
+原先只写 reason code 本身，一条被误记的 decline 事后无法甄别。
+
+**F2（P2）迁移窗口炸掉整个 tick。** decline 读取无保护，`UndefinedTable` 会
+未捕获地穿出 `main()`，整个 tick 无 JSON 汇总地崩溃——比修复前的 `rc=1` 更糟。
+裁决指出朴素的 `try/except` 无效：该 cursor 与 `superseded` 查询共享非 autocommit
+事务，失败语句会毒化事务，完备性查询随即抛 `InFailedSqlTransaction`。故用
+**SAVEPOINT** 限定该读取，`psycopg2.Error` 时降级为空集。
+
+降级方向是安全的：不抑制 → run 被重试 → 再次被挡 → 写入侧同样失败并已被捕获 →
+outcome 保持 `failed`、`rc=1`。即精确退化为本变更之前的行为。实现方原先的理由
+"吞掉该读会变成静默抑制"**是错的**——抑制需要读取**返回行**，出错路径返回空集。
+
+**F3（P2）progress 行在它该暴露的场景下静默。** `declines_active` 在读取失败时为
+`None`，而 `None` 在布尔上下文中与 `0` 同为假，于是"本 tick 无新 decline + 计数
+读失败"这个长期积压稳态下整行不打印——而该行的 body 早已备好 `'unknown'` 渲染。
+
 ## Must-preserve behavior
 
 - 瞬态 forcing 失败（`HANDOFF_APPLY_SQL_FAILURE`、通用异常路径等）**仍然** `rc=1`

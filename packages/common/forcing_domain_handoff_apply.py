@@ -17,6 +17,7 @@ from packages.common.redaction import redact_payload, redact_text
 from packages.common.source_identity import normalize_source_id
 from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
+    CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
 
@@ -33,6 +34,13 @@ REASON_APPLY_STATION_CONFLICT = "HANDOFF_APPLY_STATION_CONFLICT"
 REASON_APPLY_FORCING_VERSION_CONFLICT = "HANDOFF_APPLY_FORCING_VERSION_CONFLICT"
 REASON_APPLY_SQL_FAILURE = "HANDOFF_APPLY_SQL_FAILURE"
 REASON_APPLY_COMPRESSED_CHUNK_BLOCKED = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
+# #1781: the guard's BASE class means "could not certify the batch" — a partial
+# batch window, an unregistered hypertable, or its own catalog SELECT failing
+# under a 5s statement_timeout. Only the subclass means "a compressed chunk was
+# actually detected". They MUST NOT share a reason code: the autopipeline
+# terminal-states the BLOCKED code permanently, and a DB contention blip must
+# stay retryable.
+REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
 
 TARGET_TABLES = (
     "met.forcing_version",
@@ -174,12 +182,15 @@ def apply_forcing_domain_handoff(
             identity=prepared["identity"],
             writes_performed=False,
         )
-    except CompressedChunkGuardError as error:
-        # Dedicated caller-observable contract for the compressed-chunk write
-        # guard: operators route on this reason code to the runbook decompress
-        # procedure rather than the generic SQL failure bucket. Rollback is
-        # symmetric with the SQL failure branch — owns_transaction vs.
-        # savepoint mirrors the existing psycopg2 discipline.
+    except CompressedChunkWriteError as error:
+        # Subclass FIRST (#1781): this is the only case that means a compressed
+        # chunk was actually detected, i.e. the write is unappliable until an
+        # operator decompresses. Dedicated caller-observable contract: operators
+        # route on this reason code to the runbook decompress procedure rather
+        # than the generic SQL failure bucket, and the autopipeline treats it as
+        # terminal. Rollback is symmetric with the SQL failure branch —
+        # owns_transaction vs. savepoint mirrors the existing psycopg2
+        # discipline.
         if owns_transaction:
             connection.rollback()
         else:
@@ -189,6 +200,28 @@ def apply_forcing_domain_handoff(
             reasons=[
                 _reason(
                     REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+                    detail=redact_text(str(error)),
+                    exception_type=type(error).__name__,
+                )
+            ],
+            parser_envelope=parser_envelope,
+            identity=prepared["identity"],
+            writes_performed=False,
+        )
+    except CompressedChunkGuardError as error:
+        # Base class only (#1781): the guard could not certify the batch —
+        # partial window, unregistered hypertable, or its own catalog SELECT
+        # failing under the 5s statement_timeout. The last one is transient, so
+        # this gets its own reason code and stays in the retryable bucket.
+        if owns_transaction:
+            connection.rollback()
+        else:
+            _rollback_apply_savepoint(cursor)
+        return _unavailable_report(
+            status="failed",
+            reasons=[
+                _reason(
+                    REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED,
                     detail=redact_text(str(error)),
                     exception_type=type(error).__name__,
                 )

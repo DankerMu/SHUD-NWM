@@ -1187,23 +1187,42 @@ chunk(s) TimescaleDB names.
 
 #### 4.3.1 Operator triage codes
 
-The compressed-chunk write guard surfaces via four caller-observable string
+The compressed-chunk write guard surfaces via five caller-observable string
 codes. Three of them route unconditionally to the decompress procedure below;
 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` has a second acceptable disposition
-since `#1781` (see its row). Grep the DB / stderr / receipt surface for these
-literals when triaging a reingest failure:
+since `#1781` (see its row); `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED` is
+NOT a compressed-chunk case at all and must never be decompressed against.
+Grep the DB / stderr / receipt surface for these literals when triaging a
+reingest failure:
 
 | Code (literal string) | Where produced | How to observe |
 |---|---|---|
-| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) when the guard raises inside `_replace_forcing_station_timeseries`. | Persisted on the apply report (DB or API response) that the caller inspects. Also on the ingest tick: the run's summary entry goes `outcome="declined"` and a row lands in `ops.ingest_recompute_decline`. |
+| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) by the `except CompressedChunkWriteError` arm, i.e. **only** when a compressed chunk was actually detected. It never means the guard itself failed (`#1781` split that off — see the next row). | Persisted on the apply report (DB or API response) that the caller inspects. Also on the ingest tick: the run's summary entry goes `outcome="declined"` and a row lands in `ops.ingest_recompute_decline` (its `detail` column carries the guard message naming the chunk). |
+| `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED` | Same function, `except CompressedChunkGuardError` arm (base class, `REASON_APPLY_COMPRESSED_CHUNK_GUARD_FAILED`). Means the guard could not certify the batch: its catalog SELECT failed under the 5s `SET LOCAL statement_timeout` (DB contention), the caller passed a partial batch window, or the hypertable is not in `HYPERTABLES_GUARDED`. | Apply report reason code; on the ingest tick the run stays `outcome="failed"`, the tick stays `rc=1`, and **no** `ops.ingest_recompute_decline` row is written. |
 | `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` | `workers/output_parser/parser.py::OutputParser.parse_run` — stamped on `hydro.hydro_run.error_code` via `mark_run_failed`, and emitted as the stderr prefix by `workers/output_parser/cli.py` when the guard escapes. | `hydro.hydro_run.error_code` column; parser CLI stderr line `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: ...`. |
 | `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/cli.py` stderr prefix — emitted when `ForcingProducer.produce()` re-raises a `CompressedChunkGuardError` un-wrapped. | Forcing producer CLI stderr line `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: ...`. |
 | `FORCING_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/producer.py::ForcingProducer._mark_failed` — stamped on `met.forecast_cycle.error_code` when the dedicated `except CompressedChunkGuardError` arm fires. | `met.forecast_cycle.error_code` column (with `status = 'failed_forcing'`). |
 
-For every code above, the operator response is the decompress procedure
-in §4.3.2 below (identify chunk from the structured error message → run
-`decompress_chunk(...)` → re-run ingest). Route on the code; do NOT paper
-over with a generic ingest retry.
+For every code above **except** `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED`,
+the operator response is the decompress procedure in §4.3.2 below (identify
+chunk from the structured error message → run `decompress_chunk(...)` → re-run
+ingest). Route on the code; do NOT paper over with a generic ingest retry.
+
+`HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED` is **retryable and is not a
+decline**: there is no chunk to decompress, so the run keeps failing until the
+underlying condition clears, exactly as it should. Triage it as a database
+health / wiring problem instead:
+
+- read the reason's `detail` (the redacted underlying error) — a `QueryCanceled`
+  / statement timeout means the `timescaledb_information.chunks` lookup lost a
+  5s race, i.e. DB contention. Check the tick's own concurrency and any
+  concurrent `compress_chunk` / `ANALYZE` work, then let the next tick retry;
+- a "partial batch range" or "unregistered hypertable" detail is a **caller
+  bug**, not an operational condition — it does not self-heal and needs a code
+  fix (`packages/common/timescale_write_guard.py::HYPERTABLES_GUARDED`);
+- if it persists across many ticks, do NOT convert it into a decline by hand
+  (do not insert into `ops.ingest_recompute_decline`) — that would suppress a
+  run whose products were never proven unappliable.
 
 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` is the one code with a sanctioned
 alternative (`#1781`): the ingest tick records the blocked recompute in

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 
 import scripts.node27_autopipeline as autopipe
@@ -239,14 +240,21 @@ def _handoff_success(run_id: str) -> dict[str, Any]:
     }
 
 
-def _handoff_unavailable(code: str = "HANDOFF_FIELD_MISSING") -> dict[str, Any]:
+def _handoff_unavailable(
+    code: str = "HANDOFF_FIELD_MISSING",
+    *,
+    detail: str | None = "redacted",
+) -> dict[str, Any]:
+    reason: dict[str, Any] = {"code": code}
+    if detail is not None:
+        reason["detail"] = detail
     return {
         "mode": autopipe.OBJECT_STORE_HANDOFF_MODE,
         "status": "unavailable",
         "available": False,
         "ready": False,
         "row_counts": {},
-        "unavailable_reasons": [{"code": code, "detail": "redacted"}],
+        "unavailable_reasons": [reason],
     }
 
 
@@ -412,6 +420,7 @@ def test_declared_handoff_success_records_run_details_without_mirror(
             "met.interp_weight": 4,
         },
         "reason_codes": [],
+        "reason_details": {},
     }
     assert detail["parse_status"] == "parsed"
     assert detail["coverage_refresh"] == "refreshed"
@@ -1436,6 +1445,14 @@ def test_stats_guard_progress_line_stays_silent_when_neither_leg_worked(
 # --------------------------------------------------------------------------- #
 
 BLOCKED = REASON_APPLY_COMPRESSED_CHUNK_BLOCKED
+# Literal, not the constant: the gate must key on BLOCKED alone, and pinning the
+# wire value here keeps this file honest if the apply layer renames it (#1781).
+GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+BLOCKED_DETAIL = (
+    "Reingest targets compressed chunk _timescaledb_internal._hyper_1_52_chunk in "
+    "met.forcing_station_timeseries; run decompress procedure per "
+    "docs/runbooks/tier-node27-timeseries-storage.md#43-decompress-procedure before retrying."
+)
 
 
 def test_compressed_chunk_blocked_recompute_is_declined_and_recorded(
@@ -1448,7 +1465,7 @@ def test_compressed_chunk_blocked_recompute_is_declined_and_recorded(
         monkeypatch,
         tmp_path,
         runs={RUN_A: True},
-        apply_reports={RUN_A: _handoff_unavailable(BLOCKED)},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
         decline_store=store,
     )
     _set_initial_state(object_store_root, RUN_A, "state-a")
@@ -1467,13 +1484,17 @@ def test_compressed_chunk_blocked_recompute_is_declined_and_recorded(
     # a softer story: stage and reason codes stay exactly as the failure had.
     assert detail["stage"] == "forcing_handoff"
     assert detail["forcing_stage"]["reason_codes"] == [BLOCKED]
+    # #1781 diagnosability: the decline row is the only post-hoc handle on a
+    # permanently suppressed run, so `detail` must carry the guard's (redacted)
+    # message naming the offending chunk -- not a copy of the reason code, which
+    # `reason_code` already holds.
     assert store.rows == [
         {
             "run_id": RUN_A,
             "init_state_id": "state-a",
             "product_mtime": expected_mtime,
             "reason_code": BLOCKED,
-            "detail": BLOCKED,
+            "detail": BLOCKED_DETAIL,
         }
     ]
     assert summary["runs"]["declined"] == 1
@@ -1507,10 +1528,60 @@ def test_declined_run_is_named_on_the_progress_surface(
     assert "active records 1" in decline_lines[0]
 
 
+def test_progress_line_reports_an_unknown_decline_count_on_a_quiet_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The steady state of a long-standing backlog: nothing declined this tick,
+    and the count read failed. `None` is falsy exactly like `0`, so a gate on
+    truthiness goes silent in precisely the case the line exists to surface."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+    )
+    monkeypatch.setattr(autopipe, "_active_decline_count", lambda *_args, **_kwargs: None)
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    decline_lines = [line for line in captured.err.splitlines() if line.startswith("[declines]")]
+    assert len(decline_lines) == 1
+    assert "active records unknown" in decline_lines[0]
+
+
+def test_decline_detail_falls_back_to_the_reason_codes_when_none_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A reason without a `detail` field must still produce a non-null decline
+    detail -- degraded, but never a null column on the only surviving record."""
+
+    store = _DeclineStore()
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=None)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["details"][0]["outcome"] == "declined"
+    assert store.rows[0]["detail"] == BLOCKED
+
+
 @pytest.mark.parametrize(
     "report",
     [
         pytest.param(_handoff_unavailable("HANDOFF_APPLY_SQL_FAILURE"), id="transient-reason"),
+        pytest.param(_handoff_unavailable(GUARD_FAILED), id="guard-internal-failure"),
         pytest.param(_handoff_failed(), id="failed-status"),
         pytest.param(RuntimeError("apply exploded"), id="generic-exception"),
     ],
@@ -1714,9 +1785,29 @@ class _IngestedRunsCursor:
 
     def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
         self.conn.executed.append(sql)
+        statement = sql.strip().upper()
+        # psycopg2 semantics, deliberately faithful (#1781): once a statement
+        # errors, EVERY later statement in the same transaction raises
+        # InFailedSqlTransaction until the transaction is rewound. Only
+        # ROLLBACK TO SAVEPOINT clears it -- which is what makes this double
+        # able to tell a savepoint-scoped degrade apart from a bare
+        # `except psycopg2.Error`, where the completeness query below would
+        # then blow up instead.
+        if statement.startswith("ROLLBACK TO SAVEPOINT"):
+            self.conn.aborted = False
+            self.rows = []
+            return
+        if self.conn.aborted:
+            raise psycopg2.errors.InFailedSqlTransaction("current transaction is aborted")
+        if statement.startswith(("SAVEPOINT", "RELEASE SAVEPOINT")):
+            self.rows = []
+            return
         if "status = 'superseded'" in sql:
             self.rows = []
         elif "ops.ingest_recompute_decline" in sql:
+            if self.conn.decline_error is not None:
+                self.conn.aborted = True
+                raise self.conn.decline_error
             assert params is not None
             bound = set(params[0])
             self.rows = [row for row in self.conn.decline_rows if row[0] in bound]
@@ -1738,9 +1829,12 @@ class _IngestedRunsConnection:
         *,
         decline_rows: list[tuple[str, str, float]],
         completeness_rows: list[tuple[Any, ...]] | None = None,
+        decline_error: BaseException | None = None,
     ) -> None:
         self.decline_rows = decline_rows
         self.completeness_rows = completeness_rows or []
+        self.decline_error = decline_error
+        self.aborted = False
         self.executed: list[str] = []
 
     def cursor(self) -> _IngestedRunsCursor:
@@ -1863,3 +1957,80 @@ def test_decline_record_is_inert_without_an_object_store_side(
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
     assert autopipe._already_ingested_runs(NODE27_DATABASE_URL, [RUN_A], object_store_root=None) == set()
+
+
+def test_missing_decline_table_degrades_to_no_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1781 deploy window: new code, migration 000055 not applied yet. The
+    decline read must not take the completeness read down with it -- it shares
+    the transaction, so an unscoped catch leaves it poisoned and the next
+    statement raises InFailedSqlTransaction instead."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    conn = _IngestedRunsConnection(
+        decline_rows=[],
+        decline_error=psycopg2.errors.UndefinedTable(
+            'relation "ops.ingest_recompute_decline" does not exist'
+        ),
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    # Degrade to "suppress nothing": the run goes back into pending, gets
+    # blocked again, and the decline write fails against the same missing table
+    # -- i.e. exactly the pre-#1781 behaviour, which is the safe direction.
+    assert (
+        autopipe._already_ingested_runs(
+            NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+        )
+        == set()
+    )
+    # The completeness query still ran: the transaction survived the degrade.
+    assert any("hydro.hydro_run h" in sql for sql in conn.executed)
+
+
+def test_missing_decline_table_still_emits_a_summary_and_returns_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole tick, not just the helper: an unguarded read would propagate
+    out of main() with a traceback and NO summary at all -- strictly worse than
+    the rc=1-with-summary this replaces."""
+
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    store = _DeclineStore()
+    store.write_error = psycopg2.errors.UndefinedTable(
+        'relation "ops.ingest_recompute_decline" does not exist'
+    )
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    # Un-stub the read side: this case is about it.
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+    monkeypatch.setattr(autopipe, "_active_decline_count", lambda *_args, **_kwargs: None)
+    conn = _IngestedRunsConnection(
+        decline_rows=[],
+        decline_error=psycopg2.errors.UndefinedTable(
+            'relation "ops.ingest_recompute_decline" does not exist'
+        ),
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["runs"]["details"][0]["outcome"] == "failed"
+    assert summary["runs"]["declined"] == 0
+    assert summary["declines_active"] is None
+    assert store.rows == []

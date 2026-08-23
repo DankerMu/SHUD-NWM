@@ -44,6 +44,32 @@
 - **THEN** 已有的 decline 记录不再匹配，该 run 不再被并入 `_already_ingested_runs`
   的返回集，于是重新进入 pending 并被重试
 
+#### Scenario: A guard-internal failure is not a compressed-chunk block
+
+- **WHEN** `check_batch_targets_uncompressed` 因自身原因失败——catalog 查询超时
+  （它给自己设了 5s `statement_timeout`）、批次窗口只有单端点、目标 hypertable
+  未注册——从而抛出**基类** `CompressedChunkGuardError` 而非子类
+  `CompressedChunkWriteError`
+- **THEN** handoff SHALL 报告一个与真实压缩块阻塞**不同**的 reason code
+  （`HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED`），`_process_run` 返回
+  `outcome="failed"`，进程 `rc == 1`，**不**写入任何 decline 记录，该 run 继续重试
+- **AND** `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` SHALL 只由子类
+  `CompressedChunkWriteError` 那条分支挂出，即它只表示"确实探测到压缩块"
+
+#### Scenario: A decline record carries a diagnosable detail
+
+- **WHEN** 一条 decline 记录被写入
+- **THEN** 其 `detail` 列 SHALL 携带底层守卫消息（已经过 `redact_text`），
+  而不是仅仅重复 reason code 本身——否则一条被误记的 decline 事后无法甄别
+
+#### Scenario: A failed decline read degrades to no suppression, never to a crash
+
+- **WHEN** 对 `ops.ingest_recompute_decline` 的读取失败（典型情形：代码已部署
+  而迁移 `000055` 尚未 apply，或任何 `psycopg2.Error`）
+- **THEN** 该读取 SHALL 被限定在自己的 savepoint 内，失败时降级为"不抑制任何
+  run"，tick SHALL 正常完成并输出 JSON 汇总；抑制的缺失使被挡的 run 继续重试并
+  以 `rc == 1` 报红——即退化为本变更之前的行为，而不是整个 tick 未捕获异常退出
+
 #### Scenario: An incomplete decline key fails closed
 
 - **WHEN** 一次 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` 发生，但
@@ -55,7 +81,9 @@
 
 - **WHEN** 任意 ingest tick 结束并输出 JSON 汇总
 - **THEN** 汇总含 `declines_active` 字段，其值为 `ops.ingest_recompute_decline`
-  的当前行数，使一条长期存在的终态记录在每个 tick 上都可被 grep 到
+  的当前行数；读取失败时为 `null`（`null` 本身即"计数未知"的信号，绝不省略该字段
+  也绝不因此把一次成功的 ingest tick 判红）。这使一条长期存在的终态记录在每个
+  tick 上都可被 grep 到
 
 #### Scenario: A declined run does not inflate ingested or publish counters
 
