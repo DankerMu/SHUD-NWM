@@ -1145,3 +1145,25 @@ shared `subagent-workflow` skill, not in project code, so the fix lands outside
 this repo while the affected log and this ADR are project-local — that split is
 part of why the drift went unnoticed. Any future reversal continues to require
 the attribution-schema and round-role fixes plus maintainer review.
+
+## Revisit 2026-08-23 (PR #1754, issues #1640 + #1654) — keep, and the sample moved by nothing
+
+`loop_log_audit --log docs/review-loop-log.jsonl` returns DECIDABLE at 111
+multi-round merged PRs, later-round catches **core=68 / rotated=264**. The
+previous revisit (PR #1746) read 109 PRs at core=66 / rotated=264.
+
+The rotated count did not move, and the core count moved by exactly this PR's
+two catches. That is not a signal about lens rotation — it is arithmetic about a
+PR that had **one** round. A compact fixture that goes clean in round 1 has no
+later rounds, so it contributes to the numerator of neither bucket and only
+enlarges the denominator's neighbourhood. Reading the ratio as having "shifted
+toward core" would be wrong.
+
+Decision unchanged: **keep** the rotation.
+
+Recorded because it is a fifth way this counter can mislead, alongside the four
+already listed above: single-round PRs contribute round-1 catches to the `core`
+tally while contributing no opportunity for a rotated lens to catch anything. The
+counter's denominator is multi-round PRs but its `core` numerator admits catches
+from PRs where rotation was never exercised. Anyone using this ratio to argue
+cut should first filter to PRs that actually reached round 2.
