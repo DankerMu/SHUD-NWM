@@ -44,7 +44,10 @@ completed_pipeline_init_state_identity(
 Accessor按以下顺序裁决：
 
 1. matching `hydro_run` 本身completed且含任一init-state identity alias时，返回其identity fields，保持legacy/direct verdict语义；旧string wrapper仍只认两个历史aliases。
-2. 否则从内部未截断 `rows.pipeline_jobs` 取满足以下条件的rows：`_job_matches_candidate`；显式current accepted-submit contract；`accepted_submit_row_kind == "candidate"`。Cohort master、marker-free historical/ordinary job、foreign model与畸形versioned row均无authority。
+2. 否则从内部未截断 `rows.pipeline_jobs` 取满足以下条件的rows：`_job_matches_candidate`；显式current accepted-submit contract；`accepted_submit_row_kind == "candidate"`。Cohort master、marker-free historical/ordinary job、foreign model与畸形versioned row均无authority。这里的三类拒绝发生在不同边界，不混为一谈：
+   - loader-level fail-to-absent：**畸形/不完整的master行**（缺master必填evidence字段，如 `cohort_members`/`submission_attempt`/reconciliation family）、**latest-view里其他model的row**（latest视图按model分文件，loader的model绑定在selector前拒绝它）、**malformed identity entry**——均由 `normalize_accepted_submit_evidence`/`normalize_init_state_identities` 在每次journal持久化/读取入口绑定校验当前candidate identity时拒绝，selector永不看到这些行；
+   - selector-level排除（非loader拒绝）：**valid current-contract cohort master** 能合法通过loader存活 `_cycle_rows`（写入路径合法、contract-current），但 `accepted_submit_row_kind == "candidate"` 的row-kind filter先把它排除在candidate authority之外，accessor返回None；candidate immutable evidence不会在该master行上执行，这是row-kind排除，不是loader fail-to-absent；
+   - direct-partition cycle-run foreign-model row 能存活loader与model cycle scan（direct分区按cycle run id宽扫描），由selector的self-bound model guard拒绝。
 3. 对候选rows复用 `chain_source_cycle._pipeline_job_truth_sort_key` 选**最新一行，再校验**：latest row必须terminal-success，且 `accepted_submit_candidate_immutable_evidence` 规范化后恰有一条绑定其 `array_task_id`/`model_id` 的identity；否则返回None。禁止先过滤success再取max，否则旧success会掩盖更新的failure/empty identity。
 4. identity mapping保持writer记录的id/checksum/URI/valid-time；不经 `_public_scheduler_row` redaction与candidate-state truncation。
 
@@ -119,7 +122,7 @@ Regression rows:
 - positive same-base wrong-suffix cohort token -> discovery stale True and candidate quarantine retry/blocked per existing breaker；match/no accessor/no record/suffix-less/different-base -> unchanged no judgement。
 - completed hydro identity -> current outputs unchanged；bare `state_id` remains unavailable to old string accessor。
 - latest current-contract candidate row failure/empty identity overrides older success -> accessor None；latest success with one valid entry -> mapping。
-- master-only map, marker-free candidate, other-model row, malformed entry -> accessor None。
+- 畸形/不完整master、latest-view other-model row与malformed identity entry无法合法存活loader，均在selector前fail-to-absent；valid current-contract master可存活loader但由row-kind filter排除；marker-free candidate、latest failed/empty row与direct-partition cycle-run foreign-model row由selector拒绝；以上形状均 -> accessor None。
 - `_job_state_evidence` keep-list与 `_CYCLE_SCOPE_JOB_PROJECTION_KEYS` remain without `init_state_identities`。
 
 ## Boundary-Surface Checklist

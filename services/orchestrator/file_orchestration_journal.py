@@ -711,16 +711,23 @@ class FileOrchestrationJournalRepository:
 
         Every other shape — no journal/unreadable rows, cohort master maps,
         marker-free historical/ordinary jobs, foreign-model rows, malformed
-        versioned rows, latest rows that failed or recorded an empty/plural
-        identity — returns ``None`` rather than raising.  The value is the
-        writer-recorded identity mapping (id plus the optional
-        checksum/URI/valid-time fields), never the bounded candidate-state
-        projection or a public-redacted row.
+        versioned rows, malformed read-stage timestamps, latest rows that
+        failed or recorded an empty/plural identity — returns ``None`` rather
+        than raising.  The value is the writer-recorded identity mapping (id
+        plus the optional checksum/URI/valid-time fields), never the bounded
+        candidate-state projection or a public-redacted row.
         """
         try:
             canonical_source_id = _normalize_file_source_id(source_id, field="source_id")
             rows = self._cycle_rows(source_id=canonical_source_id, cycle_time=cycle_time, model_id=model_id)
-        except FileOrchestrationJournalError:
+        except (FileOrchestrationJournalError, TypeError, ValueError):
+            # The canonical read path reports its own corruption as
+            # FileOrchestrationJournalError, but the shared timestamp parser
+            # may surface a bare ValueError (and the shared row predicates a
+            # TypeError) for a malformed value inside an otherwise readable
+            # latest view.  Every malformed input shape is a no-judgement here
+            # (fails to absent): the authority never leaks read-stage
+            # input-origin exceptions to the verdict or §8.7 consumers.
             return None
         hydro_run = rows.hydro_run
         if _row_matches_candidate(

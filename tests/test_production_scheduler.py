@@ -38172,7 +38172,12 @@ def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
     )
     assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
 
-    # An accessor raising inside the tolerated window also keeps the hydro path.
+    # A foreign optional provider that violates its own contract by RAISING
+    # must propagate, not be silently downgraded to an absence (CAND-02).  The
+    # documented optional-repo tolerance authorizes fallback only for a missing
+    # method or a returned ``None``; the journal authority itself never raises
+    # for malformed input, so a raise from this seam is a loud provider failure
+    # and the verdict must surface it rather than mask a recorded conflict.
     class RaisingFullAccessorRepository(FakeCandidateStateRepository):
         def completed_pipeline_init_state_identity(
             self, *, source_id: str, cycle_time: datetime, model_id: str
@@ -38191,7 +38196,8 @@ def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
         successor_state=None,
         repository_factory=RaisingFullAccessorRepository,
     )
-    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+    with pytest.raises(ValueError, match="optional accessor failed"):
+        scheduler._cycle_completion_status(discovery, models, horizon={})
 
 
 def test_cycle_completion_verdict_direct_hydro_optional_field_conflict_stays_gap(

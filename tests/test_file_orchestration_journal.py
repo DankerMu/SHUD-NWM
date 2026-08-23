@@ -7394,6 +7394,86 @@ def test_full_identity_accessor_prefers_completed_hydro_row_and_preserves_aliase
     assert (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes() == before
 
 
+def test_full_identity_accessor_prefers_completed_hydro_over_qualified_candidate(
+    tmp_path: Path,
+) -> None:
+    """CAND-01: completed hydro identity A beats a qualified candidate identity B.
+
+    Both sources can coexist for one cycle/model: a completed ``hydro_run`` row
+    records identity A, and a current-contract terminal candidate row records a
+    DIFFERENT qualified identity B.  The hydro branch must win on both the full
+    accessor and the delegated string accessor, and a candidate-first (or
+    hydro-branch-deleted) mutation must flip the result.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    candidate_identity = _cohort_candidate_identity(
+        init_state_id="state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    )
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=candidate_identity)
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete", jobs=[terminal])
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    latest["hydro_run"]["init_state_checksum"] = "sha256:" + "a" * 64
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert identity["init_state_checksum"] == "sha256:" + "a" * 64
+    assert identity.get("model_id") != "model_a"  # hydro identity has no model binding
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # The candidate row is qualified (a distinct wrong-suffix lineage B) but
+    # the hydro identity still wins the authority order.
+    assert candidate_identity["init_state_id"] != identity["init_state_id"]
+    assert terminal["init_state_identities"][0]["init_state_id"] == candidate_identity["init_state_id"]
+
+
+def test_full_identity_accessor_placeholder_hydro_falls_back_to_qualified_candidate(
+    tmp_path: Path,
+) -> None:
+    """CAND-03: a declined placeholder P lets the qualified candidate Q win.
+
+    Under the ``forecast_state_save_qc`` terminal mode the hydro row is a
+    non-completed placeholder carrying its own recorded id; when a qualified
+    current-contract candidate row is ALSO present, the accessor must decline
+    the placeholder (hydro status is not completed) and fall back to the
+    candidate identity Q on both accessors — never leak P.
+    """
+    from services.orchestrator.accepted_submit_identity import (
+        INIT_STATE_IDENTITY_FIELD,
+        accepted_submit_candidate_immutable_evidence,
+    )
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=_cohort_candidate_identity())
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[terminal])
+    latest["hydro_run"]["init_state_id"] = "state_placeholder_gfs_model_a_2026062800"
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # The candidate row is the qualified fallback Q.
+    evidence = accepted_submit_candidate_immutable_evidence(terminal)
+    assert evidence[INIT_STATE_IDENTITY_FIELD][0]["init_state_id"] == identity["init_state_id"]
+
+
 def test_full_identity_accessor_preserves_completed_hydro_optional_identity_fields(
     tmp_path: Path,
 ) -> None:
@@ -7546,7 +7626,7 @@ def test_full_identity_accessor_returns_latest_current_candidate_terminal_identi
         "latest_failed",
         "latest_empty_identity",
         "marker_free",
-        "master_row",
+        "malformed_incomplete_master",
         "other_model",
         "no_journal",
     ],
@@ -7555,7 +7635,27 @@ def test_full_identity_accessor_returns_none_for_unqualified_shapes(
     tmp_path: Path,
     leg: str,
 ) -> None:
-    """Every rejection shape returns ``None`` and never raises."""
+    """Every rejection shape returns ``None`` and never raises.
+
+    The rejection is split across two honest boundaries:
+
+    - ``latest_failed`` / ``latest_empty_identity`` / ``marker_free`` reach
+      the ACCESSOR SELECTOR: they are valid rows the selector must decline.
+    - ``malformed_incomplete_master`` / ``other_model`` are rejected by the
+      LOADER's model binding / accepted-submit normalization before the
+      selector ever runs (see
+      ``test_full_identity_accessor_rejects_direct_partition_foreign_model_cycle_run_row``
+      for the loader-surviving accessor-level other-model proof); these legs
+      are loader-level fail-to-absent proofs, not selector proofs.
+    - A VALID current-contract cohort master — one the loader accepts and that
+      survives ``_cycle_rows`` — is excluded from candidate authority by the
+      row-kind filter (``accepted_submit_row_kind == "candidate"``) alone, not
+      by the loader; the candidate immutable evidence is never invoked on the
+      master row.  With no per-model terminal candidate row present it yields
+      ``None`` on both accessors (see
+      ``test_full_identity_accessor_valid_cohort_master_without_terminal_candidate``).
+    - ``no_journal`` is the empty authority shape.
+    """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     stamp = format_cycle_time(cycle_time)
     journal_root = tmp_path / "journal"
@@ -7566,7 +7666,13 @@ def test_full_identity_accessor_returns_none_for_unqualified_shapes(
     elif leg == "marker_free":
         terminal = _cohort_candidate_terminal_row(cycle_time)
         del terminal["accepted_submit_contract_version"]
-    elif leg == "master_row":
+    elif leg == "malformed_incomplete_master":
+        # Loader-level fail-to-absent proof: a MASTER-SHAPED but INCOMPLETE
+        # row (model-less + cycle run id + master markers, yet missing the
+        # required master evidence fields such as ``cohort_members``,
+        # ``submission_attempt`` and the reconciliation family) is rejected by
+        # ``normalize_accepted_submit_evidence`` before the accessor selector
+        # ever runs; the selector never sees a master row on a valid journal.
         from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
 
         terminal = _cohort_candidate_terminal_row(cycle_time)
@@ -7581,6 +7687,10 @@ def test_full_identity_accessor_returns_none_for_unqualified_shapes(
             }
         )
     elif leg == "other_model":
+        # Loader-level fail-to-absent proof: written into the model_a latest
+        # view, this foreign row is rejected by the loader's model binding
+        # before the accessor selector runs (see the direct-partition sibling
+        # for the selector-level other-model proof).
         terminal = _cohort_candidate_terminal_row(
             cycle_time, model_id="model_b", array_task_id=1
         )
@@ -7594,6 +7704,109 @@ def test_full_identity_accessor_returns_none_for_unqualified_shapes(
     repository = FileOrchestrationJournalRepository(journal_root)
 
     assert _full_accessor(repository, cycle_time) is None
+
+
+def test_full_identity_accessor_valid_cohort_master_without_terminal_candidate(
+    tmp_path: Path,
+) -> None:
+    """A VALID current-contract master alone yields no identity.
+
+    The ``malformed_incomplete_master`` leg of the unqualified-shapes test is a
+    loader-level fail-to-absent proof (the loader rejects that incomplete row).
+    This oracle is the honest complement (CAND-04 authority-rejection
+    coverage): a REAL, loader-valid current-contract cohort master written by
+    the canonical accepted-submit writer path — with its own
+    ``init_state_identities`` map — SURVIVES ``_cycle_rows`` for the model and
+    is visible in ``rows.pipeline_jobs``.  The row-kind filter
+    (``accepted_submit_row_kind == "candidate"``) alone excludes it from
+    candidate authority before ``_candidate_row_self_bound_identity`` runs,
+    not the loader; the candidate immutable evidence is never invoked on the
+    master row.  Because no per-model terminal candidate row exists for it,
+    the accessor selector finds no ``candidate`` row, so BOTH the full and
+    string accessors return ``None``.
+    """
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitTransition,
+    )
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=1,
+        init_state_identities=[_cohort_init_state_identity(0)],
+    )
+    # Canonical accepted-submit writer path: reserve, commit, project every
+    # task as succeeded.  The master becomes terminal-success; the projection
+    # also writes the per-model terminal candidate row, so to exercise the
+    # master-only shape we deliberately project NOTHING (member_count would
+    # normally materialize candidate rows; here we reserve+commit only).
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    commit = repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=1,
+        slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert commit.committed
+    # Drive the master to terminal-success through the journal's own write
+    # sequence (the same outgoing validator production writes use).
+    job_id = str(record["job_id"])
+    source_id = journal_module._source_id_from_job(record)
+    with repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+        existing = repository._accepted_submit_job_for_id_unlocked(
+            job_id, source_id=source_id, cycle_time=cycle_time
+        )
+        assert existing is not None
+        row = {**existing, "status": "succeeded"}
+        journal_record = journal_module._journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=repository._next_sequence_unlocked(
+                source_id=source_id, cycle_time=cycle_time
+            ),
+        )
+        repository._validate_outgoing_record(
+            journal_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=None,
+        )
+        repository._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=[journal_record],
+        )
+
+    # The valid master survives the loader into model_0's row set...
+    rows = repository._cycle_rows(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+    )
+    assert job_id in rows.pipeline_jobs
+    assert (
+        journal_module.accepted_submit_row_kind(rows.pipeline_jobs[job_id])
+        == "master"
+    )
+    # ...and no per-model terminal candidate row exists for it.
+    candidate_ids = [
+        job_id_
+        for job_id_, job in rows.pipeline_jobs.items()
+        if journal_module.accepted_submit_row_kind(job) == "candidate"
+    ]
+    assert candidate_ids == []
+
+    # Full and string accessors: no identity.
+    assert _full_accessor(repository, cycle_time, model_id="model_0") is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+        )
+        is None
+    )
 
 
 def test_full_identity_accessor_latest_first_old_success_cannot_hide_newer_failure(
@@ -7652,6 +7865,148 @@ def test_full_identity_accessor_rejects_malformed_current_row_without_raising(
     assert repository.completed_pipeline_init_state_id(
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
     ) is None
+
+
+def test_full_identity_accessor_rejects_direct_partition_foreign_model_cycle_run_row(
+    tmp_path: Path,
+) -> None:
+    """CAND-04: a loader-surviving foreign-model cycle-run row is selector-rejected.
+
+    The ``other_model`` leg of the unqualified-shapes test writes the foreign
+    row into the model_a latest view, where the loader's model binding rejects
+    it BEFORE the accessor selector ever runs — that leg is a loader-level
+    fail-to-absent proof, not an accessor proof.  This oracle uses the DIRECT
+    ``pipeline-jobs/`` partition instead: a current-contract candidate row
+    naming ``model_b`` whose ``run_id`` is the exact cycle run id
+    (``cycle_gfs_<stamp>``) SURVIVES ``_cycle_rows`` for model_a (the direct
+    scan filters by ``_job_matches_candidate``, whose cycle-run arm is wide),
+    so the row reaches the accessor selector.  The self-bound model guard
+    inside ``_candidate_row_self_bound_identity`` must reject the ``model_b``
+    entry for a ``model_a`` read on BOTH accessors, keeping the authority None
+    (no loader rejection involved).
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    foreign = _cohort_candidate_terminal_row(
+        cycle_time,
+        model_id="model_b",
+        array_task_id=1,
+        job_id="job_fcst_gfs_2026062800_model_b_forecast_reconciled_17667_1",
+        identity=_cohort_candidate_identity(
+            model_id="model_b",
+            array_task_id=1,
+            init_state_id="state_gfs_model_b_2026062800_gfs_2026062712_f012",
+        ),
+    )
+    # The exact cycle run id: the direct-partition cycle-wide scan accepts it
+    # even though the row names a foreign model.
+    foreign["run_id"] = f"cycle_gfs_{stamp}"
+    foreign["candidate_id"] = f"cycle_gfs_{stamp}"
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time),
+    )
+    _write_json(
+        journal_root / f"pipeline-jobs/{foreign['job_id']}.json",
+        _journal_record(
+            record_type="pipeline_job",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id=foreign["model_id"],
+            payload=foreign,
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The row survives the loader into model_a's row set...
+    rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    assert foreign["job_id"] in rows.pipeline_jobs
+    # ...and the accessor selector still rejects its foreign-bound entry.
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_malformed_duplicate_no_replay_timestamp_fails_to_absent(
+    tmp_path: Path,
+) -> None:
+    """A malformed read-stage timestamp never leaks out of the authority.
+
+    CAND-02 regression: two rows of the SAME ``job_id`` with no replay block
+    (an older latest-view geometry) resolve the duplicate through
+    ``_latest_mapping``, whose shared timestamp sort calls ``_parse_gateway_time``
+    and can raise a bare ``ValueError`` for a malformed ``updated_at``.  That
+    exception originates in the read stage of ``_cycle_rows``, before the
+    accessor's candidate-selection window.  The full accessor must absorb it
+    (fail to absent) instead of leaking it, and the delegated string accessor
+    plus both §8.7 consumers must keep making no judgement.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    first = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="2026-06-28T00:05:00Z",
+        identity=_cohort_candidate_identity(),
+    )
+    duplicate = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="not-a-timestamp",
+        identity=_cohort_candidate_identity(init_state_id="state_other"),
+    )
+    latest = _latest_view(cycle_time=cycle_time, jobs=[first, duplicate])
+    # No replay block: the duplicate resolution must fall through to the
+    # timestamp comparison that raises on the malformed value.
+    latest.pop("replay", None)
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        latest,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # Full accessor: no judgement (None), never raising.
+    assert _full_accessor(repository, cycle_time) is None
+    # Delegated string accessor: no judgement.
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+    # Both §8.7 wirings delegate to the same string accessor, so the malformed
+    # timestamp stays a no-judgement on the discovery filter and the candidate
+    # quarantine alike (design D4; CAND-02 regression).  The shared harness
+    # builds the two scheduler contexts once; only the two wirings differ.
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(tmp_path, active_repository=repository, cycle_time=cycle_time, stamp=stamp)
+    )
+    assert (
+        scheduler_discovery_module._journal_predecessor_identity_stale_tokens(
+            discovery_context, discovery, candidate, horizon={}
+        )
+        is None
+    )
+    assert (
+        scheduler_candidates_module._journal_predecessor_identity_quarantine(
+            construction_context,
+            candidate,
+            source_cycle,
+            CandidateStateDecision(
+                "skip",
+                "terminal_completed_cycle",
+                {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+            ),
+        )
+        is None
+    )
 
 
 def test_full_identity_accessor_returns_defensive_copy(tmp_path: Path) -> None:
@@ -7717,6 +8072,101 @@ def test_full_identity_accessor_ignores_candidate_state_job_limit_truncation(
 # ---------------------------------------------------------------------------
 
 
+def _discovery_and_quarantine_harness(
+    tmp_path: Path,
+    *,
+    active_repository: Any,
+    cycle_time: datetime,
+    stamp: str,
+    base_lead: int = 12,
+) -> tuple[Any, Any, Any, Any, Any]:
+    """Build both §8.7 wiring contexts for one real journal repository.
+
+    Shared setup for the §8.7 tests: a discovery, a model_a candidate, the
+    discovery source cycle, and the two scheduler contexts (discovery-side
+    ``SchedulerDiscoveryContext`` and candidate-side
+    ``SchedulerCandidateConstructionContext``) bound to ``active_repository``.
+    The scheduler itself is internal to the harness (its config feeds both
+    contexts) and is not returned.
+    """
+    from services.orchestrator.scheduler_discovery import (
+        SchedulerDiscoveryContext,
+    )
+    from services.orchestrator.scheduler_discovery import (
+        SchedulerSourceCycle as DiscoverySourceCycle,
+    )
+
+    discovery = CycleDiscovery(
+        cycle_id=f"gfs_{stamp}",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    candidate = _scheduler_candidate_fixture()
+    candidate = scheduler_module._candidate_for(
+        discovery=discovery,
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id=candidate.model_id,
+            basin_id=candidate.basin_id,
+            basin_version_id=candidate.basin_version_id,
+            river_network_version_id=candidate.river_network_version_id,
+            segment_count=3,
+            output_segment_count=3,
+            model_package_uri="s3://nhms/models/model_a/package/",
+            shud_code_version="2.0",
+            resource_profile={},
+            resource_profile_summary={},
+            display_capabilities={},
+        ),
+        horizon={},
+    )
+    source_cycle = DiscoverySourceCycle(discovery=discovery, horizon={})
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-06-28T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={},
+        active_repository=active_repository,
+    )
+    discovery_context = SchedulerDiscoveryContext(
+        config=scheduler.config,
+        adapters={},
+        active_repository=active_repository,
+        floor_to_source_cycle_boundary=lambda value, _sources: value,
+        source_horizon_metadata=lambda discovery, adapter: {},
+        candidate_factory=lambda *a, **k: candidate,
+        candidate_state_provider_caller=lambda *a, **k: None,
+        candidate_state_decider=lambda candidate, state: None,
+        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
+    )
+    construction_context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
+        config=scheduler.config,
+        active_repository=active_repository,
+        canonical_readiness_for_candidate=lambda *a, **k: {"ready": True},
+        strict_warm_start_for_candidate=lambda *a, **k: None,
+        orchestrator_for=lambda *a, **k: None,
+        candidate_factory=lambda *a, **k: candidate,
+        candidate_state_provider_caller=scheduler_state_decision_module._call_candidate_state_provider,
+        active_slurm_jobs_provider_caller=scheduler_state_decision_module._call_active_slurm_jobs_provider,
+        active_slurm_jobs_bounder=lambda *a, **k: [],
+        candidate_state_decider=scheduler_state_decision_module._candidate_state_decision,
+        candidate_state_identity_mismatch_detector=scheduler_module._candidate_state_has_identity_mismatch,
+        candidate_state_scoped_retry_detector=scheduler_module._candidate_state_is_candidate_scoped_retry,
+        repaired_state_audit_evidence_builder=scheduler_module._candidate_repaired_state_audit_evidence,
+        successor_state_for_candidate=None,
+        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
+        max_candidates=scheduler_module.MAX_CANDIDATES,
+    )
+    return (
+        discovery,
+        candidate,
+        source_cycle,
+        discovery_context,
+        construction_context,
+    )
+
+
 def _discovery_and_quarantine_context(
     context: Any,
     discovery: Any,
@@ -7741,21 +8191,14 @@ def _discovery_and_quarantine_context(
 
 def test_discovery_and_candidate_quarantine_share_delegated_string_accessor(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both §8.7 wirings judge the same cohort token off one real repository.
 
     The candidate terminal row records a wrong-suffix lineage; the discovery
     filter must report a positive mismatch and the candidate quarantine must
-    decline the completed skip.  The same fixture also proves the no-judgement
-    shapes stay unchanged on both wirings.
+    decline the completed skip.  The shared harness builds the two scheduler
+    contexts once; only the two wirings differ.
     """
-    from services.orchestrator.scheduler_discovery import (
-        SchedulerDiscoveryContext,
-    )
-    from services.orchestrator.scheduler_discovery import (
-        SchedulerSourceCycle as DiscoverySourceCycle,
-    )
     from services.orchestrator.scheduler_generation import expected_journal_init_state_tokens
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -7797,74 +8240,13 @@ def test_discovery_and_candidate_quarantine_share_delegated_string_accessor(
         source_id="gfs", cycle_time=cycle_time, model_id="model_a"
     ) == recorded_id
 
-    discovery = CycleDiscovery(
-        cycle_id=f"gfs_{stamp}",
-        source_id="gfs",
-        cycle_time=cycle_time,
-        cycle_hour=0,
-        available=True,
-        status="discovered",
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=repository, cycle_time=cycle_time, stamp=stamp
+        )
     )
-    candidate = _scheduler_candidate_fixture()
-    candidate = scheduler_module._candidate_for(
-        discovery=discovery,
-        model=scheduler_module.RegisteredSchedulerModel(
-            model_id=candidate.model_id,
-            basin_id=candidate.basin_id,
-            basin_version_id=candidate.basin_version_id,
-            river_network_version_id=candidate.river_network_version_id,
-            segment_count=3,
-            output_segment_count=3,
-            model_package_uri="s3://nhms/models/model_a/package/",
-            shud_code_version="2.0",
-            resource_profile={},
-            resource_profile_summary={},
-            display_capabilities={},
-        ),
-        horizon={},
-    )
-    source_cycle = DiscoverySourceCycle(discovery=discovery, horizon={})
-
-    scheduler = ProductionScheduler(
-        _config(tmp_path, now=_dt("2026-06-28T12:00:00Z")),
-        registry=FakeRegistry([_model("model_a", "basin_a")]),
-        adapters={},
-        active_repository=repository,
-    )
-    discovery_context = SchedulerDiscoveryContext(
-        config=scheduler.config,
-        adapters={},
-        active_repository=repository,
-        floor_to_source_cycle_boundary=lambda value, _sources: value,
-        source_horizon_metadata=lambda discovery, adapter: {},
-        candidate_factory=lambda *a, **k: candidate,
-        candidate_state_provider_caller=lambda *a, **k: None,
-        candidate_state_decider=lambda candidate, state: None,
-        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
-    )
-
-    # The discovery-side stale filter consumes the discovery context; the
-    # quarantine needs a CandidateConstructionContext.  Build both.
     stale_tokens = scheduler_discovery_module._journal_predecessor_identity_stale_tokens(
         discovery_context, discovery, candidate, horizon={}
-    )
-    construction_context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
-        config=scheduler.config,
-        active_repository=repository,
-        canonical_readiness_for_candidate=lambda *a, **k: {"ready": True},
-        strict_warm_start_for_candidate=lambda *a, **k: None,
-        orchestrator_for=lambda *a, **k: None,
-        candidate_factory=lambda *a, **k: candidate,
-        candidate_state_provider_caller=scheduler_state_decision_module._call_candidate_state_provider,
-        active_slurm_jobs_provider_caller=scheduler_state_decision_module._call_active_slurm_jobs_provider,
-        active_slurm_jobs_bounder=lambda *a, **k: [],
-        candidate_state_decider=scheduler_state_decision_module._candidate_state_decision,
-        candidate_state_identity_mismatch_detector=scheduler_module._candidate_state_has_identity_mismatch,
-        candidate_state_scoped_retry_detector=scheduler_module._candidate_state_is_candidate_scoped_retry,
-        repaired_state_audit_evidence_builder=scheduler_module._candidate_repaired_state_audit_evidence,
-        successor_state_for_candidate=None,
-        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
-        max_candidates=scheduler_module.MAX_CANDIDATES,
     )
     quarantine = scheduler_candidates_module._journal_predecessor_identity_quarantine(
         construction_context,

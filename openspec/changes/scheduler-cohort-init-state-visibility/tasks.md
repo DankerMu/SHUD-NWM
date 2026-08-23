@@ -1,7 +1,7 @@
 ## 1. Journal identity authority
 
 - [x] 1.1 新增 `completed_pipeline_init_state_identity` 完整mapping accessor：completed hydro identity优先；否则在内部未截断rows中按canonical truth-order选latest current-contract accepted-submit candidate row，latest必须terminal-success且含唯一normalized identity。
-- [x] 1.2 选择器拒绝cohort master、marker-free/ordinary row、other-model、malformed identity、latest failed/empty row；必须latest-first再qualify，禁止旧success遮蔽新failure。
+- [x] 1.2 选择器拒绝marker-free/ordinary row、latest failed/empty row与direct-partition cycle-run foreign-model row（self-bound model guard）；畸形/不完整master row、latest-view other-model row与malformed identity entry无法合法存活loader，由loader在selector前拒绝（loader-level fail-to-absent）；valid current-contract cohort master能合法存活loader与`_cycle_rows`，但由`accepted_submit_row_kind == "candidate"` filter排除（candidate immutable evidence不会在该master行上执行），无per-model terminal candidate时full/string accessor均None；必须latest-first再qualify，禁止旧success遮蔽新failure。
 - [x] 1.3 既有 `completed_pipeline_init_state_id` 委托完整accessor且只提取 `init_state_id` / `initial_state_id`，保持bare `state_id`、unreadable/no-record返回None；accessor read-only且不经public redaction/job_limit。
 - [x] 1.4 `_job_state_evidence` 与 `_CYCLE_SCOPE_JOB_PROJECTION_KEYS` 保持不含 `init_state_identities`；#1183 writer、digest、frozen fields与schema逐字不变。
 

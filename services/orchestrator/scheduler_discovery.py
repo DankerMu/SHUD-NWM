@@ -342,17 +342,19 @@ def _cycle_completion_verdict(
                     else None
                 )
                 if callable(full_identity_provider):
-                    try:
-                        full_identity = full_identity_provider(
-                            source_id=candidate.source_id,
-                            cycle_time=candidate.cycle_time_utc,
-                            model_id=candidate.model_id,
-                        )
-                    except (TypeError, ValueError):
-                        # Within the documented optional-repo tolerance an
-                        # accessor may raise; that shape is a no-mapping and
-                        # falls back to the legacy hydro evidence.
-                        full_identity = None
+                    # A missing method or a returned ``None`` are the only
+                    # authorized fallback shapes (design D3); a FOREIGN
+                    # optional provider that violates its own contract by
+                    # raising is a loud failure, not an absence — silently
+                    # downgrading it would let a broken repository mask a
+                    # recorded conflict as a match.  The journal authority
+                    # itself never raises for malformed input (it returns
+                    # ``None``), so no caller-side tolerance is needed.
+                    full_identity = full_identity_provider(
+                        source_id=candidate.source_id,
+                        cycle_time=candidate.cycle_time_utc,
+                        model_id=candidate.model_id,
+                    )
                     if isinstance(full_identity, Mapping):
                         observed_identity = full_identity
                 init_state_verdict = _terminal_init_state_verdict(
