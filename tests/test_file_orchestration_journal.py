@@ -30,6 +30,10 @@ from services.orchestrator import scheduler_state_decision as scheduler_state_de
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator.chain import SlurmClientError
+from services.orchestrator.chain_repository_state import (
+    DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
+    DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
+)
 from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
@@ -156,8 +160,8 @@ def _candidate_state(
     cycle_time: datetime,
     source_id: str = "gfs",
     model_id: str = "model_a",
-    job_limit: int = 100,
-    event_limit: int = 100,
+    job_limit: int = DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
+    event_limit: int = DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
 ) -> dict[str, Any] | None:
     return repository.candidate_state(
         source_id=source_id,
@@ -8307,33 +8311,61 @@ def test_full_identity_accessor_returns_defensive_copy(tmp_path: Path) -> None:
 def test_full_identity_accessor_ignores_candidate_state_job_limit_truncation(
     tmp_path: Path,
 ) -> None:
-    """The accessor reads internal untruncated rows, not the bounded payload."""
+    """The accessor reads internal untruncated rows, not the bounded payload.
+
+    The identity-bearing current candidate row sits BELOW the bounded
+    truth-order cutoff: enough newer cohort masters fill every retained slot
+    at the default limit (and thus at every smaller limit), so a bounded-reader
+    regression can never return the identity from the payload.  The full
+    accessor must still return it from the internal untruncated rows.
+    """
     cycle_time = _dt("2026-06-28T00:00:00Z")
     stamp = format_cycle_time(cycle_time)
-    filler = [
-        _cohort_candidate_terminal_row(
-            cycle_time,
-            array_task_id=index,
-            identity_sentinel=[],
-            updated_at=f"2026-06-28T00:04:{index:02d}Z",
-        )
-        for index in range(1, 7)
-    ]
     terminal = _cohort_candidate_terminal_row(
         cycle_time,
         identity=_cohort_candidate_identity(),
-        updated_at="2026-06-28T00:05:00Z",
+        updated_at="2026-06-28T00:04:00Z",
     )
+    # One more terminal row than the default candidate-state job limit, all
+    # newer than the identity-bearing terminal.  The masters are model-less
+    # cycle-scope cohort rows: they fill bounded-payload slots (and the
+    # terminal filter admits their ``forecast`` stage) while never being
+    # candidate rows the full accessor can select.
+    newer_masters = [
+        _cohort_master_job(
+            cycle_time,
+            job_suffix=f"_observed_{index}",
+            updated_at=f"2026-06-28T00:04:{(index % 59) + 1:02d}Z",
+        )
+        for index in range(1, DEFAULT_CANDIDATE_STATE_JOB_LIMIT + 2)
+    ]
     journal_root = tmp_path / "journal"
     _write_json(
         journal_root / f"latest/gfs/{stamp}/model_a.json",
-        _latest_view(cycle_time=cycle_time, jobs=[terminal, *filler]),
+        _latest_view(cycle_time=cycle_time, jobs=[terminal, *newer_masters]),
     )
     repository = FileOrchestrationJournalRepository(journal_root)
+    identity_job_id = terminal["job_id"]
 
-    bounded = _candidate_state(repository, cycle_time=cycle_time, job_limit=2, event_limit=2)
+    # The bounded payload is truncated and every retained slot is occupied by
+    # rows newer than the identity-bearing terminal: at the repository's
+    # default candidate-state job limit -- and therefore at any smaller limit,
+    # including the explicit ``job_limit=2`` probe below -- the payload can
+    # never carry the identity-bearing job id.
+    bounded = _candidate_state(repository, cycle_time=cycle_time)
     assert bounded is not None
     assert bounded["state_truncated"] is True
+    assert len(bounded["pipeline_jobs"]) == DEFAULT_CANDIDATE_STATE_JOB_LIMIT
+    assert identity_job_id not in {
+        str(job.get("job_id") or "") for job in bounded["pipeline_jobs"]
+    }
+
+    explicit = _candidate_state(repository, cycle_time=cycle_time, job_limit=2, event_limit=2)
+    assert explicit is not None
+    assert explicit["state_truncated"] is True
+    assert identity_job_id not in {
+        str(job.get("job_id") or "") for job in explicit["pipeline_jobs"]
+    }
 
     identity = _full_accessor(repository, cycle_time)
     assert identity is not None
@@ -8681,6 +8713,7 @@ def _cohort_master_job(
     status: str = "succeeded",
     identities: list[dict[str, Any]] | None = None,
     quarantine_rerun_model_ids: list[str] | None = None,
+    updated_at: str | None = None,
 ) -> dict[str, Any]:
     """One forecast cohort MASTER row: model-less, cycle-scoped, identity-bearing.
 
@@ -8702,6 +8735,8 @@ def _cohort_master_job(
         if identities is not None
         else [_breaker_identity_entry()],
     }
+    if updated_at is not None:
+        row["updated_at"] = updated_at
     if quarantine_rerun_model_ids is not None:
         row["journal_predecessor_quarantine_rerun_model_ids"] = list(quarantine_rerun_model_ids)
     return row
