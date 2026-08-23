@@ -494,8 +494,10 @@ def _finalize_timing_into_evidence(
     property documented above: this is the ONE hook that runs at every
     ``SchedulerPassResult`` return site before the artifact is written, so
     merging the counters here is what makes them always-on. Both blocks are
-    plain snapshots of per-pass instrumentation, and the attribution is a dozen
-    ``(tag, calls, bytes)`` triples — negligible against ``MAX_EVIDENCE_BYTES``.
+    plain snapshots of per-pass instrumentation, and the attribution is a
+    measured ~51 live ``(tag, calls, bytes)`` triples per pass window (72
+    distinct across a 308-test session, cap 256, ``tags_dropped`` observed 0) —
+    negligible against ``MAX_EVIDENCE_BYTES``.
     """
 
     evidence["timing"] = collector.finalize_evidence(status)

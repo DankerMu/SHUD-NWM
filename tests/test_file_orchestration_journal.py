@@ -13582,7 +13582,10 @@ def test_journal_reads_carry_an_entrypoint_across_the_whole_public_surface(
 
     The spec requires this to be pinned by an assertion rather than by prose,
     so the mix below deliberately includes a cycle predicate, a whole-tree
-    query and a write path that reads before it writes.
+    query and a write path that reads before it writes — and, because
+    ``_install_public_read_attribution`` decorates BOTH
+    ``FileOrchestrationJournalRepository`` and ``FileJournalRetryService``,
+    a retry-service read as well: "the whole public surface" is two classes.
     """
 
     _populate_narrowing_journal(tmp_path)
@@ -13598,6 +13601,20 @@ def test_journal_reads_carry_an_entrypoint_across_the_whole_public_surface(
     repository.query_inflight_jobs()
     repository.query_reserved_unbound_jobs()
     repository.update_pipeline_job_status("job_cycle_gfs_2026062800_convert", "succeeded")
+    # The decorated surface is TWO classes, so driving only the repository
+    # cannot see a decorator dropped from the retry service: measured, stripping
+    # `_install_public_read_attribution` from `FileJournalRetryService` leaves
+    # `without_entrypoint == 0` because the reads fall through to the still
+    # wrapped `repository.get_pipeline_job` and are silently misattributed to
+    # the inner entrypoint. Round-3 targeting is read off entrypoint identity
+    # (D11b), so that granularity is load-bearing and must be pinned here.
+    repository.update_pipeline_job_status(
+        "job_cycle_gfs_2026062800_convert",
+        "failed",
+        error_code="SLURM_TIMEOUT",
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    assert retry_service.handle_failed_job(repository.get_pipeline_job("job_cycle_gfs_2026062800_convert")) is not None
 
     attribution = journal_module.journal_read_attribution()
     total, without_entrypoint, without_lane = _attribution_shares(attribution)
@@ -13610,11 +13627,16 @@ def test_journal_reads_carry_an_entrypoint_across_the_whole_public_surface(
         "query_pipeline_jobs_by_cycle",
         "query_inflight_jobs",
         "update_pipeline_job_status",
+        # `FileJournalRetryService` — the second decorated class.
+        "handle_failed_job",
     } <= entrypoints, sorted(entrypoints)
-    # The lane residual is an alarm, not a resting place: the reconcile
-    # inventory and rollback-scope readers are the only reads left outside a
-    # named lane, and they must stay a rounding error against a pass's bytes.
-    assert without_lane * 20 <= total, f"{without_lane}/{total} bytes carry no lane"
+    # The lane residual is not a resting place, and it is not a varying one
+    # either: measured over 5 consecutive runs against this fixture it is
+    # byte-identical (total=100997 no_lane=0 tags=21 tags_dropped=0), a pure
+    # function of the fixture bytes and the call list above. So it is pinned
+    # exactly, like ``without_entrypoint`` — a 5% tolerance would only hide a
+    # newly-laneless reader.
+    assert without_lane == 0, [row["tag"] for row in attribution["tags"]]
 
 
 def test_direct_cycle_read_lanes_separate_flat_from_by_cycle(tmp_path: Path) -> None:
