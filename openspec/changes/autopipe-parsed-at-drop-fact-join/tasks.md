@@ -91,7 +91,7 @@
       handoff 尝试。断言必须落在 handoff 尝试记录上，仅看 rc 与行数不足。
       若观测窗内确有 published run 被重解析（用 `parsed_at` 前进识别），
       在 receipt 中标出——那是一次真实的正例，值钱；没有也不阻塞，因为证伪责任在 E9a。
-- [ ] E10 真实 DB pytest（`NHMS_RUN_INTEGRATION=1` +
+- [x] E10 真实 DB pytest（`NHMS_RUN_INTEGRATION=1` +
       `NHMS_INTEGRATION_DATABASE_URL`）无 skip。
 - [x] E11 两个兄弟探针（`_publish_display_runs`、
       `services/tile_publisher/forcing_copyback_backfill.py`）实机 EXPLAIN 分诊结论；
@@ -115,6 +115,16 @@
 - **E8** no-op tick `phase=ingest elapsed_sec=6`、`done rc=0`（基线 1431–1608 s，
   目标 ~240 s）。tick 归属：进程 `lstart` 21:36:58 / 21:56:21 均晚于 `PULL_AT` 21:25:59。
 - **E9a** node-27 真实库 `tests/test_hydro_run_parsed_at_integration.py` **3 passed, 0 skipped**。
+- **E10** node-27 全量 `pytest -q -m integration`：**169 passed, 1 skipped, exit 0**。
+  唯一的 skip 已认领：`tests/test_basins_registry_import.py:1885`
+  （"real Basins import smoke is opt-in and requires data/Basins"），opt-in 且与本单无关，
+  非环境缺陷、非证据缺口。
+  **首轮为 4 failed**，全在 `tests/test_river_identity_normalization_integration.py`：
+  seed helper 只写事实行、不写 `hydro_run.parsed_at`；旧判据从事实行聚合出时间戳所以成立，
+  新判据读列后 `parsed_at` 为 NULL，`parsed` 侧被门排除、`published` 侧被
+  `_ingested_run_is_current` 短路判为 current。**生产代码无需改动**，修的是 seed
+  （见 T8c）。该文件是 `integration` marker：本地无 env 必 skip、PR CI 也不选它，
+  所以本地全量 13774 passed 对它**完全是盲的**——只有 node-27 抓得到。
 - **E9b** 两连 tick 均 rc=0；tick1 `processed=21 already_ingested=2128 declined=0 failed=0`，
   tick2 `processed=0 already_ingested=2128 declined=0 failed=0`——第二 tick 对同一 published
   人群零新增 forcing handoff。
