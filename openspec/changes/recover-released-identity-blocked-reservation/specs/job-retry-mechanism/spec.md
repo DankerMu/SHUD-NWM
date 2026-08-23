@@ -50,6 +50,18 @@ or one re-seeded through reservation reclaim. Freezing the row without such a
 record is not permitted, because the row is otherwise indistinguishable from an
 ordinary in-flight reservation until a human happens to read the journal.
 
+**The signal SHALL NOT be able to fail the release.** The release write is
+durable and has no rollback, and the release path is never re-entered for an
+already-released row, so a raising emission would leave the row permanently
+released with no record — reproducing the very silent terminal this requirement
+exists to end. The emission SHALL therefore be best-effort with respect to the
+release: a failure SHALL NOT propagate out of the release call, and SHALL NOT
+abort the enclosing reconcile pass. **The fallback SHALL NOT be silent**: when
+the primary emission fails, the failure itself SHALL leave a durable, queryable
+trace through whatever channel remains available, and only if that too fails may
+it degrade to a log — never to nothing, and never to a raise. A refusal that
+makes no release write SHALL remain write-free and signal-free.
+
 #### Scenario: an ordinary pass submits after operator recovery
 
 - **WHEN** an operator records the recovery attestation on a released
@@ -97,6 +109,17 @@ ordinary in-flight reservation until a human happens to read the journal.
   reservation row, before or after the recovery API exists
 - **THEN** `should_auto_retry` SHALL be false and the row's `error_code` SHALL be
   null
+
+#### Scenario: a failing signal does not undo or hide the release
+
+- **WHEN** the operator-visible record cannot be written after the release write
+  has already landed durably — whether the failure is a journal error or a
+  filesystem/OS error
+- **THEN** the release call SHALL NOT raise and the reconcile pass SHALL NOT be
+  aborted
+- **AND** the row SHALL remain durably released
+- **AND** a durable trace of the emission failure SHALL exist, so the released
+  row is not left indistinguishable from one that signalled correctly
 
 #### Scenario: the release announces the terminal from either prior state
 

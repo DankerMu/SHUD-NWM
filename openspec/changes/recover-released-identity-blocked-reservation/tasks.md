@@ -15,13 +15,13 @@
 
 ## 3. Consuming The Attestation
 
-- [x] 3.1 Admit the attestation as an **additive disjunct** at `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`).
-- [x] 3.2 Leave `_verified_accepted_submit_forecast_retry` (`chain_forecast_orchestrator_cycle.py:911-919`) and the reclaim predicate (`file_orchestration_journal.py:2126-2140`) **byte-identical** — no widening, weakening, or reordering.
+- [x] 3.1 Admit the attestation as an **additive disjunct** at `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:171-183`).
+- [x] 3.2 Leave `_verified_accepted_submit_forecast_retry` (`chain_forecast_orchestrator_cycle.py:923-931`) and the reclaim predicate (`file_orchestration_journal.py:2117-2170`) **byte-identical** — no widening, weakening, or reordering.
 - [x] 3.3 The recovered attempt participates in ordinary candidate selection; do **not** carry the released row's member set forward.
 
 ## 4. Operator Signal
 
-- [x] 4.1 Emit `IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR` **once**, at the single release write point `release_identity_blocked_reservation` (`file_orchestration_journal.py:3267-3346`, decision at `:3338`). Already delivered in `54714525` — keep it.
+- [x] 4.1 Emit `IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR` **once**, at the single release write point `release_identity_blocked_reservation` (`file_orchestration_journal.py:3294-3400`, decision at `:3365`). Already delivered in `54714525` — keep it.
 - [x] 4.2 Do **not** also instrument the `reconcile.py:2135` caller (sole caller — would double-emit).
 - [x] 4.3 Record names job id, cohort digest, and `identity_blocked_streak`.
 

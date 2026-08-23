@@ -33,13 +33,13 @@
    `:48681` SHALL pass **unweakened** — they are the anti-regression pin for the
    duplicate-submission class, not incidental coverage.
 2. **The two door predicates stay byte-identical**: the reservation reclaim
-   predicate (`file_orchestration_journal.py:2126-2140`) and
+   predicate (`file_orchestration_journal.py:2117-2170`) and
    `_verified_accepted_submit_forecast_retry`
-   (`chain_forecast_orchestrator_cycle.py:911-919`) keep hard-pinning
+   (`chain_forecast_orchestrator_cycle.py:923-931`) keep hard-pinning
    `absence_retry_permitted`. This is **not** the same as "the call sites are
    untouched": the operator attestation is admitted as an **additional disjunct**
    at `_terminal_stage_needs_manual_retry`
-   (`chain_forecast_orchestrator_cycle.py:169-171`), whose first arm currently
+   (`chain_forecast_orchestrator_cycle.py:171-183`), whose first arm currently
    `return`s the door verdict unconditionally for this shape. Reviewers will read
    that diff; it is stated here rather than glossed. Neither predicate may be
    widened, weakened, or reordered.
@@ -52,9 +52,9 @@
 ## D3. Why not the three rejected designs
 
 - **Stamp a transient `error_code` at release.** Directly contradicts
-  `file_orchestration_journal.py:3331-3334` and reddens both pins. Rejected.
+  `file_orchestration_journal.py:3358-3361` and reddens both pins. Rejected.
 - **Open a reclaim door to `identity_mismatch_released`.** Contradicts the
-  contract at `:3285-3288` and would fabricate an identity proof the system does
+  contract at `:3312-3314` and would fabricate an identity proof the system does
   not have. Rejected.
 - **Auto-mint at the release site under an `identity_blocked_streak` cap.**
   Reverses the deliberate "permanent wedge over duplicate submission" choice.
@@ -81,7 +81,7 @@ verified INERT and self-blocking. The trace, each predicate opened and checked:
 - `job_needs_submission` (`chain_forecast_cycle.py:527-528`) is true, so the pass
   tries to submit it.
 - `_pipeline_job_conflicts_unlocked`'s master branch
-  (`file_orchestration_journal.py:7317-7330`) sees a row already under that
+  (`file_orchestration_journal.py:7376-7389`) sees a row already under that
   `job_id` and refuses the reserve; `reclaim_pipeline_job_reservation` then
   refuses at `:2135` because the row is `pending`, not `reservation_lost`.
 - `_reservation_already_inflight` therefore fires and the pass calls
@@ -94,7 +94,7 @@ verified INERT and self-blocking. The trace, each predicate opened and checked:
 
 **The revised design.** The recovery API records a durable operator attestation
 on the released row and writes no successor. The consuming call site
-`_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`)
+`_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:171-183`)
 gains an additive disjunct for that attestation, after which the ordinary path
 mints `_retry_<n>` via `_retry_cycle_stage_job_id` and
 `_submit_and_wait_cycle_stage` creates a clean reservation on a **free**
@@ -102,8 +102,8 @@ identity, reaching sbatch.
 
 **Why no existing channel was reused (pre-flight, recorded).**
 `_terminal_stage_needs_manual_retry`'s first arm `return`s for this shape, so
-`_terminal_stage_needs_forced_resubmit` (`:883-908`) is unreachable; and
-`manual_retry` is not in `_FORCE_TERMINAL_RESUBMIT_DECISIONS` (`:23-37`), so
+`_terminal_stage_needs_forced_resubmit` (`:895-920`) is unreachable; and
+`manual_retry` is not in `_FORCE_TERMINAL_RESUBMIT_DECISIONS` (`:27-41`), so
 adding it there would change behaviour for every terminal status. The additive
 disjunct is forced, not preferred.
 
@@ -116,7 +116,7 @@ admitted on this row kind; (b) a side journal record keyed by job id that the
 chain reads at stage selection. Red-first will settle which survives.
 
 **No member-set carry-forward.** The recovered attempt participates in ordinary
-candidate selection like any retry. `chain_forecast_orchestrator_cycle.py:216-218`
+candidate selection like any retry. `chain_forecast_orchestrator_cycle.py:228-230`
 states the next submit builds a clean reservation from the **then-current** basin
 cohort, and the July production journal shows `cohort_digest` churning per attempt
 (`cf0bba44…` → `0b32b13f…`). With the manifest now at 24 basins instead of 17,
@@ -127,14 +127,14 @@ carrying a stale member set forward would silently re-run a superseded manifest.
 one operator invocation recovers one wedged cohort.
 
 **Why the generic manual channel is not reused.** `_create_pending_manual_retry_job`
-(`file_orchestration_journal.py:8264-8305`) clones the failed row with
+(`file_orchestration_journal.py:8556-8600`) clones the failed row with
 `candidate_id: None` and key `manual_retry:{run_id}:{n}`, writing through
-`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8298`, `:8302-8304`).
+`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8590`, `:8594-8598`).
 The clone carries `reconciliation_decision = identity_mismatch_released` over
-unchanged while overriding `status` to `"pending"` (`:8281`), tripping the
+unchanged while overriding `status` to `"pending"` (`:8573`), tripping the
 accepted-submit invariant at `accepted_submit_identity.py:646` — surfaced as
 `file_journal_evidence_invariant_invalid`. (The typed-API guard at
-`file_orchestration_journal.py:1913-1918` is **not** what blocks this: it lives
+`file_orchestration_journal.py:1914-1922` is **not** what blocks this: it lives
 in `upsert_pipeline_job`, which this path never calls.) It would also
 pre-materialize a row, which the invariant above forbids outright.
 
@@ -142,23 +142,39 @@ pre-materialize a row, which the invariant above forbids outright.
 
 Today the wedge is silent: the row freezes and each pass rewrites the same
 `RUN_SHUD_FORECAST_ARRAY_RESERVATION_LOST` cycle terminal, with nothing saying
-"this is permanent and needs a human". Both release write points SHALL emit a
-queryable operator-visible record with a searchable token naming the job id,
+"this is permanent and needs a human". The single release write point SHALL emit
+a queryable operator-visible record with a searchable token naming the job id,
 cohort digest and streak. This is what makes the recovery path reachable in
 practice — the 2026-08-22 wedge was found only by accident while investigating
 a different issue.
 
+**The signal may not be able to fail the release.** The release write is durable
+with no rollback, and the release path is never re-entered for an already-released
+row (the reconcile loop iterates reserved-unbound jobs, which never yields a
+`reservation_lost` row), so a raising emission would strand the row released and
+unannounced — the very silent terminal this section exists to end. The emission
+is therefore best-effort with respect to the release, and **its own failure is
+not silent**: it records a durable failure trace, degrading to a log only if that
+too fails, and never to a raise. Precedent: `_record_permanent_failure_mark_failure`
+(#1312 C-P2, "the fallback must not be silent"). One deliberate difference from
+that precedent: the fallback here catches the filesystem/OS class as well, because
+this path writes through the unlocked journal helper that can raise it — catching
+only the precedent's two classes would let a filesystem fault escape the fallback
+and abort the whole reconcile pass.
+
 ## D6. Seams under test
 
 - `retry.RetryService.should_auto_retry` — asserted still false for the shape.
-- `file_orchestration_journal` typed recovery API — asserted to mint exactly one
-  no pipeline-job row, to leave the `_retry_<n>` identity free, and to refuse
-  every non-released shape.
-- `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:169-171`)
+- `file_orchestration_journal` typed recovery API — asserted to write **no**
+  pipeline-job row, to leave the `_retry_<n>` identity free, and to refuse every
+  non-released shape.
+- `_terminal_stage_needs_manual_retry` (`chain_forecast_orchestrator_cycle.py:171-183`)
   — asserted to admit the attestation and to be unchanged without it.
 - The ordinary pass, end to end — asserted to reach the stage's submission call
   after recovery. This is the oracle whose absence let an inert no-op go green.
-- The release write points — asserted to emit the signal at both sites.
+- The single release write point — asserted to emit the signal exactly once for
+  both prior-state shapes, and asserted to keep the release durable, to not raise,
+  and to leave a trace when the emission itself fails.
 
 ## D7. Evidence mapping
 
@@ -180,8 +196,8 @@ implementer to instrument both. That premise is false, and the correction is
 recorded rather than silently rewritten because it changes what the tasks mean:
 
 - `IDENTITY_MISMATCH_RELEASED_DECISION` is constructed in exactly one place,
-  `file_orchestration_journal.py:3338`, inside
-  `release_identity_blocked_reservation` (`:3267-3346`). Its only production
+  `file_orchestration_journal.py:3365`, inside
+  `release_identity_blocked_reservation` (`:3294-3400`). Its only production
   caller is `reconcile.py:2135`.
 - A function named `release_pipeline_job_reservation` does **not exist**; the
   first draft cited it twice.
