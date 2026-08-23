@@ -608,6 +608,61 @@ construction.
 candidates verbatim: `full_tree_replay` (A), `direct_flat_scan` (B),
 `cycle_replay` (C).
 
+**D11a — the lane set grew past A/B/C, and that is the right answer (round-1
+fix pass).** An earlier sentence here read "Lanes are the design's candidates
+verbatim." It no longer describes the code, and the reason is worth recording
+because it was forced by a spec scenario rather than chosen freely.
+
+Requiring that *every* counted byte carry a lane (not merely an entrypoint)
+leaves nowhere for a non-candidate read to go. The fix pass answered that by
+naming the baseline reads explicitly — `cycle_rows`, `cycle_journal_replay`,
+`sequence_replay`, `direct_row_probe`, `reconcile_inventory_migration`,
+`reconcile_inventory_scan` — alongside `direct_by_cycle_scan` from the lane
+split. Without them the lane residual stayed at ~78% of bytes even after
+entrypoint attribution reached ~100%.
+
+**Adjudicated: accept.** A catch-all bucket would have satisfied the letter of
+the scenario and defeated its purpose. D12's whole question is whether the
+residual 8.27 GB is candidate A or ordinary baseline cost, and that is only
+answerable if the baseline is itself named and separable. So the lane set is now
+two kinds of thing, and reading a receipt requires knowing which is which:
+
+- **candidate lanes** — `full_tree_replay` (A), `direct_flat_scan` (B),
+  `cycle_replay` (C). These are what the next round may be aimed at.
+- **baseline lanes** — the six above plus `direct_by_cycle_scan`. These are the
+  cost A/B/C must be separated *from*, never a target in themselves.
+
+**D11b — entrypoint attribution is outermost-wins, applied at the class
+boundary (round-1 fix pass).** The six hand-written `journal_read_entrypoint`
+wrappers and the context manager itself are gone; a class decorator wraps the
+public surface of `FileOrchestrationJournalRepository` and `FileJournalRetryService`,
+skipping generators and already-wrapped callables so no tag can span a `yield`.
+
+Two consequences to know when reading a receipt:
+
+- `_pipeline_job_for_id_unlocked` and `_candidate_job_for_idempotency_unlocked`
+  no longer appear as entrypoints; their reads attribute to the public caller.
+  A round-2 receipt and a round-3 receipt are therefore **not** tag-comparable.
+- An enumerated list is what drifted in the first place — this paragraph
+  previously claimed eight entrypoints where six existed. A boundary cannot
+  drift the same way, which is the point of the change.
+
+Measured effect, same command as the finding's receipt
+(`pytest tests/test_production_scheduler.py -k "file_journal or db_free"`,
+308 passed): bytes with no entrypoint **80.8% → 0.01%**; bytes with no lane
+**78% → 0.14%**.
+
+**Known residual, recorded rather than rounded away**: 114 B per fixture pass
+still reach the read primitive through
+`_prepare_reconcile_inventory_rollback_under_scheduler_lease`, a private method
+entered from outside the two decorated classes, so no boundary covers it. Two
+further named-but-laneless sources total ~2.4 KB
+(`current_generation_scheduler_rollback_blocker`,
+`query_rollback_unsettled_jobs`, and `candidate_state` via `_forcing_context`).
+At ~0.1% of a fixture pass these do not threaten the A/B/C separation D12 needs;
+they are recorded so a future receipt reader does not mistake a growing residual
+for a rounding artefact.
+
 **CORRECTED after round-1 verification.** An earlier draft read "Entrypoints are
 the six query methods plus the two `_unlocked` helpers; anything else falls to
 `unattributed`, so totals always reconcile rather than silently dropping reads."

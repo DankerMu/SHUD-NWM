@@ -293,7 +293,7 @@ Spec/design corrections are already applied by the orchestrator (D11/D13 entrypo
 claim, D13 "no unscoped leg", I7 matrix row, and three new spec scenarios). The
 items below are the code and test work.
 
-- [ ] **P1 — the counter's concurrency oracle is tautological.**
+- [x] **P1 — the counter's concurrency oracle is tautological.**
       `tests/test_file_orchestration_journal.py:13383-13385` asserts
       `totals == sum(tags)`, but `journal_read_attribution()` (`:275-282`) builds
       `totals` from the same `rows` it returns as `tags`, so the equality is an
@@ -303,7 +303,7 @@ items below are the code and test work.
       independently known expected count. New spec scenario: "The counter is
       proven accurate, not merely self-consistent". Must be shown to bite by the
       same racy-counter substitution.
-- [ ] **P2 — attribution does not cover the read surface.** Measured on a real
+- [x] **P2 — attribution does not cover the read surface.** Measured on a real
       308-test fixture: **80.6% of bytes carried no entrypoint**. Only six
       wrappers existed (`:1202, 1212, 1255, 1310, 1324, 1337`);
       `query_inflight_jobs`, `query_reserved_unbound_jobs`,
@@ -313,7 +313,7 @@ items below are the code and test work.
       attributed. Prefer a boundary mechanism over enumerating methods — a list
       is what drifted in the first place. Acceptance is measured, not argued:
       re-run the fixture probe and report the residual share.
-- [ ] **P3 — `direct_flat_scan` conflates two legs.** `:4527` wraps the whole of
+- [x] **P3 — `direct_flat_scan` conflates two legs.** `:4527` wraps the whole of
       `_iter_direct_pipeline_job_records_for_cycle`, which merges the flat leg and
       the already-partitioned `pipeline-jobs/by-cycle/` leg into one sorted list
       (`:5077-5091`). **Measured**: by-cycle contributed 33.5% of the lane's bytes
@@ -323,19 +323,53 @@ items below are the code and test work.
       sits on the cache-**miss** path, so by-cycle re-reads on thrash-induced
       misses are arguably part of B's real cost — the defect is that D11 grades
       this lane against flat-sized expectations.
-- [ ] **P3 — the discriminating memo test does not discriminate.**
+- [x] **P3 — the discriminating memo test does not discriminate.**
       `:13066-13122` uses only parseable job ids, so it cannot see either
       fall-open arm. Add an **unparseable-name** arm (real legacy shape
       `cycle_gfs_..._retry_active`, no `job_` prefix) and a **source-unnormalisable**
-      arm. Both must fail against today's code, then pass. No production code
-      change: broadening invalidation is semantically required here (see D13).
-- [ ] **P3 — the new memo has no concurrent-stress coverage.** The named vehicle
+      arm. No production code change: broadening invalidation is semantically
+      required here (see D13).
+
+      **Correction to this item's own wording, recorded rather than quietly
+      dropped.** It first said "Both must fail against today's code, then pass"
+      while simultaneously forbidding a production change and requiring the
+      tests to pin *current* behaviour. Those are contradictory: a behaviour pin
+      cannot go red against the source it pins. The fix pass flagged the conflict
+      instead of silently choosing, which is the correct handling. Resolved as
+      **red against the tempting wrong fix** — narrow the prefilter so fall-open
+      files are skipped (exactly what D13 forbids) and both arms go red:
+      `assert 'cycle_gfs_2026062800_retry_active' in {...}` for arm 1 and
+      `assert set() > {'gfs_2026062800'}` for arm 2 — then restore and both pass.
+      That is a stronger receipt than the original wording asked for: it proves
+      the pins guard the specific wrong turn a future reader is most likely to
+      take.
+- [x] **P3 — the new memo has no concurrent-stress coverage.** The named vehicle
       for I7 drives only `_cycle_rows` and `_read_bytes_limited_cached`. The
       8-thread counter test does incidentally populate `_cycle_job_records_cache`
       (12 entries measured), but capacity is 512 so the eviction branch
       (`:5319-5320`) never runs, and it has no writer thread. Minimal closure:
       squeeze `MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES` in a memo-driving
       concurrent test that also runs a writer.
-- [ ] Re-run the CI-selected set (`scripts/select_ci_tests.py --base master`) as
+- [x] Re-run the CI-selected set (`scripts/select_ci_tests.py --base master`) as
       the CI substitute. Pre-fix baseline at `f329eab4`: **4355 passed, 1 skipped,
       exit 0**.
+
+**Round-1 fix pass evidence (`b7aff05d`).**
+
+|item|receipt|
+|---|---|
+|P1 oracle|bite proof RED `counter recorded 8 reads, threads performed 40: per-thread [5,5,5,5,5,5,5,5]` -> restored GREEN|
+|P2 attribution|no-entrypoint bytes **80.8% -> 0.01%** (114 B), no-lane **78% -> 0.14%**, same 308-test command as the finding's receipt|
+|P3 lane split|`direct_flat_scan` / `direct_by_cycle_scan` both carry bytes in a relocation test|
+|P3 fall-open pins|two arms, each RED against the tempting wrong fix, then GREEN|
+|P3 memo concurrency|cap squeezed to 2, eviction branch instrumented as executing **94 times**|
+|suites|journal+scheduler+gateway **2896 passed, 1 skipped**; journal pair **474 passed, 1 skipped** (was 470 -> exactly +4 new tests, zero deletions, orchestrator-verified)|
+|CI substitute|**4359 passed, 1 skipped**, exit 0 (baseline 4355 + exactly the 4 new tests)|
+|ruff|clean|
+
+Orchestrator-side follow-ups from the fix pass, applied in design.md: **D11a**
+(the lane set grew past A/B/C; adjudicated accept, and the receipt vocabulary is
+now split into candidate lanes vs baseline lanes) and **D11b** (entrypoint
+attribution moved to the class boundary, outermost-wins; round-2 and round-3
+receipts are not tag-comparable). The 114 B / ~2.4 KB residuals are recorded
+there as known limits rather than rounded away.
