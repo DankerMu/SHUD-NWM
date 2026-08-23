@@ -76,6 +76,15 @@ _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
     "duplicate_exclusions",
     "readiness_interpretation",
     "execution_mode",
+    # #1734 D11: the journal read attribution is a last-resort shed, placed
+    # immediately BEFORE ``timing`` so no pre-existing field's drop order
+    # moves. At the production 5 MB limit the attribution block — measured at
+    # ~51 live (tag, calls, bytes) triples per pass window, 72 distinct across
+    # a 308-test session, against a cap of 256 with ``tags_dropped`` observed 0
+    # — is never the reason an artifact does not fit; this tier only exists so a
+    # pathologically small limit still yields a writable artifact instead of
+    # ``evidence_size_limit_exceeded``.
+    "journal_read_attribution",
     "timing",
 )
 _DB_FREE_DB_BACKEND_VALUES = frozenset({"postgres", "postgresql", "psycopg", "psycopg2", "pg"})

@@ -18,6 +18,7 @@ from services.orchestrator.chain_source_cycle import (
 from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     EVIDENCE_REDACTION_PLACEHOLDERS,
+    TERMINAL_INIT_STATE_CONFLICT,
     TERMINAL_INIT_STATE_MATCH,
     init_state_field,
     terminal_init_state_match,
@@ -427,6 +428,61 @@ def build_candidates(
                 and not bool(strict_warm_start.get("ready"))
                 and not bool(getattr(context.config, "repair_missing_forcing", False))
             ):
+                # #1775 D4: same ordering defect as the completion verdict —
+                # this branch's `continue` used to fire ahead of
+                # `classify_candidate_state()`, so a candidate that had ALREADY
+                # reached terminal success was re-blocked on the admission gate
+                # for a run it never needed to start.  Classify first and take
+                # the existing terminal skip exit for those; only non-terminal
+                # candidates reach the warm-admission gate.
+                classify_candidate_state()
+                if (
+                    state_decision is not None
+                    and state_decision.action == "skip"
+                    and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                    # This exit's ``continue`` bypasses the whole downstream
+                    # terminal ladder, so it has to carry EVERY gate the cycle
+                    # verdict applies past the terminal decision — otherwise the
+                    # pass receipt reports "done" for a (model, cycle) that
+                    # ``_cycle_completion_verdict`` simultaneously scores
+                    # ``gap``: the cycle keeps the source's single oldest-gap
+                    # slot while the ``state_snapshot_index_*`` blocker evidence
+                    # operators relied on disappears from the receipt.
+                    #
+                    # The verdict path has exactly two such gates, and both are
+                    # REFERENCED here rather than re-implemented, so a later
+                    # edit to either cannot desynchronise the two paths again:
+                    #
+                    #   1. the closed not-ready reason allowlist, reached
+                    #      through ``_terminal_init_state_verdict`` — at this
+                    #      exit ``strict_warm_start`` is always not-ready (the
+                    #      enclosing branch guarantees it), so this predicate
+                    #      reduces to the allowlist test and cannot disturb the
+                    #      ``match`` / ``absent`` shapes;
+                    #   2. successor continuity, where ``None`` means "no
+                    #      verdict was reached" and silence is not proof —
+                    #      hence ``_successor_state_proves_continuity`` and NOT
+                    #      the laxer ``_successor_state_terminal_can_skip`` the
+                    #      sibling exit one branch up uses (that exit sits ahead
+                    #      of a strict resolution being required at all).
+                    #
+                    # Non-conforming rows fall through to the existing ladder
+                    # and keep their pre-#1775 routing — blocked with the typed
+                    # strict reason — so this introduces no new wedge.
+                    and _scheduler_discovery._terminal_init_state_verdict(
+                        state_decision.evidence, strict_warm_start
+                    )
+                    != TERMINAL_INIT_STATE_CONFLICT
+                    and _scheduler_discovery._successor_state_proves_continuity(successor_state)
+                ):
+                    skipped.append(
+                        {
+                            **candidate.to_dict(),
+                            "reason": state_decision.reason,
+                            "state_evidence": _evidence_safe(state_decision.evidence),
+                        }
+                    )
+                    continue
                 state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
                     context.config,
                     candidate,

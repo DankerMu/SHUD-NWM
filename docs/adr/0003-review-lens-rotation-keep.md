@@ -1212,3 +1212,416 @@ that reversed the approach from rebuilding an index to deleting it. The
 rotation counter cannot see that, and a reader using this ADR to reason about
 where review value originates should know the instrument only counts one of the
 sources.
+
+## Revisit 2026-08-23 (PR #1783, issue #1747) — keep, denominator +1, numerators unchanged
+
+`loop_log_audit` returns DECIDABLE at **112 multi-round merged PRs, core=68 /
+rotated=264**. The denominator moved by one; both numerators are identical to
+the PR #1771 revisit above. Decision unchanged: **keep**.
+
+This PR is the first revisit that adds a *sixth* way the counter misleads, and
+it is the one that most directly attacks the instrument's premise. PR #1783 did
+rotate — round 2 pulled in `spec-compliance`, a lens not used in round 1 — and
+the rotated lens returned zero findings. On the ledger that is indistinguishable
+from a PR where rotation was never exercised: both contribute nothing to
+`rotated`.
+
+But the two are not the same thing, and here the difference is total. Round 2
+reviewed a **byte-identical code head**: round 1's single verified finding was
+an orchestrator-authored false claim living only in the PR body, so the
+corrective action was a prose edit and the head SHA was unchanged across
+round 1, round 2, and Phase 7. A rotated-in lens finding nothing in code that
+did not change is not evidence that rotation buys nothing; it is not evidence
+about rotation at all. The counter cannot distinguish "the new lens looked and
+the code was clean" from "the new lens looked at code no one had touched."
+
+The practical consequence for anyone reading this ledger to decide keep/cut:
+`rotated=264` is a floor on rotation's value, not an estimate of it, and the
+gap between floor and truth widens every time a round runs against an unchanged
+head. The four prior caveats plus this one all push the same direction — the
+instrument systematically undercounts rotation and overcounts core — which is
+why the default-keep has never been close to a hard call.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1780, issue #1775) — keep, and the first caveat that cuts the other way
+
+`loop_log_audit` returns DECIDABLE at **113 multi-round merged PRs, core=68 /
+rotated=265**. This PR moved the denominator by one and `rotated` by one; `core`
+is unchanged. Decision unchanged: **keep**.
+
+On its face this is the cleanest pro-rotation line in the ledger so far. Round 1
+ran `relaxation-correctness`, `test-oracle-integrity` and
+`root-cause-blast-radius` and returned one P1 (a gate-parity divergence between
+`scheduler_candidates.py`'s terminal-skip exit and `_cycle_completion_verdict`).
+Round 2 rotated in `allowlist-tightening-reachability` and
+`gate-parity-and-test-honesty`, and returned a second P1 — a *second instance of
+the same class*, in a different code path. Round 3 went comprehensive and
+returned clean. A rotated-in lens found a P1 that the round-1 mix had not.
+
+**But that is not blind rotation, and counting it as such flatters the
+instrument.** The round-2 lens was rotated in *because* round 1 had named the
+class. It was targeted re-verification of a known failure mode, not exploration
+of an unexamined axis. It found what it was pointed at.
+
+That is the seventh caveat, and it is the first one that pushes *against*
+rotation rather than for it. The six recorded above all argue that `rotated` is
+a floor — that the counter systematically undercounts rotation's value. This one
+argues that some fraction of `rotated` is not rotation at all but follow-up
+targeting, which the ledger cannot distinguish from a lens rotated in cold. The
+honest statement is now two-sided: `rotated=265` is neither a floor nor an
+estimate, because it mixes two mechanisms with different value profiles. Both
+are worth doing; only one of them is what "lens rotation" names.
+
+The practical read is unchanged — 68 vs 265 is a wide enough margin to survive
+the correction in either direction — but a future maintainer deciding keep/cut on
+this counter should know it is measuring a union, and that separating the two
+would require recording *why* each lens entered a round, which no line currently
+does.
+
+One further observation, and it is the same shape as the PR #1771 revisit's
+point about the user challenge. This PR's most consequential error was not in
+the diff at all: the orchestrator's premise that production backfill was
+permanently wedged and would never self-heal was false, and it was written into
+the issue body and into every reviewer brief before any lens ran. Three
+comprehensive rounds, a verifier gate and a Phase 7 review all executed and all
+found real implementation defects; none questioned the premise, because a
+premise baked into the brief is upstream of every lens and is not part of what
+any of them review. No rotation policy reaches it. That is the second recorded
+instance of the ledger's blind spot being *where the review question came from*
+rather than *which lens asked it*, and it is a stronger argument for keeping the
+count honest than for changing it.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1784, issue #1781) — keep, and the counter's third blind spot: the catch that came from neither lens
+
+Counter moved `core=68`, `rotated=265 → 267`; 114 multi-round merged PRs. The
+margin is untouched and the default-keep stands. What this run adds is not a
+number but a category the ledger has no column for.
+
+Three comprehensive rounds ran. The code-facing lens — the pinned core — returned
+**zero findings in rounds 2 and 3**, having been correct both times: an
+independent verifier separately confirmed the fix round was complete, and the
+final review re-derived the same conclusion. Every net catch in those two rounds
+came from a rotated-in lens, and every one of them was the same class: an
+artifact contradicting the code. A deployment instruction that the PR's own fix
+round had falsified. A Must-preserve paragraph describing a placement the design
+had already reversed. A spec scenario left un-revisited when its replacement was
+added beside it, so that one file both authorized and forbade the same behaviour.
+On the counter's own terms this is another clean win for rotation.
+
+But the most consequential finding of the run came from **neither**. It came from
+running the change on node-27. The first live tick declined 144 of 158 blocked
+runs and left 14 pinned at `failed` with `rc=1` forever, because those runs had
+no init-state evidence and the design's fail-closed rule turned "key unobtainable"
+into retry-forever — reproducing, for that subset, precisely the loop the change
+existed to eliminate. It was as-designed and it was not as-promised, and it would
+have shipped as a silent descope of the outcome the user had explicitly chosen.
+No lens found it, in three rounds, because nothing in the diff is wrong: the
+defect lives in the interaction between a deliberate design rule and a data shape
+that only production exhibits (cold-start and packaged-IC runs write a null
+`state_id`, so the condition is ongoing rather than historical).
+
+That is the third recorded instance of this ledger's blind spot being structural
+rather than allocative. The first two were about *where the review question came
+from* — a premise baked into the brief, upstream of every lens. This one is about
+*what a review is made of*: reading a diff cannot discover a data shape the diff
+does not contain. Rotation policy does not reach it; neither does buying another
+round. The marginal review round in this PR found stale prose. The marginal
+**deployment** found a functional gap.
+
+The practical implication is a sequencing one and does not change keep/cut: for
+changes whose acceptance is a production behaviour, live evidence is not the last
+box to tick after review converges — it is a distinct detector that should be
+allowed to run *before* the review budget is exhausted, because it answers a
+question no lens is capable of asking. Two method notes from this run belong with
+that claim, since both nearly produced a wrong live verdict: a checkout does not
+swap code in an already-running process, so tick attribution must key on a
+structural marker rather than on counting ticks; and acceptance assertions must
+never pin absolute counts when the population under test is growing, or they go
+red while the change works.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1786, issue #1671) — keep
+
+Denominator 115 multi-round merged PRs; later-round catches core=68, rotated=270.
+Decision unchanged: **keep**.
+
+This run is an unusually clean data point for rotation, because round 2 used two
+lenses that round 1 did not have (`gap-sweep`, `evidence-claim-verification`) and
+both earned their slot:
+
+- `gap-sweep` found that T11/T12 were ticked with no pasted evidence — the
+  *identical* defect class that round 1 had already found in T10/T10b and that I
+  had just "fixed". The round-1 mix could not have found it: those same six
+  lenses had passed over the file and stopped at the two items they named.
+- `evidence-claim-verification` found that the sleep-counting instrument used to
+  produce the round-2 evidence is evadable by a test that monkeypatches
+  `time.sleep`, and that a live example was sitting in the measured set. That is
+  a lens aimed at *the evidence added by the previous round*, which by
+  construction does not exist at round 1.
+
+Both are cases where the rotated-in lens was not merely a different reader of the
+same artifact but the only reader of an artifact that round 1 predates. That is
+the mechanism the `rotated` counter is supposed to be measuring, and here it is
+visible rather than inferred.
+
+The caveat recorded in the previous revisit still stands and is not weakened: a
+rotated-in lens that reviews a byte-identical head contributes nothing to
+`rotated` yet is not evidence about rotation either way. Nothing in this run
+changes the fact that the counter cannot distinguish those cases on its own.
+
+## Revisit 2026-08-23 (PR #1788, issue #1734) — keep, with three counted `rotated` that are not evidence
+
+Denominator 116 multi-round merged PRs; later-round catches core=68, rotated=273.
+Decision unchanged: **keep**. But this run's three-point contribution to
+`rotated` must not be read as support for the decision, for two independent
+reasons, and it is recorded here so a later reader does not count it twice.
+
+**First: the attribution is empty, not rotated.** Reviewer lens names were never
+persisted for this PR — `.workplans/pr-1788/review/` holds only
+`round-ledger.log`, no verdict tables — so its loop-log line carries
+`round_lenses: [[], []]` and `lens: "unrecorded"` on every catch. Because
+`rotation_attribution` classifies by `catch["lens"] in core_lenses` and the core
+set is empty, all three round-2 catches fall to the `else` branch and are
+counted as rotated. The script has no *unattributable* state; the honest reading
+of this line is core=0, rotated=0, unknown=3. **Subtract 3 from `rotated`
+before using this counter as evidence.** This is a persistence failure of mine,
+not a property of the review, and it compounds the schema gap already reported
+on the PR #1759 line (catches written with `phase` only default to round 1 and
+are skipped entirely).
+
+**Second, and more interesting: even with perfect lens records these three would
+not have been evidence about rotation.** All three round-2 findings were defects
+in code that *round 1's own fix pass had just written* — a pin that spanned one
+of two decorated classes, a missing pin on the `resource_limit_blocked` evidence
+path, and a 5% threshold where the true value is a deterministic zero. Round 1
+could not have caught them under any lens mix, because at round 1 they did not
+exist. This is exactly the conflation flagged on the #1759 line and it has now
+recurred: **later rounds earning their keep is a different claim from lens
+rotation earning its keep, and the counter cannot separate them.** The #1786
+revisit above is the clean case precisely because its rotated-in lenses read an
+artifact round 1 predates *and were named*; this run is the muddy case.
+
+The standing caveat compounds rather than resolves: the counter over-credits
+rotation both when a rotated-in lens reviews a head round 1 never saw (fix-pass
+defects, this run) and whenever lens records are missing (also this run). Its
+one-directional bias is now documented twice. Keep remains the recorded default,
+but the next revisit should be made against lines with **recorded** lens names
+only — and the first corrective step is mechanical: persist the verdict tables
+and reviewer list at each round, which the pre-merge evidence gate already
+nominally requires.
+
+## Addendum 2026-08-23 (PR #1777, issue #1686 — abandoned) — the optimization premise, and a third user challenge
+
+The revisit above named a blind spot and gave it one instance. Later the same day
+a second, sharper one arrived, and it is worth appending rather than leaving the
+claim resting on a single case.
+
+PR #1777 was finished. Its real-DB oracle was green — 64 passed, 0 skipped on
+node-27 — and its measured benefit was *larger* than the issue had claimed: both
+compressed backing tables moved from `Seq Scan` to `Index Cond`, `Seq Scan` 5→2.
+Nothing in the diff was wrong. It was closed unmerged anyway, because gathering
+the last acceptance measurement forced a look at what the optimized query is for,
+and two cheap facts settled it: the join's existence half is idle in production
+(status mix published 3174 / superseded 959 / succeeded 140 / **parsed 0**, and
+the `HAVING` arm is unconditionally true for `published`), and its only
+load-bearing output — `MAX(rt.created_at) AS parsed_at` — exists solely because
+`hydro.hydro_run` has no parse timestamp column. The query aggregates a
+compressed hypertable to derive one timestamp per run, and an `EXPLAIN (ANALYZE)`
+on a 50-run sample would not finish inside 180 s. The correct change deletes the
+join; it was refiled as #1789.
+
+The generalizable rule is narrower than "question your premises", and it is the
+reason this belongs in a lens-rotation ledger rather than a postmortem:
+
+> **An optimization issue carries an implicit premise — that the work being made
+> faster needs doing at all — and that premise sits upstream of every reviewer
+> lens.** A lens verifies the optimization is correct, safe, and measured. None
+> is chartered to ask whether the thing should exist. No rotation policy reaches
+> it, and buying another round cannot find it.
+
+That is now the third recorded instance of this ledger's blind spot being
+structural rather than allocative, and the second triggered by a **user
+challenge** rather than by any lens (the first being #1771's, recorded above).
+Three instances, three different upstream positions: a premise baked into the
+brief, a data shape that only production exhibits, and now the value question an
+optimization never asks about itself. The counter is measuring lens allocation
+faithfully; what keeps escaping it is not allocation.
+
+One practical consequence, cheap enough to adopt without ceremony: the evidence
+that decided this was a status-mix count and a column list — seconds of work,
+available on day one. The reason it was gathered at all is that the acceptance
+criteria demanded execution-level measurement (`EXPLAIN (ANALYZE)`) rather than a
+plan comparison. Plan-only evidence would have confirmed the optimization and
+never raised the question. Where an issue's whole value rests on a cost claim,
+requiring the measurement to be *executed* is doing double duty as a premise
+check.
+
+Recorded mistake from the same run, kept because this file is also where method
+errors go: an unattended `EXPLAIN (ANALYZE)` with a 900 s bound was left running
+against production for ten minutes and was cancelled only on the user's
+prompting. The bound was set for "let it finish" rather than for "this is
+unsupervised on a live database", which are different numbers.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit (2026-08-23, issue #1749 / PR #1793)
+
+Audit re-flagged DECIDABLE at the larger sample: **117 multi-round merged PRs,
+later-round catches core=68 rotated=283**. Keep/cut unchanged — the ratio has
+only strengthened.
+
+**First, the metric was checked before being believed**, because issue #1764
+records a defect in exactly this counter: an entry whose round-1 `core_lenses`
+is empty makes *all* its later-round catches count as `rotated`. Measured on
+this ledger: 29 of 128 multi-round merged entries (23%) have an empty round-1
+lens list, but those entries contribute only **3** later-round catches, against
+274 from entries that do record round-1 lenses. The defect inflates `rotated` by
+about 1% at this sample size — real, worth fixing, and nowhere near enough to
+overturn a 283/68 split. #1764 could not be used to dismiss this DECIDABLE, and
+was not.
+
+**The fourth structural instance, and the first where the escape route was a
+document rather than a code path.** PR #1793's production change was three
+deleted lines. Five rounds produced twelve verified findings and **not one was
+in the code** — two independent reviewers confirmed the code, one with a live
+mutation bite-proof. Every finding was in orchestrator-authored prose: OpenSpec
+proposals, designs, task records, deviation records, the PR body.
+
+Rotation worked exactly as this ADR claims. Round 4's rotated-in
+`closed-list-claim-audit` lens caught six falsehoods that three prior rounds and
+a targeted grep sweep had all walked past. That is the keep criterion, met again.
+
+But the shape of the failure is the part worth recording. The recurring defect
+was "a document asserts something no longer true", and it recurred **five times
+in one PR** — including once by the Phase 7 *class sweep* written to end it, and
+once by the *correction commit* written to end that. The sweep failed for the
+same reason as the point-fixes it was correcting: it grepped the vocabulary its
+author already suspected (`archive`, `archived`, `on this branch`) while the
+surviving falsehoods were phrased in premise vocabulary (`every inflight
+cohort`, `a shape production never writes`). A grep is only as wide as the
+suspicion behind it.
+
+So the escaping thing was again not allocation — but unlike the prior three
+instances it was not upstream of the lenses either. It was **inside the
+orchestrator's own output, on a surface no reviewer is chartered to enumerate
+exhaustively.** Reviewers sample prose for plausibility; nobody was tasked to
+enumerate every claim and rule on each. The closed-list audit is that task, and
+this is the second time it has closed a class no lens closed (the first was
+issue #1759).
+
+Two rules adopted from this run, both cheap:
+
+1. When a finding is "document X asserts something untrue", the fix is **neither
+   an edit to X nor a grep for X's wording** — it is a closed-list pass over
+   every claim-bearing document in the change set, PR body and test comments
+   included, with a recorded ruling per claim. The claim you miss is by
+   construction phrased in words you did not think to search for.
+2. **A citation is a claim.** `file:line` is verified by opening the file. This
+   run mechanically extracted all 43 citations across both changes and printed
+   the line each actually points at; seven were wrong, one substantively — the
+   load-bearing evidence for a deviation record cited the *adjacent* error
+   guard.
+
+A boundary this run also had to settle, recorded here because it will recur:
+**prose documents must be true at head or carry an in-place correction; a spec
+delta need only be true of the specs tree at its landing SHA.** `openspec
+archive` folds a delta verbatim, and the mechanism for superseding a landed
+clause is a later `MODIFIED` requirement — rewriting a completed change's delta
+to match a later head would falsify its own record of what it shipped. The same
+reasoning governs line-number drift in a completed change's prose: disclose it,
+do not renumber it.
+
+Recorded method errors from this run, kept per this file's convention: (a) round
+4 was initially recorded against the post-fix SHA rather than the SHA the
+reviewers actually ran on, which would have let an unreviewed head inherit a
+clean baseline — self-caught and corrected, and the Phase 7 final review was
+consequently still run on the final head; (b) `review_gate.py record-round
+--clean` silently zeroes the finding counts and failure classes, so "found eight
+and fixed eight" is indistinguishable in the ledger from "found nothing", and
+the dropped classes blind cross-round repeat detection — filed as #1794.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit at #1789 merge (PR #1791, 2026-08-23)
+
+`loop_log_audit` again returns DECIDABLE lens-rotation: 119 multi-round merged
+PRs, later-round catches core=68 / rotated=285. **Keep**, unchanged, and this
+run is a clean confirming instance: of four review passes (two lenses in round
+1, a Phase 7 final, a Phase 7 delta final), the `production-loop-safety +
+state-machine-correctness` lens returned zero and every net review catch came
+from the rotated-in `db-migration + data-loss-and-staleness +
+artifact-consistency` lens — the same distribution as #1781.
+
+Two things this run adds that the rotation ledger does not model, both worth
+recording because the numbers above will keep looking healthy while they recur:
+
+**(1) The highest-value catch was upstream of every lens.** It landed before
+implementation, from the advisor, against the *issue body* rather than the code: #1789
+prescribed folding `parsed_at = now()` into `mark_run_parsed`'s existing
+UPDATE, which is gated on `PARSE_READY_RUN_STATUSES` and therefore excludes
+`published` — the very population recompute detection exists for. The issue
+stated the requirement ("重新 parse 必须 bump 它") two lines above a remedy that
+does not satisfy it. Nothing in the review track would have caught this, because
+by the time reviewers see a diff the fixture has already chosen the mechanism.
+ADR 0003 already records that an optimization issue's premise sits upstream of
+every reviewer lens; this run extends it: **an implementation-ready issue's
+prescribed remedy is itself an unverified claim, and deserves the same treatment
+as code.** Verifying it required tracing the actual convergence mechanism —
+fact-row `created_at` refreshed by a keyed DELETE + reinsert, not the status-
+gated UPDATE — which is exactly the kind of thing that reads as settled
+background.
+
+**(2) Four review passes cannot see which oracles execute.** The real-DB run on
+node-27 returned 4 failures in an `integration`-marked file whose seed helpers
+never wrote the new column. Production code was correct; the seeds were stale.
+Every review pass reasons over code and artifacts, and the local full suite
+(13774 passed) was *structurally* blind because integration-marked tests skip
+without env vars and the PR CI lane does not select them. This is the second
+consecutive issue (#1781, #1789) where live deployment was the only oracle for
+the decisive defect. The lesson is not "add a lens" — a lens still reads text.
+It is that for any change altering a value that seeded fixtures also produce,
+**the deployment step is load-bearing verification, not a receipt-taking
+formality**, and its evidence floor must run the marked suites the PR lane skips.
+
+Recorded method errors from this run: (a) the six-step deploy sequence was
+corrected in `design.md` but not propagated to `proposal.md`, which continued to
+state the superseded three-step form *while citing D5 as its authority* — caught
+by the Phase 7 final review, i.e. the orchestrator's own fix contradicting a
+sibling paragraph; (b) an integration suite was first launched over a foreground
+ssh session, so the timeout that moved it to background killed the remote
+pytest and produced an empty result that could have been misread as a pass —
+re-run detached per the project's own `setsid nohup` discipline; (c) two
+process-liveness checks used `pgrep -f <pattern>` from a shell whose own command
+line contained the pattern, yielding false "still running" readings — use
+`pgrep -f` with a bracketed pattern or check the PID directly.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit (2026-08-23, issue #1185 / parent PR #1753 terminal split)
+
+The appended #1753 line is a terminal `ceiling-split` record, not a merged
+sample. With master's #1789 accountability already present, `loop_log_audit`
+remains at **119 multi-round merged PRs, later-round catches core=68 rotated=285**.
+The parent terminal line contributes neither a merged sample nor a catch. This
+does not change the direction already adjudicated above, so the recorded **keep
+rotation** decision stands unchanged.
+
+This line does add a cost-boundary signal, but it belongs to the review-gate
+sizing ledger rather than the lens-allocation ratio. PR #1753 reached Round 3
+with one remaining P2 coverage finding on a behavior-neutral extraction that
+had entered the PR only after a deterministic large-file hook fired. The second
+gate selected a real breadth split: extraction compatibility moves to
+predecessor issue #1799, and the cohort-identity state machine returns in a
+successor PR for #1185 after that predecessor merges. The finding and
+implementation are not copied into both children.
+
+That is the gate doing the job this ADR does not: stopping an unrelated wrapper
+compatibility proof from consuming more high-risk journal review rounds. It
+neither supports nor weakens lens rotation, so no keep/cut policy change follows.

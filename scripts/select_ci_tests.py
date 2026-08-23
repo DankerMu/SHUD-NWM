@@ -1068,10 +1068,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
             "tests/test_display_publish_status_only.py",
-            # #1442: the two per-tick criteria are registered statements of the
-            # zero-text-identity oracle (group D, no sanctioned aid at all), and
-            # the oracle additionally censuses this file for a THIRD
-            # river_timeseries statement. Nothing above would notice either.
+            # #1442/#1789: the publish criterion is a registered statement of
+            # the zero-text-identity oracle (group D, no sanctioned aid at all),
+            # and that oracle also censuses this file so a NEW fact-table
+            # statement -- or the deleted ingest join coming back -- turns red.
+            # It additionally pins the ingest criterion's authority-state gate.
+            # Nothing above would notice any of it.
             "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),

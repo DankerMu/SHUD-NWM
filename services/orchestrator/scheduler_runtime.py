@@ -13,6 +13,10 @@ from services.orchestrator import scheduler as _scheduler
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
 from services.orchestrator import scheduler_evidence as _scheduler_evidence_module
 from services.orchestrator import scheduler_no_progress as _scheduler_no_progress
+from services.orchestrator.file_orchestration_journal import (
+    journal_read_attribution,
+    reset_journal_read_counters,
+)
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.scheduler_timing import SchedulerPassTiming
 from workers.data_adapters.base import format_cycle_time
@@ -485,9 +489,19 @@ def _finalize_timing_into_evidence(
     — it backfills the timestamp so callers can invoke it BEFORE
     ``pass_span.__exit__`` and still get a non-null ``pass.pass_finished_at``
     (Phase 4.5 C1).
+
+    #1734 D11 piggybacks the journal read attribution here for exactly the
+    property documented above: this is the ONE hook that runs at every
+    ``SchedulerPassResult`` return site before the artifact is written, so
+    merging the counters here is what makes them always-on. Both blocks are
+    plain snapshots of per-pass instrumentation, and the attribution is a
+    measured ~51 live ``(tag, calls, bytes)`` triples per pass window (72
+    distinct across a 308-test session, cap 256, ``tags_dropped`` observed 0) —
+    negligible against ``MAX_EVIDENCE_BYTES``.
     """
 
     evidence["timing"] = collector.finalize_evidence(status)
+    evidence["journal_read_attribution"] = journal_read_attribution()
 
 
 def _restart_reconcile_with_timing(
@@ -547,6 +561,11 @@ def run_once(self) -> SchedulerPassResult:
     # here so the collector carries the correct id from t=0; the same id
     # feeds every downstream SchedulerPassResult return path.
     self._source_readiness_context_cache.clear()
+    # #1734 D11: the read counters are per-pass, so they are zeroed here
+    # and only here. `_finalize_timing_into_evidence` may run more than
+    # once on a return path; snapshotting there stays idempotent because
+    # the reset lives at pass entry rather than at finalize.
+    reset_journal_read_counters()
     started_at = _now(self.config)
     pass_id = f"scheduler_{format_cycle_time(started_at)}_{_scheduler.uuid4().hex[:12]}"
     # Normalise per SUB-1 followup note item 2: strip + lower + fall back to

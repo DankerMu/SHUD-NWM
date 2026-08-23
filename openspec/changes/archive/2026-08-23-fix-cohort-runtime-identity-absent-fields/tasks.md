@@ -22,6 +22,16 @@
   unchanged master row.
   Evidence floor: parametrized over the three fields, all pass.
 
+> **Superseded at head (2026-08-23, issue #1749).** Tasks 1.1 and 1.3 name
+> three degradable fields and a three-way parametrization. Both were satisfied
+> as written when they were checked off. At head there are two:
+> `scope-cohort-identity-off-array-layout` removed the `array_task_id`
+> comparison outright (it is a per-submission layout index, not an identity),
+> so
+> `tests/test_gateway_reconcile.py::test_file_cohort_present_but_different_runtime_identity_still_blocks`
+> parametrizes over `candidate_id` and `basin_id` only.
+
+
 ## 2. Change-level verification floor
 
 - [x] 2.1 `openspec validate fix-cohort-runtime-identity-absent-fields

@@ -152,7 +152,10 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * publisher.py 2 = the discovery aggregate + the PublishError message naming
 #   the required table.
 # * forcing_copyback_backfill.py 1 = the correlated EXISTS probe.
-# * node27_autopipeline.py 2 = the ingest and publish per-tick criteria.
+# * node27_autopipeline.py 1 = the publish per-tick criterion. The ingest
+#   criterion used to be the second; #1789 deleted its fact-table join (the
+#   parse timestamp it derived now lives on hydro_run.parsed_at), so a return
+#   to 2 means the join came back.
 # * summarize_qhh_smoke_results.py 1 / reset_qhh_smoke_db.py 1 = one statement
 #   each; the reset one is the table NAME passed to its ``_delete`` helper,
 #   which is why the census counts bare mentions and not just SQL-shaped ones.
@@ -165,7 +168,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "packages/common/forecast_store.py": 10,
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
-    "scripts/node27_autopipeline.py": 2,
+    "scripts/node27_autopipeline.py": 1,
     "scripts/summarize_qhh_smoke_results.py": 1,
     "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
@@ -852,25 +855,48 @@ def test_copyback_discovery_probe_correlates_on_the_run_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _autopipeline_statement(function: str) -> str:
+def _autopipeline_statements(function: str, *, needle: str = RIVER_TABLE, expected: int) -> tuple[str, ...]:
+    """The ``needle``-bearing string constants of one autopipeline function.
+
+    ``expected`` is a parameter and not a hard-coded ``1`` because #1789 drove
+    one of the two call sites to ZERO such statements: ``_already_ingested_runs``
+    no longer touches the fact table at all. With the count baked in, the helper
+    itself raised before the negative pin below could run — a guard that fails
+    for the very shape it is supposed to certify is not a guard. The publish
+    criterion still carries exactly one, and asserts it through the same helper.
+    """
     statements = _sql_constants(
         module=("scripts", "node27_autopipeline.py"),
         function=function,
-        needle="hydro.river_timeseries",
+        needle=needle,
     )
-    assert len(statements) == 1, f"{function}: expected exactly one river_timeseries statement"
-    return statements[0]
+    assert len(statements) == expected, (
+        f"{function}: expected exactly {expected} statement(s) mentioning {needle!r}, "
+        f"found {len(statements)}"
+    )
+    return statements
 
 
-def test_autopipeline_ingest_criterion_joins_by_key_with_no_aid() -> None:
-    sql = _autopipeline_statement("_already_ingested_runs")
+def _autopipeline_statement(function: str, *, needle: str = RIVER_TABLE) -> str:
+    return _autopipeline_statements(function, needle=needle, expected=1)[0]
 
-    _assert_switched_surface(sql, "rt", NO_AIDS, "autopipeline _already_ingested_runs")
-    assert "ON rt.run_key = h.run_key" in sql
+
+def test_autopipeline_ingest_criterion_touches_no_fact_table() -> None:
+    """#1789: the completeness criterion must not reference the fact table at all.
+
+    Was a key-only-join shape pin. The join existed to derive one per-run
+    timestamp (``MAX(rt.created_at)``) out of a compressed hypertable whose
+    ``run_key`` is neither a segmentby column nor indexed, so every tick
+    decompressed every compressed chunk to compute it. ``hydro_run.parsed_at``
+    now carries that timestamp at the point it is produced, and the join is
+    gone. Zero occurrences, not "no forbidden aid": an aid-free join would still
+    be the whole regression.
+    """
+    _autopipeline_statements("_already_ingested_runs", expected=0)
 
 
 def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
-    """#1674: 'published' is complete on its own; 'parsed' still needs key rows.
+    """#1674: 'published' is complete on its own; 'parsed' needs a parse timestamp.
 
     Sits beside the #1442 shape pin rather than in a new file because
     ``scripts/select_ci_tests.py`` maps the autopipeline script to exactly this
@@ -883,13 +909,19 @@ def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
     is ``hydro_run.updated_at`` -- which every tick's register upsert bumps, so
     it is a false parse timestamp that would make recompute detection claim a
     currency it does not have (design D1).
-    """
-    sql = _autopipeline_statement("_already_ingested_runs")
 
-    assert "LEFT JOIN hydro.river_timeseries rt" in sql
-    assert "ON rt.run_key = h.run_key" in sql
-    assert "HAVING h.status = 'published' OR COUNT(rt.run_key) > 0" in sql
-    assert "MAX(rt.created_at) AS parsed_at" in sql
+    The positive pin is the #1789 half: the gate must stay
+    ``h.status = 'published' OR h.parsed_at IS NOT NULL``. A bare
+    ``h.parsed_at IS NOT NULL`` would judge the NULL-key legacy cohort — which
+    the backfill leaves at NULL — incomplete and re-trigger exactly the
+    per-cycle handoff #1674 removed.
+    """
+    sql = _autopipeline_statement("_already_ingested_runs", needle="FROM hydro.hydro_run h")
+
+    assert "h.parsed_at" in sql
+    assert "(h.status = 'published' OR h.parsed_at IS NOT NULL)" in sql
+    assert "GROUP BY" not in sql
+    assert "HAVING" not in sql
     assert "COALESCE" not in sql
     assert "updated_at" not in sql
 

@@ -2414,6 +2414,145 @@ def test_orchestrator_config_from_env_reads_compute_state_terminal_profile(
     assert config.terminal_stage == "forecast_state_save_qc"
 
 
+# ---------------------------------------------------------------------------
+# #1671: where the orchestrator's minimum Slurm poll interval is enforced.
+#
+# The floor lives on ``OrchestratorConfig.from_env`` -- the only construction
+# path that reads the deployment environment -- and NOT in ``__post_init__``.
+# Before this change ``__post_init__`` floored unconditionally, which silently
+# rewrote the ``poll_interval_seconds=0`` that ten test files already pass
+# into a real 1s sleep per poll (measured: 844s of the 881s wall clock of this
+# file).  Nothing asserted the clamp at all, so it could have been moved or
+# deleted invisibly.  These tests pin every construction path.
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_config_from_env_uses_default_poll_interval_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unset -> the declared 30s default, untouched by the floor."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", raising=False)
+
+    assert OrchestratorConfig.from_env().poll_interval_seconds == 30.0
+
+
+@pytest.mark.parametrize("raw", ["0", "0.001", "-3"])
+def test_orchestrator_config_from_env_floors_sub_minimum_poll_interval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw: str,
+) -> None:
+    """A below-minimum deployment value is raised to 1s and never rejected.
+
+    Clamping up rather than raising is deliberate (design D2): a mis-set
+    environment variable must degrade to safe polling, not crash the
+    orchestrator at start.  ``-3`` is in the set because a negative would
+    otherwise reach ``time.sleep`` as a negative interval.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", raw)
+
+    config = OrchestratorConfig.from_env()
+
+    assert config.poll_interval_seconds == 1.0
+
+
+def test_orchestrator_config_from_env_honours_poll_interval_above_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The minimum is a floor, not a normalization: 5s stays 5s."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "5")
+
+    assert OrchestratorConfig.from_env().poll_interval_seconds == 5.0
+
+
+def test_orchestrator_config_honours_explicitly_passed_poll_interval_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicitly supplied interval is used exactly as given, including 0.
+
+    This is the behavior the ten ``poll_interval_seconds=0`` test files rely
+    on, and it is what the environment floor must NOT reach.  The environment
+    is set to a floored value here to prove the explicit argument wins on a
+    path that never consults it.
+    """
+    monkeypatch.setenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")
+
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        poll_interval_seconds=0,
+    )
+
+    assert config.poll_interval_seconds == 0
+
+
+def test_orchestrator_config_coerces_explicit_poll_interval_to_float(
+    tmp_path: Path,
+) -> None:
+    """An explicit interval keeps its value but is coerced to ``float``.
+
+    The field feeds ``time.sleep`` at ``chain_stage_execution.py:1026``, so a
+    non-float stored here becomes a ``TypeError`` at the poll site -- notably
+    ``time.sleep("7")``.  The ``max(..., 1.0)`` floor moved to ``from_env``,
+    but the field's type contract did not move with it and must stay in
+    ``__post_init__``.  ``isinstance`` is asserted explicitly because
+    ``0 == 0.0`` is ``True`` in Python: an equality-only assertion would not
+    catch an ``int`` slipping through.
+    """
+    zero = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        poll_interval_seconds=0,
+    )
+
+    assert zero.poll_interval_seconds == 0.0
+    assert isinstance(zero.poll_interval_seconds, float)
+
+    numeric_string = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        poll_interval_seconds="7",
+    )
+
+    assert numeric_string.poll_interval_seconds == 7.0
+    assert isinstance(numeric_string.poll_interval_seconds, float)
+
+
+def test_sibling_poll_interval_configs_are_untouched_by_the_orchestrator_floor(
+    tmp_path: Path,
+) -> None:
+    """The three same-named fields on other config classes are unaffected.
+
+    ``poll_interval_seconds`` exists on four unrelated dataclasses.  Only
+    ``OrchestratorConfig``'s ever floored, and this change moved only that one,
+    so the siblings must still take an explicit value verbatim.  Asserted here
+    so a reader can see they were considered rather than overlooked.
+    """
+    from workers.data_adapters.gfs_adapter import GFSAdapterConfig
+    from workers.data_adapters.ifs_adapter import IFSAdapterConfig
+
+    assert GFSAdapterConfig(workspace_root=tmp_path, poll_interval_seconds=0).poll_interval_seconds == 0
+    assert IFSAdapterConfig(workspace_root=tmp_path, poll_interval_seconds=0).poll_interval_seconds == 0
+
+    # The production-closure validation lane owns its own default and option
+    # parsing; it is a different class on a different tier and is not floored.
+    from services.production_closure import slurm_validation as slurm_validation_module
+
+    assert slurm_validation_module.DEFAULT_POLL_INTERVAL_SECONDS == 15.0
+    poll_field = next(
+        item
+        for item in dataclasses.fields(slurm_validation_module.ProductionSlurmConfig)
+        if item.name == "poll_interval_seconds"
+    )
+    assert poll_field.default == slurm_validation_module.DEFAULT_POLL_INTERVAL_SECONDS
+
+
 def test_orchestrator_config_rejects_unknown_terminal_stage(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="NHMS_ORCHESTRATOR_TERMINAL_STAGE"):
         OrchestratorConfig(

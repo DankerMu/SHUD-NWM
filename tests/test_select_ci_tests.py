@@ -520,7 +520,9 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_display_publish_status_only.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
-        # #1442: the two per-tick criteria are registered oracle statements.
+        # #1442/#1789: the publish criterion is a registered oracle
+        # statement; the ingest criterion's fact-table-free shape is pinned
+        # by the same file.
         "tests/test_river_ts_text_identity_cleanup.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)

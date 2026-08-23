@@ -1166,6 +1166,34 @@ class PsycopgOutputParserRepository:
         )
 
     def mark_run_parsed(self, run_id: str) -> dict[str, Any]:
+        if self._connection is None:
+            with self.transaction() as repository:
+                return repository.mark_run_parsed(run_id)
+
+        # #1789: stamp the parse time FIRST and WITHOUT a status predicate.
+        #
+        # The status UPDATE below is gated on PARSE_READY_RUN_STATUSES, which
+        # excludes 'published' -- and re-parsing an already-published run is
+        # precisely the population the autopipe recompute detector reads
+        # parsed_at for. Folding `parsed_at = now()` into that gated statement
+        # would match zero rows on those runs and leave the timestamp frozen in
+        # the past, so their product mtime would exceed it forever and every
+        # tick would re-ingest them: a permanent re-handoff loop, rc=0 and
+        # silent. Widening the gate instead is not an option either -- it would
+        # downgrade 'published' back to 'parsed' and make the display status
+        # flicker. Hence two statements, in one transaction.
+        #
+        # Zero rows here means the run row does not exist; the status UPDATE
+        # then also matches nothing and _terminal_state_or_missing_row raises
+        # DATABASE_ROW_MISSING as before.
+        self._fetch_all(
+            """
+            UPDATE hydro.hydro_run
+            SET parsed_at = now()
+            WHERE run_id = %s
+            """,
+            (run_id,),
+        )
         row = self._fetch_optional(
             """
             UPDATE hydro.hydro_run

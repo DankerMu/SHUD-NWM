@@ -860,6 +860,23 @@ def _seed_run(
         )
 
 
+def _stamp_parsed_at(connection: Any, run_id: str) -> None:
+    """Record on the authority row that ``run_id`` was parsed just now.
+
+    Since #1789 the completeness criterion reads `hydro_run.parsed_at` instead of
+    aggregating `MAX(river_timeseries.created_at)` through `rt.run_key = h.run_key`,
+    so a seed that means "this run was parsed at T" has to put T where the
+    criterion now looks. `now()` is the same transaction clock the fact rows'
+    `created_at` default uses, so the relative ordering against the product
+    mtimes these tests set (±3600 s) is exactly the one the aggregate gave.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE hydro.hydro_run SET parsed_at = now() WHERE run_id = %s",
+            (run_id,),
+        )
+
+
 def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
     """A handful of `river_timeseries` rows for ``run_id``.
 
@@ -867,6 +884,13 @@ def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
     all seven surrogate/enum columns NULL, exactly like the rows the 000051
     backfill runner had to skip inside already-compressed chunks. A few rows are
     enough — the predicate is an existence test, not a volume test.
+
+    ``normalized=True`` additionally stamps `hydro_run.parsed_at`, and that
+    coupling is production semantics, not convenience: the #1789 backfill (design
+    D4) derives `parsed_at` from `MAX(created_at) GROUP BY run_key`, so exactly
+    the rows whose `run_key` is visible are the rows that can produce a
+    timestamp. NULL-key legacy rows leave `parsed_at` NULL forever — which is why
+    ``normalized=False`` must NOT stamp it.
     """
     filled = """
         (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s),
@@ -894,6 +918,8 @@ def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
             """,
             {"run_id": run_id, "base_time": _BASE_TIME},
         )
+    if normalized:
+        _stamp_parsed_at(connection, run_id)
 
 
 def _compress_all_river_chunks(connection: Any) -> int:
@@ -962,6 +988,11 @@ def test_already_ingested_excludes_a_parsed_run_whose_only_rows_are_null_key(
 
     A 'parsed' run with no key-visible row means the parser chain did not
     finish; keeping it incomplete is what makes the pipeline retry it.
+
+    Since #1789 the exclusion is carried by `parsed_at IS NULL` rather than by a
+    missed key join, and it is the same rows that produce both: NULL-key rows are
+    invisible to the old join and unaggregatable by the backfill alike, so
+    ``_seed_run_facts(normalized=False)`` deliberately leaves `parsed_at` NULL.
     """
     apply_migrations_from_zero(throwaway_database_url)
     connection = _connect(throwaway_database_url)
@@ -983,25 +1014,46 @@ def test_already_ingested_excludes_a_parsed_run_whose_only_rows_are_null_key(
         connection.close()
 
 
-def test_already_ingested_counts_a_parsed_run_with_key_matched_rows(
+def test_already_ingested_counts_a_parsed_run_on_its_parse_timestamp_alone(
     throwaway_database_url: str,
 ) -> None:
-    """#1674 (iii): the post-dual-write normal path is unchanged."""
+    """#1674 (iii), rewritten for #1789: what makes a 'parsed' run complete.
+
+    The completeness evidence for `status = 'parsed'` used to be row presence
+    through `rt.run_key = h.run_key`; since #1789 it is `parsed_at IS NOT NULL`
+    on the authority row and the criterion does not reference the fact table at
+    all. So this seeds the run with a parse timestamp and NO fact rows
+    whatsoever: if anything ever re-introduces a row-presence requirement, this
+    run drops out and the test goes red.
+
+    Together with `test_already_ingested_excludes_a_parsed_run_whose_only_rows_are_null_key`
+    above (rows but no timestamp -> incomplete) this pins both directions of the
+    swap. The straight negative half —
+    `parsed` + `parsed_at IS NULL` -> incomplete, then stamped -> complete —
+    is already covered by
+    `tests/test_hydro_run_parsed_at_integration.py::test_a_parsed_run_without_a_parse_timestamp_stays_incomplete`
+    and is deliberately not duplicated here.
+    """
     apply_migrations_from_zero(throwaway_database_url)
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
         _seed_run(connection, "fresh-parsed", status="parsed")
         _seed_run(connection, _SUPERSEDED_RUN, status="superseded")
-        _seed_run_facts(connection, "fresh-parsed", normalized=True)
+        _stamp_parsed_at(connection, "fresh-parsed")
         assert (
             _scalar(
                 connection,
-                "SELECT count(*) FROM hydro.river_timeseries rt "
-                "JOIN hydro.hydro_run h ON h.run_key = rt.run_key "
-                "WHERE h.run_id = 'fresh-parsed'",
+                "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = 'fresh-parsed'",
             )
-            > 0
+            == 0
+        )
+        assert (
+            _scalar(
+                connection,
+                "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = 'fresh-parsed'",
+            )
+            is not None
         )
 
         ingested = autopipe._already_ingested_runs(
@@ -1110,12 +1162,12 @@ def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_a
 
     Scenarios (i)-(iv) pass ``object_store_root=None``, so `_ingested_run_is_current`
     returns before `parsed_at` is ever read, and (v) is a NULL-`parsed_at` cohort by
-    construction. Outside the SQL string pin nothing holds `MAX(rt.created_at)` to a
-    real timestamp on the post-cutover population — the population that actually gets
-    recomputed. Under the pre-#1674 inner join a row-bearing run structurally
-    guaranteed a non-NULL aggregate; the #1674 LEFT JOIN makes NULL a legal output
-    state, so a refactor could keep the literal `MAX(rt.created_at) AS parsed_at` and
-    still hand every key-visible run a NULL, silently disabling recompute detection.
+    construction. Nothing else holds the timestamp the criterion hands the mtime
+    branch to a real value on the post-cutover population — the population that
+    actually gets recomputed. Since #1789 that value is the `hydro_run.parsed_at`
+    column rather than `MAX(rt.created_at)`, and it stays a legal NULL, so a
+    regression in either the parse-time write or the backfill hands every
+    key-visible run a NULL and silently disables recompute detection.
 
     That is exactly what this test bites on: with `parsed_at` NULL,
     `_ingested_run_is_current` short-circuits to True, the run comes back complete,
@@ -1143,6 +1195,16 @@ def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_a
                 "SELECT max(rt.created_at) FROM hydro.river_timeseries rt "
                 "JOIN hydro.hydro_run h ON h.run_key = rt.run_key "
                 "WHERE h.run_id = 'keyed-published'",
+            )
+            is not None
+        )
+        # ...and the same T on the authority column, which is where the criterion
+        # reads it since #1789. Without this the mtime branch is unreachable and
+        # every assertion below passes vacuously.
+        assert (
+            _scalar(
+                connection,
+                "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = 'keyed-published'",
             )
             is not None
         )
@@ -1178,5 +1240,151 @@ def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_a
             ["keyed-published", _SUPERSEDED_RUN],
             object_store_root=tmp_path,
         ) == {"keyed-published", _SUPERSEDED_RUN}
+    finally:
+        connection.close()
+
+
+# ---------------------------------------------------------------------------
+# #1781 — the decline record as a status-independent exclusion
+# ---------------------------------------------------------------------------
+#
+# The oracle has to be a real database for two reasons unit tests cannot cover:
+# the suppression must hold for a run at `succeeded`, which the completeness
+# statement never returns at all (28 of the 88 blocked runs on node-27 are in
+# that state), and `product_mtime` has to survive a DOUBLE PRECISION round trip
+# through PostgreSQL bit-for-bit or the key stops matching and the retry loop
+# comes back.
+
+
+def _record_decline(connection: Any, run_id: str, init_state_id: str, product_mtime: float) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ops.ingest_recompute_decline
+                (run_id, init_state_id, product_mtime, reason_code)
+            VALUES (%s, %s, %s, 'HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED')
+            ON CONFLICT DO NOTHING
+            """,
+            (run_id, init_state_id, product_mtime),
+        )
+
+
+def _write_recomputed_product(object_store_root: Path, run_id: str, state_id: str) -> float:
+    """Manifest + a product file whose mtime is newer than any plausible parse.
+
+    This is the production shape being pinned: without a decline record these
+    runs are (correctly) detected as recomputed and re-sent every tick.
+    """
+    _write_manifest(object_store_root, run_id, state_id)
+    product = object_store_root / "runs" / run_id / "output" / "rivqdown.csv"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_text("time,q\n", encoding="utf-8")
+    future = datetime.now(tz=UTC).timestamp() + 3600
+    os.utime(product, (future, future))
+    mtime = autopipe._run_product_mtime(object_store_root, run_id)
+    assert mtime is not None
+    return mtime
+
+
+def test_matching_decline_record_suppresses_a_published_and_a_succeeded_run(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """Both cohorts, in one call, because they reach the exclusion by different
+    routes: the `published` run is row-bearing and would be reopened by the
+    mtime comparison, while the `succeeded` run never appears in the
+    completeness statement's result at all — which is exactly why the
+    suppression cannot live inside `_ingested_run_is_current`.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "declined-published", status="published", init_state_id="state-a")
+        _seed_run(connection, "declined-succeeded", status="succeeded", init_state_id="state-a")
+        # Only the published run gets fact rows: a 'succeeded' run has never
+        # been parsed, so it has none, and that is the point.
+        _seed_run_facts(connection, "declined-published", normalized=True)
+
+        published_mtime = _write_recomputed_product(tmp_path, "declined-published", "state-a")
+        succeeded_mtime = _write_recomputed_product(tmp_path, "declined-succeeded", "state-a")
+
+        # Non-vacuity: without the records, neither run is skipped.
+        assert (
+            autopipe._already_ingested_runs(
+                throwaway_database_url,
+                ["declined-published", "declined-succeeded"],
+                object_store_root=tmp_path,
+            )
+            == set()
+        )
+
+        _record_decline(connection, "declined-published", "state-a", published_mtime)
+        _record_decline(connection, "declined-succeeded", "state-a", succeeded_mtime)
+
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["declined-published", "declined-succeeded"],
+            object_store_root=tmp_path,
+        ) == {"declined-published", "declined-succeeded"}
+    finally:
+        connection.close()
+
+
+def test_a_newer_product_reopens_a_declined_run(throwaway_database_url: str, tmp_path: Path) -> None:
+    """The key IS the reopen condition. An operator who decompresses the chunk
+    and has the products regenerated must get the run back without touching the
+    decline table; a terminal state that could not be reopened by new evidence
+    would be a permanent data hole.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "reopened-published", status="published", init_state_id="state-a")
+        _seed_run_facts(connection, "reopened-published", normalized=True)
+
+        declined_mtime = _write_recomputed_product(tmp_path, "reopened-published", "state-a")
+        _record_decline(connection, "reopened-published", "state-a", declined_mtime)
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["reopened-published"],
+            object_store_root=tmp_path,
+        ) == {"reopened-published"}
+
+        # node-22 regenerates the products: same run, same initial state, newer
+        # mtime. The stored record no longer describes what is on disk.
+        product = tmp_path / "runs" / "reopened-published" / "output" / "rivqdown.csv"
+        os.utime(product, (declined_mtime + 60.0, declined_mtime + 60.0))
+        # Read the mtime back rather than assuming the value just written: the
+        # stored st_mtim is nanoseconds and the float is what `stat()` derives
+        # from it, which is exactly why the match is on the stat-derived value.
+        later = autopipe._run_product_mtime(tmp_path, "reopened-published")
+        assert later is not None and later > declined_mtime
+
+        assert (
+            autopipe._already_ingested_runs(
+                throwaway_database_url,
+                ["reopened-published"],
+                object_store_root=tmp_path,
+            )
+            == set()
+        )
+
+        # And the newly blocked regeneration adds its own record rather than
+        # replacing the old one — the table accumulates, so a float-equality
+        # miss costs at most another blocked tick.
+        _record_decline(connection, "reopened-published", "state-a", later)
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM ops.ingest_recompute_decline WHERE run_id = 'reopened-published'",
+            )
+            == 2
+        )
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["reopened-published"],
+            object_store_root=tmp_path,
+        ) == {"reopened-published"}
     finally:
         connection.close()

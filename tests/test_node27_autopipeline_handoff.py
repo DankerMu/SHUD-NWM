@@ -6,9 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 
 import scripts.node27_autopipeline as autopipe
+from packages.common.forcing_domain_handoff_apply import (
+    REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+)
 
 RUN_A = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
@@ -64,6 +68,56 @@ def _write_run(object_store_root: Path, run_id: str, *, handoff: bool = True) ->
         (input_dir / "forcing_domain_handoff.json").write_text("{}\n", encoding="utf-8")
 
 
+class _DeclineStore:
+    """In-memory stand-in for `ops.ingest_recompute_decline` (#1781).
+
+    Both DB-boundary wrappers are patched onto the SAME store, so
+    ``declines_active`` in the summary is genuinely the row count the writes
+    produced rather than a second, independently faked number.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.write_error: BaseException | None = None
+        self.count_calls = 0
+
+    def record(
+        self,
+        _database_url: str,
+        *,
+        run_id: str,
+        init_state_id: str,
+        product_mtime: float,
+        reason_code: str,
+        detail: str | None,
+    ) -> None:
+        if self.write_error is not None:
+            raise self.write_error
+        key = (run_id, init_state_id, product_mtime)
+        if key in {(row["run_id"], row["init_state_id"], row["product_mtime"]) for row in self.rows}:
+            return  # ON CONFLICT DO NOTHING
+        self.rows.append(
+            {
+                "run_id": run_id,
+                "init_state_id": init_state_id,
+                "product_mtime": product_mtime,
+                "reason_code": reason_code,
+                "detail": detail,
+            }
+        )
+
+    def count(self, _database_url: str) -> int:
+        self.count_calls += 1
+        return len(self.rows)
+
+
+def _set_initial_state(object_store_root: Path, run_id: str, state_id: str) -> None:
+    path = object_store_root / "runs" / run_id / "input" / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["initial_state"] = {"state_id": state_id}
+    path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+
 def _prepare_autopipe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -71,6 +125,7 @@ def _prepare_autopipe(
     runs: Mapping[str, bool],
     apply_reports: Mapping[str, dict[str, Any] | BaseException] | None = None,
     command_handler: Callable[[list[str], dict[str, str]], tuple[int, str, str]] | None = None,
+    decline_store: _DeclineStore | None = None,
 ) -> tuple[Path, list[list[str]], list[str]]:
     object_store_root = tmp_path / "object-store"
     basins_root = tmp_path / "Basins"
@@ -109,6 +164,12 @@ def _prepare_autopipe(
         return 7
 
     monkeypatch.setattr(autopipe, "_publish_display_runs", fake_publish)
+    # #1781: both decline surfaces talk to the database directly and run on
+    # every tick (the count does), so every case in this file needs the double,
+    # not just the decline cases.
+    store = decline_store if decline_store is not None else _DeclineStore()
+    monkeypatch.setattr(autopipe, "_record_recompute_decline", store.record)
+    monkeypatch.setattr(autopipe, "_active_decline_count", store.count)
     # Phase 3.5 talks to the database directly; the handoff cases below are not
     # about it, and an unstubbed guard would dial a real socket. The #1378 cases
     # at the bottom of this file re-patch it with their own doubles. BOTH legs
@@ -179,14 +240,21 @@ def _handoff_success(run_id: str) -> dict[str, Any]:
     }
 
 
-def _handoff_unavailable(code: str = "HANDOFF_FIELD_MISSING") -> dict[str, Any]:
+def _handoff_unavailable(
+    code: str = "HANDOFF_FIELD_MISSING",
+    *,
+    detail: str | None = "redacted",
+) -> dict[str, Any]:
+    reason: dict[str, Any] = {"code": code}
+    if detail is not None:
+        reason["detail"] = detail
     return {
         "mode": autopipe.OBJECT_STORE_HANDOFF_MODE,
         "status": "unavailable",
         "available": False,
         "ready": False,
         "row_counts": {},
-        "unavailable_reasons": [{"code": code, "detail": "redacted"}],
+        "unavailable_reasons": [reason],
     }
 
 
@@ -352,6 +420,7 @@ def test_declared_handoff_success_records_run_details_without_mirror(
             "met.interp_weight": 4,
         },
         "reason_codes": [],
+        "reason_details": {},
     }
     assert detail["parse_status"] == "parsed"
     assert detail["coverage_refresh"] == "refreshed"
@@ -1362,3 +1431,861 @@ def test_stats_guard_progress_line_stays_silent_when_neither_leg_worked(
 
     assert rc == 0
     assert [line for line in captured.err.splitlines() if line.startswith("[stats-guard]")] == []
+
+
+# --------------------------------------------------------------------------- #
+# #1781 -- terminal state for a compressed-chunk-blocked recompute.
+#
+# The production loop this pins: node-22 regenerates a run's products, the tick
+# correctly detects the recompute, the forcing handoff is correctly rejected
+# because its target chunk is compressed, nothing advances, and the next tick
+# repeats it forever (88 runs when this was written, 116 by deploy time -- the
+# set grows, every tick, rc=1). The fix is a recorded terminal
+# state, so the failure mode a test has to bite on is BOTH directions: a
+# blocked recompute must stop retrying, and everything else must not.
+# --------------------------------------------------------------------------- #
+
+BLOCKED = REASON_APPLY_COMPRESSED_CHUNK_BLOCKED
+# Literal, not the constant: the gate must key on BLOCKED alone, and pinning the
+# wire value here keeps this file honest if the apply layer renames it (#1781).
+GUARD_FAILED = "HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED"
+BLOCKED_DETAIL = (
+    "Reingest targets compressed chunk _timescaledb_internal._hyper_1_52_chunk in "
+    "met.forcing_station_timeseries; run decompress procedure per "
+    "docs/runbooks/tier-node27-timeseries-storage.md#43-decompress-procedure before retrying."
+)
+
+
+def test_compressed_chunk_blocked_recompute_is_declined_and_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = _DeclineStore()
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    expected_mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    # rc is the whole point: this tick used to be red forever.
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert _command_kinds(calls) == ["register"]
+    assert published_calls == []
+    detail = summary["runs"]["details"][0]
+    assert detail["outcome"] == "declined"
+    # The evidence of what was declined is preserved verbatim, not swapped for
+    # a softer story: stage and reason codes stay exactly as the failure had.
+    assert detail["stage"] == "forcing_handoff"
+    assert detail["forcing_stage"]["reason_codes"] == [BLOCKED]
+    # #1781 diagnosability: the decline row is the only post-hoc handle on a
+    # permanently suppressed run, so `detail` must carry the guard's (redacted)
+    # message naming the offending chunk -- not a copy of the reason code, which
+    # `reason_code` already holds.
+    assert store.rows == [
+        {
+            "run_id": RUN_A,
+            "init_state_id": "state-a",
+            "product_mtime": expected_mtime,
+            "reason_code": BLOCKED,
+            "detail": BLOCKED_DETAIL,
+        }
+    ]
+    assert summary["runs"]["declined"] == 1
+    assert summary["runs"]["declined_runs"] == [{"run_id": RUN_A, "reason_code": BLOCKED}]
+    assert summary["declines_active"] == 1
+
+
+def test_declined_run_is_named_on_the_progress_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A terminal state is silent by construction -- the tick goes green and
+    never mentions the run again. The progress line is the only place an
+    operator watching the loop sees which runs stopped."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED)},
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    decline_lines = [line for line in captured.err.splitlines() if line.startswith("[declines]")]
+    assert len(decline_lines) == 1
+    assert RUN_A in decline_lines[0]
+    assert "active records 1" in decline_lines[0]
+
+
+def test_progress_line_reports_an_unknown_decline_count_on_a_quiet_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The steady state of a long-standing backlog: nothing declined this tick,
+    and the count read failed. `None` is falsy exactly like `0`, so a gate on
+    truthiness goes silent in precisely the case the line exists to surface."""
+
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+    )
+    monkeypatch.setattr(autopipe, "_active_decline_count", lambda *_args, **_kwargs: None)
+
+    rc, captured = _run_main_captured(capsys, object_store_root, "--progress")
+
+    assert rc == 0
+    decline_lines = [line for line in captured.err.splitlines() if line.startswith("[declines]")]
+    assert len(decline_lines) == 1
+    assert "active records unknown" in decline_lines[0]
+
+
+def test_decline_detail_falls_back_to_the_reason_codes_when_none_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A reason without a `detail` field must still produce a non-null decline
+    detail -- degraded, but never a null column on the only surviving record."""
+
+    store = _DeclineStore()
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=None)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["details"][0]["outcome"] == "declined"
+    assert store.rows[0]["detail"] == BLOCKED
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        pytest.param(_handoff_unavailable("HANDOFF_APPLY_SQL_FAILURE"), id="transient-reason"),
+        pytest.param(_handoff_unavailable(GUARD_FAILED), id="guard-internal-failure"),
+        pytest.param(_handoff_failed(), id="failed-status"),
+        pytest.param(RuntimeError("apply exploded"), id="generic-exception"),
+    ],
+)
+def test_transient_forcing_failure_still_fails_and_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    report: dict[str, Any] | BaseException,
+) -> None:
+    """Terminal-stating the wrong failure class is the expensive mistake here:
+    a transient failure declared terminal stops retrying a run that would have
+    succeeded on the next tick, and goes green while doing it."""
+
+    store = _DeclineStore()
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: report},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["runs"]["details"][0]["outcome"] == "failed"
+    assert summary["runs"]["declined"] == 0
+    assert summary["runs"]["declined_runs"] == []
+    assert store.rows == []
+    assert summary["declines_active"] == 0
+
+
+def test_blocked_recompute_without_product_mtime_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = _DeclineStore()
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    monkeypatch.setattr(autopipe, "_run_product_mtime", lambda *_args, **_kwargs: None)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["runs"]["details"][0]["outcome"] == "failed"
+    assert store.rows == []
+
+
+def test_failed_decline_write_keeps_the_run_failing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The one unrecoverable mistake: reporting a run as accounted for on a
+    record that never committed. It would never be retried and never appear in
+    the decline table either."""
+
+    store = _DeclineStore()
+    store.write_error = RuntimeError("insert exploded")
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["runs"]["details"][0]["outcome"] == "failed"
+    assert summary["runs"]["failed"] == 1
+    assert store.rows == []
+    assert summary["declines_active"] == 0
+
+
+def test_declined_run_does_not_pollute_ingest_publish_or_stats_counters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """E6: the new outcome must be invisible to every counter that was already
+    matching outcome strings exactly."""
+
+    guard_calls: list[int] = []
+    object_store_root, _calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True, RUN_B: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED), RUN_B: _handoff_success(RUN_B)},
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    def fake_stats_guard(_database_url: str, *, ingested_runs: int, env: Any) -> dict[str, Any]:
+        guard_calls.append(ingested_runs)
+        return _stats_guard_result(authority=_authority_result())
+
+    monkeypatch.setattr(autopipe, "_stats_guard", fake_stats_guard)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 0
+    assert summary["runs"]["ingested"] == 1
+    assert summary["runs"]["failed"] == 0
+    assert summary["runs"]["declined"] == 1
+    assert summary["runs"]["failed_runs"] == []
+    assert summary["runs"]["ingested_by_source"] == {"gfs": 1, "ifs": 0}
+    # publish_eligible fired on the ingested run alone, and the frontier leg saw
+    # exactly one row-writing run.
+    assert published_calls == [NODE27_DATABASE_URL]
+    assert guard_calls == [1]
+
+
+def test_every_tick_summary_carries_the_live_decline_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """E10: the anti-silence field. A tick with nothing declined must still say
+    how many terminal records are standing, or a permanent decline is invisible
+    on every tick after the one that wrote it."""
+
+    store = _DeclineStore()
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        decline_store=store,
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+    assert rc == 0
+    assert summary["runs"]["declined"] == 0
+    assert summary["declines_active"] == 0
+
+    store.rows.append(
+        {
+            "run_id": "some-earlier-run",
+            "init_state_id": "state-z",
+            "product_mtime": 1.0,
+            "reason_code": BLOCKED,
+            "detail": None,
+        }
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+    assert rc == 0
+    assert summary["runs"]["declined"] == 0
+    assert summary["declines_active"] == len(store.rows) == 1
+
+
+# --- read side: `_already_ingested_runs` ------------------------------------ #
+
+
+class _IngestedRunsCursor:
+    def __init__(self, conn: "_IngestedRunsConnection") -> None:
+        self.conn = conn
+        self.rows: list[tuple[Any, ...]] = []
+
+    def __enter__(self) -> "_IngestedRunsCursor":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: tuple[Any, ...] | None = None) -> None:
+        self.conn.executed.append(sql)
+        statement = sql.strip().upper()
+        # psycopg2 semantics, deliberately faithful (#1781): once a statement
+        # errors, EVERY later statement in the same transaction raises
+        # InFailedSqlTransaction until the transaction is rewound. Only
+        # ROLLBACK TO SAVEPOINT clears it -- which is what makes this double
+        # able to tell a savepoint-scoped degrade apart from a bare
+        # `except psycopg2.Error`, where the completeness query below would
+        # then blow up instead.
+        if statement.startswith("ROLLBACK TO SAVEPOINT"):
+            self.conn.aborted = False
+            self.rows = []
+            return
+        if self.conn.aborted:
+            raise psycopg2.errors.InFailedSqlTransaction("current transaction is aborted")
+        if statement.startswith("SAVEPOINT"):
+            if self.conn.savepoint_error is not None:
+                self.conn.aborted = True
+                raise self.conn.savepoint_error
+            self.rows = []
+            return
+        if statement.startswith("RELEASE SAVEPOINT"):
+            self.rows = []
+            return
+        if "status = 'superseded'" in sql:
+            assert params is not None
+            bound = set(params[0])
+            self.rows = [(run_id,) for run_id in self.conn.superseded_rows if run_id in bound]
+        elif "ops.ingest_recompute_decline" in sql:
+            if self.conn.decline_error is not None:
+                self.conn.aborted = True
+                raise self.conn.decline_error
+            assert params is not None
+            bound = set(params[0])
+            self.rows = [row for row in self.conn.decline_rows if row[0] in bound]
+        else:
+            self.rows = list(self.conn.completeness_rows)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self.rows)
+
+
+class _IngestedRunsConnection:
+    """Only the three statements `_already_ingested_runs` issues, dispatched on
+    their text. A real database is the oracle for the SQL semantics
+    (`tests/test_river_identity_normalization_integration.py`); what needs
+    isolating here is the read-count budget and the key-matching rule."""
+
+    def __init__(
+        self,
+        *,
+        decline_rows: list[tuple[str, str, float]],
+        completeness_rows: list[tuple[Any, ...]] | None = None,
+        decline_error: BaseException | None = None,
+        savepoint_error: BaseException | None = None,
+        superseded_rows: list[str] | None = None,
+    ) -> None:
+        self.decline_rows = decline_rows
+        self.completeness_rows = completeness_rows or []
+        self.decline_error = decline_error
+        self.savepoint_error = savepoint_error
+        self.superseded_rows = superseded_rows or []
+        self.aborted = False
+        self.executed: list[str] = []
+
+    def cursor(self) -> _IngestedRunsCursor:
+        return _IngestedRunsCursor(self)
+
+    def close(self) -> None:
+        return None
+
+
+def _count_object_store_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    reads: list[str] = []
+    real_manifest = autopipe._load_run_manifest_or_none
+    real_mtime = autopipe._run_product_mtime
+
+    def counting_manifest(root: Path, run_id: str) -> Any:
+        reads.append(run_id)
+        return real_manifest(root, run_id)
+
+    def counting_mtime(root: Path, run_id: str) -> Any:
+        reads.append(run_id)
+        return real_mtime(root, run_id)
+
+    monkeypatch.setattr(autopipe, "_load_run_manifest_or_none", counting_manifest)
+    monkeypatch.setattr(autopipe, "_run_product_mtime", counting_mtime)
+    return reads
+
+
+def test_matching_decline_record_suppresses_the_run_and_reads_only_its_products(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """E7: one batched query, and the object-store reads scale with the number
+    of decline records -- not with the pending population. On node-27 the
+    pending set is hundreds of runs and the decline set is a handful; reading
+    per pending run would put a per-tick stat storm on NFS."""
+
+    object_store_root = tmp_path / "object-store"
+    pending = [RUN_A, RUN_B, DIRECT_GRID_RUN, LEGACY_SAME_CYCLE_RUN]
+    for run_id in pending:
+        _write_run(object_store_root, run_id)
+        _set_initial_state(object_store_root, run_id, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+    reads = _count_object_store_reads(monkeypatch)
+
+    assert autopipe._already_ingested_runs(
+        NODE27_DATABASE_URL, pending, object_store_root=object_store_root
+    ) == {RUN_A}
+    assert set(reads) == {RUN_A}
+    assert len([sql for sql in conn.executed if "ops.ingest_recompute_decline" in sql]) == 1
+
+
+@pytest.mark.parametrize(
+    ("recorded_state", "mtime_delta"),
+    [
+        pytest.param("state-b", 0.0, id="init-state-changed"),
+        pytest.param("state-a", -5.0, id="products-regenerated"),
+    ],
+)
+def test_unmatched_decline_key_reopens_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    recorded_state: str,
+    mtime_delta: float,
+) -> None:
+    """The key IS the reopen condition: any new evidence must put the run back
+    into pending, or an operator who fixes the chunk and recomputes gets
+    silence."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, recorded_state, mtime + mtime_delta)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert (
+        autopipe._already_ingested_runs(
+            NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+        )
+        == set()
+    )
+
+
+def test_any_of_a_runs_decline_records_may_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The table accumulates one row per blocked regeneration. Matching only the
+    newest (or only one) row would silently drop the older decisions."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(
+        decline_rows=[(RUN_A, "state-a", mtime - 90.0), (RUN_A, "state-a", mtime)]
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert autopipe._already_ingested_runs(
+        NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+    ) == {RUN_A}
+
+
+def test_decline_record_is_inert_without_an_object_store_side(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Read-side fail-closed: with no evidence to compare against, suppress
+    nothing."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", 1.0)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert autopipe._already_ingested_runs(NODE27_DATABASE_URL, [RUN_A], object_store_root=None) == set()
+
+
+def test_missing_decline_table_degrades_to_no_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1781 deploy window: new code, migration 000055 not applied yet. The
+    decline read must not take the completeness read down with it -- it shares
+    the transaction, so an unscoped catch leaves it poisoned and the next
+    statement raises InFailedSqlTransaction instead."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    conn = _IngestedRunsConnection(
+        decline_rows=[],
+        decline_error=psycopg2.errors.UndefinedTable(
+            'relation "ops.ingest_recompute_decline" does not exist'
+        ),
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    # Degrade to "suppress nothing": the run goes back into pending, gets
+    # blocked again, and the decline write fails against the same missing table
+    # -- i.e. exactly the pre-#1781 behaviour, which is the safe direction.
+    assert (
+        autopipe._already_ingested_runs(
+            NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+        )
+        == set()
+    )
+    # The completeness query still ran: the transaction survived the degrade.
+    assert any("hydro.hydro_run h" in sql for sql in conn.executed)
+
+
+def test_missing_decline_table_still_emits_a_summary_and_returns_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole tick, not just the helper: an unguarded read would propagate
+    out of main() with a traceback and NO summary at all -- strictly worse than
+    the rc=1-with-summary this replaces."""
+
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    store = _DeclineStore()
+    store.write_error = psycopg2.errors.UndefinedTable(
+        'relation "ops.ingest_recompute_decline" does not exist'
+    )
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    # Un-stub the read side: this case is about it.
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+    monkeypatch.setattr(autopipe, "_active_decline_count", lambda *_args, **_kwargs: None)
+    conn = _IngestedRunsConnection(
+        decline_rows=[],
+        decline_error=psycopg2.errors.UndefinedTable(
+            'relation "ops.ingest_recompute_decline" does not exist'
+        ),
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["runs"]["details"][0]["outcome"] == "failed"
+    assert summary["runs"]["declined"] == 0
+    assert summary["declines_active"] is None
+    assert store.rows == []
+
+
+def _tick_with_real_read_side(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    superseded: bool,
+) -> tuple[dict[str, Any], list[str], list[str], _DeclineStore]:
+    """One whole tick on a run that is already excluded -- by `superseded` or by
+    a standing decline record -- with the REAL `_already_ingested_runs` in play.
+
+    The harness stubs that function outright, so no end-to-end case ever lets an
+    exclusion reach `already_count` / `publish_eligible`. Un-stubbing it here (as
+    `test_missing_decline_table_still_emits_a_summary_and_returns_one` does) is
+    what closes that gap.
+    """
+
+    root.mkdir(parents=True, exist_ok=True)
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    store = _DeclineStore()
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        root,
+        runs={RUN_A: True},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+
+    if superseded:
+        conn = _IngestedRunsConnection(decline_rows=[], superseded_rows=[RUN_A])
+    else:
+        # The decline was written by an EARLIER tick: the row stands before this
+        # one starts, on both the read surface and the count surface.
+        conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime)])
+        store.rows.append(
+            {
+                "run_id": RUN_A,
+                "init_state_id": "state-a",
+                "product_mtime": mtime,
+                "reason_code": BLOCKED,
+                "detail": BLOCKED_DETAIL,
+            }
+        )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    rc, summary = _run_main(capsys, object_store_root)
+    assert rc == 0
+    return summary, _command_kinds(calls), published_calls, store
+
+
+def test_standing_decline_counts_as_already_done_exactly_like_a_retired_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The tick AFTER the decline was written, end to end.
+
+    Helper-level coverage stops at `_already_ingested_runs`; nothing pinned what
+    the tick summary then says. The contract (spec: "A standing decline counts
+    as already-done, exactly like a retired run") is that the run is neither
+    ingested nor failed nor retried, and that it lands in `already_count` and
+    satisfies `publish_eligible` on its own -- the same shape `superseded` has
+    had since before #1781. Running BOTH exclusions through the same tick and
+    demanding an identical `runs` block is what makes that parity an assertion
+    rather than a comment.
+    """
+
+    declined_summary, declined_kinds, declined_published, store = _tick_with_real_read_side(
+        monkeypatch, tmp_path / "declined", capsys, superseded=False
+    )
+
+    # Not ingested, not failed, and never re-attempted: no register/parse means
+    # `_process_run` -- and therefore the forcing handoff -- never ran.
+    assert declined_summary["runs"]["ingested"] == 0
+    assert declined_summary["runs"]["failed"] == 0
+    assert declined_summary["runs"]["declined"] == 0
+    assert declined_summary["runs"]["processed"] == 0
+    assert declined_summary["runs"]["details"] == []
+    assert declined_summary["runs"]["failed_runs"] == []
+    assert declined_summary["runs"]["declined_runs"] == []
+    assert declined_summary["runs"]["ingested_by_source"] == {"gfs": 0, "ifs": 0}
+    assert "register" not in declined_kinds
+    assert "parse" not in declined_kinds
+    # No second decline row: the terminal record is not rewritten every tick.
+    assert [row["run_id"] for row in store.rows] == [RUN_A]
+    assert declined_summary["declines_active"] == 1
+    # `already_count` carries it, and it alone satisfies `publish_eligible`.
+    assert declined_summary["runs"]["already_ingested"] == 1
+    assert declined_published == [NODE27_DATABASE_URL]
+
+    retired_summary, retired_kinds, retired_published, retired_store = _tick_with_real_read_side(
+        monkeypatch, tmp_path / "retired", capsys, superseded=True
+    )
+
+    # The parity claim, asserted: a standing decline produces the same tick
+    # accounting as `status='superseded'`. `declines_active` is the one field
+    # that legitimately differs -- it counts records, not exclusions.
+    assert retired_summary["runs"] == declined_summary["runs"]
+    assert retired_kinds == declined_kinds
+    assert retired_published == declined_published
+    assert retired_summary["declines_active"] == 0
+    assert retired_store.rows == []
+
+
+def test_declined_runs_degrades_when_the_savepoint_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """"Degrades to suppress nothing on any DB error" has to cover the statement
+    that opens the scope too, and the degrade must NOT try to rewind to a
+    savepoint that was never established -- that is itself an error."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(
+        decline_rows=[(RUN_A, "state-a", mtime)],
+        savepoint_error=psycopg2.errors.DiskFull("could not extend file"),
+    )
+    cur = conn.cursor()
+
+    assert autopipe._declined_runs(cur, [RUN_A], object_store_root) == set()
+    assert not [sql for sql in conn.executed if sql.strip().upper().startswith("ROLLBACK TO")]
+
+
+# --- D11: "no manifest" is a known-empty key, not missing evidence ---------- #
+
+
+def _write_product_output(object_store_root: Path, run_id: str) -> None:
+    output_dir = object_store_root / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "rivqdown.csv").write_text("time,value\n", encoding="utf-8")
+
+
+def test_blocked_run_without_init_evidence_is_declined_then_suppressed_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D11, and it has to be TWO ticks.
+
+    On node-27 tick 1 this shape was 14 of 158 runs: no manifest
+    `initial_state`, `hydro_run.init_state_id` NULL, product mtime present. The
+    old fail-closed rule turned "no init evidence" into retry-forever -- exactly
+    the loop #1781 exists to kill -- and rc never reached 0.
+
+    The half-fix this test exists to falsify is: write `''`, but keep skipping
+    `''` on the read side. Under it tick 1 looks identical (rc 0, outcome
+    declined, one row), and `ON CONFLICT DO NOTHING` even keeps `store.rows`
+    at one row on tick 2 -- so neither rc nor the row count discriminates. The
+    only observable that does is whether tick 2 attempts the handoff again,
+    which is why tick 2 asserts on the command log and the apply call log.
+    """
+
+    store = _DeclineStore()
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    # `_write_run`'s manifest carries no `initial_state` block at all, so the
+    # init component of the key is the `''` sentinel on both sides.
+    object_store_root, calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+
+    apply_calls: list[str] = []
+    stubbed_apply = autopipe._apply_object_store_forcing_handoff
+
+    def recording_apply(manifest_path: str | Path, **kwargs: object) -> dict[str, Any]:
+        apply_calls.append(Path(manifest_path).parents[1].name)
+        return stubbed_apply(manifest_path, **kwargs)
+
+    monkeypatch.setattr(autopipe, "_apply_object_store_forcing_handoff", recording_apply)
+
+    # Tick 1: nothing recorded yet.
+    monkeypatch.setattr(
+        autopipe, "_connect", lambda *_args, **_kwargs: _IngestedRunsConnection(decline_rows=[])
+    )
+    rc_one, summary_one = _run_main(capsys, object_store_root)
+
+    assert rc_one == 0
+    assert summary_one["runs"]["details"][0]["outcome"] == "declined"
+    assert summary_one["runs"]["declined"] == 1
+    assert summary_one["runs"]["failed"] == 0
+    assert [(row["run_id"], row["init_state_id"]) for row in store.rows] == [(RUN_A, "")]
+    assert apply_calls == [RUN_A]
+    tick_one_kinds = _command_kinds(calls)
+    assert "register" in tick_one_kinds
+
+    # Tick 2: same store, same evidence, and the row tick 1 wrote now stands on
+    # the read surface -- built from the store, not hand-authored, so a write
+    # side that recorded something unreadable cannot be papered over here.
+    conn_two = _IngestedRunsConnection(
+        decline_rows=[
+            (row["run_id"], row["init_state_id"], row["product_mtime"]) for row in store.rows
+        ]
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn_two)
+    rc_two, summary_two = _run_main(capsys, object_store_root)
+
+    assert rc_two == 0
+    # The discriminating assertions: zero handoff attempts for this run on tick
+    # 2, on the real command log and the real apply call log.
+    assert apply_calls == [RUN_A]
+    assert _command_kinds(calls) == tick_one_kinds
+    assert summary_two["runs"]["processed"] == 0
+    assert summary_two["runs"]["details"] == []
+    assert summary_two["runs"]["declined"] == 0
+    assert summary_two["runs"]["failed"] == 0
+    assert summary_two["runs"]["already_ingested"] == 1
+    # No second row either: the terminal record is written once.
+    assert len(store.rows) == 1
+    assert summary_two["declines_active"] == 1
+
+
+def test_empty_init_state_key_suppresses_a_run_with_no_manifest_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The literal production shape: `input/manifest.json` absent entirely, with
+    the mtime coming from the output products. The read side must treat the
+    recorded `''` as a value that matches, not as evidence it failed to get."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_product_output(object_store_root, RUN_A)
+    assert autopipe._load_run_manifest_or_none(object_store_root, RUN_A) is None
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+    assert mtime is not None
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert autopipe._already_ingested_runs(
+        NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+    ) == {RUN_A}
+
+
+def test_decline_on_the_empty_init_sentinel_reopens_once_a_manifest_appears(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`''` is a key value, so it is also a reopen condition: the day the run
+    gains a manifest with a real `initial_state_id`, the key changes, the record
+    stops matching, and the run is re-evaluated instead of staying terminal."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    # Computed after the rewrite so the mismatch is isolated on the init
+    # component -- `_set_initial_state` rewrites the manifest and moves mtime.
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert (
+        autopipe._already_ingested_runs(
+            NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+        )
+        == set()
+    )

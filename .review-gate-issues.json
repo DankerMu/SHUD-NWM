@@ -1901,6 +1901,11 @@
           "pr": 1759,
           "outcome": "merged",
           "rounds": 3
+        },
+        {
+          "pr": 1788,
+          "outcome": "closed",
+          "rounds": 2
         }
       ]
     },
@@ -1941,6 +1946,50 @@
       "ceilingPrs": [],
       "gateEntries": 1,
       "closed": []
+    },
+    "1747": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1783,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1749": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1793,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "1797": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1798,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1185": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 1753,
+          "outcome": "superseded-by-split",
+          "rounds": 3
+        }
+      ]
     }
   },
   "1736": {
