@@ -1551,11 +1551,13 @@ Keep/cut unchanged; still the recorded default-keep pending maintainer override.
 
 ## Revisit (2026-08-23, issue #1185 / parent PR #1753 terminal split)
 
-The appended line is a terminal `ceiling-split` record, not a merged sample, so
-`loop_log_audit` remains at the exact figures already adjudicated above:
-**117 multi-round merged PRs, later-round catches core=68 rotated=283**. There is
-no new attribution evidence to re-analyse; the recorded **keep rotation** decision
-stands unchanged.
+The appended #1753 line is a terminal `ceiling-split` record, not a merged
+sample. After this branch also absorbed master's #1797 accountability line,
+`loop_log_audit` reports **118 multi-round merged PRs, later-round catches
+core=68 rotated=284**. The one-sample / one-rotated increment comes from #1797's
+Round 2 `final-full-pass` record; the parent terminal line contributes neither a
+merged sample nor a catch. This does not change the direction already adjudicated
+above, so the recorded **keep rotation** decision stands unchanged.
 
 This line does add a cost-boundary signal, but it belongs to the review-gate sizing
 ledger rather than the lens-allocation ratio. PR #1753 reached Round 3 with one

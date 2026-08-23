@@ -89,8 +89,16 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 #### Scenario: restart-reconcile incident evidence survives the fallback compactly
 
 - WHEN the source evidence payload carries a `restart_reconcile` block and the bounded fallback payload is constructed
-- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, `inflight_error`, and per-outcome summary rows limited to job identity, action, status, reconciliation reason class, `identity_blocked_streak`, `quarantine_reason`, and `quarantine_field`
+- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, and `inflight_error`
+- AND the fallback retains per-outcome summary rows for **both** reconcile lanes — `inflight` and `reserved_unbound` — each lane's rows limited to job identity, action, status, reconciliation reason class, `identity_blocked_streak`, `quarantine_reason`, and `quarantine_field`
+- AND a lane absent from the source payload stays absent from the fallback, and a lane present without outcome rows SHALL NOT be given a fabricated empty `outcomes` list
 - AND when the source payload has no `restart_reconcile` block the fallback omits the key.
+
+#### Scenario: a dropped lane SHALL NOT be indistinguishable from an empty lane
+
+- WHEN a bounded fallback artifact is read by an operator or an acceptance check asking whether a pass recorded any `identity_mismatch_blocked` or `identity_mismatch_released` outcome
+- THEN the answer SHALL be derivable from the artifact, because the lane carrying those outcomes (`inflight` for jobs bound to a Slurm id, `reserved_unbound` for reserved unbound jobs) is present whenever the source payload carried it
+- AND the artifact SHALL NOT present a syntactically valid `restart_reconcile` block whose missing lane reads as "no such outcomes occurred" when the lane was in fact discarded.
 
 #### Scenario: within-limit evidence is byte-identical to the pre-change contract
 
