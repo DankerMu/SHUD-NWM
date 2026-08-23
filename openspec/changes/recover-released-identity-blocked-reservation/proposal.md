@@ -4,7 +4,7 @@ A pipeline-job row that reaches the `identity_mismatch_released` /
 `reservation_lost` shape is a **permanent, silent wedge**. Its cohort never runs
 again and no operator action can recover it.
 
-`file_orchestration_journal.py:3312-3314` promises otherwise:
+`file_orchestration_journal.py:3364-3366` promises otherwise:
 
 > The released row is a deliberate non-reclaimable terminal: reclaim only accepts
 > `absence_retry_permitted`, so this idempotency key is spent. **Liveness comes
@@ -12,10 +12,10 @@ again and no operator action can recover it.
 
 That liveness mechanism does not exist. Both minting sites —
 `chain_forecast_orchestrator_cycle.py:218-233` and
-`file_orchestration_journal.py:8210` and `:8276` — are gated on
-`should_auto_retry` (directly or through the caller at `:8220-8221`),
+`file_orchestration_journal.py:8268` and `:8334` — are gated on
+`should_auto_retry` (directly or through the caller at `:8278-8279`),
 which is false by construction for this shape: the release transition
-deliberately withholds `error_code` (`file_orchestration_journal.py:3358-3361`),
+deliberately withholds `error_code` (`file_orchestration_journal.py:3410-3413`),
 so `retry.py:200` reads `UNKNOWN_FAILURE`, `retry.py:202` classifies it
 non-retriable, and `retry.py:204` marks it permanent. The retry budget is
 untouched (`retry_count=0`, limit 6) — this is a classification outcome, not
@@ -30,8 +30,8 @@ rows at all and nothing has touched them since `2026-08-22T13:08Z`.
 
 The existing manual channel does not help: `retry.py:73-74` defines
 `MANUAL_RETRY_SOURCE_STATUSES` without `reservation_lost`, so
-`file_orchestration_journal.py:9155` never classifies it as a retry source, so
-`failed_job` resolves to `None` and `:8563` raises `RetryNotFoundError`.
+`file_orchestration_journal.py:9213` never classifies it as a retry source, so
+`failed_job` resolves to `None` and `:8621` raises `RetryNotFoundError`.
 
 ## What Changes
 
@@ -54,8 +54,8 @@ The existing manual channel does not help: `retry.py:73-74` defines
   what `tests/test_production_scheduler.py:48632` and `:48681` actually
   distinguish (`:48681`'s docstring: "the SECOND *reservation* write point").
   There is exactly **one** release write point
-  (`release_identity_blocked_reservation`, `file_orchestration_journal.py:3294`,
-  decision constructed at `:3365`), so the signal is emitted once, there.
+  (`release_identity_blocked_reservation`, `file_orchestration_journal.py:3346`,
+  decision constructed at `:3417`), so the signal is emitted once, there.
 
 ## Non-Goals
 
@@ -63,7 +63,7 @@ The existing manual channel does not help: `retry.py:73-74` defines
   cluster means absence can never be proven through the comment leg, so a
   released row means "a job may still be running and we cannot know". Automatic
   minting would reverse the deliberate safety decision recorded at
-  `file_orchestration_journal.py:3358-3361` and re-open the duplicate-submission
+  `file_orchestration_journal.py:3410-3413` and re-open the duplicate-submission
   class that #1116 closed. A streak cap would bound how many duplicates, not
   whether.
 - **No `error_code` stamping.** `tests/test_production_scheduler.py:48632` and

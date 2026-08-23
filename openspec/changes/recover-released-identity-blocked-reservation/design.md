@@ -33,7 +33,7 @@
    `:48681` SHALL pass **unweakened** — they are the anti-regression pin for the
    duplicate-submission class, not incidental coverage.
 2. **The two door predicates stay byte-identical**: the reservation reclaim
-   predicate (`file_orchestration_journal.py:2117-2170`) and
+   predicate (`file_orchestration_journal.py:2169-2222`) and
    `_verified_accepted_submit_forecast_retry`
    (`chain_forecast_orchestrator_cycle.py:923-931`) keep hard-pinning
    `absence_retry_permitted`. This is **not** the same as "the call sites are
@@ -52,9 +52,9 @@
 ## D3. Why not the three rejected designs
 
 - **Stamp a transient `error_code` at release.** Directly contradicts
-  `file_orchestration_journal.py:3358-3361` and reddens both pins. Rejected.
+  `file_orchestration_journal.py:3410-3413` and reddens both pins. Rejected.
 - **Open a reclaim door to `identity_mismatch_released`.** Contradicts the
-  contract at `:3312-3314` and would fabricate an identity proof the system does
+  contract at `:3364-3366` and would fabricate an identity proof the system does
   not have. Rejected.
 - **Auto-mint at the release site under an `identity_blocked_streak` cap.**
   Reverses the deliberate "permanent wedge over duplicate submission" choice.
@@ -81,7 +81,7 @@ verified INERT and self-blocking. The trace, each predicate opened and checked:
 - `job_needs_submission` (`chain_forecast_cycle.py:527-528`) is true, so the pass
   tries to submit it.
 - `_pipeline_job_conflicts_unlocked`'s master branch
-  (`file_orchestration_journal.py:7376-7389`) sees a row already under that
+  (`file_orchestration_journal.py:7434-7447`) sees a row already under that
   `job_id` and refuses the reserve; `reclaim_pipeline_job_reservation` then
   refuses at `:2135` because the row is `pending`, not `reservation_lost`.
 - `_reservation_already_inflight` therefore fires and the pass calls
@@ -127,14 +127,14 @@ carrying a stale member set forward would silently re-run a superseded manifest.
 one operator invocation recovers one wedged cohort.
 
 **Why the generic manual channel is not reused.** `_create_pending_manual_retry_job`
-(`file_orchestration_journal.py:8556-8600`) clones the failed row with
+(`file_orchestration_journal.py:8614-8656`) clones the failed row with
 `candidate_id: None` and key `manual_retry:{run_id}:{n}`, writing through
-`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8590`, `:8594-8598`).
+`_pipeline_job_row` + `_write_pipeline_job_unlocked` (`:8648`, `:8652-8656`).
 The clone carries `reconciliation_decision = identity_mismatch_released` over
-unchanged while overriding `status` to `"pending"` (`:8573`), tripping the
+unchanged while overriding `status` to `"pending"` (`:8631`), tripping the
 accepted-submit invariant at `accepted_submit_identity.py:646` — surfaced as
 `file_journal_evidence_invariant_invalid`. (The typed-API guard at
-`file_orchestration_journal.py:1914-1922` is **not** what blocks this: it lives
+`file_orchestration_journal.py:1966-1974` is **not** what blocks this: it lives
 in `upsert_pipeline_job`, which this path never calls.) It would also
 pre-materialize a row, which the invariant above forbids outright.
 
@@ -186,6 +186,29 @@ it; and the operator could not even find the row. Each time, a correct mechanism
 with no path from the party it exists for. The full-tree replay is more expensive
 than its `query_*` siblings; that cost is accepted because this is a hand-run
 operator command, never a scheduling path.
+
+## D4c. Citation re-anchoring is a last action, not a fix
+
+Line-number drift bit this PR **four** times, and every instance had the same
+cause: a citation that was accurate when written, invalidated by **this PR's own
+later commits**. Round 1 found it in the documents; an implementer report carried
+it once; and it recurred in the fixture after the re-anchoring pass that was
+supposed to have closed it, because two more code commits landed afterwards.
+
+Two rules, recorded so the next person does not spend the same four rounds:
+
+1. **Re-anchoring at "final head" only works if that head is final.** It is a
+   pre-push action, not a mid-flight cleanup. Any commit that touches a cited
+   file re-opens it.
+2. **Range-checking is not verification.** "The line exists" is a weaker claim
+   than "the line says what the citation asserts". Every pass here that only
+   checked ranges passed while the citations were wrong; the content-level audit
+   — open each cited line and print it — is what actually caught it, each time.
+
+Note what this is NOT: none of the four instances was a fabricated citation. Every
+one pointed at the right content when authored. That distinction matters when
+triaging — renumbering is hygiene, whereas a citation whose content never
+supported its claim is evidence failure, and only the second warrants alarm.
 
 ## D5. The signal
 
@@ -254,8 +277,8 @@ implementer to instrument both. That premise is false, and the correction is
 recorded rather than silently rewritten because it changes what the tasks mean:
 
 - `IDENTITY_MISMATCH_RELEASED_DECISION` is constructed in exactly one place,
-  `file_orchestration_journal.py:3365`, inside
-  `release_identity_blocked_reservation` (`:3294-3400`). Its only production
+  `file_orchestration_journal.py:3417`, inside
+  `release_identity_blocked_reservation` (`:3346-3482`). Its only production
   caller is `reconcile.py:2135`.
 - A function named `release_pipeline_job_reservation` does **not exist**; the
   first draft cited it twice.
