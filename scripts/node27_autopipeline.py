@@ -983,6 +983,9 @@ def _declined_runs(
 
     ``object_store_root=None`` means there is no evidence side at all, so
     nothing is suppressed: the fail-closed rule of design D3 on the read side.
+    Within that rule, the key itself comes from `_decline_key` -- the SAME
+    helper the write side uses, so `''` (known to have no manifest, design D11)
+    matches here instead of being skipped as missing evidence.
     """
     if object_store_root is None or not run_ids:
         return set()
@@ -1026,14 +1029,44 @@ def _declined_runs(
 
     declined: set[str] = set()
     for run_id, keys in recorded.items():
-        manifest = _load_run_manifest_or_none(object_store_root, run_id)
-        init_state_id = _manifest_initial_state_id(manifest) if manifest is not None else None
-        product_mtime = _run_product_mtime(object_store_root, run_id)
-        if init_state_id is None or product_mtime is None:
+        key = _decline_key(object_store_root, run_id)
+        if key is None:
             continue
-        if (init_state_id, product_mtime) in keys:
+        if key in keys:
             declined.add(run_id)
     return declined
+
+
+def _decline_key(object_store_root: Path, run_id: str) -> tuple[str, float] | None:
+    """The (init_state_id, product_mtime) decline key for a run, or None when it
+    is genuinely unobtainable (#1781 design D11).
+
+    BOTH the write side (`_decline_blocked_recompute`) and the read side
+    (`_declined_runs`) go through here, and that is the point: the two used to
+    source the key separately and disagreed about `''` (`if not init_state_id`
+    vs `if init_state_id is None`). Harmless only while the write side never
+    recorded `''` -- and the moment it does, the disagreement becomes the
+    "writes fine, reads never" half-fix, where every tick re-declines, the
+    ON CONFLICT DO NOTHING swallows it, rc goes green and the handoff retries
+    forever. One helper, one rule.
+
+    A missing manifest (or a manifest with no `initial_state`) yields `''`, a
+    legitimate key value meaning "known to have no manifest". It is not missing
+    evidence: 14 of the 158 runs on the first node-27 tick had exactly this
+    shape, and fail-closing on it re-created the very loop this change kills.
+    `''` still works as a reopen condition -- if a manifest with a real
+    `initial_state_id` ever appears, the key changes and stops matching, so the
+    run is re-evaluated. A transiently unreadable manifest self-heals the same
+    way.
+
+    Only `product_mtime` is genuinely unknowable, so it alone returns None.
+    """
+    manifest = _load_run_manifest_or_none(object_store_root, run_id)
+    init_state_id = _manifest_initial_state_id(manifest) if manifest is not None else None
+    product_mtime = _run_product_mtime(object_store_root, run_id)
+    if product_mtime is None:
+        return None
+    return (init_state_id or "", product_mtime)
 
 
 def _already_ingested_runs(
@@ -1944,16 +1977,19 @@ def _decline_blocked_recompute(
     """Terminate a compressed-chunk-blocked recompute, or keep failing (#1781).
 
     Returns the outcome the caller should report: ``"declined"`` only when the
-    full decline key was available AND the record committed. Fail-closed on
-    everything else -- an incomplete key or a failed write leaves the run at
+    decline key was obtainable AND the record committed. Fail-closed on
+    everything else -- an unobtainable key or a failed write leaves the run at
     ``"failed"``, so it retries. The one thing that must never happen is a run
     treated as accounted for on a record that was never written.
+
+    "Unobtainable" is narrower than it once was (design D11): a missing
+    manifest is not missing evidence, it is the `''` init component, so only an
+    unreadable ``product_mtime`` and a failing write remain fail-closed.
     """
-    manifest = _load_run_manifest_or_none(object_store_root, run_id)
-    init_state_id = _manifest_initial_state_id(manifest) if manifest is not None else None
-    product_mtime = _run_product_mtime(object_store_root, run_id)
-    if not init_state_id or product_mtime is None:
+    key = _decline_key(object_store_root, run_id)
+    if key is None:
         return "failed"
+    init_state_id, product_mtime = key
     try:
         _record_recompute_decline(
             database_url,

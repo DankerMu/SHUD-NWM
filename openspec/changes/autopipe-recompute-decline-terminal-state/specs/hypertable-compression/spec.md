@@ -92,6 +92,19 @@
   `runs.ingested` 也不计入 `runs.failed`，也不参与 `_stats_guard`（后者钉的是
   本 tick 真正 ingest 的条数，不是 publish 判据）
 
+#### Scenario: A blocked run with no manifest still reaches the terminal state
+
+- **WHEN** 一个被压缩块挡住的 run 既没有 manifest、`hydro_run.init_state_id`
+  也为 `NULL`，但产物 mtime 可取
+- **THEN** 它同样被 decline，记录的 `init_state_id` 为空串 `''`（合法键值，
+  含义是"已知无 manifest"），并在其后的 tick 中被抑制、不再发起 handoff 尝试。
+  fail-closed 只保留给真正不可知的情形：`product_mtime` 取不到、或 DB 写入失败
+- **AND** 写入侧与读取侧必须由**同一个**键计算逻辑得出该键——否则会出现
+  "写得进、读不出"的半修复：每 tick 重新 decline 被 `ON CONFLICT DO NOTHING` 吞掉，
+  `rc` 变 0 而 handoff 仍在永久重试
+- **AND** 日后若出现带真实 `initial_state_id` 的 manifest，键随之改变、与记录失配，
+  该 run 自动重开重新评估（manifest 被瞬时读坏的情形同理自愈）
+
 #### Scenario: A standing decline counts as already-done, exactly like a retired run
 
 - **WHEN** 一条已存在的 decline 记录在**其后**的某个 tick 上仍与产物证据相符

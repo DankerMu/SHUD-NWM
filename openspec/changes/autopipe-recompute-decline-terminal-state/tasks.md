@@ -29,6 +29,16 @@
     被 decline 而增长——这是正确行为且对 rc 中性）。
   - 只看 `rc==0` 不算通过（`rc` 会因 outcome 改名而变绿，即使环还在转）；
     且先查部署前那个 tick 有无**非被挡族**的失败，一个无关瞬态就会让 rc 保持 1。
+- **E11** **（D11，live 证据驱动新增）无 init 证据的 run 也到达终态**：一条被挡、
+  无 manifest initial state 且 DB `init_state_id` 为 `NULL` 的 run，tick 1 以
+  `init_state_id=''` 被 decline，**tick 2 对它零 handoff 尝试**、零新行、被抑制。
+  必须是**跨两个 tick** 的测试——只看 `rc` 的测试会被"半修复"骗过（写入侧记 `''`、
+  读取侧仍 fail-closed：`rc` 变 0 而 handoff 永久重试）。
+  另需钉死：从 `''` 哨兵的重开（日后出现真实 manifest init → 失配 → 重开），
+  以及 fail-closed 仅剩的两条真不可知路径（`product_mtime` 取不到、DB 写入失败）。
+  **oracle 事项**：本项作废并删除了 `test_blocked_recompute_without_manifest_initial_state_fails_closed`
+  ——它钉的正是 D11 反转掉的行为。删除由 fixture（D11 + spec 新场景）授权，
+  继任者是上述两 tick 测试；另两条 fail-closed 测试逐字未动且保持绿。
 - **E6** 计数器不被污染：测试钉死 declined run 不计入 `runs.ingested` /
   `runs.failed`，且不改变 `publish_eligible` 输入。
 - **E7** decline 查询为批量，且 object store 读取只对有 decline 记录的 run 发生：
@@ -65,5 +75,8 @@
       压缩前置检查清单（可执行 SQL）；§4.3 解压小节补一句部分解压会打开 parse
       侧守卫路径（D6/D7）。
 - [x] T9 本地验证：ruff + 单测 + openspec validate（两个 change 各自 strict）。
+- [x] T11 （D11）键的 init 分量改为「manifest 有就用它，否则 `''`」，写入侧与读取侧
+      共用一个 `_decline_key` helper（消除既有的 `not x` / `is None` 不对称）；
+      fail-closed 收窄到 `product_mtime` 取不到与 DB 写入失败。不改迁移。
 - [ ] T10 node-27 实机：apply 迁移、跑双 tick、跑真实 DB pytest、跑 runbook 清单 SQL，
       全部留档（E2/E4/E5/E9）。

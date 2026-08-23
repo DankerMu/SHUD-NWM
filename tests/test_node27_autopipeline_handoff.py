@@ -1617,32 +1617,6 @@ def test_transient_forcing_failure_still_fails_and_records_nothing(
     assert summary["declines_active"] == 0
 
 
-def test_blocked_recompute_without_manifest_initial_state_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Half a key cannot be matched on the read side, so a record written from
-    one would suppress nothing and the loop would come back -- except the tick
-    would now be green. Keep failing instead."""
-
-    store = _DeclineStore()
-    # `_write_run`'s manifest carries no `initial_state` block at all.
-    object_store_root, _calls, _published = _prepare_autopipe(
-        monkeypatch,
-        tmp_path,
-        runs={RUN_A: True},
-        apply_reports={RUN_A: _handoff_unavailable(BLOCKED)},
-        decline_store=store,
-    )
-
-    rc, summary = _run_main(capsys, object_store_root)
-
-    assert rc == 1
-    assert summary["runs"]["details"][0]["outcome"] == "failed"
-    assert store.rows == []
-
-
 def test_blocked_recompute_without_product_mtime_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2175,3 +2149,143 @@ def test_declined_runs_degrades_when_the_savepoint_itself_fails(
 
     assert autopipe._declined_runs(cur, [RUN_A], object_store_root) == set()
     assert not [sql for sql in conn.executed if sql.strip().upper().startswith("ROLLBACK TO")]
+
+
+# --- D11: "no manifest" is a known-empty key, not missing evidence ---------- #
+
+
+def _write_product_output(object_store_root: Path, run_id: str) -> None:
+    output_dir = object_store_root / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "rivqdown.csv").write_text("time,value\n", encoding="utf-8")
+
+
+def test_blocked_run_without_init_evidence_is_declined_then_suppressed_next_tick(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D11, and it has to be TWO ticks.
+
+    On node-27 tick 1 this shape was 14 of 158 runs: no manifest
+    `initial_state`, `hydro_run.init_state_id` NULL, product mtime present. The
+    old fail-closed rule turned "no init evidence" into retry-forever -- exactly
+    the loop #1781 exists to kill -- and rc never reached 0.
+
+    The half-fix this test exists to falsify is: write `''`, but keep skipping
+    `''` on the read side. Under it tick 1 looks identical (rc 0, outcome
+    declined, one row), and `ON CONFLICT DO NOTHING` even keeps `store.rows`
+    at one row on tick 2 -- so neither rc nor the row count discriminates. The
+    only observable that does is whether tick 2 attempts the handoff again,
+    which is why tick 2 asserts on the command log and the apply call log.
+    """
+
+    store = _DeclineStore()
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    # `_write_run`'s manifest carries no `initial_state` block at all, so the
+    # init component of the key is the `''` sentinel on both sides.
+    object_store_root, calls, _published = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+
+    apply_calls: list[str] = []
+    stubbed_apply = autopipe._apply_object_store_forcing_handoff
+
+    def recording_apply(manifest_path: str | Path, **kwargs: object) -> dict[str, Any]:
+        apply_calls.append(Path(manifest_path).parents[1].name)
+        return stubbed_apply(manifest_path, **kwargs)
+
+    monkeypatch.setattr(autopipe, "_apply_object_store_forcing_handoff", recording_apply)
+
+    # Tick 1: nothing recorded yet.
+    monkeypatch.setattr(
+        autopipe, "_connect", lambda *_args, **_kwargs: _IngestedRunsConnection(decline_rows=[])
+    )
+    rc_one, summary_one = _run_main(capsys, object_store_root)
+
+    assert rc_one == 0
+    assert summary_one["runs"]["details"][0]["outcome"] == "declined"
+    assert summary_one["runs"]["declined"] == 1
+    assert summary_one["runs"]["failed"] == 0
+    assert [(row["run_id"], row["init_state_id"]) for row in store.rows] == [(RUN_A, "")]
+    assert apply_calls == [RUN_A]
+    tick_one_kinds = _command_kinds(calls)
+    assert "register" in tick_one_kinds
+
+    # Tick 2: same store, same evidence, and the row tick 1 wrote now stands on
+    # the read surface -- built from the store, not hand-authored, so a write
+    # side that recorded something unreadable cannot be papered over here.
+    conn_two = _IngestedRunsConnection(
+        decline_rows=[
+            (row["run_id"], row["init_state_id"], row["product_mtime"]) for row in store.rows
+        ]
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn_two)
+    rc_two, summary_two = _run_main(capsys, object_store_root)
+
+    assert rc_two == 0
+    # The discriminating assertions: zero handoff attempts for this run on tick
+    # 2, on the real command log and the real apply call log.
+    assert apply_calls == [RUN_A]
+    assert _command_kinds(calls) == tick_one_kinds
+    assert summary_two["runs"]["processed"] == 0
+    assert summary_two["runs"]["details"] == []
+    assert summary_two["runs"]["declined"] == 0
+    assert summary_two["runs"]["failed"] == 0
+    assert summary_two["runs"]["already_ingested"] == 1
+    # No second row either: the terminal record is written once.
+    assert len(store.rows) == 1
+    assert summary_two["declines_active"] == 1
+
+
+def test_empty_init_state_key_suppresses_a_run_with_no_manifest_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The literal production shape: `input/manifest.json` absent entirely, with
+    the mtime coming from the output products. The read side must treat the
+    recorded `''` as a value that matches, not as evidence it failed to get."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_product_output(object_store_root, RUN_A)
+    assert autopipe._load_run_manifest_or_none(object_store_root, RUN_A) is None
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+    assert mtime is not None
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert autopipe._already_ingested_runs(
+        NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+    ) == {RUN_A}
+
+
+def test_decline_on_the_empty_init_sentinel_reopens_once_a_manifest_appears(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`''` is a key value, so it is also a reopen condition: the day the run
+    gains a manifest with a real `initial_state_id`, the key changes, the record
+    stops matching, and the run is re-evaluated instead of staying terminal."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    # Computed after the rewrite so the mismatch is isolated on the init
+    # component -- `_set_initial_state` rewrites the manifest and moves mtime.
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    assert (
+        autopipe._already_ingested_runs(
+            NODE27_DATABASE_URL, [RUN_A], object_store_root=object_store_root
+        )
+        == set()
+    )

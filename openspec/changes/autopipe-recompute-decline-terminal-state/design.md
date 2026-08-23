@@ -228,6 +228,36 @@ outcome 保持 `failed`、`rc=1`。即精确退化为本变更之前的行为。
 本身在 `try` 之外，与该函数"任何 DB 错误都退化为不抑制"的承诺不严格一致）因为是
 两行守卫，随本轮一并收掉，不单独开轮。
 
+## D11 — live 证据推翻 D3 的一个边角：`init_state_id` 缺失是"已知无"，不是"未知"
+
+node-27 tick 1 实测：158 个 run 里 144 个被正常 decline，**14 个走了 fail-closed
+仍然 `failed`，`rc` 因此停在 1**。诊断（14/14 一致，非瞬态）：
+`hydro.hydro_run.init_state_id` 为 `NULL` **且**对象存储里没有 manifest，
+产物 mtime 俱在。按 D3「拿不到完整键就不终态化」，这完全是设计内行为。
+
+但后果是 D3 当初没预料到的：对这批 run，fail-closed 把"键取不到"变成了**永久重试**
+——恰恰是本变更要杀死的那个环。而且 `rc` 永远不会归 0，proposal 里"从每 tick
+`rc=1` 恢复为 `rc=0`"这句话在生产上不成立。这是对用户所选终态的功能缺口，
+不是可以记一笔了事的已知限制。
+
+**修正**：键的 init 分量重新定义为「manifest 有就用它，没有就是空串 `''`」，
+`''` 是一个**合法的键值，含义是"已知无 manifest"**，不是"证据缺失"。
+fail-closed 收窄到只剩 `product_mtime` 取不到与 DB 写入失败——那才是真正的不可知。
+
+为什么语义上成立：键**就是**重开条件。日后若出现带真实 init 的 manifest，
+两侧算出的键随之改变 → 与记录失配 → 该 run 自动重开重新评估。manifest 只是被
+瞬时读坏（I/O 错误、写到一半）同理自愈：读取侧一旦能读到真值就失配，不抑制。
+不需要改迁移——`''` 满足 `NOT NULL` 且可进主键；已写入的 144 行不受影响。
+
+**顺带消除一处既有不对称**：写入侧原用 `if not init_state_id`（`''` 判为缺），
+读取侧用 `if init_state_id is None`（`''` 可接受）。今天无害只因写入侧从不写 `''`；
+一旦引入 `''` 就会变成"写不进、读得出"的半修复。两侧必须共用同一个键计算 helper。
+
+**必须证伪的半修复形态**（评审与测试都要盯）：写入侧记 `''`、读取侧仍 fail-closed，
+则每 tick 重新 decline、`ON CONFLICT DO NOTHING` 吞掉、`rc` 变 0 但 handoff 仍在
+永久重试——**环在 rc 上看着死了、在工作量上还活着**。所以验收必须有一条
+"两侧都无 init 证据、跨两个 tick"的测试：tick 1 以 `''` decline，tick 2 零 handoff 尝试。
+
 ## Must-preserve behavior
 
 - 瞬态 forcing 失败（`HANDOFF_APPLY_SQL_FAILURE`、通用异常路径等）**仍然** `rc=1`

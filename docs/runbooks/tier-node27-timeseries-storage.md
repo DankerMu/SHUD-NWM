@@ -1100,62 +1100,62 @@ Bind the candidate chunk's own bounds first — every check below reuses them:
 -- No trailing semicolon: \gset must terminate the query itself, and it binds
 -- one psql variable per output column (:range_start, :range_end).
 SELECT hypertable_schema || '.' || hypertable_name AS target_table,
-       range_start, range_end
+   range_start, range_end
 FROM timescaledb_information.chunks
 WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk'
 \gset
 ```
 
 - [ ] **No decline record already points into the window.** A hit means this
-      window has ALREADY cost runs their recompute — compressing further inside
-      it compounds a known loss rather than creating a new one:
+  window has ALREADY cost runs their recompute — compressing further inside
+  it compounds a known loss rather than creating a new one:
 
-      ```sql
-      SELECT d.run_id, d.reason_code, d.declined_at,
-             h.status, h.start_time, h.end_time
-      FROM ops.ingest_recompute_decline d
-      JOIN hydro.hydro_run h USING (run_id)
-      WHERE h.start_time < :'range_end'::timestamptz
-        AND h.end_time   > :'range_start'::timestamptz
-      ORDER BY d.declined_at DESC;
-      ```
+  ```sql
+  SELECT d.run_id, d.reason_code, d.declined_at,
+         h.status, h.start_time, h.end_time
+  FROM ops.ingest_recompute_decline d
+  JOIN hydro.hydro_run h USING (run_id)
+  WHERE h.start_time < :'range_end'::timestamptz
+    AND h.end_time   > :'range_start'::timestamptz
+  ORDER BY d.declined_at DESC;
+  ```
 
-      Expected before a clean compression: **0 rows.**
+  Expected before a clean compression: **0 rows.**
 
 - [ ] **Recent ticks are not already blocked on this window.** Both surfaces,
-      on node-27:
+  on node-27:
 
-      ```bash
-      grep -o '"declines_active": [0-9]*' /home/nwm/autopipe-logs/autopipe.log | tail -20
-      grep -c 'HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED' /home/nwm/autopipe-logs/autopipe.log
-      grep -n '"stage": "forcing_handoff"' /home/nwm/autopipe-logs/autopipe.log | tail -20
-      ```
+  ```bash
+  grep -o '"declines_active": [0-9]*' /home/nwm/autopipe-logs/autopipe.log | tail -20
+  grep -c 'HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED' /home/nwm/autopipe-logs/autopipe.log
+  grep -n '"stage": "forcing_handoff"' /home/nwm/autopipe-logs/autopipe.log | tail -20
+  ```
 
-      Expected: `declines_active` flat (a rising value means runs are being
-      terminal-stated right now), and no recent `forcing_handoff` failure whose
-      run overlaps the window.
+  Expected: `declines_active` flat (a rising value means runs are being
+  terminal-stated right now), and no recent `forcing_handoff` failure whose
+  run overlaps the window.
 
 - [ ] **The window is older than the product-regeneration horizon.** node-22
-      regenerates products for cycles well after their initial run, so a chunk
-      whose `range_end` is still inside that horizon is a live target:
+  regenerates products for cycles well after their initial run, so a chunk
+  whose `range_end` is still inside that horizon is a live target:
 
-      ```sql
-      SELECT :'target_table' AS hypertable, range_end, now() - range_end AS age
-      FROM timescaledb_information.chunks
-      WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk';
-      ```
+  ```sql
+  SELECT :'target_table' AS hypertable, range_end, now() - range_end AS age
+  FROM timescaledb_information.chunks
+  WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk';
+  ```
 
-      ```bash
-      # The horizon, measured rather than assumed: on node-27, the newest
-      # product write anywhere in the object store. A chunk whose range_end is
-      # younger than the oldest run still being regenerated is a live target.
-      find /home/ghdc/nwm/object-store/runs -maxdepth 3 -name 'rivqdown*' \
-        -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort -r | head -20
-      ```
+  ```bash
+  # The horizon, measured rather than assumed: on node-27, the newest
+  # product write anywhere in the object store. A chunk whose range_end is
+  # younger than the oldest run still being regenerated is a live target.
+  find /home/ghdc/nwm/object-store/runs -maxdepth 3 -name 'rivqdown*' \
+    -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort -r | head -20
+  ```
 
-      Expected: `age` comfortably exceeds the newest regeneration seen for that
-      window. If it does not, **do not compress this chunk yet** — pick an older
-      one.
+  Expected: `age` comfortably exceeds the newest regeneration seen for that
+  window. If it does not, **do not compress this chunk yet** — pick an older
+  one.
 
 **Disposition when any check hits.** Exactly two acceptable answers, and
 "compress anyway and see" is not one of them:
