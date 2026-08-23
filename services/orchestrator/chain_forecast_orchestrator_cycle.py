@@ -175,10 +175,12 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
         if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
-            # #1748: ADDITIVE disjunct.  The reconcile-verified door predicate
-            # below is untouched and still hard-pins ``absence_retry_permitted``;
-            # the operator attestation is a SECOND, separate way in, not a
-            # widening of that predicate.  Without this arm the released
+            # #1748: ADDITIVE disjunct.  The reconcile-verified retry predicate
+            # below legitimately accepts exactly two absence decisions --
+            # ``absence_retry_permitted`` and the typed-demotion-only
+            # ``operator_verified_absence`` -- while the released-row attestation
+            # is additive here at this consuming call site and never enters that
+            # lower-level predicate.  Without this arm the released
             # identity-blocked shape returns the door verdict unconditionally,
             # which is why nothing -- not even
             # ``_terminal_stage_needs_forced_resubmit`` below -- could ever reach

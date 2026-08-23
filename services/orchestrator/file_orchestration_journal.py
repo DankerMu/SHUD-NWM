@@ -3934,10 +3934,13 @@ class FileOrchestrationJournalRepository:
 
         The released row is a permanent terminal for every AUTOMATIC arm: the
         release deliberately withholds ``error_code`` so ``should_auto_retry`` is
-        false by construction, and reclaim only accepts
-        ``absence_retry_permitted``.  This door records a durable operator
-        attestation ON THE RELEASED ROW and writes **no** successor pipeline-job
-        row.
+        false by construction, and lower-level reclaim accepts exactly two
+        absence decisions -- ``absence_retry_permitted`` and the
+        typed-demotion-only ``operator_verified_absence``.  This released row
+        carries ``identity_mismatch_released``, matches neither, and reaches
+        liveness only through the separate operator-attestation disjunct.  This
+        door records a durable operator attestation ON THE RELEASED ROW and
+        writes **no** successor pipeline-job row.
 
         Why a marker and not a row: the successor identity the ordinary retry
         path mints is exactly ``_next_current_master_retry_identity``'s, so
