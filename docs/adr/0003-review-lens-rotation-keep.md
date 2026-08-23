@@ -1416,3 +1416,57 @@ but the next revisit should be made against lines with **recorded** lens names
 only — and the first corrective step is mechanical: persist the verdict tables
 and reviewer list at each round, which the pre-merge evidence gate already
 nominally requires.
+
+## Addendum 2026-08-23 (PR #1777, issue #1686 — abandoned) — the optimization premise, and a third user challenge
+
+The revisit above named a blind spot and gave it one instance. Later the same day
+a second, sharper one arrived, and it is worth appending rather than leaving the
+claim resting on a single case.
+
+PR #1777 was finished. Its real-DB oracle was green — 64 passed, 0 skipped on
+node-27 — and its measured benefit was *larger* than the issue had claimed: both
+compressed backing tables moved from `Seq Scan` to `Index Cond`, `Seq Scan` 5→2.
+Nothing in the diff was wrong. It was closed unmerged anyway, because gathering
+the last acceptance measurement forced a look at what the optimized query is for,
+and two cheap facts settled it: the join's existence half is idle in production
+(status mix published 3174 / superseded 959 / succeeded 140 / **parsed 0**, and
+the `HAVING` arm is unconditionally true for `published`), and its only
+load-bearing output — `MAX(rt.created_at) AS parsed_at` — exists solely because
+`hydro.hydro_run` has no parse timestamp column. The query aggregates a
+compressed hypertable to derive one timestamp per run, and an `EXPLAIN (ANALYZE)`
+on a 50-run sample would not finish inside 180 s. The correct change deletes the
+join; it was refiled as #1789.
+
+The generalizable rule is narrower than "question your premises", and it is the
+reason this belongs in a lens-rotation ledger rather than a postmortem:
+
+> **An optimization issue carries an implicit premise — that the work being made
+> faster needs doing at all — and that premise sits upstream of every reviewer
+> lens.** A lens verifies the optimization is correct, safe, and measured. None
+> is chartered to ask whether the thing should exist. No rotation policy reaches
+> it, and buying another round cannot find it.
+
+That is now the third recorded instance of this ledger's blind spot being
+structural rather than allocative, and the second triggered by a **user
+challenge** rather than by any lens (the first being #1771's, recorded above).
+Three instances, three different upstream positions: a premise baked into the
+brief, a data shape that only production exhibits, and now the value question an
+optimization never asks about itself. The counter is measuring lens allocation
+faithfully; what keeps escaping it is not allocation.
+
+One practical consequence, cheap enough to adopt without ceremony: the evidence
+that decided this was a status-mix count and a column list — seconds of work,
+available on day one. The reason it was gathered at all is that the acceptance
+criteria demanded execution-level measurement (`EXPLAIN (ANALYZE)`) rather than a
+plan comparison. Plan-only evidence would have confirmed the optimization and
+never raised the question. Where an issue's whole value rests on a cost claim,
+requiring the measurement to be *executed* is doing double duty as a premise
+check.
+
+Recorded mistake from the same run, kept because this file is also where method
+errors go: an unattended `EXPLAIN (ANALYZE)` with a 900 s bound was left running
+against production for ten minutes and was cancelled only on the user's
+prompting. The bound was set for "let it finish" rather than for "this is
+unsupervised on a live database", which are different numbers.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.
