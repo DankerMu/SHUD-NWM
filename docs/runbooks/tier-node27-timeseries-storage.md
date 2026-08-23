@@ -1080,6 +1080,97 @@ The guard is intentionally scoped to `hydro.river_timeseries` and
 isolated staging schema and never tripped the guard; it no longer exists —
 see the retirement record at the top of this runbook.)
 
+#### 4.1.1 Pre-compression checklist (run BEFORE compressing a window, `#1781`)
+
+Compression is one-directional in practice: once a window is compressed, any
+run whose products get regenerated into it is permanently unappliable until an
+operator decompresses. In 2026-08 a manual tiering pass compressed
+`met.forcing_station_timeseries` chunk `_hyper_1_52_chunk` (2026-08-06..08-13)
+while that window was still inside the product-regeneration horizon; node-22
+then regenerated 88 runs into it, and the ingest tick spent days rejecting
+them. Draining afterwards was measured and rejected (met 250 MB → 11.9 GB plus
+river 7.0 GB → 196 GB against 521 GB free), so the runs were terminal-stated
+instead. **The cheap place to prevent that is here, before compressing.**
+
+Bind the candidate chunk's own bounds first — every check below reuses them:
+
+```sql
+\set target_chunk '_timescaledb_internal._hyper_1_52_chunk'
+
+-- No trailing semicolon: \gset must terminate the query itself, and it binds
+-- one psql variable per output column (:range_start, :range_end).
+SELECT hypertable_schema || '.' || hypertable_name AS target_table,
+       range_start, range_end
+FROM timescaledb_information.chunks
+WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk'
+\gset
+```
+
+- [ ] **No decline record already points into the window.** A hit means this
+      window has ALREADY cost runs their recompute — compressing further inside
+      it compounds a known loss rather than creating a new one:
+
+      ```sql
+      SELECT d.run_id, d.reason_code, d.declined_at,
+             h.status, h.start_time, h.end_time
+      FROM ops.ingest_recompute_decline d
+      JOIN hydro.hydro_run h USING (run_id)
+      WHERE h.start_time < :'range_end'::timestamptz
+        AND h.end_time   > :'range_start'::timestamptz
+      ORDER BY d.declined_at DESC;
+      ```
+
+      Expected before a clean compression: **0 rows.**
+
+- [ ] **Recent ticks are not already blocked on this window.** Both surfaces,
+      on node-27:
+
+      ```bash
+      grep -o '"declines_active": [0-9]*' /home/nwm/autopipe-logs/autopipe.log | tail -20
+      grep -c 'HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED' /home/nwm/autopipe-logs/autopipe.log
+      grep -n '"stage": "forcing_handoff"' /home/nwm/autopipe-logs/autopipe.log | tail -20
+      ```
+
+      Expected: `declines_active` flat (a rising value means runs are being
+      terminal-stated right now), and no recent `forcing_handoff` failure whose
+      run overlaps the window.
+
+- [ ] **The window is older than the product-regeneration horizon.** node-22
+      regenerates products for cycles well after their initial run, so a chunk
+      whose `range_end` is still inside that horizon is a live target:
+
+      ```sql
+      SELECT :'target_table' AS hypertable, range_end, now() - range_end AS age
+      FROM timescaledb_information.chunks
+      WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk';
+      ```
+
+      ```bash
+      # The horizon, measured rather than assumed: on node-27, the newest
+      # product write anywhere in the object store. A chunk whose range_end is
+      # younger than the oldest run still being regenerated is a live target.
+      find /home/ghdc/nwm/object-store/runs -maxdepth 3 -name 'rivqdown*' \
+        -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort -r | head -20
+      ```
+
+      Expected: `age` comfortably exceeds the newest regeneration seen for that
+      window. If it does not, **do not compress this chunk yet** — pick an older
+      one.
+
+**Disposition when any check hits.** Exactly two acceptable answers, and
+"compress anyway and see" is not one of them:
+
+1. **Drain first** — decompress the overlapping chunk(s) per §4.3, replay the
+   affected runs (`scripts/node27_autopipeline.py --force --only-cycle …`), let
+   the tick reach `rc=0`, delete the now-stale rows from
+   `ops.ingest_recompute_decline`, then compress. Budget the full decompressed
+   size for BOTH `met` and `hydro` (the 2026-08 measurement above is the shape
+   of that bill).
+2. **Explicitly accept the terminal state** — compress knowing those runs keep
+   their pre-compression data forever, and record the decision in the change /
+   issue that authorized the compression. The decline table is the audit trail;
+   an accepted loss must be readable there, not inferred from a quiet log.
+
 ### 4.2 Residual reingest window mismatch
 
 The guard's semantic scope is the batch time window, not the identity's
@@ -1097,13 +1188,14 @@ chunk(s) TimescaleDB names.
 #### 4.3.1 Operator triage codes
 
 The compressed-chunk write guard surfaces via four caller-observable string
-codes. Every one of them routes to the decompress procedure below. Grep
-the DB / stderr / receipt surface for these literals when triaging a
-reingest failure:
+codes. Three of them route unconditionally to the decompress procedure below;
+`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` has a second acceptable disposition
+since `#1781` (see its row). Grep the DB / stderr / receipt surface for these
+literals when triaging a reingest failure:
 
 | Code (literal string) | Where produced | How to observe |
 |---|---|---|
-| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) when the guard raises inside `_replace_forcing_station_timeseries`. | Persisted on the apply report (DB or API response) that the caller inspects. |
+| `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` | `packages/common/forcing_domain_handoff_apply.py::apply_forcing_domain_handoff` — attached as `unavailable_report.unavailable_reasons[].code` (from `REASON_APPLY_COMPRESSED_CHUNK_BLOCKED`) when the guard raises inside `_replace_forcing_station_timeseries`. | Persisted on the apply report (DB or API response) that the caller inspects. Also on the ingest tick: the run's summary entry goes `outcome="declined"` and a row lands in `ops.ingest_recompute_decline`. |
 | `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` | `workers/output_parser/parser.py::OutputParser.parse_run` — stamped on `hydro.hydro_run.error_code` via `mark_run_failed`, and emitted as the stderr prefix by `workers/output_parser/cli.py` when the guard escapes. | `hydro.hydro_run.error_code` column; parser CLI stderr line `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED: ...`. |
 | `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/cli.py` stderr prefix — emitted when `ForcingProducer.produce()` re-raises a `CompressedChunkGuardError` un-wrapped. | Forcing producer CLI stderr line `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: ...`. |
 | `FORCING_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/producer.py::ForcingProducer._mark_failed` — stamped on `met.forecast_cycle.error_code` when the dedicated `except CompressedChunkGuardError` arm fires. | `met.forecast_cycle.error_code` column (with `status = 'failed_forcing'`). |
@@ -1113,6 +1205,18 @@ in §4.3.2 below (identify chunk from the structured error message → run
 `decompress_chunk(...)` → re-run ingest). Route on the code; do NOT paper
 over with a generic ingest retry.
 
+`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` is the one code with a sanctioned
+alternative (`#1781`): the ingest tick records the blocked recompute in
+`ops.ingest_recompute_decline` and stops retrying it, which is the correct
+disposition when the regenerated products are not worth the decompress bill
+(§4.1.1 disposition 2). Decompressing is still the way to actually apply them.
+Either way the decision is now explicit and queryable — what is NOT acceptable
+is leaving the tick to rediscover the block every 10 minutes. To take the
+decompress route on a run already declined, decompress the chunk and re-run
+with `--force` (which bypasses the exclusion entirely), or delete the run's
+rows from `ops.ingest_recompute_decline`; a decompress alone does not reopen
+the decision, because nothing about the products changed.
+
 #### 4.3.2 Manual decompress steps
 
 When a reingest surfaces `CompressedChunkWriteError` or TimescaleDB's raw
@@ -1121,6 +1225,13 @@ automated decompress-on-demand lane (ADR 0002 decision 3 — the manual
 escape hatch is intentional; automated decompress-on-demand would
 re-introduce write amplification the compression tier is meant to
 prevent).
+
+Decompress the `met` AND `hydro` chunks covering the window together: a partial
+decompress (met decompressed, river still compressed) lets the forcing handoff
+succeed and then trips the parse-stage guard at
+`workers/output_parser/parser.py:976` instead, which `#1781` deliberately does
+NOT terminal-state — that failure stays a plain `rc=1` retry, so a half-drained
+window trades one loop for another.
 
 1. Identify the offending chunk from the error message. Example structured
    error:

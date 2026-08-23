@@ -64,6 +64,7 @@ from packages.common.forcing_domain_handoff_apply import (
     APPLY_MODE as OBJECT_STORE_HANDOFF_MODE,
 )
 from packages.common.forcing_domain_handoff_apply import (
+    REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
     apply_forcing_domain_handoff_path,
 )
 from packages.common.redaction import redact_payload, redact_text
@@ -709,10 +710,12 @@ def _empty_runs_summary() -> dict[str, Any]:
         "ingested": 0,
         "skipped": 0,
         "failed": 0,
+        "declined": 0,
         "ingested_by_source": {},
         "details": [],
         "skipped_runs": [],
         "failed_runs": [],
+        "declined_runs": [],
     }
 
 
@@ -900,6 +903,111 @@ def _basin_seeded(database_url: str, basin_id: str) -> bool:
         conn.close()
 
 
+def _record_recompute_decline(
+    database_url: str,
+    *,
+    run_id: str,
+    init_state_id: str,
+    product_mtime: float,
+    reason_code: str,
+    detail: str | None,
+) -> None:
+    """Write one terminal decline record (#1781).
+
+    Deliberately raises on any failure: the caller keeps ``outcome="failed"``
+    when this does not commit, so a run is never treated as accounted for on a
+    row that does not exist. ``ON CONFLICT DO NOTHING`` makes the write
+    idempotent across concurrent workers within a tick and across tick replays.
+    """
+    conn = _connect(database_url)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ops.ingest_recompute_decline
+                        (run_id, init_state_id, product_mtime, reason_code, detail)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (run_id, init_state_id, product_mtime, reason_code, detail),
+                )
+    finally:
+        conn.close()
+
+
+def _active_decline_count(database_url: str) -> int | None:
+    """Row count of ``ops.ingest_recompute_decline`` for the tick summary (#1781).
+
+    A long-lived terminal record is otherwise invisible after the tick that
+    wrote it: the tick goes rc=0 and stays quiet forever. Putting the count in
+    every summary makes "silently declining" greppable.
+
+    Errors degrade to ``None`` rather than propagating, on the same rule as the
+    stats guard: an observability read must never turn a successful ingest tick
+    red. A null in the summary is itself the signal that the count is unknown.
+    """
+    try:
+        conn = _connect(database_url)
+    except psycopg2.Error:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM ops.ingest_recompute_decline")
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+    except psycopg2.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _declined_runs(
+    cur: Any,
+    run_ids: list[str],
+    object_store_root: Path | None,
+) -> set[str]:
+    """Runs whose CURRENT product evidence exactly matches a decline record (#1781).
+
+    One batched query, then object-store reads for the runs that came back only
+    -- the stat/read cost scales with the number of decline records, not with
+    the pending population.
+
+    The match is exact on all three key components, and a run may carry SEVERAL
+    records (the table accumulates: each newly-blocked regeneration adds one).
+    Matching against ANY of a run's records is what makes the float-equality
+    failure mode self-healing -- a mismatched read costs one more blocked tick,
+    which writes another row, and never degrades into the permanent loop.
+
+    ``object_store_root=None`` means there is no evidence side at all, so
+    nothing is suppressed: the fail-closed rule of design D3 on the read side.
+    """
+    if object_store_root is None or not run_ids:
+        return set()
+    cur.execute(
+        """
+        SELECT run_id, init_state_id, product_mtime
+        FROM ops.ingest_recompute_decline
+        WHERE run_id = ANY(%s)
+        """,
+        (run_ids,),
+    )
+    recorded: dict[str, set[tuple[str, float]]] = {}
+    for row in cur.fetchall():
+        recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
+
+    declined: set[str] = set()
+    for run_id, keys in recorded.items():
+        manifest = _load_run_manifest_or_none(object_store_root, run_id)
+        init_state_id = _manifest_initial_state_id(manifest) if manifest is not None else None
+        product_mtime = _run_product_mtime(object_store_root, run_id)
+        if init_state_id is None or product_mtime is None:
+            continue
+        if (init_state_id, product_mtime) in keys:
+            declined.add(run_id)
+    return declined
+
+
 def _already_ingested_runs(
     database_url: str,
     run_ids: list[str],
@@ -934,6 +1042,12 @@ def _already_ingested_runs(
     timeseries-row or manifest-currency check), even though their object-store
     products still exist. Reviving one requires the explicit --force path,
     whose register step flips 'superseded' back to an active status.
+
+    Runs carrying a decline record whose key matches their current product
+    evidence are likewise skipped unconditionally (#1781): their recompute was
+    correctly detected but is physically unappliable, so it was terminated and
+    recorded rather than retried every tick. Both --force (which bypasses this
+    whole function) and any new evidence reopen the decision.
     """
     if not run_ids:
         return set()
@@ -945,6 +1059,13 @@ def _already_ingested_runs(
                 (run_ids,),
             )
             retired = {str(row[0]) for row in cur.fetchall()}
+            # #1781: the second status-independent exclusion, same shape as
+            # `retired` above. It must sit here and not inside
+            # `_ingested_run_is_current`: the completeness statement below only
+            # returns runs at 'parsed'/'published', and 28 of the 88 runs the
+            # compressed-chunk guard blocks on node-27 are at 'succeeded' --
+            # never parsed, so never in that result at all.
+            declined = _declined_runs(cur, run_ids, object_store_root)
             cur.execute(
                 """
                 SELECT h.run_id,
@@ -968,7 +1089,7 @@ def _already_ingested_runs(
                 """,
                 (run_ids,),
             )
-            return retired | {
+            return retired | declined | {
                 str(row[0])
                 for row in cur.fetchall()
                 if _ingested_run_is_current(
@@ -1759,6 +1880,40 @@ def _refresh_coverage_script() -> Path | None:
     return path if path.is_file() else None
 
 
+def _decline_blocked_recompute(
+    run_id: str,
+    *,
+    object_store_root: Path,
+    database_url: str,
+    detail: str | None,
+) -> str:
+    """Terminate a compressed-chunk-blocked recompute, or keep failing (#1781).
+
+    Returns the outcome the caller should report: ``"declined"`` only when the
+    full decline key was available AND the record committed. Fail-closed on
+    everything else -- an incomplete key or a failed write leaves the run at
+    ``"failed"``, so it retries. The one thing that must never happen is a run
+    treated as accounted for on a record that was never written.
+    """
+    manifest = _load_run_manifest_or_none(object_store_root, run_id)
+    init_state_id = _manifest_initial_state_id(manifest) if manifest is not None else None
+    product_mtime = _run_product_mtime(object_store_root, run_id)
+    if not init_state_id or product_mtime is None:
+        return "failed"
+    try:
+        _record_recompute_decline(
+            database_url,
+            run_id=run_id,
+            init_state_id=init_state_id,
+            product_mtime=product_mtime,
+            reason_code=REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+            detail=redact_text(detail) if detail else None,
+        )
+    except Exception:  # noqa: BLE001 - any write failure must fall back to retrying
+        return "failed"
+    return "declined"
+
+
 def _process_run(
     run_id: str,
     env: dict[str, str],
@@ -1786,13 +1941,27 @@ def _process_run(
     )
     forcing_stage = forcing.get("forcing_stage")
     if forcing["outcome"] == "failed":
-        return {
+        result = {
             "run_id": run_id,
             "outcome": "failed",
             "stage": forcing.get("stage", FORCING_STAGE),
             "error": forcing.get("error"),
             "forcing_stage": forcing_stage,
         }
+        # #1781: a recompute the compressed-chunk guard rejects has no remedy
+        # this tick, next tick, or any tick until an operator decompresses --
+        # retrying it just reprints the same rejection forever. Record the
+        # decision and terminate it. Every other forcing failure (including
+        # HANDOFF_APPLY_SQL_FAILURE and the generic exception path) is
+        # potentially transient and MUST keep failing so it keeps retrying.
+        if REASON_APPLY_COMPRESSED_CHUNK_BLOCKED in ((forcing_stage or {}).get("reason_codes") or []):
+            result["outcome"] = _decline_blocked_recompute(
+                run_id,
+                object_store_root=object_store_root,
+                database_url=database_url,
+                detail=result.get("error"),
+            )
+        return result
 
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
     rc, out, err = _run(parse, env)
@@ -2223,6 +2392,20 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    # ---- phase 3.6: terminal-state accounting (#1781) ------------------------
+    declined_results = by("declined")
+    declines_active = _active_decline_count(database_url)
+    if args.progress and (declined_results or declines_active):
+        # Named run_ids, not a bare count: the whole point of a terminal state
+        # is that nothing else in the tick will ever mention these runs again.
+        print(
+            f"[declines] this tick {len(declined_results)}"
+            f" ({', '.join(r['run_id'] for r in declined_results) or 'none'})"
+            f", active records {declines_active if declines_active is not None else 'unknown'}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     summary = {
         "schema": INGEST_SUMMARY_SCHEMA,
         "status": "completed",
@@ -2249,6 +2432,7 @@ def main(argv: list[str] | None = None) -> int:
             "ingested": len(by("ingested")),
             "skipped": len(by("skipped")),
             "failed": len(by("failed")),
+            "declined": len(by("declined")),
             "ingested_by_source": {
                 src: len([r for r in by("ingested") if r["run_id"].startswith(f"fcst_{src}_")]) for src in sources
             },
@@ -2257,8 +2441,19 @@ def main(argv: list[str] | None = None) -> int:
             "failed_runs": [
                 {"run_id": r["run_id"], "stage": r.get("stage"), "error": r.get("error")} for r in by("failed")
             ],
+            "declined_runs": [
+                {
+                    "run_id": r["run_id"],
+                    "reason_code": REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+                }
+                for r in by("declined")
+            ],
         },
         "stats_guard": stats_guard,
+        # #1781: a terminal decline is silent by construction -- it makes the
+        # tick green and then never speaks again. Carrying the live row count on
+        # EVERY tick is what keeps a long-standing decline greppable.
+        "declines_active": declines_active,
     }
     # stats_guard is deliberately absent from this expression: a statistics
     # refresh failure never turns a successful ingest tick red.
