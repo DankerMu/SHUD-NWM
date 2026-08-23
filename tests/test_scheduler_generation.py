@@ -1910,28 +1910,34 @@ def test_missing_state_object_at_predecessor_slot_flags_operator_action(
     assert state_evidence["failure"]["permanent"] is False
 
 
-def test_env_override_blocks_predecessor_pending_without_earlier_history(
+def test_future_only_history_admits_cold_new_model_with_env_override(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """#1150: env=false + ``block_predecessor_pending`` and NO strictly-earlier
-    usable history → §8 still blocks with
-    ``state_snapshot_index_prior_checkpoint_missing_after_history``.
+    """#1775 D5 at the ``_build_candidates`` seam: a run's own output is not history.
 
     Fixture = T15(b) with ONE state-index change: the single
     current-generation entry sits at ``valid_time`` 2026-05-22T00Z, strictly
     LATER than the 12Z candidate cycle (``cycle_id`` = gfs_2026052112,
-    ``lead_hours`` = 12).  That splits the two history predicates: the
-    generation-scoped matrix signal (``state_manager.py``
-    ``generation_scoped_history_signal``, valid_time-agnostic) still sees
-    current-generation history → branch (e) → ``block_predecessor_pending``,
-    while the gate's fallback probe ``usable_state_history_evidence``
-    (strictly earlier than the candidate cycle) reports
-    ``history_exists=False``.  Pre-fix, ``scheduler_generation_gate.py``
-    returned ``None`` on that probe result regardless of decision, and
-    ``scheduler_candidates.py`` read ``None`` as "no warm gate" → the blocked
-    candidate was ADMITTED with empty evidence.  The passthrough is now
-    warm_continue-only, so the block survives.
+    ``lead_hours`` = 12) — i.e. an entry only this candidate's OWN run (or a
+    later cycle) could have produced.
+
+    Before D5 this test asserted the opposite outcome.  ``state_manager.py``
+    ``generation_scoped_history_signal`` was valid_time-agnostic, so that
+    future entry counted as current-generation history → branch (e) →
+    ``block_predecessor_pending`` → the candidate blocked with
+    ``state_snapshot_index_prior_checkpoint_missing_after_history``, forever,
+    demanding a predecessor cycle that had never existed.  That is precisely
+    the wedge #1775 fixes: with history-existence scoped to
+    ``valid_time <= cutoff`` the entry no longer counts, the model reads as
+    what it is — one with no prior history — and the packaged-IC bootstrap
+    branch (``cold_new_model``) stays open.
+
+    The #1150 fail-open guard this fixture used to carry (the gate's
+    warm_continue-only passthrough) is NOT lost: under D5 the split-predicate
+    geometry it needed is unreachable through ``_build_candidates``, so the pin
+    now lives at the gate seam in
+    ``test_predecessor_pending_without_earlier_history_still_blocks_at_gate``.
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -2050,59 +2056,37 @@ def test_env_override_blocks_predecessor_pending_without_earlier_history(
             )
         ],
     )
-    # The fail-open regression: pre-fix this candidate was admitted.
-    assert candidates == []
-    assert len(blocked) == 1
-    # R1-A4 invariant: single-value pin, no OR-set. See
-    # .workplans/1081/review/review-failure-retro-round3.md.
-    assert (
-        blocked[0].reason
-        == "state_snapshot_index_prior_checkpoint_missing_after_history"
-    )
-    state_evidence = blocked[0].state_evidence
+    # D5: the future-dated entry is not history, so nothing blocks and the
+    # bootstrap admit fires.  No predecessor is demanded and no operator
+    # backfill signal is emitted — there is nothing to back-fill.
+    assert blocked == []
+    assert len(candidates) == 1
+    state_evidence = candidates[0].state_evidence
+    assert state_evidence["mode"] == "db_free_cold_new_model"
+    assert state_evidence["cold_start_reason"] == "no_prior_history"
     assert (
         state_evidence.get("registry_cutover_transition", {}).get("decision")
-        == "block_predecessor_pending"
+        == "cold_new_model"
     )
-    # Pin the split predicate itself: the block fires even though the gate's
-    # strictly-earlier history probe found nothing.
-    assert state_evidence.get("state_history", {}).get("history_exists") is False
-    # #1152: this is the NON-self-healing population — with no strictly-earlier
-    # usable history the emitted predecessor reproduces the same block forever,
-    # so the evidence names the operator action and the runbook literal.
-    assert state_evidence["self_heal_expected"] is False
-    assert state_evidence["operator_action_required"] is True
-    assert state_evidence["operator_action"] == "backfill_predecessor_state"
-    assert (
-        state_evidence["runbook"]
-        == "docs/runbooks/scheduler-dbfree-typed-reasons.md"
-    )
-    # Round-2: the predecessor's own probe finds nothing at 00Z at all.
-    assert state_evidence["self_heal_probe"] == {
-        "ready": False,
-        "reason": "state_snapshot_index_exact_checkpoint_missing",
-    }
-    # Non-goal guard: the failure block is untouched by the additive signal.
-    assert state_evidence["failure"]["retryable"] is True
-    assert state_evidence["failure"]["permanent"] is False
 
 
-def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_history(
+def test_future_only_history_admits_cold_new_model_under_strict_warm_start(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    """#1150 non-regression: the same no-earlier-history fixture under
-    ``NHMS_REQUIRE_FORECAST_WARM_START=true`` still blocks with the unchanged
-    strict reason ``state_snapshot_index_exact_checkpoint_missing``.
+    """#1775 D5: the same future-only fixture under
+    ``NHMS_REQUIRE_FORECAST_WARM_START=true``.
 
-    env=true short-circuits in ``scheduler_generation_gate.py`` at the
-    ``_db_free_strict_warm_start_required_for`` return, well before the
-    history-probe branch the sibling test guards — so this pins that the
-    #1150 split did not move the strict leg's typed reason.  The decision
-    pin below only shows the blocked evidence reached the
-    ``block_predecessor_pending`` split; the no-earlier-history geometry
-    itself is pinned by the env=false sibling (that short-circuit attaches
-    no ``state_history`` evidence).
+    Strict warm start does not forbid a cold bootstrap — it forbids running a
+    model FORWARD without the checkpoint its own history implies.  A model with
+    no usable entry at or before its cutoff has no such implication, so the
+    env=true leg reaches the same ``cold_new_model`` admit as the env=false
+    sibling.  Pinned as a pair so the relaxation cannot be read as env-scoped.
+
+    Before D5 this asserted a block with
+    ``state_snapshot_index_exact_checkpoint_missing``: the future entry made
+    the generation-scoped signal report history, which routed the strict leg
+    into demanding an exact predecessor at a cycle that never ran.
     """
     from services.orchestrator import scheduler as scheduler_module
     from services.orchestrator.scheduler import ProductionSchedulerConfig
@@ -2213,20 +2197,17 @@ def test_strict_warm_start_env_blocks_predecessor_pending_without_earlier_histor
             )
         ],
     )
-    assert candidates == []
-    assert len(blocked) == 1
-    # R1-A4 invariant: single-value pin, no OR-set.
-    assert blocked[0].reason == "state_snapshot_index_exact_checkpoint_missing"
-    # The strict leg still carries the predecessor-pending split decision.
-    state_evidence = blocked[0].state_evidence
+    assert blocked == []
+    assert len(candidates) == 1
+    state_evidence = candidates[0].state_evidence
+    assert state_evidence["mode"] == "db_free_cold_new_model"
+    assert state_evidence["cold_start_reason"] == "no_prior_history"
     assert (
         state_evidence.get("registry_cutover_transition", {}).get("decision")
-        == "block_predecessor_pending"
+        == "cold_new_model"
     )
-    # #1152 absence pin: the strict leg short-circuits BEFORE the operator-signal
-    # attachment site, so none of the signal fields may appear here.  The runbook
-    # documents the signal as an env=false (history-probe branch) artifact only;
-    # if strict mode ever grew them the runbook's routing advice would be wrong.
+    # #1152 absence pin, retained: the cold admit is not an operator-signal
+    # site either, so none of the backfill signal fields may appear here.
     assert "operator_action_required" not in state_evidence
     assert "self_heal_expected" not in state_evidence
     assert "self_heal_probe" not in state_evidence
@@ -2705,6 +2686,164 @@ def test_transition_blocks_old_checksum_mismatch_as_stale(tmp_path: Path) -> Non
     assert (
         evaluation.declaration_evidence.get("stale_reason") == "old_checksum_mismatch"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1775 D5 regression: branch (d)'s old-checksum comparison reads
+# ``latest_any_generation_checkpoint``, which D5 now scopes to
+# ``valid_time <= cutoff``.  The tests above drive that comparison from a
+# hand-built ``_HistorySignal``, so they are blind to the scoping.  These two
+# drive it from a REAL state index through the real
+# ``generation_scoped_history_signal``, which is the only way the scope shows up.
+# ---------------------------------------------------------------------------
+
+
+def _history_signal_from_index(
+    tmp_path: Path,
+    entries: list[dict[str, Any]],
+    *,
+    cutoff: str,
+    current_package_checksum: str,
+    expected_predecessor_cycle_id: str,
+    required_lead_hours: int = 12,
+) -> tuple[generation._HistorySignal, dict[str, Any]]:
+    """Real index -> real signal -> ``_HistorySignal``, wired as the gate wires it.
+
+    Mirrors ``scheduler_generation_gate.py:385-400`` field for field; the point
+    of the exercise is that the evidence comes from
+    ``FileStateSnapshotIndexRepository`` rather than from ``_signal()``.
+    """
+    from tests.test_state_manager_generation_history import (
+        FileStateSnapshotIndexRepository,
+        _publish_entries,
+    )
+
+    index_path = _publish_entries(tmp_path, entries, generated_at="2026-07-06T18:00:00Z")
+    repo = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-07-06T18:00:00Z"),
+    )
+    evidence = repo.generation_scoped_history_signal(
+        model_id="model_a",
+        source_id="gfs",
+        before_time=_dt(cutoff),
+        current_package_checksum=current_package_checksum,
+        expected_predecessor_cycle_id=expected_predecessor_cycle_id,
+        expected_predecessor_lead_hours=required_lead_hours,
+    )
+    assert evidence["ready"] is True
+    signal = generation._HistorySignal(
+        exists_current_generation=bool(evidence.get("history_exists_current_generation")),
+        exists_any_generation=bool(evidence.get("history_exists_any_generation")),
+        latest_current_generation_checkpoint=evidence.get(
+            "latest_current_generation_checkpoint"
+        ),
+        latest_any_generation_checkpoint=evidence.get("latest_any_generation_checkpoint"),
+        wrong_generation_predecessor_present=bool(
+            evidence.get("wrong_generation_predecessor_present")
+        ),
+        wrong_generation_predecessor_checksum=str(
+            evidence.get("wrong_generation_predecessor_checksum") or ""
+        ),
+    )
+    return signal, evidence
+
+
+@pytest.mark.parametrize(
+    ("post_cutoff_checksum", "post_cutoff_id"),
+    [
+        # A THIRD generation published after the cutover cycle (the model was
+        # repackaged again later).  Pre-D5 this row was the ``latest_any``
+        # sample, so branch (d) compared the declaration's ``old_checksum``
+        # against a checksum from the FUTURE -> BLOCK_DECLARATION_STALE /
+        # ``old_checksum_mismatch``: a later cycle's output answering a question
+        # about an earlier candidate, the same circular evidence D5 removes.
+        pytest.param(_hex("c"), "state_third_generation_later", id="third_generation_after_cutoff"),
+        # The ordinary shape: the cutover ran and later cycles wrote
+        # NEW-generation checkpoints.  Pre-D5 those counted as
+        # current-generation history and pushed the candidate out of branch (d)
+        # into branch (e) -> block_predecessor_pending.
+        pytest.param(NEW_CHECKSUM, "state_new_generation_later", id="new_generation_after_cutoff"),
+    ],
+)
+def test_declaration_binds_when_only_post_cutoff_history_would_contradict_it(
+    tmp_path: Path,
+    post_cutoff_checksum: str,
+    post_cutoff_id: str,
+) -> None:
+    """#1775 D5 at branch (d): the old-checksum comparison is as-of candidate time.
+
+    Geometry: a cutover-declared model at the cutover cycle itself
+    (``candidate_cycle_time_utc == effective_cycle_utc``), with the state index
+    carrying BOTH an OLD-generation entry at ``valid_time`` before the cutoff
+    AND a later entry after it.  Only the at-or-before entry may drive
+    ``latest_any_generation_checkpoint``; the declaration therefore binds and
+    the candidate cold-starts on the declared cutover, instead of being blocked
+    by an entry that did not exist when the candidate's cycle came due.
+
+    Both rows are pinned because the two post-cutoff checksums fail
+    DIFFERENTLY without D5's scope — see the parametrization comments.
+    """
+    from tests.test_state_manager_generation_history import _entry
+
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True, exist_ok=True)
+    old_generation_entry = _entry(
+        state_id="state_old_generation_before_cutoff",
+        valid_time="2026-07-06T00:00:00Z",
+        cycle_id="gfs_2026070512",
+        lead_hours=12,
+        checksum_seed=b"old1",
+        package_checksum=OLD_CHECKSUM,
+        object_root=object_root,
+    )
+    post_cutoff_entry = _entry(
+        state_id=post_cutoff_id,
+        valid_time="2026-07-07T00:00:00Z",
+        cycle_id="gfs_2026070612",
+        lead_hours=12,
+        checksum_seed=b"post1",
+        package_checksum=post_cutoff_checksum,
+        object_root=object_root,
+    )
+
+    signal, evidence = _history_signal_from_index(
+        tmp_path,
+        [old_generation_entry, post_cutoff_entry],
+        cutoff="2026-07-06T12:00:00Z",
+        current_package_checksum=NEW_CHECKSUM,
+        expected_predecessor_cycle_id="gfs_2026070600",
+    )
+
+    # The value that drives branch (d)'s ``old_checksum`` comparison is the
+    # at-or-before-cutoff entry, never the later one.  This assertion alone is
+    # M4-sensitive; the decision below pins the consequence.
+    assert signal.exists_any_generation is True
+    assert signal.exists_current_generation is False
+    assert evidence["latest_any_generation_checkpoint"]["state_id"] == (
+        "state_old_generation_before_cutoff"
+    )
+    assert evidence["latest_any_generation_checkpoint"]["model_package_checksum"] == OLD_CHECKSUM
+
+    declaration = generation.load_cutover_declaration(
+        str(_write_declaration(tmp_path, effective_cycle_utc="2026-07-06T12:00:00Z")),
+        now=NOW,
+    )
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=signal,
+        declaration=declaration,
+    )
+
+    assert evaluation.decision == generation.TransitionDecision.COLD_DECLARED_CUTOVER
+    assert evaluation.cold_start_reason == "declared_cutover_at_effective_cycle"
+    assert evaluation.declaration_evidence.get("stale_reason") is None
 
 
 def test_transition_blocks_missing_candidate_checksum_with_declaration_as_stale(
@@ -4318,10 +4457,12 @@ class _StubStateIndex:
         signal_ready: bool = True,
         exists_any: bool = False,
         exists_current: bool = False,
+        latest_current: dict[str, Any] | None = None,
     ) -> None:
         self.signal_ready = signal_ready
         self.exists_any = exists_any
         self.exists_current = exists_current
+        self.latest_current = latest_current
         self.history_signal_calls = 0
 
     def generation_scoped_history_signal(self, **_kwargs: Any) -> dict[str, Any]:
@@ -4330,7 +4471,7 @@ class _StubStateIndex:
             "ready": self.signal_ready,
             "history_exists_current_generation": self.exists_current,
             "history_exists_any_generation": self.exists_any,
-            "latest_current_generation_checkpoint": None,
+            "latest_current_generation_checkpoint": self.latest_current,
             "latest_any_generation_checkpoint": None,
             "wrong_generation_predecessor_present": False,
             "wrong_generation_predecessor_checksum": "",
@@ -4349,10 +4490,17 @@ class _StubStateIndex:
 
 
 class _StubScheduler:
-    def __init__(self, *, index: _StubStateIndex, object_store_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        index: _StubStateIndex,
+        object_store_root: Path,
+        strict_warm_start_required: bool = True,
+    ) -> None:
         from services.orchestrator.scheduler_generation_gate import CUTOVER_DECLARATION_UNLOADED
 
         self._index = index
+        self._strict_warm_start_required = strict_warm_start_required
         self.config = SimpleNamespace(
             now=NOW,
             object_store_root=object_store_root,
@@ -4367,7 +4515,7 @@ class _StubScheduler:
         return self._index
 
     def _db_free_strict_warm_start_required_for(self, _candidate: Any) -> bool:
-        return True
+        return self._strict_warm_start_required
 
 
 def _stub_candidate(*, resource_profile: dict[str, Any]) -> Any:
@@ -4662,6 +4810,78 @@ def test_gate_does_not_read_package_manifest_when_history_exists(tmp_path: Path)
 
     assert evidence is not None
     assert evidence["reason"] != "first_cycle_initial_state_undecided"
+
+
+def test_predecessor_pending_without_earlier_history_still_blocks_at_gate(
+    tmp_path: Path,
+) -> None:
+    """#1150 fail-open guard, relocated to the gate seam by #1775 D5.
+
+    The guard: ``scheduler_generation_gate`` may return ``None`` (the
+    "no warm gate" cold-seed passthrough that ``scheduler_candidates`` reads as
+    "admit") ONLY for ``warm_continue``.  Every other decision that reaches the
+    strictly-earlier history probe — ``block_predecessor_pending`` above all —
+    must fall through to blocked evidence.  Pre-#1150 the passthrough ignored
+    the decision and the blocked candidate was ADMITTED with empty evidence.
+
+    This used to be pinned end-to-end through ``_build_candidates`` with a
+    state-index entry dated LATER than the candidate cycle, which was the only
+    geometry that made the two history predicates disagree (the matrix signal
+    counted any usable current-generation entry; this probe counts strictly
+    earlier ones).  #1775 D5 scopes the matrix signal to ``valid_time <=
+    cutoff``, so that geometry no longer produces current-generation history at
+    all, and the disagreement survives only at ``valid_time == cutoff`` — where
+    the strict probe reports a cycle-id/lead mismatch and returns before this
+    branch.  The gate code is unchanged, so the pin moves down to the seam that
+    still reaches it, driven by the same stubs the T15 gate tests use.
+    """
+    from services.orchestrator import scheduler_generation_gate as gate
+
+    object_root = tmp_path / "object-store"
+    object_root.mkdir(parents=True, exist_ok=True)
+    candidate = _stub_candidate(
+        resource_profile={
+            "package_checksum": NEW_CHECKSUM,
+            "manifest_uri": "s3://nhms/models/model_new/manifest.json",
+        }
+    )
+    # Current-generation history exists but names no exact predecessor →
+    # branch (e) → ``block_predecessor_pending``; the strict probe answers
+    # ``exact_checkpoint_missing`` and the strictly-earlier history probe
+    # answers ``history_exists=False`` (both stub defaults).
+    pending = _StubScheduler(
+        index=_StubStateIndex(exists_any=True, exists_current=True, latest_current=None),
+        object_store_root=object_root,
+        strict_warm_start_required=False,
+    )
+
+    evidence = gate.strict_warm_start_evidence(pending, candidate, cycle=None)
+
+    assert evidence is not None, "block_predecessor_pending must never take the cold-seed passthrough"
+    assert evidence["ready"] is False
+    assert evidence["reason"] == "state_snapshot_index_prior_checkpoint_missing_after_history"
+    assert (
+        evidence["registry_cutover_transition"]["decision"] == "block_predecessor_pending"
+    )
+
+    # Positive half of the same predicate: warm_continue — which has no block
+    # to overturn — still passes through on the identical probe answers.
+    warm = _StubScheduler(
+        index=_StubStateIndex(
+            exists_any=True,
+            exists_current=True,
+            latest_current={
+                "has_exact_predecessor": True,
+                "predecessor_valid_time": "2026-07-06T00:00:00Z",
+                "predecessor_cycle_id": "gfs_2026070600",
+                "predecessor_lead_hours": 12,
+            },
+        ),
+        object_store_root=object_root,
+        strict_warm_start_required=False,
+    )
+
+    assert gate.strict_warm_start_evidence(warm, candidate, cycle=None) is None
 
 
 # ---------------------------------------------------------------------------
