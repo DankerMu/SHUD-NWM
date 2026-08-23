@@ -238,6 +238,17 @@ new top-level file if a natural home exists.
       the intended and separately reconciled delta. No pre-existing test changed
       outcome.
 
+      **Known limit of this instrument (found by the final review, recorded
+      rather than papered over).** The plugin wraps the `time.sleep` attribute,
+      so a test that monkeypatches `time.sleep` itself evades the counter.
+      `tests/test_e2e_m3.py:27/:66/:104` does exactly that, and its retry case
+      genuinely reaches a sleep at `chain_forecast_orchestrator_cycle.py:222/230`.
+      For that file, `calls=0` therefore supports only "no sleep was observed",
+      **not** "it never enters a poll loop" -- the earlier wording overstepped
+      its evidence. The totals and the seven/three split are unaffected: that
+      call site waits on `backoff_seconds` with a `[0]` schedule, so it is
+      `sleep(0)` in both states and unrelated to the floor this change moves.
+
       **Correction this measurement forced (the third to the file count).** Only
       **seven** of the ten files actually get faster. `test_e2e_ifs`,
       `test_e2e_m3`, and `test_ifs_forecast_integration` record **zero**

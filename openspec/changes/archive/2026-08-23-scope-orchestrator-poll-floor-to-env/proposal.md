@@ -108,6 +108,10 @@ must keep doing that. Three designs were on the table (issue #1671 comment
   All ten contribute tests to the full lane's marker expression
   (`-m "not e2e and not grib and not integration"`), verified by
   `--collect-only`: 8 / 2 / 3 / 10 / 382 / 5 / 21 / 1884 / 32 / 110.
+  **This list is the pre-change baseline**, taken at `5063747c`. After this
+  change the fifth and eighth entries become 390 and 1886 (the +8 / +2 of the
+  new tests, T14's +10). Recorded as a baseline snapshot rather than silently
+  updated, since the whole point of the number is the before/after comparison.
 
 ### Correction to the issue's stated blast radius
 

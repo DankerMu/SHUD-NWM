@@ -1346,3 +1346,32 @@ red while the change works.
 
 Recorded under the run's autonomous default-keep rule; keep/cut remains a human
 call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1786, issue #1671) — keep
+
+Denominator 115 multi-round merged PRs; later-round catches core=68, rotated=270.
+Decision unchanged: **keep**.
+
+This run is an unusually clean data point for rotation, because round 2 used two
+lenses that round 1 did not have (`gap-sweep`, `evidence-claim-verification`) and
+both earned their slot:
+
+- `gap-sweep` found that T11/T12 were ticked with no pasted evidence — the
+  *identical* defect class that round 1 had already found in T10/T10b and that I
+  had just "fixed". The round-1 mix could not have found it: those same six
+  lenses had passed over the file and stopped at the two items they named.
+- `evidence-claim-verification` found that the sleep-counting instrument used to
+  produce the round-2 evidence is evadable by a test that monkeypatches
+  `time.sleep`, and that a live example was sitting in the measured set. That is
+  a lens aimed at *the evidence added by the previous round*, which by
+  construction does not exist at round 1.
+
+Both are cases where the rotated-in lens was not merely a different reader of the
+same artifact but the only reader of an artifact that round 1 predates. That is
+the mechanism the `rotated` counter is supposed to be measuring, and here it is
+visible rather than inferred.
+
+The caveat recorded in the previous revisit still stands and is not weakened: a
+rotated-in lens that reviews a byte-identical head contributes nothing to
+`rotated` yet is not evidence about rotation either way. Nothing in this run
+changes the fact that the counter cannot distinguish those cases on its own.
