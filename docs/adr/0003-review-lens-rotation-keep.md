@@ -1548,3 +1548,24 @@ and fixed eight" is indistinguishable in the ledger from "found nothing", and
 the dropped classes blind cross-round repeat detection — filed as #1794.
 
 Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit (2026-08-23, issue #1185 / parent PR #1753 terminal split)
+
+The appended line is a terminal `ceiling-split` record, not a merged sample, so
+`loop_log_audit` remains at the exact figures already adjudicated above:
+**117 multi-round merged PRs, later-round catches core=68 rotated=283**. There is
+no new attribution evidence to re-analyse; the recorded **keep rotation** decision
+stands unchanged.
+
+This line does add a cost-boundary signal, but it belongs to the review-gate sizing
+ledger rather than the lens-allocation ratio. PR #1753 reached Round 3 with one
+remaining P2 coverage finding on a behavior-neutral extraction that had entered
+the PR only after a deterministic large-file hook fired. The second gate selected
+a real breadth split: extraction compatibility moves to predecessor issue #1799,
+and the cohort-identity state machine returns in a successor PR for #1185 after
+that predecessor merges. The finding and implementation are not copied into both
+children.
+
+That is the gate doing the job this ADR does not: stopping an unrelated wrapper
+compatibility proof from consuming more high-risk journal review rounds. It neither
+supports nor weakens lens rotation, so no keep/cut policy change follows.
