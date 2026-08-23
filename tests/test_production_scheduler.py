@@ -51886,6 +51886,366 @@ def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path) -> None:
     assert skipped == []
 
 
+def _identity_released_operator_signals(repository: Any, job_id: str) -> list[dict[str, Any]]:
+    """Operator-visible records carrying the #1748 searchable token."""
+
+    released = repository.get_pipeline_job(job_id)
+    assert released is not None
+    source_id = file_orchestration_journal_module._source_id_from_job(released)
+    cycle_time = file_orchestration_journal_module._cycle_time_from_job(released)
+    rows = repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+    return [
+        dict(event)
+        for event in rows.pipeline_events
+        if str(event.get("event_type") or "") == "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
+    ]
+
+
+def _assert_identity_released_operator_signal(repository: Any, job_id: str, *, streak: int) -> None:
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+    signal = signals[0]
+    released = repository.get_pipeline_job(job_id)
+    assert signal["entity_type"] == "pipeline_job"
+    assert signal["entity_id"] == job_id
+    assert signal["status_to"] == "reservation_lost"
+    assert "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR" in str(signal["message"])
+    details = signal["details"]
+    assert details["pipeline_job_id"] == job_id
+    assert details["cohort_digest"] == released["cohort_digest"]
+    assert details["identity_blocked_streak"] == streak
+
+
+def test_identity_blocked_release_signals_operator_from_a_fresh_reservation(tmp_path: Path) -> None:
+    """#1748 tasks 3.1/4.4 -- the released terminal announces itself, prior state 1.
+
+    Without this record the wedge is indistinguishable from an ordinary
+    in-flight reservation until a human happens to read the journal; the
+    2026-08-22 production wedge was found only by accident.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    assert _identity_released_operator_signals(repository, job_id) == []
+
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+
+    _assert_identity_released_operator_signal(repository, job_id, streak=3)
+
+    # Exactly once per release: a re-run of the same release is a no-op CAS
+    # refusal and must not emit a second record.
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 0
+    )
+    _assert_identity_released_operator_signal(repository, job_id, streak=3)
+
+
+def test_identity_blocked_release_signals_operator_from_a_reclaimed_reservation(tmp_path: Path) -> None:
+    """#1748 tasks 3.1/4.4 -- prior state 2: the reclaim-re-seeded reservation.
+
+    Same walk as ``test_reclaimed_reservation_release_is_not_auto_retriable_either``
+    (the SECOND *reservation* write point): reserve, permit, reclaim, release.
+    There is only one release write point, so the signal must appear here too.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    record = dict(vars(_accepted_submit_reserved_cohort_row()))
+    job_id = str(record["job_id"])
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = repository.get_pipeline_job(job_id)
+    assert (
+        repository.reclaim_pipeline_job_reservation(
+            {
+                **permitted,
+                "expected_submission_attempt": permitted["submission_attempt"],
+                "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+                "status": "reserved",
+                "submission_attempt": int(permitted["submission_attempt"]) + 1,
+                "submit_outcome": None,
+                "reconciliation_source": None,
+                "reconciliation_decision": None,
+                "matched_slurm_job_id": None,
+            }
+        )
+        is not None
+    )
+    reclaimed = repository.get_pipeline_job(job_id)
+    assert reclaimed["status"] == "reserved"
+    assert _identity_released_operator_signals(repository, job_id) == []
+
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reclaimed["submission_attempt"]),
+            expected_submission_attempt_started_at=reclaimed["submission_attempt_started_at"],
+            identity_blocked_streak=4,
+        )
+        == 1
+    )
+
+    _assert_identity_released_operator_signal(repository, job_id, streak=4)
+
+
+_IDENTITY_RELEASED_SIGNAL_FAILED = "identity_released_operator_signal_failed"
+
+
+def _identity_released_signal_failures(repository: Any, job_id: str) -> list[dict[str, Any]]:
+    """The degraded trace left when the #1748 operator signal could not be written."""
+
+    released = repository.get_pipeline_job(job_id)
+    assert released is not None
+    source_id = file_orchestration_journal_module._source_id_from_job(released)
+    cycle_time = file_orchestration_journal_module._cycle_time_from_job(released)
+    rows = repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+    return [
+        dict(event)
+        for event in rows.pipeline_events
+        if str(event.get("event_type") or "") == _IDENTITY_RELEASED_SIGNAL_FAILED
+    ]
+
+
+def _break_release_signal_emission(repository: Any, error: Exception, *, primary_only: bool) -> None:
+    """Inject a journal-write fault INSIDE the emission, after the release write.
+
+    The filter is deliberately narrow: ``_write_pipeline_job_unlocked`` reaches
+    the same append seam, so an unfiltered raise would abort the durable release
+    itself and prove nothing about the post-write emission. With
+    ``primary_only`` the fallback trace is still allowed through; without it,
+    both emissions fail and the caller must degrade to a log.
+    """
+
+    original = repository._append_validated_record_unlocked
+
+    def patched(record_type: str, payload: Any, **kwargs: Any) -> Any:
+        if record_type == "pipeline_event":
+            event_type = str(payload.get("event_type") or "")
+            if not primary_only or event_type == "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR":
+                raise error
+        return original(record_type, payload, **kwargs)
+
+    repository._append_validated_record_unlocked = patched
+
+
+def _release_with_broken_signal(tmp_path: Path, error: Exception, *, primary_only: bool) -> tuple[Any, str]:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    _break_release_signal_emission(repository, error, primary_only=primary_only)
+
+    # (b) the caller does NOT raise -- the durable release is not undone by a
+    # failure of its own secondary evidence write.
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+    return repository, job_id
+
+
+def _assert_release_survived_a_broken_signal(repository: Any, job_id: str) -> dict[str, Any]:
+    # (a) the row is still durably released.
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+    assert released.get("error_code") in (None, "")
+    # The primary signal genuinely did not land -- otherwise the fallback would
+    # be proving nothing.
+    assert _identity_released_operator_signals(repository, job_id) == []
+    return released
+
+
+def _assert_signal_failure_trace(repository: Any, job_id: str, *, error_type: str) -> None:
+    # (c) a durable, queryable failure trace exists (#1312 C-P2: the fallback
+    # must not be silent).
+    failures = _identity_released_signal_failures(repository, job_id)
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["entity_type"] == "pipeline_job"
+    assert failure["entity_id"] == job_id
+    assert failure["status_to"] == "reservation_lost"
+    details = failure["details"]
+    assert details["pipeline_job_id"] == job_id
+    # The degraded trace must still tell the operator what to invoke.
+    assert details["recovery_api"] == "recover_released_identity_blocked_reservation"
+    assert details["error_type"] == error_type
+    assert details["reason"]
+    assert "error_code" not in details
+
+
+def test_release_signal_failure_keeps_the_release_and_leaves_a_trace(tmp_path: Path) -> None:
+    """#1748 P1 -- a journal-class emission fault must not raise through the release.
+
+    ``_locked_cycle_write`` has no rollback and the release bytes are already
+    appended when the emission runs, so a raise here would leave the row
+    durably released with NO operator record -- and it can never be re-emitted,
+    because the reconcile loop iterates ``query_reserved_unbound_jobs()``, which
+    never yields a ``reservation_lost`` row.
+    """
+
+    error = file_orchestration_journal_module.FileOrchestrationJournalError(
+        "file_journal_byte_limit_exceeded",
+        field="pipeline_event",
+    )
+    repository, job_id = _release_with_broken_signal(tmp_path, error, primary_only=True)
+
+    _assert_release_survived_a_broken_signal(repository, job_id)
+    _assert_signal_failure_trace(repository, job_id, error_type="FileOrchestrationJournalError")
+
+
+def test_release_signal_filesystem_failure_keeps_the_release_and_leaves_a_trace(tmp_path: Path) -> None:
+    """#1748 P1 -- the filesystem/OS class too, which escapes reconcile's handler.
+
+    ``_write_pipeline_event_private_recovery_unlocked`` writes through
+    ``_atomic_write_bytes_unlocked``, whose faults are
+    ``SafeFilesystemError``/``OSError`` -- neither is a
+    ``FileOrchestrationJournalError``, so ``reconcile.py``'s enclosing handler
+    would not catch them and the whole reconcile pass would abort.
+    """
+
+    from packages.common.safe_fs import SafeFilesystemError
+
+    repository, job_id = _release_with_broken_signal(
+        tmp_path, SafeFilesystemError("atomic write refused"), primary_only=True
+    )
+
+    _assert_release_survived_a_broken_signal(repository, job_id)
+    _assert_signal_failure_trace(repository, job_id, error_type="SafeFilesystemError")
+
+
+def test_release_signal_double_failure_degrades_to_a_log_without_raising(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """#1748 P1 -- when the fallback ALSO fails it degrades to a log, never a raise.
+
+    A filesystem fault that killed the primary emission very likely kills the
+    fallback too, so the fallback's own guard has to catch the same four
+    classes.
+    """
+
+    from packages.common.safe_fs import SafeFilesystemError
+
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        repository, job_id = _release_with_broken_signal(
+            tmp_path, SafeFilesystemError("atomic write refused"), primary_only=False
+        )
+
+    _assert_release_survived_a_broken_signal(repository, job_id)
+    assert _identity_released_signal_failures(repository, job_id) == []
+    assert any(
+        "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR" in record.getMessage() for record in caplog.records
+    )
+
+
+def _assert_runnable_operator_command(details: Any, job_id: str) -> list[str]:
+    """The record must name the surface a human can reach, not just the API."""
+
+    command = str(details["operator_command"])
+    tokens = command.split()
+    assert tokens[0] == "nhms-pipeline"
+    assert tokens[1] == file_orchestration_journal_module.RELEASED_RESERVATION_RECOVERY_COMMAND
+    # The form that ACTS, not the discovery form.
+    assert "--attest" in tokens
+    assert tokens[tokens.index("--job-id") + 1] == job_id
+    assert tokens[tokens.index("--journal-root") + 1] == "<journal-root>"
+    # The redaction constraint on details keys still holds.
+    assert "error_code" not in details
+    assert not any(key.endswith("_token") for key in details)
+    return tokens
+
+
+def test_release_signal_carries_the_runnable_operator_command(tmp_path: Path) -> None:
+    """#1748 -- the signal must not point at the unreachable end of the path.
+
+    Round 3's defect was a signal telling an operator to invoke something they
+    had no way to invoke. Naming only ``recover_released_identity_blocked_reservation``
+    -- a private repository method -- leaves that half-closed now that a real
+    subcommand exists.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+    details = signals[0]["details"]
+    # Additive: the API name stays, the reachable surface is added beside it.
+    assert details["recovery_api"] == "recover_released_identity_blocked_reservation"
+    _assert_runnable_operator_command(details, job_id)
+
+
+def test_release_signal_failure_trace_also_carries_the_operator_command(tmp_path: Path) -> None:
+    """#1748 -- the degraded trace needs the command MORE, not less.
+
+    When the primary signal could not be written, a human reading the journal by
+    hand is the only remaining reader; handing them a method name is exactly the
+    dead end this whole round is about.
+    """
+
+    error = file_orchestration_journal_module.FileOrchestrationJournalError(
+        "file_journal_byte_limit_exceeded",
+        field="pipeline_event",
+    )
+    repository, job_id = _release_with_broken_signal(tmp_path, error, primary_only=True)
+
+    _assert_release_survived_a_broken_signal(repository, job_id)
+    failures = _identity_released_signal_failures(repository, job_id)
+    assert len(failures) == 1
+    _assert_runnable_operator_command(failures[0]["details"], job_id)
+
+
 # ---------------------------------------------------------------------------
 # scheduler-discovery evidence owner compatibility (issue #1799)
 #
