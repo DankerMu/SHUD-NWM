@@ -1470,3 +1470,81 @@ prompting. The bound was set for "let it finish" rather than for "this is
 unsupervised on a live database", which are different numbers.
 
 Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit (2026-08-23, issue #1749 / PR #1793)
+
+Audit re-flagged DECIDABLE at the larger sample: **117 multi-round merged PRs,
+later-round catches core=68 rotated=283**. Keep/cut unchanged — the ratio has
+only strengthened.
+
+**First, the metric was checked before being believed**, because issue #1764
+records a defect in exactly this counter: an entry whose round-1 `core_lenses`
+is empty makes *all* its later-round catches count as `rotated`. Measured on
+this ledger: 29 of 128 multi-round merged entries (23%) have an empty round-1
+lens list, but those entries contribute only **3** later-round catches, against
+274 from entries that do record round-1 lenses. The defect inflates `rotated` by
+about 1% at this sample size — real, worth fixing, and nowhere near enough to
+overturn a 283/68 split. #1764 could not be used to dismiss this DECIDABLE, and
+was not.
+
+**The fourth structural instance, and the first where the escape route was a
+document rather than a code path.** PR #1793's production change was three
+deleted lines. Five rounds produced twelve verified findings and **not one was
+in the code** — two independent reviewers confirmed the code, one with a live
+mutation bite-proof. Every finding was in orchestrator-authored prose: OpenSpec
+proposals, designs, task records, deviation records, the PR body.
+
+Rotation worked exactly as this ADR claims. Round 4's rotated-in
+`closed-list-claim-audit` lens caught six falsehoods that three prior rounds and
+a targeted grep sweep had all walked past. That is the keep criterion, met again.
+
+But the shape of the failure is the part worth recording. The recurring defect
+was "a document asserts something no longer true", and it recurred **five times
+in one PR** — including once by the Phase 7 *class sweep* written to end it, and
+once by the *correction commit* written to end that. The sweep failed for the
+same reason as the point-fixes it was correcting: it grepped the vocabulary its
+author already suspected (`archive`, `archived`, `on this branch`) while the
+surviving falsehoods were phrased in premise vocabulary (`every inflight
+cohort`, `a shape production never writes`). A grep is only as wide as the
+suspicion behind it.
+
+So the escaping thing was again not allocation — but unlike the prior three
+instances it was not upstream of the lenses either. It was **inside the
+orchestrator's own output, on a surface no reviewer is chartered to enumerate
+exhaustively.** Reviewers sample prose for plausibility; nobody was tasked to
+enumerate every claim and rule on each. The closed-list audit is that task, and
+this is the second time it has closed a class no lens closed (the first was
+#1759).
+
+Two rules adopted from this run, both cheap:
+
+1. When a finding is "document X asserts something untrue", the fix is **neither
+   an edit to X nor a grep for X's wording** — it is a closed-list pass over
+   every claim-bearing document in the change set, PR body and test comments
+   included, with a recorded ruling per claim. The claim you miss is by
+   construction phrased in words you did not think to search for.
+2. **A citation is a claim.** `file:line` is verified by opening the file. This
+   run mechanically extracted all 43 citations across both changes and printed
+   the line each actually points at; seven were wrong, one substantively — the
+   load-bearing evidence for a deviation record cited the *adjacent* error
+   guard.
+
+A boundary this run also had to settle, recorded here because it will recur:
+**prose documents must be true at head or carry an in-place correction; a spec
+delta need only be true of the specs tree at its landing SHA.** `openspec
+archive` folds a delta verbatim, and the mechanism for superseding a landed
+clause is a later `MODIFIED` requirement — rewriting a completed change's delta
+to match a later head would falsify its own record of what it shipped. The same
+reasoning governs line-number drift in a completed change's prose: disclose it,
+do not renumber it.
+
+Recorded method errors from this run, kept per this file's convention: (a) round
+4 was initially recorded against the post-fix SHA rather than the SHA the
+reviewers actually ran on, which would have let an unreviewed head inherit a
+clean baseline — self-caught and corrected, and the Phase 7 final review was
+consequently still run on the final head; (b) `review_gate.py record-round
+--clean` silently zeroes the finding counts and failure classes, so "found eight
+and fixed eight" is indistinguishable in the ledger from "found nothing", and
+the dropped classes blind cross-round repeat detection — filed as #1794.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.

@@ -1956,7 +1956,13 @@
     "1749": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1793,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     }
   },
   "1736": {
