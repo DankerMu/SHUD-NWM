@@ -89,7 +89,18 @@
 
 - **WHEN** 一个 tick 内既有 declined run 也有正常 ingested run
 - **THEN** `runs.ingested` 只计入真正写入的 run，declined run 既不计入
-  `runs.ingested` 也不计入 `runs.failed`，且不改变 `publish_eligible` 的判定输入
+  `runs.ingested` 也不计入 `runs.failed`，也不参与 `_stats_guard`（后者钉的是
+  本 tick 真正 ingest 的条数，不是 publish 判据）
+
+#### Scenario: A standing decline counts as already-done, exactly like a retired run
+
+- **WHEN** 一条已存在的 decline 记录在**其后**的某个 tick 上仍与产物证据相符
+- **THEN** 该 run 落在 `_already_ingested_runs` 的返回集里，因而计入
+  `already_count` 并可独立满足 `publish_eligible`——这与 `retired`
+  （`status='superseded'`）在 #1781 之前就有的行为**完全同形**，是刻意的并列语义，
+  不是回归。此时 `_publish_display_runs` 的 UPDATE 命中零行（无 `parsed` 可推进），
+  不写行、不动 `updated_at`。注意由此 `already_ingested` 字段会计入从未 ingest 过
+  的 run；判断"本 tick 真正写了多少"一律看 `runs.ingested`，不要看该字段
 
 #### Scenario: The decline lookup is batched and its object-store reads are bounded
 

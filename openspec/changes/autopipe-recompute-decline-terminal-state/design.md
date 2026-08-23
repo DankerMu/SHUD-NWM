@@ -196,13 +196,46 @@ outcome 保持 `failed`、`rc=1`。即精确退化为本变更之前的行为。
 `None`，而 `None` 在布尔上下文中与 `0` 同为假，于是"本 tick 无新 decline + 计数
 读失败"这个长期积压稳态下整行不打印——而该行的 body 早已备好 `'unknown'` 渲染。
 
+## D10 — 交叉审查第 2 轮：两条产物失实 + 一条真实覆盖缺口
+
+第 2 轮两路 lens 出 4 条候选，两个独立 verifier 批次全部 CONFIRMED。三条与运行时
+行为无关、落在**产物文本**上，一条是真覆盖缺口。
+
+- **PR body 偏离记录第 3 条已被自己的修复轮作废**（P1）。它宣称迁移前存在崩溃窗口、
+  「部署顺序必须先 apply 迁移」。F2 修完之后三个触点全有守卫，迁移前的一个 tick
+  精确退化为 #1781 之前的行为并正常产出 JSON 汇总。verifier 特别区分了"失实"与
+  "理由过期"：结论是**机制描述失实**，必须重写而非软化措辞；先 apply 迁移仍建议，
+  但唯一理由是在此之前功能是惰性的。
+- **本文件 Must-preserve 段残留被 D2 推翻的旧措辞**（P2）：称 decline 判定发生在
+  `_ingested_run_is_current` 内，与 D2 和 8 行之后的 Seams 段自相矛盾，两个 commit
+  都没清掉。已改为"与 authority-state 判据并列的状态无关排除项"。
+- **spec 场景把 `publish_eligible` 的独立性说过头了**（P3，但带真覆盖缺口 → 仍修）。
+  实际语义是：`declined` 与 `retired` 同处一个并集，因而进 `already_count`，
+  一条常驻 decline 可以独自满足 `publish_eligible`。verifier 把边界钉得更准——
+  该 clause 在**写入 decline 的那个 tick 上为真**（`done` 在 `_process_run` 之前
+  就算好了），在其后每个 tick 上为假；这正是原 E6 测试能过而措辞是错的原因。
+  维持 P3 的依据：`_publish_display_runs` 在纯 decline tick 上命中零行、刻意不动
+  `updated_at`，`_stats_guard` 钉的是 `len(by("ingested"))` 而非 publish 判据，
+  故无负载也无状态抖动。唯一外部可见后果是 `already_ingested` 字段会计入从未
+  ingest 过的 run——已在 spec 中写实并明示"看 `runs.ingested`，别看该字段"。
+  **覆盖缺口**（无视严重度必修）：`_prepare_autopipe` 把 `_already_ingested_runs`
+  整个打桩成 `set()`，因此没有任何端到端 tick 测试让常驻 decline 走到
+  `already_count` / `publish_eligible`。已补一条端到端用例。
+- 顺带订正 `_already_ingested_runs` 注释里的陈旧实测数（88/28 → 116 = 60 published
+  + 56 succeeded，且集合仍在增长）。
+
+**未修（按严重度配给记录在案）**：无。第 2 轮 lens A 另出的 P3（`SAVEPOINT` 语句
+本身在 `try` 之外，与该函数"任何 DB 错误都退化为不抑制"的承诺不严格一致）因为是
+两行守卫，随本轮一并收掉，不单独开轮。
+
 ## Must-preserve behavior
 
 - 瞬态 forcing 失败（`HANDOFF_APPLY_SQL_FAILURE`、通用异常路径等）**仍然** `rc=1`
   并继续重试。`tests/test_node27_autopipeline_handoff.py:414` 钉的就是这条，必须保持绿。
 - `_already_ingested_runs` 现有的 authority-state 语义（#1674 的
-  published/parsed 判据、#1442 的 key-only join）不变；decline 判定发生在
-  `_ingested_run_is_current` 内，位于那些 SQL 语义的下游。
+  published/parsed 判据、#1442 的 key-only join）不变；decline 判定与它们**并列**，
+  是 `retired` 之后的第二个状态无关排除并集项，不经过那两条 SQL 的 status 过滤
+  （正因为如此才能同时覆盖 `published` 与 `succeeded` 两个总体——见 D2）。
 - `retired`（`status='superseded'` 无条件跳过）语义不变；decline 是并列的第二个
   排除项，不改变它。
 - 产物 mtime 与 `parsed_at` 的比较语义不变——`tests/test_river_identity_normalization_integration.py:1122`

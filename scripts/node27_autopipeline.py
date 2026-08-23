@@ -995,8 +995,15 @@ def _declined_runs(
     # the safe direction: the run is retried, blocked again, and the decline
     # write fails against the same missing table, so the outcome stays "failed"
     # and rc stays 1 -- pre-#1781 behaviour, with a valid summary.
-    cur.execute(f"SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+    # The SAVEPOINT statement itself is inside the guard: "degrades to suppress
+    # nothing on ANY DB error" has to include the statement that establishes the
+    # scope, or the one path that cannot degrade is the one that opens it. The
+    # flag is the ordering hazard -- ROLLBACK TO a savepoint that was never
+    # established is itself an error.
+    established = False
     try:
+        cur.execute(f"SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+        established = True
         cur.execute(
             """
             SELECT run_id, init_state_id, product_mtime
@@ -1007,8 +1014,9 @@ def _declined_runs(
         )
         rows = cur.fetchall()
     except psycopg2.Error:
-        cur.execute(f"ROLLBACK TO SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
-        cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+        if established:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
+            cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
         return set()
     cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
 
@@ -1082,9 +1090,12 @@ def _already_ingested_runs(
             # #1781: the second status-independent exclusion, same shape as
             # `retired` above. It must sit here and not inside
             # `_ingested_run_is_current`: the completeness statement below only
-            # returns runs at 'parsed'/'published', and 28 of the 88 runs the
-            # compressed-chunk guard blocks on node-27 are at 'succeeded' --
-            # never parsed, so never in that result at all.
+            # returns runs at 'parsed'/'published', and at deploy time 56 of the
+            # 116 runs the compressed-chunk guard blocks on node-27 are at
+            # 'succeeded' (the other 60 are 'published') -- never parsed, so
+            # never in that result at all. The set keeps GROWING: every new
+            # old-cycle run whose forcing window lands in the compressed chunk
+            # joins it, so treat those figures as a snapshot, not a bound.
             declined = _declined_runs(cur, run_ids, object_store_root)
             cur.execute(
                 """

@@ -6,7 +6,8 @@ node-27 的 autopipe 每个 tick 都以 `rc=1` 结束，已持续多日，日志
 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED`（issue #1781）。机制已实测闭合：
 
 1. node-22 于 2026-08-22 17:56 重算了三个 init 周期（`2026080712` / `2026080800` /
-   `2026080812`，gfs+ifs 共 **88** 个 run）的产物。
+   `2026080812`，gfs+ifs 共 **88** 个 run；这是立项时的快照，部署前复测已增至
+   **116** 个、周期扩到 5 个——集合在增长，见下）的产物。
 2. `_ingested_run_is_current`（`scripts/node27_autopipeline.py:1020`）**正确**检出
    `product_mtime > parsed_at + 1`，把这些 run 排除出 `already_ingested`。
 3. tick 重新 ingest，forcing handoff 写向 `met.forcing_station_timeseries` 的
@@ -40,7 +41,7 @@ node-27 的 autopipe 每个 tick 都以 `rc=1` 结束，已持续多日，日志
   `rc` 判据排除 `declined`，故 tick 收 `rc=0`。
 - `_already_ingested_runs` 批量取回本 tick run_ids 的 decline 记录，键完全匹配者
   并入返回集——与已有的 `retired`（`status='superseded'`）并列的**状态无关**排除项。
-  实测这 88 个 run 里 60 个是 `published`、**28 个是 `succeeded`**，后者从不进入
+  实测这 88 个 run 里 60 个是 `published`、**28 个是 `succeeded`**（部署前复测：116 = 60 + **56**），后者从不进入
   完备性查询，所以抑制必须装在这里而不是 `_ingested_run_is_current`（见 design D2）。
   **任一键分量变化（新的 init_state 或更新的产物 mtime）自动重开决定**。
 - `docs/runbooks/tier-node27-timeseries-storage.md` 新增压缩前置检查清单，含可执行 SQL。
@@ -52,5 +53,5 @@ node-27 的 autopipe 每个 tick 都以 `rc=1` 结束，已持续多日，日志
   `docs/runbooks/tier-node27-timeseries-storage.md`
 - Affected tests: `tests/test_node27_autopipeline_handoff.py`、
   `tests/test_river_identity_normalization_integration.py`
-- 生产影响：node-27 autopipe 从每 tick `rc=1` 恢复为 `rc=0`；88 个 run 的数据保持
+- 生产影响：node-27 autopipe 从每 tick `rc=1` 恢复为 `rc=0`；这批 run 的数据保持
   2026-08-22 之前的状态，并以可查询记录问责。

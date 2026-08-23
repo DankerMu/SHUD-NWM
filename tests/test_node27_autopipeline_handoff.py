@@ -1439,7 +1439,8 @@ def test_stats_guard_progress_line_stays_silent_when_neither_leg_worked(
 # The production loop this pins: node-22 regenerates a run's products, the tick
 # correctly detects the recompute, the forcing handoff is correctly rejected
 # because its target chunk is compressed, nothing advances, and the next tick
-# repeats it forever (88 runs, every tick, rc=1). The fix is a recorded terminal
+# repeats it forever (88 runs when this was written, 116 by deploy time -- the
+# set grows, every tick, rc=1). The fix is a recorded terminal
 # state, so the failure mode a test has to bite on is BOTH directions: a
 # blocked recompute must stop retrying, and everything else must not.
 # --------------------------------------------------------------------------- #
@@ -1799,11 +1800,19 @@ class _IngestedRunsCursor:
             return
         if self.conn.aborted:
             raise psycopg2.errors.InFailedSqlTransaction("current transaction is aborted")
-        if statement.startswith(("SAVEPOINT", "RELEASE SAVEPOINT")):
+        if statement.startswith("SAVEPOINT"):
+            if self.conn.savepoint_error is not None:
+                self.conn.aborted = True
+                raise self.conn.savepoint_error
+            self.rows = []
+            return
+        if statement.startswith("RELEASE SAVEPOINT"):
             self.rows = []
             return
         if "status = 'superseded'" in sql:
-            self.rows = []
+            assert params is not None
+            bound = set(params[0])
+            self.rows = [(run_id,) for run_id in self.conn.superseded_rows if run_id in bound]
         elif "ops.ingest_recompute_decline" in sql:
             if self.conn.decline_error is not None:
                 self.conn.aborted = True
@@ -1830,10 +1839,14 @@ class _IngestedRunsConnection:
         decline_rows: list[tuple[str, str, float]],
         completeness_rows: list[tuple[Any, ...]] | None = None,
         decline_error: BaseException | None = None,
+        savepoint_error: BaseException | None = None,
+        superseded_rows: list[str] | None = None,
     ) -> None:
         self.decline_rows = decline_rows
         self.completeness_rows = completeness_rows or []
         self.decline_error = decline_error
+        self.savepoint_error = savepoint_error
+        self.superseded_rows = superseded_rows or []
         self.aborted = False
         self.executed: list[str] = []
 
@@ -2034,3 +2047,131 @@ def test_missing_decline_table_still_emits_a_summary_and_returns_one(
     assert summary["runs"]["declined"] == 0
     assert summary["declines_active"] is None
     assert store.rows == []
+
+
+def _tick_with_real_read_side(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    superseded: bool,
+) -> tuple[dict[str, Any], list[str], list[str], _DeclineStore]:
+    """One whole tick on a run that is already excluded -- by `superseded` or by
+    a standing decline record -- with the REAL `_already_ingested_runs` in play.
+
+    The harness stubs that function outright, so no end-to-end case ever lets an
+    exclusion reach `already_count` / `publish_eligible`. Un-stubbing it here (as
+    `test_missing_decline_table_still_emits_a_summary_and_returns_one` does) is
+    what closes that gap.
+    """
+
+    root.mkdir(parents=True, exist_ok=True)
+    real_already_ingested_runs = autopipe._already_ingested_runs
+    store = _DeclineStore()
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        root,
+        runs={RUN_A: True},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+    monkeypatch.setattr(autopipe, "_already_ingested_runs", real_already_ingested_runs)
+
+    if superseded:
+        conn = _IngestedRunsConnection(decline_rows=[], superseded_rows=[RUN_A])
+    else:
+        # The decline was written by an EARLIER tick: the row stands before this
+        # one starts, on both the read surface and the count surface.
+        conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime)])
+        store.rows.append(
+            {
+                "run_id": RUN_A,
+                "init_state_id": "state-a",
+                "product_mtime": mtime,
+                "reason_code": BLOCKED,
+                "detail": BLOCKED_DETAIL,
+            }
+        )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
+
+    rc, summary = _run_main(capsys, object_store_root)
+    assert rc == 0
+    return summary, _command_kinds(calls), published_calls, store
+
+
+def test_standing_decline_counts_as_already_done_exactly_like_a_retired_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The tick AFTER the decline was written, end to end.
+
+    Helper-level coverage stops at `_already_ingested_runs`; nothing pinned what
+    the tick summary then says. The contract (spec: "A standing decline counts
+    as already-done, exactly like a retired run") is that the run is neither
+    ingested nor failed nor retried, and that it lands in `already_count` and
+    satisfies `publish_eligible` on its own -- the same shape `superseded` has
+    had since before #1781. Running BOTH exclusions through the same tick and
+    demanding an identical `runs` block is what makes that parity an assertion
+    rather than a comment.
+    """
+
+    declined_summary, declined_kinds, declined_published, store = _tick_with_real_read_side(
+        monkeypatch, tmp_path / "declined", capsys, superseded=False
+    )
+
+    # Not ingested, not failed, and never re-attempted: no register/parse means
+    # `_process_run` -- and therefore the forcing handoff -- never ran.
+    assert declined_summary["runs"]["ingested"] == 0
+    assert declined_summary["runs"]["failed"] == 0
+    assert declined_summary["runs"]["declined"] == 0
+    assert declined_summary["runs"]["processed"] == 0
+    assert declined_summary["runs"]["details"] == []
+    assert declined_summary["runs"]["failed_runs"] == []
+    assert declined_summary["runs"]["declined_runs"] == []
+    assert declined_summary["runs"]["ingested_by_source"] == {"gfs": 0, "ifs": 0}
+    assert "register" not in declined_kinds
+    assert "parse" not in declined_kinds
+    # No second decline row: the terminal record is not rewritten every tick.
+    assert [row["run_id"] for row in store.rows] == [RUN_A]
+    assert declined_summary["declines_active"] == 1
+    # `already_count` carries it, and it alone satisfies `publish_eligible`.
+    assert declined_summary["runs"]["already_ingested"] == 1
+    assert declined_published == [NODE27_DATABASE_URL]
+
+    retired_summary, retired_kinds, retired_published, retired_store = _tick_with_real_read_side(
+        monkeypatch, tmp_path / "retired", capsys, superseded=True
+    )
+
+    # The parity claim, asserted: a standing decline produces the same tick
+    # accounting as `status='superseded'`. `declines_active` is the one field
+    # that legitimately differs -- it counts records, not exclusions.
+    assert retired_summary["runs"] == declined_summary["runs"]
+    assert retired_kinds == declined_kinds
+    assert retired_published == declined_published
+    assert retired_summary["declines_active"] == 0
+    assert retired_store.rows == []
+
+
+def test_declined_runs_degrades_when_the_savepoint_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """"Degrades to suppress nothing on any DB error" has to cover the statement
+    that opens the scope too, and the degrade must NOT try to rewind to a
+    savepoint that was never established -- that is itself an error."""
+
+    object_store_root = tmp_path / "object-store"
+    _write_run(object_store_root, RUN_A)
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+    mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
+
+    conn = _IngestedRunsConnection(
+        decline_rows=[(RUN_A, "state-a", mtime)],
+        savepoint_error=psycopg2.errors.DiskFull("could not extend file"),
+    )
+    cur = conn.cursor()
+
+    assert autopipe._declined_runs(cur, [RUN_A], object_store_root) == set()
+    assert not [sql for sql in conn.executed if sql.strip().upper().startswith("ROLLBACK TO")]

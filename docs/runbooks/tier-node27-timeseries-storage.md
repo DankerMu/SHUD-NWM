@@ -1188,10 +1188,12 @@ chunk(s) TimescaleDB names.
 #### 4.3.1 Operator triage codes
 
 The compressed-chunk write guard surfaces via five caller-observable string
-codes. Three of them route unconditionally to the decompress procedure below;
-`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` has a second acceptable disposition
-since `#1781` (see its row); `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED` is
-NOT a compressed-chunk case at all and must never be decompressed against.
+codes. Only the two `HANDOFF_APPLY_*` codes distinguish "a compressed chunk was
+really there" from "the guard could not certify the batch" — `#1781` split those
+apart. The other three are stamped by base-class `except CompressedChunkGuardError`
+arms and are therefore **ambiguous**: read the detail before acting (see the
+caveat under the table, tracked as `#1785`). `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED`
+additionally has a second sanctioned disposition since `#1781` (see its row).
 Grep the DB / stderr / receipt surface for these literals when triaging a
 reingest failure:
 
@@ -1203,10 +1205,22 @@ reingest failure:
 | `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/cli.py` stderr prefix — emitted when `ForcingProducer.produce()` re-raises a `CompressedChunkGuardError` un-wrapped. | Forcing producer CLI stderr line `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED: ...`. |
 | `FORCING_COMPRESSED_CHUNK_BLOCKED` | `workers/forcing_producer/producer.py::ForcingProducer._mark_failed` — stamped on `met.forecast_cycle.error_code` when the dedicated `except CompressedChunkGuardError` arm fires. | `met.forecast_cycle.error_code` column (with `status = 'failed_forcing'`). |
 
-For every code above **except** `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED`,
-the operator response is the decompress procedure in §4.3.2 below (identify
-chunk from the structured error message → run `decompress_chunk(...)` → re-run
-ingest). Route on the code; do NOT paper over with a generic ingest retry.
+For the two `HANDOFF_APPLY_*` codes the routing is exact: `_BLOCKED` → decompress
+procedure in §4.3.2 below (identify chunk from the structured error message → run
+`decompress_chunk(...)` → re-run ingest), `_GUARD_FAILED` → never decompress.
+
+The remaining three codes usually mean the same thing as `_BLOCKED` and usually
+route to §4.3.2 — but the code alone does not prove it. Each is stamped by an
+`except CompressedChunkGuardError` arm that catches the **base** class, so the
+same literal also fires when the guard's catalog SELECT lost its 5s statement
+timeout, when the caller passed a partial batch window, or when the hypertable
+is not in `HYPERTABLES_GUARDED` — none of which have a chunk to decompress.
+Before decompressing on one of those three, read the accompanying error detail
+and confirm it names a concrete chunk; if it instead reads like a timeout or a
+wiring error, triage it as `_GUARD_FAILED` below. Extending the `#1781` split to
+those call sites is tracked in `#1785`; until it lands the code is a hint, not a
+verdict. Either way: route on the evidence, and do NOT paper over with a generic
+ingest retry.
 
 `HANDOFF_APPLY_COMPRESSED_CHUNK_GUARD_FAILED` is **retryable and is not a
 decline**: there is no chunk to decompress, so the run keeps failing until the
