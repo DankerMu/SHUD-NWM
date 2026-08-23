@@ -165,7 +165,6 @@ def _build_cli_environment(
             index_path,
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
-            generated_at=CUTOVER_VALID_TIME,
             verify_objects=False,
         )
 
@@ -312,7 +311,6 @@ def _add_recalibration_pair(
             Path(index_path),
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
-            generated_at=CUTOVER_VALID_TIME,
             verify_objects=False,
         )
 
@@ -456,7 +454,6 @@ def test_copyback_still_fails_closed_on_two_differing_entries(tmp_path: Path) ->
         Path(env["mirror_index"]),
         object_store_root=env["object_root"],
         object_store_prefix="s3://nhms",
-        generated_at=CUTOVER_VALID_TIME,
         verify_objects=False,
     )
 
