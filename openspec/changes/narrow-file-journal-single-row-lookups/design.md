@@ -328,3 +328,137 @@ follow-up issue and is explicitly **not** implemented here (tasks.md §3).
 | I6 | `include_direct=False` still excludes direct records | parity test |
 | I7 | Single lock order preserved; no new cache unless measurement demands one | D7 + existing concurrency test |
 | I8 | `query_pipeline_job_by_slurm_id` semantics byte-identical (untouched) | existing tests |
+
+## D9. Round 2: the D2a prefilter was applied to one of two near-identical readers
+
+**Ruling: `_iter_direct_pipeline_job_records_for_cycle` (`:4857`) must delegate
+its flat leg to `_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`)
+rather than carry a third copy of the filter.**
+
+There are two readers of the flat `pipeline-jobs/` directory, serving different
+callers:
+
+|reader|flat leg|callers|
+|---|---|---|
+|`_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`)|**filename-prefiltered (D2a)**|`_iter_pipeline_job_records_for_cycle` (`:4943`) — the narrowed path this change built|
+|`_iter_direct_pipeline_job_records_for_cycle` (`:4857`)|**unfiltered** — `self._read_optional_json(path)` at `:4883` runs on every file in the directory before any content check|`_direct_pipeline_job_records_for_cycle_cached` (`:4348`) → `_cycle_rows` (`:4216`, `:4283`)|
+
+D2a's fix landed on the first and not the second. The second's docstring-free
+flat leg reads the whole directory's *content* — 13.18 MB across 4,375 files on
+node-22 today — on every cache miss.
+
+This is the same defect class as the two P1s in #1775: two near-identical code
+paths deciding the same thing, one corrected and one not. It is closed the same
+way — by **reference, not by a second fix**. A third copy of the filename filter
+would recreate the class. Delegating also preserves the fail-open-on-unparseable
+-name property by construction rather than by re-argument.
+
+The by-cycle leg (`pipeline-jobs/by-cycle/<source>/<cycle>/`) is already
+partitioned and needs nothing.
+
+## D10. The D7 memo contingency has fired — and its invalidation scope is the whole decision
+
+D7 recorded: *"a memo is only justified if the post-change node-22 measurement
+misses the `>=90%` target. Recorded so the implementer does not add one
+speculatively."* The 2026-08-23 receipt missed it (71.3% vs `>=90%`). **The
+contingency has fired; the memo is now in scope.**
+
+**Ruling: memoize `_iter_pipeline_job_records_for_cycle` (`:4943`) keyed on
+`(source_id, cycle)`, with the invalidation signature scoped to that cycle's own
+files — never to a shared directory's stat.**
+
+The scoping rule is not a refinement, it is the whole point, and
+`_direct_jobs_cycle_cache` (`:4348`) is the cautionary example sitting in this
+same file. Its signature's first component is
+`_stat_signature(self.root / "pipeline-jobs")` (`:4363`) — the **shared,
+unpartitioned** flat directory. Any write to any cycle's flat row bumps that
+directory's `(mtime_ns, size, inode)` and therefore invalidates **every**
+`(source, cycle)` entry, not just the written one. That cache is *correct*
+(the signature is conservative, so it never serves stale rows) and it *thrashes*
+(a write-heavy pass re-scans the whole flat directory repeatedly). Correct-but-
+thrashing is defect B in this change's attribution. A memo that keys on a shared
+directory stat reproduces it exactly and buys nothing: the measured pass carried
+`syscw` 4,961.
+
+`_iter_pipeline_job_records_for_cycle`'s three legs make precise scoping
+available:
+
+|leg|partitioned?|signature component|
+|---|---|---|
+|`latest/<segment>/<cycle>/`|yes, by source+cycle|directory stat is already cycle-scoped|
+|`journal/<segment>/<cycle>*.jsonl`|directory shared across the source's cycles, **files** are cycle-named|stat the matched file set, not the directory|
+|flat `pipeline-jobs/`|directory shared globally, **already filename-prefiltered to this cycle** (D2a, and D9 above)|stat the prefiltered file set, not the directory|
+
+Per-file `lstat` over an already-narrowed set is O(files-for-this-cycle) metadata
+calls — the set the pass would open anyway — and contributes nothing to `rchar`.
+Where a leg cannot be scoped, that is recorded as a stated limitation of the
+memo, never hidden behind a directory stat.
+
+**Discriminating test, required:** a write to a *different* cycle MUST NOT evict
+this cycle's memo entry. That single assertion is what separates this memo from
+the `_direct_jobs_cycle_cache` pattern; without it the two are indistinguishable
+from their code.
+
+The concurrency requirement is unchanged and binding: spec
+`pipeline-job-persistence` "Journal read caches are safe under concurrent
+orchestration threads sharing one repository instance"
+(`openspec/specs/pipeline-job-persistence/spec.md:550`). Single lock order
+preserved; no cache-mutex -> write-mutex nesting.
+
+## D11. Attribution must become traced, and the counter ships in the repo
+
+The 2026-08-23 receipt leaves three candidate mechanisms and traces none:
+
+- **A** — full-tree replay via `_iter_pipeline_job_records()` (`:4894`) reached
+  by the narrowed entrypoints' fall-open derivation. ~96 MB per call. Ranked
+  highest by fit to both the 12.75 GB total and the 16.6 KB average read size
+  (12.75 GB / 768,170 `syscr`), and **not sized**: D1a states plainly that the
+  local driver's 19/796 fall-open ratio is not the production ratio.
+- **B** — the flat-directory re-read of D9 + the shared-stat invalidation of
+  D10. Bounded above at ~175 full rescans / ~2.3 GB by the pass's own `syscr`
+  budget (768,170 / 4,375 files).
+- **C** — the absent memo of D10. Order 1-4 GB, on a call count (777) that is
+  again a local-driver number.
+
+**Ruling: add a permanent, always-on per-entrypoint read counter and merge its
+totals into pass evidence.**
+
+Three properties are required and each has a reason:
+
+1. **Always-on, shipped through the repo.** node-22 pulls from GitHub; there is
+   no local-patch path. A monkeypatched probe would also have to run a real
+   submitting pass to be representative — a plan-only pass performs no writes,
+   so it triggers no invalidation and would understate B specifically.
+2. **Tag -> bytes, keyed by entrypoint (A/B/C).** The output is a dozen
+   `(tag, calls, bytes)` triples, negligible against the 5 MB evidence limit.
+3. **Self-attributing, so no pre-fix baseline is needed.** After D9+D10 land,
+   the same counters *verify* them: C's tag near zero proves the memo holds
+   across the pass, and B's tag at roughly one 13 MB pass per cycle rather than
+   many proves prefilter-plus-scoped-invalidation. The counter is therefore both
+   the measuring instrument and the regression pin.
+
+Thread-safety is bound by the same spec:550 requirement as D10.
+
+## D12. Pre-declared outcome of this round: the primary criterion is expected to MISS again
+
+The criterion allows `0.32 GB x 14 = 4.48 GB`. The receipt measured 12.75 GB, so
+**8.27 GB must be removed**. Against the only published sizes: B is capped at
+~2.3 GB by the `syscr` budget and C is estimated at 1-4 GB. Their sum is at most
+~6.3 GB, which leaves the criterion missed even if both land perfectly and even
+at the top of C's range.
+
+**This is recorded before implementation, not discovered after it.** This change
+has twice mistaken an estimate for a measurement (the pre-D1a table, and the
+now-stale fallback ruling), and a third "we expected this to pass" would be the
+same failure a third time. The deliverable of this round is therefore explicitly
+three things, not one:
+
+1. D9 — a parity defect fixed on its own merits, independent of attribution.
+2. D10 — D7's own pre-registered contingency, now fired.
+3. D11 — the traced attribution that **sizes A**, which is the only candidate
+   large enough to close the remaining gap and the only one this change has
+   never measured.
+
+A receipt showing the primary criterion still missed, together with a traced
+A/B/C split, is this round **succeeding**. The criterion closes in the round
+that follows, against a measured target.

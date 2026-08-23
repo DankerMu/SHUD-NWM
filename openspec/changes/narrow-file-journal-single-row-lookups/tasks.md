@@ -182,3 +182,59 @@ three-part, all three required:
       去重，二者互锁（前者产出的混合拼法 `("IFS","ifs")` 原样喂给后者，后者收不掉）。
       与本 change 已修的 primary 分支同缺陷类，但在冻结的分支范围之外。属**开发环境
       完整性**面：本地 macOS 上预算/containment 类断言仍可能「以错误的理由」变绿。
+
+## 5. Round 2 (2026-08-23): parity fix + fired memo contingency + traced attribution
+
+Opened because the round-1 receipt missed the primary criterion (71.3% vs
+`>=90%`) and the pre-declared fallback ruling was found stale. Design: D9, D10,
+D11, D12.
+
+**Pre-declared outcome (D12): the primary criterion is expected to MISS again in
+this round.** 8.27 GB must go; B is `syscr`-capped at ~2.3 GB and C is estimated
+at 1-4 GB, so at most ~6.3 GB is reachable here. The round's deliverable is the
+two pre-declared fixes **plus a traced A/B/C split that sizes A**. A receipt
+showing the criterion still missed alongside that split is this round succeeding.
+
+### Implementation
+
+- [ ] **D9 parity**: `_iter_direct_pipeline_job_records_for_cycle` (`:4857`)
+      delegates its flat `pipeline-jobs/` leg to
+      `_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`).
+      **Delegate, do not copy** — a third filter definition recreates the very
+      parity class this fixes. By-cycle leg untouched (already partitioned).
+- [ ] **D10 memo**: memoize `_iter_pipeline_job_records_for_cycle` (`:4943`) on
+      `(source_id, cycle)`. Invalidation signature scoped to **this cycle's own
+      files** — `latest/<segment>/<cycle>/` dir stat is already cycle-scoped;
+      `journal/` and flat `pipeline-jobs/` legs stat the **matched file set**,
+      never the shared directory. Any leg that cannot be scoped is recorded as a
+      stated memo limitation, not hidden behind a directory stat.
+- [ ] **D11 counter**: always-on per-entrypoint `(tag, calls, bytes)` counter
+      over the read primitives, merged into pass evidence. Ships in the repo
+      (node-22 pulls from GitHub; no local-patch path). Thread-safe under
+      spec `pipeline-job-persistence:550`.
+
+### Evidence floor
+
+- [ ] **Discriminating memo test** (D10, required): a write to a **different**
+      cycle MUST NOT evict this cycle's memo entry. Without this assertion the
+      new memo is indistinguishable from `_direct_jobs_cycle_cache`'s
+      correct-but-thrashing pattern. Must be shown to bite: revert the scoping
+      to a shared-directory stat and watch it go red.
+- [ ] **D9 parity test**: a file in flat `pipeline-jobs/` belonging to another
+      cycle is not opened by `_iter_direct_pipeline_job_records_for_cycle`.
+      Must be shown to bite against the pre-change function.
+- [ ] **Fail-open preserved**: an unparseable flat file name is still read
+      (both readers), pinned on the delegating path.
+- [ ] **Concurrency unchanged**: existing shared-instance concurrency test
+      (spec `pipeline-job-persistence:550`) green; single lock order, no
+      cache-mutex -> write-mutex nesting.
+- [ ] **Local suite**: `uv run pytest` over the journal/scheduler suites the
+      round-1 change already covered, plus the new tests.
+- [ ] **node-22 receipt, same口径 as round 1 verbatim**: denominator 14,
+      decimal GB/MB, `syscr` recorded alongside `rchar`, PID pinned for the whole
+      sample on a pass that genuinely submits (a plan-only pass performs no
+      writes, triggers no invalidation, and would understate B).
+      Report `rchar`/candidate, `rchar` total, `syscr`, `read_bytes`, elapsed —
+      **and the D11 tag split**, which is the round's actual deliverable.
+      Record `wchar` this time: round 1 could not attribute the `read_bytes`
+      rise because the baseline sample never recorded it.
