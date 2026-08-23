@@ -1,0 +1,46 @@
+## MODIFIED Requirements
+
+### Requirement: Bounded evidence observability floor
+
+When the scheduler pass evidence payload exceeds the configured size bound and the bounded fallback shape is emitted, the artifact SHALL preserve an operator-readable observability floor — the true computed pass status, per-candidate summary rows, and a compact restart-reconcile block — without weakening the fail-closed top-level status contract or the hard size bound.
+
+#### Scenario: pre-limit status is preserved inside the limit block
+
+- WHEN the evidence payload exceeds `max_evidence_bytes` and the bounded fallback payload is written
+- THEN the top-level `status` remains `resource_limit_blocked` and `limit.reason` remains `evidence_size_limit_exceeded`
+- AND `limit.pre_limit_status` records the pass status computed before the fallback (the key is omitted when the source payload carried no status)
+- AND downstream consumers of the top-level status require no change.
+
+#### Scenario: candidate lists degrade to bounded summaries before being dropped
+
+- WHEN the bounded fallback payload is constructed
+- THEN `candidates`, `blocked_candidates`, and `skipped_candidates` are populated row-for-row with fixed-key summary rows carrying candidate identity (including the readiness-reader identity keys `source_id`, `cycle_time_utc`, `scenario_id`, and for admitted candidates `run_id` and `forcing_version_id`), status, reason, and the incident-critical candidate state-evidence subset (scheduler decision, missing-forcing repair status, journal-predecessor quarantined skip reason), each value passed through from the already-redacted source payload with keys absent from a row when the source value is absent or null
+- AND `limit.candidate_lists` is `summarized`
+- AND only if the summarized payload still exceeds the bound does the existing droppable tier empty the lists, progressively in field order and stopping as soon as the payload fits, so a partial drop can leave the later lists as summaries
+- AND `limit.candidate_lists` is set to `dropped` only when that tier empties a candidate list that still held rows; emptying an already-empty candidate list drops nothing and the marker stays `summarized`
+- AND the marker is monotone: once `limit.candidate_lists` is `dropped`, a later summarize pass SHALL NOT downgrade it back to `summarized` — empty candidate lists under a `dropped` marker mean rows were cut, and the marker keeps saying so
+- AND the artifact never exceeds `max_evidence_bytes`, and a payload that cannot fit even after all degradation tiers still fails closed with the existing write error.
+
+#### Scenario: restart-reconcile incident evidence survives the fallback compactly
+
+- WHEN the source evidence payload carries a `restart_reconcile` block and the bounded fallback payload is constructed
+- THEN the fallback retains a compact `restart_reconcile` block exposing its status, `reserved_unbound_error`, and `inflight_error`
+- AND the fallback retains per-outcome summary rows for **both** reconcile lanes — `inflight` and `reserved_unbound` — each lane's rows limited to job identity, action, status, reconciliation reason class, `identity_blocked_streak`, `quarantine_reason`, and `quarantine_field`
+- AND a lane absent from the source payload stays absent from the fallback, and a lane present without outcome rows SHALL NOT be given a fabricated empty `outcomes` list
+- AND when the source payload has no `restart_reconcile` block the fallback omits the key.
+
+#### Scenario: a dropped lane SHALL NOT be indistinguishable from an empty lane
+
+- WHEN a bounded fallback artifact is read by an operator or an acceptance check asking whether a pass recorded any `identity_mismatch_blocked` or `identity_mismatch_released` outcome
+- THEN the answer SHALL be derivable from the artifact, because the lane carrying those outcomes (`inflight` for jobs bound to a Slurm id, `reserved_unbound` for reserved unbound jobs) is present whenever the source payload carried it
+- AND the artifact SHALL NOT present a syntactically valid `restart_reconcile` block whose missing lane reads as "no such outcomes occurred" when the lane was in fact discarded.
+
+#### Scenario: within-limit evidence is byte-identical to the pre-change contract
+
+- WHEN the evidence payload fits within `max_evidence_bytes`
+- THEN the artifact carries full candidate detail and contains neither `limit.pre_limit_status` nor `limit.candidate_lists`.
+
+#### Scenario: terminal limit compaction remains the fail-closed floor
+
+- WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
+- THEN `limit.pre_limit_status` and `limit.candidate_lists` are permitted to disappear with the rest of the compacted `limit` block, preserving the pre-existing fail-closed behavior unchanged.
