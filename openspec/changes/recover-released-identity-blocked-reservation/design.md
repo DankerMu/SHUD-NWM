@@ -29,8 +29,8 @@
 ## D2. Must-preserve behavior
 
 1. `should_auto_retry` stays **false** for this shape, and the release writes
-   keep `error_code` null. `tests/test_production_scheduler.py:48632` and
-   `:48681` SHALL pass **unweakened** — they are the anti-regression pin for the
+   keep `error_code` null. `tests/test_production_scheduler.py:48713` and
+   `:48762` SHALL pass **unweakened** — they are the anti-regression pin for the
    duplicate-submission class, not incidental coverage.
 2. **The two door predicates stay byte-identical**: the reservation reclaim
    predicate (`file_orchestration_journal.py:2169-2222`) and
@@ -109,7 +109,7 @@ disjunct is forced, not preferred.
 
 **Attestation carrier.** The carrier must survive
 `normalize_accepted_submit_evidence` and the shape pins at
-`tests/test_production_scheduler.py:48632`/`:48681`. Candidates, in order:
+`tests/test_production_scheduler.py:48713`/`:48762`. Candidates, in order:
 (a) a field the accepted-submit validators already admit — note the production
 wedged row already carries `manual_retry_marker: False`, so that field is
 admitted on this row kind; (b) a side journal record keyed by job id that the
@@ -261,7 +261,7 @@ and abort the whole reconcile pass.
 
 | claim | evidence |
 |---|---|
-| released rows stay non-auto-retriable | `tests/test_production_scheduler.py:48632`, `:48681` pass unweakened |
+| released rows stay non-auto-retriable | `tests/test_production_scheduler.py:48713`, `:48762` pass unweakened |
 | **an ordinary pass submits after recovery** (the oracle whose absence let an inert no-op go green) | new test, red-first, driving a real pass to the submission call |
 | recovery writes no row and leaves the `_retry_<n>` identity free | new test |
 | without the attestation nothing changes | new test |
@@ -282,9 +282,9 @@ recorded rather than silently rewritten because it changes what the tasks mean:
   caller is `reconcile.py:2135`.
 - A function named `release_pipeline_job_reservation` does **not exist**; the
   first draft cited it twice.
-- What `tests/test_production_scheduler.py:48632` and `:48681` distinguish is two
+- What `tests/test_production_scheduler.py:48713` and `:48762` distinguish is two
   **reservation** write points — the fresh reserve and the
-  `reclaim_pipeline_job_reservation` re-seed — as `:48681`'s own docstring says
+  `reclaim_pipeline_job_reservation` re-seed — as `:48762`'s own docstring says
   ("the SECOND reservation write point"). That is a difference in the released
   row's *prior state*, not a second release-writing function.
 

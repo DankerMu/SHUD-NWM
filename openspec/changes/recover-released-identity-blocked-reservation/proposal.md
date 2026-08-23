@@ -51,8 +51,8 @@ The existing manual channel does not help: `retry.py:73-74` defines
   leaves a durable trace rather than degrading to silence.
 - Cover both **prior-state shapes** a released row can arrive in — a fresh
   reservation, and one re-seeded by `reclaim_pipeline_job_reservation` — which is
-  what `tests/test_production_scheduler.py:48632` and `:48681` actually
-  distinguish (`:48681`'s docstring: "the SECOND *reservation* write point").
+  what `tests/test_production_scheduler.py:48713` and `:48762` actually
+  distinguish (`:48762`'s docstring: "the SECOND *reservation* write point").
   There is exactly **one** release write point
   (`release_identity_blocked_reservation`, `file_orchestration_journal.py:3346`,
   decision constructed at `:3417`), so the signal is emitted once, there.
@@ -66,8 +66,8 @@ The existing manual channel does not help: `retry.py:73-74` defines
   `file_orchestration_journal.py:3410-3413` and re-open the duplicate-submission
   class that #1116 closed. A streak cap would bound how many duplicates, not
   whether.
-- **No `error_code` stamping.** `tests/test_production_scheduler.py:48632` and
-  `:48681` pin the null `error_code` and the false `should_auto_retry` verdict;
+- **No `error_code` stamping.** `tests/test_production_scheduler.py:48713` and
+  `:48762` pin the null `error_code` and the false `should_auto_retry` verdict;
   both SHALL stay green unweakened.
 - No change to the two reclaim doors, to `absence_retry_permitted` semantics, or
   to HPC/Slurm configuration.

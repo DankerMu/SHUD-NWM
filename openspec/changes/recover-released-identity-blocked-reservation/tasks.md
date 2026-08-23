@@ -44,7 +44,7 @@ absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.m
 - [x] 5.3 Test: without the attestation, the stage behaves exactly as today and no submission occurs.
 - [x] 5.4 Test: refusal for each non-owned shape; repeated attestation idempotent.
 - [x] 5.5 Test: both release prior-state shapes emit the token exactly once (keep from `54714525`).
-- [x] 5.6 `tests/test_production_scheduler.py:48632` and `:48681` pass **unweakened** — assertions unchanged.
+- [x] 5.6 `tests/test_production_scheduler.py:48713` and `:48762` pass **unweakened** — assertions unchanged.
 - [x] 5.7 The **operator-facing path itself** is pinned by a test that goes through the entry point, not only the method behind it.
 - [x] 5.8 CLI tests cover: attest + idempotent repeat (both entrypoints), each refusal naming its failing precondition, help text carrying the attestation-not-a-proof non-goal, `--attest` without `--job-id` refused, and the listing carrying the CAS values.
 - [x] 5.9 The signal names the **invocable command**, not only the Python method, at every emission point — including the degraded failure trace, which is exactly when a human is reading by hand.
