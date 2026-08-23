@@ -37866,6 +37866,52 @@ _COLD_START_STRICT_EVIDENCE = {
             "gap",
             id="cold_start_shape_successor_ready",
         ),
+        # Not-ready for a reason OUTSIDE the allowlist: a defect in a state
+        # that DOES exist, so the successor-continuity tolerance must not be
+        # reached even with a ready successor.  The first row is the trap —
+        # its name says "missing" but it means history exists and its
+        # checkpoint is gone (#1150/#1152 operator-backfill population).
+        pytest.param(
+            {
+                "status": "blocked",
+                "ready": False,
+                "reason": "state_snapshot_index_prior_checkpoint_missing_after_history",
+            },
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "gap",
+            id="not_allowlisted_prior_checkpoint_missing_after_history",
+        ),
+        pytest.param(
+            {
+                "status": "blocked",
+                "ready": False,
+                "reason": "state_snapshot_index_lineage_mismatch",
+            },
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "gap",
+            id="not_allowlisted_lineage_mismatch",
+        ),
+        pytest.param(
+            {
+                "status": "blocked",
+                "ready": False,
+                "reason": "state_snapshot_index_checkpoint_unusable",
+            },
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "gap",
+            id="not_allowlisted_checkpoint_unusable",
+        ),
+        # Fail closed: not-ready evidence carrying no reason at all.
+        pytest.param(
+            {"status": "blocked", "ready": False},
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "gap",
+            id="not_ready_without_reason_fails_closed",
+        ),
     ],
 )
 def test_cycle_completion_verdict_unverifiable_truth_table(
@@ -37940,10 +37986,15 @@ def test_terminal_init_state_verdict_returns_unverifiable_only_when_not_ready(
     terminal = {"hydro_run": dict(_MATCHING_INIT_STATE_HYDRO_RUN)}
 
     verdict = scheduler_discovery_module._terminal_init_state_verdict
-    assert verdict(terminal, {"ready": False}) == "unverifiable"
-    assert verdict(terminal, {"ready": False, "candidate_state": selected}) == "unverifiable"
+    allowlisted = dict(_NOT_READY_STRICT_EVIDENCE)
+    assert verdict(terminal, allowlisted) == "unverifiable"
+    assert verdict(terminal, {**allowlisted, "candidate_state": selected}) == "unverifiable"
     assert verdict(terminal, {"ready": True}) == "conflict"
     assert verdict(terminal, {"ready": True, "candidate_state": selected}) == "match"
+    # Fail closed: a not-ready shape carrying no reason at all is NOT in the
+    # allowlist, so it cannot borrow the successor-continuity tolerance.
+    assert verdict(terminal, {"ready": False}) == "conflict"
+    assert verdict(terminal, {"ready": False, "reason": None}) == "conflict"
 
     # The helper's value domain is unchanged: `unverifiable` is produced by the
     # verdict-path wrapper AHEAD of it and never by the helper itself.
@@ -37956,6 +38007,69 @@ def test_terminal_init_state_verdict_returns_unverifiable_only_when_not_ready(
     assert (
         init_state_match_module.terminal_init_state_match(selected, {"init_state_id": "other"})
         == "conflict"
+    )
+
+
+_NON_ALLOWLISTED_NOT_READY_REASONS = (
+    # History EXISTS and its checkpoint is gone (#1150/#1152 operator-backfill
+    # population).  The name says "missing" but the meaning is the OPPOSITE of
+    # an absence — this is the trap the allowlist exists to keep out.
+    "state_snapshot_index_prior_checkpoint_missing_after_history",
+    # A state that DOES exist, but is the wrong lineage / wrong package.
+    "state_snapshot_index_lineage_mismatch",
+    "state_snapshot_index_package_checksum_mismatch",
+    # A state that DOES exist, but cannot be trusted or read.
+    "state_snapshot_index_checkpoint_unusable",
+    "state_snapshot_index_object_unreadable",
+    # No index at all — nothing was established either way.
+    "state_snapshot_index_unavailable",
+    # Anything nobody has classified yet defaults to the hard gap.
+    "some_reason_invented_after_this_change_shipped",
+)
+
+
+@pytest.mark.parametrize("reason", _NON_ALLOWLISTED_NOT_READY_REASONS)
+def test_terminal_init_state_verdict_conflicts_for_non_allowlisted_not_ready_reasons(
+    reason: str,
+) -> None:
+    """#1775: the `unverifiable` relaxation is admitted by CLOSED ALLOWLIST.
+
+    ``strict_warm_start_evidence`` reports not-ready for heterogeneous reasons.
+    Exactly one of them — ``state_snapshot_index_exact_checkpoint_missing`` —
+    means "there is genuinely no predecessor state here", and that is the only
+    one that may borrow the successor-continuity tolerance.  Every other reason
+    reports that something is WRONG with a state that DOES exist; granting them
+    the relaxation would let a run that started from a wrong-generation or
+    corrupt predecessor score its cycle ``complete`` merely because a usable
+    successor exists.  A reason nobody has classified yet gets the hard gap by
+    construction, never by failing to be excluded.
+    """
+
+    from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+
+    terminal = {"hydro_run": dict(_ABSENT_INIT_STATE_HYDRO_RUN)}
+    assert (
+        scheduler_discovery_module._terminal_init_state_verdict(
+            terminal, {"status": "blocked", "ready": False, "reason": reason}
+        )
+        == "conflict"
+    )
+    assert reason not in scheduler_discovery_module.TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS
+
+
+def test_terminal_init_state_unverifiable_allowlist_is_exactly_one_reason() -> None:
+    """The allowlist's membership is itself the contract (#1775).
+
+    Node-22's full-window probe (1280 rows) shows exactly one not-ready reason
+    in production — ``state_snapshot_index_exact_checkpoint_missing``, 392 rows,
+    14 of them the wedged terminal candidates this change unwedges.  Widening
+    the set is a deliberate act that has to edit this pin.
+    """
+
+    from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+
+    assert scheduler_discovery_module.TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS == frozenset(
+        {"state_snapshot_index_exact_checkpoint_missing"}
     )
 
 
@@ -38034,6 +38148,67 @@ def test_candidate_loop_skips_terminal_success_before_warm_admission(
     assert candidates == []
     assert [entry.reason for entry in blocked] == []
     assert [entry["reason"] for entry in skipped] == ["terminal_hydro_success"]
+
+
+@pytest.mark.parametrize(
+    ("successor_state", "expected_skipped", "expected_blocked"),
+    [
+        # No successor verdict at all (db-free disabled / no next allowed cycle
+        # / outside the strict window).  ``_successor_state_terminal_can_skip``
+        # treats ``None`` as "no objection", exactly as the sibling terminal
+        # exit one branch up does — so the terminal skip stands.
+        pytest.param(None, ["terminal_hydro_success"], [], id="successor_no_verdict_skips"),
+        # A successor checkpoint that exists as a verdict and says NOT ready is
+        # an objection.  The row must not take D4's new early exit; it falls
+        # through to the warm-admission gate and keeps its pre-#1775 routing.
+        pytest.param(
+            {"ready": False},
+            [],
+            ["state_snapshot_index_exact_checkpoint_missing"],
+            id="successor_not_ready_blocks",
+        ),
+    ],
+)
+def test_candidate_loop_terminal_skip_exit_still_gates_on_successor_state(
+    monkeypatch: Any,
+    tmp_path: Path,
+    successor_state: dict[str, Any] | None,
+    expected_skipped: list[str],
+    expected_blocked: list[str],
+) -> None:
+    """#1775 D4: the new terminal skip exit carries the successor-continuity gate.
+
+    The exit's ``continue`` bypasses the whole downstream terminal ladder,
+    including the successor gate at ``scheduler_candidates.py:514`` that emits
+    ``strict_warm_start_successor_checkpoint_missing``.  Without an explicit
+    ``_successor_state_terminal_can_skip`` clause on the exit itself, a
+    candidate whose successor checkpoint is missing or rejected would be
+    reported "done" by the pass receipt while ``_cycle_completion_verdict``
+    scores the very same (model, cycle) a ``gap`` — and the
+    ``state_snapshot_index_*`` blocker evidence would vanish from the receipt.
+
+    The two rows are deliberately NOT symmetric: ``None`` means "no verdict was
+    reached", which is not an objection, while ``{"ready": False}`` is one.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
+        successor_state=successor_state,
+        strict_evidence=dict(_NOT_READY_STRICT_EVIDENCE),
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=models,
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon={}),
+        ],
+    )
+
+    assert candidates == []
+    assert [entry["reason"] for entry in skipped] == expected_skipped
+    assert [entry.reason for entry in blocked] == expected_blocked
 
 
 def test_cycle_completion_verdict_keeps_legacy_id_only_rows_completing(

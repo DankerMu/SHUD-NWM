@@ -15,10 +15,20 @@ When a cycle's candidate reaches a terminal-success decision, its successor stat
 the verdict SHALL remain `gap` regardless of the comparison result. Legacy per-basin terminal
 rows that record init-state identity SHALL keep their current match semantics unchanged.
 
-When the strict warm-start resolution is NOT ready and therefore names no state to compare
-against, the comparison SHALL return `unverifiable` rather than `conflict`, and the verdict
-SHALL be `complete` if and only if the successor state proves continuity — the same physical
-continuity standard the `absent` branch already applies. No new leniency is introduced: a
+When the strict warm-start resolution is NOT ready **for a reason that means no predecessor
+state exists**, the comparison SHALL return `unverifiable` rather than `conflict`, and the
+verdict SHALL be `complete` if and only if the successor state proves continuity — the same
+physical continuity standard the `absent` branch already applies.
+
+The not-ready reason SHALL be matched against a closed ALLOWLIST, never a denylist: a reason
+absent from the allowlist SHALL classify as `conflict` and keep today's hard gap. The allowlist
+SHALL contain only reasons whose meaning is "there is genuinely no predecessor state here", and
+SHALL NOT contain any reason that reports something wrong with a state that does exist — a
+lineage or checksum mismatch, an unusable or unreadable checkpoint, a missing or unavailable
+index, or `state_snapshot_index_prior_checkpoint_missing_after_history` (which means history
+exists but its checkpoint is gone: the operator-backfill population, an anomaly rather than an
+absence). A newly introduced not-ready reason SHALL therefore default to `conflict` until it is
+deliberately admitted. No new leniency is introduced: a
 successor checkpoint that exists and is usable is itself proof that the cycle ran to completion
 and produced a usable state. A `conflict` produced by an actual field disagreement SHALL remain
 a hard gap.
@@ -100,3 +110,13 @@ which remains inside the scope.
 
 - **WHEN** an exact-predecessor entry is present at the expected identity key
 - **THEN** it is still found and classified (including the wrong-generation quarantine path) exactly as before, because the expected key's `valid_time` equals the cutoff and remains in scope
+
+#### Scenario: A not-ready reason outside the allowlist keeps the hard gap
+
+- **WHEN** a cycle's candidate is terminal-success, its successor state entry is usable, and its strict warm-start resolution is not ready for a reason reporting a defect in an existing state — a lineage or checksum mismatch, an unusable or unreadable checkpoint, or a prior checkpoint missing after history
+- **THEN** the comparison returns `conflict`, the verdict remains `gap`, and the successor-continuity tolerance is not applied
+
+#### Scenario: The allowlist is closed against new reasons
+
+- **WHEN** the strict warm-start resolution is not ready for a reason that is not named in the allowlist, whatever that reason is
+- **THEN** the comparison returns `conflict` — admission to the relaxation is by explicit enumeration, never by failing to exclude

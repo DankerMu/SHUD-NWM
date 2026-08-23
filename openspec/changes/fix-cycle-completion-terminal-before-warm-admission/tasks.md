@@ -47,3 +47,8 @@
 
 - [x] #1776 — 根因 `exists_any_generation` 作用域：owner 指示不另案，已并入本 change 的 D5，
       issue 关闭并留言记录改动面实测。
+- [x] #1782 — `unverifiable` 放宽对 strict not-ready 的**成因**不作区分（错代/损坏/已修复前驱
+      也能靠可用后继判 complete）。独立 verifier 裁 PLAUSIBLE、DEFER：代码与规格一致，
+      非 code-vs-spec 偏差，`design.md` 风险轴 (1) 已接受。修法方向为成因允许清单。
+- [x] #1757 — retention 与 D5 的交互（裁剪掉某 (model, source) 在 cutoff 或更早的最后一条条目
+      会使其冷启动而非阻塞）已作为设计输入留言路由，现网无此几何形状。

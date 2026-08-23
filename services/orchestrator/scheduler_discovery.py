@@ -28,6 +28,29 @@ MAX_DISCOVERED_CYCLES = 10000
 # to compare the terminal row against.
 TERMINAL_INIT_STATE_UNVERIFIABLE = "unverifiable"
 
+# The `unverifiable` relaxation is admitted by CLOSED ALLOWLIST, never by
+# denylist (#1775).  `strict_warm_start_evidence` reports not-ready for
+# heterogeneous reasons: some mean "there is genuinely no predecessor state
+# here" (the wedge this change exists to unblock), others report that something
+# is WRONG with a state that DOES exist — a lineage/checksum mismatch, an
+# unusable or unreadable checkpoint, a missing or unavailable index.  Only the
+# first kind may borrow the successor-continuity tolerance; granting it to the
+# second would let a run that started from a wrong-generation or corrupt
+# predecessor score its cycle `complete` merely because a successor exists.
+# Anything not enumerated here — including a not-ready evidence mapping that
+# carries no reason at all, and any reason introduced later — classifies
+# `conflict` and keeps today's hard gap.  Adding a member is a deliberate act.
+#
+# Deliberately EXCLUDED, despite the "missing" in its name:
+# `state_snapshot_index_prior_checkpoint_missing_after_history` means history
+# EXISTS and its checkpoint is gone — the #1150/#1152 operator-backfill
+# population.  That is an anomaly, not an absence, and must keep blocking.
+TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS = frozenset(
+    {
+        "state_snapshot_index_exact_checkpoint_missing",
+    }
+)
+
 
 class SchedulerResourceLimitError(ValueError):
     def __init__(self, reason: str, details: Mapping[str, Any]) -> None:
@@ -555,9 +578,10 @@ def _terminal_init_state_verdict(
     the discriminator between them is the strict resolution's READY flag, never
     the mere presence or absence of ``candidate_state``:
 
-    NOT READY
-        a state was required for the candidate but could not be resolved, so
-        nothing was named to compare against — ``unverifiable``.  This reverses
+    NOT READY, for an allowlisted reason
+        a state was required for the candidate but could not be resolved
+        because none exists, so nothing was named to compare against —
+        ``unverifiable``.  This reverses
         the decision this docstring used to record ("keeps today's gap, which
         ``conflict`` expresses here").  That decision was taken when this path
         was reachable only for a READY resolution, where "names no state" could
@@ -567,6 +591,12 @@ def _terminal_init_state_verdict(
         would have needed is MISSING, which says nothing at all about whether
         the run already completed.  The cycle verdict tolerates it if and only
         if the successor state proves continuity (D3).
+    NOT READY, for any other reason
+        the resolution failed because something is wrong with a state that
+        DOES exist (lineage/checksum mismatch, unusable or unreadable
+        checkpoint, missing index), or for a reason nobody has classified yet.
+        ``conflict`` — today's hard gap, unchanged.  See
+        :data:`TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS`.
     READY but naming no state
         the cold-start generation shapes ``COLD_NEW_MODEL`` /
         ``COLD_DECLARED_CUTOVER`` (``scheduler_generation_gate.py:349-376``):
@@ -576,7 +606,10 @@ def _terminal_init_state_verdict(
     """
 
     if not bool(strict_evidence.get("ready")):
-        return TERMINAL_INIT_STATE_UNVERIFIABLE
+        not_ready_reason = str(strict_evidence.get("reason") or "")
+        if not_ready_reason in TERMINAL_INIT_STATE_UNVERIFIABLE_NOT_READY_REASONS:
+            return TERMINAL_INIT_STATE_UNVERIFIABLE
+        return TERMINAL_INIT_STATE_CONFLICT
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or init_state_field(selected, "state_id") in (None, ""):
         return TERMINAL_INIT_STATE_CONFLICT

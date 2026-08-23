@@ -439,6 +439,15 @@ def build_candidates(
                     state_decision is not None
                     and state_decision.action == "skip"
                     and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                    # The successor-continuity gate applies to THIS exit exactly
+                    # as it applies to the sibling terminal exit one branch up
+                    # and to the downstream ladder (:514) this ``continue``
+                    # skips.  Without it a candidate whose successor checkpoint
+                    # is missing/rejected would be reported "done" by the pass
+                    # receipt while ``_cycle_completion_verdict`` scores the same
+                    # (model, cycle) a ``gap``.  Non-conforming rows fall through
+                    # to the ladder and keep their pre-#1775 routing.
+                    and _successor_state_terminal_can_skip(successor_state)
                 ):
                     skipped.append(
                         {

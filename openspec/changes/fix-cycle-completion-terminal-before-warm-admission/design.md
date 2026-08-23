@@ -119,9 +119,28 @@ expresses here"）。该函数成文时这条路径**只在 strict-ready 下可�
 | **2026-08-08T12:00** | **14** | **正是被钉死的 7 个新流域 ×2 source** |
 | 2026-08-22T00:00 | 4 | 零——`basins_huai_main` / `basins_jialingjiang`（#1698 的 M1→M1′ 切换），cutover 前被 `lineage_scoped_out_pre_cutover` 排除在完成度 scope 外 |
 
-即 D5 的改动面与 D1-D4 是**同一批 14 对**。原先担心的"全机队语义变更"（state 丢失的 model
-静默从 packaged IC 重新 bootstrap）在实测下不成立：72 对既有 model 的历史条目全部远早于
-窗口内任何 cutoff。
+**这张表的判别式只管布尔量。** 它证明的是 `history_exists_any_generation` /
+`history_exists_current_generation` 这两个**分支选择信号**只对那 14 对翻转，
+原先担心的"全机队语义变更"（state 丢失的 model 静默从 packaged IC 重新 bootstrap）
+在实测下不成立：72 对既有 model 的历史条目全部远早于窗口内任何 cutoff。
+
+**但收窄同时改变了摘要值，这不在上表覆盖内**（独立 verifier 实测确认）：
+`entries_for_model` 还喂 `latest_any` / `latest_current` →
+`latest_any_generation_checkpoint` / `latest_current_generation_checkpoint`。
+对**任何**在候选 cutoff 之后还有条目的 (model, source) 对——回填老 cycle 时几乎是全部——
+这两个摘要从"史上最新"变成"截至候选时刻最新"。实测：某既有对持有 08-18..08-21 的条目，
+cutoff=08-19 时 `latest_any` 由 08-21 变为 08-19；布尔量与 `has_exact_predecessor` 不变。
+
+这些摘要在绝大多数路径上**只进 evidence、不改决策**：分支由（未翻转的）布尔量选定
+（`scheduler_generation.py:1056` 分支 (c)、`:1108` 分支 (d)），warm-continue 的前驱身份取自
+`valid_time == cutoff` 的 `exact_predecessor_entry`（始终在范围内），故 `:1267-1285` 不变。
+
+**唯一的决策相关面**是分支 (d) 的 stale-declaration old-checksum 比较
+（`scheduler_generation.py:1164-1167`，`latest_old = history.latest_any_generation_checkpoint`），
+仅当 cutoff 或更早不存在当代历史时可达：收窄前 `latest_any` 可能是 cutover **之后**的新代条目
+→ `BLOCK_DECLARATION_STALE` / `old_checksum_mismatch`；收窄后取到的是老代条目 → 声明生效。
+方向是**纠正性**的（每个消费者都按"候选时刻"求值，未收窄的值让更晚 cycle 的产出去回答关于更早
+候选的问题——正是 D5 要消灭的那种循环证据），并已补回归测试钉住。
 
 ## Evidence Mapping
 

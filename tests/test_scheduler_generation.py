@@ -2688,6 +2688,164 @@ def test_transition_blocks_old_checksum_mismatch_as_stale(tmp_path: Path) -> Non
     )
 
 
+# ---------------------------------------------------------------------------
+# #1775 D5 regression: branch (d)'s old-checksum comparison reads
+# ``latest_any_generation_checkpoint``, which D5 now scopes to
+# ``valid_time <= cutoff``.  The tests above drive that comparison from a
+# hand-built ``_HistorySignal``, so they are blind to the scoping.  These two
+# drive it from a REAL state index through the real
+# ``generation_scoped_history_signal``, which is the only way the scope shows up.
+# ---------------------------------------------------------------------------
+
+
+def _history_signal_from_index(
+    tmp_path: Path,
+    entries: list[dict[str, Any]],
+    *,
+    cutoff: str,
+    current_package_checksum: str,
+    expected_predecessor_cycle_id: str,
+    required_lead_hours: int = 12,
+) -> tuple[generation._HistorySignal, dict[str, Any]]:
+    """Real index -> real signal -> ``_HistorySignal``, wired as the gate wires it.
+
+    Mirrors ``scheduler_generation_gate.py:385-400`` field for field; the point
+    of the exercise is that the evidence comes from
+    ``FileStateSnapshotIndexRepository`` rather than from ``_signal()``.
+    """
+    from tests.test_state_manager_generation_history import (
+        FileStateSnapshotIndexRepository,
+        _publish_entries,
+    )
+
+    index_path = _publish_entries(tmp_path, entries, generated_at="2026-07-06T18:00:00Z")
+    repo = FileStateSnapshotIndexRepository(
+        str(index_path),
+        object_store_root=tmp_path / "objects",
+        object_store_prefix="s3://nhms",
+        now=_dt("2026-07-06T18:00:00Z"),
+    )
+    evidence = repo.generation_scoped_history_signal(
+        model_id="model_a",
+        source_id="gfs",
+        before_time=_dt(cutoff),
+        current_package_checksum=current_package_checksum,
+        expected_predecessor_cycle_id=expected_predecessor_cycle_id,
+        expected_predecessor_lead_hours=required_lead_hours,
+    )
+    assert evidence["ready"] is True
+    signal = generation._HistorySignal(
+        exists_current_generation=bool(evidence.get("history_exists_current_generation")),
+        exists_any_generation=bool(evidence.get("history_exists_any_generation")),
+        latest_current_generation_checkpoint=evidence.get(
+            "latest_current_generation_checkpoint"
+        ),
+        latest_any_generation_checkpoint=evidence.get("latest_any_generation_checkpoint"),
+        wrong_generation_predecessor_present=bool(
+            evidence.get("wrong_generation_predecessor_present")
+        ),
+        wrong_generation_predecessor_checksum=str(
+            evidence.get("wrong_generation_predecessor_checksum") or ""
+        ),
+    )
+    return signal, evidence
+
+
+@pytest.mark.parametrize(
+    ("post_cutoff_checksum", "post_cutoff_id"),
+    [
+        # A THIRD generation published after the cutover cycle (the model was
+        # repackaged again later).  Pre-D5 this row was the ``latest_any``
+        # sample, so branch (d) compared the declaration's ``old_checksum``
+        # against a checksum from the FUTURE -> BLOCK_DECLARATION_STALE /
+        # ``old_checksum_mismatch``: a later cycle's output answering a question
+        # about an earlier candidate, the same circular evidence D5 removes.
+        pytest.param(_hex("c"), "state_third_generation_later", id="third_generation_after_cutoff"),
+        # The ordinary shape: the cutover ran and later cycles wrote
+        # NEW-generation checkpoints.  Pre-D5 those counted as
+        # current-generation history and pushed the candidate out of branch (d)
+        # into branch (e) -> block_predecessor_pending.
+        pytest.param(NEW_CHECKSUM, "state_new_generation_later", id="new_generation_after_cutoff"),
+    ],
+)
+def test_declaration_binds_when_only_post_cutoff_history_would_contradict_it(
+    tmp_path: Path,
+    post_cutoff_checksum: str,
+    post_cutoff_id: str,
+) -> None:
+    """#1775 D5 at branch (d): the old-checksum comparison is as-of candidate time.
+
+    Geometry: a cutover-declared model at the cutover cycle itself
+    (``candidate_cycle_time_utc == effective_cycle_utc``), with the state index
+    carrying BOTH an OLD-generation entry at ``valid_time`` before the cutoff
+    AND a later entry after it.  Only the at-or-before entry may drive
+    ``latest_any_generation_checkpoint``; the declaration therefore binds and
+    the candidate cold-starts on the declared cutover, instead of being blocked
+    by an entry that did not exist when the candidate's cycle came due.
+
+    Both rows are pinned because the two post-cutoff checksums fail
+    DIFFERENTLY without D5's scope — see the parametrization comments.
+    """
+    from tests.test_state_manager_generation_history import _entry
+
+    object_root = tmp_path / "objects"
+    object_root.mkdir(parents=True, exist_ok=True)
+    old_generation_entry = _entry(
+        state_id="state_old_generation_before_cutoff",
+        valid_time="2026-07-06T00:00:00Z",
+        cycle_id="gfs_2026070512",
+        lead_hours=12,
+        checksum_seed=b"old1",
+        package_checksum=OLD_CHECKSUM,
+        object_root=object_root,
+    )
+    post_cutoff_entry = _entry(
+        state_id=post_cutoff_id,
+        valid_time="2026-07-07T00:00:00Z",
+        cycle_id="gfs_2026070612",
+        lead_hours=12,
+        checksum_seed=b"post1",
+        package_checksum=post_cutoff_checksum,
+        object_root=object_root,
+    )
+
+    signal, evidence = _history_signal_from_index(
+        tmp_path,
+        [old_generation_entry, post_cutoff_entry],
+        cutoff="2026-07-06T12:00:00Z",
+        current_package_checksum=NEW_CHECKSUM,
+        expected_predecessor_cycle_id="gfs_2026070600",
+    )
+
+    # The value that drives branch (d)'s ``old_checksum`` comparison is the
+    # at-or-before-cutoff entry, never the later one.  This assertion alone is
+    # M4-sensitive; the decision below pins the consequence.
+    assert signal.exists_any_generation is True
+    assert signal.exists_current_generation is False
+    assert evidence["latest_any_generation_checkpoint"]["state_id"] == (
+        "state_old_generation_before_cutoff"
+    )
+    assert evidence["latest_any_generation_checkpoint"]["model_package_checksum"] == OLD_CHECKSUM
+
+    declaration = generation.load_cutover_declaration(
+        str(_write_declaration(tmp_path, effective_cycle_utc="2026-07-06T12:00:00Z")),
+        now=NOW,
+    )
+    evaluation = generation.evaluate_transition_decision(
+        model_id="model_a",
+        package_checksum=NEW_CHECKSUM,
+        source_id="gfs",
+        candidate_cycle_time_utc=_dt("2026-07-06T12:00:00Z"),
+        required_lead_hours=12,
+        history=signal,
+        declaration=declaration,
+    )
+
+    assert evaluation.decision == generation.TransitionDecision.COLD_DECLARED_CUTOVER
+    assert evaluation.cold_start_reason == "declared_cutover_at_effective_cycle"
+    assert evaluation.declaration_evidence.get("stale_reason") is None
+
+
 def test_transition_blocks_missing_candidate_checksum_with_declaration_as_stale(
     tmp_path: Path,
 ) -> None:
