@@ -926,7 +926,11 @@ def _already_ingested_runs(
     warm-start recompute with the same run_id. Recorded residual: on a legacy
     NULL-key run the aggregate yields parsed_at NULL, so recompute detection
     degrades to the init_state comparison alone -- a rewrite carrying the SAME
-    initial state is not detected on that cohort. hydro_run.updated_at is NOT
+    initial state is not detected on that cohort. #1686 widens that cohort by
+    the size of the run_id/run_key drift population: the sanctioned pushdown
+    aid on the join also removes the fact rows of a published run whose stored
+    run_id differs from the one this call binds, which yields the same NULL
+    parsed_at. hydro_run.updated_at is NOT
     used as a fallback: publish deliberately leaves it alone while every tick's
     register upsert bumps it, so it is not a parse timestamp.
 
@@ -957,16 +961,27 @@ def _already_ingested_runs(
                 -- retention-dropped chunks, must not re-trigger the per-cycle
                 -- handoff); a parsed run still needs at least one key-visible
                 -- row.
-                -- #1442: key-only join, no transitional text aid
-                -- (rt.run_id = h.run_id is the forbidden text fact join).
+                -- #1442/#1686: the join condition itself stays key-only. It
+                -- carries exactly one sanctioned transitional text aid, on
+                -- run_id -- compression's first segmentby column, which is the
+                -- only predicate that can reach a compressed chunk's index
+                -- while run_key is neither segmented nor indexed there. It
+                -- binds the SAME array as the WHERE below, so it can only
+                -- narrow. It must stay in the ON clause: in WHERE it would
+                -- drop the LEFT JOIN's NULL-extended rows and delete an
+                -- rt-less published run from the result. rt.run_id = h.run_id
+                -- (the text fact join) remains forbidden -- the planner has no
+                -- constant to push there.
                 LEFT JOIN hydro.river_timeseries rt
                   ON rt.run_key = h.run_key
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                 AND rt.run_id = ANY(%s)
                 WHERE h.run_id = ANY(%s)
                   AND h.status IN ('parsed', 'published')
                 GROUP BY h.run_id, h.init_state_id, h.status
                 HAVING h.status = 'published' OR COUNT(rt.run_key) > 0
                 """,
-                (run_ids,),
+                (run_ids, run_ids),
             )
             return retired | {
                 str(row[0])

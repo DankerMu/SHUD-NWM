@@ -53,3 +53,17 @@ run 277,872 行全 NULL）。键连接对这些早已 `published` 的 run 永远
 - 代码：`scripts/node27_autopipeline.py`（一个函数的 SQL 与 docstring）。
 - 测试：新增真实 DB integration 用例 + SQL 形态 pin；既有清零 oracle 不动。
 - 运维：node-27 下一 tick 即恢复 ~4 min rc=0；新预报入库延迟回到分钟级。
+
+## Correction 2026-08-22 (#1686)
+
+上面 Impact 段最后一行「node-27 下一 tick 即恢复 ~4 min rc=0」**已被实测证伪**。
+部署后 tick 落在 591–1071 s，未回到 ~240 s。
+
+原因不是本单的修复无效——本单修的是**正确性**（tick 回到 rc=0），那一条成立。
+失实的是对**代价**的预期：本单没有触及 `_already_ingested_runs` 那条
+`LEFT JOIN ... ON rt.run_key = h.run_key` 的访问路径，而 `run_key` 在压缩侧既非
+`compress_segmentby` 也无索引，键谓词无路可下推，于是每个 tick 仍把全部压缩 chunk
+整块解压。这一项由 #1686 单独承接
+（`openspec/changes/autopipe-compressed-chunk-pushdown-aid/`）。
+
+保留原文不改写，只补记更正。

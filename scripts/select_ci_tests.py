@@ -1038,9 +1038,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_autopipeline_handoff.py",
             "tests/test_display_publish_status_only.py",
             # #1442: the two per-tick criteria are registered statements of the
-            # zero-text-identity oracle (group D, no sanctioned aid at all), and
-            # the oracle additionally censuses this file for a THIRD
-            # river_timeseries statement. Nothing above would notice either.
+            # zero-text-identity oracle (group D — since #1686 the ingest
+            # criterion carries one sanctioned `run_id` aid in its ON clause,
+            # the publish one none), and the oracle additionally censuses this
+            # file for a THIRD river_timeseries statement. Nothing above would
+            # notice either.
             "tests/test_river_ts_text_identity_cleanup.py",
         ),
     ),

@@ -860,13 +860,25 @@ def _seed_run(
         )
 
 
-def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
+def _seed_run_facts(
+    connection: Any,
+    run_id: str,
+    *,
+    normalized: bool,
+    text_run_id: str | None = None,
+) -> None:
     """A handful of `river_timeseries` rows for ``run_id``.
 
     ``normalized=False`` reproduces the legacy population: text identity filled,
     all seven surrogate/enum columns NULL, exactly like the rows the 000051
     backfill runner had to skip inside already-compressed chunks. A few rows are
     enough — the predicate is an existence test, not a volume test.
+
+    ``text_run_id`` overrides the value written to the TEXT `run_id` column
+    while `run_key` still resolves from ``run_id``, i.e. it injects run_id /
+    run_key drift (#1686). The table has no foreign key on `run_id` (000006),
+    so an arbitrary text value is storable — which is exactly why the drift is
+    possible in production and has to be tested rather than argued away.
     """
     filled = """
         (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(run_id)s),
@@ -886,13 +898,17 @@ def _seed_run_facts(connection: Any, run_id: str, *, normalized: bool) -> None:
                  valid_time, variable, value, unit, quality_flag,
                  run_key, river_network_version_key, basin_version_key, river_segment_key,
                  variable_e, unit_e, quality_flag_e)
-            SELECT %(run_id)s, 'bv1', 'rnv1', 'seg-' || s,
+            SELECT %(text_run_id)s, 'bv1', 'rnv1', 'seg-' || s,
                    %(base_time)s::timestamptz + (h * INTERVAL '1 hour'),
                    'q_down', random() * 10, 'm3/s', 'ok',
                    {filled if normalized else empty}
             FROM generate_series(1, 3) s, generate_series(0, 2) h;
             """,
-            {"run_id": run_id, "base_time": _BASE_TIME},
+            {
+                "run_id": run_id,
+                "text_run_id": text_run_id if text_run_id is not None else run_id,
+                "base_time": _BASE_TIME,
+            },
         )
 
 
@@ -1178,5 +1194,89 @@ def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_a
             ["keyed-published", _SUPERSEDED_RUN],
             object_store_root=tmp_path,
         ) == {"keyed-published", _SUPERSEDED_RUN}
+    finally:
+        connection.close()
+
+
+def test_already_ingested_run_id_drift_costs_a_published_run_its_recompute_detection(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """#1686 design D3: the one non-fail-safe path of the pushdown aid, pinned.
+
+    The aid `AND rt.run_id = ANY(%s)` in the join's ON clause can only NARROW
+    the rt side, which is safe everywhere the criterion looks at row EXISTENCE:
+    a `parsed` run at worst flips to "not ingested" and gets re-parsed (the
+    writer is replay-convergent), and a `published` run's verdict never depended
+    on the rt side since #1674.
+
+    `MAX(rt.created_at) AS parsed_at` is the exception. A `published` run whose
+    fact rows carry a `run_id` OUTSIDE the bound array still matches on
+    `run_key`, but the aid removes those rows, so the aggregate yields NULL —
+    and `_ingested_run_is_current` treats a NULL `parsed_at` as current
+    (`scripts/node27_autopipeline.py`, the `parsed_at is None` branch). A newer
+    product mtime is therefore NOT detected and the run is never reparsed.
+
+    This test asserts the OBSERVED behaviour rather than a preferred one: the
+    run comes back complete, i.e. the residual #1674 recorded for the NULL-key
+    legacy cohort now also covers any run whose `run_id` and `run_key` disagree.
+    Its scale is a deployment fact (the database's own
+    `hydro.verify_river_identity_normalization()` does not audit this pair), so
+    it is measured on node-27 and recorded in the delivery receipt.
+
+    The comparison case is `..._compares_product_mtime_to_parsed_at` above:
+    identical seeding minus the drift, where the same newer mtime DOES exclude
+    the run. If the aid is ever removed, this test's rows become visible again,
+    `parsed_at` goes non-NULL and the run is excluded — so this goes red rather
+    than silently outliving the debt it documents.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "drifted-published", status="published", init_state_id="state-a")
+        _seed_run_facts(
+            connection,
+            "drifted-published",
+            normalized=True,
+            text_run_id="drifted-published-rewritten",
+        )
+
+        # Non-vacuity: the rows ARE key-visible (so the join matches and the
+        # pre-#1686 statement would have had a non-NULL `parsed_at`), and NONE
+        # of them carries the `run_id` the call below binds (so the aid removes
+        # exactly them). Without both, the assertion at the end proves nothing.
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries rt "
+                "JOIN hydro.hydro_run h ON h.run_key = rt.run_key "
+                "WHERE h.run_id = 'drifted-published'",
+            )
+            > 0
+        )
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = 'drifted-published'",
+            )
+            == 0
+        )
+
+        # Manifest agrees on the initial state, so detection falls through to
+        # the mtime branch — the branch a NULL `parsed_at` short-circuits.
+        _write_manifest(tmp_path, "drifted-published", "state-a")
+        product = tmp_path / "runs" / "drifted-published" / "output" / "rivqdown.csv"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text("time,q\n", encoding="utf-8")
+        future = datetime.now(tz=UTC).timestamp() + 3600
+        os.utime(product, (future, future))
+        assert autopipe._run_product_mtime(tmp_path, "drifted-published") >= future
+
+        # The recorded residual: the newer product is NOT reparsed.
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["drifted-published"],
+            object_store_root=tmp_path,
+        ) == {"drifted-published"}
     finally:
         connection.close()

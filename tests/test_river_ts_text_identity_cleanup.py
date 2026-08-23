@@ -44,7 +44,8 @@ A, eight segment blocks      river_segment_id, river_network_version_id,
 A9, latest-product fallback  run_id, river_network_version_id, variable
 B, publisher discovery       variable
 C, copyback EXISTS           variable
-D, autopipeline (2)          none
+D1, autopipeline ingest      run_id (#1686, in the ON clause)
+D2, autopipeline publish     none
 E, seed/smoke/helpers        none
 F, parser replace chain (3)  none
 ===========================  ==========================================
@@ -202,6 +203,12 @@ A_SEGMENT_BLOCK_AIDS = {"river_segment_id", "river_network_version_id", "variabl
 A_FALLBACK_AIDS = {"run_id", "river_network_version_id", "variable"}
 PUBLISHER_AIDS = {"variable"}
 COPYBACK_AIDS = {"variable"}
+# D, the autopipeline ingest criterion (#1686). Its LEFT JOIN reaches compressed
+# chunks on every tick and `run_key` is neither segmentby nor indexed there, so
+# the one sanctioned aid is `run_id` — segmentby column 1 of 000047. The publish
+# criterion stays aid-free: it correlates inside an EXISTS that the planner can
+# satisfy from the uncompressed frontier.
+AUTOPIPE_INGEST_AIDS = {"run_id"}
 NO_AIDS: set[str] = set()
 
 _IDENTITY = {
@@ -852,6 +859,18 @@ def test_copyback_discovery_probe_correlates_on_the_run_key() -> None:
 # ---------------------------------------------------------------------------
 
 
+# The ingest criterion's ON clause, as #1686 pins it: the key condition, the
+# removal marker, then the aid — so the aid is separated from `run_key` by
+# exactly one AND and the marker sits on the line immediately above the line
+# #1342 has to delete. Same shape (and same reason) as the parser's
+# `_PARSER_AID_ADJACENCY` below. Whitespace between the lines is free; the
+# ORDER is not.
+_AUTOPIPE_INGEST_AID_SHAPE = re.compile(
+    rf"ON rt\.run_key = h\.run_key[ \t]*\n[ \t]*{re.escape(PUSHDOWN_AID_MARKER)}[ \t]*\n"
+    rf"[ \t]*AND rt\.run_id = ANY\(%s\)"
+)
+
+
 def _autopipeline_statement(function: str) -> str:
     statements = _sql_constants(
         module=("scripts", "node27_autopipeline.py"),
@@ -862,11 +881,90 @@ def _autopipeline_statement(function: str) -> str:
     return statements[0]
 
 
-def test_autopipeline_ingest_criterion_joins_by_key_with_no_aid() -> None:
+def test_autopipeline_ingest_criterion_joins_by_key_with_one_marked_run_id_aid() -> None:
+    """#1686: key-only join CONDITION, plus one sanctioned `run_id` aid in the ON.
+
+    Was `..._with_no_aid` until #1686. The key-only join was measured to be the
+    per-tick cost driver: `run_key` is neither a segmentby column nor indexed on
+    the compressed side (000047), so the LEFT JOIN decompressed every compressed
+    chunk of the fact table on every tick — including one whose 266M rows are
+    ALL `run_key IS NULL` and therefore cannot match at all. `run_id` is
+    segmentby column 1, so the aid turns each compressed leg's `Seq Scan on
+    compress_hyper_*` into an `Index Cond: (run_id = ANY (...))`.
+
+    The join condition itself is unchanged (`rt.run_key = h.run_key`), and the
+    ceiling is the shared sanctioned set, so this cannot grow a second text
+    column. Where the aid sits — ON, not WHERE — is a separate assertion below,
+    because none of the shape machinery distinguishes the two clauses.
+    """
     sql = _autopipeline_statement("_already_ingested_runs")
 
-    _assert_switched_surface(sql, "rt", NO_AIDS, "autopipeline _already_ingested_runs")
+    _assert_switched_surface(sql, "rt", AUTOPIPE_INGEST_AIDS, "autopipeline _already_ingested_runs")
     assert "ON rt.run_key = h.run_key" in sql
+
+
+def _execute_call_params(function: str, needle: str) -> ast.expr:
+    """The second argument of the `cur.execute(...)` whose SQL mentions ``needle``."""
+    tree = ast.parse(REPO_ROOT.joinpath("scripts", "node27_autopipeline.py").read_text(encoding="utf-8"))
+    matches = [
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == function
+    ]
+    assert len(matches) == 1, f"node27_autopipeline.py: expected exactly one {function}"
+    calls = [
+        node
+        for node in ast.walk(matches[0])
+        if isinstance(node, ast.Call)
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and needle in node.args[0].value
+    ]
+    assert len(calls) == 1, f"{function}: expected exactly one execute() whose SQL mentions {needle!r}"
+    return calls[0].args[1]
+
+
+def test_autopipeline_ingest_aid_lives_in_the_on_clause_and_binds_the_same_array() -> None:
+    """#1686 design D2: the aid's POSITION is the semantic invariant, not its text.
+
+    In `WHERE` the very same predicate stops being redundant: it filters the
+    LEFT JOIN's NULL-extended rows, so a `published` run with zero matching
+    fact rows — the #1674 cohort this criterion exists to keep complete —
+    disappears from the result and is re-ingested every tick. A substring check
+    for `rt.run_id = ANY(` survives that move unchanged, which is why the
+    assertion is made against the aid's offset relative to the statement's
+    single `WHERE`.
+
+    The params tuple is pinned in the same test because the aid is only
+    redundant if it binds the SAME array as `WHERE h.run_id = ANY(%s)`: binding
+    a different one would silently narrow the criterion, and binding nothing
+    extra would make psycopg2 raise at the first tick. `(run_ids, run_ids)` is
+    identity by construction, and the placeholder ORDER is what the position
+    assertion above already fixes (ON precedes WHERE).
+    """
+    sql = _autopipeline_statement("_already_ingested_runs")
+    outer = outer_predicates(sql)
+
+    # The offsets are only meaningful against a single, unambiguous WHERE.
+    assert outer.count(" WHERE ") == 1, outer
+    where_at = outer.index(" WHERE ")
+    join_at = outer.index("LEFT JOIN hydro.river_timeseries rt")
+    occurrences = [match.start() for match in re.finditer(r"\brt\.run_id\s*(?:=|<>|!=)", outer)]
+
+    # Universal, not existential (the #1442 round-2 discipline): exactly one
+    # comparison, so a second one in WHERE cannot hide behind the ON one.
+    assert len(occurrences) == 1, f"expected exactly one rt.run_id comparison, got {occurrences}: {outer}"
+    assert join_at < occurrences[0] < where_at, (
+        f"the sanctioned aid must sit in the LEFT JOIN's ON clause (offset {join_at}) and before the "
+        f"statement's WHERE (offset {where_at}), got offset {occurrences[0]}: {outer}"
+    )
+    assert "ANY(%s)" in outer[occurrences[0] : where_at]
+
+    params = _execute_call_params("_already_ingested_runs", RIVER_TABLE)
+    assert isinstance(params, ast.Tuple), ast.dump(params)
+    assert [name.id for name in params.elts if isinstance(name, ast.Name)] == ["run_ids", "run_ids"], (
+        "both placeholders must bind the identical run_id sequence"
+    )
+    assert sql.count("%s") == 2, "one placeholder for the aid, one for the WHERE"
 
 
 def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
@@ -888,6 +986,14 @@ def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
 
     assert "LEFT JOIN hydro.river_timeseries rt" in sql
     assert "ON rt.run_key = h.run_key" in sql
+    # #1686: the ON clause now also carries the sanctioned pushdown aid, under
+    # its removal marker. Pinned as one cross-line shape so the aid cannot
+    # drift away from the marker or out from under the key condition, and so
+    # the `#1342` binding is verbatim rather than paraphrased.
+    assert _AUTOPIPE_INGEST_AID_SHAPE.search(sql) is not None, (
+        f"expected `ON rt.run_key = h.run_key` / {PUSHDOWN_AID_MARKER!r} / `AND rt.run_id = ANY(%s)` "
+        f"on three consecutive lines, got:\n{sql}"
+    )
     assert "HAVING h.status = 'published' OR COUNT(rt.run_key) > 0" in sql
     assert "MAX(rt.created_at) AS parsed_at" in sql
     assert "COALESCE" not in sql

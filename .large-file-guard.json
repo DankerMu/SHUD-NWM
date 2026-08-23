@@ -68,6 +68,8 @@
     ".review-gate-issues.json",
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
-    "tests/test_real_database_integration.py"
+    "tests/test_real_database_integration.py",
+    "tests/test_river_identity_normalization_integration.py",
+    "tests/test_river_ts_text_identity_cleanup.py"
   ]
 }
