@@ -65,6 +65,7 @@
     "scripts/node27_autopipeline.py",
     "tests/test_node27_autopipeline_handoff.py",
     "tests/test_node27_autopipeline_preflight.py",
+    "tests/test_river_identity_normalization_integration.py",
     ".review-gate-issues.json",
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
