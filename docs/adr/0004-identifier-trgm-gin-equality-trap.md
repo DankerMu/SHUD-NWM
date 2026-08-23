@@ -186,3 +186,42 @@ dropped definition is preserved verbatim in the 000054 header.
   retired (both at `idx_scan = 0`, deliberately out of scope for #1468),
   re-examine whether the three-armed `OR` still wants an index on the id arm at
   all.
+
+## Correction 2026-08-23 — `stats_reset IS NULL` does not mean "never reset"
+
+The #1669 paragraphs above justify dropping `met_station_id_trgm_idx` partly on
+its lifetime scan counter, and say the counters "cover the cluster's entire life"
+because `pg_stat_database.stats_reset` is NULL. **That inference is wrong**, and
+it was found the same day while diagnosing #1770.
+
+PostgreSQL 15 keeps cumulative statistics in shared memory and writes them out
+only on a **clean** shutdown. After a crash it discards them — and a crash
+discard does **not** set `stats_reset`. So a NULL `stats_reset` means only "no
+one called `pg_stat_reset()`"; it says nothing about whether the counters
+survived the last restart.
+
+On node-27 this is not hypothetical. The `nhms-db` container has no `StopSignal`
+configured, so Docker sends SIGTERM, which PostgreSQL treats as a **smart**
+shutdown that waits for every client to disconnect. The application holds
+long-lived connections, so it never completes, Docker's stop timeout elapses, and
+SIGKILL follows — `database system was not properly shut down; automatic recovery
+in progress` on the next start. **Every container restart on that host is a crash
+that zeroes the cumulative counters**, silently, with `stats_reset` still NULL.
+
+What that changes for #1669, stated precisely:
+
+- The 500 scans on `met_station_id_trgm_idx` covered **four days** (PostgreSQL
+  last started 2026-08-19 12:25 UTC), not the cluster's life.
+- The observation still holds and still points the same way: 500 is exactly PR
+  #1666's E4 probe count, so every scan in that window is accounted for by a probe
+  we ran ourselves.
+- The decision never rested on the counter alone. The load-bearing evidence is
+  the measurement recorded above: the production search shape, run while the index
+  still existed, chose `met_station_active_basin_station_idx` plus a row filter and
+  touched neither GIN. That is independent of any counter.
+
+The general lesson for this ADR's own convention — *measure `idx_scan` and the
+counters' reset epoch before reaching for the rebuild* — needs its second half
+sharpened: **you cannot read the reset epoch off `stats_reset`.** Establish the
+window from the server's actual start time (`pg_postmaster_start_time()`) and from
+whether the last shutdown was clean, not from a NULL column.
