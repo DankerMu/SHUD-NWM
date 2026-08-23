@@ -41,7 +41,11 @@ tick 都跑，这条腿长期空转。
   `tests/test_river_ts_text_identity_cleanup.py`、`scripts/select_ci_tests.py`。
 - 受影响 spec：`river-identity-normalization`（完整性判据 requirement 改写 + 新增
   parse 时间戳写入契约）。
-- 部署顺序**硬约束**：迁移 → 回填 → 拉代码（design D5）。
+- 部署顺序**硬约束**（六步，design D5）：
+  **暂停 autopipe timer → 迁移 000056 → 回填 → 拉代码 → 第二次幂等回填 → 恢复 timer**。
+  暂停 timer 不是润色：它避免回填的全表顺序扫描与 tick 自己那条重聚合互相拖垮，
+  并使 D4 记录的"窗内被旧代码重解析的已 stamp run"子情形为空。
+  第二次回填是 fill-only 的，只收口窗内**首次**解析的 run（见 design D4）。
 - 不改动：#1674 的完整性语义、#1342 的删列本体、两个兄弟 key-only 探针（只分诊）。
 
 ## Non-Goals
