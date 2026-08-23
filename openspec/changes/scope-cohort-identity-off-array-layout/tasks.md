@@ -24,9 +24,25 @@
 
 ## 1. Fixture
 
-- [x] Correct the donor change's falsified premise (design + delta rationale),
-      clause-to-code check it, and archive it **before** this change's delta, so
-      the false rationale never lands in `openspec/specs/`.
+- [x] Correct the donor change's falsified premise (design + delta rationale)
+      and clause-to-code check it.
+- [x] **Corrected mid-review (round 1, P1).** The original plan said "archive it
+      **before** this change's delta". That was wrong, and it was wrong in
+      exactly the way the standing rule from PR #1759 exists to prevent. The
+      plan guarded the false *rationale* prose and missed the false *behavioural
+      SHALL*: the donor requirement says a present-but-different `array_task_id`
+      "SHALL remain fatal", and commit `764a1275` — two commits later in this
+      same PR — deletes that comparison. Archiving the donor here would land a
+      clause in `openspec/specs/` that this PR's own code contradicts at the
+      landing SHA, which is the precise failure the rule names.
+      **Resolution**: the donor archive is reverted out of this PR. The donor
+      stays a corrected-but-open change, and both changes archive together in
+      the post-merge chore commit after the node-22 receipt. Verified by probe:
+      (a) this change's `MODIFIED` validates `--strict` with the donor
+      un-archived, so nothing is blocked; (b) archiving donor-then-this-change
+      sequentially yields one coherent requirement (`~ 1` modified) and
+      `openspec validate --specs --strict` 197/197. The false SHALL therefore
+      never exists in `openspec/specs/` at any SHA.
 - [x] Author proposal / design / delta; `openspec validate --strict` green.
 - [x] Read-only fixture review by a reviewer subagent.
 
