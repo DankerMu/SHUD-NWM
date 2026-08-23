@@ -1212,3 +1212,35 @@ that reversed the approach from rebuilding an index to deleting it. The
 rotation counter cannot see that, and a reader using this ADR to reason about
 where review value originates should know the instrument only counts one of the
 sources.
+
+## Revisit 2026-08-23 (PR #1783, issue #1747) — keep, denominator +1, numerators unchanged
+
+`loop_log_audit` returns DECIDABLE at **112 multi-round merged PRs, core=68 /
+rotated=264**. The denominator moved by one; both numerators are identical to
+the PR #1771 revisit above. Decision unchanged: **keep**.
+
+This PR is the first revisit that adds a *sixth* way the counter misleads, and
+it is the one that most directly attacks the instrument's premise. PR #1783 did
+rotate — round 2 pulled in `spec-compliance`, a lens not used in round 1 — and
+the rotated lens returned zero findings. On the ledger that is indistinguishable
+from a PR where rotation was never exercised: both contribute nothing to
+`rotated`.
+
+But the two are not the same thing, and here the difference is total. Round 2
+reviewed a **byte-identical code head**: round 1's single verified finding was
+an orchestrator-authored false claim living only in the PR body, so the
+corrective action was a prose edit and the head SHA was unchanged across
+round 1, round 2, and Phase 7. A rotated-in lens finding nothing in code that
+did not change is not evidence that rotation buys nothing; it is not evidence
+about rotation at all. The counter cannot distinguish "the new lens looked and
+the code was clean" from "the new lens looked at code no one had touched."
+
+The practical consequence for anyone reading this ledger to decide keep/cut:
+`rotated=264` is a floor on rotation's value, not an estimate of it, and the
+gap between floor and truth widens every time a round runs against an unchanged
+head. The four prior caveats plus this one all push the same direction — the
+instrument systematically undercounts rotation and overcounts core — which is
+why the default-keep has never been close to a hard call.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
