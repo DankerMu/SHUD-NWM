@@ -1548,3 +1548,58 @@ and fixed eight" is indistinguishable in the ledger from "found nothing", and
 the dropped classes blind cross-round repeat detection — filed as #1794.
 
 Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit at #1789 merge (PR #1791, 2026-08-23)
+
+`loop_log_audit` again returns DECIDABLE lens-rotation: 119 multi-round merged
+PRs, later-round catches core=68 / rotated=285. **Keep**, unchanged, and this
+run is a clean confirming instance: of four review passes (two lenses in round
+1, a Phase 7 final, a Phase 7 delta final), the `production-loop-safety +
+state-machine-correctness` lens returned zero and every net review catch came
+from the rotated-in `db-migration + data-loss-and-staleness +
+artifact-consistency` lens — the same distribution as #1781.
+
+Two things this run adds that the rotation ledger does not model, both worth
+recording because the numbers above will keep looking healthy while they recur:
+
+**(1) The highest-value catch was upstream of every lens.** It landed before
+implementation, from the advisor, against the *issue body* rather than the code:
+#1789 prescribed folding `parsed_at = now()` into `mark_run_parsed`'s existing
+UPDATE, which is gated on `PARSE_READY_RUN_STATUSES` and therefore excludes
+`published` — the very population recompute detection exists for. The issue
+stated the requirement ("重新 parse 必须 bump 它") two lines above a remedy that
+does not satisfy it. Nothing in the review track would have caught this, because
+by the time reviewers see a diff the fixture has already chosen the mechanism.
+ADR 0003 already records that an optimization issue's premise sits upstream of
+every reviewer lens; this run extends it: **an implementation-ready issue's
+prescribed remedy is itself an unverified claim, and deserves the same treatment
+as code.** Verifying it required tracing the actual convergence mechanism —
+fact-row `created_at` refreshed by a keyed DELETE + reinsert, not the status-
+gated UPDATE — which is exactly the kind of thing that reads as settled
+background.
+
+**(2) Four review passes cannot see which oracles execute.** The real-DB run on
+node-27 returned 4 failures in an `integration`-marked file whose seed helpers
+never wrote the new column. Production code was correct; the seeds were stale.
+Every review pass reasons over code and artifacts, and the local full suite
+(13774 passed) was *structurally* blind because integration-marked tests skip
+without env vars and the PR CI lane does not select them. This is the second
+consecutive issue (#1781, #1789) where live deployment was the only oracle for
+the decisive defect. The lesson is not "add a lens" — a lens still reads text.
+It is that for any change altering a value that seeded fixtures also produce,
+**the deployment step is load-bearing verification, not a receipt-taking
+formality**, and its evidence floor must run the marked suites the PR lane skips.
+
+Recorded method errors from this run: (a) the six-step deploy sequence was
+corrected in `design.md` but not propagated to `proposal.md`, which continued to
+state the superseded three-step form *while citing D5 as its authority* — caught
+by the Phase 7 final review, i.e. the orchestrator's own fix contradicting a
+sibling paragraph; (b) an integration suite was first launched over a foreground
+ssh session, so the timeout that moved it to background killed the remote
+pytest and produced an empty result that could have been misread as a pass —
+re-run detached per the project's own `setsid nohup` discipline; (c) two
+process-liveness checks used `pgrep -f <pattern>` from a shell whose own command
+line contained the pattern, yielding false "still running" readings — use
+`pgrep -f` with a bracketed pattern or check the PID directly.
+
+Keep/cut unchanged; still the recorded default-keep pending maintainer override.
