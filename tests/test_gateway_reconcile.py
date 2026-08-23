@@ -2805,7 +2805,7 @@ def test_file_cohort_runtime_identity_tolerates_stale_task_id_not_only_absent(
 ) -> None:
     """Delta scenario 1, second half, at the gate itself.
 
-    The donor change (``2026-08-23-fix-cohort-runtime-identity-absent-fields``)
+    The donor change (``fix-cohort-runtime-identity-absent-fields``)
     only covers ``array_task_id is None``. The production failure is
     present-but-**stale**, and on production data the absent branch is dead:
     ``create_hydro_run_from_basin`` persists a real index on every row. This
