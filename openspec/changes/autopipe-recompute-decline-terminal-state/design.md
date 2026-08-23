@@ -79,16 +79,21 @@ manifest `initial_state.state_id` 与 `_run_product_mtime`，三分量全等才�
 
 ## D3 — fail-closed：拿不到完整键就不终态化
 
-decline 的键需要 manifest 的 `initial_state.state_id` 与 `_run_product_mtime` 两者齐备。
-两处规则：
+> **本节的量词已被 D11 收窄，请连同 D11 一起读。** 下面"任一键分量缺失"当初把
+> `init_state_id` 缺失也算进 fail-closed；live 证据表明那会把"已知无 manifest"
+> 误当成"证据不可知"，从而变成永久重试。现行规则：`init_state_id` 缺失按 `''`
+> 记账并正常终态化，fail-closed 只保留 `product_mtime` 取不到与 DB 写入失败两条。
 
-> **写入侧**：`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` 发生时，若任一键分量缺失，
-> 或 decline 写入本身抛异常，outcome 保持 `failed`，run 继续重试。
+decline 的键需要一个 init 分量与 `_run_product_mtime`。两处规则（**D11 后**）：
+
+> **写入侧**：`HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` 发生时，若 `product_mtime`
+> 取不到，或 decline 写入本身抛异常，outcome 保持 `failed`，run 继续重试。
 >
-> **读取侧**：比对时若任一键分量取不到，不排除，run 继续进入 pending。
+> **读取侧**：比对时若 `product_mtime` 取不到，不排除，run 继续进入 pending。
 
-绝不出现"以为记了账所以不再重试，实际没记上"的静默丢失。这是本设计唯一的
-fail-closed 点，也是它必须被测试钉死的原因（T6）。
+绝不出现"以为记了账所以不再重试，实际没记上"的静默丢失。这仍是本设计唯一的
+fail-closed 点——D11 改的是它的**范围**，不是它的存在，也不改它必须被测试钉死
+（T6 / E3 / E11）。
 
 ## D4 — 重开语义：键即重开条件
 

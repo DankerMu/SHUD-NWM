@@ -11,8 +11,11 @@
   `test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_at`
   与 `test_already_ingested_run_id_drift_costs_a_published_run_its_recompute_detection`
   保持绿。
-- **E3** fail-closed 路径有测试：键不全（mtime 缺失 / init_state 缺失）与
-  decline 写入抛异常两种情形均产出 `outcome="failed"` + `rc=1`。
+- **E3** fail-closed 路径有测试：`product_mtime` 取不到、decline 写入抛异常
+  两种情形均产出 `outcome="failed"` + `rc=1`。
+  **（D11 修订）** 原文还列了"init_state 缺失"——那条已被 D11 反转，其测试
+  `test_blocked_recompute_without_manifest_initial_state_fails_closed` 随之删除，
+  继任覆盖见 E11。此处不再要求该情形 fail-closed。
 - **E4** 迁移 `000055` 在 node-27 实机 apply 成功，`\d ops.ingest_recompute_decline`
   显示三列主键且 `product_mtime` 为 `double precision`。
 - **E5** **live 双 tick 验收（本变更的核心证据）**。断言一律按**不变量**写，

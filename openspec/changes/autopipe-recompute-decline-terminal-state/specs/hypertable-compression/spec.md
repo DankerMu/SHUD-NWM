@@ -70,12 +70,14 @@
   run"，tick SHALL 正常完成并输出 JSON 汇总；抑制的缺失使被挡的 run 继续重试并
   以 `rc == 1` 报红——即退化为本变更之前的行为，而不是整个 tick 未捕获异常退出
 
-#### Scenario: An incomplete decline key fails closed
+#### Scenario: A genuinely unobtainable key fails closed
 
-- **WHEN** 一次 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` 发生，但
-  `product_mtime` 或 manifest 的 `init_state_id` 缺失，或 decline 记录写入抛出异常
+- **WHEN** 一次 `HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED` 发生，但 `product_mtime`
+  取不到，或 decline 记录写入抛出异常
 - **THEN** `_process_run` 返回 `outcome="failed"`（不终态化），进程 `rc == 1`，
   该 run 在下个 tick 继续重试
+- **AND** `init_state_id` 缺失**不属于**本场景（见 D11）：它是"已知无 manifest"
+  而非"证据不可知"，按 `''` 记账并正常终态化。fail-closed 只剩上述两条真不可知路径
 
 #### Scenario: Declined runs stay visible after the tick that declined them
 
