@@ -12,7 +12,7 @@ The file-journal reclaim predicate and the forecast-cycle reconcile-verified ret
 #### Scenario: Automatic absence reclaim remains unchanged
 
 - **WHEN** a current master has the existing `reservation_lost/absence_retry_permitted` shape, or the cycle shortcut receives a marker-free automatic-absence row satisfying its pre-existing status, binding, accounting, and cohort-identity checks
-- **THEN** the same shortcut behavior remains compatible and current-master reclaim continues without output or identity changes
+- **THEN** lower-level automatic reclaim keeps its existing attempt, anchor, and identity derivation; automatic public cycles keep their retry-suffixed replacement identity, while only operator-demoted recovery reuses the old master's job id and idempotency key
 
 #### Scenario: Identity release remains a spent non-reclaimable key
 

@@ -82,6 +82,18 @@ Prefer a focused new CLI test module if it makes click/argparse parity readable;
 
 The rare held pre-state is an incident to recover from, not a fixture that release validation must create. Node-22 validation first performs a read-only census of the active journal and Slurm context. If no naturally occurring exact held row exists, that census plus the deterministic full-chain/fault evidence is sufficient for release. Validation SHALL NOT quiesce the production scheduler, force gateway failure, seed or rewrite journal authority, or submit a real cohort merely to create a receipt. When a naturally occurring held row later exists, the operator procedure remains mandatory for that incident: independently prove absence, use the exact typed CAS, retain success/audit/refusal evidence, and verify one reclaim/resubmission. This conditional receipt is operational evidence, not a prerequisite whose absence incentivizes fault injection.
 
+### D8: Writer-authority closed world for the operator decision (Round 3)
+
+`operator_verified_absence` remains valid inside `ACCEPTED_RECONCILIATION_DECISIONS` for replay and normalization, but enum membership is not write authority. Every accepted-submit writer that can receive or synthesize a reconciliation decision is inventoried and must reject the token unless it is the dedicated typed demotion: the submit-attempt commit writer (an accepted transition may carry the decision), the cohort projection defer writer (a raw caller-supplied decision string), the cohort task projection writer (a raw decision), and the already-gated generic versioned transition. Each non-dedicated writer raises the typed-authority error before any durable mutation or event. Legitimate automatic decisions keep their existing writers and behavior; the dedicated demotion stays the sole writer of the operator decision with its confirmation/CAS/audit batch.
+
+### D9: Committed reclaim completion (Round 3)
+
+The authority append inside `reclaim_pipeline_job_reservation` is the commit point of the new attempt. Once it commits on the operator old-ID route, a derived direct/inventory projection failure SHALL NOT be reported as an uncommitted failure that strands a pre-sbatch live `reserved` row. The reclaim boundary SHALL either return a committed typed result the stage submission path can honor (continuing to the single sbatch/bind), or transition the durable row to a non-live retryable authority state under the same lock — mirroring the dedicated demotion's committed-warning principle. The next public pass after any such fault SHALL NOT fail with `PIPELINE_ALREADY_ACTIVE` for this flow, and `#1116` fail-closed reconcile must not convert the wedged shape back into a held row. The identical pre-existing boundary defect reachable through automatic `absence_retry_permitted` and other reservation writes is explicitly out of this change's scope and is tracked in #1796 (pre-existing @master; independently verified against merge-base `23d774bb`).
+
+### D10: One journal-root authority (Round 3)
+
+Repository construction, authority reads/writes, and the public receipt locator derive their root from one safe-FS expansion/no-follow canonicalization owner. The command SHALL NOT call bare `Path.resolve()` on operator input. A hostile root (symlink loop) maps to the typed operational error before the authority append — exit 1, no traceback, zero authority bytes. A literal unexpanded `~` root yields a receipt locator that equals the actual expanded authority/replay root used by repository I/O. All fallible canonicalization happens before commit.
+
 ## Selected Risk Packs
 
 - Public API / CLI / script entry: selected — new `nhms-pipeline` command; both entrypoints, output, stderr, and exits are contract surfaces.
@@ -120,6 +132,9 @@ The rare held pre-state is an incident to recover from, not a fixture that relea
 - Automatic `absence_retry_permitted` → existing reclaim behavior unchanged.
 - `identity_mismatch_released`, manual retry, generic transition, and PostgreSQL repository → remain outside the new operator reclaim contract.
 - Append/event fault before commit → neither state nor audit becomes durable.
+- Any non-dedicated accepted-submit writer receiving `operator_verified_absence` (submit-attempt commit, cohort defer, cohort task projection, generic transition) → typed-authority refusal with byte-identical journal and zero events; legitimate automatic decisions still apply through their existing writers.
+- Post-commit projection failure during the public old-ID reclaim → no stranded pre-sbatch live `reserved` row; the flow completes the unique submit path or leaves a non-live retryable state, and the next pass never reports `PIPELINE_ALREADY_ACTIVE`.
+- Hostile or unexpanded journal roots → receipt locator equals the safe-FS authority root; loop roots fail typed and pre-commit with zero authority bytes.
 - No naturally occurring eligible node-22 row → record a read-only census and perform no live demotion/resubmission; deterministic full-chain evidence remains the release oracle. A later natural incident → follow the guarded procedure and retain its receipt as operational evidence.
 
 ## Boundary-Surface Checklist
@@ -127,7 +142,7 @@ The rare held pre-state is an incident to recover from, not a fixture that relea
 - Shared helper roots: accepted-submit decision normalization and journal record validation.
 - Public entrypoints: click and argparse command parity.
 - Read surfaces: current master/attempt lookup and event queries.
-- Write surfaces: one locked multi-record append plus direct/latest materialization.
+- Write surfaces: one locked multi-record append plus direct/latest materialization; every accepted-submit transition writer enumerated against the operator-token closed world (submit-attempt commit, cohort defer, cohort task projection, generic transition, permit, release, demotion, reclaim).
 - Producer/consumer evidence: reconcile held tuple → operator event/decision → cycle shortcut → reclaim.
 - Stale/idempotency: repeat request and concurrent successor reject without bytes; post-demotion repeat also rejects.
 - Unchanged consumers: HTTP manual retry, generic transitions, identity release, PG reclaim, automatic reconcile.

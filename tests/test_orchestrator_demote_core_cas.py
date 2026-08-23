@@ -618,3 +618,238 @@ def test_still_demoted_row_refuses_forbidden_persisted_axis(
     assert current["status"] == "reservation_lost"
     assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
     assert current == demoted  # current master unchanged
+
+
+# ---------------------------------------------------------------------------
+# 1.4 writer-authority closed world (Round 3): the operator decision is never
+# written by a generic accepted-submit writer
+# ---------------------------------------------------------------------------
+def _held_key(repository: Any) -> str:
+    return str(_held_row(repository)["idempotency_key"])
+
+
+def test_operator_decision_rejected_by_submit_attempt_commit_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The commit writer rejects an accepted transition carrying the operator token.
+
+    The forgery is an accepted transition (so the commit's own accepted check
+    passes) that carries ``operator_verified_absence``.  The typed-authority
+    error must fire before any mutation, leaving the journal byte-identical and
+    emitting zero events.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    key = _held_key(repository)
+    forged = AcceptedSubmitTransition.accounting(
+        OPERATOR_VERIFIED_ABSENCE_DECISION,
+        submit_outcome="accepted",
+        status="submitted",
+    )
+    before = _journal_bytes(repository.root)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    with pytest.raises(FileOrchestrationJournalError) as excinfo:
+        repository.commit_pipeline_job_submit_attempt(
+            key,
+            pipeline_job_id=JOB_ID,
+            expected_submission_attempt=int(row["submission_attempt"]),
+            slurm_job_id="9999",
+            transition=forged,
+        )
+
+    assert excinfo.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    assert _held_row(repository) == row
+
+
+def test_operator_decision_rejected_by_defer_cohort_projection_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defer writer rejects a raw operator decision before any mutation."""
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    before = _journal_bytes(repository.root)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    with pytest.raises(FileOrchestrationJournalError) as excinfo:
+        repository.defer_forecast_cohort_projection(
+            JOB_ID,
+            reconciliation_decision=OPERATOR_VERIFIED_ABSENCE_DECISION,
+            reconciliation_reason_class=None,
+            error_code="SLURM_MASTER_IDENTITY_MISMATCH",
+            error_message="forged operator decision",
+        )
+
+    assert excinfo.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    assert _held_row(repository) == row
+
+
+def test_operator_decision_rejected_by_cohort_task_projection_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cohort task projection writer cannot synthesize the operator decision.
+
+    ``project_forecast_cohort_tasks`` accepts a raw ``reconciliation_decision``
+    but only a bound master reaches the decision gate; there the writer's own
+    evidence gate refuses anything but ``matched_bound``, so the operator token
+    can never reach a durable row through this door.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    key = _held_key(repository)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+    committed = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=JOB_ID,
+        expected_submission_attempt=int(row["submission_attempt"]),
+        slurm_job_id="9999",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert committed.committed
+    before = _journal_bytes(repository.root)
+
+    with pytest.raises(FileOrchestrationJournalError) as excinfo:
+        repository.project_forecast_cohort_tasks(
+            JOB_ID,
+            master_slurm_job_id="9999",
+            projections=[],
+            complete=True,
+            master_status="failed",
+            master_error_code=None,
+            reconciliation_decision=OPERATOR_VERIFIED_ABSENCE_DECISION,
+        )
+
+    assert excinfo.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    current = _held_row(repository)
+    assert current["status"] == "submitted"
+    assert current["reconciliation_decision"] is None
+
+
+def test_operator_decision_ignored_by_unbound_task_projection_defer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw operator token on a mismatched-ID master is refused at entry.
+
+    The mismatch defer branch must never silently persist a literal
+    ``identity_mismatch_blocked`` when the caller supplied
+    ``operator_verified_absence``: the typed-authority refusal fires before any
+    lock/mutation/event, on the mismatched-ID branch exactly as on the bound
+    branch.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    before = _journal_bytes(repository.root)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    with pytest.raises(FileOrchestrationJournalError) as excinfo:
+        repository.project_forecast_cohort_tasks(
+            JOB_ID,
+            master_slurm_job_id="9999",
+            projections=[],
+            complete=True,
+            master_status="failed",
+            master_error_code=None,
+            reconciliation_decision=OPERATOR_VERIFIED_ABSENCE_DECISION,
+        )
+
+    assert excinfo.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    assert _held_row(repository) == row
+
+
+def test_legitimate_writers_still_apply_after_authority_closed_world(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legal accepted-submit decisions keep their writers unchanged."""
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    key = _held_key(repository)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    committed = repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=JOB_ID,
+        expected_submission_attempt=int(row["submission_attempt"]),
+        slurm_job_id="9999",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert committed.committed
+    assert committed.row is not None
+    assert committed.row["slurm_job_id"] == "9999"
+    assert committed.row["status"] == "submitted"
+    assert committed.row["reconciliation_decision"] is None
+
+
+def test_legitimate_cohort_projection_decisions_still_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legal bound/mismatch projection decisions keep their writers unchanged.
+
+    The operator-token refusal is narrowly scoped: ``matched_bound`` on a bound
+    master and the fixed ``identity_mismatch_blocked`` defer on a mismatched-ID
+    master still apply through the same writer.
+    """
+    repository = _held_cohort_repository(tmp_path)
+    row = _held_row(repository)
+    key = _held_key(repository)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+    assert repository.commit_pipeline_job_submit_attempt(
+        key,
+        pipeline_job_id=JOB_ID,
+        expected_submission_attempt=int(row["submission_attempt"]),
+        slurm_job_id="9999",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    ).committed
+
+    # Legal mismatch defer on the same bound master (wrong terminal id) writes
+    # the fixed identity_mismatch_blocked decision.
+    mismatch = repository.project_forecast_cohort_tasks(
+        JOB_ID,
+        master_slurm_job_id="8888",
+        projections=[],
+        complete=True,
+        master_status="failed",
+        master_error_code=None,
+        reconciliation_decision="identity_mismatch_blocked",
+    )
+    assert mismatch == {"total": 1, "pipeline_status": 1, "pipeline_event": 0}
+    current = _held_row(repository)
+    assert current["reconciliation_decision"] == "identity_mismatch_blocked"
+    assert current["status"] == "reconcile_unverified"
+
+    # Legal matched_bound projection still applies on a bound master.
+    members = journal_module._bounded_cohort_members(current.get("cohort_members"))
+    matched = repository.project_forecast_cohort_tasks(
+        JOB_ID,
+        master_slurm_job_id="9999",
+        projections=[
+            {
+                **member,
+                "array_task_outcome": "failed",
+                "native_shud_resubmitted": False,
+                "task_slurm_job_id": f"9999_{member['array_task_id']}",
+            }
+            for member in members
+        ],
+        complete=True,
+        master_status="failed",
+        master_error_code="SLURM_ARRAY_TASK_FAILED",
+        reconciliation_decision="matched_bound",
+    )
+    assert matched["pipeline_status"] >= len(members)
+    projected = _held_row(repository)
+    assert projected["status"] == "failed"
+    assert projected["reconciliation_decision"] == "matched_bound"

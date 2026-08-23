@@ -298,8 +298,9 @@ def test_cli_demote_post_commit_projection_faults_report_committed_with_warnings
         assert cli._click_main(args) == 0
     else:
         assert cli._argparse_main(args) == 0
-    out = capsys.readouterr().out.strip()
-    assert capsys.readouterr().err == ""
+    captured = capsys.readouterr()
+    out = captured.out.strip()
+    assert captured.err == ""
     payload = json.loads(out)
     assert payload["status"] == "demoted_with_warnings"
     assert payload["committed"] is True
@@ -660,8 +661,9 @@ def test_cli_demote_secret_shaped_projection_fault_warns_with_bounded_non_secret
         )
 
         assert cli._argparse_main(args) == 0
-        out = capsys.readouterr().out.strip()
-        assert capsys.readouterr().err == ""
+        captured = capsys.readouterr()
+        out = captured.out.strip()
+        assert captured.err == ""
         payload = json.loads(out)
         assert payload["status"] == "demoted_with_warnings"
         assert payload["committed"] is True
@@ -687,6 +689,7 @@ def test_cli_demote_secret_shaped_projection_fault_warns_with_bounded_non_secret
         # Repeating the request after the warning is still a zero-write CAS refusal.
         before_repeat = _journal_bytes(root)
         assert cli._argparse_main(args) == 2
+        capsys.readouterr()  # drain the refusal so the next scenario starts clean
         assert _journal_bytes(root) == before_repeat
         assert len(_durable_event_payloads(root)) == 1
     # Every warning across every distinct input is the SAME fixed constant: no
@@ -795,3 +798,93 @@ def test_cli_demote_operational_orchestrator_error_exits_1_with_stable_stderr(
     assert "operator_reserved_demotion" not in captured.err
     # Authority is byte-identical: nothing was committed.
     assert _journal_bytes(root) == before
+
+
+# ---------------------------------------------------------------------------
+# 3.4 one journal-root authority (Round 3): hostile loop and tilde roots
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cli_demote_hostile_loop_root_fails_typed_exit_1_no_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """A symlink-loop ``--journal-root`` fails typed exit 1 with zero authority.
+
+    The receipt locator is derived from the safe-FS root authority BEFORE any
+    repository I/O, so a hostile root never reaches the authority append, never
+    leaks a traceback, and leaves zero journal bytes.
+    """
+    loop_a = tmp_path / "loop-a"
+    loop_b = tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    held_repository = _held_cohort_repository(tmp_path / "held")
+    held = _held_row(held_repository)
+    args = [*_cli_base_args(held_repository, held), "--journal-root", str(loop_a), "--confirm"]
+
+    if entrypoint == "click":
+        with pytest.raises(SystemExit) as excinfo:
+            cli._click_main(args)
+        assert excinfo.value.code == 1
+    else:
+        assert cli._argparse_main(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert "Traceback" not in captured.err
+    assert "operator_reserved_demotion" not in captured.err
+    assert captured.err.strip() == (
+        "FILE_JOURNAL_INVALID_ROOT: journal root failed safe filesystem verification"
+    )
+    # The loop root was never used as an authority: zero journal bytes written.
+    assert not (loop_a / "journal").exists()
+    assert not (loop_b / "journal").exists()
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cli_demote_tilde_root_receipt_equals_expanded_authority(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """A literal unexpanded ``~`` root expands through safe-FS like journal I/O.
+
+    The success receipt's ``journal_root`` equals the expanded authority root
+    actually used by repository reads and writes -- never a cwd-relative
+    ``~/...`` literal.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # The authority lives at the tilde-expanded location; the CLI receives the
+    # literal unexpanded ``~/probe-journal/journal`` (the helper appends its own
+    # ``/journal`` segment to the base).  safe-FS must expand the leading ``~``
+    # exactly like repository I/O does.
+    expanded_root = home / "probe-journal" / "journal"
+    held_repository = _held_cohort_repository(home / "probe-journal")
+    root = held_repository.root
+    held = _held_row(held_repository)
+    args = [*_cli_base_args(held_repository, held), "--confirm"]
+    args[args.index("--journal-root") + 1] = "~/probe-journal/journal"
+
+    monkeypatch.setenv("HOME", str(home))
+
+    if entrypoint == "click":
+        rc = cli._click_main(args)
+    else:
+        rc = cli._argparse_main(args)
+    assert rc == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip())
+    assert captured.err == ""
+    # The receipt locator equals the expanded authority root actually used by
+    # repository reads and writes -- never a cwd-relative ``~/...`` literal.
+    assert payload["journal_root"] == str(expanded_root.resolve())
+    assert root.resolve() == expanded_root.resolve()
+    assert Path(payload["journal_root"]).exists()
+    current = FileOrchestrationJournalRepository(Path(payload["journal_root"])).get_accepted_submit_pipeline_job(
+        JOB_ID
+    )
+    assert current["status"] == "reservation_lost"
+    assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION

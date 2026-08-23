@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -132,6 +133,7 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cy
 
 FILE_JOURNAL_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
 LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
+LOGGER = logging.getLogger(__name__)
 FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_journal.v1"
 FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_latest.v1"
 FILE_ORCHESTRATION_PRIVATE_RECOVERY_SCHEMA_VERSION = "nhms.scheduler.file_orchestration_private_recovery.v1"
@@ -2127,8 +2129,29 @@ class FileOrchestrationJournalRepository:
                 for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
                     if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
                         row[key] = request_row[key]
+            # #1564 D9 committed reclaim completion (operator old-ID route):
+            # the authority append inside ``_write_pipeline_job_unlocked`` is
+            # the commit point of the new attempt.  A derived direct/inventory
+            # projection failure after that append must never be reported as an
+            # uncommitted failure that strands a live pre-sbatch ``reserved``
+            # row -- the identical defect reachable through automatic
+            # ``absence_retry_permitted`` and other reservation writes is
+            # pre-existing and tracked in #1796.  This route is exactly the
+            # operator flow: the source row carried ``operator_verified_absence``
+            # (the begin-attempt transition clears the accounting tuple, so the
+            # durable pre-append decision is the only reliable marker here), and
+            # a non-operator claim can never match it.
+            operator_old_id_reclaim = bool(
+                str(existing.get("reconciliation_decision") or "")
+                == OPERATOR_VERIFIED_ABSENCE_DECISION
+            )
             model_id = _optional_safe_identity(row, "model_id")
-            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return self._write_pipeline_job_unlocked(
+                row,
+                exclusive_direct=False,
+                model_id=model_id,
+                _committed_projection_containment=operator_old_id_reclaim,
+            )
 
     def bind_pipeline_job_reservation(
         self,
@@ -2201,6 +2224,15 @@ class FileOrchestrationJournalRepository:
             raise TypeError("transition must be AcceptedSubmitTransition")
         if transition.submit_outcome != "accepted":
             raise ValueError("submit-attempt commit requires an accepted transition")
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # durable provenance granted only by the dedicated typed demotion, never
+        # by an accepted-submit writer, even when a caller forges an accepted
+        # transition carrying the token.  Refuse before any mutation.
+        if transition.reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         if type(transition.status) is not str or transition.status not in {
             "submitted",
             "pending",
@@ -3386,9 +3418,12 @@ class FileOrchestrationJournalRepository:
         attempt anchor, expected status, unbound required), so a concurrently
         advanced attempt loses the race and the caller keeps its blocked outcome.
 
-        The released row is a deliberate non-reclaimable terminal: reclaim only
-        accepts ``absence_retry_permitted``, so this idempotency key is spent.
-        Liveness comes from the next attempt minting a retry-suffixed key.
+        The released row is a deliberate non-reclaimable terminal: reclaim
+        accepts exactly two lower-level decisions -- ``absence_retry_permitted``
+        and the #1564 ``operator_verified_absence`` -- and an
+        ``identity_mismatch_released`` row matches neither, so this idempotency
+        key is spent.  Liveness comes from the next attempt minting a
+        retry-suffixed key.
         """
 
         if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
@@ -3474,6 +3509,15 @@ class FileOrchestrationJournalRepository:
         }:
             raise FileOrchestrationJournalError(
                 "file_journal_evidence_enum_invalid", field="master_status"
+            )
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # never a raw caller-supplied cohort-projection decision, on either the
+        # bound or the mismatched-ID branch.  Refuse before any source parsing,
+        # lock acquisition, mutation, or event.
+        if reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
             )
         del master_status, master_error_code
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
@@ -3942,6 +3986,14 @@ class FileOrchestrationJournalRepository:
     ) -> AcceptedSubmitCommitResult:
         """Fail one current forecast projection closed without touching cohort members."""
 
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # never a raw caller-supplied defer decision; only the dedicated typed
+        # demotion may write it.  Refuse before any mutation.
+        if reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._accepted_submit_job_for_id_unlocked(
@@ -6839,6 +6891,7 @@ class FileOrchestrationJournalRepository:
         *,
         exclusive_direct: bool,
         model_id: str | None,
+        _committed_projection_containment: bool = False,
     ) -> dict[str, Any] | None:
         row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
@@ -6873,6 +6926,30 @@ class FileOrchestrationJournalRepository:
             if anchor_published and not anchor_preexisting:
                 self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
             raise
+        if _committed_projection_containment:
+            # #1564 D9 (operator old-ID reclaim route only): the authority
+            # append above is the commit point of the new attempt.  Derived
+            # projection faults after it are contained to bounded non-secret
+            # warnings (mirroring the dedicated demotion's committed-warning
+            # principle), every remaining independent projection is still
+            # attempted, and journal replay stays the source of truth.  This
+            # never raises, so the operator old-ID recovery path can never
+            # strand a live pre-sbatch ``reserved`` row.  Automatic and other
+            # reservation writes keep their pre-existing behavior (#1796).
+            try:
+                self._write_pipeline_job_direct_unlocked(row, record)
+            except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+                _emit_reclaim_projection_warning("pipeline_job_direct", None, error)
+            if model_id is not None:
+                try:
+                    self._materialize_latest_unlocked(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        model_id=model_id,
+                    )
+                except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+                    _emit_reclaim_projection_warning("latest", model_id, error)
+            return _public_scheduler_row(row)
         self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
@@ -8960,6 +9037,30 @@ def _projection_error_reason(error: Exception) -> str:
     """
     del error
     return _PROJECTION_WARNING_FALLBACK_TOKEN
+
+
+def _emit_reclaim_projection_warning(
+    projection: str, model_id: str | None, error: Exception
+) -> None:
+    """One bounded observable warning per failed committed-reclaim projection.
+
+    The authority append has already committed, so the warning is the only
+    surface that reports the fault; it must never turn committed success into
+    a failure.  Every field is a fixed non-secret token: the stable projection
+    name, the already-validated model id, and the fixed warning code.  Never
+    the exception text, class name, path, ``.error_code``, ``.reason``, repr,
+    or any secret-shaped detail.  A logger failure is absorbed so the reclaim
+    result is unaffected.
+    """
+    try:
+        LOGGER.warning(
+            "committed reclaim projection fault: projection=%s model_id=%s code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT",
+            projection,
+            model_id,
+        )
+    except Exception:  # noqa: BLE001 - observability must never fail the committed reclaim.
+        pass
+    del error
 
 
 def _projection_error_type(error: Exception) -> str:

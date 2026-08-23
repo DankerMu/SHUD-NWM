@@ -69,10 +69,13 @@ passes instead.
 
 Do **not** try to reset, reclaim or hand-edit a released row:
 
-- `reclaim_pipeline_job_reservation` only revives `absence_retry_permitted`; on an
-  `identity_mismatch_released` row it returns `None` and writes nothing.
+- `reclaim_pipeline_job_reservation` revives exactly two decisions:
+  `absence_retry_permitted` (automatic) and `operator_verified_absence` (the
+  #1564 operator demotion); every other shape — including
+  `identity_mismatch_released`, `identity_mismatch_blocked`, and any
+  `matched_bound` row — returns `None` and writes nothing.
 - The cycle chain's reclaim shortcut (`_verified_accepted_submit_forecast_retry`) is
-  likewise `False` for that decision, so the stage resumes the terminal instead of
+  likewise `False` for the identity decisions, so the stage resumes the terminal instead of
   re-submitting the spent idempotency key.
 
 That is the intended anti-duplicate-submission direction: a reservation whose identity was

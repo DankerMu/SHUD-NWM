@@ -53,3 +53,18 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI that converts 
 
 - **WHEN** a naturally occurring exact held master is independently confirmed dead with name/time/user/account `sacct` and `squeue` evidence and the guarded command is used operationally
 - **THEN** the incident record SHALL retain the success receipt and durable audit event, a stale or repeated zero-write refusal, the fresh reclaim attempt and anchor, exactly one cohort resubmission, and the cleanup boundary
+
+#### Scenario: Non-dedicated accepted-submit writers cannot persist the operator decision
+
+- **WHEN** the submit-attempt commit writer receives an accepted transition carrying `operator_verified_absence`, or the cohort defer writer or cohort task-projection writer receives the raw decision token
+- **THEN** each writer rejects it with the typed-authority error before any durable mutation or event, the journal stays byte-identical, and the existing legitimate decisions still apply unchanged
+
+#### Scenario: Committed reclaim never strands a pre-sbatch live reservation
+
+- **WHEN** the public old-ID operator recovery path commits the reclaim authority append and a derived direct or inventory projection write then fails before any submission
+- **THEN** the failure SHALL NOT be reported as an uncommitted failure that leaves a live `reserved` row: the flow either completes the single submission path or transitions the row to a non-live retryable authority state under the lock, and the next public pass does not fail with `PIPELINE_ALREADY_ACTIVE`
+
+#### Scenario: The receipt locator uses the one safe journal-root authority
+
+- **WHEN** `--journal-root` is a symlink loop or a literal unexpanded tilde path
+- **THEN** the loop root fails through the typed operational error path before the authority append with no traceback and zero journal bytes, and the tilde root's success receipt locator equals the expanded authority root actually used by repository reads and writes
