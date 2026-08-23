@@ -55,6 +55,13 @@
       see D4: it is a known defect of the same class (#1792) and is NOT fixed
       here, but its comparison must still be *present and biting* after this
       change, or the removal has over-reached.
+- [ ] **Delta scenario 4 pinned explicitly, not transitively.** The
+      `matched_bound` scenario (rows absent `candidate_id`/`basin_id`) is today
+      covered only by folding
+      `tests/test_gateway_reconcile.py::test_file_cohort_terminal_projects_when_hydro_run_rows_lack_planning_identity`
+      into the generic suite run. Name it in the PR evidence as the pin for that
+      scenario and confirm it still passes, so all four scenarios have an
+      itemised obligation rather than three itemised and one implicit.
 - [ ] `uv run pytest` over the journal and reconcile suites; `uv run ruff check .`.
 
 ## 4. node-22 receipt — criterion corrected up front, before the fixture exists
