@@ -115,7 +115,16 @@ WHERE h.run_key = b.run_key AND h.parsed_at IS NULL;
 - `AND h.parsed_at IS NULL` 使其幂等、只填不覆盖，可安全重跑。
 - NULL-key legacy 队列仍得 NULL——与今天完全一致（must-preserve #5）。
 - **需要第二次小回填**：迁移/回填与拉代码之间被解析的 run，在旧代码下不写
-  `parsed_at`。拉代码后重跑同一脚本（幂等）收口。
+  `parsed_at`。拉代码后重跑同一脚本（幂等）。
+  **但第二次回填只收口"窗内首次解析"的那部分**（`parsed_at` 仍为 NULL）。
+  已被第一次回填打上时间戳、又在窗内被旧代码**重**解析的 run，其
+  `parsed_at` 仍陈旧：脚本的 `AND h.parsed_at IS NULL` 是 fill-only 契约
+  （防止把 parser 写的时间戳倒退），会跳过它们。代价有界且已知：
+  该 run 会多触发**一次** forcing handoff——成功则新代码无条件 stamp、下一 tick 收敛；
+  被压缩块挡住则落一条 #1781 终态 decline（一条误报的 decline 记录，非重投环）。
+  **不得**改成 `GREATEST(h.parsed_at, b.parsed_at)` 去"修"它：那会毁掉
+  fill-only 契约、每次重跑改写全部已 stamp 行。
+  运维上真正清零这个子情形的办法是 D5 的 timer 暂停。
 
 ### D5 — 部署顺序是**硬**约束
 
@@ -123,8 +132,13 @@ WHERE h.run_key = b.run_key AND h.parsed_at IS NULL;
 **没有** savepoint 保护——只有 `_declined_runs` 的读被保护（#1781 D6）。先拉代码后迁移
 会让 `UndefinedColumn` 直接从 `_already_ingested_runs` 抛出，整个 tick 死掉。
 
-顺序：**迁移 → 回填 → 拉代码**。回填在拉代码前完成，还顺带消掉了"新列存在但全为
-NULL"的检测空窗。
+顺序：**暂停 autopipe timer → 迁移 → 回填 → 拉代码 → 第二次幂等回填 → 恢复 timer**。
+回填在拉代码前完成，顺带消掉"新列存在但全为 NULL"的检测空窗。
+
+暂停 timer 有两个理由，都不是可选的润色：
+(1) 回填是一次全表顺序扫描，与 tick 自己那条同样重的聚合并发会互相拖垮；
+(2) 它使 D4 记录的"窗内被旧代码重解析的已 stamp run"子情形为**空**——
+没有 tick 在跑，就没有窗内重解析。
 
 （与 #1781 相反：那单的顺序是软的，PR body 声称硬约束吃了一个 P1。本单是硬的，
 PR body 从初稿起就必须这么写，并给出上面这条"无 savepoint"的具体依据。）
@@ -176,4 +190,6 @@ PR body 从初稿起就必须这么写，并给出上面这条"无 savepoint"的
 
 - NULL-key legacy 队列 `parsed_at` 为 NULL，重算检测退化为 init-state 比较——
   与今天一致，继续记账，不新增退化。
-- 迁移/回填与拉代码之间的解析窗口需第二次幂等回填收口（D4）。
+- 迁移/回填与拉代码之间的解析窗口：第二次幂等回填只收口窗内**首次**解析的 run；
+  窗内被旧代码**重**解析的已 stamp run 保留陈旧 `parsed_at`，代价为一次多余 handoff
+  或一条误报 decline（D4）。D5 的 timer 暂停使该子情形为空。

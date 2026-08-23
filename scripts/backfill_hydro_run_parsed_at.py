@@ -17,10 +17,26 @@ Shape (design D4), and why it is not the cheaper-looking alternative:
   real timestamp today. Backfilling with the aid would import a degradation
   that does not currently exist.
 * ``AND h.parsed_at IS NULL`` makes it idempotent and fill-only. Re-running it
-  never overwrites a timestamp the parser wrote, which is what makes the
-  SECOND, mandatory run safe: runs parsed between the backfill and the code
-  deploy were parsed by old code that does not stamp the column, and only a
-  re-run closes that window.
+  never overwrites a timestamp the parser wrote. That is a deliberate contract,
+  not an optimisation: replacing it with ``GREATEST(h.parsed_at, b.parsed_at)``
+  would rewrite every already-stamped row on every re-run and void the "never
+  overwrites a parser stamp" guarantee, which is the one property that stops a
+  re-run from walking a fresh parser timestamp backwards.
+
+  Being fill-only also bounds what the SECOND, mandatory run can close. It
+  closes the migrate->deploy gap only for runs whose FIRST parse happened in
+  that gap, i.e. whose ``parsed_at`` is still NULL. A run that the first
+  backfill already stamped and that was then genuinely RE-parsed in the gap by
+  old code (which does not stamp the column at all) is NOT closed: the
+  aggregate does compute the fresher ``MAX(created_at)``, but ``UPDATE_SQL``
+  skips the run because ``parsed_at`` is no longer NULL, so its ``parsed_at``
+  stays stale. The cost of that is bounded and traced: the run gets exactly one
+  extra forcing handoff. If the handoff succeeds, the new code's unconditional
+  stamp in ``mark_run_parsed`` corrects the timestamp and the next tick
+  converges -- self-healing after one cycle. If the compressed-chunk guard
+  blocks it, it lands one recorded #1781 terminal decline (a false-positive
+  decline, not a retry loop). Pausing the autopipe timer for the deploy window
+  makes this sub-case empty outright: no tick means no in-window re-parse.
 * the UPDATE is applied in run_key batches under an explicit
   ``statement_timeout`` so a single statement cannot hold locks unboundedly.
   The aggregate itself is one statement and gets its own, larger budget.
@@ -28,6 +44,16 @@ Shape (design D4), and why it is not the cheaper-looking alternative:
 Runs at NULL ``run_key`` (the legacy cohort) have no key to aggregate by and
 keep ``parsed_at`` NULL. That is the recorded residual, unchanged in size from
 the fact join this column replaces.
+
+Deploy sequence (all six steps, in order):
+
+    pause autopipe timer -> apply migration 000056 -> backfill -> pull code ->
+    second (idempotent) backfill -> resume timer
+
+Pausing the timer is not cosmetic. It keeps this script's full sequential scan
+of the fact table from competing with the tick's own heavy aggregate, and it
+empties the not-closed sub-case described above (a paused tick cannot re-parse
+a run inside the deploy window).
 
 Usage (node-27, detached, watched):
 

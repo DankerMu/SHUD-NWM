@@ -32,7 +32,7 @@ tick 都跑，这条腿长期空转。
   `hydro.river_timeseries` 引用。
 - 随之的 oracle 改造：`_autopipeline_statement()` 改为负向钉、`RIVER_TABLE_CENSUS`
   2→1 + register、`scripts/select_ci_tests.py` 等值映射同步。
-- 更正 `openspec/changes/autopipe-completeness-authority-state/proposal.md:55` 的失实预期。
+- 更正 `openspec/changes/archive/2026-08-21-autopipe-completeness-authority-state/proposal.md:55` 的失实预期。
 
 ## Impact
 

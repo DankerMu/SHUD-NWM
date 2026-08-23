@@ -171,13 +171,23 @@ def test_populated_database_stamps_each_run_with_its_latest_fact_row() -> None:
 
 
 def test_rerun_is_idempotent_and_never_overwrites_a_newer_parser_stamp() -> None:
-    """The second, mandatory pass of the deploy.
+    """The re-run must never walk a parser stamp backwards.
 
-    Between backfill and code pull, runs are parsed by code that does not stamp
-    the column; re-running closes that window. It must not walk backwards over
-    a run the NEW parser has since stamped -- the fact rows' MAX is older than
-    that stamp, and rewriting it would push parsed_at back below the product
-    mtime and restart the per-tick re-ingest loop this whole change removes.
+    Two fixture cases, both already stamped by the first pass: (a) run 1, still
+    correct, no new fact activity; (b) run 2, whose parsed_at the NEW parser has
+    since advanced past the fact rows' MAX. Both must be left alone -- rewriting
+    (b) would push parsed_at back below the product mtime and restart the
+    per-tick re-ingest loop this whole change removes. Hence updated == 0.
+
+    NOT covered here, deliberately: a run already stamped by the first pass and
+    then RE-parsed inside the migrate->deploy gap by OLD code (which does not
+    stamp the column). Its parsed_at stays stale, because UPDATE_SQL is
+    fill-only. That is acceptable and is not a gap in the fixture: the cost is
+    one extra forcing handoff, which either succeeds -- and the new parser's
+    unconditional stamp makes the next tick converge -- or lands one recorded
+    #1781 terminal decline. Pausing the autopipe timer across the deploy window
+    (see the script's deploy sequence) empties the sub-case entirely, so there
+    is nothing to assert.
     """
     db = _FakeDatabase(
         runs=[_run(1), _run(2)],

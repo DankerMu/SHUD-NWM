@@ -47,7 +47,7 @@
 
 ## 4. 文档与记账
 
-- [x] T11 更正 `openspec/changes/autopipe-completeness-authority-state/proposal.md:55`
+- [x] T11 更正 `openspec/changes/archive/2026-08-21-autopipe-completeness-authority-state/proposal.md:55`
       的失实预期。
 - [ ] T12 PR body `偏离记录` 含：部署顺序为**硬**约束及其依据（判据 execute 无
       savepoint，`scripts/node27_autopipeline.py:1133`）；以及本单对 issue body 两处的

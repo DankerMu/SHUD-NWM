@@ -84,7 +84,7 @@ fact-join form it replaces.
 - **THEN** the run stays in the returned set, and that residual is recorded
   in the delivery receipt together with the size of the legacy cohort
 
-#### Scenario: a recomputed published run is re-detected on the next tick
+#### Scenario: a recomputed published run, once re-parsed, stays current on subsequent ticks
 
 - **GIVEN** a `published` run that was re-parsed after its product was regenerated
 - **WHEN** the next tick evaluates `_already_ingested_runs`
