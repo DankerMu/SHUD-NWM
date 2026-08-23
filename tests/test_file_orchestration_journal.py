@@ -13936,6 +13936,56 @@ def test_released_row_without_the_attestation_still_blocks_the_stage(tmp_path: P
     assert repository.get_pipeline_job(f"{job_id}_retry_1") is None
 
 
+def test_operator_recovery_attestation_predicate_refuses_non_released_shapes(tmp_path: Path) -> None:
+    """#1748 -- the predicate must implement its own narrowing, not lean on the caller.
+
+    The sole call site already gates on ``status``, so none of these shapes is
+    reachable today. The point is that the predicate has to be safe to read --
+    and to reuse -- in isolation: a ``pending`` successor that somehow inherited
+    both the attestation and the released decision is exactly the self-attesting
+    shape #1804 describes on the write side, and this closes it at the consumer
+    regardless of how the write side evolves.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
+
+    repository, record = _attested_released_master(tmp_path)
+    attested = repository.get_pipeline_job(str(record["job_id"]))
+    assert _operator_recovery_attested(attested) is True
+
+    # The self-attesting successor: attestation + released decision, but the row
+    # is an ordinary pending one.
+    assert _operator_recovery_attested({**attested, "status": "pending"}) is False
+    assert _operator_recovery_attested({**attested, "status": None}) is False
+    assert _operator_recovery_attested({**attested, "slurm_job_id": "12345"}) is False
+
+
+def test_operator_recovery_attestation_predicate_refuses_an_empty_string_binding(
+    tmp_path: Path,
+) -> None:
+    """#1748 -- both bindings mean UNBOUND the same (permissive) way.
+
+    The recovery API's own admission guard
+    (``recover_released_identity_blocked_reservation``) treats
+    ``slurm_job_id`` and ``matched_slurm_job_id`` identically, admitting
+    ``(None, "")`` for both. The consumer used a strict ``is None`` on the
+    second one, so a row the API would happily attest could then be refused at
+    the door -- an attested-but-inert shape. No writer produces ``""`` today;
+    the two sides must simply not be able to drift apart.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
+
+    repository, record = _attested_released_master(tmp_path)
+    attested = repository.get_pipeline_job(str(record["job_id"]))
+
+    assert _operator_recovery_attested({**attested, "slurm_job_id": ""}) is True
+    assert _operator_recovery_attested({**attested, "matched_slurm_job_id": ""}) is True
+    # A real binding is still refused on both fields.
+    assert _operator_recovery_attested({**attested, "matched_slurm_job_id": "12345"}) is False
+    assert _operator_recovery_attested({**attested, "slurm_job_id": "12345"}) is False
+
+
 def test_recover_released_identity_blocked_reservation_writes_no_row(tmp_path: Path) -> None:
     """#1748 tasks 5.2 -- the attestation is a marker, never a successor row.
 

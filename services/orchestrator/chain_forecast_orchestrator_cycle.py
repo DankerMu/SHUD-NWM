@@ -945,9 +945,19 @@ def _operator_recovery_attested(job: _chain.Mapping[str, _chain.Any]) -> bool:
 
     return bool(
         job.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, "")
+        # The call site already gates on ``status``, but the narrowing has to
+        # live here too or the predicate is unsafe to read -- and to reuse -- in
+        # isolation: a ``pending`` successor that somehow inherited both the
+        # attestation and the released decision would otherwise pass. Checking
+        # it here closes that shape at the consumer no matter how the write side
+        # evolves (#1804).
+        and str(job.get("status") or "") == "reservation_lost"
         and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+        # Both bindings are treated the same way the recovery API's own
+        # admission guard treats them; an asymmetric ``is None`` here would let
+        # an empty-string-bound row through if a writer ever produced one.
         and job.get("slurm_job_id") in (None, "")
-        and job.get("matched_slurm_job_id") is None
+        and job.get("matched_slurm_job_id") in (None, "")
     )
 
 

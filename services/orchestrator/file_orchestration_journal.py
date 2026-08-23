@@ -5,6 +5,7 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import stat
@@ -131,6 +132,8 @@ from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _
 from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+
+LOGGER = logging.getLogger(__name__)
 
 FILE_JOURNAL_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
 LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
@@ -328,6 +331,8 @@ def journal_read_attribution() -> dict[str, Any]:
 # ``event_type`` (not sanitized on the public read path) AND inside the message,
 # so ``grep`` finds the wedge in either rendering.
 IDENTITY_RELEASED_OPERATOR_SIGNAL = "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
+# The degraded trace emitted when that signal itself cannot be written.
+IDENTITY_RELEASED_SIGNAL_FAILED_EVENT = "identity_released_operator_signal_failed"
 # #1748: the durable operator-recovery attestation.  It is a MARKER on the
 # released row, never a pre-materialized successor: writing the successor eagerly
 # occupies the very job_id/idempotency key the ordinary retry path would mint,
@@ -3378,26 +3383,104 @@ class FileOrchestrationJournalRepository:
             # ``reconcile.py`` caller instead would double-emit, since it is the
             # sole caller.  Gated on the successful write so a CAS refusal above
             # stays write-free and signal-free.
+            # The release bytes are already appended and ``_locked_cycle_write``
+            # has NO rollback, so a raise here would leave the row durably
+            # released with no operator record -- permanently, because the
+            # reconcile loop iterates ``query_reserved_unbound_jobs()`` and
+            # never re-enters this door for a ``reservation_lost`` row.  Same
+            # best-effort discipline as ``_record_permanent_failure_mark_failure``:
+            # the evidence write exists to keep the terminal from being silent,
+            # never to turn a correct durable release into a raise.  The catch
+            # spans the filesystem/OS class too: the private-recovery side write
+            # raises ``SafeFilesystemError``/``OSError``, which ``reconcile.py``'s
+            # enclosing ``except FileOrchestrationJournalError`` would NOT catch
+            # -- it would abort the whole reconcile pass.
+            try:
+                self._append_pipeline_job_event_unlocked(
+                    row,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    event_type=IDENTITY_RELEASED_OPERATOR_SIGNAL,
+                    status_from=expected_status,
+                    status_to="reservation_lost",
+                    message=(
+                        f"{IDENTITY_RELEASED_OPERATOR_SIGNAL} pipeline job {job_id} released an "
+                        "identity-blocked reservation; the cohort is a permanent terminal until an "
+                        "operator invokes recover_released_identity_blocked_reservation."
+                    ),
+                    details={
+                        "pipeline_job_id": job_id,
+                        "cohort_digest": row.get("cohort_digest"),
+                        "identity_blocked_streak": identity_blocked_streak,
+                        "recovery_api": "recover_released_identity_blocked_reservation",
+                    },
+                )
+            except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError) as error:
+                self._record_identity_released_signal_failure(
+                    job_id,
+                    row,
+                    error,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            return 1
+
+    def _record_identity_released_signal_failure(
+        self,
+        job_id: str,
+        row: Mapping[str, Any],
+        error: Exception,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
+        """Leave a degraded trace when the #1748 operator signal could not be written.
+
+        #1312 C-P2: the fallback must not be silent.  The payload is kept
+        minimal on purpose -- ``file_journal_byte_limit_exceeded`` is one of the
+        realistic reasons the primary emission fails, and a smaller record still
+        fits -- but it keeps ``recovery_api`` so the degraded trace still tells
+        an operator what to invoke.  If this write fails too (a filesystem fault
+        that killed the primary very likely kills this one), it degrades to a
+        log and still does not raise.
+
+        Note: ``_materialize_latest_unlocked`` runs AFTER the append inside
+        ``_append_validated_record_unlocked``, so a materialize fault means the
+        primary event did land and this trace is redundant.  Noisy beats silent.
+        """
+
+        reason = str(
+            getattr(error, "reason", None) or getattr(error, "error_code", None) or type(error).__name__
+        )
+        try:
             self._append_pipeline_job_event_unlocked(
                 row,
                 source_id=source_id,
                 cycle_time=cycle_time,
-                event_type=IDENTITY_RELEASED_OPERATOR_SIGNAL,
-                status_from=expected_status,
+                event_type=IDENTITY_RELEASED_SIGNAL_FAILED_EVENT,
+                status_from="reservation_lost",
                 status_to="reservation_lost",
                 message=(
-                    f"{IDENTITY_RELEASED_OPERATOR_SIGNAL} pipeline job {job_id} released an "
-                    "identity-blocked reservation; the cohort is a permanent terminal until an "
-                    "operator invokes recover_released_identity_blocked_reservation."
+                    f"{IDENTITY_RELEASED_OPERATOR_SIGNAL} could not be written for pipeline job "
+                    f"{job_id} (reason={reason}); the row IS released and needs "
+                    "recover_released_identity_blocked_reservation."
                 ),
                 details={
                     "pipeline_job_id": job_id,
-                    "cohort_digest": row.get("cohort_digest"),
-                    "identity_blocked_streak": identity_blocked_streak,
+                    "reason": reason,
+                    "error_type": type(error).__name__,
                     "recovery_api": "recover_released_identity_blocked_reservation",
                 },
             )
-            return 1
+        except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError):
+            LOGGER.warning(
+                "%s could not be written for pipeline job %s (reason=%s) and neither could its "
+                "failure trace; the row IS released and needs "
+                "recover_released_identity_blocked_reservation.",
+                IDENTITY_RELEASED_OPERATOR_SIGNAL,
+                job_id,
+                reason,
+            )
 
     def _append_pipeline_job_event_unlocked(
         self,
