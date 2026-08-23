@@ -27,7 +27,15 @@ build each attempt's reservation from the then-current cohort, and a stale membe
 set would silently re-run a superseded basin manifest.
 
 **Attestation is required and is not a proof.** The attestation SHALL be settable
-only by an explicit operator action. The recovery API SHALL NOT perform any
+only by an explicit operator action, **and that action SHALL exist as a supported
+operator entry point** — a human SHALL be able to discover a row in this shape and
+act on it without source access or an interactive interpreter. A recovery
+mechanism with no invocation surface does not satisfy this requirement: it is
+indistinguishable, for the operator the requirement exists for, from the silent
+terminal it replaces. The entry point SHALL cover both halves — discovery (which
+rows are in this shape, and the values needed to act on them) and the action —
+because an operator who cannot obtain the action's required inputs is stopped one
+step earlier and no better off. A refusal SHALL name which precondition failed. The recovery API SHALL NOT perform any
 Slurm-side liveness or absence check, and SHALL NOT be described as one: on a
 cluster whose accounting does not store job comments, absence is not provable.
 Invoking it places that judgement with the operator rather than with the machine.
@@ -109,6 +117,16 @@ makes no release write SHALL remain write-free and signal-free.
   reservation row, before or after the recovery API exists
 - **THEN** `should_auto_retry` SHALL be false and the row's `error_code` SHALL be
   null
+
+#### Scenario: an operator can discover and act without source access
+
+- **WHEN** a row enters the released identity-blocked shape and an operator goes
+  looking for it through supported tooling
+- **THEN** the operator SHALL be able to enumerate rows in that shape together
+  with the values the recovery action requires
+- **AND** SHALL be able to perform the attestation through the same supported
+  tooling, with no interactive interpreter and no access to the source tree
+- **AND** a refused attempt SHALL name the precondition that failed
 
 #### Scenario: a failing signal does not undo or hide the release
 

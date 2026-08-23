@@ -172,6 +172,15 @@ and abort the whole reconcile pass.
   — asserted to admit the attestation and to be unchanged without it.
 - The ordinary pass, end to end — asserted to reach the stage's submission call
   after recovery. This is the oracle whose absence let an inert no-op go green.
+- **The operator, end to end** — asserted to be able to FIND a wedged row and ACT
+  on it through a supported entry point, without source access or a Python shell.
+  This seam was missing from the first three drafts of this design, and its
+  absence is why five reviewers reading against this fixture could not see that
+  the recovery API shipped with zero production callers. **Standing rule for this
+  change and its successors: for every mechanism added, name its intended invoker
+  and show the path.** "The mechanism is correct" and "the mechanism is reachable
+  by the party it exists for" are different claims; list both, or neither is under
+  test. (Recorded in `.workplans/pr-1802/review/retro-round-3.md`.)
 - The single release write point — asserted to emit the signal exactly once for
   both prior-state shapes, and asserted to keep the release durable, to not raise,
   and to leave a trace when the emission itself fails.

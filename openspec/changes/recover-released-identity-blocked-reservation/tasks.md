@@ -25,6 +25,18 @@
 - [x] 4.2 Do **not** also instrument the `reconcile.py:2135` caller (sole caller — would double-emit).
 - [x] 4.3 Record names job id, cohort digest, and `identity_blocked_streak`.
 
+## 4b. Operator Entry Point (who invokes this, and can they?)
+
+This section exists because it was absent from the first three drafts, and that
+absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.md`.
+
+- [ ] 4b.1 Name the intended invoker of every mechanism this change adds, and show the path from that invoker to the effect. Mechanisms: the recovery API (invoker: a human operator on node-22), the consuming disjunct (invoker: the ordinary scheduler pass), the release signal (invoker: reconcile; audience: a human reading the journal).
+- [ ] 4b.2 Add a supported operator entry point in `services/orchestrator/cli.py`, following the existing operator-maintenance subcommand convention.
+- [ ] 4b.3 Cover **discovery**: the operator can enumerate rows in the released identity-blocked shape together with the CAS values the action requires. Without this the operator is stopped one step earlier — there is today no supported way to read `expected_submission_attempt` / `expected_submission_attempt_started_at` off a wedged row.
+- [ ] 4b.4 Cover **action**: perform the attestation; idempotent on repeat; refusals name which precondition failed.
+- [ ] 4b.5 Help text states plainly that no Slurm-side liveness check is performed and that invoking it is an operator attestation, not a proof.
+- [ ] 4b.6 No HTTP/API route; CLI only.
+
 ## 5. Regression Evidence
 
 - [x] 5.1 **Red-first, the decisive one**: after recovery, an ordinary pass mints `_retry_<n>`, creates the reservation (`created=True`, not `already_inflight`), and reaches the submission call. This is the oracle whose absence let the first, inert implementation pass 2377 tests.
@@ -33,6 +45,7 @@
 - [x] 5.4 Test: refusal for each non-owned shape; repeated attestation idempotent.
 - [x] 5.5 Test: both release prior-state shapes emit the token exactly once (keep from `54714525`).
 - [x] 5.6 `tests/test_production_scheduler.py:48632` and `:48681` pass **unweakened** — assertions unchanged.
+- [ ] 5.7 The **operator-facing path itself** is pinned by a test that goes through the entry point, not only the method behind it.
 
 ## 6. Verification (Evidence Floor)
 
