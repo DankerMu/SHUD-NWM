@@ -42,7 +42,8 @@ Existing tests never caught this because the fixture
 >
 > - "returns `False` for **every** inflight forecast cohort" — false.
 >   `create_hydro_run_from_basin`
->   (`services/orchestrator/file_orchestration_journal.py:1527`, called from
+>   (`services/orchestrator/file_orchestration_journal.py:1718`, the `row` dict
+>   at `:1724-1731`; called from
 >   `chain_manifests.py:386`) does persist all three fields, so cohorts written
 >   through that path never reach the absent-field path at all. The defect was
 >   real but scoped to the `create_hydro_run` writer
@@ -55,6 +56,26 @@ Existing tests never caught this because the fixture
 > Neither correction changes what this change shipped; both are premises its
 > reasoning did not actually need.
 
+
+> **Line-reference drift disclosure (2026-08-23, round 4 of issue #1749).** Every
+> `file:line` reference in this change's `proposal.md` and `design.md` was
+> written against the tree as it stood on 2026-08-03 and has since drifted.
+> Mechanically checked at head (`9e962bd3`); the ones that no longer land on
+> what they name:
+>
+> | cited | names | actual at head |
+> |---|---|---|
+> | `file_orchestration_journal.py:1297` | `forecast_cohort_runtime_identity_matches` | `:1784` |
+> | `file_orchestration_journal.py:1203-1208` | the `None`-persisting writer path | `create_hydro_run` at `:1685-1716` |
+> | `reconcile.py:1124` | `_terminal_file_cohort_identity_matches` | `:1178` |
+> | `reconcile.py:1022` | the `identity_mismatch_blocked` record | `:1081` |
+> | `reconcile.py:1131-1139` | the sacct comment "not stored ≠ different" precedent | not re-derived; locate by symbol |
+>
+> These are **not** renumbered in place. This change is a completed piece of
+> history and its citations are a record of the tree it was written against;
+> renumbering them would make the document silently disagree with its own
+> commits. Locate by symbol name, not by line. Issue #1749's own documents are
+> held to head-accurate citations because they are still live.
 
 ## What Changes
 

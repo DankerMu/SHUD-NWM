@@ -51,6 +51,26 @@ the run context has no `basin_id` attribute at that point, so they persist
   wedged history, couples two planes in one deploy).
 - Non-goal: any relaxation on the cohort-member side or on check 1.
 
+> **Line-reference drift disclosure (2026-08-23, round 4 of issue #1749).** Every
+> `file:line` reference in this change's `proposal.md` and `design.md` was
+> written against the tree as it stood on 2026-08-03 and has since drifted.
+> Mechanically checked at head (`9e962bd3`); the ones that no longer land on
+> what they name:
+>
+> | cited | names | actual at head |
+> |---|---|---|
+> | `file_orchestration_journal.py:1297` | `forecast_cohort_runtime_identity_matches` | `:1784` |
+> | `file_orchestration_journal.py:1203-1208` | the `None`-persisting writer path | `create_hydro_run` at `:1685-1716` |
+> | `reconcile.py:1124` | `_terminal_file_cohort_identity_matches` | `:1178` |
+> | `reconcile.py:1022` | the `identity_mismatch_blocked` record | `:1081` |
+> | `reconcile.py:1131-1139` | the sacct comment "not stored ≠ different" precedent | not re-derived; locate by symbol |
+>
+> These are **not** renumbered in place. This change is a completed piece of
+> history and its citations are a record of the tree it was written against;
+> renumbering them would make the document silently disagree with its own
+> commits. Locate by symbol name, not by line. Issue #1749's own documents are
+> held to head-accurate citations because they are still live.
+
 ## Decision
 
 Per-field absent-is-skip, present-but-different-is-fatal, applied only to the

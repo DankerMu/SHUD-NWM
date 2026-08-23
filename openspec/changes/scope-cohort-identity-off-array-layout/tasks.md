@@ -103,7 +103,7 @@ Corrected criterion:
       passes; "churn not observed in window" is recorded as such, and the receipt
       is NOT presented as having demonstrated the churn path in production.
 - [ ] Record whether any cohort in the window is at `submission_attempt >= 2`.
-      Per D4 those stay blocked by `:1829` and that is **expected, not a
+      Per D4 those stay blocked by `:1841` and that is **expected, not a
       regression of this change** — it is #1792.
 
 ## Implementation record (2026-08-23)
@@ -162,7 +162,15 @@ comparison reddens exactly the `[submission_attempt]` parameter, deleting the
 3. Test 4's `run_id` leg mutates the **member** side, not the row side. Row-side
    is structurally impossible: the journal binds row `run_id` to `model_id` and
    raises `file_journal_run_mismatch` on write
-   (`file_orchestration_journal.py:10961`). Same comparison, operands reversed.
+   (`file_orchestration_journal.py:10955-10959`). Same comparison, operands
+   reversed.
+
+   > **Correction (round 4).** This cited `:10961`, which is the *adjacent*
+   > raise — `file_journal_model_mismatch`, a different guard. The `run_id`
+   > binding this deviation actually rests on is the raise at `:10955-10959`.
+   > The claim is unaffected; the pointer was one guard off, which for a
+   > load-bearing piece of evidence is exactly the kind of error a reader
+   > following it would trip over.
 
 ### Known limit, recorded rather than papered over
 

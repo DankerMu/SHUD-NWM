@@ -19,8 +19,9 @@ plus read-only node-22 journal inspection). It is cited, not re-derived.
 ## D1. Why `array_task_id` is not an identity
 
 `hydro_run` is a single row per `(source, cycle, model)`. `_write_hydro_run`
-(`:6842`) refuses to rewrite an existing row unless its `status` is `failed` or
-`cancelled` (`:6849-6861`), so a row's `array_task_id` is **frozen at the
+(`:6854`) refuses to rewrite an existing row unless its `status` is `failed` or
+`cancelled` — the `retriable_only` guard at `:6861-6873`, which raises
+`HYDRO_RUN_NOT_RETRIABLE` — so a row's `array_task_id` is **frozen at the
 submission that created it**.
 
 The value itself is the member's index within one array submission. Renumbering
@@ -50,28 +51,41 @@ submission". Two questions had to be answered before adopting it.
 
 **Is that proof held elsewhere?** Yes, and from a different input.
 `_terminal_file_cohort_identity_matches` (`services/orchestrator/reconcile.py:1178-1240`)
-builds `member_ids` from the **current** master's `cohort_members` (`:1206-1210`)
+builds `member_ids` from the **current** master's `cohort_members`
+(`reconcile.py:1207-1211`)
 and bijects them against **live sacct** `record.array_task_records`
-(`:1213-1240`). Its input is sacct, not `hydro_run`, so removing a `hydro_run`
+(`reconcile.py:1213-1240`). Its input is sacct, not `hydro_run`, so removing a
+`hydro_run`
 field cannot weaken it.
 
 (The sibling gate `_identity_mapping_matches_job`, `reconcile.py:921-951`, is a
 different check again — one sacct accounting row against one `job` object, to
 defend against `slurm_job_id` recycling. For a cohort master it is largely
-inert, because a master carries no task number, guarded at `:892`.)
+inert, because a master carries no task number, guarded at
+`reconcile.py:890-894`.)
 
-**Does anything else read the field?** No. A whole-repo grep over `services` and
-`packages`, excluding tests, finds exactly **one** production reader of
-`hydro_run.array_task_id`: the comparison being removed. There is no downstream
-consumer.
+**Does anything else read the field?** A whole-repo grep over `services`,
+`packages`, `apps`, `workers`, and `db`, excluding tests, finds exactly **one**
+production *comparator* of `hydro_run.array_task_id` — the comparison being
+removed — and none after it. Every other `array_task_id` hit is
+`pipeline_job.array_task_id`, a different record's own layout index backed by
+`db/migrations/000012_pipeline_job_array_task.sql`, or a `SacctRecord` field.
+
+State the residual precisely rather than as "no downstream consumer", which
+would be too strong: the field is still **persisted** on the row and still
+**travels outward** through `_hydro_run_for` → `_public_scheduler_row` (`:6884`)
+into API/display projections. Nothing there branches on it or compares it; it is
+carried, not consulted. So this change removes the last decision that reads the
+field, not the field itself — which is the intended scope, since the persisted
+value remains a true record of the submission that wrote the row.
 
 ## D4. `submission_attempt` is the same defect one field over — reported, not fixed
 
-The retained strict set is **not** claimed sound. `:1829` compares
+The retained strict set is **not** claimed sound. `:1841` compares
 `hydro_run.submission_attempt` against the identity's, and the two ends have
 asymmetric write semantics:
 
-- the identity side **increases** — `:2207-2208` bumps the master's attempt on
+- the identity side **increases** — `:2219-2221` bumps the master's attempt on
   the reclaim path, and `:1793` reads that value;
 - the `hydro_run` side **does not** — a `succeeded` row is frozen by the same
   `retriable_only` guard as in D1.
@@ -89,7 +103,7 @@ design does not claim the stronger statement.
 Filed as **#1792**. Out of this issue's stated scope (`array_task_id`), so it is
 reported and routed, not fixed here. The consequence worth stating for #1748:
 this change stops **new** cohorts entering the wedge via layout churn, but a
-cohort already reclaimed to attempt >= 2 stays blocked by `:1829`.
+cohort already reclaimed to attempt >= 2 stays blocked by `:1841`.
 
 ## D5. `project_forecast_cohort_tasks` is a legitimate use, and stays
 
@@ -117,8 +131,8 @@ Each asserts that the per-model writers never persist
    invariant-closure audit (D9) after three sweeps had missed it.
 
 All are false as statements about production: array-shaped cohorts are written
-by `create_hydro_run_from_basin` (`:1527`, called from `chain_manifests.py:386`),
-which persists all three (`:1553-1554` and siblings), and every sampled
+by `create_hydro_run_from_basin` (`:1718`, called from `chain_manifests.py:386`),
+which persists all three (the `row` dict at `:1724-1731`), and every sampled
 production row carries non-null values for all three. The `None` branch is dead
 on production data; the leg that actually runs is the present-but-different one.
 
@@ -190,9 +204,9 @@ Recorded here rather than only in the loop log because the class has now fired
 three times (twice inside PR #1759, once here) and the first two fixes did not
 prevent the third.
 
-## D9. The same fix-the-named-item-not-the-class failure, four times in one PR — including once by the sweep meant to end it
+## D9. The same fix-the-named-item-not-the-class failure, five times in one PR — including once by the sweep meant to end it, and once by the correction commit itself
 
-Four passes on this PR each found the same defect in a different file:
+Five passes on this PR each found the same defect in a different file:
 
 | pass | where | what it said |
 |---|---|---|
@@ -200,10 +214,12 @@ Four passes on this PR each found the same defect in a different file:
 | round 2 (P2) | `design.md` D6 | "now archived as `archive/2026-08-23-…`" |
 | Phase 7 (P2) | `proposal.md` | "corrected before archive on this branch" |
 | gate retro (invariant-closure audit) | donor `proposal.md`, donor `tasks.md`, `tests/test_gateway_reconcile.py`, the PR body | the falsified premise and the archive-state claim, in the four documents no prior pass had opened |
+| round 4 (P2) | the correction blocks written by `9e962bd3` | `create_hydro_run_from_basin` cited at `:1527`/`:1553-1554`; actually `:1718`/`:1724-1731` |
 
 Each fix corrected **the file it was shown** and left the others. Findings two
 through four are not new defects — they are the first defect, in the places the
-preceding fix did not look.
+preceding fix did not look. The fifth is the class reappearing inside its own
+remedy.
 
 This is a recorded personal failure mode, not a novel one.
 `docs/review-loop-log.jsonl` carries it against issue #1671 under the class
@@ -232,6 +248,20 @@ both changes plus the PR body, and adjudicated each against head — a closed li
 not a keyword filter. It returned nine false claims, six of which no reviewer and
 no sweep had seen. That is the second time the closed-list pattern has earned its
 place (PR #1759 was the first).
+
+**Round 4 added a fifth instance, in the correction commit itself.** The
+"Superseded"/"Correction" blocks written by `9e962bd3` — the commit whose entire
+purpose was to close this class — cited `create_hydro_run_from_basin` at
+`:1527` with its row dict at `:1553-1554`. Both are wrong: the function is at
+`:1718` and the dict at `:1724-1731`; `:1527` lands in an unrelated migration
+journal loop. The *substance* of the correction was right, but a reader
+following the pointer to check the evidence lands on unrelated code. Recorded
+rather than quietly fixed, because it is the sharpest available demonstration
+that this failure mode is not closed by intending to close it. The
+countermeasure is the same closed-list discipline applied one level down: a
+citation is a claim, and `file:line` claims are checked by opening the file, not
+by trusting the memory that wrote them.
+
 
 Standing rule, revised — the earlier phrasing was the one that just failed:
 
