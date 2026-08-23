@@ -206,8 +206,13 @@ COPYBACK_AIDS = {"variable"}
 # D, the autopipeline ingest criterion (#1686). Its LEFT JOIN reaches compressed
 # chunks on every tick and `run_key` is neither segmentby nor indexed there, so
 # the one sanctioned aid is `run_id` — segmentby column 1 of 000047. The publish
-# criterion stays aid-free: it correlates inside an EXISTS that the planner can
-# satisfy from the uncompressed frontier.
+# criterion stays aid-free, but not because its EXISTS is cheap by construction:
+# measured on node-27 (2026-08-23) the planner flattens that EXISTS into a hash
+# semi-join whose Append covers every chunk, all three compressed ones included.
+# What makes a no-op tick free is an execution-time artifact — the join's inner
+# side (`hydro_run` at status 'parsed') was empty, so every Append child came
+# back `(never executed)` and the statement took 0.366 ms. A tick that does have
+# parsed runs pays the full decompression. Tracked as #1779.
 AUTOPIPE_INGEST_AIDS = {"run_id"}
 NO_AIDS: set[str] = set()
 
@@ -891,6 +896,12 @@ def test_autopipeline_ingest_criterion_joins_by_key_with_one_marked_run_id_aid()
     ALL `run_key IS NULL` and therefore cannot match at all. `run_id` is
     segmentby column 1, so the aid turns each compressed leg's `Seq Scan on
     compress_hyper_*` into an `Index Cond: (run_id = ANY (...))`.
+
+    Measured, not inferred: `EXPLAIN (ANALYZE, BUFFERS)` of the pre-change shape
+    on node-27 (2026-08-23, 1972 bound `run_id`s,
+    `max_parallel_workers_per_gather = 0`) reports
+    `Execution Time: 742395.104 ms` (12:22), with all six Append children
+    scanned.
 
     The join condition itself is unchanged (`rt.run_key = h.run_key`), and the
     ceiling is the shared sanctioned set, so this cannot grow a second text

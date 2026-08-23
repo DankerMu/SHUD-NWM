@@ -970,8 +970,11 @@ def _already_ingested_runs(
                 -- narrow. It must stay in the ON clause: in WHERE it would
                 -- drop the LEFT JOIN's NULL-extended rows and delete an
                 -- rt-less published run from the result. rt.run_id = h.run_id
-                -- (the text fact join) remains forbidden -- the planner has no
-                -- constant to push there.
+                -- (the text fact join) remains forbidden by #1442 policy:
+                -- identity that arrives through an authority-table join stays
+                -- key-joined, and joining the fact table on text is exactly
+                -- what that forbids. The aid is not such a join -- it compares
+                -- against a bound constant array, never against a column of h.
                 LEFT JOIN hydro.river_timeseries rt
                   ON rt.run_key = h.run_key
                   -- transitional compressed-chunk pushdown aid, remove with #1342
