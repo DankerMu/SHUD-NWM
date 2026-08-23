@@ -108,8 +108,8 @@ Both assert that the per-model writers never persist
 `None` as "not stored" while keeping present-but-different fatal.
 
 1. The comment above the comparison (`~:1813-1818`).
-2. The donor change's design, now archived as
-   `openspec/changes/archive/2026-08-23-fix-cohort-runtime-identity-absent-fields/design.md`.
+2. The donor change's design,
+   `openspec/changes/fix-cohort-runtime-identity-absent-fields/design.md`.
 
 Both are false as statements about production: array-shaped cohorts are written
 by `create_hydro_run_from_basin` (`:1527`, called from `chain_manifests.py:386`),
@@ -118,9 +118,20 @@ production row carries non-null values for all three. The `None` branch is dead
 on production data; the leg that actually runs is the present-but-different one.
 
 Corrections are recorded **in place** — the original reasoning stays visible —
-per the project convention that produced ADR 0003's correction style. The donor
-was corrected and archived on this branch **before** this change's delta, so the
-false rationale never lands in `openspec/specs/`.
+per the project convention that produced ADR 0003's correction style.
+
+> **Correction (round 2, P2).** This paragraph originally continued: "The donor
+> was corrected and archived on this branch **before** this change's delta, so
+> the false rationale never lands in `openspec/specs/`." That described the
+> original plan, which round 1 found defective and commit `45e14464` reverted —
+> but that commit only updated `tasks.md`, leaving this section asserting an
+> archive that no longer happens. The PR's own two documents therefore
+> contradicted each other, which is the same drift class the revert was fixing.
+> **Current state**: the donor is corrected and stays an open change at
+> `openspec/changes/fix-cohort-runtime-identity-absent-fields/`; both changes
+> archive together in the post-merge chore commit, donor first. See D8 for why,
+> and `tasks.md` section 1 for the probes that established the deferred path
+> works.
 
 ## D7. Rejected directions, with the evidence that rejected them
 
