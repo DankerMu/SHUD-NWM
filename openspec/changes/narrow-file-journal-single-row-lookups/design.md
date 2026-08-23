@@ -462,3 +462,88 @@ three things, not one:
 A receipt showing the primary criterion still missed, together with a traced
 A/B/C split, is this round **succeeding**. The criterion closes in the round
 that follows, against a measured target.
+
+## D13. Round 2 implementation record: what the three fixes actually became
+
+**D9 — delegation is by shared PATH helper, not by shared record iterator.**
+`_flat_direct_pipeline_job_paths_for_cycle` is now the ONE definition of the
+flat filename filter; both flat readers call it. Record-level delegation was
+rejected on a concrete ground: `_iter_direct_pipeline_job_records_for_cycle`
+merges its flat and by-cycle legs in a **single** `sorted()`, so yielding
+records from the other reader would have reordered its output, which the round's
+own constraint forbids. Yielding paths keeps the merged sort intact and still
+leaves exactly one filter definition to correct.
+
+Two consequences worth naming rather than discovering later:
+
+- The filter now **normalises the source token** before comparing.
+  `_cycle_scope_from_job_id` returns the canonical spelling (`IFS`) while
+  callers legitimately pass the run-identifier spelling (`ifs`), and
+  `_job_matches_source_cycle` — the content filter this prefilter sits ahead of
+  — normalises too. The round-1 filter compared raw strings; had the second
+  reader inherited that, every `ifs` caller would have got a silent empty
+  result rather than a slow one. This was a latent defect in round 1's own
+  filter, fixed here.
+- **#1758 is superseded**, not merely related. It was filed "reported, not
+  fixed, because content is identity-authoritative there and a filename
+  prefilter would change behaviour for a name that contradicts its content" —
+  and D9 reverses exactly that ruling. The content check is retained; the
+  filename filter is a prefilter ahead of it. The behaviour that changes is the
+  one #1760 verified unproducible by any writer and 0-of-4,309 in production.
+
+**D10 — the memo key carries `include_direct`.** The ruling said
+`(source_id, cycle)`; the function also takes `include_direct`, and the flag is
+load-bearing (`_pipeline_job_for_id_unlocked` replays with it false so its
+fallback never re-counts the direct record it already probed). A key without it
+would serve one variant's rows to the other. The flat signature leg is likewise
+computed only when `include_direct` is true, so the `False` variant does not pay
+a flat-directory scandir per probe.
+
+All three legs were scopable, so there is **no unscoped leg** to declare. The
+one stated limitation of the signature is different in kind and is recorded
+here: the signature covers the identity of the *files*, not of the directories
+containing them. A cycle directory replaced wholesale by a fresh one whose
+children are byte-identical would be a hit. No production write path can do
+this — every write is an append or an atomic file-level replace — and an
+out-of-band swap to identical content is indistinguishable from no change by
+construction.
+
+**D11 — the counter is tagged `entrypoint|lane`.** Lanes are the design's
+candidates verbatim: `full_tree_replay` (A), `direct_flat_scan` (B),
+`cycle_replay` (C). Entrypoints are the six query methods plus the two
+`_unlocked` helpers; anything else falls to `unattributed`, so totals always
+reconcile rather than silently dropping reads.
+
+- The byte counter sits on `_read_bytes_limited_cached`, the single point where
+  journal bytes cross the syscall boundary, so `bytes` is directly comparable
+  to `/proc` `rchar`. Byte-cache hits are counted separately as
+  `cache_hit_calls` / `cache_hit_bytes` and never folded into `bytes` — a hit
+  costs no `rchar`, and folding it in would inflate exactly the number the
+  receipt is trying to attribute.
+- Lane tags wrap only **eager** collection phases, never a `yield`. A
+  `ContextVar` token reset from a generator a consumer abandoned can land in a
+  different context and raise; an instrument must not be able to fail a read
+  path. `_iter_pipeline_job_records` was therefore split into a thin generator
+  over `_replay_all_pipeline_job_records`, and lane B is tagged at
+  `_direct_pipeline_job_records_for_cycle_cached` — the cache-**miss** path,
+  which is the cost B actually names — rather than inside the streaming
+  iterator it calls.
+- Its lock is its own, increment-only, and never held while another lock is
+  acquired, so the journal's single lock order (`_write_lock` -> `_cache_lock`)
+  is untouched.
+- Merge point is `_finalize_timing_into_evidence`, whose contract is already
+  "runs at every `SchedulerPassResult` return site before the artifact is
+  written" — the one hook that makes the counter always-on. Reset is at
+  `run_once` entry and only there, so a finalize invoked twice stays idempotent.
+- It is registered in `bounded_evidence_payload` and, as a last-resort shed,
+  in `_OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS` immediately **before** `timing`
+  so no pre-existing field's drop order moves. At the production 5 MB limit a
+  dozen triples are never the reason an artifact does not fit; that tier exists
+  only so a pathologically small limit still yields a writable artifact instead
+  of `evidence_size_limit_exceeded`.
+
+**D12 restated at hand-off:** the primary criterion was pre-declared to miss
+again this round and nothing here was tuned toward it. No projection of the
+post-fix `rchar` is offered, because the only candidate large enough to close
+the gap (A) is the one this change has never measured — which is what the
+counter now makes measurable.

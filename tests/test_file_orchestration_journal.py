@@ -6224,17 +6224,17 @@ def test_file_orchestration_journal_scoped_direct_snapshot_discovery_fails_close
 
     repository = FileOrchestrationJournalRepository(journal_root)
 
-    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    # #1734 D2a + D9: the flat direct surface is filtered by file name on BOTH
+    # readers, and this file's name resolves to IFS/2026062812 -- a different
+    # cycle -- so a GFS lookup neither opens it nor is blocked by it. Round 1
+    # filtered only the narrowed reader, which is why this test previously
+    # pinned ``has_active_pipeline`` as fail-closed here; D9 moved the scoped
+    # direct reader onto the same one filter definition, so a foreign cycle's
+    # corruption can no longer wedge this cycle on either path.
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
     state = _candidate_state(repository, cycle_time=cycle_time)
     assert state is not None
-    assert state["pipeline_status"] == "running"
-    assert state["file_journal"]["reason"] == "file_journal_malformed_json"
-    assert state["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
-
-    # #1734 D2a: the flat direct surface is filtered by file name, and this
-    # file's name resolves to IFS/2026062812 -- a different cycle -- so a GFS
-    # lookup no longer opens (or is blocked by) it. The scoped reader above
-    # still fails closed on it, unchanged.
+    assert "file_journal" not in state or state["file_journal"].get("reason") is None
     query = repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
     assert [row["job_id"] for row in query] == [scoped_job["job_id"]]
     assert "error_code" not in query[0]
@@ -6243,6 +6243,19 @@ def test_file_orchestration_journal_scoped_direct_snapshot_discovery_fails_close
     blocked = repository.query_pipeline_jobs_by_cycle("unknown-source_2026062800")
     assert blocked[0]["error_code"] == "file_journal_malformed_json"
     assert blocked[0]["file_journal"]["field"] == "pipeline-jobs/job_cycle_ifs_2026062812_forecast.json"
+
+    # Fail-closed keeps its home on the scoped reader too: a malformed flat
+    # file whose name belongs to THIS cycle still blocks it. Only the foreign
+    # cycle's file stopped counting, which is equivalence, not a silent drop.
+    own_cycle_direct = journal_root / "pipeline-jobs/job_cycle_gfs_2026062800_forecast.json"
+    own_cycle_direct.write_text("{not-json", encoding="utf-8")
+    reopened = FileOrchestrationJournalRepository(journal_root)
+    assert reopened.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+    own_state = _candidate_state(reopened, cycle_time=cycle_time)
+    assert own_state is not None
+    assert own_state["pipeline_status"] == "running"
+    assert own_state["file_journal"]["reason"] == "file_journal_malformed_json"
+    assert own_state["file_journal"]["field"] == "pipeline-jobs/job_cycle_gfs_2026062800_forecast.json"
 
 
 @pytest.mark.parametrize("authoritative_surface", ["latest", "journal"])
@@ -12399,6 +12412,11 @@ def test_narrowed_journal_lookup_touches_no_foreign_cycle_file(
         lambda: repository.query_candidate_state(f"cycle_{target_source.lower()}_{target_stamp}:forecast"),
         by_job_id_replay,
     ):
+        # #1734 D10: containment is a property of the COLD path -- the memo can
+        # only shrink the opened set, never widen it -- so each lookup is
+        # measured against an empty memo. The memo's own behaviour is pinned by
+        # ``test_cycle_scoped_replay_memo_is_not_evicted_by_a_write_to_another_cycle``.
+        repository._cycle_job_records_cache.clear()
         touched.clear()
         assert lookup()
         relatives = [path.relative_to(repository.root).as_posix() for path in touched]
@@ -12417,6 +12435,7 @@ def test_narrowed_journal_lookup_touches_no_foreign_cycle_file(
 
     # The unparseable name is read by the replaying lookups (fall open), even
     # though the by-cycle/by-run lookups filter its row out of the answer.
+    repository._cycle_job_records_cache.clear()
     touched.clear()
     assert repository.query_pipeline_jobs_by_cycle(cycle_id_for(target_source, target_cycle))
     assert unparseable_flat.relative_to(repository.root).as_posix() in [
@@ -13017,3 +13036,377 @@ def test_journal_segment_name_filter_falls_open_on_unresolvable_stems(stem: str,
     """
 
     assert journal_module._journal_segment_stem_in_cycle_scope(stem, "2026062800") is in_scope
+
+
+# ---------------------------------------------------------------------------
+# #1734 round 2: D9 parity, D10 memo, D11 traced read attribution
+# ---------------------------------------------------------------------------
+
+
+def _record_read_paths(repository: Any, patch: Any) -> list[str]:
+    """Record every path whose BYTES are actually read from the filesystem.
+
+    Hooking ``_read_bytes_limited_cached`` rather than ``_read_optional_json``
+    keeps the probe on the one choke point both readers share, so a memo hit
+    is distinguishable from a byte-cache hit: a memo hit performs no call at
+    all, while a byte-cache hit still calls through here.
+    """
+
+    paths: list[str] = []
+    real = FileOrchestrationJournalRepository._read_bytes_limited_cached
+
+    def counting(self: Any, path: Path) -> Any:
+        paths.append(str(path))
+        return real(self, path)
+
+    patch.setattr(FileOrchestrationJournalRepository, "_read_bytes_limited_cached", counting)
+    return paths
+
+
+def test_cycle_scoped_replay_memo_is_not_evicted_by_a_write_to_another_cycle(
+    tmp_path: Path,
+) -> None:
+    """#1734 D10: the memo's invalidation signature is scoped to ONE cycle.
+
+    ``_direct_jobs_cycle_cache`` keys its signature on
+    ``_stat_signature(root / "pipeline-jobs")`` — a shared, unpartitioned
+    directory — so any write to any cycle invalidates every entry. It is
+    correct and it thrashes. This test is what separates the new memo from
+    that pattern: a write to a DIFFERENT cycle must leave this cycle's entry
+    intact, while a write to THIS cycle must still invalidate it.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    other = _dt("2026-06-28T12:00:00Z")
+
+    def replay() -> list[dict[str, Any]]:
+        return [
+            dict(job)
+            for job in repository._iter_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=target,
+            )
+        ]
+
+    with pytest.MonkeyPatch.context() as patch:
+        reads = _record_read_paths(repository, patch)
+
+        first = replay()
+        assert first
+        assert reads, "a cold memo must read this cycle's files"
+
+        reads.clear()
+        assert replay() == first
+        assert reads == [], "a warm memo must not re-read any file"
+
+        # A write that belongs to ANOTHER cycle: same shared flat
+        # ``pipeline-jobs/`` directory, same shared ``journal/gfs/`` directory,
+        # different cycle. The memo entry for `target` must survive it.
+        repository.update_pipeline_job_status("job_cycle_gfs_2026062812_convert", "succeeded")
+        assert repository.get_pipeline_job("job_cycle_gfs_2026062812_convert")["status"] == "succeeded"
+        reads.clear()
+        assert replay() == first
+        assert reads == [], "a write to another cycle must not evict this cycle's memo entry"
+
+        # A write that belongs to THIS cycle must invalidate it, and the memo
+        # must then serve the new row rather than the stale one.
+        repository.update_pipeline_job_status("job_cycle_gfs_2026062800_convert", "succeeded")
+        reads.clear()
+        refreshed = replay()
+        assert reads, "a write to this cycle must invalidate the memo entry"
+        statuses = {str(job["job_id"]): str(job["status"]) for job in refreshed}
+        assert statuses["job_cycle_gfs_2026062800_convert"] == "succeeded"
+        assert {str(job["job_id"]) for job in refreshed} == {str(job["job_id"]) for job in first}
+
+    # Untouched cycles still answer correctly through the same memo.
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("IFS", other))
+
+
+def test_cycle_scoped_replay_memo_separates_include_direct_variants(tmp_path: Path) -> None:
+    """#1734 D10: ``include_direct`` is part of the memo key, not a collision.
+
+    ``_pipeline_job_for_id_unlocked`` replays with ``include_direct=False``;
+    every other narrowed entrypoint replays with ``True``. A key that ignored
+    the flag would serve one variant's rows to the other.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    orphan_job_id = "job_cycle_gfs_2026062800_direct_only"
+    _write_json(
+        repository.root / "pipeline-jobs" / f"{orphan_job_id}.json",
+        {
+            "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+            "sequence": 1,
+            "record_type": "pipeline_job",
+            "source_id": "gfs",
+            "cycle_time": target.isoformat(),
+            "payload": {
+                **_active_job(target),
+                "job_id": orphan_job_id,
+                "idempotency_key": "cycle_gfs_2026062800:direct_only",
+            },
+        },
+    )
+
+    def replay(*, include_direct: bool) -> set[str]:
+        return {
+            str(job["job_id"])
+            for job in repository._iter_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=target,
+                include_direct=include_direct,
+            )
+        }
+
+    with_direct = replay(include_direct=True)
+    without_direct = replay(include_direct=False)
+    assert orphan_job_id in with_direct
+    assert orphan_job_id not in without_direct
+    # Re-read in the opposite order: a shared key would now serve the wrong set.
+    assert replay(include_direct=False) == without_direct
+    assert replay(include_direct=True) == with_direct
+
+
+def test_direct_cycle_records_skip_flat_files_of_another_cycle(tmp_path: Path) -> None:
+    """#1734 D9: the second flat reader gets the D2a prefilter by delegation.
+
+    ``_iter_direct_pipeline_job_records_for_cycle`` used to ``_read_optional_
+    json`` every file in the flat ``pipeline-jobs/`` directory before any
+    content check — 13.18 MB across 4,375 files on node-22 per cache miss.
+    Its flat leg now shares ONE filter definition with
+    ``_iter_flat_direct_pipeline_job_records_for_cycle``.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    flat = repository.root / "pipeline-jobs"
+    assert any(path.name.startswith("job_cycle_ifs_") for path in flat.glob("*.json"))
+
+    with pytest.MonkeyPatch.context() as patch:
+        reads = _record_read_paths(repository, patch)
+        rows = list(
+            repository._iter_direct_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=target,
+                model_id=None,
+            )
+        )
+
+    opened = {Path(path).name for path in reads if Path(path).parent == flat}
+    assert "job_cycle_gfs_2026062800_forecast.json" in opened
+    assert "job_cycle_gfs_2026062800_convert.json" in opened
+    assert "job_cycle_gfs_2026062812_convert.json" not in opened
+    assert not [name for name in opened if name.startswith("job_cycle_ifs_")]
+
+    job_ids = {str(job["job_id"]) for job in rows}
+    assert job_ids == {
+        "job_cycle_gfs_2026062800_forecast",
+        "job_cycle_gfs_2026062800_convert",
+        "job_fcst_gfs_2026062800_model_a",
+    }
+
+    # A malformed file of ANOTHER cycle is skipped by name and never decoded,
+    # so it cannot block this cycle's direct scan.
+    (flat / "job_cycle_ifs_2026062812_forecast.json").write_text("{not-json", encoding="utf-8")
+    assert {
+        str(job["job_id"])
+        for job in repository._iter_direct_pipeline_job_records_for_cycle(
+            source_id="gfs",
+            cycle_time=target,
+            model_id=None,
+        )
+    } == job_ids
+
+
+def test_direct_cycle_records_prefilter_normalises_the_source_case(tmp_path: Path) -> None:
+    """#1734 I4 on the delegating path: ``ifs`` and ``IFS`` are one source.
+
+    ``_cycle_scope_from_job_id`` yields the canonical spelling (``IFS``) while
+    callers may hand in the lower-case run-id spelling, and
+    ``_job_matches_source_cycle`` normalises before comparing. A filename
+    prefilter that compared raw strings would skip every file of a source
+    passed in the other case — a silent empty result, not a slow one.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    lower = {
+        str(job["job_id"])
+        for job in repository._iter_direct_pipeline_job_records_for_cycle(
+            source_id="ifs",
+            cycle_time=target,
+            model_id=None,
+        )
+    }
+    upper = {
+        str(job["job_id"])
+        for job in repository._iter_direct_pipeline_job_records_for_cycle(
+            source_id="IFS",
+            cycle_time=target,
+            model_id=None,
+        )
+    }
+    assert lower == upper
+    assert "job_cycle_ifs_2026062800_forecast" in lower
+
+
+def test_direct_cycle_records_still_read_unparseable_flat_names(tmp_path: Path) -> None:
+    """#1734 D2a fall-open, pinned on the delegating path (D9).
+
+    The prefilter fails toward reading too much: a name that does not resolve
+    at all is read, never skipped. Delegation must preserve that by
+    construction, not by re-argument.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    unparseable_job_id = "cycle_gfs_2026062800_retry_active"
+    _write_json(
+        repository.root / "pipeline-jobs" / f"{unparseable_job_id}.json",
+        {
+            "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+            "sequence": 1,
+            "record_type": "pipeline_job",
+            "source_id": "gfs",
+            "cycle_time": target.isoformat(),
+            "payload": {
+                **_active_job(target),
+                "job_id": unparseable_job_id,
+                "run_id": "cycle_gfs_2026062800",
+                "idempotency_key": "cycle_gfs_2026062800:retry_active",
+            },
+        },
+    )
+    assert journal_module._cycle_scope_from_job_id(unparseable_job_id) is None
+
+    with pytest.MonkeyPatch.context() as patch:
+        reads = _record_read_paths(repository, patch)
+        rows = list(
+            repository._iter_direct_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=target,
+                model_id=None,
+            )
+        )
+    assert f"{unparseable_job_id}.json" in {Path(path).name for path in reads}
+    assert unparseable_job_id in {str(job["job_id"]) for job in rows}
+
+    # ... and on the other reader, which already carried the property.
+    assert unparseable_job_id in {
+        str(job["job_id"])
+        for job in repository._iter_flat_direct_pipeline_job_records_for_cycle(
+            source_id="gfs",
+            cycle_time=target,
+        )
+    }
+
+
+def test_journal_read_counter_attributes_bytes_to_the_driving_entrypoint(
+    tmp_path: Path,
+) -> None:
+    """#1734 D11: the read counter ships in the repo and is on by default.
+
+    node-22 pulls from GitHub, so a monkeypatched probe is not an option. The
+    counter must name the entrypoint AND the lane (A full-tree replay / B flat
+    direct scan / C cycle-scoped replay) so the design's A/B/C split is
+    directly readable off a pass artifact.
+    """
+
+    populated = _populate_narrowing_journal(tmp_path)
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    # A FRESH instance over the same root: the writer instance left every file
+    # in its in-process byte cache, and a byte-cache hit is deliberately not
+    # counted as `bytes` because it costs no `rchar`.
+    repository = FileOrchestrationJournalRepository(populated.root)
+
+    journal_module.reset_journal_read_counters()
+    assert journal_module.journal_read_attribution()["totals"]["calls"] == 0
+
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", cycle_time))
+    scoped = journal_module.journal_read_attribution()
+    scoped_tags = {row["tag"]: row for row in scoped["tags"]}
+    assert (
+        "query_pipeline_jobs_by_cycle|cycle_replay" in scoped_tags
+    ), sorted(scoped_tags)
+    entry = scoped_tags["query_pipeline_jobs_by_cycle|cycle_replay"]
+    assert entry["calls"] > 0
+    assert entry["bytes"] > 0
+    assert scoped["totals"]["bytes"] >= entry["bytes"]
+    assert not [tag for tag in scoped_tags if tag.endswith("|full_tree_replay")]
+
+    journal_module.reset_journal_read_counters()
+    assert repository.query_pipeline_job_by_slurm_id("no-such-slurm-id") is None
+    full = {row["tag"]: row for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_pipeline_job_by_slurm_id|full_tree_replay" in full, sorted(full)
+    assert full["query_pipeline_job_by_slurm_id|full_tree_replay"]["calls"] > 0
+
+    journal_module.reset_journal_read_counters()
+    repository._direct_pipeline_job_records_for_cycle_cached(source_id="gfs", cycle_time=cycle_time)
+    direct = {row["tag"]: row for row in journal_module.journal_read_attribution()["tags"]}
+    assert [tag for tag in direct if tag.endswith("|direct_flat_scan")], sorted(direct)
+
+
+def test_journal_read_counter_is_thread_safe_under_concurrent_readers(tmp_path: Path) -> None:
+    """#1734 D11 + spec pipeline-job-persistence:550.
+
+    The counter is shared mutable state on a cross-thread singleton
+    repository, so its totals must reconcile exactly under concurrency — a
+    lost update here would silently understate the very attribution this
+    round exists to produce.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    cycle_ids = [cycle_id_for(source_id, _dt(text)) for source_id, text in _NARROWING_CYCLES]
+    journal_module.reset_journal_read_counters()
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+
+    def worker(index: int) -> None:
+        try:
+            barrier.wait(timeout=30)
+            for _ in range(10):
+                repository.query_pipeline_jobs_by_cycle(cycle_ids[index % len(cycle_ids)])
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not errors, errors
+    assert not [thread for thread in threads if thread.is_alive()]
+
+    attribution = journal_module.journal_read_attribution()
+    assert attribution["totals"]["calls"] == sum(row["calls"] for row in attribution["tags"])
+    assert attribution["totals"]["bytes"] == sum(row["bytes"] for row in attribution["tags"])
+    assert attribution["totals"]["cache_hit_calls"] == sum(row["cache_hit_calls"] for row in attribution["tags"])
+
+
+def test_scheduler_pass_evidence_carries_the_journal_read_attribution() -> None:
+    """#1734 D11: the counter's totals reach the pass artifact.
+
+    ``_finalize_timing_into_evidence`` is documented as running at every
+    ``SchedulerPassResult`` return site BEFORE the evidence is written, so it
+    is the one hook that makes the attribution always-on.
+    """
+
+    from services.orchestrator import scheduler_runtime
+    from services.orchestrator.scheduler_timing import SchedulerPassTiming
+
+    journal_module.reset_journal_read_counters()
+    journal_module._record_journal_read(byte_count=1234, cached=False)
+
+    evidence: dict[str, Any] = {}
+    collector = SchedulerPassTiming(pass_id="scheduler_2026062800_deadbeefcafe", level="stage")
+    with collector.pass_span():
+        scheduler_runtime._finalize_timing_into_evidence(evidence, collector, "completed")
+
+    assert "timing" in evidence
+    attribution = evidence["journal_read_attribution"]
+    assert attribution["schema_version"] == journal_module.JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION
+    assert attribution["totals"]["bytes"] == 1234
+    assert [row["tag"] for row in attribution["tags"]] == ["unattributed|unattributed"]
+    journal_module.reset_journal_read_counters()

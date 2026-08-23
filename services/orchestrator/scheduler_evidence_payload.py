@@ -1017,6 +1017,11 @@ def bounded_evidence_payload(
         "no_progress_circuit": payload.get("no_progress_circuit"),
         "retention": payload.get("retention"),
         "timing": payload.get("timing"),
+        # #1734 D11: a dozen (tag, calls, bytes) triples. It survives the
+        # bounded path because it is the pass's only read attribution and
+        # dropping it would blind the very measurement the artifact exists
+        # to carry, at a cost of well under a kilobyte.
+        "journal_read_attribution": payload.get("journal_read_attribution"),
     }
     if "db_free_runtime" not in payload:
         bounded_payload.pop("db_free_runtime", None)
@@ -1033,6 +1038,8 @@ def bounded_evidence_payload(
         bounded_payload.pop("no_progress_circuit", None)
     if "timing" not in payload:
         bounded_payload.pop("timing", None)
+    if "journal_read_attribution" not in payload:
+        bounded_payload.pop("journal_read_attribution", None)
     return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
 
 

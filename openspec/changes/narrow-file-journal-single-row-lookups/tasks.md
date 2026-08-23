@@ -197,38 +197,38 @@ showing the criterion still missed alongside that split is this round succeeding
 
 ### Implementation
 
-- [ ] **D9 parity**: `_iter_direct_pipeline_job_records_for_cycle` (`:4857`)
+- [x] **D9 parity**: `_iter_direct_pipeline_job_records_for_cycle` (`:4857`)
       delegates its flat `pipeline-jobs/` leg to
       `_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`).
       **Delegate, do not copy** — a third filter definition recreates the very
       parity class this fixes. By-cycle leg untouched (already partitioned).
-- [ ] **D10 memo**: memoize `_iter_pipeline_job_records_for_cycle` (`:4943`) on
+- [x] **D10 memo**: memoize `_iter_pipeline_job_records_for_cycle` (`:4943`) on
       `(source_id, cycle)`. Invalidation signature scoped to **this cycle's own
       files** — `latest/<segment>/<cycle>/` dir stat is already cycle-scoped;
       `journal/` and flat `pipeline-jobs/` legs stat the **matched file set**,
       never the shared directory. Any leg that cannot be scoped is recorded as a
       stated memo limitation, not hidden behind a directory stat.
-- [ ] **D11 counter**: always-on per-entrypoint `(tag, calls, bytes)` counter
+- [x] **D11 counter**: always-on per-entrypoint `(tag, calls, bytes)` counter
       over the read primitives, merged into pass evidence. Ships in the repo
       (node-22 pulls from GitHub; no local-patch path). Thread-safe under
       spec `pipeline-job-persistence:550`.
 
 ### Evidence floor
 
-- [ ] **Discriminating memo test** (D10, required): a write to a **different**
+- [x] **Discriminating memo test** (D10, required): a write to a **different**
       cycle MUST NOT evict this cycle's memo entry. Without this assertion the
       new memo is indistinguishable from `_direct_jobs_cycle_cache`'s
       correct-but-thrashing pattern. Must be shown to bite: revert the scoping
       to a shared-directory stat and watch it go red.
-- [ ] **D9 parity test**: a file in flat `pipeline-jobs/` belonging to another
+- [x] **D9 parity test**: a file in flat `pipeline-jobs/` belonging to another
       cycle is not opened by `_iter_direct_pipeline_job_records_for_cycle`.
       Must be shown to bite against the pre-change function.
-- [ ] **Fail-open preserved**: an unparseable flat file name is still read
+- [x] **Fail-open preserved**: an unparseable flat file name is still read
       (both readers), pinned on the delegating path.
-- [ ] **Concurrency unchanged**: existing shared-instance concurrency test
+- [x] **Concurrency unchanged**: existing shared-instance concurrency test
       (spec `pipeline-job-persistence:550`) green; single lock order, no
       cache-mutex -> write-mutex nesting.
-- [ ] **Local suite**: `uv run pytest` over the journal/scheduler suites the
+- [x] **Local suite**: `uv run pytest` over the journal/scheduler suites the
       round-1 change already covered, plus the new tests.
 - [ ] **node-22 receipt, same口径 as round 1 verbatim**: denominator 14,
       decimal GB/MB, `syscr` recorded alongside `rchar`, PID pinned for the whole
@@ -238,3 +238,51 @@ showing the criterion still missed alongside that split is this round succeeding
       **and the D11 tag split**, which is the round's actual deliverable.
       Record `wchar` this time: round 1 could not attribute the `read_bytes`
       rise because the baseline sample never recorded it.
+
+### Round 2 implementation record (2026-08-23)
+
+- D9 landed as a shared PATH helper,
+  `FileOrchestrationJournalRepository._flat_direct_pipeline_job_paths_for_cycle`
+  — one filter definition, used by both flat readers. Record-level delegation
+  was rejected because `_iter_direct_pipeline_job_records_for_cycle` merges its
+  flat and by-cycle legs in ONE sort, so yielding records from the other reader
+  would have changed its yield order.
+- D9's prefilter now normalises the source token; the pre-existing filter
+  compared raw strings, which would have skipped every file of a source passed
+  as `ifs` rather than `IFS`. Pinned by
+  `test_direct_cycle_records_prefilter_normalises_the_source_case`.
+- D10's memo key carries `include_direct` in addition to `(source_id, cycle)`,
+  plus the resolved source segments. The flag is not decorative —
+  `_pipeline_job_for_id_unlocked` replays with it false while every other
+  narrowed entrypoint replays with it true — so a key without it would serve
+  one variant's rows to the other.
+- #1758 is superseded by D9 and should be closed against this round rather
+  than left open: its stated reason for "reported, not fixed" (content is
+  identity-authoritative there) is the ruling D9 reverses.
+
+### Round 2 verification actually run (local)
+
+- Bite proof 1 (memo): red against pre-change source on `assert reads == []`
+  ("a warm memo must not re-read any file"); red again with the invalidation
+  scoping reverted to `_stat_signature(self.root / "pipeline-jobs")` on
+  `"a write to another cycle must not evict this cycle's memo entry"`; green
+  after restore. `__pycache__` cleared and mtime perturbed around the mutation.
+- Bite proof 2 (D9 parity): red against pre-change source on
+  `assert "job_cycle_gfs_2026062812_convert.json" not in opened`.
+- `uv run pytest` over the journal, scheduler, chain, reconcile, retention and
+  timing suites — see the PR body for the run.
+- `uv run ruff check .` and `openspec validate ... --strict` clean.
+
+### Round 2 pins that MOVED, and why
+
+- `test_file_orchestration_journal_scoped_direct_snapshot_discovery_fails_closed_on_malformed_present_evidence`
+  asserted that a malformed flat file naming IFS/2026062812 fails a
+  GFS/2026062800 `has_active_pipeline` closed. That is precisely the parity
+  defect D9 removes, and the test's own round-1 comment said so ("the scoped
+  reader above still fails closed on it, unchanged"). It now asserts the
+  foreign-cycle file no longer blocks, AND that a malformed file naming THIS
+  cycle still does.
+- `test_narrowed_journal_lookup_touches_no_foreign_cycle_file` asserted every
+  lookup "must still read something"; the memo makes a warm lookup read
+  nothing. Containment is a cold-path property — a memo can only shrink the
+  opened set — so the test now clears the memo before each measured lookup.
