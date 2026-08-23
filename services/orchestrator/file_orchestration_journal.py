@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -13,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypeVar
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import is_sensitive_key
@@ -175,6 +177,7 @@ JOURNAL_READ_ATTRIBUTION_SCHEMA_VERSION = "nhms.file_journal.read_attribution.v1
 #: space is entrypoint x lane, on the order of a dozen triples.
 MAX_JOURNAL_READ_ATTRIBUTION_TAGS = 256
 _JOURNAL_READ_UNATTRIBUTED = "unattributed"
+_ClassT = TypeVar("_ClassT", bound=type)
 _journal_read_counter_lock = threading.Lock()
 _journal_read_counters: dict[str, dict[str, int]] = {}
 _journal_read_counter_tags_dropped = 0
@@ -186,24 +189,6 @@ _journal_read_lane: contextvars.ContextVar[str] = contextvars.ContextVar(
     "nhms_journal_read_lane",
     default=_JOURNAL_READ_UNATTRIBUTED,
 )
-
-
-@contextmanager
-def journal_read_entrypoint(entrypoint: str) -> Iterable[None]:
-    """Tag every journal read made in this context with its entrypoint.
-
-    Set at the public query methods, which is the level the design's
-    attribution question is asked at ("which entrypoint drove the read").
-    ``ContextVar`` rather than a thread-local so the tag is correct on the
-    cohort submit pool and under any future async caller; a fresh thread
-    starts unattributed rather than inheriting a stale tag.
-    """
-
-    token = _journal_read_entrypoint.set(entrypoint)
-    try:
-        yield
-    finally:
-        _journal_read_entrypoint.reset(token)
 
 
 @contextmanager
@@ -221,6 +206,53 @@ def journal_read_lane(lane: str) -> Iterable[None]:
         yield
     finally:
         _journal_read_lane.reset(token)
+
+
+def _attributed_public_method(name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+    """Tag one public method as the entrypoint for every read beneath it.
+
+    OUTERMOST wins, unlike ``journal_read_entrypoint``: the public API call the
+    caller actually made is the attribution answer, so a public method reached
+    from another public method (``upsert_pipeline_job`` -> ``get_pipeline_job``,
+    the retry service -> the repository) does not re-tag and steal its caller's
+    bytes.
+    """
+
+    @functools.wraps(func)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _journal_read_entrypoint.get() != _JOURNAL_READ_UNATTRIBUTED:
+            return func(self, *args, **kwargs)
+        token = _journal_read_entrypoint.set(name)
+        try:
+            return func(self, *args, **kwargs)
+        finally:
+            _journal_read_entrypoint.reset(token)
+
+    return wrapper
+
+
+def _install_public_read_attribution(cls: _ClassT) -> _ClassT:
+    """Tag the whole public surface of ``cls``, by boundary rather than by list.
+
+    Round 1 measured why this is not an enumerated list: six methods carried a
+    hand-written tag, the design claimed eight, and 80.6% of a real fixture's
+    bytes carried no entrypoint at all. ``query_inflight_jobs``, the
+    cycle-status predicates and every write path that reads before it writes
+    were all silently untagged. A list drifts; a boundary cannot.
+
+    Generators are skipped deliberately: a tag spanning a ``yield`` can have
+    its ``ContextVar`` token reset from a context that never set it (design
+    D11), and an instrument must never be able to fail a read path. There are
+    none on this surface today; the guard is what keeps it that way.
+    """
+
+    for name, value in list(vars(cls).items()):
+        if name.startswith("_") or not inspect.isfunction(value):
+            continue
+        if inspect.isgeneratorfunction(value) or getattr(value, "__wrapped__", None) is not None:
+            continue
+        setattr(cls, name, _attributed_public_method(name, value))
+    return cls
 
 
 def _record_journal_read(*, byte_count: int, cached: bool) -> None:
@@ -659,6 +691,7 @@ class _RecordBudget:
             raise FileOrchestrationJournalError("file_journal_record_limit_exceeded", field=self.field)
 
 
+@_install_public_read_attribution
 class FileOrchestrationJournalRepository:
     # Capability marker used by the shared submit/reconcile paths.  Legacy and
     # PostgreSQL repositories deliberately keep their historical behaviour.
@@ -1199,20 +1232,18 @@ class FileOrchestrationJournalRepository:
         # reported as a blocked read.
         cycle_scope = _cycle_scope_from_idempotency_key(idempotency_key)
         try:
-            with journal_read_entrypoint("query_candidate_state"):
-                for job in self._iter_pipeline_job_records_scoped(cycle_scope):
-                    if str(job.get("idempotency_key") or "") == idempotency_key:
-                        return _public_scheduler_row(job)
+            for job in self._iter_pipeline_job_records_scoped(cycle_scope):
+                if str(job.get("idempotency_key") or "") == idempotency_key:
+                    return _public_scheduler_row(job)
         except FileOrchestrationJournalError as error:
             return _blocked_query_job(error, idempotency_key=idempotency_key)
         return None
 
     def _candidate_job_for_idempotency_unlocked(self, idempotency_key: str) -> dict[str, Any] | None:
         cycle_scope = _cycle_scope_from_idempotency_key(idempotency_key)
-        with journal_read_entrypoint("_candidate_job_for_idempotency_unlocked"):
-            for job in self._iter_pipeline_job_records_scoped(cycle_scope):
-                if str(job.get("idempotency_key") or "") == idempotency_key:
-                    return dict(job)
+        for job in self._iter_pipeline_job_records_scoped(cycle_scope):
+            if str(job.get("idempotency_key") or "") == idempotency_key:
+                return dict(job)
         return None
 
     def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
@@ -1252,10 +1283,9 @@ class FileOrchestrationJournalRepository:
         # direct-miss fallback is narrowed too. include_direct stays False so
         # the replay never re-counts the direct record probed above.
         cycle_scope = _cycle_scope_from_job_id(expected_job_id)
-        with journal_read_entrypoint("_pipeline_job_for_id_unlocked"):
-            for job in self._iter_pipeline_job_records_scoped(cycle_scope, include_direct=False):
-                if str(job.get("job_id") or "") == expected_job_id:
-                    return dict(job)
+        for job in self._iter_pipeline_job_records_scoped(cycle_scope, include_direct=False):
+            if str(job.get("job_id") or "") == expected_job_id:
+                return dict(job)
         return None
 
     def get_accepted_submit_pipeline_job(self, pipeline_job_id: str) -> dict[str, Any] | None:
@@ -1307,12 +1337,11 @@ class FileOrchestrationJournalRepository:
     def query_pipeline_jobs_by_cycle(self, cycle_id: str) -> list[dict[str, Any]]:
         cycle_scope = _cycle_scope_from_cycle_id(cycle_id)
         try:
-            with journal_read_entrypoint("query_pipeline_jobs_by_cycle"):
-                jobs = [
-                    _public_scheduler_row(job)
-                    for job in self._iter_pipeline_job_records_scoped(cycle_scope)
-                    if str(job.get("cycle_id") or "") == cycle_id
-                ]
+            jobs = [
+                _public_scheduler_row(job)
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope)
+                if str(job.get("cycle_id") or "") == cycle_id
+            ]
             jobs.sort(key=_db_compatible_pipeline_job_order_key)
             return jobs
         except FileOrchestrationJournalError as error:
@@ -1321,12 +1350,11 @@ class FileOrchestrationJournalRepository:
     def query_pipeline_jobs_by_run(self, run_id: str) -> list[dict[str, Any]]:
         cycle_scope = _cycle_scope_from_file_run_id(run_id)
         try:
-            with journal_read_entrypoint("query_pipeline_jobs_by_run"):
-                jobs = [
-                    _public_scheduler_row(job)
-                    for job in self._iter_pipeline_job_records_scoped(cycle_scope)
-                    if str(job.get("run_id") or "") == run_id
-                ]
+            jobs = [
+                _public_scheduler_row(job)
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope)
+                if str(job.get("run_id") or "") == run_id
+            ]
             jobs.sort(key=_db_compatible_pipeline_job_order_key)
             return jobs
         except FileOrchestrationJournalError as error:
@@ -1334,10 +1362,9 @@ class FileOrchestrationJournalRepository:
 
     def query_pipeline_job_by_slurm_id(self, slurm_job_id: str) -> dict[str, Any] | None:
         try:
-            with journal_read_entrypoint("query_pipeline_job_by_slurm_id"):
-                for job in self._iter_pipeline_job_records():
-                    if str(job.get("slurm_job_id") or "") == slurm_job_id:
-                        return _public_scheduler_row(job)
+            for job in self._iter_pipeline_job_records():
+                if str(job.get("slurm_job_id") or "") == slurm_job_id:
+                    return _public_scheduler_row(job)
         except FileOrchestrationJournalError as error:
             return _blocked_query_job(error, slurm_job_id=slurm_job_id)
         return None
@@ -4330,42 +4357,47 @@ class FileOrchestrationJournalRepository:
         # model's rows. Only pipeline jobs (keyed by job_id, collapse-free)
         # are shared with the base rows so the pipeline-jobs directory is
         # scanned once per cycle instead of once per model.
-        for source_segment in source_segments:
-            latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
-            for path in latest_paths:
-                payload = self._read_optional_json(path)
-                if payload is not None:
-                    self._apply_latest_view(
+        # #1734 D11: the baseline per-cycle read lane. It is not one of the
+        # design's A/B/C candidates — it is the cost they must be separated
+        # FROM — but the spec requires every counted byte to carry a lane, so
+        # the miss path is tagged here. Eager only: no ``yield`` is crossed.
+        with journal_read_lane("cycle_rows"):
+            for source_segment in source_segments:
+                latest_paths = self._latest_paths(source_segment, cycle_segment, model_id=model_id)
+                for path in latest_paths:
+                    payload = self._read_optional_json(path)
+                    if payload is not None:
+                        self._apply_latest_view(
+                            rows,
+                            payload,
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                            expected_model_id=_safe_segment(path.stem),
+                        )
+                for record in self._read_cycle_segments(self.root / "journal" / source_segment, cycle_segment):
+                    self._apply_journal_record(
                         rows,
-                        payload,
+                        record,
                         source_id=source_id,
                         cycle_time=cycle_time,
-                        expected_model_id=_safe_segment(path.stem),
+                        expected_model_id=model_id,
                     )
-            for record in self._read_cycle_segments(self.root / "journal" / source_segment, cycle_segment):
-                self._apply_journal_record(
-                    rows,
-                    record,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    expected_model_id=model_id,
-                )
-            for record in self._read_cycle_segments(
-                self.root / "pipeline-events" / source_segment, cycle_segment
+                for record in self._read_cycle_segments(
+                    self.root / "pipeline-events" / source_segment, cycle_segment
+                ):
+                    self._apply_journal_record(
+                        rows,
+                        record,
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        expected_record_type="pipeline_event",
+                        expected_model_id=model_id,
+                    )
+            for job in self._direct_pipeline_job_records_for_cycle_cached(
+                source_id=source_id,
+                cycle_time=cycle_time,
             ):
-                self._apply_journal_record(
-                    rows,
-                    record,
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    expected_record_type="pipeline_event",
-                    expected_model_id=model_id,
-                )
-        for job in self._direct_pipeline_job_records_for_cycle_cached(
-            source_id=source_id,
-            cycle_time=cycle_time,
-        ):
-            _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
+                _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
         if model_id is not None:
             _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
@@ -4522,17 +4554,19 @@ class FileOrchestrationJournalRepository:
             cached = self._direct_jobs_cycle_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return [dict(job) for job in cached[1]]
-        # #1734 D11 candidate B: the tag sits on the CACHE-MISS path, which is
-        # the cost this cache's shared-directory signature keeps re-paying.
-        with journal_read_lane("direct_flat_scan"):
-            jobs = [
-                dict(job)
-                for job in self._iter_direct_pipeline_job_records_for_cycle(
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    model_id=None,
-                )
-            ]
+        # #1734 D11 candidate B: this is the CACHE-MISS path, which is the cost
+        # this cache's shared-directory signature keeps re-paying. The lane tag
+        # itself sits per-path inside the reader below, because that reader
+        # merges the unpartitioned flat directory with the already-partitioned
+        # by-cycle tree and the two must not be graded as one.
+        jobs = [
+            dict(job)
+            for job in self._iter_direct_pipeline_job_records_for_cycle(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=None,
+            )
+        ]
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
         entry = (signature, [dict(job) for job in jobs])
         with self._cache_lock:
@@ -5032,19 +5066,22 @@ class FileOrchestrationJournalRepository:
                 yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
 
     def _direct_pipeline_job_record(self, expected_job_id: str) -> dict[str, Any] | None:
-        payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
-        if payload is None:
-            match = _CANDIDATE_JOB_ID_RE.fullmatch(expected_job_id)
-            if match is not None:
-                source_id = _normalize_file_source_id(match.group(1), field="job_id")
-                payload = self._read_optional_json(
-                    self.root
-                    / "pipeline-jobs"
-                    / "by-cycle"
-                    / _safe_segment(source_id)
-                    / _safe_segment(match.group(2))
-                    / f"{expected_job_id}.json"
-                )
+        # #1734 D11: a single-row probe, not a scan — its own lane so its two
+        # reads are never mistaken for a flat-directory sweep.
+        with journal_read_lane("direct_row_probe"):
+            payload = self._read_optional_json(self.root / "pipeline-jobs" / f"{expected_job_id}.json")
+            if payload is None:
+                match = _CANDIDATE_JOB_ID_RE.fullmatch(expected_job_id)
+                if match is not None:
+                    source_id = _normalize_file_source_id(match.group(1), field="job_id")
+                    payload = self._read_optional_json(
+                        self.root
+                        / "pipeline-jobs"
+                        / "by-cycle"
+                        / _safe_segment(source_id)
+                        / _safe_segment(match.group(2))
+                        / f"{expected_job_id}.json"
+                    )
         if payload is None:
             return None
         return self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
@@ -5066,6 +5103,15 @@ class FileOrchestrationJournalRepository:
         names. Only the flat leg changes: the by-cycle partition is already
         cycle-scoped, and both legs still feed the one merged sort so the yield
         order is unchanged.
+
+        The two legs carry DISTINCT lane tags (#1734 round-1 finding 3). One
+        tag over the merged list graded partitioned bytes against the flat
+        directory's size: measured, by-cycle was 33.5% of the lane in a scratch
+        fixture and would be roughly two thirds at node-22's tree sizes (26 MB
+        by-cycle / 13 MB flat). The tag is set per path around the eager read
+        only — never across the ``yield`` — because a ``ContextVar`` token reset
+        from a generator a consumer abandoned can land in a foreign context, and
+        an instrument must not be able to fail a read path (design D11).
         """
 
         by_cycle_directory = (
@@ -5075,12 +5121,14 @@ class FileOrchestrationJournalRepository:
             / _safe_segment(_normalize_file_source_id(source_id, field="source_id"))
             / format_cycle_time(cycle_time)
         )
+        flat_paths = self._flat_direct_pipeline_job_paths_for_cycle(
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
+        flat_keys = {str(path) for path in flat_paths}
         for path in sorted(
             [
-                *self._flat_direct_pipeline_job_paths_for_cycle(
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                ),
+                *flat_paths,
                 *_iter_regular_json_files(
                     by_cycle_directory,
                     root=self.root,
@@ -5090,7 +5138,9 @@ class FileOrchestrationJournalRepository:
             ]
         ):
             expected_job_id = _safe_segment(path.stem)
-            payload = self._read_optional_json(path)
+            lane = "direct_flat_scan" if str(path) in flat_keys else "direct_by_cycle_scan"
+            with journal_read_lane(lane):
+                payload = self._read_optional_json(path)
             if payload is None:
                 continue
             job = self._validated_direct_pipeline_job_record(payload, expected_job_id=expected_job_id)
@@ -5467,7 +5517,11 @@ class FileOrchestrationJournalRepository:
         directory = self.root / _RECONCILE_INVENTORY_DIRECTORY
         for entry_name in sorted(entry_names):
             path = directory / entry_name
-            anchor = self._read_optional_json(path)
+            # #1734 D11: per-anchor and eager, so no tag spans this generator's
+            # ``yield`` (a token reset from an abandoned generator can land in a
+            # foreign context, and an instrument must not fail a read path).
+            with journal_read_lane("reconcile_inventory_scan"):
+                anchor = self._read_optional_json(path)
             if anchor is None:
                 if strict_disappearance:
                     raise FileOrchestrationJournalError(
@@ -6247,38 +6301,42 @@ class FileOrchestrationJournalRepository:
             ) from error
 
     def _backfill_reconcile_inventory_unlocked(self) -> None:
-        # Flat direct jobs contain masters/legacy rows only for current
-        # accepted-submit cohorts; current candidate history lives under
-        # pipeline-jobs/by-cycle and is deliberately never traversed here.
-        for job in self._iter_reconcile_direct_pipeline_job_records():
-            self._sync_reconcile_inventory_for_row_unlocked(job)
-        for job in self._iter_legacy_active_reconcile_records():
-            self._sync_reconcile_inventory_for_row_unlocked(job)
-        # Every segment of one cycle replays through a SINGLE _CycleRows in
-        # segment order: the inventory sync below is last-write-wins with no
-        # replay arbitration, so a per-path _CycleRows would let the frozen
-        # base segment resurrect anchors a continuation segment terminated
-        # (or delete anchors it still owns).
-        segments_by_cycle: dict[tuple[str, datetime], list[tuple[int, Path]]] = {}
-        for path in self._iter_migration_journal_paths():
-            source_id, cycle_time, segment_index = _journal_segment_identity_from_path(
-                path,
-                root=self.root,
-                surface="journal",
-            )
-            segments_by_cycle.setdefault((source_id, cycle_time), []).append((segment_index, path))
-        for (source_id, cycle_time), segments in segments_by_cycle.items():
-            rows = _CycleRows()
-            for segment_index, path in sorted(segments):
-                for record in self._read_migration_jsonl(path, segment_index=segment_index):
-                    self._apply_journal_record(
-                        rows,
-                        record,
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                    )
-            for job in rows.pipeline_jobs.values():
+        # #1734 D11: the one-time inventory backfill is a lane of its own —
+        # it is bounded and non-recurring, and folding it into a scan lane
+        # would make a migration pass look like steady-state read growth.
+        with journal_read_lane("reconcile_inventory_migration"):
+            # Flat direct jobs contain masters/legacy rows only for current
+            # accepted-submit cohorts; current candidate history lives under
+            # pipeline-jobs/by-cycle and is deliberately never traversed here.
+            for job in self._iter_reconcile_direct_pipeline_job_records():
                 self._sync_reconcile_inventory_for_row_unlocked(job)
+            for job in self._iter_legacy_active_reconcile_records():
+                self._sync_reconcile_inventory_for_row_unlocked(job)
+            # Every segment of one cycle replays through a SINGLE _CycleRows in
+            # segment order: the inventory sync below is last-write-wins with no
+            # replay arbitration, so a per-path _CycleRows would let the frozen
+            # base segment resurrect anchors a continuation segment terminated
+            # (or delete anchors it still owns).
+            segments_by_cycle: dict[tuple[str, datetime], list[tuple[int, Path]]] = {}
+            for path in self._iter_migration_journal_paths():
+                source_id, cycle_time, segment_index = _journal_segment_identity_from_path(
+                    path,
+                    root=self.root,
+                    surface="journal",
+                )
+                segments_by_cycle.setdefault((source_id, cycle_time), []).append((segment_index, path))
+            for (source_id, cycle_time), segments in segments_by_cycle.items():
+                rows = _CycleRows()
+                for segment_index, path in sorted(segments):
+                    for record in self._read_migration_jsonl(path, segment_index=segment_index):
+                        self._apply_journal_record(
+                            rows,
+                            record,
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                        )
+                for job in rows.pipeline_jobs.values():
+                    self._sync_reconcile_inventory_for_row_unlocked(job)
 
     def _iter_legacy_active_reconcile_records(
         self,
@@ -7221,30 +7279,32 @@ class FileOrchestrationJournalRepository:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)
         source_segments = _cycle_read_source_segments(source_id=source_id, source_segment_override=None, root=self.root)
-        sequences: list[int] = []
-        # Public contract for the insert_pipeline_event lane, which computes the
-        # sequence floor before any precondition read; for the other write lanes
-        # this is defense in depth behind the read frame's conversion.
-        try:
-            for source_segment in source_segments:
-                for surface in ("journal", "pipeline-events"):
-                    # The floor must span ALL segments: a sequence reused across a
-                    # rollover boundary is silent state corruption.
-                    segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
-                    for segment_index, path in enumerate(segment_paths):
-                        if not self._sequence_regular_file_exists(path):
-                            continue
-                        records = self._read_jsonl(path, segment_index=segment_index)
-                        sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
-            sequences.extend(
-                self._latest_replay_sequences_unlocked(
-                    source_id=source_id,
-                    cycle_time=cycle_time,
-                    source_segments=source_segments,
+        # #1734 D11: baseline lane — the write paths' sequence floor replay.
+        with journal_read_lane("sequence_replay"):
+            sequences: list[int] = []
+            # Public contract for the insert_pipeline_event lane, which computes the
+            # sequence floor before any precondition read; for the other write lanes
+            # this is defense in depth behind the read frame's conversion.
+            try:
+                for source_segment in source_segments:
+                    for surface in ("journal", "pipeline-events"):
+                        # The floor must span ALL segments: a sequence reused across a
+                        # rollover boundary is silent state corruption.
+                        segment_paths = self._cycle_segment_paths(self.root / surface / source_segment, cycle_segment)
+                        for segment_index, path in enumerate(segment_paths):
+                            if not self._sequence_regular_file_exists(path):
+                                continue
+                            records = self._read_jsonl(path, segment_index=segment_index)
+                            sequences.extend((_optional_replay_sequence(record) or 0) for record in records)
+                sequences.extend(
+                    self._latest_replay_sequences_unlocked(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        source_segments=source_segments,
+                    )
                 )
-            )
-        except _JournalProbeContainmentError as error:
-            raise _probe_containment_failure(error) from error
+            except _JournalProbeContainmentError as error:
+                raise _probe_containment_failure(error) from error
         return max(sequences, default=0) + 1
 
     def _latest_replay_sequences_unlocked(
@@ -7261,18 +7321,20 @@ class FileOrchestrationJournalRepository:
                 source_segment_override=None,
                 root=self.root,
             )
-        sequences: list[int] = []
-        cycle_segment = format_cycle_time(cycle_time)
-        for source_segment in source_segments:
-            if not self._sequence_directory_exists(self.root / "latest" / source_segment / cycle_segment):
-                continue
-            for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
-                payload = self._read_optional_json(path)
-                if payload is None:
+        # #1734 D11: baseline lane — same family as `_next_sequence_unlocked`.
+        with journal_read_lane("sequence_replay"):
+            sequences: list[int] = []
+            cycle_segment = format_cycle_time(cycle_time)
+            for source_segment in source_segments:
+                if not self._sequence_directory_exists(self.root / "latest" / source_segment / cycle_segment):
                     continue
-                _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
-                _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
-                sequences.append(_latest_replay_sequence(payload) or 0)
+                for path in self._latest_paths(source_segment, cycle_segment, model_id=None):
+                    payload = self._read_optional_json(path)
+                    if payload is None:
+                        continue
+                    _require_schema(payload, FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION)
+                    _require_source_cycle(payload, source_id=source_id, cycle_time=cycle_time)
+                    sequences.append(_latest_replay_sequence(payload) or 0)
         return sequences
 
     def _probe_stat_mode(self, path: Path) -> int | None:
@@ -7755,10 +7817,12 @@ class FileOrchestrationJournalRepository:
         cycle_time: datetime,
         surface: str = "journal",
     ) -> list[dict[str, Any]]:
-        return self._read_cycle_segments(
-            self._journal_directory(source_id=source_id, surface=surface),
-            format_cycle_time(cycle_time),
-        )
+        # #1734 D11: baseline lane, eager — one cycle's own event log.
+        with journal_read_lane("cycle_journal_replay"):
+            return self._read_cycle_segments(
+                self._journal_directory(source_id=source_id, surface=surface),
+                format_cycle_time(cycle_time),
+            )
 
     def _ensure_root_unlocked(self) -> None:
         try:
@@ -7788,6 +7852,7 @@ def _file_lock_guard_mode() -> str:
     raise SafeFilesystemError(f"Unsupported {FILE_JOURNAL_LOCK_GUARD_MODE_ENV}: {value}")
 
 
+@_install_public_read_attribution
 class FileJournalRetryService:
     """Retry adapter that records retry state in the file orchestration journal."""
 

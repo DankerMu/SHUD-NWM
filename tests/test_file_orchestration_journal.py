@@ -13303,6 +13303,210 @@ def test_direct_cycle_records_still_read_unparseable_flat_names(tmp_path: Path) 
     }
 
 
+def _seed_unparseable_flat_row(repository: Any, cycle_time: datetime, *, sequence: int = 1) -> str:
+    """Write the real legacy flat shape: no ``job_`` prefix, so unparseable."""
+
+    job_id = "cycle_gfs_2026062800_retry_active"
+    _write_json(
+        repository.root / "pipeline-jobs" / f"{job_id}.json",
+        {
+            "schema_version": FILE_ORCHESTRATION_JOURNAL_SCHEMA_VERSION,
+            "sequence": sequence,
+            "record_type": "pipeline_job",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "payload": {
+                **_active_job(cycle_time),
+                "job_id": job_id,
+                "run_id": "cycle_gfs_2026062800",
+                "idempotency_key": "cycle_gfs_2026062800:retry_active",
+            },
+        },
+    )
+    assert journal_module._cycle_scope_from_job_id(job_id) is None
+    return job_id
+
+
+def test_cycle_scoped_replay_memo_fall_open_residue_is_pinned(tmp_path: Path) -> None:
+    """#1734 D13 corrected: the flat leg has two UNSCOPABLE fall-open arms.
+
+    The round-1 discriminating test used only parseable job ids, so it could
+    see neither arm. Both are pinned here as they actually behave, because
+    narrowing the signature to make them look scoped would serve stale rows:
+    these files genuinely are read by every cycle, so invalidating every cycle
+    when they change is semantically required, not a defect. What was a defect
+    was leaving the residue undeclared.
+    """
+
+    repository = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    other = _dt("2026-06-28T12:00:00Z")
+    unparseable_job_id = _seed_unparseable_flat_row(repository, target)
+
+    def replay(cycle_time: datetime) -> list[dict[str, Any]]:
+        return [
+            dict(job)
+            for job in repository._iter_pipeline_job_records_for_cycle(
+                source_id="gfs",
+                cycle_time=cycle_time,
+            )
+        ]
+
+    # ARM 1 — an unparseable file name is selected for EVERY cycle, so a write
+    # to it evicts every cycle's entry. Measured in round-1 verification:
+    # warming two cycles and touching only this one file evicted both.
+    with pytest.MonkeyPatch.context() as patch:
+        reads = _record_read_paths(repository, patch)
+        warm_target = replay(target)
+        warm_other = replay(other)
+        assert unparseable_job_id in {str(job["job_id"]) for job in warm_target}
+        assert unparseable_job_id in {str(job["job_id"]) for job in warm_other}, (
+            "the fall-open arm reaches the OTHER cycle's replay too, which is why "
+            "its invalidation cannot be cycle-scoped"
+        )
+
+        reads.clear()
+        assert replay(target) == warm_target
+        assert replay(other) == warm_other
+        assert reads == [], "both memo entries must be warm"
+
+        _seed_unparseable_flat_row(repository, target, sequence=2)
+        reads.clear()
+        assert replay(target)
+        target_reads = list(reads)
+        reads.clear()
+        assert replay(other)
+        other_reads = list(reads)
+
+    assert target_reads, "the touched fall-open file must invalidate this cycle"
+    assert other_reads, (
+        "and the OTHER cycle too — the residue D13 declares, pinned rather than "
+        "argued away"
+    )
+
+    # ARM 2 — a source_id this instance cannot normalise filters nothing, so
+    # the whole flat directory is selected and the entry is invalidated by a
+    # write anywhere in it.
+    with pytest.raises(FileOrchestrationJournalError):
+        journal_module._normalize_file_source_id("unknown_source", field="source_id")
+    unnormalisable = [
+        dict(job)
+        for job in repository._iter_pipeline_job_records_for_cycle(
+            source_id="unknown_source",
+            cycle_time=target,
+        )
+    ]
+    assert {str(job["cycle_id"]) for job in unnormalisable} > {cycle_id_for("gfs", target)}, (
+        "an unusable scope selects the whole flat directory, across every cycle"
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        reads = _record_read_paths(repository, patch)
+        assert [
+            dict(job)
+            for job in repository._iter_pipeline_job_records_for_cycle(
+                source_id="unknown_source",
+                cycle_time=target,
+            )
+        ] == unnormalisable
+        assert reads == [], "the unnormalisable-source entry must memoize like any other"
+
+        repository.update_pipeline_job_status("job_cycle_ifs_2026062812_convert", "succeeded")
+        reads.clear()
+        assert repository._iter_pipeline_job_records_for_cycle(
+            source_id="unknown_source",
+            cycle_time=target,
+        )
+        assert reads, (
+            "a write to ANY flat row evicts it, because its signature covers the "
+            "whole flat directory — declared, not fixed"
+        )
+
+
+def test_cycle_scoped_replay_memo_survives_concurrent_readers_and_a_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1734 I7 round-2 vehicle: the NEW memo under concurrency, with eviction.
+
+    The named I7 vehicle
+    (``test_file_journal_read_caches_survive_concurrent_readers_and_a_writer``)
+    drives only ``_cycle_rows`` and ``_read_bytes_limited_cached``: it never
+    reaches ``_cycle_job_records_cache`` at all. The 8-thread counter test does
+    populate it incidentally, but at the default capacity of 512 its eviction
+    branch never executes and it runs no writer.
+
+    Here the cap is squeezed to 2 while more than 2 distinct memo keys are
+    driven — both ``include_direct`` variants across several cycles — so the
+    eviction branch runs on every miss, with a writer invalidating one of the
+    cycles underneath. The three caches sharing this constant do NOT share a
+    budget: they are separate dicts, each bounded by it independently.
+    """
+
+    monkeypatch.setattr(journal_module, "MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES", 2)
+    repository = _populate_narrowing_journal(tmp_path)
+    cycles = [(source_id, _dt(text)) for source_id, text in _NARROWING_CYCLES]
+    writer_source, writer_cycle = cycles[0]
+    keys_seen: set[tuple[str, str, bool]] = set()
+    real_memo = FileOrchestrationJournalRepository._cycle_job_records_memoized
+
+    def recording(self: Any, *, source_id: str, cycle_time: datetime, include_direct: bool) -> Any:
+        keys_seen.add((source_id, format_cycle_time(cycle_time), include_direct))
+        return real_memo(self, source_id=source_id, cycle_time=cycle_time, include_direct=include_direct)
+
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_cycle_job_records_memoized", recording)
+
+    failures: list[BaseException] = []
+    stop = threading.Event()
+    deadline = time.monotonic() + 0.6
+
+    def read_cycle_jobs() -> None:
+        for source_id, cycle_time in cycles:
+            assert repository.query_pipeline_jobs_by_cycle(cycle_id_for(source_id, cycle_time))
+
+    def read_missing_job() -> None:
+        # No direct row exists for this id, so the lookup falls through to the
+        # narrowed replay with ``include_direct=False`` — the other half of the
+        # memo key space, and the variant that must never collide with True.
+        for source_id, cycle_time in cycles:
+            segment = source_id.lower()
+            stamp = format_cycle_time(cycle_time)
+            assert repository.get_pipeline_job(f"job_cycle_{segment}_{stamp}_absent") is None
+
+    def append_records() -> None:
+        repository.update_forecast_cycle_status(
+            source_id=writer_source, cycle_time=writer_cycle, status="raw_complete"
+        )
+
+    _join_all(
+        [
+            threading.Thread(
+                target=_hammer_until(read_cycle_jobs, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-jobs-a",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_cycle_jobs, stop=stop, deadline=deadline, failures=failures),
+                name="cycle-jobs-b",
+            ),
+            threading.Thread(
+                target=_hammer_until(read_missing_job, stop=stop, deadline=deadline, failures=failures),
+                name="missing-job",
+            ),
+            threading.Thread(
+                target=_hammer_until(append_records, stop=stop, deadline=deadline, failures=failures),
+                name="writer",
+            ),
+        ],
+        stop=stop,
+    )
+
+    assert not failures, f"{type(failures[0]).__name__}: {failures[0]}"
+    assert len(keys_seen) > 2, sorted(keys_seen)
+    assert {include_direct for _, _, include_direct in keys_seen} == {True, False}
+    # Pigeonhole: more distinct keys were driven than the cap allows, and the
+    # cap held — the eviction branch executed.
+    assert len(repository._cycle_job_records_cache) <= 2, list(repository._cycle_job_records_cache)
+
+
 def test_journal_read_counter_attributes_bytes_to_the_driving_entrypoint(
     tmp_path: Path,
 ) -> None:
@@ -13348,20 +13552,145 @@ def test_journal_read_counter_attributes_bytes_to_the_driving_entrypoint(
     assert [tag for tag in direct if tag.endswith("|direct_flat_scan")], sorted(direct)
 
 
-def test_journal_read_counter_is_thread_safe_under_concurrent_readers(tmp_path: Path) -> None:
-    """#1734 D11 + spec pipeline-job-persistence:550.
+def _attribution_shares(payload: dict[str, Any]) -> tuple[int, int, int]:
+    """(total bytes, bytes with no entrypoint, bytes with no lane)."""
 
-    The counter is shared mutable state on a cross-thread singleton
-    repository, so its totals must reconcile exactly under concurrency — a
-    lost update here would silently understate the very attribution this
-    round exists to produce.
+    total = 0
+    without_entrypoint = 0
+    without_lane = 0
+    for row in payload["tags"]:
+        entrypoint, _, lane = str(row["tag"]).partition("|")
+        total += int(row["bytes"])
+        if entrypoint == journal_module._JOURNAL_READ_UNATTRIBUTED:
+            without_entrypoint += int(row["bytes"])
+        if lane == journal_module._JOURNAL_READ_UNATTRIBUTED:
+            without_lane += int(row["bytes"])
+    return total, without_entrypoint, without_lane
+
+
+def test_journal_reads_carry_an_entrypoint_across_the_whole_public_surface(
+    tmp_path: Path,
+) -> None:
+    """#1734 D11 corrected: attribution is an obligation on the read surface.
+
+    Round 1 measured the enumerated-list version of this: six methods carried
+    a hand-written tag, the design document claimed eight, and on a real
+    308-test fixture **80.6% of counted bytes carried no entrypoint at all** —
+    ``query_inflight_jobs``, the cycle-status predicates and every write path
+    that reads before it writes were untagged. The residual reconciled
+    perfectly while telling nobody anything.
+
+    The spec requires this to be pinned by an assertion rather than by prose,
+    so the mix below deliberately includes a cycle predicate, a whole-tree
+    query and a write path that reads before it writes.
     """
 
-    repository = _populate_narrowing_journal(tmp_path)
-    cycle_ids = [cycle_id_for(source_id, _dt(text)) for source_id, text in _NARROWING_CYCLES]
+    _populate_narrowing_journal(tmp_path)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    target = _dt("2026-06-28T00:00:00Z")
     journal_module.reset_journal_read_counters()
+
+    assert repository.has_active_orchestration(source_id="gfs", cycle_time=target) in (True, False)
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=target, model_id="model_a") in (True, False)
+    assert repository.has_completed_pipeline(source_id="gfs", cycle_time=target, model_id="model_a") in (True, False)
+    assert repository.get_pipeline_job("job_cycle_gfs_2026062800_convert") is not None
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", target))
+    repository.query_inflight_jobs()
+    repository.query_reserved_unbound_jobs()
+    repository.update_pipeline_job_status("job_cycle_gfs_2026062800_convert", "succeeded")
+
+    attribution = journal_module.journal_read_attribution()
+    total, without_entrypoint, without_lane = _attribution_shares(attribution)
+    entrypoints = {str(row["tag"]).partition("|")[0] for row in attribution["tags"]}
+    assert total > 0
+    assert without_entrypoint == 0, [row["tag"] for row in attribution["tags"]]
+    assert {
+        "has_active_orchestration",
+        "get_pipeline_job",
+        "query_pipeline_jobs_by_cycle",
+        "query_inflight_jobs",
+        "update_pipeline_job_status",
+    } <= entrypoints, sorted(entrypoints)
+    # The lane residual is an alarm, not a resting place: the reconcile
+    # inventory and rollback-scope readers are the only reads left outside a
+    # named lane, and they must stay a rounding error against a pass's bytes.
+    assert without_lane * 20 <= total, f"{without_lane}/{total} bytes carry no lane"
+
+
+def test_direct_cycle_read_lanes_separate_flat_from_by_cycle(tmp_path: Path) -> None:
+    """#1734 round-1 finding 3: ``direct_flat_scan`` conflated two legs.
+
+    ``_iter_direct_pipeline_job_records_for_cycle`` merges the unpartitioned
+    flat directory with the already-partitioned
+    ``pipeline-jobs/by-cycle/<source>/<cycle>/`` tree. One tag over the merged
+    list graded partitioned bytes against the flat directory's size: measured
+    at 33.5% of the lane in this fixture, and roughly two thirds at node-22's
+    tree sizes (26 MB by-cycle / 13 MB flat).
+    """
+
+    populated = _populate_narrowing_journal(tmp_path)
+    target = _dt("2026-06-28T00:00:00Z")
+    source_segment = journal_module._normalize_file_source_id("gfs", field="source_id")
+    relocated = populated.root / "pipeline-jobs" / "job_fcst_gfs_2026062800_model_a.json"
+    assert relocated.exists()
+    destination = (
+        populated.root
+        / "pipeline-jobs"
+        / "by-cycle"
+        / source_segment
+        / format_cycle_time(target)
+        / relocated.name
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    relocated.rename(destination)
+
+    repository = FileOrchestrationJournalRepository(populated.root)
+    journal_module.reset_journal_read_counters()
+    jobs = repository._direct_pipeline_job_records_for_cycle_cached(source_id="gfs", cycle_time=target)
+    assert "job_fcst_gfs_2026062800_model_a" in {str(job["job_id"]) for job in jobs}
+
+    lanes = {
+        str(row["tag"]).partition("|")[2]: int(row["bytes"])
+        for row in journal_module.journal_read_attribution()["tags"]
+    }
+    assert lanes.get("direct_flat_scan", 0) > 0, lanes
+    assert lanes.get("direct_by_cycle_scan", 0) > 0, lanes
+
+
+def test_journal_read_counter_is_thread_safe_under_concurrent_readers(tmp_path: Path) -> None:
+    """#1734 D11 + spec pipeline-job-persistence:550 — accurate, not self-consistent.
+
+    Round 1 measured why the oracle had to change: the previous assertion was
+    ``totals == sum(tags)``, and ``journal_read_attribution`` builds ``totals``
+    by summing the very rows it returns as ``tags``, so the equality holds for
+    ANY counter content. With ``_record_journal_read`` replaced by a non-atomic
+    read-modify-write it measured ``TRUE_CALLS=40 COUNTED=37 LOST=3`` — 7.5% of
+    reads genuinely lost — and passed anyway.
+
+    The oracle here is independent of the counter: every thread owns its own
+    integer, incremented at ``_read_bytes_limited_cached`` (which performs
+    exactly one accounting call per successful return, cached or not) and read
+    only after every thread has joined. Nothing is shared between the two
+    tallies, so a lost update on one side cannot be mirrored on the other.
+    """
+
+    _populate_narrowing_journal(tmp_path)
+    # A FRESH instance over the populated root: cold caches, so the workers do
+    # real reads rather than serving everything from the writer's memo.
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    cycle_ids = [cycle_id_for(source_id, _dt(text)) for source_id, text in _NARROWING_CYCLES]
     errors: list[BaseException] = []
     barrier = threading.Barrier(8)
+    # Key per thread ident: each thread writes only its own key, so this tally
+    # cannot itself lose an update the way an unlocked shared counter would.
+    observed: dict[int, int] = {}
+    real_read = FileOrchestrationJournalRepository._read_bytes_limited_cached
+
+    def counting(self: Any, path: Path) -> Any:
+        result = real_read(self, path)
+        ident = threading.get_ident()
+        observed[ident] = observed.get(ident, 0) + 1
+        return result
 
     def worker(index: int) -> None:
         try:
@@ -13371,18 +13700,27 @@ def test_journal_read_counter_is_thread_safe_under_concurrent_readers(tmp_path: 
         except BaseException as error:  # noqa: BLE001 - surfaced below
             errors.append(error)
 
-    threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=60)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FileOrchestrationJournalRepository, "_read_bytes_limited_cached", counting)
+        journal_module.reset_journal_read_counters()
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        attribution = journal_module.journal_read_attribution()
+
     assert not errors, errors
     assert not [thread for thread in threads if thread.is_alive()]
 
-    attribution = journal_module.journal_read_attribution()
-    assert attribution["totals"]["calls"] == sum(row["calls"] for row in attribution["tags"])
-    assert attribution["totals"]["bytes"] == sum(row["bytes"] for row in attribution["tags"])
-    assert attribution["totals"]["cache_hit_calls"] == sum(row["cache_hit_calls"] for row in attribution["tags"])
+    expected_calls = sum(observed.values())
+    assert expected_calls > 0, "the workers must actually reach the read primitive"
+    assert len(observed) > 1, "the reads must be spread across threads for this to prove anything"
+    counted = attribution["totals"]["calls"] + attribution["totals"]["cache_hit_calls"]
+    assert counted == expected_calls, (
+        f"counter recorded {counted} reads, threads performed {expected_calls}: "
+        f"per-thread {sorted(observed.values())}"
+    )
 
 
 def test_scheduler_pass_evidence_carries_the_journal_read_attribution() -> None:
