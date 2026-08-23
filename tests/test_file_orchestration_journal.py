@@ -15068,3 +15068,756 @@ def test_scheduler_pass_evidence_carries_the_journal_read_attribution() -> None:
     assert attribution["totals"]["bytes"] == 1234
     assert [row["tag"] for row in attribution["tags"]] == ["unattributed|unattributed"]
     journal_module.reset_journal_read_counters()
+
+
+def _released_identity_blocked_master(
+    tmp_path: Path, *, member_count: int = 2
+) -> tuple[Any, dict[str, Any]]:
+    """The production wedge: reserved -> identity-blocked release (#1748)."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=member_count)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert (
+        repository.release_identity_blocked_reservation(
+            str(record["job_id"]),
+            accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+    return repository, record
+
+
+def _attested_released_master(
+    tmp_path: Path, *, member_count: int = 2
+) -> tuple[Any, dict[str, Any]]:
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path, member_count=member_count)
+    released = repository.get_pipeline_job(str(record["job_id"]))
+    attested = repository.recover_released_identity_blocked_reservation(
+        str(record["job_id"]),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(released["submission_attempt"]),
+        expected_submission_attempt_started_at=released["submission_attempt_started_at"],
+    )
+    assert attested is not None
+    return repository, record
+
+
+def _forecast_cycle_context(orchestrator: Any, cycle_time: datetime, member_count: int) -> Any:
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    # Deliberately NOT ``tests.test_orchestration_chain._basins``: that fixture
+    # pins ``run_id="run_<n>"``, which only suits ``FakeCycleRepository``. The
+    # file journal derives the canonical ``fcst_<source>_<cycle>_<model>`` run id
+    # and rejects a divergent one with ``file_journal_run_mismatch``.
+    raw_basins = [
+        {
+            "model_id": f"model_{index}",
+            "basin_id": f"basin_{index}",
+            "basin_version_id": f"basin_v{index}",
+            "river_network_version_id": f"river_v{index}",
+        }
+        for index in range(member_count)
+    ]
+    basins = orchestrator._normalize_cycle_basins(raw_basins, "gfs", cycle_time)
+    return CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026072000",
+        run_id="cycle_gfs_2026072000",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+
+def test_operator_attested_release_lets_an_ordinary_pass_submit(tmp_path: Path) -> None:
+    """#1748 tasks 5.1 -- THE decisive oracle: liveness, end to end.
+
+    The first implementation of this change pre-materialized the successor row
+    and passed 2377 tests while being permanently INERT, because no test drove an
+    ordinary pass to an actual submission after recovery.  This is that test.
+
+    It walks the real stage-loop branch at
+    ``chain_forecast_execution._run_cycle_chain`` (`:172-206`): find the stage's
+    existing job, ask whether it needs submission, ask
+    ``_terminal_stage_needs_manual_retry``, then mint the retry identity and call
+    the real ``_submit_and_wait_cycle_stage``.  The reservation for the minted
+    identity must be NEWLY CREATED -- if it were refused as already in flight the
+    pass would take ``_skip_duplicate_submission`` and never reach sbatch.
+    """
+
+    from services.orchestrator.chain import M3_STAGES
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _orchestrator
+
+    repository, record = _attested_released_master(tmp_path, member_count=3)
+    job_id = str(record["job_id"])
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    # Deliberately a DIFFERENT cohort than the released row's: the production
+    # motivation is a manifest that went from 17 basins to 24 while the wedged
+    # row froze at the old set.  Driving the pass with 2 basins against a
+    # 3-member released row is what makes the "no member-set carry-forward"
+    # assertion below discriminating -- with a carry-forward it would be 3.
+    context = _forecast_cycle_context(orchestrator, cycle_time, member_count=2)
+    stage = M3_STAGES[2]
+    assert stage.stage == "forecast"
+
+    existing_jobs = orchestrator._query_pipeline_jobs_for_cycle_context(context)
+    existing_job = orchestrator._find_existing_stage_job(existing_jobs, stage, context=context)
+    assert existing_job is not None
+    assert existing_job["job_id"] == job_id
+    assert existing_job["status"] == "reservation_lost"
+    assert orchestrator._job_needs_submission(existing_job) is False
+
+    # The additive disjunct: without it this is False and the stage resumes the
+    # dead row forever.
+    assert orchestrator._terminal_stage_needs_manual_retry(context, existing_job) is True
+
+    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_job)
+    assert pipeline_job_id == f"{job_id}_retry_1"
+
+    orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id=pipeline_job_id)
+
+    # Reached the stage's submission call -- not skipped as a duplicate.
+    assert len(client.submissions) == 1
+    successor = repository.get_pipeline_job(pipeline_job_id)
+    assert successor is not None
+    assert successor["submit_outcome"] == "accepted"
+    assert successor["slurm_job_id"] not in (None, "")
+    # The recovered attempt is built from the THEN-CURRENT cohort by the ordinary
+    # reservation path (``_reserve_cycle_stage``), not carried over from the
+    # released row.  The member set is the discriminating evidence: the digest
+    # alone would differ anyway, because it hashes the retry-suffixed
+    # job_id/key/comment.
+    released_row = repository.get_pipeline_job(job_id)
+    assert [member["model_id"] for member in released_row["cohort_members"]] == [
+        "model_0",
+        "model_1",
+        "model_2",
+    ]
+    assert [member["model_id"] for member in successor["cohort_members"]] == ["model_0", "model_1"]
+    assert successor["cohort_digest"] != released_row["cohort_digest"]
+    assert successor.get("operator_recovery_attested_at") in (None, "")
+
+
+def test_released_row_without_the_attestation_still_blocks_the_stage(tmp_path: Path) -> None:
+    """#1748 tasks 5.3 -- the disjunct is additive: no attestation, no change.
+
+    Same walk as the decisive test, on a released row that was never attested.
+    ``_terminal_stage_needs_manual_retry`` must stay false (the reconcile door
+    predicate is unchanged and still demands ``absence_retry_permitted``), so the
+    stage resumes the dead row and nothing is submitted.
+    """
+
+    from services.orchestrator.chain import M3_STAGES
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _orchestrator
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    context = _forecast_cycle_context(orchestrator, _dt("2026-07-20T00:00:00Z"), member_count=3)
+    stage = M3_STAGES[2]
+
+    existing_jobs = orchestrator._query_pipeline_jobs_for_cycle_context(context)
+    existing_job = orchestrator._find_existing_stage_job(existing_jobs, stage, context=context)
+    assert existing_job is not None and existing_job["job_id"] == job_id
+
+    assert orchestrator._terminal_stage_needs_manual_retry(context, existing_job) is False
+    assert client.submissions == []
+    assert repository.get_pipeline_job(f"{job_id}_retry_1") is None
+
+
+def test_operator_recovery_attestation_predicate_refuses_non_released_shapes(tmp_path: Path) -> None:
+    """#1748 -- the predicate must implement its own narrowing, not lean on the caller.
+
+    The sole call site already gates on ``status``, so none of these shapes is
+    reachable today. The point is that the predicate has to be safe to read --
+    and to reuse -- in isolation: a ``pending`` successor that somehow inherited
+    both the attestation and the released decision is exactly the self-attesting
+    shape #1804 describes on the write side, and this closes it at the consumer
+    regardless of how the write side evolves.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
+
+    repository, record = _attested_released_master(tmp_path)
+    attested = repository.get_pipeline_job(str(record["job_id"]))
+    assert _operator_recovery_attested(attested) is True
+
+    # The self-attesting successor: attestation + released decision, but the row
+    # is an ordinary pending one.
+    assert _operator_recovery_attested({**attested, "status": "pending"}) is False
+    assert _operator_recovery_attested({**attested, "status": None}) is False
+    assert _operator_recovery_attested({**attested, "slurm_job_id": "12345"}) is False
+
+
+def test_operator_recovery_attestation_predicate_refuses_an_empty_string_binding(
+    tmp_path: Path,
+) -> None:
+    """#1748 -- both bindings mean UNBOUND the same (permissive) way.
+
+    The recovery API's own admission guard
+    (``recover_released_identity_blocked_reservation``) treats
+    ``slurm_job_id`` and ``matched_slurm_job_id`` identically, admitting
+    ``(None, "")`` for both. The consumer used a strict ``is None`` on the
+    second one, so a row the API would happily attest could then be refused at
+    the door -- an attested-but-inert shape. No writer produces ``""`` today;
+    the two sides must simply not be able to drift apart.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
+
+    repository, record = _attested_released_master(tmp_path)
+    attested = repository.get_pipeline_job(str(record["job_id"]))
+
+    assert _operator_recovery_attested({**attested, "slurm_job_id": ""}) is True
+    assert _operator_recovery_attested({**attested, "matched_slurm_job_id": ""}) is True
+    # A real binding is still refused on both fields.
+    assert _operator_recovery_attested({**attested, "matched_slurm_job_id": "12345"}) is False
+    assert _operator_recovery_attested({**attested, "slurm_job_id": "12345"}) is False
+
+
+def test_recover_released_identity_blocked_reservation_writes_no_row(tmp_path: Path) -> None:
+    """#1748 tasks 5.2 -- the attestation is a marker, never a successor row.
+
+    Pre-materializing the successor occupies the exact ``job_id`` and
+    idempotency key the ordinary retry path would mint, and the ordinary path
+    refuses to submit a row it did not itself reserve -- so the eager write
+    consumes the only submittable identity.  The `_retry_<n>` slot must stay free.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    jobs_before = {str(job["job_id"]) for job in repository.query_pipeline_jobs_by_cycle(str(record["cycle_id"]))}
+
+    attested = repository.recover_released_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(released["submission_attempt"]),
+        expected_submission_attempt_started_at=released["submission_attempt_started_at"],
+    )
+
+    assert attested is not None
+    assert attested["job_id"] == job_id
+    assert attested["operator_recovery_attested_at"] not in (None, "")
+
+    persisted = repository.get_pipeline_job(job_id)
+    assert persisted["operator_recovery_attested_at"] == attested["operator_recovery_attested_at"]
+    # Nothing about the released terminal itself moved.
+    assert persisted["status"] == "reservation_lost"
+    assert persisted["reconciliation_decision"] == "identity_mismatch_released"
+    assert persisted.get("error_code") in (None, "")
+    assert persisted["submission_attempt"] == released["submission_attempt"]
+
+    # No successor row, and the identity the ordinary path will mint is free.
+    jobs_after = {str(job["job_id"]) for job in repository.query_pipeline_jobs_by_cycle(str(record["cycle_id"]))}
+    assert jobs_after == jobs_before
+    assert repository.get_pipeline_job(f"{job_id}_retry_1") is None
+    assert repository.query_candidate_state(f"{record['idempotency_key']}:retry_1") is None
+
+
+def test_recover_released_identity_blocked_reservation_repeat_is_idempotent(tmp_path: Path) -> None:
+    """#1748 tasks 2.4/5.4 -- a second attestation leaves the row exactly as it was."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    kwargs = {
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        "expected_submission_attempt": int(released["submission_attempt"]),
+        "expected_submission_attempt_started_at": released["submission_attempt_started_at"],
+    }
+
+    first = repository.recover_released_identity_blocked_reservation(job_id, **kwargs)
+    assert first is not None
+    after_first = repository.get_pipeline_job(job_id)
+    events_after_first = _master_events(repository, record)
+
+    second = repository.recover_released_identity_blocked_reservation(job_id, **kwargs)
+
+    assert second is not None
+    assert second["operator_recovery_attested_at"] == first["operator_recovery_attested_at"]
+    assert repository.get_pipeline_job(job_id) == after_first
+    assert _master_events(repository, record) == events_after_first
+    assert repository.get_pipeline_job(f"{job_id}_retry_1") is None
+
+
+def test_recover_released_identity_blocked_reservation_refuses_cas_mismatch(tmp_path: Path) -> None:
+    """#1748 -- a concurrently advanced attempt loses the race, write-free."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    before = dict(released)
+
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]) + 1,
+            expected_submission_attempt_started_at=released["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]),
+            expected_submission_attempt_started_at=_dt("2001-01-01T00:00:00Z"),
+        )
+        is None
+    )
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]),
+            expected_submission_attempt_started_at=None,
+        )
+        is None
+    )
+
+    assert repository.get_pipeline_job(job_id) == before
+    assert before.get("operator_recovery_attested_at") in (None, "")
+
+
+def test_recover_released_identity_blocked_reservation_refuses_unowned_shapes(tmp_path: Path) -> None:
+    """#1748 tasks 2.3/5.4 -- every shape outside the released terminal is refused."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    # (a) a plain reserved row -- never released.
+    repository, record = _reserved_cohort_master(tmp_path / "reserved", member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            str(record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert repository.get_pipeline_job(str(record["job_id"])) == reserved
+
+    # (b) the OTHER released decision -- ``absence_retry_permitted`` owns the
+    # reclaim door and must not be attested through this one.
+    permitted_repo, permitted_record = _reserved_cohort_master(tmp_path / "permitted", member_count=2)
+    assert permitted_repo.reserve_pipeline_job(dict(permitted_record)) is not None
+    permitted_reserved = permitted_repo.get_pipeline_job(str(permitted_record["job_id"]))
+    assert (
+        permitted_repo.permit_pipeline_job_retry(
+            str(permitted_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(permitted_reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=permitted_reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = permitted_repo.get_pipeline_job(str(permitted_record["job_id"]))
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+    assert (
+        permitted_repo.recover_released_identity_blocked_reservation(
+            str(permitted_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(permitted["submission_attempt"]),
+            expected_submission_attempt_started_at=permitted["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert permitted_repo.get_pipeline_job(str(permitted_record["job_id"])) == permitted
+
+    # (c) a bound row -- a live Slurm identity is never recoverable this way.
+    bound_repo, bound_record = _reserved_cohort_master(tmp_path / "bound", member_count=2)
+    assert bound_repo.reserve_pipeline_job(dict(bound_record)) is not None
+    bound_reserved = bound_repo.get_pipeline_job(str(bound_record["job_id"]))
+    _bind_and_project_cohort(bound_repo, bound_record, member_count=2)
+    bound = bound_repo.get_pipeline_job(str(bound_record["job_id"]))
+    assert bound["slurm_job_id"] == "17667"
+    assert (
+        bound_repo.recover_released_identity_blocked_reservation(
+            str(bound_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(bound_reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=bound_reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert bound_repo.get_pipeline_job(str(bound_record["job_id"])) == bound
+
+    # (d) an unknown job id.
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            "job_cycle_gfs_2026072000_forecast_missing",
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+
+    # (e) a stale accepted-submit contract version raises rather than attests.
+    released_repo, released_record = _released_identity_blocked_master(tmp_path / "released")
+    released_row = released_repo.get_pipeline_job(str(released_record["job_id"]))
+    with pytest.raises(journal_module.FileOrchestrationJournalError):
+        released_repo.recover_released_identity_blocked_reservation(
+            str(released_record["job_id"]),
+            accepted_submit_contract_version="v0-not-current",
+            expected_submission_attempt=int(released_row["submission_attempt"]),
+            expected_submission_attempt_started_at=released_row["submission_attempt_started_at"],
+        )
+    assert released_repo.get_pipeline_job(str(released_record["job_id"])) == released_row
+
+
+def test_operator_recovery_attestation_cannot_be_set_by_an_ordinary_upsert(tmp_path: Path) -> None:
+    """#1748 tasks 2.5 -- no automatic path can set or clear the attestation.
+
+    ``upsert_pipeline_job`` merges only ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS``
+    (`file_orchestration_journal.py:373-420`), and the attestation is
+    deliberately NOT in that whitelist, so a caller can neither forge it on a
+    candidate row nor strip it from an attested master.
+    """
+
+    repository, record = _attested_released_master(tmp_path)
+    job_id = str(record["job_id"])
+    attested_at = repository.get_pipeline_job(job_id)["operator_recovery_attested_at"]
+    assert attested_at not in (None, "")
+
+    # Forging it through the generic upsert is refused outright.
+    with pytest.raises(journal_module.FileOrchestrationJournalError):
+        repository.upsert_pipeline_job(
+            {
+                "job_id": "job_fcst_gfs_2026072000_model_0_forecast",
+                "run_id": "fcst_gfs_2026072000_model_0",
+                "cycle_id": "gfs_2026072000",
+                "job_type": "run_shud_forecast",
+                "stage": "forecast",
+                "model_id": "model_0",
+                "status": "failed",
+                "operator_recovery_attested_at": "2026-07-20T05:00:00Z",
+            }
+        )
+    assert repository.get_pipeline_job("job_fcst_gfs_2026072000_model_0_forecast") is None
+
+    # And an ordinary upsert on the attested master cannot STRIP it, because the
+    # field is outside ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS``.
+    repository.upsert_pipeline_job(
+        {
+            "job_id": job_id,
+            "run_id": str(record["run_id"]),
+            "cycle_id": str(record["cycle_id"]),
+            "job_type": str(record["job_type"]),
+            "stage": "forecast",
+            "status": "reservation_lost",
+            "operator_recovery_attested_at": None,
+        }
+    )
+    assert repository.get_pipeline_job(job_id)["operator_recovery_attested_at"] == attested_at
+
+    # And a clean reservation may not carry one in.
+    fresh_repo, fresh_record = _reserved_cohort_master(tmp_path / "fresh", member_count=2)
+    with pytest.raises(journal_module.FileOrchestrationJournalError):
+        fresh_repo.reserve_pipeline_job(
+            {**fresh_record, "operator_recovery_attested_at": "2026-07-20T05:00:00Z"}
+        )
+    assert fresh_repo.get_pipeline_job(str(fresh_record["job_id"])) is None
+
+
+_RECOVER_COMMAND = "recover-released-identity-blocked-reservation"
+
+
+def _run_recovery_cli(entrypoint: str, argv: list[str], capsys: Any) -> tuple[int, Any]:
+    """Drive the operator subcommand through BOTH shipped entrypoints.
+
+    ``_click_main`` runs with ``standalone_mode=False`` when argv is supplied, so
+    a command that exits non-zero raises ``SystemExit`` out of it instead of
+    returning -- the same normalization the file-journal rollback CLI tests use.
+    """
+
+    from services.orchestrator import cli as cli_module
+
+    full = [_RECOVER_COMMAND, *argv]
+    if entrypoint == "click":
+        try:
+            code = cli_module._click_main(full)
+        except SystemExit as error:
+            code = int(error.code or 0)
+    else:
+        code = cli_module._argparse_main(full)
+    captured = capsys.readouterr().out
+    return code, (json.loads(captured) if captured.strip() else None)
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_recovery_cli_attests_a_wedged_row_and_is_idempotent(
+    tmp_path: Path, capsys: Any, entrypoint: str
+) -> None:
+    """#1748 -- the operator-facing channel: attest, then attest again.
+
+    A typed method with no invocation surface is not a recovery channel; an
+    operator on node-22 has a shell, not a Python REPL.  Second invocation must
+    report ``already_attested`` and leave the row byte-identical.
+    """
+
+    base = tmp_path / entrypoint
+    repository, record = _released_identity_blocked_master(base)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    assert released.get("operator_recovery_attested_at") in (None, "")
+
+    # Half 1 -- FIND. The signal names an API whose CAS arguments a human has
+    # no other supported way to read; without this the operator is stuck one
+    # step before the recovery.
+    list_code, listing = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
+    assert list_code == 0
+    assert listing["decision"] == "listed"
+    assert listing["wedged_count"] == 1
+    wedged = listing["wedged"][0]
+    assert wedged["job_id"] == job_id
+    assert wedged["cohort_digest"] == released["cohort_digest"]
+    assert wedged["identity_blocked_streak"] == 3
+    assert wedged["expected_submission_attempt"] == released["submission_attempt"]
+    assert wedged["expected_submission_attempt_started_at"]
+    assert wedged["operator_recovery_attested_at"] is None
+
+    # Dry run by default: inspect, write nothing.
+    dry_code, dry = _run_recovery_cli(
+        entrypoint, ["--journal-root", str(repository.root), "--job-id", job_id], capsys
+    )
+    assert dry_code == 0
+    assert dry["decision"] == "eligible"
+    assert repository.get_pipeline_job(job_id).get("operator_recovery_attested_at") in (None, "")
+
+    # Half 2 -- ACT.
+    code, payload = _run_recovery_cli(
+        entrypoint,
+        ["--journal-root", str(repository.root), "--job-id", job_id, "--attest"],
+        capsys,
+    )
+
+    assert code == 0
+    assert payload["decision"] == "attested"
+    assert payload["slurm_liveness_checked"] is False
+    assert payload["job_id"] == job_id
+    # The CAS values are read off the row and echoed for operator confirmation.
+    assert payload["expected_submission_attempt"] == released["submission_attempt"]
+    assert payload["expected_submission_attempt_started_at"]
+    assert payload["operator_recovery_attested_at"]
+    attested = repository.get_pipeline_job(job_id)
+    assert attested["operator_recovery_attested_at"] == payload["operator_recovery_attested_at"]
+
+    repeat_code, repeat_payload = _run_recovery_cli(
+        entrypoint,
+        ["--journal-root", str(repository.root), "--job-id", job_id, "--attest"],
+        capsys,
+    )
+
+    assert repeat_code == 0
+    assert repeat_payload["decision"] == "already_attested"
+    assert repository.get_pipeline_job(job_id) == attested
+
+    # An attested row leaves the wedge listing: it is no longer awaiting an
+    # operator.
+    _, after = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
+    assert after["wedged"][0]["operator_recovery_attested_at"] == payload["operator_recovery_attested_at"]
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_recovery_cli_refusals_name_the_failing_precondition(
+    tmp_path: Path, capsys: Any, entrypoint: str
+) -> None:
+    """#1748 -- a refusal must be diagnosable, not just non-zero.
+
+    This command exists because the wedge itself was undiagnosable; ``None``
+    from the typed API tells an operator nothing about WHICH precondition it
+    tripped.  The CLI mirrors the API's precondition order and names the one
+    that failed.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    base = tmp_path / entrypoint
+    repository, record = _reserved_cohort_master(base, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    job_id = str(record["job_id"])
+    root = str(repository.root)
+
+    # --attest without a target: it acts on exactly one row, never a sweep.
+    code, payload = _run_recovery_cli(entrypoint, ["--journal-root", root, "--attest"], capsys)
+    assert code == 2
+    assert payload["reason"] == "job_id_required_to_attest"
+
+    # Nothing wedged yet -- the listing is empty rather than an error.
+    code, payload = _run_recovery_cli(entrypoint, ["--journal-root", root], capsys)
+    assert code == 0
+    assert payload["wedged"] == []
+
+    # Unparseable job_id: refused before any journal read.
+    code, payload = _run_recovery_cli(
+        entrypoint, ["--journal-root", root, "--job-id", "nope", "--attest"], capsys
+    )
+    assert code == 2
+    assert payload["decision"] == "refused"
+    assert payload["reason"] == "job_id_unparseable"
+
+    # Well-formed but absent.
+    code, payload = _run_recovery_cli(
+        entrypoint,
+        ["--journal-root", root, "--job-id", "job_cycle_gfs_2026072000_publish", "--attest"],
+        capsys,
+    )
+    assert code == 2
+    assert payload["reason"] == "job_not_found"
+
+    # Present, but still an ordinary live reservation.
+    code, payload = _run_recovery_cli(
+        entrypoint, ["--journal-root", root, "--job-id", job_id, "--attest"], capsys
+    )
+    assert code == 2
+    assert payload["reason"] == "status_not_reservation_lost"
+    assert payload["observed"]["status"] == "reserved"
+
+    # Released through the OTHER door: reclaim's absence proof, not the identity
+    # wedge.  That row has its own automatic path and must not be attested here.
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    code, payload = _run_recovery_cli(
+        entrypoint, ["--journal-root", root, "--job-id", job_id, "--attest"], capsys
+    )
+    assert code == 2
+    assert payload["reason"] == "decision_not_identity_mismatch_released"
+    # And it is absent from the wedge listing -- a different door owns it.
+    _, listing = _run_recovery_cli(entrypoint, ["--journal-root", root], capsys)
+    assert listing["wedged"] == []
+    assert payload["observed"]["reconciliation_decision"] == "absence_retry_permitted"
+
+    # Every refusal above is write-free.
+    assert repository.get_pipeline_job(job_id).get("operator_recovery_attested_at") in (None, "")
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_recovery_cli_help_says_it_is_an_attestation_not_a_proof(
+    tmp_path: Path, capsys: Any, entrypoint: str
+) -> None:
+    """#1748 -- the non-goal has to be readable at the point of use.
+
+    Both entrypoints ship depending on whether click is importable, so both must
+    carry the warning.
+    """
+
+    del tmp_path
+    from services.orchestrator import cli as cli_module
+
+    argv = [_RECOVER_COMMAND, "--help"]
+    if entrypoint == "click":
+        try:
+            cli_module._click_main(argv)
+        except SystemExit:
+            pass
+    else:
+        with pytest.raises(SystemExit):
+            cli_module._argparse_main(argv)
+    text = capsys.readouterr().out
+    assert "attestation" in text.lower()
+    assert "liveness" in text.lower() or "does not check" in text.lower()
+    assert "slurm" in text.lower()
+
+
+def test_operator_cli_recovery_lets_an_ordinary_pass_submit(tmp_path: Path, capsys: Any) -> None:
+    """#1748 -- the decisive oracle, driven through the OPERATOR-FACING path.
+
+    ``test_operator_attested_release_lets_an_ordinary_pass_submit`` pins the
+    typed API.  This sibling pins the channel a human actually has: the CLI
+    subcommand must reach a real submission through an ordinary pass.
+    """
+
+    from services.orchestrator.chain import M3_STAGES
+    from tests.test_orchestration_chain import FakeCycleSlurmClient, _orchestrator
+
+    repository, record = _released_identity_blocked_master(tmp_path, member_count=3)
+    job_id = str(record["job_id"])
+
+    code, payload = _run_recovery_cli(
+        "argparse",
+        ["--journal-root", str(repository.root), "--job-id", job_id, "--attest"],
+        capsys,
+    )
+    assert code == 0 and payload["decision"] == "attested"
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    context = _forecast_cycle_context(orchestrator, _dt("2026-07-20T00:00:00Z"), member_count=2)
+    stage = M3_STAGES[2]
+
+    existing_jobs = orchestrator._query_pipeline_jobs_for_cycle_context(context)
+    existing_job = orchestrator._find_existing_stage_job(existing_jobs, stage, context=context)
+    assert existing_job is not None and existing_job["job_id"] == job_id
+    assert orchestrator._job_needs_submission(existing_job) is False
+    assert orchestrator._terminal_stage_needs_manual_retry(context, existing_job) is True
+
+    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_job)
+    assert pipeline_job_id == f"{job_id}_retry_1"
+
+    orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id=pipeline_job_id)
+
+    # Reached the stage's submission call -- not skipped as a duplicate.
+    assert len(client.submissions) == 1
+    successor = repository.get_pipeline_job(pipeline_job_id)
+    assert successor is not None
+    assert successor["submit_outcome"] == "accepted"
+    assert successor["slurm_job_id"] not in (None, "")
+
+
+def test_signalled_operator_command_is_actually_runnable(tmp_path: Path, capsys: Any) -> None:
+    """#1748 -- copy the command out of the journal record and run it verbatim.
+
+    The strongest available guard against drift: if the subcommand were renamed,
+    or the flags changed, or the acting flag dropped, this fails. A signal that
+    names a command no longer accepted by the shell is worse than one that names
+    a method.
+    """
+
+    from services.orchestrator import cli as cli_module
+    from tests.test_production_scheduler import _identity_released_operator_signals
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+
+    tokens = str(signals[0]["details"]["operator_command"]).split()
+    assert tokens[0] == "nhms-pipeline"
+    # Substitute only the placeholder the record cannot know; everything else is
+    # replayed exactly as the operator would read it.
+    argv = list(tokens[1:])
+    argv[argv.index("--journal-root") + 1] = str(repository.root)
+
+    assert cli_module._argparse_main(argv) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "attested"
+    assert payload["job_id"] == job_id
+    assert repository.get_pipeline_job(job_id)["operator_recovery_attested_at"]

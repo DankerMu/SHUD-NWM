@@ -5,6 +5,7 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import stat
@@ -135,6 +136,8 @@ from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _
 from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
+
+LOGGER = logging.getLogger(__name__)
 
 FILE_JOURNAL_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_JOURNAL_LOCK_GUARD_MODE"
 LEGACY_FILE_LOCK_GUARD_MODE_ENV = "NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE"
@@ -328,6 +331,39 @@ def journal_read_attribution() -> dict[str, Any]:
         "tags": rows,
         "tags_dropped": tags_dropped,
     }
+# #1748: the searchable token an operator greps for.  Used verbatim as the
+# ``event_type`` (not sanitized on the public read path) AND inside the message,
+# so ``grep`` finds the wedge in either rendering.
+IDENTITY_RELEASED_OPERATOR_SIGNAL = "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
+# The degraded trace emitted when that signal itself cannot be written.
+IDENTITY_RELEASED_SIGNAL_FAILED_EVENT = "identity_released_operator_signal_failed"
+# #1748: the ``nhms-pipeline`` subcommand that actually recovers the wedge.
+# Defined HERE rather than in ``cli.py`` because the signal has to name it and
+# ``cli`` already imports this module -- the other direction would be a cycle.
+# ``cli`` registers the subcommand from this same constant, so the name in the
+# journal record cannot drift away from the name a shell will accept.
+RELEASED_RESERVATION_RECOVERY_COMMAND = "recover-released-identity-blocked-reservation"
+
+
+def _released_reservation_recovery_command(job_id: str) -> str:
+    """The runnable invocation, not the discovery form.
+
+    A human reading this record needs the form that ACTS: the round-3 defect was
+    a signal naming something its reader could not invoke, and half-closing that
+    with a command they still have to figure out how to arm would repeat it.
+    ``--journal-root`` is a placeholder because the record cannot know the
+    operator's deployment root; the shape makes the missing piece obvious.
+    """
+
+    return (
+        f"nhms-pipeline {RELEASED_RESERVATION_RECOVERY_COMMAND} "
+        f"--journal-root <journal-root> --job-id {job_id} --attest"
+    )
+# #1748: the durable operator-recovery attestation.  It is a MARKER on the
+# released row, never a pre-materialized successor: writing the successor eagerly
+# occupies the very job_id/idempotency key the ordinary retry path would mint,
+# and the ordinary path refuses to submit a row it did not itself reserve.
+OPERATOR_RECOVERY_ATTESTATION_FIELD = "operator_recovery_attested_at"
 _RECONCILE_INVENTORY_DIRECTORY = "reconcile-inventory"
 _RECONCILE_INVENTORY_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory.v1"
 _RECONCILE_INVENTORY_MIGRATION_SCHEMA_VERSION = "nhms.scheduler.reconcile_inventory_migration.v1"
@@ -1443,6 +1479,36 @@ class FileOrchestrationJournalRepository:
         jobs.sort(key=lambda job: (_datetime_sort_key(job.created_at), str(job.job_id)))
         return jobs
 
+    def query_released_identity_blocked_jobs(self) -> list[dict[str, Any]]:
+        """Enumerate the released identity-blocked wedge for an OPERATOR (#1748).
+
+        Read-only, and deliberately consumed by nothing automatic: reconcile
+        iterates ``query_reserved_unbound_jobs``, which never yields this shape,
+        and that is the whole reason the shape is a permanent terminal.  This
+        exists so ``IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR`` is
+        ACTIONABLE -- the recovery API demands CAS values a human otherwise has
+        no supported way to read.  The filter mirrors that API's own admission
+        shape so a row listed here is one it will actually consider.
+        """
+
+        # Whole-tree replay, deliberately: the reconcile inventory prunes its
+        # anchor the moment a row stops needing restart reconcile, which is
+        # exactly what the release does -- ``_iter_reconcile_pipeline_job_records``
+        # returns nothing here.  The cost is acceptable because this is an
+        # operator command run by hand on a wedge, never a scheduler pass.
+        jobs = [
+            _public_scheduler_row(job)
+            for job in self._iter_pipeline_job_records()
+            if accepted_submit_contract_is_current(job)
+            and accepted_submit_row_kind(job) == "master"
+            and str(job.get("status") or "") == "reservation_lost"
+            and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+            and job.get("slurm_job_id") in (None, "")
+            and job.get("matched_slurm_job_id") in (None, "")
+        ]
+        jobs.sort(key=lambda job: str(job.get("job_id") or ""))
+        return jobs
+
     def query_inflight_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
@@ -1959,6 +2025,15 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        # #1748: the operator-recovery attestation is settable ONLY by the typed
+        # recovery API.  The merge whitelist below already keeps this generic
+        # path from changing it on an existing row; this guard closes the other
+        # half -- forging it on a row this call creates.
+        if record.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, ""):
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field=OPERATOR_RECOVERY_ATTESTATION_FIELD,
+            )
         # Upserts may be partial status transitions for an existing cohort.
         # Validate the accepted-submit contract only after merging with its
         # canonical durable identity; fresh rows still validate in full.
@@ -2105,6 +2180,10 @@ class FileOrchestrationJournalRepository:
                     "reconciliation_decision",
                     "reconciliation_reason_class",
                     "matched_slurm_job_id",
+                    # #1748: a fresh reservation may never carry an operator
+                    # attestation in -- the marker is settable only by the typed
+                    # recovery API, on an already-released row.
+                    OPERATOR_RECOVERY_ATTESTATION_FIELD,
                 )
                 if record.get(field) not in (None, "")
             }
@@ -3405,7 +3484,271 @@ class FileOrchestrationJournalRepository:
             row["updated_at"] = _format_utc(_utcnow())
             model_id = _optional_safe_identity(row, "model_id")
             written = self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
-            return 1 if written is not None else 0
+            if written is None:
+                return 0
+            # #1748: the released terminal is otherwise SILENT -- the row is
+            # indistinguishable from an ordinary in-flight reservation until a
+            # human happens to read the journal, and nothing automatic can
+            # revive it (that is deliberate, see the error_code comment above).
+            # This is the single release write point, so emitting here is
+            # exactly-once per release and covers BOTH prior states (a fresh
+            # reservation and a reclaim re-seed).  Emitting at the
+            # ``reconcile.py`` caller instead would double-emit, since it is the
+            # sole caller.  Gated on the successful write so a CAS refusal above
+            # stays write-free and signal-free.
+            # The release bytes are already appended and ``_locked_cycle_write``
+            # has NO rollback, so a raise here would leave the row durably
+            # released with no operator record -- permanently, because the
+            # reconcile loop iterates ``query_reserved_unbound_jobs()`` and
+            # never re-enters this door for a ``reservation_lost`` row.  Same
+            # best-effort discipline as ``_record_permanent_failure_mark_failure``:
+            # the evidence write exists to keep the terminal from being silent,
+            # never to turn a correct durable release into a raise.  The catch
+            # spans the filesystem/OS class too: the private-recovery side write
+            # raises ``SafeFilesystemError``/``OSError``, which ``reconcile.py``'s
+            # enclosing ``except FileOrchestrationJournalError`` would NOT catch
+            # -- it would abort the whole reconcile pass.
+            try:
+                self._append_pipeline_job_event_unlocked(
+                    row,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    event_type=IDENTITY_RELEASED_OPERATOR_SIGNAL,
+                    status_from=expected_status,
+                    status_to="reservation_lost",
+                    message=(
+                        f"{IDENTITY_RELEASED_OPERATOR_SIGNAL} pipeline job {job_id} released an "
+                        "identity-blocked reservation; the cohort is a permanent terminal until an "
+                        "operator invokes recover_released_identity_blocked_reservation."
+                    ),
+                    details={
+                        "pipeline_job_id": job_id,
+                        "cohort_digest": row.get("cohort_digest"),
+                        "identity_blocked_streak": identity_blocked_streak,
+                        "recovery_api": "recover_released_identity_blocked_reservation",
+                        # Both the API and the surface a human can actually
+                        # reach: naming only the former is the round-3 defect.
+                        "operator_command": _released_reservation_recovery_command(job_id),
+                    },
+                )
+            except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError) as error:
+                self._record_identity_released_signal_failure(
+                    job_id,
+                    row,
+                    error,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            return 1
+
+    def _record_identity_released_signal_failure(
+        self,
+        job_id: str,
+        row: Mapping[str, Any],
+        error: Exception,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
+        """Leave a degraded trace when the #1748 operator signal could not be written.
+
+        #1312 C-P2: the fallback must not be silent.  The payload is kept
+        minimal on purpose -- ``file_journal_byte_limit_exceeded`` is one of the
+        realistic reasons the primary emission fails, and a smaller record still
+        fits -- but it keeps ``recovery_api`` so the degraded trace still tells
+        an operator what to invoke.  If this write fails too (a filesystem fault
+        that killed the primary very likely kills this one), it degrades to a
+        log and still does not raise.
+
+        Note: ``_materialize_latest_unlocked`` runs AFTER the append inside
+        ``_append_validated_record_unlocked``, so a materialize fault means the
+        primary event did land and this trace is redundant.  Noisy beats silent.
+        """
+
+        reason = str(
+            getattr(error, "reason", None) or getattr(error, "error_code", None) or type(error).__name__
+        )
+        try:
+            self._append_pipeline_job_event_unlocked(
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                event_type=IDENTITY_RELEASED_SIGNAL_FAILED_EVENT,
+                status_from="reservation_lost",
+                status_to="reservation_lost",
+                message=(
+                    f"{IDENTITY_RELEASED_OPERATOR_SIGNAL} could not be written for pipeline job "
+                    f"{job_id} (reason={reason}); the row IS released and needs "
+                    "recover_released_identity_blocked_reservation."
+                ),
+                details={
+                    "pipeline_job_id": job_id,
+                    "reason": reason,
+                    "error_type": type(error).__name__,
+                    "recovery_api": "recover_released_identity_blocked_reservation",
+                    # The degraded trace is exactly when a human is reading by
+                    # hand, so it needs the runnable command more, not less.
+                    "operator_command": _released_reservation_recovery_command(job_id),
+                },
+            )
+        except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError):
+            LOGGER.warning(
+                "%s could not be written for pipeline job %s (reason=%s) and neither could its "
+                "failure trace; the row IS released and needs "
+                "recover_released_identity_blocked_reservation.",
+                IDENTITY_RELEASED_OPERATOR_SIGNAL,
+                job_id,
+                reason,
+            )
+
+    def _append_pipeline_job_event_unlocked(
+        self,
+        row: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        event_type: str,
+        status_from: str | None,
+        status_to: str | None,
+        message: str | None,
+        details: Mapping[str, Any],
+    ) -> None:
+        """Append one pipeline_job event from inside an open cycle write window.
+
+        ``insert_pipeline_event`` cannot be reused here: it re-enters
+        ``_locked_cycle_write``, whose ``finally`` clears ``_cycle_write_owner``
+        for the still-open outer window and whose second ``flock`` on the same
+        cycle lock file would block this thread against itself.
+        """
+
+        model_id = _optional_safe_identity(row, "model_id")
+        event = {
+            "event_id": self._next_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            ),
+            "entity_type": "pipeline_job",
+            "entity_id": _required_safe_identity(row, "job_id"),
+            "event_type": event_type,
+            "status_from": status_from,
+            "status_to": status_to,
+            "message": message,
+            "details": dict(details),
+            "created_at": _format_utc(_utcnow()),
+        }
+        self._append_validated_record_unlocked(
+            "pipeline_event",
+            event,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=model_id,
+            materialize_model_id=model_id,
+        )
+
+    def recover_released_identity_blocked_reservation(
+        self,
+        job_id: str,
+        *,
+        accepted_submit_contract_version: str | None = None,
+        expected_submission_attempt: int | None = None,
+        expected_submission_attempt_started_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Operator-gated liveness for one released identity-blocked cohort (#1748).
+
+        The released row is a permanent terminal for every AUTOMATIC arm: the
+        release deliberately withholds ``error_code`` so ``should_auto_retry`` is
+        false by construction, and reclaim only accepts
+        ``absence_retry_permitted``.  This door records a durable operator
+        attestation ON THE RELEASED ROW and writes **no** successor pipeline-job
+        row.
+
+        Why a marker and not a row: the successor identity the ordinary retry
+        path mints is exactly ``_next_current_master_retry_identity``'s, so
+        pre-materializing it occupies that ``job_id``/idempotency key,
+        ``_pipeline_job_conflicts_unlocked`` then refuses the ordinary reserve,
+        reclaim refuses too (the row is ``pending``, not ``reservation_lost``),
+        and the pass takes ``_skip_duplicate_submission`` on every later pass --
+        permanently inert.  The recovery's only durable output must be an INPUT
+        the ordinary submission path already consumes; here that consumer is the
+        additive disjunct in
+        ``chain_forecast_orchestrator_cycle._terminal_stage_needs_manual_retry``.
+
+        This performs **no** Slurm-side liveness or absence check and must not be
+        described as one.  On a cluster whose accounting does not store job
+        comments absence is not provable; invoking this is an operator
+        attestation, and the judgement deliberately sits with the operator.  For
+        the same reason there is no automatic caller, and no automatic path can
+        set the marker (it is outside ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` and
+        rejected by the clean-reservation check).
+
+        ``should_auto_retry`` is never consulted and no ``error_code`` is written.
+
+        Returns the attested row, or ``None`` when the call is refused.  Refusal
+        is write-free, and a repeat attestation is an idempotent no-op.
+        """
+
+        if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None:
+                return None
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+            ):
+                return None
+            if str(existing.get("status") or "") != "reservation_lost":
+                return None
+            if existing.get("reconciliation_decision") != IDENTITY_MISMATCH_RELEASED_DECISION:
+                return None
+            if existing.get("slurm_job_id") not in (None, "") or existing.get(
+                "matched_slurm_job_id"
+            ) not in (None, ""):
+                return None
+            # CAS mirrors ``release_identity_blocked_reservation``: a
+            # concurrently advanced attempt loses the race, write-free.
+            if expected_submission_attempt_started_at is None:
+                return None
+            try:
+                anchor_matches = _accepted_submit_attempt_anchor(
+                    existing.get("submission_attempt_started_at")
+                ) == _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+            except FileOrchestrationJournalError:
+                return None
+            if not anchor_matches:
+                return None
+            if existing.get("submission_attempt") != expected_submission_attempt:
+                return None
+            if existing.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, ""):
+                # Idempotent: a second attestation leaves the row byte-identical
+                # and emits nothing.  At most one recovered attempt still
+                # follows, because the ordinary reservation path's own conflict
+                # gate owns that exclusion, not this call.
+                return _public_scheduler_row(existing)
+            row = {
+                **existing,
+                OPERATOR_RECOVERY_ATTESTATION_FIELD: _format_utc(_utcnow()),
+                "updated_at": _format_utc(_utcnow()),
+            }
+            return self._write_pipeline_job_unlocked(
+                self._pipeline_job_row(row),
+                exclusive_direct=False,
+                model_id=_optional_safe_identity(row, "model_id"),
+            )
 
     def project_forecast_cohort_tasks(
         self,
@@ -7011,6 +7354,13 @@ class FileOrchestrationJournalRepository:
                 record.get(QUARANTINE_RERUN_PROVENANCE_FIELD)
             ),
             "restart_stage": record.get("restart_stage"),
+            # #1748: the operator-recovery attestation.  Deliberately absent from
+            # ``_PIPELINE_JOB_UPSERT_MUTABLE_FIELDS`` so the generic upsert can
+            # neither forge nor strip it -- only the typed recovery API writes it.
+            OPERATOR_RECOVERY_ATTESTATION_FIELD: _optional_format_datetime(
+                record.get(OPERATOR_RECOVERY_ATTESTATION_FIELD),
+                field=OPERATOR_RECOVERY_ATTESTATION_FIELD,
+            ),
             "submission_attempt": record.get("submission_attempt", 1),
             "submission_attempt_started_at": _optional_format_datetime(
                 record.get("submission_attempt_started_at"), field="submission_attempt_started_at"
