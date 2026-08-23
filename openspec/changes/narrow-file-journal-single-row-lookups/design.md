@@ -485,8 +485,13 @@ Three properties are required and each has a reason:
    no local-patch path. A monkeypatched probe would also have to run a real
    submitting pass to be representative — a plan-only pass performs no writes,
    so it triggers no invalidation and would understate B specifically.
-2. **Tag -> bytes, keyed by entrypoint (A/B/C).** The output is a dozen
-   `(tag, calls, bytes)` triples, negligible against the 5 MB evidence limit.
+2. **Tag -> bytes, keyed by entrypoint (A/B/C).** The output is on the order of
+   50 `(tag, calls, bytes)` triples, negligible against the 5 MB evidence limit.
+   (This originally read "a dozen", written before the counter existed to be
+   measured. Measured after D11 shipped: 51 live tags per pass window, 72
+   distinct across a 308-test session, `tags_dropped=0` against the cap of 256.
+   The conclusion is unchanged — the correction is to the number, not the
+   ruling.)
 3. **Self-attributing, so no pre-fix baseline is needed.** After D9+D10 land,
    the same counters *verify* them: C's tag near zero proves the memo holds
    across the pass, and B's tag at roughly one 13 MB pass per cycle rather than

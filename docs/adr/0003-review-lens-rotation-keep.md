@@ -1375,3 +1375,44 @@ The caveat recorded in the previous revisit still stands and is not weakened: a
 rotated-in lens that reviews a byte-identical head contributes nothing to
 `rotated` yet is not evidence about rotation either way. Nothing in this run
 changes the fact that the counter cannot distinguish those cases on its own.
+
+## Revisit 2026-08-23 (PR #1788, issue #1734) — keep, with three counted `rotated` that are not evidence
+
+Denominator 116 multi-round merged PRs; later-round catches core=68, rotated=273.
+Decision unchanged: **keep**. But this run's three-point contribution to
+`rotated` must not be read as support for the decision, for two independent
+reasons, and it is recorded here so a later reader does not count it twice.
+
+**First: the attribution is empty, not rotated.** Reviewer lens names were never
+persisted for this PR — `.workplans/pr-1788/review/` holds only
+`round-ledger.log`, no verdict tables — so its loop-log line carries
+`round_lenses: [[], []]` and `lens: "unrecorded"` on every catch. Because
+`rotation_attribution` classifies by `catch["lens"] in core_lenses` and the core
+set is empty, all three round-2 catches fall to the `else` branch and are
+counted as rotated. The script has no *unattributable* state; the honest reading
+of this line is core=0, rotated=0, unknown=3. **Subtract 3 from `rotated`
+before using this counter as evidence.** This is a persistence failure of mine,
+not a property of the review, and it compounds the schema gap already reported
+on the PR #1759 line (catches written with `phase` only default to round 1 and
+are skipped entirely).
+
+**Second, and more interesting: even with perfect lens records these three would
+not have been evidence about rotation.** All three round-2 findings were defects
+in code that *round 1's own fix pass had just written* — a pin that spanned one
+of two decorated classes, a missing pin on the `resource_limit_blocked` evidence
+path, and a 5% threshold where the true value is a deterministic zero. Round 1
+could not have caught them under any lens mix, because at round 1 they did not
+exist. This is exactly the conflation flagged on the #1759 line and it has now
+recurred: **later rounds earning their keep is a different claim from lens
+rotation earning its keep, and the counter cannot separate them.** The #1786
+revisit above is the clean case precisely because its rotated-in lenses read an
+artifact round 1 predates *and were named*; this run is the muddy case.
+
+The standing caveat compounds rather than resolves: the counter over-credits
+rotation both when a rotated-in lens reviews a head round 1 never saw (fix-pass
+defects, this run) and whenever lens records are missing (also this run). Its
+one-directional bias is now documented twice. Keep remains the recorded default,
+but the next revisit should be made against lines with **recorded** lens names
+only — and the first corrective step is mechanical: persist the verdict tables
+and reviewer list at each round, which the pre-merge evidence gate already
+nominally requires.
