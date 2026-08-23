@@ -47,7 +47,7 @@
       `rchar` 44,453,875,940 · `read_bytes` 1,043,906,560 · `syscr` 1,403,447.
       = 380 MB/min and **3.18 GB per candidate** (14 candidates); working set
       566.1 MiB. systemd at exit: `Consumed 1h 22min 53.556s CPU, 1.5G peak`.
-- [ ] **node-22 post-change re-measurement, same口径**, on a pass that genuinely
+- [x] **node-22 post-change re-measurement, same口径**, on a pass that genuinely
       executes backfill, **with the PID pinned for the whole sample** (the timer
       relaunches immediately, so a `pgrep` sampler silently follows the next
       pass — this happened during baseline capture):
@@ -91,11 +91,54 @@ three-part, all three required:
       with a counter and drive an existing end-to-end scheduler test, recording
       which entrypoints fire and how often. This converts (a)'s estimate into a
       measured per-entrypoint ranking on a real code path.
-- [ ] (c) The node-22 post-change measurement is the empirical decider.
+- [x] (c) The node-22 post-change measurement is the empirical decider.
       **Pre-declared fallback ruling**: if `rchar` does not drop >=90%, the D1
       "leave" decisions for `_pipeline_job_for_id_unlocked` and
       `query_pipeline_job_by_slurm_id` are void and are revisited **inside this
       change**, not shipped around and deferred.
+
+      **MEASURED 2026-08-23 — PRIMARY CRITERION NOT MET. Receipt:
+      `.workplans/1734/receipt-node22-postchange.md`.** Post-change pass
+      `scheduler_2026082306_f02713c4c7ec`, PID 4077969, node-22 HEAD `e056c33b`
+      (contains `e5d25c80`/PR #1759, verified by `git merge-base --is-ancestor`).
+      Shape-identical to the baseline pass (`candidate_count 48 / submitted 14 /
+      skipped 34 / blocked 0`), so the denominator 14 is the baseline's own.
+
+      |metric|baseline|post-change|criterion|verdict|
+      |---|---|---|---|---|
+      |`rchar`/candidate (GB)|3.175|0.911|<= 0.32|**FAIL** (71.3% drop, needed >= 90%)|
+      |`rchar` rate (MB/min)|380.7|320.5|<= 38|**FAIL**|
+      |`read_bytes` rate (MB/min)|8.94|46.66|<= 0.89|**FAIL**, 5.2x baseline|
+      |`syscr` total|1,403,447|768,170|record|-45%|
+      |`syscr` rate (/min)|12,019|19,309|record|+61%|
+
+      Elapsed fell 65.9% (116.77 -> 39.78 min) alongside the 71.3% byte drop,
+      which is why the *rate* criteria barely move: they normalise by wall time,
+      and this change removed work rather than slowing it down. The primary
+      criterion is per-candidate total bytes and is the pre-declared decider; it
+      fails.
+
+      **THE PRE-DECLARED FALLBACK RULING ABOVE IS STALE AND CANNOT DISCHARGE
+      THIS MISS.** It voids "the D1 'leave' decisions for
+      `_pipeline_job_for_id_unlocked` and `query_pipeline_job_by_slurm_id`", but
+      design.md D1a already REVERSED `_pipeline_job_for_id_unlocked` to **narrow**
+      (implemented), and design.md D1 records `query_pipeline_job_by_slurm_id` as
+      having **zero production callers** — narrowing it cannot change any
+      production byte. Executing the ruling literally would close nothing. The
+      ruling was written against the pre-D1a table and was never updated when
+      D1a landed.
+
+      **Where the residual actually points, on this receipt's own numbers:**
+      `rchar` fell 71.3% while `syscr` fell only 45% and `read_bytes` rose 5.2x.
+      That is the exact asymmetry this task block predicted in its `syscr`
+      clause — `_iter_discovered_files` `lstat`s every directory entry BEFORE the
+      filename prefilter, so metadata cost does not fall with bytes (routed to
+      #1758). The residual is therefore attributed to the directory-walk surface
+      rather than to either D1 call site, but that attribution is an inference
+      from three aggregate counters, NOT a traced measurement, and it is recorded
+      as such. Closing the primary criterion requires attributing the remaining
+      11.88 GB before any further narrowing is chosen — the same discipline
+      Task 1 imposed on the first round.
 
 ## 2. Implementation
 

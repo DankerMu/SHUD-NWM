@@ -1280,3 +1280,149 @@ def test_already_ingested_run_id_drift_costs_a_published_run_its_recompute_detec
         ) == {"drifted-published"}
     finally:
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# #1781 — the decline record as a status-independent exclusion
+# ---------------------------------------------------------------------------
+#
+# The oracle has to be a real database for two reasons unit tests cannot cover:
+# the suppression must hold for a run at `succeeded`, which the completeness
+# statement never returns at all (28 of the 88 blocked runs on node-27 are in
+# that state), and `product_mtime` has to survive a DOUBLE PRECISION round trip
+# through PostgreSQL bit-for-bit or the key stops matching and the retry loop
+# comes back.
+
+
+def _record_decline(connection: Any, run_id: str, init_state_id: str, product_mtime: float) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ops.ingest_recompute_decline
+                (run_id, init_state_id, product_mtime, reason_code)
+            VALUES (%s, %s, %s, 'HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED')
+            ON CONFLICT DO NOTHING
+            """,
+            (run_id, init_state_id, product_mtime),
+        )
+
+
+def _write_recomputed_product(object_store_root: Path, run_id: str, state_id: str) -> float:
+    """Manifest + a product file whose mtime is newer than any plausible parse.
+
+    This is the production shape being pinned: without a decline record these
+    runs are (correctly) detected as recomputed and re-sent every tick.
+    """
+    _write_manifest(object_store_root, run_id, state_id)
+    product = object_store_root / "runs" / run_id / "output" / "rivqdown.csv"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_text("time,q\n", encoding="utf-8")
+    future = datetime.now(tz=UTC).timestamp() + 3600
+    os.utime(product, (future, future))
+    mtime = autopipe._run_product_mtime(object_store_root, run_id)
+    assert mtime is not None
+    return mtime
+
+
+def test_matching_decline_record_suppresses_a_published_and_a_succeeded_run(
+    throwaway_database_url: str, tmp_path: Path
+) -> None:
+    """Both cohorts, in one call, because they reach the exclusion by different
+    routes: the `published` run is row-bearing and would be reopened by the
+    mtime comparison, while the `succeeded` run never appears in the
+    completeness statement's result at all — which is exactly why the
+    suppression cannot live inside `_ingested_run_is_current`.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "declined-published", status="published", init_state_id="state-a")
+        _seed_run(connection, "declined-succeeded", status="succeeded", init_state_id="state-a")
+        # Only the published run gets fact rows: a 'succeeded' run has never
+        # been parsed, so it has none, and that is the point.
+        _seed_run_facts(connection, "declined-published", normalized=True)
+
+        published_mtime = _write_recomputed_product(tmp_path, "declined-published", "state-a")
+        succeeded_mtime = _write_recomputed_product(tmp_path, "declined-succeeded", "state-a")
+
+        # Non-vacuity: without the records, neither run is skipped.
+        assert (
+            autopipe._already_ingested_runs(
+                throwaway_database_url,
+                ["declined-published", "declined-succeeded"],
+                object_store_root=tmp_path,
+            )
+            == set()
+        )
+
+        _record_decline(connection, "declined-published", "state-a", published_mtime)
+        _record_decline(connection, "declined-succeeded", "state-a", succeeded_mtime)
+
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["declined-published", "declined-succeeded"],
+            object_store_root=tmp_path,
+        ) == {"declined-published", "declined-succeeded"}
+    finally:
+        connection.close()
+
+
+def test_a_newer_product_reopens_a_declined_run(throwaway_database_url: str, tmp_path: Path) -> None:
+    """The key IS the reopen condition. An operator who decompresses the chunk
+    and has the products regenerated must get the run back without touching the
+    decline table; a terminal state that could not be reopened by new evidence
+    would be a permanent data hole.
+    """
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection)
+        _seed_run(connection, "reopened-published", status="published", init_state_id="state-a")
+        _seed_run_facts(connection, "reopened-published", normalized=True)
+
+        declined_mtime = _write_recomputed_product(tmp_path, "reopened-published", "state-a")
+        _record_decline(connection, "reopened-published", "state-a", declined_mtime)
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["reopened-published"],
+            object_store_root=tmp_path,
+        ) == {"reopened-published"}
+
+        # node-22 regenerates the products: same run, same initial state, newer
+        # mtime. The stored record no longer describes what is on disk.
+        product = tmp_path / "runs" / "reopened-published" / "output" / "rivqdown.csv"
+        os.utime(product, (declined_mtime + 60.0, declined_mtime + 60.0))
+        # Read the mtime back rather than assuming the value just written: the
+        # stored st_mtim is nanoseconds and the float is what `stat()` derives
+        # from it, which is exactly why the match is on the stat-derived value.
+        later = autopipe._run_product_mtime(tmp_path, "reopened-published")
+        assert later is not None and later > declined_mtime
+
+        assert (
+            autopipe._already_ingested_runs(
+                throwaway_database_url,
+                ["reopened-published"],
+                object_store_root=tmp_path,
+            )
+            == set()
+        )
+
+        # And the newly blocked regeneration adds its own record rather than
+        # replacing the old one — the table accumulates, so a float-equality
+        # miss costs at most another blocked tick.
+        _record_decline(connection, "reopened-published", "state-a", later)
+        assert (
+            _scalar(
+                connection,
+                "SELECT count(*) FROM ops.ingest_recompute_decline WHERE run_id = 'reopened-published'",
+            )
+            == 2
+        )
+        assert autopipe._already_ingested_runs(
+            throwaway_database_url,
+            ["reopened-published"],
+            object_store_root=tmp_path,
+        ) == {"reopened-published"}
+    finally:
+        connection.close()

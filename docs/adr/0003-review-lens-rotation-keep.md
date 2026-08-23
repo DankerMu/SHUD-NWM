@@ -1212,3 +1212,137 @@ that reversed the approach from rebuilding an index to deleting it. The
 rotation counter cannot see that, and a reader using this ADR to reason about
 where review value originates should know the instrument only counts one of the
 sources.
+
+## Revisit 2026-08-23 (PR #1783, issue #1747) — keep, denominator +1, numerators unchanged
+
+`loop_log_audit` returns DECIDABLE at **112 multi-round merged PRs, core=68 /
+rotated=264**. The denominator moved by one; both numerators are identical to
+the PR #1771 revisit above. Decision unchanged: **keep**.
+
+This PR is the first revisit that adds a *sixth* way the counter misleads, and
+it is the one that most directly attacks the instrument's premise. PR #1783 did
+rotate — round 2 pulled in `spec-compliance`, a lens not used in round 1 — and
+the rotated lens returned zero findings. On the ledger that is indistinguishable
+from a PR where rotation was never exercised: both contribute nothing to
+`rotated`.
+
+But the two are not the same thing, and here the difference is total. Round 2
+reviewed a **byte-identical code head**: round 1's single verified finding was
+an orchestrator-authored false claim living only in the PR body, so the
+corrective action was a prose edit and the head SHA was unchanged across
+round 1, round 2, and Phase 7. A rotated-in lens finding nothing in code that
+did not change is not evidence that rotation buys nothing; it is not evidence
+about rotation at all. The counter cannot distinguish "the new lens looked and
+the code was clean" from "the new lens looked at code no one had touched."
+
+The practical consequence for anyone reading this ledger to decide keep/cut:
+`rotated=264` is a floor on rotation's value, not an estimate of it, and the
+gap between floor and truth widens every time a round runs against an unchanged
+head. The four prior caveats plus this one all push the same direction — the
+instrument systematically undercounts rotation and overcounts core — which is
+why the default-keep has never been close to a hard call.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1780, issue #1775) — keep, and the first caveat that cuts the other way
+
+`loop_log_audit` returns DECIDABLE at **113 multi-round merged PRs, core=68 /
+rotated=265**. This PR moved the denominator by one and `rotated` by one; `core`
+is unchanged. Decision unchanged: **keep**.
+
+On its face this is the cleanest pro-rotation line in the ledger so far. Round 1
+ran `relaxation-correctness`, `test-oracle-integrity` and
+`root-cause-blast-radius` and returned one P1 (a gate-parity divergence between
+`scheduler_candidates.py`'s terminal-skip exit and `_cycle_completion_verdict`).
+Round 2 rotated in `allowlist-tightening-reachability` and
+`gate-parity-and-test-honesty`, and returned a second P1 — a *second instance of
+the same class*, in a different code path. Round 3 went comprehensive and
+returned clean. A rotated-in lens found a P1 that the round-1 mix had not.
+
+**But that is not blind rotation, and counting it as such flatters the
+instrument.** The round-2 lens was rotated in *because* round 1 had named the
+class. It was targeted re-verification of a known failure mode, not exploration
+of an unexamined axis. It found what it was pointed at.
+
+That is the seventh caveat, and it is the first one that pushes *against*
+rotation rather than for it. The six recorded above all argue that `rotated` is
+a floor — that the counter systematically undercounts rotation's value. This one
+argues that some fraction of `rotated` is not rotation at all but follow-up
+targeting, which the ledger cannot distinguish from a lens rotated in cold. The
+honest statement is now two-sided: `rotated=265` is neither a floor nor an
+estimate, because it mixes two mechanisms with different value profiles. Both
+are worth doing; only one of them is what "lens rotation" names.
+
+The practical read is unchanged — 68 vs 265 is a wide enough margin to survive
+the correction in either direction — but a future maintainer deciding keep/cut on
+this counter should know it is measuring a union, and that separating the two
+would require recording *why* each lens entered a round, which no line currently
+does.
+
+One further observation, and it is the same shape as the PR #1771 revisit's
+point about the user challenge. This PR's most consequential error was not in
+the diff at all: the orchestrator's premise that production backfill was
+permanently wedged and would never self-heal was false, and it was written into
+the issue body and into every reviewer brief before any lens ran. Three
+comprehensive rounds, a verifier gate and a Phase 7 review all executed and all
+found real implementation defects; none questioned the premise, because a
+premise baked into the brief is upstream of every lens and is not part of what
+any of them review. No rotation policy reaches it. That is the second recorded
+instance of the ledger's blind spot being *where the review question came from*
+rather than *which lens asked it*, and it is a stronger argument for keeping the
+count honest than for changing it.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1784, issue #1781) — keep, and the counter's third blind spot: the catch that came from neither lens
+
+Counter moved `core=68`, `rotated=265 → 267`; 114 multi-round merged PRs. The
+margin is untouched and the default-keep stands. What this run adds is not a
+number but a category the ledger has no column for.
+
+Three comprehensive rounds ran. The code-facing lens — the pinned core — returned
+**zero findings in rounds 2 and 3**, having been correct both times: an
+independent verifier separately confirmed the fix round was complete, and the
+final review re-derived the same conclusion. Every net catch in those two rounds
+came from a rotated-in lens, and every one of them was the same class: an
+artifact contradicting the code. A deployment instruction that the PR's own fix
+round had falsified. A Must-preserve paragraph describing a placement the design
+had already reversed. A spec scenario left un-revisited when its replacement was
+added beside it, so that one file both authorized and forbade the same behaviour.
+On the counter's own terms this is another clean win for rotation.
+
+But the most consequential finding of the run came from **neither**. It came from
+running the change on node-27. The first live tick declined 144 of 158 blocked
+runs and left 14 pinned at `failed` with `rc=1` forever, because those runs had
+no init-state evidence and the design's fail-closed rule turned "key unobtainable"
+into retry-forever — reproducing, for that subset, precisely the loop the change
+existed to eliminate. It was as-designed and it was not as-promised, and it would
+have shipped as a silent descope of the outcome the user had explicitly chosen.
+No lens found it, in three rounds, because nothing in the diff is wrong: the
+defect lives in the interaction between a deliberate design rule and a data shape
+that only production exhibits (cold-start and packaged-IC runs write a null
+`state_id`, so the condition is ongoing rather than historical).
+
+That is the third recorded instance of this ledger's blind spot being structural
+rather than allocative. The first two were about *where the review question came
+from* — a premise baked into the brief, upstream of every lens. This one is about
+*what a review is made of*: reading a diff cannot discover a data shape the diff
+does not contain. Rotation policy does not reach it; neither does buying another
+round. The marginal review round in this PR found stale prose. The marginal
+**deployment** found a functional gap.
+
+The practical implication is a sequencing one and does not change keep/cut: for
+changes whose acceptance is a production behaviour, live evidence is not the last
+box to tick after review converges — it is a distinct detector that should be
+allowed to run *before* the review budget is exhausted, because it answers a
+question no lens is capable of asking. Two method notes from this run belong with
+that claim, since both nearly produced a wrong live verdict: a checkout does not
+swap code in an already-running process, so tick attribution must key on a
+structural marker rather than on counting ticks; and acceptance assertions must
+never pin absolute counts when the population under test is growing, or they go
+red while the change works.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
