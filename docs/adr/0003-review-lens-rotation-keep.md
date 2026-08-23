@@ -1649,3 +1649,51 @@ the missing surfaces into durable tests. Conversely, counting either early catch
 as a rotated-lens catch would overstate rotation's value. Keep/cut remains
 unchanged; this single-round confirming instance moves neither numerator nor
 denominator.
+
+## Revisit (2026-08-23, issue #1748 / PR #1802)
+
+`loop_log_audit` still reports **119 multi-round merged PRs, later-round catches
+core=68 rotated=285**. Keep/cut is unchanged. But this time the number is
+unchanged for a reason that is itself the finding, so it is recorded rather
+than waved through.
+
+PR #1802 is a four-round merged PR with seven catches, three of them in rounds
+≥ 2 including one CRITICAL. On the stated criterion it is exactly the kind of
+sample this ADR is short of. It contributes **nothing** — neither numerator nor
+denominator — because `loop_log_audit.py:124` gates inclusion on
+`e.get("round_lenses")`, and I never persisted per-round lens lists for this PR.
+`.workplans/pr-1802/review/` holds the round ledger and the retro; it holds no
+`round-N-lenses.txt`.
+
+I did not reconstruct the lens lists after the fact. Rounds 1 and 2 ran before
+the gate tripped and I have no durable record of which lenses were selected;
+writing plausible names now would be precisely the failure this PR's own retro
+was about — an assertion that was true when believed rather than when checked.
+An omitted sample is recoverable; a fabricated attribution silently corrupts the
+statistic this ADR exists to read.
+
+**Consequence for the keep/cut question.** The sample is biased in a direction
+that has gone unmeasured: lines are admitted only when the orchestrator
+remembered to persist lens lists, and the rounds most likely to skip that
+bookkeeping are the ones under gate pressure — which are also the rounds where
+rotated-in lenses would be doing their most distinctive work. `core=68
+rotated=285` may therefore *understate* rotation's value, but that is a
+conjecture from one missing sample, not a measurement. Direction of the recorded
+**keep rotation** decision is unchanged; the confidence attached to the 68/285
+ratio should be lower than the sample size suggests.
+
+**Mechanical gap.** `evidence_check --loop-log-entry` validated my line as clean
+while it was silently unusable for the audit — it checks required keys, fixture
+vocabulary, outcome vocabulary, and date, and `round_lenses` is in none of those
+sets. This is the same shape as #1764 (`rotation_attribution` skipping catches
+that lack `round`/`lens`), one level up: there the sub-keys are unchecked, here
+the whole key is. Both belong to #1764, which is open and is the tracked owner;
+no separate issue is filed.
+
+**Method note from this run**, in the register of the (a)/(b)/(c) list above:
+after the clean Phase 7 round, `origin/master` advanced and the branch went
+`CONFLICTING`. Merging it moved cited lines in `tests/test_production_scheduler.py`
+by +81 — the PR's own `design.md` D4c had recorded that re-anchoring "only works
+if that head is final", and this is the first instance where the head moved for a
+reason outside the PR entirely. The discipline held only because the re-anchor
+was re-run after the merge rather than treated as done at push time.

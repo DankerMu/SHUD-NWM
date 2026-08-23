@@ -55,4 +55,49 @@ absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.m
 - [x] 6.2 `uv run ruff check .` PASS.
 - [x] 6.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
 - [x] 6.5 Re-anchor and content-verify every `file:line` in this fixture **as the last action before push** — open each cited line and confirm it says what the citation asserts. Range-checking is not verification (see design D4c: drift caused by this PR's own commits bit four times, and every range-only check passed while the citations were wrong).
-- [ ] 6.4 node-22 runtime receipt: scheduler behavior changed, so a post-deploy pass SHALL be observed on node-22 (or an explicit statement that no released row occurred in the window — the shape is rare, 4 in 4487 rows).
+- [x] 6.4 node-22 runtime receipt: scheduler behavior changed, so a post-deploy pass SHALL be observed on node-22 (or an explicit statement that no released row occurred in the window — the shape is rare, 4 in 4487 rows).
+
+  > **Post-archive receipt (2026-08-23, in-place correction — this task was
+  > constructively unsatisfiable before merge).** node-22 pulled
+  > `be19ff77 → 88d5d0c1` at `2026-08-23T20:11:17Z`. Receipt:
+  > `.workplans/1748/receipt-node22-6.4.md`.
+  >
+  > Post-deploy pass observed: `scheduler_2026082320_9e380e678e18.json`,
+  > `started_at = 2026-08-23T20:45:55.236378Z` — strictly after the
+  > `20:11:17Z` pull, verified by re-reading the evidence file directly rather
+  > than trusting a watchdog summary. `limit.pre_limit_status = "submitted"`,
+  > `restart_reconcile` present with BOTH lanes (`inflight.outcomes` 0,
+  > `reserved_unbound` `{"outcomes": []}`), `blocked_candidates` 0, 14 submitted
+  > / 34 terminal-skipped — identical to the two pre-deploy baseline passes, as
+  > this change's design requires (it adds an operator channel and touches no
+  > automatic-retry door). The strings `identity_mismatch_released` and
+  > `reservation_lost` each occur 0 times in that evidence, so the task's second
+  > accepted form — an explicit statement that no released row occurred in the
+  > window — is satisfied by whole-document count, not by inference.
+  >
+  > Established: the operator CLI exists and is invocable on the real production
+  > journal; the primary path — release signal → its runnable command with
+  > `--job-id` → `decision: "eligible"` with every CAS value readable, write-free —
+  > verifies end-to-end on a genuine wedged production row; the four
+  > `identity_mismatch_released` rows present at intake are still four (none added
+  > in the window).
+  >
+  > **Defect found by this very receipt**: the `--job-id`-less DISCOVERY listing
+  > raises `file_journal_record_limit_exceeded` on production.
+  > `query_released_identity_blocked_jobs` (`file_orchestration_journal.py:1421`)
+  > does a whole-tree replay whose `_RecordBudget` (`:5526`) is capped at
+  > `MAX_FILE_JOURNAL_RECORDS = 100_000` (`:144`), and production `journal/`
+  > already holds **71 213** append-only records plus the jobs expanded from 4 329
+  > `latest/` files. This is not a transient overshoot: `journal/` only grows.
+  > D-note: the docstring's cost argument ("acceptable because this is an operator
+  > command run by hand") answered the WRONG objection — the blocker is a hard
+  > fail-closed budget, not wall time.
+  >
+  > Scheduler passes are unaffected — they use the inventory-scoped
+  > `_iter_reconcile_pipeline_job_records`, never the whole-tree replay.
+  >
+  > Disposition: successor PR under #1748. Not a new deferred issue — this is this
+  > issue's own deliverable failing at its intended invocation, and it is the same
+  > retro invariant ("every mechanism must have a verified path from its intended
+  > invoker to its effect") recurring at production scale, which the small-fixture
+  > discovery oracle could not see.
