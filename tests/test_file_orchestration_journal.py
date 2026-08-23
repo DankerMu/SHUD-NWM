@@ -23,6 +23,10 @@ from packages.common import safe_fs
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_candidates as scheduler_candidates_module
+from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+from services.orchestrator import scheduler_generation as scheduler_generation_module
+from services.orchestrator import scheduler_state_decision as scheduler_state_decision_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator.chain import SlurmClientError
@@ -36,8 +40,12 @@ from services.orchestrator.file_orchestration_journal import (
 )
 from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
+from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from tests.test_production_scheduler import (
     FakeAdapter,
+    FakeRegistry,
+    RawCandidateStateRepository,
+    _config,
     _dt,
     _model,
     _scheduler_candidate_fixture,
@@ -52,7 +60,7 @@ from tests.test_retry import (
     _spec_non_transient_error_codes,
     _unknown_error_code_warning,
 )
-from workers.data_adapters.base import cycle_id_for, format_cycle_time
+from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 
 @pytest.mark.parametrize("fault", ["directory_fsync", "parent_identity"])
@@ -7347,6 +7355,1296 @@ def test_completed_pipeline_init_state_id_ignores_superseded_hydro_placeholder(
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# #1185: the full cohort-aware identity accessor and the string wrapper that
+# delegates to it.  The string wrapper must keep returning only the historical
+# ``init_state_id`` / ``initial_state_id`` aliases, while the full accessor
+# also exposes the optional checksum/URI/valid-time fields the completion
+# verdict compares.
+# ---------------------------------------------------------------------------
+
+
+def _cohort_candidate_terminal_row(
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+    array_task_id: int = 0,
+    job_id: str | None = None,
+    status: str = "succeeded",
+    retry_count: int = 0,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    identity: dict[str, Any] | None = None,
+    identity_sentinel: Any = None,
+) -> dict[str, Any]:
+    """One current accepted-submit per-model candidate row as reconcile writes it."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    stamp = format_cycle_time(cycle_time)
+    row = {
+        "job_id": job_id
+        or f"job_fcst_gfs_{stamp}_{model_id}_forecast_reconciled_17667_{array_task_id}",
+        "run_id": f"fcst_gfs_{stamp}_{model_id}",
+        "cycle_id": cycle_id_for("gfs", cycle_time),
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": f"17667_{array_task_id}",
+        "array_task_id": array_task_id,
+        "model_id": model_id,
+        "status": status,
+        "stage": "forecast",
+        "candidate_id": f"gfs:{cycle_time.isoformat()}:{model_id}:forecast_gfs_deterministic",
+        "submit_outcome": "accepted",
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        "restart_stage": "forecast",
+        "native_shud_resubmitted": False,
+        "retry_count": retry_count,
+        "created_at": created_at or f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T00:00:00Z",
+        "updated_at": updated_at or f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T00:05:00Z",
+    }
+    row["init_state_identities"] = (
+        identity_sentinel if identity_sentinel is not None else ([identity] if identity is not None else [])
+    )
+    return row
+
+
+def _cohort_candidate_identity(
+    *,
+    model_id: str = "model_a",
+    array_task_id: int = 0,
+    init_state_id: str = "state_gfs_model_a_2026062800_gfs_2026062712_f012",
+) -> dict[str, Any]:
+    return {
+        "array_task_id": array_task_id,
+        "model_id": model_id,
+        "init_state_id": init_state_id,
+        "init_state_checksum": "sha256:" + "c" * 64,
+        "init_state_uri": "s3://nhms/states/gfs/model_a/2026062800/state.cfg.ic",
+        "init_state_valid_time": "2026-06-28T00:00:00Z",
+    }
+
+
+def _full_accessor(
+    repository: FileOrchestrationJournalRepository,
+    cycle_time: datetime,
+    *,
+    model_id: str = "model_a",
+) -> dict[str, Any] | None:
+    return repository.completed_pipeline_init_state_identity(
+        source_id="gfs", cycle_time=cycle_time, model_id=model_id
+    )
+
+
+def test_full_identity_accessor_prefers_completed_hydro_row_and_preserves_aliases(
+    tmp_path: Path,
+) -> None:
+    """Hydro identity wins over any job row, and bare ``state_id`` is preserved.
+
+    The completed hydro row records only ``init_state_id`` plus a bare
+    ``state_id`` alias; the full accessor returns both, while the string
+    wrapper returns only the historical alias.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    latest["hydro_run"]["state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    before = (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes()
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert identity["state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # Read-only invariant: the accessor never rewrites the audit entry.
+    assert (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes() == before
+
+
+def test_bare_state_id_hydro_row_stays_full_only_and_no_judgement_on_both_wirings(
+    tmp_path: Path,
+) -> None:
+    """D1/D2: a bare ``state_id`` alias never becomes the legacy ``init_state_id``.
+
+    The completed hydro row records ONLY the bare ``state_id`` alias.  The full
+    accessor must expose it verbatim (the optional-field matcher still reads it
+    as the canonical id), while the string wrapper must keep returning ``None``
+    — a string wrapper that promotes a bare ``state_id`` to ``init_state_id``
+    would leak the row into discovery stale scoring and candidate quarantine.
+    The two §8.7 consumers therefore stay no-judgement on the same repository.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    assert "init_state_id" not in identity
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens, quarantine = _discovery_and_quarantine_context(
+        discovery_context, construction_context, discovery, candidate, source_cycle
+    )
+    assert stale_tokens is None
+    assert quarantine is None
+
+
+def test_full_identity_accessor_prefers_completed_hydro_over_qualified_candidate(
+    tmp_path: Path,
+) -> None:
+    """CAND-01: completed hydro identity A beats a qualified candidate identity B.
+
+    Both sources can coexist for one cycle/model: a completed ``hydro_run`` row
+    records identity A, and a current-contract terminal candidate row records a
+    DIFFERENT qualified identity B.  The hydro branch must win on both the full
+    accessor and the delegated string accessor.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    candidate_identity = _cohort_candidate_identity(
+        init_state_id="state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    )
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=candidate_identity)
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete", jobs=[terminal])
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    latest["hydro_run"]["init_state_checksum"] = "sha256:" + "a" * 64
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert identity["init_state_checksum"] == "sha256:" + "a" * 64
+    assert identity.get("model_id") != "model_a"  # hydro identity has no model binding
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # The candidate row is qualified (a distinct wrong-suffix lineage B) but
+    # the hydro identity still wins the authority order.
+    assert candidate_identity["init_state_id"] != identity["init_state_id"]
+
+
+def test_full_identity_accessor_placeholder_hydro_falls_back_to_qualified_candidate(
+    tmp_path: Path,
+) -> None:
+    """CAND-03: a declined placeholder P lets the qualified candidate Q win.
+
+    Under the ``forecast_state_save_qc`` terminal mode the hydro row is a
+    non-completed placeholder carrying its own recorded id; when a qualified
+    current-contract candidate row is ALSO present, the accessor must decline
+    the placeholder (hydro status is not completed) and fall back to the
+    candidate identity Q on both accessors — never leak P.
+    """
+    from services.orchestrator.accepted_submit_identity import (
+        INIT_STATE_IDENTITY_FIELD,
+        accepted_submit_candidate_immutable_evidence,
+    )
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=_cohort_candidate_identity())
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="created", jobs=[terminal])
+    latest["hydro_run"]["init_state_id"] = "state_placeholder_gfs_model_a_2026062800"
+    journal_root = tmp_path / "journal"
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+    # The candidate row is the qualified fallback Q.
+    evidence = accepted_submit_candidate_immutable_evidence(terminal)
+    assert evidence[INIT_STATE_IDENTITY_FIELD][0]["init_state_id"] == identity["init_state_id"]
+
+
+def test_full_identity_accessor_preserves_completed_hydro_optional_identity_fields(
+    tmp_path: Path,
+) -> None:
+    """The completed-hydro full mapping keeps every optional field.
+
+    The hydro projection must not drop ``init_state_checksum`` /
+    ``init_state_uri`` / ``init_state_valid_time``, so a direct completed-hydro
+    row whose optional identity fields conflicted with the strict selection
+    would silently match.  All present optional fields must survive.
+    """
+    from services.orchestrator.scheduler_init_state_match import (
+        INIT_STATE_IDENTITY_FIELDS,
+        init_state_field,
+    )
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["init_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    latest["hydro_run"]["init_state_checksum"] = "sha256:" + "a" * 64
+    latest["hydro_run"]["init_state_uri"] = "s3://nhms/states/gfs/model_a/2026062800/state.cfg.ic"
+    latest["hydro_run"]["init_state_valid_time"] = "2026-06-28T00:00:00Z"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+    before = (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes()
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert identity["init_state_checksum"] == "sha256:" + "a" * 64
+    assert identity["init_state_uri"] == "s3://nhms/states/gfs/model_a/2026062800/state.cfg.ic"
+    assert identity["init_state_valid_time"] == "2026-06-28T00:00:00Z"
+    # Every canonical matcher field is resolvable through the accessor output.
+    for field in INIT_STATE_IDENTITY_FIELDS:
+        assert init_state_field(identity, field) not in (None, ""), field
+    # Read-only invariant.
+    assert (journal_root / "latest/gfs/2026062800/model_a.json").read_bytes() == before
+
+
+def test_full_identity_accessor_preserves_hydro_optional_field_through_aliases(
+    tmp_path: Path,
+) -> None:
+    """The matcher's alternate aliases (initial_state_*, ic_file_uri, ...) survive too."""
+    from services.orchestrator.scheduler_init_state_match import init_state_field
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["initial_state_id"] = "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    latest["hydro_run"]["initial_state_checksum"] = "sha256:" + "b" * 64
+    latest["hydro_run"]["ic_file_uri"] = "s3://nhms/states/gfs/model_a/2026062800/state.cfg.ic"
+    latest["hydro_run"]["valid_time"] = "2026-06-28T00:00:00Z"
+    _write_json(journal_root / "latest/gfs/2026062800/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert init_state_field(identity, "state_id") == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert init_state_field(identity, "checksum") == "sha256:" + "b" * 64
+    assert init_state_field(identity, "uri") == "s3://nhms/states/gfs/model_a/2026062800/state.cfg.ic"
+    assert init_state_field(identity, "valid_time") == "2026-06-28T00:00:00Z"
+    # The string wrapper still only recognizes the two historical id aliases.
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    )
+
+
+def test_full_identity_accessor_round_trips_the_cohort_candidate_terminal_row(
+    tmp_path: Path,
+) -> None:
+    """Real write -> reopen -> read: the full mapping and the old string id.
+
+    ``completed_pipeline_init_state_id`` and the full accessor both come from
+    the same journal on a reopened repository, and no byte on disk changes.
+    """
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=1,
+        init_state_identities=[
+            _cohort_init_state_identity(0)
+        ],
+    )
+    reserved = repository.reserve_pipeline_job(record)
+    assert reserved is not None
+    _bind_and_project_cohort(repository, record, member_count=1)
+    terminal_id = "job_fcst_gfs_2026072000_model_0_forecast_reconciled_17667_0"
+    assert repository.get_pipeline_job(terminal_id) is not None
+
+    reopened = FileOrchestrationJournalRepository(tmp_path / "journal")
+    identity = reopened.completed_pipeline_init_state_identity(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+    )
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_0_2026072000_gfs_2026071912_f012"
+    assert identity["init_state_checksum"].startswith("sha256:")
+    assert identity["init_state_uri"].startswith("s3://")
+    assert identity["init_state_valid_time"] == "2026-07-20T00:00:00Z"
+    assert identity["array_task_id"] == 0
+    assert identity["model_id"] == "model_0"
+    assert reopened.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+    ) == "state_gfs_model_0_2026072000_gfs_2026071912_f012"
+
+    # Read-only: the accessor leaves every on-disk payload untouched.
+    before = {
+        path: path.read_bytes()
+        for path in (tmp_path / "journal").rglob("*")
+        if path.is_file() and not path.name.endswith(".lock")
+    }
+    reopened.completed_pipeline_init_state_identity(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+    )
+    assert {
+        path: path.read_bytes()
+        for path in (tmp_path / "journal").rglob("*")
+        if path.is_file() and not path.name.endswith(".lock")
+    } == before
+
+
+def test_full_identity_accessor_returns_latest_current_candidate_terminal_identity(
+    tmp_path: Path,
+) -> None:
+    """Latest current-contract candidate row wins when it is terminal-success."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=_cohort_candidate_identity())
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+    assert identity["init_state_checksum"] == "sha256:" + "c" * 64
+    assert repository.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    ) == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+
+
+def test_full_identity_accessor_returns_latest_first_old_success_cannot_hide_newer_failure(
+    tmp_path: Path,
+) -> None:
+    """A newer failed/empty row hides an older succeeded one (D2 latest-first)."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    old_success = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="2026-06-28T00:04:00Z",
+        identity=_cohort_candidate_identity(),
+    )
+    journal_root = tmp_path / "journal"
+
+    for newer_status in ("failed", "empty"):
+        if newer_status == "failed":
+            newer = _cohort_candidate_terminal_row(
+                cycle_time,
+                job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_1",
+                status="failed",
+                updated_at="2026-06-28T00:06:00Z",
+                identity=_cohort_candidate_identity(init_state_id="state_newer"),
+            )
+        else:
+            newer = _cohort_candidate_terminal_row(
+                cycle_time,
+                job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_1",
+                updated_at="2026-06-28T00:06:00Z",
+                identity_sentinel=[],
+            )
+        _write_json(
+            journal_root / f"latest/gfs/{stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, jobs=[old_success, newer]),
+        )
+        repository = FileOrchestrationJournalRepository(journal_root)
+        assert _full_accessor(repository, cycle_time) is None, newer_status
+        assert (
+            repository.completed_pipeline_init_state_id(
+                source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+            )
+            is None
+        ), newer_status
+
+
+def test_full_identity_accessor_latest_valid_success_returns_when_newer_masks(
+    tmp_path: Path,
+) -> None:
+    """A newer failed/empty row masks an older success; the newest valid wins.
+
+    D2 requires the LATEST row to be terminal-success with a single identity.
+    A newer failed row masks an older success (None), and a newest valid
+    terminal-success row returns its identity — the truth-order selection is
+    latest-first, not any-success.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    old_success = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="2026-06-28T00:04:00Z",
+        identity=_cohort_candidate_identity(),
+    )
+    newest = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_2",
+        updated_at="2026-06-28T00:08:00Z",
+        identity=_cohort_candidate_identity(init_state_id="state_newest"),
+    )
+    journal_root = tmp_path / "journal"
+
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[old_success, newest]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_newest"
+
+
+@pytest.mark.parametrize(
+    "leg",
+    [
+        "latest_failed",
+        "latest_empty_identity",
+        "marker_free",
+        "malformed_incomplete_master",
+        "other_model",
+        "no_journal",
+    ],
+)
+def test_full_identity_accessor_returns_none_for_unqualified_shapes(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """Every rejection shape returns ``None`` and never raises.
+
+    The rejection is split across two honest boundaries:
+
+    - ``latest_failed`` / ``latest_empty_identity`` / ``marker_free`` reach
+      the ACCESSOR SELECTOR: they are valid rows the selector must decline.
+    - ``malformed_incomplete_master`` / ``other_model`` are rejected by the
+      LOADER's model binding / accepted-submit normalization before the
+      selector ever runs; these legs are loader-level fail-to-absent proofs,
+      not selector proofs.
+    - A VALID current-contract cohort master — one the loader accepts and that
+      survives ``_cycle_rows`` — is excluded from candidate authority by the
+      row-kind filter (``accepted_submit_row_kind == "candidate"``) alone, not
+      by the loader (see
+      ``test_full_identity_accessor_valid_cohort_master_without_terminal_candidate``).
+    - ``no_journal`` is the empty authority shape.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    if leg == "latest_failed":
+        terminal = _cohort_candidate_terminal_row(cycle_time, status="failed")
+    elif leg == "latest_empty_identity":
+        terminal = _cohort_candidate_terminal_row(cycle_time, identity_sentinel=[])
+    elif leg == "marker_free":
+        terminal = _cohort_candidate_terminal_row(cycle_time)
+        del terminal["accepted_submit_contract_version"]
+    elif leg == "malformed_incomplete_master":
+        # Loader-level fail-to-absent proof: a MASTER-SHAPED but INCOMPLETE
+        # row (model-less + cycle run id + master markers, yet missing the
+        # required master evidence fields such as ``cohort_members``,
+        # ``submission_attempt`` and the reconciliation family) is rejected by
+        # ``normalize_accepted_submit_evidence`` before the accessor selector
+        # ever runs.
+        from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+        terminal = _cohort_candidate_terminal_row(cycle_time)
+        terminal.update(
+            {
+                "model_id": None,
+                "run_id": f"cycle_gfs_{stamp}",
+                "candidate_id": f"cycle_gfs_{stamp}",
+                "init_state_identities": [_cohort_candidate_identity(array_task_id=0)],
+                "slurm_comment": "nhms_idem:cycle",
+                "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            }
+        )
+    elif leg == "other_model":
+        # Loader-level fail-to-absent proof: written into the model_a latest
+        # view, this foreign row is rejected by the loader's model binding
+        # before the accessor selector runs.
+        terminal = _cohort_candidate_terminal_row(
+            cycle_time, model_id="model_b", array_task_id=1
+        )
+    else:  # no_journal
+        terminal = None
+    if terminal is not None:
+        _write_json(
+            journal_root / f"latest/gfs/{stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+        )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_valid_cohort_master_without_terminal_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A VALID current-contract master alone yields no identity.
+
+    A REAL, loader-valid current-contract cohort master written by the
+    canonical accepted-submit writer path — with its own ``init_state_identities``
+    map — SURVIVES ``_cycle_rows`` for the model and is visible in
+    ``rows.pipeline_jobs``.  The row-kind filter
+    (``accepted_submit_row_kind == "candidate"``) alone excludes it from
+    candidate authority before ``_candidate_row_self_bound_identity`` runs,
+    not the loader; the candidate immutable evidence is never invoked on the
+    master row.  Because no per-model terminal candidate row exists for it,
+    the accessor selector finds no ``candidate`` row, so BOTH the full and
+    string accessors return ``None``.
+
+    The outer-owner seam is pinned: before the accessors run, the module's
+    ``accepted_submit_candidate_immutable_evidence`` is replaced with a
+    sentinel that raises ``AssertionError`` if ever invoked.  Correct code
+    stays green (the outer row-kind filter excludes the valid master before
+    the inner candidate helper can call the canonical evidence); deleting
+    ONLY the outer ``accepted_submit_row_kind == "candidate"`` predicate sends
+    the master into the inner helper and this test goes red with the
+    sentinel's message.
+    """
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitTransition,
+    )
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    repository, record = _reserved_cohort_master(
+        tmp_path,
+        member_count=1,
+        init_state_identities=[_cohort_init_state_identity(0)],
+    )
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    commit = repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=str(record["job_id"]),
+        expected_submission_attempt=1,
+        slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    assert commit.committed
+    job_id = str(record["job_id"])
+    source_id = journal_module._source_id_from_job(record)
+    with repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+        existing = repository._accepted_submit_job_for_id_unlocked(
+            job_id, source_id=source_id, cycle_time=cycle_time
+        )
+        assert existing is not None
+        row = {**existing, "status": "succeeded"}
+        journal_record = journal_module._journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=repository._next_sequence_unlocked(
+                source_id=source_id, cycle_time=cycle_time
+            ),
+        )
+        repository._validate_outgoing_record(
+            journal_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=None,
+        )
+        repository._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=[journal_record],
+        )
+
+    # The valid master survives the loader into model_0's row set...
+    rows = repository._cycle_rows(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+    )
+    assert job_id in rows.pipeline_jobs
+    assert (
+        journal_module.accepted_submit_row_kind(rows.pipeline_jobs[job_id])
+        == "master"
+    )
+    # ...and no per-model terminal candidate row exists for it.
+    candidate_ids = [
+        job_id_
+        for job_id_, job in rows.pipeline_jobs.items()
+        if journal_module.accepted_submit_row_kind(job) == "candidate"
+    ]
+    assert candidate_ids == []
+
+    # Pin the outer-owner seam: the valid master must be excluded by the
+    # outer row-kind filter BEFORE the inner candidate helper's canonical
+    # immutable evidence can run.  A sentinel replaces the module-level
+    # function (pytest restores it automatically); if the outer predicate is
+    # ever deleted, the master reaches the inner helper and this raises.
+    def _fail_if_candidate_immutable_evidence_invoked(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "candidate immutable evidence must not run on a valid cohort master "
+            "(outer accepted_submit_row_kind == 'candidate' filter must exclude it first)"
+        )
+
+    monkeypatch.setattr(
+        journal_module,
+        "accepted_submit_candidate_immutable_evidence",
+        _fail_if_candidate_immutable_evidence_invoked,
+    )
+
+    # Full and string accessors: no identity.
+    assert _full_accessor(repository, cycle_time, model_id="model_0") is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_0"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_rejects_malformed_current_row_without_raising(
+    tmp_path: Path,
+) -> None:
+    """A malformed latest candidate row fails to absent instead of raising."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    malformed = _cohort_candidate_terminal_row(cycle_time, identity_sentinel=["not-a-mapping"])
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[malformed]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert _full_accessor(repository, cycle_time) is None
+    assert repository.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    ) is None
+
+
+def test_full_identity_accessor_rejects_direct_partition_foreign_model_cycle_run_row(
+    tmp_path: Path,
+) -> None:
+    """CAND-04: a loader-surviving foreign-model cycle-run row is selector-rejected.
+
+    A current-contract candidate row naming ``model_b`` whose ``run_id`` is
+    the exact cycle run id (``cycle_gfs_<stamp>``) SURVIVES ``_cycle_rows`` for
+    model_a (the direct scan filters by ``_job_matches_candidate``, whose
+    cycle-run arm is wide), so the row reaches the accessor selector.  The
+    self-bound model guard inside ``_candidate_row_self_bound_identity`` must
+    reject the ``model_b`` entry for a ``model_a`` read on BOTH accessors,
+    keeping the authority None (no loader rejection involved).
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    foreign = _cohort_candidate_terminal_row(
+        cycle_time,
+        model_id="model_b",
+        array_task_id=1,
+        job_id="job_fcst_gfs_2026062800_model_b_forecast_reconciled_17667_1",
+        identity=_cohort_candidate_identity(
+            model_id="model_b",
+            array_task_id=1,
+            init_state_id="state_gfs_model_b_2026062800_gfs_2026062712_f012",
+        ),
+    )
+    # The exact cycle run id: the direct-partition cycle-wide scan accepts it
+    # even though the row names a foreign model.
+    foreign["run_id"] = f"cycle_gfs_{stamp}"
+    foreign["candidate_id"] = f"cycle_gfs_{stamp}"
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time),
+    )
+    _write_json(
+        journal_root / f"pipeline-jobs/{foreign['job_id']}.json",
+        _journal_record(
+            record_type="pipeline_job",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id=foreign["model_id"],
+            payload=foreign,
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The row survives the loader into model_a's row set...
+    rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    assert foreign["job_id"] in rows.pipeline_jobs
+    # ...and the accessor selector still rejects its foreign-bound entry.
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_masks_foreign_self_bound_row_even_when_foreign_is_newer(
+    tmp_path: Path,
+) -> None:
+    """CAND-04 latest-first: the self-bound model guard outranks mere recency.
+
+    Both rows are current-contract candidates; the older one is the model_a
+    entry (legal identity, so it is not loader- or qualifier-rejected), and the
+    NEWER one names ``model_b`` but carries the exact cycle run id
+    (``cycle_gfs_<stamp>``), which lets it survive the direct-partition
+    cycle-wide scan into the selector.  Selection is latest-first, so a wrong
+    mutation that filters foreign rows out BEFORE the max would turn the
+    older model_a entry into the latest surviving row and leak its legal
+    identity on both accessors — the exact regression this oracle forbids.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    foreign = _cohort_candidate_terminal_row(
+        cycle_time,
+        model_id="model_b",
+        array_task_id=1,
+        job_id="job_fcst_gfs_2026062800_model_b_forecast_reconciled_17667_1",
+        updated_at="2026-06-28T00:06:00Z",
+        identity=_cohort_candidate_identity(
+            model_id="model_b",
+            array_task_id=1,
+            init_state_id="state_gfs_model_b_2026062800_gfs_2026062712_f012",
+        ),
+    )
+    # The exact cycle run id: the direct-partition cycle-wide scan accepts it
+    # even though the row names a foreign model.
+    foreign["run_id"] = f"cycle_gfs_{stamp}"
+    foreign["candidate_id"] = f"cycle_gfs_{stamp}"
+    terminal = _cohort_candidate_terminal_row(
+        cycle_time,
+        updated_at="2026-06-28T00:05:00Z",
+        identity=_cohort_candidate_identity(),
+    )
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+    )
+    _write_json(
+        journal_root / f"pipeline-jobs/{foreign['job_id']}.json",
+        _journal_record(
+            record_type="pipeline_job",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id=foreign["model_id"],
+            payload=foreign,
+        ),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    rows = repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id="model_a")
+    assert foreign["job_id"] in rows.pipeline_jobs
+    assert terminal["job_id"] in rows.pipeline_jobs
+    # The foreign row is strictly newer than the model_a terminal row, so a
+    # filter-then-max implementation would select the model_a row here.
+    from services.orchestrator.chain_source_cycle import _pipeline_job_truth_sort_key
+
+    assert _pipeline_job_truth_sort_key(foreign) > _pipeline_job_truth_sort_key(terminal)
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_ignores_run_manifest_only_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design D1/D4: the run manifest is no #1185 authority, even when loaded.
+
+    A real journal with a completed ``hydro_run`` recording no identity alias
+    and NO qualified candidate row; the run manifest DOES carry an
+    init-state identity (wrong-suffix, so any consumer that promoted it would
+    judge a stale lineage) at exactly the path candidate-state assembly reads.
+    The full and string accessors must stay ``None``, and both §8.7 wirings —
+    discovery stale tokens and candidate quarantine — must stay no-judgement on
+    the same repository.  The candidate-state assertion is the proof the
+    manifest was actually loaded rather than a dead fixture field.
+    """
+    from services.orchestrator.chain_repository_state import _run_manifest_initial_state_for_run
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    object_root = tmp_path / "object-store"
+    manifest_state_id = "state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    _write_json(
+        object_root / f"runs/fcst_gfs_{stamp}_model_a/input/manifest.json",
+        {"initial_state": {"state_id": manifest_state_id, "quality": "fresh"}},
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="complete"),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The manifest is really loaded by candidate-state assembly...
+    assert _run_manifest_initial_state_for_run(f"fcst_gfs_{stamp}_model_a") == {
+        "state_id": manifest_state_id,
+        "quality": "fresh",
+    }
+    state = _candidate_state(repository, cycle_time=cycle_time)
+    assert state is not None
+    assert state.get("run_manifest_initial_state") == {
+        "state_id": manifest_state_id,
+        "quality": "fresh",
+    }
+    # ...but it is no journal identity authority.
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens, quarantine = _discovery_and_quarantine_context(
+        discovery_context, construction_context, discovery, candidate, source_cycle
+    )
+    assert stale_tokens is None
+    assert quarantine is None
+
+
+def test_full_identity_accessor_malformed_duplicate_no_replay_timestamp_fails_to_absent(
+    tmp_path: Path,
+) -> None:
+    """A malformed read-stage timestamp never leaks out of the authority.
+
+    CAND-02 regression: two rows of the SAME ``job_id`` with no replay block
+    resolve the duplicate through ``_latest_mapping``, whose shared timestamp
+    sort can raise a bare ``ValueError`` for a malformed ``updated_at``.  The
+    full accessor must absorb it (fail to absent) instead of leaking it, and
+    the delegated string accessor keeps making no judgement.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    first = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="2026-06-28T00:05:00Z",
+        identity=_cohort_candidate_identity(),
+    )
+    duplicate = _cohort_candidate_terminal_row(
+        cycle_time,
+        job_id="job_fcst_gfs_2026062800_model_a_forecast_reconciled_17667_0",
+        updated_at="not-a-timestamp",
+        identity=_cohort_candidate_identity(init_state_id="state_other"),
+    )
+    latest = _latest_view(cycle_time=cycle_time, jobs=[first, duplicate])
+    # No replay block: the duplicate resolution must fall through to the
+    # timestamp comparison that raises on the malformed value.
+    latest.pop("replay", None)
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        latest,
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert _full_accessor(repository, cycle_time) is None
+    assert (
+        repository.completed_pipeline_init_state_id(
+            source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+        )
+        is None
+    )
+
+
+def test_full_identity_accessor_returns_defensive_copy(tmp_path: Path) -> None:
+    """The returned mapping is a copy; mutating it never touches the journal."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    terminal = _cohort_candidate_terminal_row(cycle_time, identity=_cohort_candidate_identity())
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    first = _full_accessor(repository, cycle_time)
+    assert first is not None
+    first["init_state_id"] = "state_tampered"
+    second = _full_accessor(repository, cycle_time)
+    assert second is not None
+    assert second["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+
+
+def test_full_identity_accessor_ignores_candidate_state_job_limit_truncation(
+    tmp_path: Path,
+) -> None:
+    """The accessor reads internal untruncated rows, not the bounded payload."""
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    filler = [
+        _cohort_candidate_terminal_row(
+            cycle_time,
+            array_task_id=index,
+            identity_sentinel=[],
+            updated_at=f"2026-06-28T00:04:{index:02d}Z",
+        )
+        for index in range(1, 7)
+    ]
+    terminal = _cohort_candidate_terminal_row(
+        cycle_time,
+        identity=_cohort_candidate_identity(),
+        updated_at="2026-06-28T00:05:00Z",
+    )
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal, *filler]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    bounded = _candidate_state(repository, cycle_time=cycle_time, job_limit=2, event_limit=2)
+    assert bounded is not None
+    assert bounded["state_truncated"] is True
+
+    identity = _full_accessor(repository, cycle_time)
+    assert identity is not None
+    assert identity["init_state_id"] == "state_gfs_model_a_2026062800_gfs_2026062712_f012"
+
+
+# ---------------------------------------------------------------------------
+# #1185: discovery §8.7 scoring and candidate quarantine consume one token
+# source.  The old string accessor delegates to the full accessor, so both
+# wirings must agree on a real repository fixture (design D4).
+# ---------------------------------------------------------------------------
+
+
+def _discovery_and_quarantine_harness(
+    tmp_path: Path,
+    *,
+    active_repository: Any,
+    cycle_time: datetime,
+    stamp: str,
+    base_lead: int = 12,
+) -> tuple[Any, Any, Any, Any, Any]:
+    """Build both §8.7 wiring contexts for one real journal repository."""
+    from services.orchestrator.scheduler_discovery import (
+        SchedulerDiscoveryContext,
+    )
+    from services.orchestrator.scheduler_discovery import (
+        SchedulerSourceCycle as DiscoverySourceCycle,
+    )
+
+    discovery = CycleDiscovery(
+        cycle_id=f"gfs_{stamp}",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    candidate = _scheduler_candidate_fixture()
+    candidate = scheduler_module._candidate_for(
+        discovery=discovery,
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id=candidate.model_id,
+            basin_id=candidate.basin_id,
+            basin_version_id=candidate.basin_version_id,
+            river_network_version_id=candidate.river_network_version_id,
+            segment_count=3,
+            output_segment_count=3,
+            model_package_uri="s3://nhms/models/model_a/package/",
+            shud_code_version="2.0",
+            resource_profile={},
+            resource_profile_summary={},
+            display_capabilities={},
+        ),
+        horizon={},
+    )
+    source_cycle = DiscoverySourceCycle(discovery=discovery, horizon={})
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-06-28T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={},
+        active_repository=active_repository,
+    )
+    discovery_context = SchedulerDiscoveryContext(
+        config=scheduler.config,
+        adapters={},
+        active_repository=active_repository,
+        floor_to_source_cycle_boundary=lambda value, _sources: value,
+        source_horizon_metadata=lambda discovery, adapter: {},
+        candidate_factory=lambda *a, **k: candidate,
+        candidate_state_provider_caller=lambda *a, **k: None,
+        candidate_state_decider=lambda candidate, state: None,
+        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
+    )
+    construction_context = scheduler_candidates_module.SchedulerCandidateConstructionContext(
+        config=scheduler.config,
+        active_repository=active_repository,
+        canonical_readiness_for_candidate=lambda *a, **k: {"ready": True},
+        strict_warm_start_for_candidate=lambda *a, **k: None,
+        orchestrator_for=lambda *a, **k: None,
+        candidate_factory=lambda *a, **k: candidate,
+        candidate_state_provider_caller=scheduler_state_decision_module._call_candidate_state_provider,
+        active_slurm_jobs_provider_caller=scheduler_state_decision_module._call_active_slurm_jobs_provider,
+        active_slurm_jobs_bounder=lambda *a, **k: [],
+        candidate_state_decider=scheduler_state_decision_module._candidate_state_decision,
+        candidate_state_identity_mismatch_detector=scheduler_module._candidate_state_has_identity_mismatch,
+        candidate_state_scoped_retry_detector=scheduler_module._candidate_state_is_candidate_scoped_retry,
+        repaired_state_audit_evidence_builder=scheduler_module._candidate_repaired_state_audit_evidence,
+        successor_state_for_candidate=None,
+        required_lead_hours_for_candidate=lambda candidate, source_cycle: base_lead,
+        max_candidates=scheduler_module.MAX_CANDIDATES,
+    )
+    return (
+        discovery,
+        candidate,
+        source_cycle,
+        discovery_context,
+        construction_context,
+    )
+
+
+def _discovery_and_quarantine_context(
+    discovery_context: Any,
+    construction_context: Any,
+    discovery: Any,
+    candidate: Any,
+    source_cycle: Any,
+) -> tuple[Any, Any]:
+    """Drive the two §8.7 wirings with their own context types.
+
+    The discovery stale-token filter consumes a ``SchedulerDiscoveryContext``
+    while the candidate quarantine consumes a
+    ``SchedulerCandidateConstructionContext``; passing one context to both
+    would let either wiring silently read the wrong provider surface.
+    """
+    stale_tokens = scheduler_discovery_module._journal_predecessor_identity_stale_tokens(
+        discovery_context, discovery, candidate, horizon={}
+    )
+    quarantine = scheduler_candidates_module._journal_predecessor_identity_quarantine(
+        construction_context,
+        candidate,
+        source_cycle,
+        CandidateStateDecision(
+            "skip",
+            "terminal_completed_cycle",
+            {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        ),
+    )
+    return stale_tokens, quarantine
+
+
+def test_discovery_and_candidate_quarantine_share_delegated_string_accessor(
+    tmp_path: Path,
+) -> None:
+    """Both §8.7 wirings judge the same cohort token off one real repository.
+
+    The candidate terminal row records a wrong-suffix lineage; the discovery
+    filter must report a positive mismatch and the candidate quarantine must
+    decline the completed skip.
+    """
+    from services.orchestrator.scheduler_generation import expected_journal_init_state_tokens
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    base_lead = 12
+
+    # A wrong-suffix lineage for cycle 2026062800 (same base key, different f-suffix).
+    recorded_id = "state_gfs_model_a_2026062800_gfs_2026062712_f024"
+    _base, expected_id = expected_journal_init_state_tokens(
+        source_id="gfs",
+        model_id="model_a",
+        candidate_valid_time=cycle_time,
+        required_lead_hours=base_lead,
+    )
+    assert recorded_id != expected_id
+
+    terminal = _cohort_candidate_terminal_row(
+        cycle_time,
+        identity={
+            "array_task_id": 0,
+            "model_id": "model_a",
+            "init_state_id": recorded_id,
+        },
+    )
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The full accessor returns the recorded lineage; the string wrapper the id.
+    identity = repository.completed_pipeline_init_state_identity(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    )
+    assert identity is not None
+    assert identity["init_state_id"] == recorded_id
+    assert repository.completed_pipeline_init_state_id(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    ) == recorded_id
+
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens = scheduler_discovery_module._journal_predecessor_identity_stale_tokens(
+        discovery_context, discovery, candidate, horizon={}
+    )
+    quarantine = scheduler_candidates_module._journal_predecessor_identity_quarantine(
+        construction_context,
+        candidate,
+        source_cycle,
+        CandidateStateDecision(
+            "skip",
+            "terminal_completed_cycle",
+            {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        ),
+    )
+    assert stale_tokens is not None
+    assert quarantine is not None
+    assert quarantine.reason == "journal_predecessor_identity_mismatch"
+
+
+def test_discovery_and_quarantine_no_judgement_shapes_unchanged(
+    tmp_path: Path,
+) -> None:
+    """No accessor / no record / suffix-less / different-base stay no-judgement.
+
+    The discovery filter returns no stale tokens and the candidate quarantine
+    leaves the completed skip alone for every pre-change shape.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    base_lead = 12
+
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=RawCandidateStateRepository({}), cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens = scheduler_discovery_module._journal_predecessor_identity_stale_tokens(
+        discovery_context, discovery, candidate, horizon={}
+    )
+    quarantine = scheduler_candidates_module._journal_predecessor_identity_quarantine(
+        construction_context,
+        candidate,
+        source_cycle,
+        CandidateStateDecision(
+            "skip",
+            "terminal_completed_cycle",
+            {"terminal_source": "pipeline_job", "terminal_status": "succeeded"},
+        ),
+    )
+    assert stale_tokens is None
+    assert quarantine is None
+
+    # No record: an empty journal with no candidate rows.
+    journal_root = tmp_path / "empty-journal"
+    _write_json(
+        journal_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="complete"),
+    )
+    empty_repository = FileOrchestrationJournalRepository(journal_root)
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=empty_repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens, quarantine = _discovery_and_quarantine_context(
+        discovery_context, construction_context, discovery, candidate, source_cycle
+    )
+    assert stale_tokens is None
+    assert quarantine is None
+
+    # Suffix-less legacy id (equals the expected base key): no judgement.
+    _base_key, _expected_token = scheduler_generation_module.expected_journal_init_state_tokens(
+        source_id="gfs",
+        model_id="model_a",
+        candidate_valid_time=cycle_time,
+        required_lead_hours=base_lead,
+    )
+    legacy_terminal = _cohort_candidate_terminal_row(
+        cycle_time,
+        identity={
+            "array_task_id": 0,
+            "model_id": "model_a",
+            "init_state_id": _base_key,
+        },
+    )
+    legacy_root = tmp_path / "legacy-journal"
+    _write_json(
+        legacy_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[legacy_terminal]),
+    )
+    legacy_repository = FileOrchestrationJournalRepository(legacy_root)
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=legacy_repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens, quarantine = _discovery_and_quarantine_context(
+        discovery_context, construction_context, discovery, candidate, source_cycle
+    )
+    assert stale_tokens is None
+    assert quarantine is None
+
+    # Different base key (earlier-valid-time fallback): no judgement.
+    fallback_terminal = _cohort_candidate_terminal_row(
+        cycle_time,
+        identity={
+            "array_task_id": 0,
+            "model_id": "model_a",
+            "init_state_id": "state_gfs_model_a_2026062700_gfs_2026062600_f012",
+        },
+    )
+    fallback_root = tmp_path / "fallback-journal"
+    _write_json(
+        fallback_root / f"latest/gfs/{stamp}/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[fallback_terminal]),
+    )
+    fallback_repository = FileOrchestrationJournalRepository(fallback_root)
+    discovery, candidate, source_cycle, discovery_context, construction_context = (
+        _discovery_and_quarantine_harness(
+            tmp_path, active_repository=fallback_repository, cycle_time=cycle_time, stamp=stamp
+        )
+    )
+    stale_tokens, quarantine = _discovery_and_quarantine_context(
+        discovery_context, construction_context, discovery, candidate, source_cycle
+    )
+    assert stale_tokens is None
+    assert quarantine is None
 
 
 # ---------------------------------------------------------------------------
