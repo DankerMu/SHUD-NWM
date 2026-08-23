@@ -427,6 +427,27 @@ def build_candidates(
                 and not bool(strict_warm_start.get("ready"))
                 and not bool(getattr(context.config, "repair_missing_forcing", False))
             ):
+                # #1775 D4: same ordering defect as the completion verdict —
+                # this branch's `continue` used to fire ahead of
+                # `classify_candidate_state()`, so a candidate that had ALREADY
+                # reached terminal success was re-blocked on the admission gate
+                # for a run it never needed to start.  Classify first and take
+                # the existing terminal skip exit for those; only non-terminal
+                # candidates reach the warm-admission gate.
+                classify_candidate_state()
+                if (
+                    state_decision is not None
+                    and state_decision.action == "skip"
+                    and state_decision.reason in _STRICT_WARM_START_TERMINAL_SKIP_REASONS
+                ):
+                    skipped.append(
+                        {
+                            **candidate.to_dict(),
+                            "reason": state_decision.reason,
+                            "state_evidence": _evidence_safe(state_decision.evidence),
+                        }
+                    )
+                    continue
                 state_decision, warm_admission_blocker = _candidate_warm_admission_decision(
                     context.config,
                     candidate,

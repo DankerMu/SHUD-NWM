@@ -1,0 +1,68 @@
+## MODIFIED Requirements
+
+### Requirement: Terminal init-state comparison SHALL distinguish absence from conflict via a single shared helper
+
+The scheduler SHALL evaluate a terminal decision's recorded init-state identity against the strict warm start resolution through one shared helper returning exactly one of `match`, `absent`, `conflict`. Comparison SHALL be per-present-field: `absent` means the terminal evidence carries no init-state identity fields at all; when `init_state_id` is present, every additionally present field (`checksum`, `uri`, `valid_time`; redaction placeholders skipped as today) SHALL agree for `match`; any present field in disagreement SHALL classify as `conflict`. A record carrying only `init_state_id` SHALL retain today's match semantics unchanged; a record carrying other identity fields without `init_state_id` SHALL classify as `conflict`. The helper SHALL be a pure field comparison: the candidate path's existing special branches — the `candidate_state` terminal-source branch and the `COLD_START_QUARANTINED` escape — SHALL remain candidate-side short-circuits ahead of the helper and SHALL NOT enter the verdict path; when the strict resolution is READY but carries no `candidate_state` (the cold-start generation shapes), the verdict path SHALL bypass the helper and keep today's gap behavior unchanged; when the strict resolution is NOT READY — a state was required for the candidate but could not be resolved — the verdict path SHALL bypass the helper and classify `unverifiable`, which the cycle-completion verdict tolerates if and only if the successor state proves continuity. The discriminator is the strict resolution's READY flag, never the mere presence or absence of `candidate_state`. This reverses the previously recorded decision that a strict resolution naming no state keeps the gap unconditionally: that decision was taken when the verdict path was reachable only for a ready strict resolution, so "names no state" could only mean a cold-start shape. Evaluating the terminal decision before the strict early-return makes the not-ready case reachable, where "names no state" instead means the checkpoint the candidate would have needed is missing — which says nothing about whether the run already completed. The verdict path SHALL consume this helper for the init-identity field comparison.
+
+The candidate path's final `hydro_run`-record comparison SHALL retain the selected-driven strict semantics (`_warm_state_record_matches`: a field present on the selected state but absent on the observed record is a mismatch) as its default, with exactly one narrow upgrade. When the terminal `hydro_run` record's `init_state_id` equals the strict resolution's selected `state_id` and none of the record's remaining identity fields disagrees — that is, each is either **absent** or **present and in agreement**, the per-present-field `match` classification defined above; the strictly id-only case is the shape every file-journal `hydro_run` writer produces — the scheduler SHALL consult `run_manifest_initial_state`. A full four-field match there SHALL admit the candidate through the existing terminal reuse exit; the candidate SHALL be reported skipped with its terminal reason and SHALL NOT be resubmitted. Anything else SHALL classify as not-match exactly as today.
+
+The upgraded shape SHALL remain subject to every admission gate that already follows the terminal reuse decision — in particular the successor-state readiness gate, which SHALL apply to an id-only record admitted by the run manifest exactly as it applies to a record matching on all four of its own fields.
+
+The upgrade SHALL NOT widen any other route. Where the run manifest is absent, or any run-manifest field disagrees, or the terminal record's own present fields disagree, or the record carries no identity fields at all, or the record carries identity fields without `init_state_id`, the decision SHALL remain the budgeted `strict_warm_start_terminal_init_state_mismatch` path (#1173) and SHALL NOT be rerouted onto the unbudgeted `strict_warm_start_terminal_run_manifest_missing` retry. Reuse on `init_state_id` alone is forbidden: the run manifest's `checksum` is what preserves the repaired-checkpoint protection, under which a corrupt object's repaired successor keeps its deterministic `state_id` while its checksum changes.
+
+For a terminal `hydro_run` record whose `init_state_id` matches and whose run manifest proves all four fields, the candidate path and the cycle-completion verdict path SHALL reach the same conclusion that the record is current. Outside that shape the two paths MAY differ, and the differences named above — the candidate-side special branches and the budget routing — are contract rather than drift. The candidate path's remaining admission segments are out of scope.
+
+#### Scenario: Absence is distinguished from conflict
+
+- **WHEN** a terminal-success row carries no init-state identity fields
+- **THEN** the helper returns `absent`, not `conflict`
+
+#### Scenario: Legacy id-only records keep matching
+
+- **WHEN** a terminal row carries only `init_state_id` and it equals the strict resolution's state id
+- **THEN** the helper returns `match`, byte-identical in effect to today's verdict-side behavior
+
+#### Scenario: Id-only terminal record is reused when the run manifest proves the init state
+
+- **WHEN** the candidate admission ladder compares a strict `candidate_state` carrying a checksum against a terminal `hydro_run` record carrying only a matching `init_state_id`, and `run_manifest_initial_state` matches the selected state on all four identity fields, and no successor-state readiness gate intervenes (the successor state, where one is resolved, is ready)
+- **THEN** the candidate is reported skipped through the terminal reuse exit, no `retry_strict_warm_start_terminal_init_state_mismatch` decision is emitted, and no forecast work is resubmitted
+
+#### Scenario: Partially recorded but agreeing terminal record is reused on the same terms
+
+- **WHEN** the terminal `hydro_run` record carries a matching `init_state_id` plus at least one further identity field that AGREES with the strict resolution, its remaining fields absent, and `run_manifest_initial_state` matches the selected state on all four identity fields, and no successor-state readiness gate intervenes
+- **THEN** the candidate is reported skipped through the terminal reuse exit, exactly as for the strictly id-only shape — the discriminator is absence-versus-disagreement, never the number of recorded fields
+
+#### Scenario: Id-only terminal record without a run manifest stays on the budgeted path
+
+- **WHEN** the candidate admission ladder compares a strict `candidate_state` carrying a checksum against a terminal `hydro_run` record carrying only a matching `init_state_id`, and no `run_manifest_initial_state` is recorded
+- **THEN** the candidate is classified not-match and routed through the budgeted `strict_warm_start_terminal_init_state_mismatch` decision — never through the unbudgeted `strict_warm_start_terminal_run_manifest_missing` retry
+
+#### Scenario: Repaired checkpoint is still recomputed
+
+- **WHEN** the terminal `hydro_run` record carries only an `init_state_id` equal to the selected state's, but `run_manifest_initial_state` carries a `checksum` that disagrees with the selected state's
+- **THEN** the candidate is classified not-match, the budgeted mismatch decision is emitted, and the forecast is recomputed
+
+#### Scenario: Any present-field disagreement is conflict
+
+- **WHEN** a terminal row carries `init_state_id` plus at least one further identity field and any present field disagrees with the strict resolution
+- **THEN** the helper returns `conflict`
+
+#### Scenario: Candidate-path special branches stay candidate-side
+
+- **WHEN** the candidate ladder evaluates a terminal whose evidence takes the `candidate_state` terminal-source branch or the `COLD_START_QUARANTINED` escape
+- **THEN** the candidate-side wrapper short-circuits to match ahead of the helper, the emitted candidate decision shapes are unchanged from today, and the cycle-completion verdict path never inherits these escapes — it classifies the same shapes through the plain helper (`absent`), so their completion still requires proven successor continuity (the design's named cold-seed residual risk)
+
+#### Scenario: Strict resolution without candidate_state keeps gap
+
+- **WHEN** the strict warm-start resolution is ready but carries no `candidate_state` (cold-start generation shapes)
+- **THEN** the verdict path bypasses the helper and the cycle verdict remains `gap` as today
+
+#### Scenario: Not-ready strict resolution classifies unverifiable rather than conflict
+
+- **WHEN** the strict warm-start resolution is not ready, so it names no state to compare against, and the terminal decision is a success
+- **THEN** the verdict path returns `unverifiable` rather than `conflict`, and the cycle verdict is decided by the successor-continuity rule rather than by an unconditional gap
+
+#### Scenario: Shared helper value domain is unchanged
+
+- **WHEN** the shared init-state comparison helper is invoked
+- **THEN** it still returns exactly one of `match`, `absent`, `conflict` — `unverifiable` is produced by the verdict-path wrapper ahead of the helper and never by the helper itself

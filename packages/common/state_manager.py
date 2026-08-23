@@ -1467,18 +1467,31 @@ class FileStateSnapshotIndexRepository:
                 lead_hours=int(expected_predecessor_lead_hours),
             )
         current_checksum = str(current_package_checksum or "").strip()
-        # For §8 history-existence semantics we accept ANY usable entry for
-        # this ``model_id + source_id`` regardless of valid_time — a state
-        # snapshot at valid_time == cutoff (the exact-predecessor location)
-        # still counts as history because it proves the model was previously
-        # exercised.  The stricter "valid_time < cutoff" filter belongs to
-        # ``usable_state_history_evidence`` which powers different semantics.
+        # §8 history-existence counts usable entries for this
+        # ``model_id + source_id`` AT OR BEFORE the candidate's own cutoff
+        # (#1775 D5).  The boundary is inclusive on purpose: an entry at
+        # valid_time == cutoff sits at the exact-predecessor location and does
+        # prove the model was previously exercised.  An entry at
+        # valid_time > cutoff proves nothing of the sort — it can only have
+        # been produced by the candidate's OWN run or by a later cycle, and
+        # treating a run's own output as evidence that the run had a
+        # predecessor is circular.  Unscoped, a newly onboarded model's very
+        # first cycle flipped ``history_exists_any_generation`` True forever
+        # the moment it wrote its own checkpoint, permanently closing the
+        # packaged-IC bootstrap branch (``scheduler_generation.py:1057``) and
+        # demanding a predecessor cycle that never existed.  This is the
+        # general form of the per-case lineage-cutover scope-out #1735 added
+        # for recalibrated models; models carrying a cutover keep that
+        # behavior unchanged.  The stricter "valid_time < cutoff" filter still
+        # belongs to ``usable_state_history_evidence``, which powers different
+        # semantics.
         entries_for_model = [
             (key, entry)
             for key, entry in index_snapshot.entries.items()
             if key[0] == str(model_id)
             and key[1] == source
             and _require_state_index_bool(entry.get("usable_flag"), field="usable_flag")
+            and _parse_state_index_time(entry.get("valid_time"), field="valid_time") <= cutoff
         ]
         any_entries = [entry for _key, entry in entries_for_model]
         current_entries = [

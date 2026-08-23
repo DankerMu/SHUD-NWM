@@ -21,6 +21,13 @@ from workers.data_adapters.base import CycleDiscovery, cycle_id_for
 
 MAX_DISCOVERED_CYCLES = 10000
 
+# Verdict-path-only classification (#1775).  The shared helper's value domain
+# stays exactly {match, absent, conflict}; ``unverifiable`` is produced by
+# :func:`_terminal_init_state_verdict` AHEAD of the helper, for the one case the
+# helper cannot answer: the strict resolution is not ready, so it names no state
+# to compare the terminal row against.
+TERMINAL_INIT_STATE_UNVERIFIABLE = "unverifiable"
+
 
 class SchedulerResourceLimitError(ValueError):
     def __init__(self, reason: str, details: Mapping[str, Any]) -> None:
@@ -305,12 +312,6 @@ def _cycle_completion_verdict(
             if strict_evidence is None and successor_evidence is None:
                 continue
             checked = True
-            if strict_evidence is None:
-                pass
-            elif not bool(strict_evidence.get("ready")):
-                return "gap"
-            if successor_evidence is not None and not bool(successor_evidence.get("ready")):
-                return "gap"
             state = context.candidate_state_provider_caller(
                 state_provider,
                 source_id=candidate.source_id,
@@ -324,18 +325,36 @@ def _cycle_completion_verdict(
                 event_limit=context.config.candidate_state_event_limit,
             )
             decision = context.candidate_state_decider(candidate, state)
+            # #1775 D1: the terminal decision is evaluated BEFORE the strict /
+            # successor admission early-returns.  Warm-start admission answers
+            # "should this run be STARTED"; it must never veto the finding that
+            # a run ALREADY COMPLETED.  Ordered the other way, an already
+            # succeeded cycle whose strict resolution is not ready scored `gap`
+            # forever and the backfill window could never advance past it.
             if decision is None or decision.reason not in {
                 "terminal_hydro_success",
                 "terminal_pipeline_success",
             }:
+                # Non-terminal candidate: the pre-#1775 ordering evaluated the
+                # strict gate, then the successor gate, then this one — all
+                # three return `gap`, so falling back to `gap` here is the same
+                # verdict for every non-terminal shape.
+                return "gap"
+            # Successor gating is NOT dropped for terminal candidates: the gate
+            # that used to sit ahead of the terminal decision keeps its place
+            # ahead of the init-state verdict.
+            if successor_evidence is not None and not bool(successor_evidence.get("ready")):
                 return "gap"
             if strict_evidence is not None:
                 init_state_verdict = _terminal_init_state_verdict(decision.evidence, strict_evidence)
                 if init_state_verdict == TERMINAL_INIT_STATE_CONFLICT:
                     return "gap"
-                if init_state_verdict == TERMINAL_INIT_STATE_ABSENT and not _successor_state_proves_continuity(
-                    successor_evidence
-                ):
+                if init_state_verdict in {
+                    TERMINAL_INIT_STATE_ABSENT,
+                    TERMINAL_INIT_STATE_UNVERIFIABLE,
+                } and not _successor_state_proves_continuity(successor_evidence):
+                    # #1775 D3: `unverifiable` reuses the `absent` branch's
+                    # physical-continuity standard verbatim — no new leniency.
                     return "gap"
         if checked:
             return "complete"
@@ -532,12 +551,32 @@ def _terminal_init_state_verdict(
 ) -> str:
     """Classify the terminal row's recorded init state for the cycle verdict.
 
-    A strict resolution that names no state (the cold-start generation shapes
-    ``COLD_NEW_MODEL`` / ``COLD_DECLARED_CUTOVER``, ``scheduler_generation_gate
-    .py:349-376``) carries nothing to compare against: the verdict path skips
-    the shared helper and keeps today's gap, which ``conflict`` expresses here.
+    Two different facts used to share one ``conflict`` answer here (#1775 D2);
+    the discriminator between them is the strict resolution's READY flag, never
+    the mere presence or absence of ``candidate_state``:
+
+    NOT READY
+        a state was required for the candidate but could not be resolved, so
+        nothing was named to compare against — ``unverifiable``.  This reverses
+        the decision this docstring used to record ("keeps today's gap, which
+        ``conflict`` expresses here").  That decision was taken when this path
+        was reachable only for a READY resolution, where "names no state" could
+        only mean a cold-start shape.  D1's reorder — evaluating the terminal
+        decision before the strict early-return — makes the not-ready case
+        reachable, and there "names no state" means the checkpoint the candidate
+        would have needed is MISSING, which says nothing at all about whether
+        the run already completed.  The cycle verdict tolerates it if and only
+        if the successor state proves continuity (D3).
+    READY but naming no state
+        the cold-start generation shapes ``COLD_NEW_MODEL`` /
+        ``COLD_DECLARED_CUTOVER`` (``scheduler_generation_gate.py:349-376``):
+        the resolution genuinely resolved, and it resolved to no warm start.
+        Unchanged — the verdict path bypasses the shared helper and keeps
+        today's gap, which ``conflict`` expresses here.
     """
 
+    if not bool(strict_evidence.get("ready")):
+        return TERMINAL_INIT_STATE_UNVERIFIABLE
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or init_state_field(selected, "state_id") in (None, ""):
         return TERMINAL_INIT_STATE_CONFLICT

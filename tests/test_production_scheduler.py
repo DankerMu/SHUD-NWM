@@ -37654,20 +37654,23 @@ def _absence_tolerance_scheduler(
     hydro_run: dict[str, Any],
     successor_state: dict[str, Any] | None,
     repository_factory: Any | None = None,
+    strict_evidence: dict[str, Any] | None = None,
+    hydro_status: str = "published",
 ) -> tuple[Any, CycleDiscovery, list[Any]]:
     """Cycle-completion verdict seam with the strict/successor providers pinned.
 
     The verdict's four AND conditions (`scheduler_discovery.py:180-223`) are
-    exercised directly: a terminal-success candidate state, a ready strict
-    resolution naming one warm-start state, and the successor-state evidence
-    under test (ready / not ready / no verdict at all).
+    exercised directly: a terminal-success candidate state, a strict resolution
+    (READY and naming one warm-start state by default; override with
+    ``strict_evidence`` for the cold-start and not-ready shapes), and the
+    successor-state evidence under test (ready / not ready / no verdict at all).
     """
 
     model = _model("model_a", "basin_a")
     factory = repository_factory or FakeCandidateStateRepository
     repository = factory(
         {
-            "hydro_status": "published",
+            "hydro_status": hydro_status,
             "hydro_run": hydro_run,
         }
     )
@@ -37677,14 +37680,19 @@ def _absence_tolerance_scheduler(
         adapters={},
         active_repository=repository,
     )
-    monkeypatch.setattr(
-        scheduler,
-        "_strict_warm_start_for_candidate",
-        lambda _candidate, _cycle: {
+    resolved_strict = (
+        dict(strict_evidence)
+        if strict_evidence is not None
+        else {
             "status": "ready",
             "ready": True,
             "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
-        },
+        }
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: dict(resolved_strict),
     )
     monkeypatch.setattr(
         scheduler,
@@ -37785,6 +37793,247 @@ def test_cycle_completion_verdict_init_state_record_truth_table(
     )
 
     assert scheduler._cycle_completion_status(discovery, models, horizon={}) == expected_status
+
+
+# #1775: the strict resolution that could not resolve a state at all.  Production
+# shape on node-22 for the 7 wedged new-basin models: the checkpoint the
+# candidate would have needed is missing, so the resolution is NOT ready and
+# names nothing to compare the terminal row against.
+_NOT_READY_STRICT_EVIDENCE = {
+    "status": "blocked",
+    "ready": False,
+    "reason": "state_snapshot_index_exact_checkpoint_missing",
+}
+_COLD_START_STRICT_EVIDENCE = {
+    "status": "ready",
+    "ready": True,
+    "mode": "db_free_cold_new_model",
+}
+
+
+@pytest.mark.parametrize(
+    ("strict_evidence", "hydro_run", "successor_state", "expected_status"),
+    [
+        # The ONE combination whose verdict #1775 flips: strict not ready
+        # (→ `unverifiable`) + a terminal success + a successor checkpoint that
+        # physically proves the cycle ran to completion.
+        pytest.param(
+            _NOT_READY_STRICT_EVIDENCE,
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "complete",
+            id="unverifiable_successor_ready",
+        ),
+        # D3's safety pin: the relaxation is conditioned on physical
+        # continuity, never on terminal success alone.
+        pytest.param(
+            _NOT_READY_STRICT_EVIDENCE,
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": False},
+            "gap",
+            id="unverifiable_successor_unusable",
+        ),
+        pytest.param(
+            _NOT_READY_STRICT_EVIDENCE,
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            None,
+            "gap",
+            id="unverifiable_successor_no_verdict",
+        ),
+        # `unverifiable` is decided by the strict READY flag, not by what the
+        # terminal row happens to record: a recorded id cannot be compared
+        # against a resolution that named no state either.
+        pytest.param(
+            _NOT_READY_STRICT_EVIDENCE,
+            _MATCHING_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "complete",
+            id="unverifiable_id_only_row_successor_ready",
+        ),
+        pytest.param(
+            _NOT_READY_STRICT_EVIDENCE,
+            _MATCHING_INIT_STATE_HYDRO_RUN,
+            None,
+            "gap",
+            id="unverifiable_id_only_row_no_successor",
+        ),
+        # READY-but-names-no-state stays `conflict`: the cold-start generation
+        # shapes resolved, and they resolved to no warm start.  Unchanged.
+        pytest.param(
+            _COLD_START_STRICT_EVIDENCE,
+            _ABSENT_INIT_STATE_HYDRO_RUN,
+            {"ready": True},
+            "gap",
+            id="cold_start_shape_successor_ready",
+        ),
+    ],
+)
+def test_cycle_completion_verdict_unverifiable_truth_table(
+    monkeypatch: Any,
+    tmp_path: Path,
+    strict_evidence: dict[str, Any],
+    hydro_run: dict[str, Any],
+    successor_state: dict[str, Any] | None,
+    expected_status: str,
+) -> None:
+    """#1775 D2+D3: the not-ready strict resolution is `unverifiable`, not `conflict`.
+
+    Together with ``test_cycle_completion_verdict_init_state_record_truth_table``
+    (which covers every strict-READY row) this enumerates the whole verdict
+    surface, so the change's blast radius is checkable rather than asserted:
+    the only rows that move are terminal-success ∧ strict-not-ready ∧ proven
+    successor continuity.  Every `match` row, every cold-start row and every
+    genuine-disagreement row keeps its pre-#1775 verdict.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(hydro_run),
+        successor_state=successor_state,
+        strict_evidence=strict_evidence,
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == expected_status
+
+
+def test_cycle_completion_verdict_gaps_on_genuine_disagreement_when_strict_not_ready(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1775 must-preserve: a real field disagreement is never reached leniently.
+
+    A not-ready strict resolution that nevertheless carries a ``candidate_state``
+    still classifies `unverifiable` — the discriminator is the READY flag — but
+    the row this test uses records a DIFFERENT init state id, so the pin here is
+    that the relaxation cannot be reached with a resolution that IS ready: the
+    same conflicting row under a ready resolution stays a hard gap even with the
+    successor checkpoint present.
+    """
+
+    conflicting = dict(_CONFLICTING_INIT_STATE_HYDRO_RUN)
+    ready_scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=conflicting,
+        successor_state={"ready": True},
+    )
+
+    assert ready_scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+
+def test_terminal_init_state_verdict_returns_unverifiable_only_when_not_ready(
+    monkeypatch: Any,
+) -> None:
+    """#1775 D2 at the wrapper seam, plus the helper's untouched value domain.
+
+    The discriminator is ``strict_evidence['ready']``, NOT the presence of
+    ``candidate_state``: a not-ready resolution CARRYING a candidate_state is
+    still `unverifiable`, and a ready resolution carrying none is still
+    `conflict`.  The shared helper itself never learns the fourth value.
+    """
+
+    from services.orchestrator import scheduler_discovery as scheduler_discovery_module
+    from services.orchestrator import scheduler_init_state_match as init_state_match_module
+
+    selected = dict(_ABSENCE_TOLERANCE_SELECTED_STATE)
+    terminal = {"hydro_run": dict(_MATCHING_INIT_STATE_HYDRO_RUN)}
+
+    verdict = scheduler_discovery_module._terminal_init_state_verdict
+    assert verdict(terminal, {"ready": False}) == "unverifiable"
+    assert verdict(terminal, {"ready": False, "candidate_state": selected}) == "unverifiable"
+    assert verdict(terminal, {"ready": True}) == "conflict"
+    assert verdict(terminal, {"ready": True, "candidate_state": selected}) == "match"
+
+    # The helper's value domain is unchanged: `unverifiable` is produced by the
+    # verdict-path wrapper AHEAD of it and never by the helper itself.
+    assert "unverifiable" not in {
+        init_state_match_module.TERMINAL_INIT_STATE_MATCH,
+        init_state_match_module.TERMINAL_INIT_STATE_ABSENT,
+        init_state_match_module.TERMINAL_INIT_STATE_CONFLICT,
+    }
+    assert not hasattr(init_state_match_module, "TERMINAL_INIT_STATE_UNVERIFIABLE")
+    assert (
+        init_state_match_module.terminal_init_state_match(selected, {"init_state_id": "other"})
+        == "conflict"
+    )
+
+
+@pytest.mark.parametrize(
+    ("strict_evidence", "successor_state"),
+    [
+        pytest.param(_NOT_READY_STRICT_EVIDENCE, {"ready": True}, id="strict_not_ready"),
+        pytest.param(None, {"ready": True}, id="strict_ready_successor_ready"),
+        pytest.param(None, {"ready": False}, id="strict_ready_successor_unusable"),
+        pytest.param(None, None, id="strict_ready_no_successor_verdict"),
+    ],
+)
+def test_cycle_completion_verdict_keeps_gating_non_terminal_candidates(
+    monkeypatch: Any,
+    tmp_path: Path,
+    strict_evidence: dict[str, Any] | None,
+    successor_state: dict[str, Any] | None,
+) -> None:
+    """#1775 must-preserve: a cycle that never reached terminal success is a gap.
+
+    D1 moved the terminal decision ahead of the strict/successor early-returns.
+    For a NON-terminal candidate every one of those pre-#1775 early-returns
+    answered `gap`, and so does the reordered path — under every combination of
+    strict and successor evidence.
+
+    The ``strict_ready_successor_ready`` row is what proves the fixture really
+    is non-terminal: the same row with a terminal ``hydro_run`` completes (see
+    ``..._init_state_record_truth_table[absent_successor_ready]``), so a `gap`
+    here can only come from the non-terminal decision.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "failed",
+        },
+        hydro_status="failed",
+        successor_state=successor_state,
+        strict_evidence=strict_evidence,
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+
+def test_candidate_loop_skips_terminal_success_before_warm_admission(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1775 D4: the candidate loop's ordering defect, same shape as D1.
+
+    ``scheduler_candidates.py`` used to ``continue`` out of the strict
+    warm-admission branch BEFORE ``classify_candidate_state()`` ran, so a
+    candidate that had already reached terminal success was appended to
+    ``blocked`` on an admission gate for a run it never needed to start — 28
+    such rows per pass on node-22.  Classification now happens first and a
+    terminal candidate leaves through the existing terminal skip exit,
+    carrying its own reason.
+    """
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run=dict(_MATCHING_INIT_STATE_HYDRO_RUN),
+        successor_state={"ready": True},
+        strict_evidence=dict(_NOT_READY_STRICT_EVIDENCE),
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=models,
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon={}),
+        ],
+    )
+
+    assert candidates == []
+    assert [entry.reason for entry in blocked] == []
+    assert [entry["reason"] for entry in skipped] == ["terminal_hydro_success"]
 
 
 def test_cycle_completion_verdict_keeps_legacy_id_only_rows_completing(

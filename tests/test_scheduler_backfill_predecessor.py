@@ -761,15 +761,23 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
 ) -> None:
     """#1152: real §8 gate + ``NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST=true``.
 
-    Fixture base = ``tests/test_scheduler_generation.py::
-    test_env_override_blocks_predecessor_pending_without_earlier_history``
-    (one current-generation state entry strictly LATER than the candidate
-    cycle → generation-scoped signal sees history, the gate's strictly-earlier
-    probe does not).  The successor at 12Z blocks with
-    ``block_predecessor_pending``; §8.6 emits the 00Z predecessor, whose OWN
-    §8 gate reproduces the identical geometry — so the emitted predecessor is
-    blocked, not admitted, and the gap does not close without an operator
-    backfilling the missing state.
+    Fixture: one current-generation state entry at 2026-05-19T00Z — real
+    history, but two full days before the 12Z candidate and therefore the exact
+    warm-start predecessor of NEITHER the 12Z successor nor the 00Z predecessor
+    §8.6 emits.  The successor blocks with ``block_predecessor_pending``; §8.6
+    emits the 00Z predecessor, whose OWN §8 gate reproduces the identical
+    geometry — so the emitted predecessor is blocked, not admitted, and the gap
+    does not close without an operator backfilling the missing state.
+
+    #1775 D5 re-fixtured this: the entry used to sit at 2026-05-22T00Z, LATER
+    than the candidate cycle, which made the generation-scoped signal report
+    history the strictly-earlier probe could not see.  A future-dated entry is
+    now correctly not history (a run's own output does not prove it had a
+    predecessor), so the two-day-old entry above supplies the same
+    ``block_predecessor_pending`` geometry from a real predecessor gap.  The
+    one consequence for the assertions: the predecessor's strictly-earlier
+    history probe now reports ``history_exists=True``, which is what makes the
+    ``after_history`` reason honest here.
 
     Silent-skip traps this test must avoid (tasks.md 2.1): the predecessor
     cycle is deliberately NOT injected into ``cycles`` (that would make the
@@ -829,9 +837,9 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
             _old_generation_state_entry(
                 roots,
                 old_package_checksum=candidate_checksum,
-                state_id="state_current_gen_later_history",
-                valid_time="2026-05-22T00:00:00Z",
-                cycle_id="gfs_2026052112",
+                state_id="state_current_gen_earlier_history",
+                valid_time="2026-05-19T00:00:00Z",
+                cycle_id="gfs_2026051812",
                 lead_hours=12,
             )
         ],
@@ -942,7 +950,10 @@ def test_emitted_predecessor_reblocks_with_operator_action_under_real_gate(
         predecessor_blocked[0].reason
         == "state_snapshot_index_prior_checkpoint_missing_after_history"
     )
-    assert predecessor_evidence["state_history"]["history_exists"] is False
+    # D5 re-fixture: the two-day-old entry IS strictly-earlier history for the
+    # emitted predecessor too — the block is "prior checkpoint missing AFTER
+    # history", and this is the geometry that makes that reason literal.
+    assert predecessor_evidence["state_history"]["history_exists"] is True
     # #1152: the operator signal fires — this population cannot self-heal.
     assert predecessor_evidence["operator_action_required"] is True
     assert predecessor_evidence["self_heal_expected"] is False
