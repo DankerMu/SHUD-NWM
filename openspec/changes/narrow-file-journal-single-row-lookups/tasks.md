@@ -286,3 +286,56 @@ showing the criterion still missed alongside that split is this round succeeding
   lookup "must still read something"; the memo makes a warm lookup read
   nothing. Containment is a cold-path property — a memo can only shrink the
   opened set — so the test now clears the memo before each measured lookup.
+
+### Round-1 cross-review fixes (5 verified findings, all CONFIRMED by an independent verifier)
+
+Spec/design corrections are already applied by the orchestrator (D11/D13 entrypoint
+claim, D13 "no unscoped leg", I7 matrix row, and three new spec scenarios). The
+items below are the code and test work.
+
+- [ ] **P1 — the counter's concurrency oracle is tautological.**
+      `tests/test_file_orchestration_journal.py:13383-13385` asserts
+      `totals == sum(tags)`, but `journal_read_attribution()` (`:275-282`) builds
+      `totals` from the same `rows` it returns as `tags`, so the equality is an
+      identity for any counter content. **Measured**: with the counter replaced by
+      a non-atomic read-modify-write, `TRUE_CALLS=40 COUNTED=37 LOST=3` and all
+      three assertions still passed. Replace with an assertion against an
+      independently known expected count. New spec scenario: "The counter is
+      proven accurate, not merely self-consistent". Must be shown to bite by the
+      same racy-counter substitution.
+- [ ] **P2 — attribution does not cover the read surface.** Measured on a real
+      308-test fixture: **80.6% of bytes carried no entrypoint**. Only six
+      wrappers existed (`:1202, 1212, 1255, 1310, 1324, 1337`);
+      `query_inflight_jobs`, `query_reserved_unbound_jobs`,
+      `query_rollback_unsettled_jobs`, `get_pipeline_job`, the three cycle-status
+      predicates (`:721`, `:729`, `:764`) and the write-path methods that read
+      before writing were all untagged. Spec `:180` requires **every** read to be
+      attributed. Prefer a boundary mechanism over enumerating methods — a list
+      is what drifted in the first place. Acceptance is measured, not argued:
+      re-run the fixture probe and report the residual share.
+- [ ] **P3 — `direct_flat_scan` conflates two legs.** `:4527` wraps the whole of
+      `_iter_direct_pipeline_job_records_for_cycle`, which merges the flat leg and
+      the already-partitioned `pipeline-jobs/by-cycle/` leg into one sorted list
+      (`:5077-5091`). **Measured**: by-cycle contributed 33.5% of the lane's bytes
+      in a scratch fixture; on node-22's tree sizes (26 MB by-cycle vs 13 MB flat)
+      it would be roughly two thirds. Split into `direct_flat_scan` and
+      `direct_by_cycle_scan`. Record D13's counter-argument with the fix: the tag
+      sits on the cache-**miss** path, so by-cycle re-reads on thrash-induced
+      misses are arguably part of B's real cost — the defect is that D11 grades
+      this lane against flat-sized expectations.
+- [ ] **P3 — the discriminating memo test does not discriminate.**
+      `:13066-13122` uses only parseable job ids, so it cannot see either
+      fall-open arm. Add an **unparseable-name** arm (real legacy shape
+      `cycle_gfs_..._retry_active`, no `job_` prefix) and a **source-unnormalisable**
+      arm. Both must fail against today's code, then pass. No production code
+      change: broadening invalidation is semantically required here (see D13).
+- [ ] **P3 — the new memo has no concurrent-stress coverage.** The named vehicle
+      for I7 drives only `_cycle_rows` and `_read_bytes_limited_cached`. The
+      8-thread counter test does incidentally populate `_cycle_job_records_cache`
+      (12 entries measured), but capacity is 512 so the eviction branch
+      (`:5319-5320`) never runs, and it has no writer thread. Minimal closure:
+      squeeze `MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES` in a memo-driving
+      concurrent test that also runs a writer.
+- [ ] Re-run the CI-selected set (`scripts/select_ci_tests.py --base master`) as
+      the CI substitute. Pre-fix baseline at `f329eab4`: **4355 passed, 1 skipped,
+      exit 0**.

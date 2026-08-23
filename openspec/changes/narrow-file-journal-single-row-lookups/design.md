@@ -326,7 +326,7 @@ follow-up issue and is explicitly **not** implemented here (tasks.md §3).
 | I4 | Source-case mismatch (`ifs` vs `IFS`) still resolves | case negative pin |
 | I5 | The direct partition is never used as the sole record source | D2, reviewer checks by name |
 | I6 | `include_direct=False` still excludes direct records | parity test |
-| I7 | Single lock order preserved; no new cache unless measurement demands one | D7 + existing concurrency test |
+| I7 | Single lock order preserved; no new cache unless measurement demands one | D7 + existing concurrency test **(STALE as of round 2: D10 added `_cycle_job_records_cache`, which the named vehicle `test_file_journal_read_caches_survive_concurrent_readers_and_a_writer` does not touch — it drives only `_cycle_rows` and `_read_bytes_limited_cached`. Round-2 vehicle: a memo-driving concurrent test with a writer thread and the entry cap squeezed so the eviction branch actually runs.)** |
 | I8 | `query_pipeline_job_by_slurm_id` semantics byte-identical (untouched) | existing tests |
 
 ## D9. Round 2: the two flat-directory readers disagree on a corrupt file's blast radius
@@ -555,9 +555,49 @@ would serve one variant's rows to the other. The flat signature leg is likewise
 computed only when `include_direct` is true, so the `False` variant does not pay
 a flat-directory scandir per probe.
 
-All three legs were scopable, so there is **no unscoped leg** to declare. The
-one stated limitation of the signature is different in kind and is recorded
-here: the signature covers the identity of the *files*, not of the directories
+**CORRECTED after round-1 verification (measured, not argued).** An earlier
+draft of this paragraph read "All three legs were scopable, so there is **no
+unscoped leg** to declare." That is false, and it contradicted D10's own
+standing instruction above — "Where a leg cannot be scoped, that is recorded as
+a stated limitation of the memo, never hidden behind a directory stat."
+
+The flat leg has **two fall-open arms**, both declared in
+`_flat_direct_pipeline_job_paths_for_cycle`'s docstring and neither of them
+scopable:
+
+1. a file whose name does not resolve to any `(source_id, cycle)` is selected
+   for **every** cycle (D4's fall-open pushed down to the filename level);
+2. a `source_id` this instance cannot normalise filters nothing, so the whole
+   flat directory is selected.
+
+Consequently a change to any such file invalidates **every** cycle's
+`include_direct=True` memo entry. Round-1 verification measured this rather
+than inferring it: seeding the real legacy shape
+`pipeline-jobs/cycle_gfs_2026062800_retry_active.json`, warming two cycles'
+memos and touching only that one file evicted **both**.
+
+**This is not a signature defect and MUST NOT be "fixed" by narrowing the
+signature.** Those files genuinely are read by every cycle, so invalidating
+every cycle when they change is semantically required; a tighter signature
+would serve stale rows. The defect was that the residue went undeclared here.
+
+Reachability, measured: node-22 holds 2 such files (2,941 B, legacy
+`cycle_gfs_..._retry_*` names missing the `job_` prefix; see the D2a census
+above). Every current minting point produces a parseable name
+(`accepted_submit_identity.py:1041`, `file_orchestration_journal.py:3515`,
+`chain_runtime_utils.py:431-432`), and D8 forbids pruning, so those two files'
+stats are static and the invalidation does not fire in production today. It is
+declared because a future writer that mints an unparseable name would turn a
+static residue into live thrash silently.
+
+Round-1 verification also established that this is **not** a wrong-row-served
+bug: fall-open rows do enter the merged dict, but all five consumers re-filter
+on the exact field they need (`:1313` `cycle_id`, `:1327` `run_id`, `:1203` and
+`:1213` `idempotency_key`, `:1256` `job_id`), which was verified per-caller
+rather than taken on trust.
+
+The second stated limitation of the signature is different in kind and is
+recorded here: the signature covers the identity of the *files*, not of the directories
 containing them. A cycle directory replaced wholesale by a fresh one whose
 children are byte-identical would be a hit. No production write path can do
 this — every write is an append or an atomic file-level replace — and an
@@ -566,9 +606,41 @@ construction.
 
 **D11 — the counter is tagged `entrypoint|lane`.** Lanes are the design's
 candidates verbatim: `full_tree_replay` (A), `direct_flat_scan` (B),
-`cycle_replay` (C). Entrypoints are the six query methods plus the two
-`_unlocked` helpers; anything else falls to `unattributed`, so totals always
-reconcile rather than silently dropping reads.
+`cycle_replay` (C).
+
+**CORRECTED after round-1 verification.** An earlier draft read "Entrypoints are
+the six query methods plus the two `_unlocked` helpers; anything else falls to
+`unattributed`, so totals always reconcile rather than silently dropping reads."
+Two things were wrong with it.
+
+First it was **inaccurate about the implementation**: only six wrappers existed,
+not eight. `query_inflight_jobs`, `query_reserved_unbound_jobs`,
+`query_rollback_unsettled_jobs` and `get_pipeline_job` all read under no
+entrypoint at all — the tagged surface was narrower than this paragraph's own
+disclosure of it.
+
+Second, and more importantly, **the disclosure was treated as if it settled the
+matter, and it does not**. The delta spec says "Every read the file journal
+performs SHALL be counted against the entrypoint and the reader lane that drove
+it." A note in a design document does not amend a SHALL in the spec. "Totals
+reconcile" is a much weaker property than "reads are attributed": a residual
+bucket reconciles perfectly while telling you nothing.
+
+Round-1 verification measured the consequence instead of arguing it: on a real
+308-test fixture, **80.6% of counted bytes carried no entrypoint**. That fixture
+is submit-heavy and therefore unrepresentative of a production pass's call mix —
+what it establishes is that an `unattributed`-dominated regime is real, not that
+production's residual has the same composition. Either way an instrument whose
+residual can dominate cannot separate baseline `_cycle_rows` cost from candidate
+A's fall-open growth, which is the single ambiguity D11 exists to remove.
+
+**Ruling: attribution is an obligation on the read surface, not on an
+enumerated list of methods.** Every public entry point that reaches a journal
+read carries a tag, including the cycle-status predicates and the write-path
+methods that read before they write. `unattributed` remains as a safety net so
+totals still reconcile if something is missed, but it is now an alarm rather
+than a documented resting place: it must be a negligible share of a pass's
+bytes, and that is pinned by an assertion rather than left to prose.
 
 - The byte counter sits on `_read_bytes_limited_cached`, the single point where
   journal bytes cross the syscall boundary, so `bytes` is directly comparable

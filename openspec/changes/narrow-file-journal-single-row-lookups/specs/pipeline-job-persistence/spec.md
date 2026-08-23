@@ -205,6 +205,33 @@ once on a return path.
   entrypoint and reader lane, the number of reads and the number of bytes read
 - **THEN** the totals reconcile against the sum of the per-tag rows.
 
+#### Scenario: The counter is proven accurate, not merely self-consistent
+
+- **WHEN** concurrent orchestration threads sharing one repository instance
+  each perform a known number of reads
+- **THEN** the recorded call count SHALL equal that independently known number,
+  and SHALL NOT be asserted only against a total derived from the same rows it
+  is being compared with — an assertion of the form
+  `totals == sum(per_tag_rows)` is satisfied by construction for any counter
+  content, including one that has silently lost updates under a race, and
+  therefore SHALL NOT stand as the concurrency oracle for this requirement.
+
+#### Scenario: No read escapes attribution
+
+- **WHEN** a pass performs reads through any public journal API, including the
+  cycle-status predicates and the write-path methods that read before they write
+- **THEN** every counted byte SHALL carry both an entrypoint and a lane; a
+  residual bucket for reads that reached no entrypoint SHALL NOT carry a
+  material share of a pass's bytes, because a residual that dominates cannot
+  separate baseline cost from the growth this change exists to measure.
+
+#### Scenario: The by-cycle partition is not attributed to the flat directory
+
+- **WHEN** a direct-record read for one cycle draws from both the unpartitioned
+  flat directory and the already-partitioned by-cycle directory
+- **THEN** the two SHALL be attributed to distinct lanes, so that bytes read
+  from the partitioned tree are never graded against the flat directory's size.
+
 #### Scenario: A narrowed lookup and a whole-tree lookup are told apart
 
 - **WHEN** one lookup is answered by the cycle-scoped replay and another falls
