@@ -1192,3 +1192,23 @@ should not mistake the *number* of revisits for the amount of evidence
 accumulated. The prior revisit made the adjacent point about single-round PRs
 inflating `core`; this one makes the stronger version: zero-round PRs inflate the
 revisit count itself.
+
+## Revisit 2026-08-23 (PR #1771, issue #1669) — keep, counter did not move
+
+`loop_log_audit` returns DECIDABLE at **111 multi-round merged PRs, core=68 /
+rotated=264** — identical to the PR #1754 revisit above. This PR contributed
+nothing to either bucket: one round, and its single catch is a round-1 catch, so
+it lands in neither later-round tally.
+
+That is the fifth caveat from the #1754 revisit playing out exactly as described:
+single-round PRs enlarge the population without exercising rotation. Decision
+unchanged: **keep**.
+
+One observation worth recording anyway, because it is about where catches come
+from rather than which lens found them. This PR's most consequential correction
+did not come from a lens at all — it came from the **user** challenging the
+premise ("production already has too many indexes"), which forced a measurement
+that reversed the approach from rebuilding an index to deleting it. The
+rotation counter cannot see that, and a reader using this ADR to reason about
+where review value originates should know the instrument only counts one of the
+sources.
