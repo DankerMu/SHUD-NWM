@@ -1295,3 +1295,54 @@ count honest than for changing it.
 
 Recorded under the run's autonomous default-keep rule; keep/cut remains a human
 call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1784, issue #1781) — keep, and the counter's third blind spot: the catch that came from neither lens
+
+Counter moved `core=68`, `rotated=265 → 267`; 114 multi-round merged PRs. The
+margin is untouched and the default-keep stands. What this run adds is not a
+number but a category the ledger has no column for.
+
+Three comprehensive rounds ran. The code-facing lens — the pinned core — returned
+**zero findings in rounds 2 and 3**, having been correct both times: an
+independent verifier separately confirmed the fix round was complete, and the
+final review re-derived the same conclusion. Every net catch in those two rounds
+came from a rotated-in lens, and every one of them was the same class: an
+artifact contradicting the code. A deployment instruction that the PR's own fix
+round had falsified. A Must-preserve paragraph describing a placement the design
+had already reversed. A spec scenario left un-revisited when its replacement was
+added beside it, so that one file both authorized and forbade the same behaviour.
+On the counter's own terms this is another clean win for rotation.
+
+But the most consequential finding of the run came from **neither**. It came from
+running the change on node-27. The first live tick declined 144 of 158 blocked
+runs and left 14 pinned at `failed` with `rc=1` forever, because those runs had
+no init-state evidence and the design's fail-closed rule turned "key unobtainable"
+into retry-forever — reproducing, for that subset, precisely the loop the change
+existed to eliminate. It was as-designed and it was not as-promised, and it would
+have shipped as a silent descope of the outcome the user had explicitly chosen.
+No lens found it, in three rounds, because nothing in the diff is wrong: the
+defect lives in the interaction between a deliberate design rule and a data shape
+that only production exhibits (cold-start and packaged-IC runs write a null
+`state_id`, so the condition is ongoing rather than historical).
+
+That is the third recorded instance of this ledger's blind spot being structural
+rather than allocative. The first two were about *where the review question came
+from* — a premise baked into the brief, upstream of every lens. This one is about
+*what a review is made of*: reading a diff cannot discover a data shape the diff
+does not contain. Rotation policy does not reach it; neither does buying another
+round. The marginal review round in this PR found stale prose. The marginal
+**deployment** found a functional gap.
+
+The practical implication is a sequencing one and does not change keep/cut: for
+changes whose acceptance is a production behaviour, live evidence is not the last
+box to tick after review converges — it is a distinct detector that should be
+allowed to run *before* the review budget is exhausted, because it answers a
+question no lens is capable of asking. Two method notes from this run belong with
+that claim, since both nearly produced a wrong live verdict: a checkout does not
+swap code in an already-running process, so tick attribution must key on a
+structural marker rather than on counting ticks; and acceptance assertions must
+never pin absolute counts when the population under test is growing, or they go
+red while the change works.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
