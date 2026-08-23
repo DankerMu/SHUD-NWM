@@ -57,6 +57,16 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_openapi_drift.py",
 )
 
+# #1646: the pytest warning-policy suite proves the SHIPPING config semantically
+# (subprocess + removed-filter mutant + unrelated-warning control) and parses
+# pyproject/uv.lock for the exact filter and the absence of a timeout
+# dependency. Both the config file and the dependency lock select it (plus the
+# selector meta-guard, which guards the selector's own rules), so a pyproject
+# or lock change cannot ship without re-proving the policy.
+THREAD_EXCEPTION_POLICY_TESTS: tuple[str, ...] = (
+    "tests/test_pytest_thread_exception_policy.py",
+)
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -1132,12 +1142,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (SELECTOR_META_GUARD_TEST,),
     ),
     PathTestRule(
+        # #1646: a pytest-config change must re-prove the thread-exception
+        # policy (the file carries the exact filter and the no-timeout
+        # decision) and still keep core smoke plus the selector meta-guard.
         "pyproject.toml",
-        CORE_SMOKE_TESTS,
+        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST),
     ),
     PathTestRule(
+        # #1646: a dependency-lock change could add pytest-timeout, so the lock
+        # rule must also run the policy suite (which asserts no such package is
+        # resolved) alongside core smoke and the selector meta-guard.
         "uv.lock",
-        CORE_SMOKE_TESTS,
+        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST),
     ),
 )
 

@@ -72,6 +72,13 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# #1646: escalate only pytest's built-in thread-exception collector so an
+# unhandled worker exception fails the owning test with its original cause,
+# instead of passing as a warning-only false-green. Exact category only:
+# unrelated warnings keep their default behavior.
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
     "integration: requires explicitly configured external services such as PostgreSQL/PostGIS/TimescaleDB",
     "e2e: end-to-end pipeline tests (network/multi-step); run on node-22, excluded from pure CI",
