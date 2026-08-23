@@ -66,6 +66,8 @@
     "tests/test_node27_autopipeline_handoff.py",
     "tests/test_node27_autopipeline_preflight.py",
     ".review-gate-issues.json",
-    "docs/adr/0003-review-lens-rotation-keep.md"
+    "docs/adr/0003-review-lens-rotation-keep.md",
+    "tests/test_migrations.py",
+    "tests/test_real_database_integration.py"
   ]
 }

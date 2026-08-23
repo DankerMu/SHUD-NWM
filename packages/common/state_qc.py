@@ -64,32 +64,45 @@ _MAX_STATE_VALUE_M = 1.0e6
 # negatives remain fatal because they are no longer harmless roundoff.
 _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 
-# SHUD's constitutive update treats a negative unsaturated-zone depth as the
-# dry lower bound, but the restart writer can still serialize a small negative
-# ODE residual.  Permit a narrowly bounded projection to that physical lower
-# bound.  A domain-mean correction cap prevents a basin-wide solver failure
-# from being hidden while avoiding false rejection when many cells contain
-# only sub-millimetre serialization residuals.
-MAX_UNSAT_NEGATIVE_REPAIR_M = 5.0e-2
-MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
-
-# River channel stage carries the same class of residual as ``Unsat``: SHUD's
-# channel routing treats a negative stage as the dry bed, but the restart writer
-# still serializes the raw ODE residual. 0.2 m is the recorded numeric reading of
-# the project hydrologist's ruling that decimetre-scale negatives on newly
-# onboarded basins are normal numeric tolerance (worst case observed at
-# onboarding: -0.106 m on ``basins_dth_yj``).
+# Negative restart residuals are projected to the physical zero floor
+# UNCONDITIONALLY: there is no per-cell repair ceiling. SHUD maps a negative
+# unsaturated-zone depth and a negative channel stage to its dry constitutive
+# branch, but the restart writer still serializes the raw ODE residual, so the
+# published artifact has to be projected before QC sees it.
 #
-# The domain-mean cap is the actual safety valve, and its denominator is the
-# RIVER row count, not the mesh count. Its value cannot simply mirror the unsat
-# cap: production river-row counts span 319..43799, so a cap of 2.0e-4 would give
-# the smallest basin a 0.064 m total budget and fail closed on a *single*
-# tolerated residual. The cap must therefore stay above
-# ``MAX_RIVER_NEGATIVE_REPAIR_M / min_river_rows`` (0.2 / 319 = 6.3e-4); 2.0e-3
-# holds ~3x margin over that floor while a 2 mm domain-average stage error stays
-# hydrologically negligible. A basin-wide routing failure exceeds it by orders of
-# magnitude and still fails closed.
-MAX_RIVER_NEGATIVE_REPAIR_M = 2.0e-1
+# The per-cell ceiling was removed by owner directive after production falsified
+# two successive attempts to size one. The population supports the removal: a
+# scan of all 4327 published ``state.cfg.ic`` files found 122,070 negative river
+# values across 539 files, and the distribution is bimodal --
+#
+#     < 1 cm      122,057   (99.99%)
+#     1 - 5 cm          2
+#     5 - 10 cm         5
+#     10 - 20 cm        3
+#     20 - 30 cm        3   (max 0.216031, seen twice)
+#
+# -- with every value above 1 cm belonging to two ``basins_dth_yj`` models at the
+# same reach. Above 0.216 m the data constrains nothing, so any ceiling in
+# [0.25, 1.0] would accept and reject exactly the same observed set; a ceiling
+# sized off the worst observation just re-stalls production on the next one.
+#
+# The domain-mean caps are therefore the ONLY rejection criteria, and they are
+# what still fails closed on a basin-wide solver collapse. Their denominators
+# are the mesh row count and the RIVER row count respectively. The river cap
+# cannot mirror the unsat cap: production river-row counts span 319..43799, so
+# 2.0e-4 would give the smallest basin a 0.064 m total budget and fail closed on
+# a single decimetre residual. 2.0e-3 leaves a 2 mm domain-average stage error,
+# hydrologically negligible, while a routing failure exceeds it by orders of
+# magnitude.
+#
+# Recorded trade: a lone insane value (one -17 m stage among 8622 reaches
+# averages ~2e-3) is now published rather than blocked. Availability was chosen
+# over strictness by owner directive; ``max_correction_m`` and
+# ``over_tolerance_clamp_count`` in the evidence keep it visible in the receipt.
+# ``_NEGATIVE_ZERO_TOLERANCE`` survives only as the line between routine cleanup
+# and a flagged clamp in that evidence, and as the raw-content range check in
+# :func:`run_state_variable_qc` (which always runs on already-projected bytes).
+MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
 MAX_RIVER_MEAN_CORRECTION_M = 2.0e-3
 
 
@@ -107,10 +120,12 @@ class StateResidualNormalization:
     river_row_count: int = 0
     max_river_correction_m: float = 0.0
     mean_river_correction_m: float = 0.0
+    over_tolerance_clamp_count: int = 0
+    max_correction_m: float = 0.0
 
     def evidence(self) -> dict[str, Any]:
         return {
-            "policy": "bounded_physical_zero_projection_v3",
+            "policy": "unbounded_physical_zero_projection_v4",
             "accepted": self.accepted,
             "reason": self.reason,
             "normalized_value_count": self.normalized_value_count,
@@ -121,7 +136,6 @@ class StateResidualNormalization:
             ),
             "max_unsat_correction_m": self.max_unsat_correction_m,
             "mean_unsat_correction_m": self.mean_unsat_correction_m,
-            "max_unsat_negative_repair_m": MAX_UNSAT_NEGATIVE_REPAIR_M,
             "max_unsat_mean_correction_m": MAX_UNSAT_MEAN_CORRECTION_M,
             "normalized_river_row_count": self.normalized_river_row_count,
             "river_row_count": self.river_row_count,
@@ -130,21 +144,23 @@ class StateResidualNormalization:
             ),
             "max_river_correction_m": self.max_river_correction_m,
             "mean_river_correction_m": self.mean_river_correction_m,
-            "max_river_negative_repair_m": MAX_RIVER_NEGATIVE_REPAIR_M,
             "max_river_mean_correction_m": MAX_RIVER_MEAN_CORRECTION_M,
+            "negative_zero_tolerance_m": _NEGATIVE_ZERO_TOLERANCE,
+            "over_tolerance_clamp_count": self.over_tolerance_clamp_count,
+            "max_correction_m": self.max_correction_m,
         }
 
 
 def normalize_state_negative_residuals(content: str) -> StateResidualNormalization:
-    """Project bounded negative restart residuals to the physical zero floor.
+    """Project every negative restart residual to the physical zero floor.
 
-    Other state variables retain the existing 10 mm numeric-zero tolerance.
-    ``Unsat`` alone receives the 50 mm repair ceiling because SHUD explicitly
-    maps negative unsaturated-zone depth to its dry constitutive branch, and the
-    river ``Stage`` column receives the 0.2 m ceiling for the same reason on the
-    channel-routing side.  Any value beyond its ceiling remains untouched so
-    normal QC rejects it.  Lake stage is deliberately NOT relaxed: no residual
-    evidence exists for it, so it fails closed on the 10 mm tolerance.
+    There is no per-cell repair ceiling: any negative value in any state column,
+    of any magnitude, is written as ``0``. Rejection is decided solely by the two
+    domain-mean correction caps, which is what still fails closed on a
+    basin-wide solver collapse. ``_NEGATIVE_ZERO_TOLERANCE`` no longer gates the
+    projection; it only splits the evidence into routine sub-centimetre cleanup
+    and ``over_tolerance_clamp_count`` flagged clamps. See the module-level
+    comment on the caps for the population data and the recorded trade.
     """
 
     lines = content.splitlines()
@@ -167,6 +183,8 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
     river_row_count = 0
     river_correction_sum = 0.0
     max_river_correction = 0.0
+    max_correction = 0.0
+    over_tolerance_clamps = 0
     mesh_row_index = 0
     data_row_index = 0
     stage_section_count = 0
@@ -220,18 +238,13 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
             value = row[value_index]
             if value >= 0.0:
                 continue
-            if is_mesh_row and unsat_index == value_index:
-                tolerance = MAX_UNSAT_NEGATIVE_REPAIR_M
-            elif is_river_row and stage_index == value_index:
-                tolerance = MAX_RIVER_NEGATIVE_REPAIR_M
-            else:
-                tolerance = _NEGATIVE_ZERO_TOLERANCE
-            if value < -tolerance:
-                continue
             tokens[value_index] = "0"
             changed = True
             normalized_value_count += 1
             correction = -value
+            max_correction = max(max_correction, correction)
+            if correction > _NEGATIVE_ZERO_TOLERANCE:
+                over_tolerance_clamps += 1
             if is_mesh_row and unsat_index == value_index:
                 normalized_unsat_rows.add(mesh_row_index - 1)
                 unsat_correction_sum += correction
@@ -262,6 +275,8 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
             river_row_count,
             max_river_correction,
             mean_river_correction,
+            over_tolerance_clamps,
+            max_correction,
         )
 
     if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
@@ -291,6 +306,8 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
         river_row_count,
         max_river_correction,
         mean_river_correction,
+        over_tolerance_clamps,
+        max_correction,
     )
 
 

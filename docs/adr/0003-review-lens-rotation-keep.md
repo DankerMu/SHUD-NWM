@@ -1085,12 +1085,12 @@ two data points without measuring the log.** Measured over all 446 lines at
 | carrying `round`+`lens` (counted) | **1314 (98.7%)** |
 | carrying `phase` only (skipped) | **17 (1.3%)** |
 
-The 17 sit in exactly **four** entries — log lines 440, 442, 443, 445 = PRs
-#1730, #1738, #1746, #1751. #1730 is `rounds=1` and never entered the numerator,
+The 17 sit in exactly **four** entries — log lines 440, 442, 443, 445 =
+PRs #1730, #1738, #1746, #1751. #1730 is `rounds=1` and never entered the numerator,
 so the upper bound on later-round catches lost to this is **14 of 332 (≤4.2%)**
 across three multi-round PRs. `phase`-only is a **recent write regression**, not
-a historical baseline: `round`/`lens` has been written continuously since PR
-#1126, and `references/phase-flow.md:566` already specifies `{"round":<n>,
+a historical baseline: `round`/`lens` has been written continuously since
+PR #1126, and `references/phase-flow.md:566` already specifies `{"round":<n>,
 "lens":...}` as the canonical shape — those four entries violate an existing
 convention rather than reveal a missing one.
 
@@ -1167,3 +1167,48 @@ tally while contributing no opportunity for a rotated lens to catch anything. Th
 counter's denominator is multi-round PRs but its `core` numerator admits catches
 from PRs where rotation was never exercised. Anyone using this ratio to argue
 cut should first filter to PRs that actually reached round 2.
+
+## Revisit 2026-08-23 (PR #1773, issue #1743) — keep; a zero-round line cannot move this counter
+
+`loop_log_audit --log docs/review-loop-log.jsonl` returns DECIDABLE at 111
+multi-round merged PRs, later-round catches **core=68 / rotated=264** —
+identical to the previous revisit (PR #1754) in all three numbers.
+
+That identity is the whole content of this revisit. PR #1773 is a `fixture:
+none`, `rounds: 0` line: no cross-review round ran at all, so it contributes to
+neither numerator and does not even enter the multi-round denominator. The
+counter is unchanged because nothing about it was exercised.
+
+Decision unchanged: **keep** the rotation.
+
+Worth recording alongside the five ways this counter can already mislead: the
+audit emits DECIDABLE on every merge once the sample thresholds are met,
+*including* merges that carry zero review evidence in either direction. The
+obligation to record a keep/cut call therefore fires on lines that are, by
+construction, incapable of informing it. That is not an argument to weaken the
+obligation — a cheap recorded "unchanged, and here is why it could not change"
+is exactly what keeps the ledger honest — but a reader scanning revisit headings
+should not mistake the *number* of revisits for the amount of evidence
+accumulated. The prior revisit made the adjacent point about single-round PRs
+inflating `core`; this one makes the stronger version: zero-round PRs inflate the
+revisit count itself.
+
+## Revisit 2026-08-23 (PR #1771, issue #1669) — keep, counter did not move
+
+`loop_log_audit` returns DECIDABLE at **111 multi-round merged PRs, core=68 /
+rotated=264** — identical to the PR #1754 revisit above. This PR contributed
+nothing to either bucket: one round, and its single catch is a round-1 catch, so
+it lands in neither later-round tally.
+
+That is the fifth caveat from the #1754 revisit playing out exactly as described:
+single-round PRs enlarge the population without exercising rotation. Decision
+unchanged: **keep**.
+
+One observation worth recording anyway, because it is about where catches come
+from rather than which lens found them. This PR's most consequential correction
+did not come from a lens at all — it came from the **user** challenging the
+premise ("production already has too many indexes"), which forced a measurement
+that reversed the approach from rebuilding an index to deleting it. The
+rotation counter cannot see that, and a reader using this ADR to reason about
+where review value originates should know the instrument only counts one of the
+sources.
