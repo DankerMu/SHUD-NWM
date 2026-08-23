@@ -1244,3 +1244,54 @@ why the default-keep has never been close to a hard call.
 
 Recorded under the run's autonomous default-keep rule; keep/cut remains a human
 call and this is the recorded default pending maintainer override.
+
+## Revisit 2026-08-23 (PR #1780, issue #1775) — keep, and the first caveat that cuts the other way
+
+`loop_log_audit` returns DECIDABLE at **113 multi-round merged PRs, core=68 /
+rotated=265**. This PR moved the denominator by one and `rotated` by one; `core`
+is unchanged. Decision unchanged: **keep**.
+
+On its face this is the cleanest pro-rotation line in the ledger so far. Round 1
+ran `relaxation-correctness`, `test-oracle-integrity` and
+`root-cause-blast-radius` and returned one P1 (a gate-parity divergence between
+`scheduler_candidates.py`'s terminal-skip exit and `_cycle_completion_verdict`).
+Round 2 rotated in `allowlist-tightening-reachability` and
+`gate-parity-and-test-honesty`, and returned a second P1 — a *second instance of
+the same class*, in a different code path. Round 3 went comprehensive and
+returned clean. A rotated-in lens found a P1 that the round-1 mix had not.
+
+**But that is not blind rotation, and counting it as such flatters the
+instrument.** The round-2 lens was rotated in *because* round 1 had named the
+class. It was targeted re-verification of a known failure mode, not exploration
+of an unexamined axis. It found what it was pointed at.
+
+That is the seventh caveat, and it is the first one that pushes *against*
+rotation rather than for it. The six recorded above all argue that `rotated` is
+a floor — that the counter systematically undercounts rotation's value. This one
+argues that some fraction of `rotated` is not rotation at all but follow-up
+targeting, which the ledger cannot distinguish from a lens rotated in cold. The
+honest statement is now two-sided: `rotated=265` is neither a floor nor an
+estimate, because it mixes two mechanisms with different value profiles. Both
+are worth doing; only one of them is what "lens rotation" names.
+
+The practical read is unchanged — 68 vs 265 is a wide enough margin to survive
+the correction in either direction — but a future maintainer deciding keep/cut on
+this counter should know it is measuring a union, and that separating the two
+would require recording *why* each lens entered a round, which no line currently
+does.
+
+One further observation, and it is the same shape as the PR #1771 revisit's
+point about the user challenge. This PR's most consequential error was not in
+the diff at all: the orchestrator's premise that production backfill was
+permanently wedged and would never self-heal was false, and it was written into
+the issue body and into every reviewer brief before any lens ran. Three
+comprehensive rounds, a verifier gate and a Phase 7 review all executed and all
+found real implementation defects; none questioned the premise, because a
+premise baked into the brief is upstream of every lens and is not part of what
+any of them review. No rotation policy reaches it. That is the second recorded
+instance of the ledger's blind spot being *where the review question came from*
+rather than *which lens asked it*, and it is a stronger argument for keeping the
+count honest than for changing it.
+
+Recorded under the run's autonomous default-keep rule; keep/cut remains a human
+call and this is the recorded default pending maintainer override.
