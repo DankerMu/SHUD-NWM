@@ -1514,7 +1514,7 @@ orchestrator's own output, on a surface no reviewer is chartered to enumerate
 exhaustively.** Reviewers sample prose for plausibility; nobody was tasked to
 enumerate every claim and rule on each. The closed-list audit is that task, and
 this is the second time it has closed a class no lens closed (the first was
-#1759).
+issue #1759).
 
 Two rules adopted from this run, both cheap:
 
@@ -1603,3 +1603,25 @@ line contained the pattern, yielding false "still running" readings — use
 `pgrep -f` with a bracketed pattern or check the PID directly.
 
 Keep/cut unchanged; still the recorded default-keep pending maintainer override.
+
+## Revisit (2026-08-23, issue #1185 / parent PR #1753 terminal split)
+
+The appended #1753 line is a terminal `ceiling-split` record, not a merged
+sample. With master's #1789 accountability already present, `loop_log_audit`
+remains at **119 multi-round merged PRs, later-round catches core=68 rotated=285**.
+The parent terminal line contributes neither a merged sample nor a catch. This
+does not change the direction already adjudicated above, so the recorded **keep
+rotation** decision stands unchanged.
+
+This line does add a cost-boundary signal, but it belongs to the review-gate
+sizing ledger rather than the lens-allocation ratio. PR #1753 reached Round 3
+with one remaining P2 coverage finding on a behavior-neutral extraction that
+had entered the PR only after a deterministic large-file hook fired. The second
+gate selected a real breadth split: extraction compatibility moves to
+predecessor issue #1799, and the cohort-identity state machine returns in a
+successor PR for #1185 after that predecessor merges. The finding and
+implementation are not copied into both children.
+
+That is the gate doing the job this ADR does not: stopping an unrelated wrapper
+compatibility proof from consuming more high-risk journal review rounds. It
+neither supports nor weakens lens rotation, so no keep/cut policy change follows.
