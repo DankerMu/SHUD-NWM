@@ -37,6 +37,11 @@ _UNRECOGNIZED_CANDIDATE_SUMMARY_ERROR = "unrecognized_candidate_shape"
 # Both reconcile segments record their own failure key (scheduler_runtime.py:1542,1572)
 # and either can be the only one present, so the compact block must keep both.
 _BOUNDED_RESTART_RECONCILE_KEYS = ("status", "reserved_unbound_error", "inflight_error")
+# #1797: the same symmetry applies to the outcome rows.  `identity_mismatch_blocked` is
+# produced by `reconcile_inflight_jobs` (reconcile.py:1076-1087) and lands in `inflight`,
+# so compacting only `reserved_unbound` deleted the lane the streak guard below exists to
+# protect, and a discarded lane reads exactly like a lane with no outcomes.
+_BOUNDED_RESTART_RECONCILE_LANES = ("inflight", "reserved_unbound")
 # Producer key set: scheduler_runtime.py:1515-1538 (sole writer of outcome rows).
 _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
     "job_id",
@@ -299,18 +304,30 @@ def _compact_bounded_restart_reconcile(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     compact = _present_bounded_summary_keys(value, _BOUNDED_RESTART_RECONCILE_KEYS)
-    reserved_unbound = value.get("reserved_unbound")
-    outcomes = reserved_unbound.get("outcomes") if isinstance(reserved_unbound, Mapping) else None
-    if isinstance(outcomes, Sequence) and not isinstance(outcomes, str | bytes | bytearray):
-        compact["reserved_unbound"] = {
-            "outcomes": [
-                _present_bounded_summary_keys(outcome, _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS)
-                if isinstance(outcome, Mapping)
-                else {}
-                for outcome in outcomes
-            ]
-        }
+    for lane in _BOUNDED_RESTART_RECONCILE_LANES:
+        lane_outcomes = _compact_bounded_reconcile_lane(value.get(lane))
+        if lane_outcomes is not None:
+            compact[lane] = {"outcomes": lane_outcomes}
     return compact
+
+
+def _compact_bounded_reconcile_lane(lane: Any) -> list[dict[str, Any]] | None:
+    """Filter one reconcile lane's outcome rows, or ``None`` when the lane has none.
+
+    ``None`` means "emit no lane": both a lane absent from the source and a lane
+    present without an ``outcomes`` sequence stay absent from the compact block, so a
+    fabricated empty list never claims the lane ran with zero outcomes.
+    """
+
+    outcomes = lane.get("outcomes") if isinstance(lane, Mapping) else None
+    if not isinstance(outcomes, Sequence) or isinstance(outcomes, str | bytes | bytearray):
+        return None
+    return [
+        _present_bounded_summary_keys(outcome, _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS)
+        if isinstance(outcome, Mapping)
+        else {}
+        for outcome in outcomes
+    ]
 
 
 def _present_bounded_summary_keys(value: Mapping[str, Any], keys: Sequence[str]) -> dict[str, Any]:

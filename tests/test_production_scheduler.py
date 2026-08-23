@@ -20026,11 +20026,123 @@ def test_bounded_evidence_retains_inflight_error_when_only_the_inflight_segment_
     rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
 
     assert len(rendered.encode("utf-8")) <= 8_000
+    # #1797: the inflight lane is kept symmetric with `reserved_unbound` -- its rows
+    # survive filtered through `_BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS`, so the verbose
+    # `detail` is still dropped while the lane itself stays readable.
     assert bounded["restart_reconcile"] == {
         "status": "error",
         "inflight_error": "OperationalError: reconcile sacct session unavailable",
+        "inflight": {"outcomes": [{"job_id": "job_healthy"}]},
     }
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
+def test_bounded_evidence_keeps_inflight_identity_mismatch_outcomes() -> None:
+    """#1797: `identity_mismatch_blocked` is written into the `inflight` lane.
+
+    `reconcile_inflight_jobs` (`reconcile.py:1076-1087`) is the producer, so an
+    acceptance check asking "did this pass record an identity mismatch?" reads the
+    `inflight` lane.  Dropping the lane on the bounded path made a discarded lane
+    indistinguishable from an empty one and falsely satisfied that check.
+    """
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_inflight_identity")
+    payload["restart_reconcile"] = {
+        "status": "completed",
+        "inflight": {
+            "count": 1,
+            "outcomes": [
+                {
+                    "job_id": "job_cycle_gfs_2026072612_forecast",
+                    "idempotency_key": _bounded_incident_verbose_text("inflight-identity-key"),
+                    "action": "identity_mismatch_blocked",
+                    "status": "reserved",
+                    "reconciliation_decision": "identity_mismatch_blocked",
+                    "reconciliation_reason_class": "identity_mismatch",
+                    "identity_blocked_streak": 4,
+                    "durable_write_kind": "pipeline_job_reconciliation",
+                    "durable_write_count": 1,
+                    "attempt_evidence": {"detail": _bounded_incident_verbose_text("inflight-attempt")},
+                }
+            ],
+        },
+    }
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+    rendered = json.dumps(bounded, separators=(",", ":"), sort_keys=True)
+
+    assert len(rendered.encode("utf-8")) <= 8_000
+    assert bounded["restart_reconcile"] == {
+        "status": "completed",
+        "inflight": {
+            "outcomes": [
+                {
+                    "job_id": "job_cycle_gfs_2026072612_forecast",
+                    "action": "identity_mismatch_blocked",
+                    "status": "reserved",
+                    "reconciliation_reason_class": "identity_mismatch",
+                    "identity_blocked_streak": 4,
+                }
+            ]
+        },
+    }
+    assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
+
+
+def test_compact_restart_reconcile_keeps_both_lanes_absent_when_the_source_lacks_them() -> None:
+    """#1797 absence direction: a lane missing from the source must not be invented."""
+
+    from services.orchestrator import scheduler_evidence_payload
+
+    compact = scheduler_evidence_payload._compact_bounded_restart_reconcile(
+        {"status": "completed", "reserved_unbound": {"outcomes": [{"job_id": "job-1", "action": "bound"}]}}
+    )
+
+    assert compact == {
+        "status": "completed",
+        "reserved_unbound": {"outcomes": [{"job_id": "job-1", "action": "bound"}]},
+    }
+    assert "inflight" not in compact
+
+
+def test_compact_restart_reconcile_does_not_fabricate_outcomes_for_either_lane() -> None:
+    """#1797: a lane present without an `outcomes` sequence stays out, both sides alike."""
+
+    from services.orchestrator import scheduler_evidence_payload
+
+    compact = scheduler_evidence_payload._compact_bounded_restart_reconcile(
+        {
+            "status": "completed",
+            "inflight": {"count": 0},
+            "reserved_unbound": {"count": 0},
+        }
+    )
+
+    assert compact == {"status": "completed"}
+
+
+def test_compact_restart_reconcile_passes_an_empty_outcomes_list_through_on_both_lanes() -> None:
+    """An empty list is a real sequence: it means "no outcomes", not "lane missing"."""
+
+    from services.orchestrator import scheduler_evidence_payload
+
+    compact = scheduler_evidence_payload._compact_bounded_restart_reconcile(
+        {
+            "status": "completed",
+            "inflight": {"count": 0, "outcomes": []},
+            "reserved_unbound": {"count": 0, "outcomes": []},
+        }
+    )
+
+    assert compact == {
+        "status": "completed",
+        "inflight": {"outcomes": []},
+        "reserved_unbound": {"outcomes": []},
+    }
 
 
 def test_bounded_evidence_omits_restart_reconcile_when_source_payload_has_none() -> None:
@@ -34350,6 +34462,9 @@ def _expected_bounded_restart_reconcile() -> dict[str, Any]:
                 {"job_id": "job_healthy", "action": "bound", "status": "submitted"},
             ]
         },
+        # #1797: the source fixture carries an `inflight` lane too; the compact block
+        # keeps both lanes, each filtered through the same per-outcome key set.
+        "inflight": {"outcomes": [{"job_id": "job-3"}]},
     }
 
 
