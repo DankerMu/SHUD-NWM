@@ -1625,3 +1625,27 @@ implementation are not copied into both children.
 That is the gate doing the job this ADR does not: stopping an unrelated wrapper
 compatibility proof from consuming more high-risk journal review rounds. It
 neither supports nor weakens lens rotation, so no keep/cut policy change follows.
+
+## Revisit (2026-08-23, issue #1799 / PR #1803)
+
+The merged Child A line has one comprehensive round, so it does not enter the
+multi-round rotation sample. `loop_log_audit` therefore remains at **119
+multi-round merged PRs, later-round catches core=68 rotated=285**. The recorded
+**keep rotation** decision is unchanged.
+
+The useful signal from this child occurred before that accounting boundary. Its
+fixture reviewer found that the first invariant inventory named four downstream
+consumers while production had eight. The orchestrator's Phase 2 audit then
+found that four import/runtime binding classes still lacked committed evidence,
+and that the extracted module's local Protocol described `config` while its
+window implementation actually called `discover_cycles`. Both defects were
+closed before PR review. Round 1 then ran all six high-risk lenses and returned
+zero candidates; the independent final sweep also returned zero.
+
+That sequence is not evidence that rotation is wasted. It is evidence that lens
+rotation is not a substitute for the earlier closed-list inventory and
+orchestrator verification gates: by review time, those gates had already turned
+the missing surfaces into durable tests. Conversely, counting either early catch
+as a rotated-lens catch would overstate rotation's value. Keep/cut remains
+unchanged; this single-round confirming instance moves neither numerator nor
+denominator.
