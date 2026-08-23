@@ -13770,3 +13770,257 @@ def test_scheduler_pass_evidence_carries_the_journal_read_attribution() -> None:
     assert attribution["totals"]["bytes"] == 1234
     assert [row["tag"] for row in attribution["tags"]] == ["unattributed|unattributed"]
     journal_module.reset_journal_read_counters()
+
+
+def _released_identity_blocked_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+    """The production wedge: reserved -> identity-blocked release (#1748)."""
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert (
+        repository.release_identity_blocked_reservation(
+            str(record["job_id"]),
+            accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+    return repository, record
+
+
+def test_recover_released_identity_blocked_reservation_mints_one_successor(tmp_path: Path) -> None:
+    """#1748 tasks 2.1/2.3/4.1 -- the operator door mints the next retry identity.
+
+    Before this change the released row was a permanent silent wedge: both
+    automatic minting arms are gated on ``should_auto_retry``, which is false by
+    construction for a row whose ``error_code`` the release deliberately
+    withholds.  The recovery path is the ONLY liveness the shape has.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        forecast_cohort_digest,
+    )
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == "identity_mismatch_released"
+
+    successor = repository.recover_released_identity_blocked_reservation(
+        job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=int(released["submission_attempt"]),
+        expected_submission_attempt_started_at=released["submission_attempt_started_at"],
+    )
+
+    assert successor is not None
+    assert successor["job_id"] == f"{job_id}_retry_1"
+    assert successor["idempotency_key"] == f"{record['idempotency_key']}:retry_1"
+    assert successor["slurm_comment"] == f"nhms_idem:{record['idempotency_key']}:retry_1"
+    assert successor["status"] == "pending"
+    assert successor["retry_count"] == 1
+    assert successor["slurm_job_id"] is None
+    assert successor["matched_slurm_job_id"] is None
+    assert successor["reconciliation_decision"] is None
+    assert successor["submit_outcome"] is None
+    assert successor["identity_blocked_streak"] == 0
+    assert successor["error_code"] is None
+    assert successor["previous_job_id"] == job_id
+
+    # Cohort identity preservation: a recovered attempt is the SAME cohort.
+    # ``cohort_members`` is what carries that, byte-for-byte.
+    assert successor["cohort_members"] == released["cohort_members"]
+    # ``cohort_digest`` CANNOT be carried over unchanged, and this assertion is
+    # the durable record of why: ``forecast_cohort_digest`` hashes ``job_id``,
+    # ``idempotency_key`` and ``slurm_comment`` (accepted_submit_identity.py:1006),
+    # all three of which the ``_retry_<n>`` suffix necessarily changes, while
+    # ``forecast_cohort_identity_is_valid`` (:1094) enforces
+    # ``cohort_digest == forecast_cohort_digest(row)`` on every master write.
+    # "Successor carries the retry suffix" and "successor carries the same
+    # digest" are mutually exclusive by construction.  The ordinary attempt path
+    # resolves it the same way (``_reserve_cycle_stage`` recomputes per attempt).
+    assert successor["cohort_digest"] == forecast_cohort_digest(successor)
+    assert successor["cohort_digest"] != released["cohort_digest"]
+
+    persisted = repository.get_pipeline_job(f"{job_id}_retry_1")
+    assert persisted is not None and persisted["status"] == "pending"
+
+    # Exactly one successor, and the source row keeps its null error_code.
+    source_after = repository.get_pipeline_job(job_id)
+    assert source_after["status"] == "reservation_lost"
+    assert source_after.get("error_code") in (None, "")
+    cycle_jobs = repository.query_pipeline_jobs_by_cycle(str(record["cycle_id"]))
+    assert [job["job_id"] for job in cycle_jobs if str(job["job_id"]).startswith(f"{job_id}_retry_")] == [
+        f"{job_id}_retry_1"
+    ]
+
+
+def test_recover_released_identity_blocked_reservation_refuses_repeat_invocation(tmp_path: Path) -> None:
+    """#1748 tasks 2.6/4.6 -- one released row can never yield two successors.
+
+    The CAS guard does NOT cover this: minting leaves the source row's
+    ``submission_attempt`` / anchor untouched, so a second identical call passes
+    every shape and CAS check.  The successor identity collision is what refuses.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    kwargs = {
+        "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        "expected_submission_attempt": int(released["submission_attempt"]),
+        "expected_submission_attempt_started_at": released["submission_attempt_started_at"],
+    }
+
+    first = repository.recover_released_identity_blocked_reservation(job_id, **kwargs)
+    assert first is not None
+    successor_before = repository.get_pipeline_job(f"{job_id}_retry_1")
+    source_before = repository.get_pipeline_job(job_id)
+
+    second = repository.recover_released_identity_blocked_reservation(job_id, **kwargs)
+
+    assert second is None
+    assert repository.get_pipeline_job(f"{job_id}_retry_1") == successor_before
+    assert repository.get_pipeline_job(job_id) == source_before
+    cycle_jobs = repository.query_pipeline_jobs_by_cycle(str(record["cycle_id"]))
+    assert [job["job_id"] for job in cycle_jobs if str(job["job_id"]).startswith(f"{job_id}_retry_")] == [
+        f"{job_id}_retry_1"
+    ]
+
+
+def test_recover_released_identity_blocked_reservation_refuses_cas_mismatch(tmp_path: Path) -> None:
+    """#1748 tasks 2.2/4.3 -- a concurrently advanced attempt loses the race."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    before = dict(released)
+
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]) + 1,
+            expected_submission_attempt_started_at=released["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]),
+            expected_submission_attempt_started_at=_dt("2001-01-01T00:00:00Z"),
+        )
+        is None
+    )
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(released["submission_attempt"]),
+            expected_submission_attempt_started_at=None,
+        )
+        is None
+    )
+
+    assert repository.get_pipeline_job(job_id) == before
+    assert repository.get_pipeline_job(f"{job_id}_retry_1") is None
+
+
+def test_recover_released_identity_blocked_reservation_refuses_unowned_shapes(tmp_path: Path) -> None:
+    """#1748 tasks 2.4/4.2 -- every shape outside the released terminal is refused."""
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    # (a) a plain reserved row -- never released.
+    repository, record = _reserved_cohort_master(tmp_path / "reserved", member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            str(record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert repository.get_pipeline_job(f"{record['job_id']}_retry_1") is None
+
+    # (b) the OTHER released decision -- ``absence_retry_permitted`` owns the
+    # reclaim door and must not be recovered through this one.
+    permitted_repo, permitted_record = _reserved_cohort_master(tmp_path / "permitted", member_count=2)
+    assert permitted_repo.reserve_pipeline_job(dict(permitted_record)) is not None
+    permitted_reserved = permitted_repo.get_pipeline_job(str(permitted_record["job_id"]))
+    assert (
+        permitted_repo.permit_pipeline_job_retry(
+            str(permitted_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(permitted_reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=permitted_reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = permitted_repo.get_pipeline_job(str(permitted_record["job_id"]))
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+    assert (
+        permitted_repo.recover_released_identity_blocked_reservation(
+            str(permitted_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(permitted["submission_attempt"]),
+            expected_submission_attempt_started_at=permitted["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert permitted_repo.get_pipeline_job(f"{permitted_record['job_id']}_retry_1") is None
+
+    # (c) a bound row -- a live Slurm identity is never recoverable this way.
+    bound_repo, bound_record = _reserved_cohort_master(tmp_path / "bound", member_count=2)
+    assert bound_repo.reserve_pipeline_job(dict(bound_record)) is not None
+    bound_reserved = bound_repo.get_pipeline_job(str(bound_record["job_id"]))
+    _bind_and_project_cohort(bound_repo, bound_record, member_count=2)
+    bound = bound_repo.get_pipeline_job(str(bound_record["job_id"]))
+    assert bound["slurm_job_id"] == "17667"
+    assert (
+        bound_repo.recover_released_identity_blocked_reservation(
+            str(bound_record["job_id"]),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(bound_reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=bound_reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+    assert bound_repo.get_pipeline_job(f"{bound_record['job_id']}_retry_1") is None
+
+    # (d) an unknown job id.
+    assert (
+        repository.recover_released_identity_blocked_reservation(
+            "job_cycle_gfs_2026072000_forecast_missing",
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        is None
+    )
+
+    # (e) a stale accepted-submit contract version raises rather than recovers.
+    released_repo, released_record = _released_identity_blocked_master(tmp_path / "released")
+    released_row = released_repo.get_pipeline_job(str(released_record["job_id"]))
+    with pytest.raises(journal_module.FileOrchestrationJournalError):
+        released_repo.recover_released_identity_blocked_reservation(
+            str(released_record["job_id"]),
+            accepted_submit_contract_version="v0-not-current",
+            expected_submission_attempt=int(released_row["submission_attempt"]),
+            expected_submission_attempt_started_at=released_row["submission_attempt_started_at"],
+        )
+    assert released_repo.get_pipeline_job(f"{released_record['job_id']}_retry_1") is None

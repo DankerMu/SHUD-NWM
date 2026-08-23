@@ -51803,3 +51803,136 @@ def test_build_candidates_without_lineage_is_unchanged(tmp_path: Path) -> None:
     assert [candidate.model_id for candidate in candidates] == ["model_a"]
     assert blocked == []
     assert skipped == []
+
+
+def _identity_released_operator_signals(repository: Any, job_id: str) -> list[dict[str, Any]]:
+    """Operator-visible records carrying the #1748 searchable token."""
+
+    released = repository.get_pipeline_job(job_id)
+    assert released is not None
+    source_id = file_orchestration_journal_module._source_id_from_job(released)
+    cycle_time = file_orchestration_journal_module._cycle_time_from_job(released)
+    rows = repository._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=None)
+    return [
+        dict(event)
+        for event in rows.pipeline_events
+        if str(event.get("event_type") or "") == "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
+    ]
+
+
+def _assert_identity_released_operator_signal(repository: Any, job_id: str, *, streak: int) -> None:
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+    signal = signals[0]
+    released = repository.get_pipeline_job(job_id)
+    assert signal["entity_type"] == "pipeline_job"
+    assert signal["entity_id"] == job_id
+    assert signal["status_to"] == "reservation_lost"
+    assert "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR" in str(signal["message"])
+    details = signal["details"]
+    assert details["pipeline_job_id"] == job_id
+    assert details["cohort_digest"] == released["cohort_digest"]
+    assert details["identity_blocked_streak"] == streak
+
+
+def test_identity_blocked_release_signals_operator_from_a_fresh_reservation(tmp_path: Path) -> None:
+    """#1748 tasks 3.1/4.4 -- the released terminal announces itself, prior state 1.
+
+    Without this record the wedge is indistinguishable from an ordinary
+    in-flight reservation until a human happens to read the journal; the
+    2026-08-22 production wedge was found only by accident.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    assert _identity_released_operator_signals(repository, job_id) == []
+
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+
+    _assert_identity_released_operator_signal(repository, job_id, streak=3)
+
+    # Exactly once per release: a re-run of the same release is a no-op CAS
+    # refusal and must not emit a second record.
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 0
+    )
+    _assert_identity_released_operator_signal(repository, job_id, streak=3)
+
+
+def test_identity_blocked_release_signals_operator_from_a_reclaimed_reservation(tmp_path: Path) -> None:
+    """#1748 tasks 3.1/4.4 -- prior state 2: the reclaim-re-seeded reservation.
+
+    Same walk as ``test_reclaimed_reservation_release_is_not_auto_retriable_either``
+    (the SECOND *reservation* write point): reserve, permit, reclaim, release.
+    There is only one release write point, so the signal must appear here too.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    record = dict(vars(_accepted_submit_reserved_cohort_row()))
+    job_id = str(record["job_id"])
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.permit_pipeline_job_retry(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+        )
+        == 1
+    )
+    permitted = repository.get_pipeline_job(job_id)
+    assert (
+        repository.reclaim_pipeline_job_reservation(
+            {
+                **permitted,
+                "expected_submission_attempt": permitted["submission_attempt"],
+                "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+                "status": "reserved",
+                "submission_attempt": int(permitted["submission_attempt"]) + 1,
+                "submit_outcome": None,
+                "reconciliation_source": None,
+                "reconciliation_decision": None,
+                "matched_slurm_job_id": None,
+            }
+        )
+        is not None
+    )
+    reclaimed = repository.get_pipeline_job(job_id)
+    assert reclaimed["status"] == "reserved"
+    assert _identity_released_operator_signals(repository, job_id) == []
+
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reclaimed["submission_attempt"]),
+            expected_submission_attempt_started_at=reclaimed["submission_attempt_started_at"],
+            identity_blocked_streak=4,
+        )
+        == 1
+    )
+
+    _assert_identity_released_operator_signal(repository, job_id, streak=4)
