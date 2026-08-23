@@ -81,6 +81,42 @@ writer, so the probed window cannot go stale before the DELETE executes. Recorde
 because the production idiom this mirrors *does* have that concern, and a
 reviewer importing production semantics into teardown would otherwise flag it.
 
+**Measured on node-27 after the fix pass** (PostgreSQL 15.2, TimescaleDB 2.10.2,
+throwaway database, one of two chunks compressed; full transcript in
+`.workplans/pr-1754/review/node27-e7-receipt.md`). Four statements, four
+settled questions:
+
+- An unbounded DELETE under an identity matching **zero** rows fails:
+  `cannot update/delete rows from chunk "_hyper_1_1_chunk" as it is compressed`.
+  Both issues' premise, measured on the server rather than inferred from #1119.
+- The same DELETE bounded to a window covering only the uncompressed chunk
+  succeeds. The bound restricts which chunks the statement touches — that is the
+  mechanism this change relies on.
+- A bounded DELETE whose window covers the compressed chunk fails identically.
+  So the claim above — the guard changes which error is raised, not whether the
+  DELETE succeeds — is now measured, not argued.
+- The `min`/`max` probe reads through compression: it returned the full 48-row
+  window including the 24 rows inside the compressed chunk. The probed window is
+  therefore never too narrow, and the DELETE cannot silently under-delete.
+
+The precise improvement: the failure surface narrows from **any compressed chunk
+anywhere in the hypertable** to **any compressed chunk overlapping `[min, max]`
+of the matching rows**. Note what that does not say — the first result above
+errored on an identity with zero matches, because the rejection happens at
+chunk-touch time, not at row-deletion time. A compressed chunk sitting *between*
+two matching rows would still fail. Irrelevant here, where the fixture's window
+is one hour wide, and recorded anyway because an approximately-true decision
+record is worse than none.
+
+Combined with the skip path, every case the two issues raise is covered: zero
+matching rows issue no statement at all, and matching rows produce a statement
+touching only their own chunks. The residual case fails **loud**, with a clear
+TimescaleDB error and never a silent under-delete — the same preference ordering
+that ruled out per-chunk skipping.
+
+This behavior is version-dependent. Re-take the probe after any TimescaleDB
+major upgrade rather than citing this receipt for a different version.
+
 ### D2 — Do not hard-code the seeded `valid_time` constants
 
 `#1654` offers, as its first recommendation, binding the bound to

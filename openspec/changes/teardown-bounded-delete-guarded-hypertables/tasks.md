@@ -65,7 +65,7 @@
       `.review-gate-issues.json` (inert gate accounting carried over from
       #1707's close, not code).
 - [x] E6 `openspec validate teardown-bounded-delete-guarded-hypertables --strict --no-interactive`.
-- [ ] E7 **node-27 receipt**, the terminal oracle:
+- [x] E7 **node-27 receipt**, the terminal oracle:
       `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=... uv run pytest -q -m integration
       tests/test_real_database_integration.py tests/test_display_coverage_residual_debt_integration.py`
       — teardown path passes, both the session-scoped and the throwaway-database
@@ -146,12 +146,53 @@ this PR introduces.
   in front of the real command — nothing executed through it, and every actual
   Python ran under `uv run`.
 
-### Still open
+### E7 receipt — node-27, HEAD `774e9ebe`
 
-E7 remains unchecked. node-27's **root filesystem is 100% full** (98G, 0
-available; `/tmp/pytest-of-nwm` alone holds 27G of accumulated pytest temp
-trees), so the integration lane cannot create its throwaway database or write
-its temp files. Production is unaffected — the PG data lives on `/home`, which
-has 517G free, and the container is up and answering. The cleanup is a
-destructive action on a production host and is awaiting the operator's decision;
-this PR does not merge before E7 lands.
+Full transcript in `.workplans/pr-1754/review/node27-e7-receipt.md`. Server:
+**PostgreSQL 15.2, TimescaleDB 2.10.2** — the probe's subject is server
+behavior, which is version-dependent, so the versions are part of the receipt.
+
+The lane, in a detached worktree `/home/nwm/NWM-1640` at `774e9ebe`:
+
+```
+NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL='postgresql://nhms:nhms_dev@127.0.0.1:55432/postgres' \
+uv run pytest -q -m integration tests/test_real_database_integration.py \
+  tests/test_display_coverage_residual_debt_integration.py
+
+17 passed in 29.10s
+```
+
+Both callers of `seed_issue_126_data` exercised — the session-scoped database and
+the per-test throwaway one — against a real `RealDictCursor`, which is the
+fidelity gap round 1 named as unclosable by the local fake.
+
+**Premise probe**, run on a throwaway database (`nhms_premise_1640`, dropped
+afterwards) built with two chunks, exactly one compressed:
+
+```
+chunk states: _hyper_1_1_chunk=true, _hyper_1_2_chunk=false
+A unbounded DELETE, identity matches ZERO rows
+  -> ERROR: cannot update/delete rows from chunk "_hyper_1_1_chunk" as it is compressed
+B bounded DELETE, window over the UNCOMPRESSED chunk only, zero rows match
+  -> succeeds
+C bounded DELETE, window covers the COMPRESSED chunk
+  -> ERROR: cannot update/delete rows from chunk "_hyper_1_1_chunk" as it is compressed
+D min/max probe over an identity spanning both chunks
+  -> min=2020-01-01 00:00:00+00 max=2020-01-02 23:00:00+00 n=48
+```
+
+A measures the premise of both issues on the server. B measures the fix's
+mechanism. C measures design D1's residual risk and its claim that the guard
+would not have helped. D measures that the probe reads through compression, so
+the window is never too narrow. D1 carries the analysis, including the sharp
+edge that the rejection is chunk-touch-time rather than row-deletion-time.
+
+The root-filesystem exhaustion that blocked this receipt (98G, 0 available;
+`/tmp/pytest-of-nwm` holding 27G) was cleared by the operator — `/` now at 76%,
+24G free. Reported as out-of-scope, not fixed: filed as
+https://github.com/DankerMu/SHUD-NWM/issues/1765, whose read-only verification
+sharpened the diagnosis — node-27 *does* measure `/` on a daily timer
+(`scripts/node27_resource_governance.py:208-213`, warn at 20 GiB, critical at
+10 GiB) but the lane hardcodes `"status": "completed"` (`:642`) and so exits 0
+under a critical recommendation, and its unit carries no `OnFailure=`. The signal
+existed and was structurally unable to reach anyone.
