@@ -2,20 +2,27 @@
 
 ## 0. Evidence Floor
 
-- [ ] `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_state_manager_generation_history.py tests/test_scheduler_backfill_predecessor.py` 全绿（本地）
+- [x] `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_state_manager_generation_history.py tests/test_scheduler_backfill_predecessor.py` 全绿（本地）
       —— **口径修正**：初稿写的是 `-k "cycle_completion or completion_verdict or warm_admission or init_state"`，
       该关键字集**选不中任何 D5/M4 测试**（`generation_scoped_history_signal_*`、
       `future_only_history_*` 一个词都不匹配），照那条跑会"以错误的理由变绿"。
-      改为直接点名实际承载证据的四个 suite。
-- [ ] `uv run ruff check .` 全绿（本地）
-- [ ] `openspec validate fix-cycle-completion-terminal-before-warm-admission --strict --no-interactive` 全绿（本地）
-- [ ] **三个 mutation check**，每一个都必须能把对应测试变红：
-      1. 把 D1 的判定顺序改回 strict-early-return 优先 → 红
-      2. 把 D2 的 `unverifiable` 塌回统一 `CONFLICT` → 红
-      3. 去掉 D3 的 successor 容忍条件（`unverifiable` 无条件判 complete）→ 红
-      4. 去掉 D5 的 `valid_time <= cutoff` 过滤 → 红
-      第 3 条是新放宽的安全销子；缺了它这次放宽就没有 pin。
-- [ ] **must-preserve 回归**：真实不一致仍 gap、`absent` 语义不变、successor 不 ready
+      改为直接点名实际承载证据的四个 suite。**终值 2081 passed**（终审独立复跑核实）。
+- [x] `uv run ruff check .` 全绿（本地）
+- [x] `openspec validate fix-cycle-completion-terminal-before-warm-admission --strict --no-interactive` 全绿（本地）
+- [x] **mutation check**，每一条都必须能把对应测试变红（各自先红后还原）。
+      初稿写"三个"却列了四条，且随两轮审查发现又增补三条；实际交付 **M1-M7 + 两条附加**：
+      1. **M1** 把 D1 的判定顺序改回 strict-early-return 优先 → 4 红
+      2. **M2** 把 D2 的 `unverifiable` 塌回统一 `CONFLICT` → 6 红
+         （含 candidate-loop 侧——D4 改为引用 verdict 判定式后的**反脱钩证据**：改一边两边同红）
+      3. **M3** 去掉 D3 的 successor 容忍条件 → 3 红
+      4. **M4** 去掉 D5 的 `valid_time <= cutoff` 过滤 → 6 红
+      5. **M5** 把成因允许清单放宽为任意 not-ready → 16 红
+      6. **M6** 只删 D4 的允许清单子句 → 4 红
+      7. **M7** 把 D4 的 `_successor_state_proves_continuity` 换回
+         `_successor_state_terminal_can_skip` → 1 红，恰好只红被修复的那条回归
+      附加：D4 两子句全删 → 6 红；去掉 D4 的 terminal skip → 1 红
+      M3 是本次放宽的安全销子，M5/M7 是两轮审查后新增的销子；缺任何一条对应放宽就没有 pin。
+- [x] **must-preserve 回归**：真实不一致仍 gap、`absent` 语义不变、successor 不 ready
       仍 gap、`match` 路径不变、非 terminal 仍 gap —— 各一条断言。
 - [ ] **node-22 部署后收据**（按序，全部必须满足）：
       1. 下一趟 pass `blocked_candidate_count` 28 → 0
@@ -29,19 +36,27 @@
 
 ## 1. Implementation
 
-- [ ] D1：`_cycle_completion_verdict` 第一分支判定顺序改为 terminal 优先
-- [ ] D2：`_terminal_init_state_verdict` 拆出 `unverifiable`，新增常量并纳入返回值域
-- [ ] D3：`unverifiable` 的容忍分支复用 `_successor_state_proves_continuity`
-- [ ] D4：`scheduler_candidates.py` warm-admission 分支之前先 `classify_candidate_state()`，
+- [x] D1：`_cycle_completion_verdict` 第一分支判定顺序改为 terminal 优先
+- [x] D2：`_terminal_init_state_verdict` 拆出 `unverifiable`，新增常量并纳入返回值域
+- [x] D3：`unverifiable` 的容忍分支复用 `_successor_state_proves_continuity`
+- [x] D4：`scheduler_candidates.py` warm-admission 分支之前先 `classify_candidate_state()`，
       terminal 终态短路
-- [ ] D5：`packages/common/state_manager.py` 的 `entries_for_model` 按
+- [x] D5：`packages/common/state_manager.py` 的 `entries_for_model` 按
       `valid_time <= cutoff` 过滤；更新那段注释说明为何 `> cutoff` 不算历史
+- [x] **D6（第二轮增补）**：`unverifiable` 收敛到**闭合成因允许清单**——不在清单内一律
+      `conflict`，无 reason 亦然（fail closed）。清单只含
+      `state_snapshot_index_exact_checkpoint_missing`；显式排除
+      `state_snapshot_index_prior_checkpoint_missing_after_history`（历史存在而 checkpoint
+      丢失，属 #1150/#1152 人工回填 population，是异常不是缺席）。
+- [x] **D7（第三轮增补）**：D4 出口改为**引用** verdict 路径自身的两个判定式
+      （`_terminal_init_state_verdict != CONFLICT` 且 `_successor_state_proves_continuity`），
+      不再维护平行的窄谓词。消除了两处 receipt-vs-verdict 分歧，并使规则只有一个所有者。
 
 ## 2. Spec
 
-- [ ] `cross-cycle-warm-start-chaining` delta：判定顺序 + `unverifiable` 容忍规则 + D5 的
-      history-existence 作用域（ADDED requirement）
-- [ ] `strict-warm-start` delta：推翻 "verdict 路径 bypass helper 并保持今天的 gap 行为"
+- [x] `cross-cycle-warm-start-chaining` delta：判定顺序 + `unverifiable` 容忍规则 + D5 的
+      history-existence 作用域（ADDED requirement）+ 允许清单规则
+- [x] `strict-warm-start` delta：推翻 "verdict 路径 bypass helper 并保持今天的 gap 行为"
 
 ## 3. Follow-ups filed
 
