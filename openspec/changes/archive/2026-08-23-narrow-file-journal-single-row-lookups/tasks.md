@@ -230,7 +230,7 @@ showing the criterion still missed alongside that split is this round succeeding
       cache-mutex -> write-mutex nesting.
 - [x] **Local suite**: `uv run pytest` over the journal/scheduler suites the
       round-1 change already covered, plus the new tests.
-- [ ] **node-22 receipt, same口径 as round 1 verbatim**: denominator 14,
+- [x] **node-22 receipt, same口径 as round 1 verbatim**: denominator 14,
       decimal GB/MB, `syscr` recorded alongside `rchar`, PID pinned for the whole
       sample on a pass that genuinely submits (a plan-only pass performs no
       writes, triggers no invalidation, and would understate B).
@@ -399,3 +399,27 @@ Two comprehensive rounds, both recorded in the review gate against PR #1788.
 No third comprehensive round: round 2's verified set was minor-only, and a
 comprehensive round is never bought for P2s alone. Phase 7 final review runs on
 the final head instead.
+
+### node-22 receipt taken (2026-08-23) — and it reframes the change
+
+Pass `scheduler_2026082311_881ead8569d1`, PID 51112 pinned for the whole pass,
+HEAD `935bb9a2`, 36.97 min, `submitted_count=14` / `blocked=0`, `tags_dropped=0`.
+Full receipt: `.workplans/1734/receipt-node22-round2.md`. Adjudication: **D15**.
+
+- `rchar`/candidate 3.175 -> **0.861 GB** = **72.87%**, primary criterion **MISSED**
+  and recorded as missed. `syscr` 1,403,447 -> **54,492** (−96.1%).
+  `wchar` 832.6 MB. `read_bytes` 1.830 GB.
+- **The criterion had a 73.20% ceiling** — 11.9 GB of its own denominator is
+  non-journal traffic. 72.87% is 99.55% of everything it could ever measure.
+- **The journal is 1.22% of the process** (146.6 MB of 12.060 GB), and 146.6 MB is
+  about ONE pass over a 142 MB tree.
+- **A/B/C all dead**: A = 0 bytes (lane wired at `file_orchestration_journal.py:5165`,
+  so never-fired not never-instrumented), B = 1.88 MB, C = 4.97 MB. Total 0.057%.
+- **No round 3.** Round-3 targeting existed to spend the A/B/C split; there is
+  nothing to spend it on.
+
+Two items deliberately left open rather than closed:
+
+- `read_bytes` 1.044 -> 1.856 GB at round 1, 1.830 GB now. `wchar` was required this
+  round to explain it and does not (flat, 820 -> 833 MB). Unexplained, recorded.
+- The 11.9 GB non-journal residual is routed to its own issue, not absorbed here.

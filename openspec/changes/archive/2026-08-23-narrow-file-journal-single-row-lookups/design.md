@@ -794,3 +794,78 @@ The round-2 fixes were accepted only with that last form attached: both new pins
 were demonstrated red against the specific defect they guard (the merge made
 status-conditional; the decorator stripped from `FileJournalRetryService` alone)
 and green again after restore.
+
+## D15. The primary criterion was unsatisfiable by construction — corrected, not re-ticked
+
+The node-22 receipt (`.workplans/1734/receipt-node22-round2.md`, pass
+`scheduler_2026082311_881ead8569d1`, HEAD `935bb9a2`) closes this change's open
+question, and the answer is not the one D1a through D12 were built to find.
+
+**The original criterion is NOT met and is NOT hereby marked met.** It read
+`>=90%` reduction in whole-process `rchar` per candidate. Measured: **72.87%**
+(3.175 -> 0.861 GB/candidate, denominator 14). It stays in the record as missed.
+
+**But it could never have been met.** The counter this round shipped measures
+146,563,559 bytes of journal-attributed reads against a process `rchar` of
+12,059,757,752 — the journal is **1.22%** of the traffic the criterion counts.
+The non-journal floor is 11.913 GB. Holding that floor constant back to baseline
+implies journal-at-baseline of 32.541 GB, so the ceiling on *any* journal work is
+32.541/44.454 = **73.20%**. The measured 72.87% is **99.55% of that ceiling**.
+
+The criterion put 11.9 GB of traffic the journal never touches into its own
+denominator. That is a specification defect in the criterion, dating to the
+issue's original diagnosis, which attributed a whole-process `/proc` figure to
+journal replay. Rounds 1 and 2 confirm the diagnosis was ~73% right: the
+narrowing really did remove ~32.4 GB. It was ~27% wrong, and the wrong part is
+exactly the part the criterion demanded.
+
+**Corrected criterion, stated so the difference from re-ticking is auditable:**
+journal-attributed bytes per pass. Measured 146.6 MB against an independently
+measured 142 MB tree — across a 37-minute production pass the journal is now
+read approximately **once**, which is the floor for a reader that must read it.
+
+### D15a. Why this is a correction and not oracle-weakening
+
+"Criterion revised after missing it" and "criterion corrected per measurement"
+are the same edit; only independent evidence separates them. The counter's own
+`sum(tags) == totals` is self-agreement and is disallowed by D14a. Three strands
+the counter did not compute:
+
+1. **Ceiling arithmetic** — from `/proc` `rchar` at two SHAs, not the counter. It
+   independently implies journal-at-baseline of 32.5 GB.
+2. **Syscall shape** — the 1,348,955 eliminated read syscalls carried 24 KB each
+   (journal-row-shaped); the ~52,170 survivors carry 228 KB each (bulk-data-shaped).
+   Two populations 9.5x apart; the small one is what disappeared.
+3. **Tree size** — 146.6 MB attributed against a 142 MB tree measured separately.
+
+### D15b. D11's three candidates are all empirically dead
+
+| candidate | lane | calls | bytes |
+|---|---|---|---|
+| A full-tree replay | `full_tree_replay` | **0** | **0** |
+| B flat-dir thrash | `direct_flat_scan` | 322 | 1.88 MB |
+| C uncached iterator | `cycle_replay` | 20 | 4.97 MB |
+| | **A+B+C** | 342 | **6.85 MB** = 0.057% of process `rchar` |
+
+A's lane string is wired in production (`file_orchestration_journal.py:5165`), so
+A = 0 means never fired, not never instrumented. The largest journal lane is
+`candidate_state|cycle_rows` at 94.7 MB (64.6% of journal reads) — a **baseline**
+lane, never a candidate.
+
+**Consequence: no round 3.** Round-3 targeting existed to spend the A/B/C split.
+The split says there is nothing to spend it on: the largest remaining lane is
+94.7 MB out of a 12.06 GB process. D7's memo contingency and D12's "size A" are
+both discharged — A is zero.
+
+### D15c. Out of scope, routed not fixed
+
+The 11.9 GB non-journal residual is **not this change's** and is not a defect
+this change may grow scope to chase. Routed to its own issue with the
+221 KB/syscall shape and the `read_bytes` data.
+
+One thing stays **open and unexplained**: `read_bytes` rose 1.044 -> 1.856 GB at
+round 1 and held at 1.830 GB in round 2. tasks.md required `wchar` this round
+specifically to explain it. `wchar` does not: it is flat across both rounds
+(820 -> 833 MB). Recorded as open. It does not block this closeout, because the
+journal conclusion rests on the counter plus the three strands above, none of
+which is disk-side bytes.

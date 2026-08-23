@@ -1901,6 +1901,11 @@
           "pr": 1759,
           "outcome": "merged",
           "rounds": 3
+        },
+        {
+          "pr": 1788,
+          "outcome": "closed",
+          "rounds": 2
         }
       ]
     },
