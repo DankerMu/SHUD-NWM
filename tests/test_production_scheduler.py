@@ -52093,3 +52093,73 @@ def test_release_signal_double_failure_degrades_to_a_log_without_raising(
     assert any(
         "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR" in record.getMessage() for record in caplog.records
     )
+
+
+def _assert_runnable_operator_command(details: Any, job_id: str) -> list[str]:
+    """The record must name the surface a human can reach, not just the API."""
+
+    command = str(details["operator_command"])
+    tokens = command.split()
+    assert tokens[0] == "nhms-pipeline"
+    assert tokens[1] == file_orchestration_journal_module.RELEASED_RESERVATION_RECOVERY_COMMAND
+    # The form that ACTS, not the discovery form.
+    assert "--attest" in tokens
+    assert tokens[tokens.index("--job-id") + 1] == job_id
+    assert tokens[tokens.index("--journal-root") + 1] == "<journal-root>"
+    # The redaction constraint on details keys still holds.
+    assert "error_code" not in details
+    assert not any(key.endswith("_token") for key in details)
+    return tokens
+
+
+def test_release_signal_carries_the_runnable_operator_command(tmp_path: Path) -> None:
+    """#1748 -- the signal must not point at the unreachable end of the path.
+
+    Round 3's defect was a signal telling an operator to invoke something they
+    had no way to invoke. Naming only ``recover_released_identity_blocked_reservation``
+    -- a private repository method -- leaves that half-closed now that a real
+    subcommand exists.
+    """
+
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, record = _reserve_wedged_identity_blocked_master(tmp_path / "journal")
+    job_id = str(record["job_id"])
+    reserved = repository.get_pipeline_job(job_id)
+    assert (
+        repository.release_identity_blocked_reservation(
+            job_id,
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=int(reserved["submission_attempt"]),
+            expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+            identity_blocked_streak=3,
+        )
+        == 1
+    )
+
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+    details = signals[0]["details"]
+    # Additive: the API name stays, the reachable surface is added beside it.
+    assert details["recovery_api"] == "recover_released_identity_blocked_reservation"
+    _assert_runnable_operator_command(details, job_id)
+
+
+def test_release_signal_failure_trace_also_carries_the_operator_command(tmp_path: Path) -> None:
+    """#1748 -- the degraded trace needs the command MORE, not less.
+
+    When the primary signal could not be written, a human reading the journal by
+    hand is the only remaining reader; handing them a method name is exactly the
+    dead end this whole round is about.
+    """
+
+    error = file_orchestration_journal_module.FileOrchestrationJournalError(
+        "file_journal_byte_limit_exceeded",
+        field="pipeline_event",
+    )
+    repository, job_id = _release_with_broken_signal(tmp_path, error, primary_only=True)
+
+    _assert_release_survived_a_broken_signal(repository, job_id)
+    failures = _identity_released_signal_failures(repository, job_id)
+    assert len(failures) == 1
+    _assert_runnable_operator_command(failures[0]["details"], job_id)

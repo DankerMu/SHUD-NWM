@@ -14492,3 +14492,34 @@ def test_operator_cli_recovery_lets_an_ordinary_pass_submit(tmp_path: Path, caps
     assert successor is not None
     assert successor["submit_outcome"] == "accepted"
     assert successor["slurm_job_id"] not in (None, "")
+
+
+def test_signalled_operator_command_is_actually_runnable(tmp_path: Path, capsys: Any) -> None:
+    """#1748 -- copy the command out of the journal record and run it verbatim.
+
+    The strongest available guard against drift: if the subcommand were renamed,
+    or the flags changed, or the acting flag dropped, this fails. A signal that
+    names a command no longer accepted by the shell is worse than one that names
+    a method.
+    """
+
+    from services.orchestrator import cli as cli_module
+    from tests.test_production_scheduler import _identity_released_operator_signals
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    signals = _identity_released_operator_signals(repository, job_id)
+    assert len(signals) == 1
+
+    tokens = str(signals[0]["details"]["operator_command"]).split()
+    assert tokens[0] == "nhms-pipeline"
+    # Substitute only the placeholder the record cannot know; everything else is
+    # replayed exactly as the operator would read it.
+    argv = list(tokens[1:])
+    argv[argv.index("--journal-root") + 1] = str(repository.root)
+
+    assert cli_module._argparse_main(argv) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "attested"
+    assert payload["job_id"] == job_id
+    assert repository.get_pipeline_job(job_id)["operator_recovery_attested_at"]

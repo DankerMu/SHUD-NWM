@@ -22,6 +22,7 @@ from .accepted_submit_identity import (
 from .chain import AnalysisOrchestrator, OrchestratorError
 from .file_orchestration_journal import (
     OPERATOR_RECOVERY_ATTESTATION_FIELD,
+    RELEASED_RESERVATION_RECOVERY_COMMAND,
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
     _accepted_submit_source_cycle_from_job_id,
@@ -892,7 +893,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(2) from error
 
     @cli.command(
-        "recover-released-identity-blocked-reservation",
+        RELEASED_RESERVATION_RECOVERY_COMMAND,
         help=RECOVER_RELEASED_RESERVATION_HELP,
     )
     @click.option("--journal-root", required=True)
@@ -1062,7 +1063,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollforward_parser.add_argument("--scheduler-lock-backend", default="file")
     rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
     recover_parser = subparsers.add_parser(
-        "recover-released-identity-blocked-reservation",
+        RELEASED_RESERVATION_RECOVERY_COMMAND,
         help=RECOVER_RELEASED_RESERVATION_HELP,
         description=RECOVER_RELEASED_RESERVATION_HELP,
     )
@@ -1188,7 +1189,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
-    if args.command == "recover-released-identity-blocked-reservation":
+    if args.command == RELEASED_RESERVATION_RECOVERY_COMMAND:
         try:
             receipt, exit_code = _recover_released_identity_blocked_reservation(
                 journal_root=args.journal_root,

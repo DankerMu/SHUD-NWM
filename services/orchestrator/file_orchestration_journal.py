@@ -333,6 +333,28 @@ def journal_read_attribution() -> dict[str, Any]:
 IDENTITY_RELEASED_OPERATOR_SIGNAL = "IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR"
 # The degraded trace emitted when that signal itself cannot be written.
 IDENTITY_RELEASED_SIGNAL_FAILED_EVENT = "identity_released_operator_signal_failed"
+# #1748: the ``nhms-pipeline`` subcommand that actually recovers the wedge.
+# Defined HERE rather than in ``cli.py`` because the signal has to name it and
+# ``cli`` already imports this module -- the other direction would be a cycle.
+# ``cli`` registers the subcommand from this same constant, so the name in the
+# journal record cannot drift away from the name a shell will accept.
+RELEASED_RESERVATION_RECOVERY_COMMAND = "recover-released-identity-blocked-reservation"
+
+
+def _released_reservation_recovery_command(job_id: str) -> str:
+    """The runnable invocation, not the discovery form.
+
+    A human reading this record needs the form that ACTS: the round-3 defect was
+    a signal naming something its reader could not invoke, and half-closing that
+    with a command they still have to figure out how to arm would repeat it.
+    ``--journal-root`` is a placeholder because the record cannot know the
+    operator's deployment root; the shape makes the missing piece obvious.
+    """
+
+    return (
+        f"nhms-pipeline {RELEASED_RESERVATION_RECOVERY_COMMAND} "
+        f"--journal-root <journal-root> --job-id {job_id} --attest"
+    )
 # #1748: the durable operator-recovery attestation.  It is a MARKER on the
 # released row, never a pre-materialized successor: writing the successor eagerly
 # occupies the very job_id/idempotency key the ordinary retry path would mint,
@@ -3443,6 +3465,9 @@ class FileOrchestrationJournalRepository:
                         "cohort_digest": row.get("cohort_digest"),
                         "identity_blocked_streak": identity_blocked_streak,
                         "recovery_api": "recover_released_identity_blocked_reservation",
+                        # Both the API and the surface a human can actually
+                        # reach: naming only the former is the round-3 defect.
+                        "operator_command": _released_reservation_recovery_command(job_id),
                     },
                 )
             except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError) as error:
@@ -3500,6 +3525,9 @@ class FileOrchestrationJournalRepository:
                     "reason": reason,
                     "error_type": type(error).__name__,
                     "recovery_api": "recover_released_identity_blocked_reservation",
+                    # The degraded trace is exactly when a human is reading by
+                    # hand, so it needs the runnable command more, not less.
+                    "operator_command": _released_reservation_recovery_command(job_id),
                 },
             )
         except (OrchestratorError, FileOrchestrationJournalError, SafeFilesystemError, OSError):
