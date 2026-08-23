@@ -100,12 +100,26 @@ real: it is a partial index (`WHERE active_flag = true`), so an equality lookup
 30,128 buffers), and still chose it with seq/index/index-only scans disabled.
 
 #1669 was implemented as an expression rebuild first, then withdrawn on evidence.
-With `stats_reset` NULL, `pg_stat_user_indexes` covers the cluster's entire life:
-`met_station_id_trgm_idx` stood at **500** scans before the issue was touched —
-exactly PR #1666's E4 probe count — and `met_station_name_trgm_idx`, which sits
-in the same search `OR` and would be lit by the same `BitmapOr`, has **zero**
-scans ever. Station search's trigram path has never run in production, so the
-index had no consumer to preserve.
+With `stats_reset` NULL, `pg_stat_user_indexes` covers the cluster's entire life,
+and `met_station_id_trgm_idx` stood at **500** scans before the issue was touched
+— exactly PR #1666's E4 probe count. Every scan it has ever served is accounted
+for by a probe we ran ourselves; there is no organic usage, so there was no
+consumer to preserve. That is the whole argument, and it stands alone.
+
+A second observation was originally written into this ADR as if it proved the
+same thing, and it does not. `met_station_name_trgm_idx` has **zero** scans ever;
+because the id arm and the name arm sit in one `OR` in station search, a real
+search "would" light both GINs through a `BitmapOr`, so zero on the name index
+"would" mean search never ran. **That inference is wrong.** The search branch
+carrying `active_flag = true` — the only branch where either partial GIN is
+structurally eligible — also carries `ms.basin_version_id = %s`, and
+`met_station_active_basin_station_idx`
+(`db/migrations/000033_station_mvt_active_source_index.sql`:
+`(basin_version_id, station_id) WHERE active_flag = true`) can satisfy that on
+its own and apply the whole `OR` as a plain row filter, touching neither GIN.
+The #1669 receipt measured exactly that routing at 7.3 ms. Searches may have run
+organically many times and still left both GINs at zero. The zero-scan
+observation is consistent with the conclusion; it is not evidence for it.
 
 **The general lesson, which outlives this table: check whether the index has a
 consumer before applying this ADR's convention to it.** The expression rebuild
@@ -114,6 +128,15 @@ is not useful, the convention is the wrong tool — it removes the trap while
 continuing to maintain, write to and store an index nothing reads, and the
 cheaper answer that also removes the trap is to drop the index. Measure
 `idx_scan` (and the counters' reset epoch) before reaching for the rebuild.
+
+**And read `idx_scan` for what it actually says.** A zero or near-zero count
+proves the index was never *chosen*; it never proves the query did not *run*.
+Before concluding that a code path is dead because an index it could use is
+unscanned, identify what other index could be serving that path — here, a
+composite btree that covers the scoping predicates and applies the rest as a
+filter — and check its counter too. This ADR exists to stop an unmeasured
+inherited assumption from being re-asserted as fact, and the paragraph above is
+where we did precisely that, inside this ADR, and had it caught in review.
 
 That question now stands open against `core.river_segment`'s own rebuilt index,
 whose `idx_scan` is **4**. This ADR does not reopen #1468 — that decision shipped

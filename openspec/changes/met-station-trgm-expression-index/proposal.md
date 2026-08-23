@@ -37,8 +37,13 @@ this change's own baseline probes ran 500-iteration loops against it. The
 decisive corroboration is the last row: the id arm and the name arm sit in the
 same `OR` in `packages/common/forecast_store.py`, so a real search lights up both
 through a `BitmapOr`. `met_station_name_trgm_idx` has **zero** scans in the
-cluster's entire history. **Station search's trigram path has never been
-exercised in production.**
+cluster's entire history.
+
+Round 1 corrected how much that second observation proves: corroboration, not
+proof. `met_station_active_basin_station_idx` can serve the whole search
+predicate without touching either GIN, so zero scans on the name index is
+*consistent with* searches happening rather than evidence that they did not. See
+design.md D1. The decision rests on the 500-scan leg, which stands alone.
 
 So the index is not accelerating anything. Rebuilding it as an expression index
 would remove the trap while continuing to maintain, write to, and store an index

@@ -35,14 +35,29 @@
 --   met_station_geom_gix                  idx_scan           0     18 MB
 --   met_station_name_trgm_idx             idx_scan           0   2576 kB
 --
--- `met_station_id_trgm_idx` stood at 500 scans before this issue was touched --
--- exactly the lookup count of PR #1666's E4 probe -- and reached 2,502 only from
--- this change's own 500-iteration baseline loops. The corroboration is the last
--- row: the id arm and the name arm sit in the same `OR` in the station search
+-- THAT IS THE WHOLE ARGUMENT: `met_station_id_trgm_idx` stood at 500 scans
+-- before this issue was touched -- exactly the lookup count of PR #1666's E4
+-- probe -- and reached 2,502 only from this change's own 500-iteration baseline
+-- loops. Every scan this index has ever served is accounted for by a probe we
+-- ran ourselves. There is no organic usage to preserve, so an index with no
+-- evidence of a consumer is not worth rebuilding.
+--
+-- The last row (`met_station_name_trgm_idx`, never scanned) is consistent with
+-- that and worth recording, but it is NOT a second proof, and an earlier draft
+-- of this header wrongly presented it as one. The tempting inference runs: the
+-- id arm and the name arm sit in the same `OR` in the station search
 -- (`packages/common/forecast_store.py`, `list_met_stations`), so a real search
--- lights BOTH up through a `BitmapOr`, and `met_station_name_trgm_idx` has never
--- been scanned at all. Station search's trigram path has never run in
--- production. An index with no evidence of a consumer is not worth rebuilding.
+-- would light BOTH GINs through a `BitmapOr`; the name GIN is at zero; therefore
+-- search never ran. THE INFERENCE DOES NOT HOLD. The `else` branch that carries
+-- `active_flag = true` -- the only branch where either partial trigram index is
+-- structurally eligible at all -- also carries `ms.basin_version_id = %s`, and
+-- `met_station_active_basin_station_idx` from
+-- `db/migrations/000033_station_mvt_active_source_index.sql`
+-- (`(basin_version_id, station_id) WHERE active_flag = true`) can satisfy that
+-- by itself and apply the whole `OR` as a plain row Filter, touching neither
+-- GIN. Our own receipt below shows exactly that routing at 7.3 ms. So searches
+-- may well have run organically and still left both GINs at zero scans; a zero
+-- `idx_scan` proves the index was not CHOSEN, never that the query did not RUN.
 --
 -- Search is unchanged and keeps returning the same rows: no SQL and no Python
 -- changes, only the access path. Measured on the same day, `station_id ILIKE

@@ -54,6 +54,36 @@ which a real search would light up through the same `BitmapOr`, has **zero**
 scans in the cluster's entire history. An index with no evidence of a consumer is
 not worth a rebuild.
 
+**Round-1 correction — the second observation is corroboration, not proof, and
+the paragraph above states it as though it were.** The `BitmapOr` inference
+assumes a real search would necessarily touch one of the two GINs. It would not.
+`packages/common/forecast_store.py:1058-1059` — the `else` branch, the only one
+carrying `active_flag = true` and therefore the only one where either partial
+trigram index is structurally eligible — **also carries
+`ms.basin_version_id = %s`**. That hands the planner
+`met_station_active_basin_station_idx`, which
+`db/migrations/000033_station_mvt_active_source_index.sql` defines as
+`(basin_version_id, station_id) WHERE active_flag = true`: it can satisfy the
+equality predicates by itself and apply the whole `OR` as a plain row filter,
+touching neither GIN. This change's own baseline receipt shows exactly that
+routing, at 7.3 ms. So searches could have run organically, many times, and still
+left `met_station_name_trgm_idx` at zero scans.
+
+The decision does not depend on this leg. The 500-scan leg carries it alone:
+500 lifetime scans matching PR #1666's E4 probe count exactly means no
+unexplained organic usage of the index being dropped. The zero-scan observation
+stays as what it is — consistent with the conclusion, not evidence for it.
+
+The sharper lesson belongs in ADR 0004 next to the first one: when reading
+`idx_scan` as evidence of non-use, check what *other* index could be serving the
+query. A zero count proves the index was not chosen. It never proves the query
+did not run.
+
+Worth stating plainly because of where it happened: ADR 0004 exists to stop an
+unmeasured inherited assumption from being re-asserted as fact, and this change
+did exactly that inside ADR 0004 itself, one paragraph after correcting the
+previous instance.
+
 **This reverses the issue's own recommendation and this change's first
 implementation, and it should be read as a correction, not a preference.** The
 withdrawn design's D4 rejected deletion on the grounds that it would leave

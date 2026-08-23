@@ -127,6 +127,62 @@ a live call still returned the unmutated tuple. Clearing `__pycache__` produced
 the red. **Any red-receipt procedure in this repository that edits Python in
 place can certify a false green** unless it clears the cache or perturbs mtime.
 
+### Round-1 fix, and a measurement that settles the P2
+
+Round 1 (two lenses, findings in `.workplans/pr-1771/review/round-1-findings.md`)
+returned one P2: the `BitmapOr` corroboration was asserted as fact in three
+places and is not proven, because
+`met_station_active_basin_station_idx (basin_version_id, station_id) WHERE
+active_flag = true` could serve the whole search predicate without touching
+either GIN. Corrected in the migration header, ADR 0004, design.md D1 and
+proposal.md; the implementer additionally pinned the correction with an assertion
+(`tests/test_migrations.py:1307-1313` requires the header to keep naming
+`000033_station_mvt_active_source_index.sql`), with a red receipt.
+
+**Then it was measured, while the index still existed.** Probe k7 in
+`.workplans/issue-1669/hitset-before-20260823.txt` runs the `else`-branch shape
+exactly as `forecast_store` emits it — `basin_version_id = $0 AND active_flag =
+true AND (station_id ILIKE ... OR COALESCE(station_name,'') ILIKE ...)`:
+
+```
+Index Scan using met_station_active_basin_station_idx on met_station ms
+  Index Cond: (basin_version_id = $0)
+  Filter: ((station_id ~~* '%q%') OR (COALESCE(station_name, '') ~~* '%q%'))
+  Rows Removed by Filter: 1709   Buffers: shared hit=583
+Execution Time: 3.783 ms
+```
+
+Neither GIN appears. The reviewer's alternative access path is not hypothetical —
+it is what the planner actually chooses for the real search shape, with both
+trigram indexes present and eligible. Two consequences:
+
+1. The P2 was correct and the correction is not a hedge; the inference really
+   does fail.
+2. It **strengthens** the drop. The zero-scan reading was ambiguous, but this is
+   not: the production search shape does not use `met_station_id_trgm_idx` even
+   when it exists. The earlier isolated probes, which omitted `basin_version_id`,
+   were the ones that made the GIN look load-bearing.
+
+### E4 hit-set baseline, captured before the drop
+
+`.workplans/issue-1669/hitset-before-20260823.txt`, fingerprints are
+`md5(string_agg(station_id, ',' ORDER BY station_id))` over the search predicate
+with `active_flag = true`:
+
+| keyword | n | fingerprint |
+|---|---|---|
+| `QHH` (mixed case) | 386 | `50cb1aa35beaa74aefbbe00cdc2df2d1` |
+| `qhh` (lower) | 386 | `50cb1aa35beaa74aefbbe00cdc2df2d1` |
+| escaped `%` | 0 | — |
+| escaped `_` | 6290 | `d2766ca3cdcaad6798805195ef9c1cca` |
+| escaped `\` | 0 | — |
+| `青海` (non-ASCII) | 0 | — |
+| k7, full else-branch shape | 0 | — |
+
+`QHH` and `qhh` agreeing on both count and fingerprint is the case-insensitivity
+check. Three keywords return zero rows, which pins less than a non-empty result
+would; recorded as a limit rather than presented as coverage.
+
 ### Out-of-scope findings (reported, not fixed)
 
 - `met_station_geom_gix` (18 MB) and `met_station_name_trgm_idx` (2,576 kB) have

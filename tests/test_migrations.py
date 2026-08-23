@@ -1305,6 +1305,13 @@ def test_met_station_trgm_expression_migration_documents_the_reversal_and_the_re
         "idx_scan",
         "ACCESS EXCLUSIVE",
         "000031_search_discovery_performance.sql:12-14",
+        # Round-1 correction: the zero-scan reading of `met_station_name_trgm_idx`
+        # was written as PROOF that station search never ran, and it is not --
+        # `met_station_active_basin_station_idx` can serve the search's scoping
+        # predicates and apply the `OR` as a plain filter, leaving both GINs
+        # unscanned. The header must keep naming that alternative path, or the
+        # header reverts to asserting an inference that does not hold.
+        "000033_station_mvt_active_source_index.sql",
     ):
         assert required_note in comment_body, required_note
 
