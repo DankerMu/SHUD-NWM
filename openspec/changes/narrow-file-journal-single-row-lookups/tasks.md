@@ -238,6 +238,9 @@ showing the criterion still missed alongside that split is this round succeeding
       **and the D11 tag split**, which is the round's actual deliverable.
       Record `wchar` this time: round 1 could not attribute the `read_bytes`
       rise because the baseline sample never recorded it.
+      Also verify `tags_dropped == 0` in the emitted attribution block: a
+      nonzero value means the 256-tag cap truncated the split and the shares
+      reported are of an incomplete population, not of the pass.
 
 ### Round 2 implementation record (2026-08-23)
 
@@ -373,3 +376,26 @@ now split into candidate lanes vs baseline lanes) and **D11b** (entrypoint
 attribution moved to the class boundary, outermost-wins; round-2 and round-3
 receipts are not tag-comparable). The 114 B / ~2.4 KB residuals are recorded
 there as known limits rather than rounded away.
+
+### Round 2 cross-review record (2026-08-23)
+
+Two comprehensive rounds, both recorded in the review gate against PR #1788.
+
+- **Round 1** (`b7aff05d`): 5 verified findings fixed — non-tautological counter
+  oracle, boundary-form attribution, a separate lane for the by-cycle partition,
+  the fall-open residual pinned, memo eviction under concurrency.
+- **Round 2** (`51e83a05`): 3 verified findings fixed, all minor and all
+  pin-strength — the `resource_limit_blocked` evidence path now pins
+  `journal_read_attribution` from the **on-disk artifact** (the bounded-payload
+  path is what could drop it); the "whole public surface" pin now drives
+  `FileJournalRetryService` too and asserts `handle_failed_job`; the no-lane
+  threshold tightened from 5% to `== 0`. Both new pins were shown red against
+  the specific defect they guard, then green after restore. Two further
+  candidates were adjudicated not-actionable and the reasons recorded in D14.
+- **Repeated class `test-coverage`** across both rounds triggered the Phase 6.2
+  invariant audit; the single underlying cause and the standing rule it produced
+  are D14a.
+
+No third comprehensive round: round 2's verified set was minor-only, and a
+comprehensive round is never bought for P2s alone. Phase 7 final review runs on
+the final head instead.

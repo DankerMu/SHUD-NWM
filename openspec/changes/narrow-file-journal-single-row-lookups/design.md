@@ -721,7 +721,7 @@ bytes, and that is pinned by an assertion rather than left to prose.
 - It is registered in `bounded_evidence_payload` and, as a last-resort shed,
   in `_OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS` immediately **before** `timing`
   so no pre-existing field's drop order moves. At the production 5 MB limit a
-  dozen triples are never the reason an artifact does not fit; that tier exists
+  ~51 live tags are never the reason an artifact does not fit; that tier exists
   only so a pathologically small limit still yields a writable artifact instead
   of `evidence_size_limit_exceeded`.
 
@@ -730,3 +730,62 @@ again this round and nothing here was tuned toward it. No projection of the
 post-fix `rchar` is offered, because the only candidate large enough to close
 the gap (A) is the one this change has never measured — which is what the
 counter now makes measurable.
+
+## D14. Round-2 adjudications, and the invariant the repeated failure class exposes
+
+Round 2 returned three FIX_NOW findings (all landed in `51e83a05`) and two that
+are recorded here as deliberately **not** acted on, so a later reader does not
+re-open them as oversights.
+
+**Not acted on — correctness-under-eviction in the memo concurrency test.**
+The candidate asked the concurrency test to assert that the memo serves the new
+row after a same-cycle write. That oracle **already exists**, deterministic and
+sequential, in the memo invalidation test (`tests/test_file_orchestration_journal.py:13066-13122`),
+with both arms. A concurrency-flavoured duplicate cannot assert visibility
+without first imposing a happens-before between the writer and the reader — and
+once it does, it *is* the sequential test. So the concurrency test keeps its
+actual job (no crash, no torn read, no lock-order inversion under contention)
+and does not grow an assertion it cannot honestly make.
+
+**Not acted on — raising `MAX_JOURNAL_READ_ATTRIBUTION_TAGS`.** Refuted by
+measurement, not by argument: across a 308-test session the counter saw
+`union_distinct_tags=72`, `max_live_window=51`, `max_at_reset=51`, `resets=199`,
+and `tags_dropped=0` against the cap of 256 — roughly 5x headroom, and the
+worst case is the 23 entrypoints actually reached, not the 58-method surface.
+The cap stays 256; only the stale justification comment was corrected (four code
+sites plus `:724` here, all of which had claimed "a dozen triples").
+
+### D14a. Invariant audit (workflow Phase 6.2): `test-coverage` repeated across both rounds
+
+The gate flagged `test-coverage` as a **repeated failure class** — round 1's
+tautological oracle and unattributed surface, round 2's single-class pin and
+loose threshold. They look like four unrelated slips. They are one:
+
+> **Every pin in this change was calibrated against the instrument's own output
+> rather than against something the instrument did not produce.**
+
+The tautology is the pure form (`assert totals == sum(tags)` where `totals` was
+computed as `sum(rows)` from those same rows — an identity for any input). The
+loose `without_lane * 20 <= total` is the same mistake at 5% strength: the
+threshold was set to accommodate whatever the code currently emitted, not to
+state what must be true. The single-class entrypoint pin is the same mistake in
+the *scope* dimension: the asserted set was transcribed from what one object
+happened to produce, so a second decorated class could lose its decorator and
+the reads would silently reattribute to the inner entrypoints with
+`without_entrypoint` still reading 0.
+
+This is a hazard specific to changes whose deliverable **is** a measuring
+instrument. Normal code has an external oracle — the behaviour it implements. A
+counter's "behaviour" is its own numbers, so the reflex of asserting against
+observed output degenerates into self-agreement. The standing rule for the rest
+of this change, and for the round-3 targeting work that reads these numbers:
+
+> A pin on the attribution counter must compare against a quantity the counter
+> did not compute — an independently known call count, a byte total measured by
+> `/proc`, an exact zero, or a deliberately injected defect that the pin is
+> shown to turn red on.
+
+The round-2 fixes were accepted only with that last form attached: both new pins
+were demonstrated red against the specific defect they guard (the merge made
+status-conditional; the decorator stripped from `FileJournalRetryService` alone)
+and green again after restore.
