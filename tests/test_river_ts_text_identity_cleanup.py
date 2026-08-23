@@ -159,7 +159,8 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * seed_demo.py 5 = the seed INSERT + two verification counts + the two
 #   human-readable count LABELS.
 # * parser.py 4 = probe, window, DELETE, INSERT.
-# * integration_helpers.py 2 = the dual-write INSERT + the cleanup DELETE.
+# * integration_helpers.py 3 = the dual-write INSERT + the cleanup DELETE +
+#   the #1640/#1654 min/max valid_time probe that bounds that DELETE.
 RIVER_TABLE_CENSUS: dict[str, int] = {
     "packages/common/forecast_store.py": 10,
     "services/tile_publisher/publisher.py": 2,
@@ -169,7 +170,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
-    "tests/integration_helpers.py": 2,
+    "tests/integration_helpers.py": 3,
 }
 
 # The marker every retained transitional text predicate must carry, verbatim.
@@ -1113,10 +1114,20 @@ def test_integration_helpers_delete_targets_the_run_key() -> None:
         function="_clear_issue_126_rows",
         needle="hydro.river_timeseries",
     )
-    assert len(statements) == 1
+    # #1640/#1654 put a min/max valid_time probe in front of the DELETE, so
+    # select each statement by CONTENT: the probe precedes the DELETE, and an
+    # index-based pick would silently start asserting about the wrong one.
+    assert len(statements) == 2
 
-    assert "WHERE run_key IN (" in statements[0]
-    _assert_no_text_identity_predicate(statements[0], "integration_helpers cleanup", resolves_keys_inline=True)
+    deletes = [statement for statement in statements if "DELETE FROM" in statement]
+    assert len(deletes) == 1
+    assert "WHERE run_key IN (" in deletes[0]
+    _assert_no_text_identity_predicate(deletes[0], "integration_helpers cleanup", resolves_keys_inline=True)
+
+    probes = [statement for statement in statements if "min(valid_time)" in statement]
+    assert len(probes) == 1
+    assert "WHERE run_key IN (" in probes[0]
+    _assert_no_text_identity_predicate(probes[0], "integration_helpers cleanup probe", resolves_keys_inline=True)
 
 
 # ---------------------------------------------------------------------------
