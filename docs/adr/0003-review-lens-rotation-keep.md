@@ -1563,8 +1563,8 @@ Two things this run adds that the rotation ledger does not model, both worth
 recording because the numbers above will keep looking healthy while they recur:
 
 **(1) The highest-value catch was upstream of every lens.** It landed before
-implementation, from the advisor, against the *issue body* rather than the code:
-#1789 prescribed folding `parsed_at = now()` into `mark_run_parsed`'s existing
+implementation, from the advisor, against the *issue body* rather than the code: #1789
+prescribed folding `parsed_at = now()` into `mark_run_parsed`'s existing
 UPDATE, which is gated on `PARSE_READY_RUN_STATUSES` and therefore excludes
 `published` — the very population recompute detection exists for. The issue
 stated the requirement ("重新 parse 必须 bump 它") two lines above a remedy that
