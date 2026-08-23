@@ -108,7 +108,11 @@ class OrchestratorConfig:
                 "forecast_warm_start_required_from",
                 parse_cycle_time(self.forecast_warm_start_required_from),
             )
-        object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
+        # #1671: the ``max(..., 1.0)`` floor moved to ``from_env``; the type
+        # coercion stays here.  The field's declared type is ``float`` and its
+        # consumers hand it straight to ``time.sleep``, so a ``str`` or ``int``
+        # stored verbatim would surface as a ``TypeError`` at the poll site.
+        object.__setattr__(self, "poll_interval_seconds", float(self.poll_interval_seconds))
         object.__setattr__(self, "scenario_id_explicit", self.scenario_id is not None)
         if self.scenario_id is None:
             object.__setattr__(self, "scenario_id", scenario_for_source(self.source_id))
@@ -144,7 +148,14 @@ class OrchestratorConfig:
             object_store_root=os.getenv("OBJECT_STORE_ROOT", workspace_root),
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             slurm_gateway_url=os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000"),
-            poll_interval_seconds=float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")),
+            # #1671: the one-second minimum Slurm poll interval is enforced HERE,
+            # on the only construction path that reads the deployment environment,
+            # rather than unconditionally in ``__post_init__``.  Flooring in
+            # ``__post_init__`` also rewrote the explicit ``poll_interval_seconds=0``
+            # that test harnesses pass, turning every poll into a real 1s sleep.
+            # ``max`` clamps up and never raises: a mis-set deployment variable must
+            # degrade to safe polling, not fail the orchestrator at start.
+            poll_interval_seconds=max(float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")), 1.0),
             job_timeout_seconds=float(os.getenv("ORCHESTRATOR_JOB_TIMEOUT_SECONDS", "3600")),
             source_id=os.getenv("FORECAST_SOURCE_ID", "gfs"),
             forecast_horizon_hours=int(os.getenv("FORECAST_HORIZON_HOURS", "168")),

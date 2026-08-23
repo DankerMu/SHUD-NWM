@@ -82,22 +82,28 @@ Evidence floor:
 
 ## 1. Implementation
 
-- [ ] T1 In `services/orchestrator/chain_config.py`, delete the
-      `poll_interval_seconds` line from `__post_init__` (currently `:111`).
-- [ ] T2 In the same file's `from_env` (`:147`), wrap the environment read so
+- [x] T1 In `services/orchestrator/chain_config.py`, replace the
+      `poll_interval_seconds` line in `__post_init__` (currently `:111`) with a
+      bare `float()` coercion, dropping only the `max(..., 1.0)` floor:
+      `object.__setattr__(self, "poll_interval_seconds", float(self.poll_interval_seconds))`.
+      **Corrected during Phase 2**: this task originally said "delete the line",
+      which silently dropped the field's type coercion along with the floor and
+      let a `str` reach `time.sleep` (design.md D6). The Invariant Matrix always
+      specified `-> 0.0`, a float, so the deletion diverged from the fixture.
+- [x] T2 In the same file's `from_env` (`:147`), wrap the environment read so
       the floor is applied there:
       `poll_interval_seconds=max(float(os.getenv("ORCHESTRATOR_POLL_INTERVAL_SECONDS", "30")), 1.0)`.
       Keep `max` semantics exactly — clamp up, never raise (design.md D2).
-- [ ] T3 Change nothing else in `__post_init__`. The other eleven
+- [x] T3 Change nothing else in `__post_init__`. The other eleven
       normalizations (workspace_root, object_store_root, source_id,
       forecast_warm_start_required_from, scenario_id/scenario_id_explicit,
       terminal_stage, templates_dir, slurm_job_type_templates, slurm_env,
       target_python_runtime, reconcile_slurm_user/account) must be byte-identical.
       Prove it with a diff of that method.
-- [ ] T4 Edit **no test file** to obtain the speedup (design.md D3). If any
+- [x] T4 Edit **no test file** to obtain the speedup (design.md D3). If any
       existing test fails after the change, do not "fix" it by restoring a
       sleep — report it: a test that needs a real 1-second wait is a finding.
-- [ ] T5 Do not touch `.github/workflows/ci.yml` (design.md D4), nor
+- [x] T5 Do not touch `.github/workflows/ci.yml` (design.md D4), nor
       `workers/data_adapters/*`, nor `services/production_closure/*`.
 
 ## 2. Tests — Invariant Matrix regression rows
@@ -106,27 +112,35 @@ Every row in design.md's Invariant Matrix needs a test. Put the new tests where
 the existing `chain_config` / orchestrator config tests live; do not create a
 new top-level file if a natural home exists.
 
-- [ ] T6 `from_env` floor rows, all five, each asserting the resulting
+- [x] T6 `from_env` floor rows, all five, each asserting the resulting
       `poll_interval_seconds`:
       unset -> `30.0`; `"0"` -> `1.0`; `"0.001"` -> `1.0`; `"5"` -> `5.0`
       (**not** raised — the floor is a minimum, not a normalization);
       `"-3"` -> `1.0`. Assert no exception is raised in the below-minimum cases.
-- [ ] T7 Both `scheduler_core._default_orchestrator_for` propagation rows, with
+- [x] T7 Both `scheduler_core._default_orchestrator_for` propagation rows, with
       `ORCHESTRATOR_POLL_INTERVAL_SECONDS="0"` in the environment:
       the `slurm_execution_enabled` branch (`scheduler_core.py:446`) and the
       `config.source_id != source_id` branch (`:470`) each yield an orchestrator
       whose `config.poll_interval_seconds` is `1.0`. This is the test that makes
       the selected design safe rather than merely small — it fails if a future
       refactor stops propagating the floored value.
-- [ ] T8 The explicit-construction row: `OrchestratorConfig(poll_interval_seconds=0)`
+- [x] T8 The explicit-construction row: `OrchestratorConfig(poll_interval_seconds=0)`
       yields `0.0`. This is the new behavior and must be pinned, because it is
       what the eleven test files rely on.
-- [ ] T9 Unchanged-sibling rows: `GFSAdapterConfig(poll_interval_seconds=0)` and
+- [x] T8b The type-coercion row (design.md D6):
+      `OrchestratorConfig(poll_interval_seconds=0).poll_interval_seconds` is a
+      `float` (`isinstance(..., float)`, not just `== 0`), and
+      `OrchestratorConfig(poll_interval_seconds="7").poll_interval_seconds ==
+      7.0`. Without this the field can hold a `str` that raises `TypeError` at
+      `time.sleep`. Do **not** add an assertion that an explicit negative is
+      clamped -- design.md D6 states explicit negatives are honored verbatim by
+      design; clamping them would reinstate the defect this change removes.
+- [x] T9 Unchanged-sibling rows: `GFSAdapterConfig(poll_interval_seconds=0)` and
       `IFSAdapterConfig(poll_interval_seconds=0)` still yield `0` (they never
       floored), and `services/production_closure/slurm_validation.py`'s own
       config default is unchanged. These may be assertions in one test; the
       point is that a reader can see the sibling classes were considered.
-- [ ] T10 Red-proof (mandatory, batched): run T6 and T7 against the
+- [x] T10 Red-proof (mandatory, batched): run T6 and T7 against the
       **pre-change** source and show they behave as the old code does — T6's
       unset/`"5"` rows pass, and the `"0"`/`"0.001"`/`"-3"` rows pass too
       (the old code floored them, just in a different place), while **T8 fails**
@@ -135,7 +149,7 @@ new top-level file if a natural home exists.
       and T7 both fail**. Paste all runs. The second half is the one that
       matters: it proves the new tests actually defend the invariant rather than
       passing vacuously.
-- [ ] T10b Second red-proof mutation, on the propagation rather than the floor:
+- [x] T10b Second red-proof mutation, on the propagation rather than the floor:
       in `services/orchestrator/scheduler_core.py`, replace
       `poll_interval_seconds=config.poll_interval_seconds` (`:452` and `:476`)
       with a hardcoded sub-floor literal, and show **T7 fails on both branches**;
@@ -147,7 +161,7 @@ new top-level file if a natural home exists.
 
 ## 3. Measurement — this is the deliverable, not a side effect
 
-- [ ] T11 Per-file wall clock, before and after, for all eleven affected files
+- [x] T11 Per-file wall clock, before and after, for all eleven affected files
       (`test_analysis_pipeline`, `test_e2e`, `test_e2e_ifs`, `test_e2e_m3`,
       `test_ifs_forecast_integration`, `test_orchestration_chain`,
       `test_orchestrator`, `test_pipeline_logs_artifacts`,
@@ -156,26 +170,43 @@ new top-level file if a natural home exists.
       `-m "not e2e and not grib and not integration"`. Report a table: file,
       before, after, delta, and pass/fail counts before and after. **Pass counts
       must be identical** — a changed count is a finding, not a win.
-- [ ] T12 Sleep-attribution re-measurement on `tests/test_orchestration_chain.py`
+- [x] T12 Sleep-attribution re-measurement on `tests/test_orchestration_chain.py`
       after the change, using the same accounting-proxy technique as issue
       #1671's comment (an out-of-tree pytest plugin wrapping `time.sleep`; do not
       add it to the repo). Expected: the 844s at
       `chain_stage_execution.py:1026` collapses to approximately zero. Paste the
       totals block.
-- [ ] T13 Full local suite before and after:
+- [ ] T13 (orchestrator-owned) Full local suite before and after:
       `uv run pytest -q -m "not e2e and not grib and not integration"`.
       Report both durations and both result lines. The pre-existing #1707 red in
       `tests/test_entropy_audit_script.py` is expected in **both** runs — state
       that explicitly so it is not read as a regression. Any *other* difference
       in the failure set is a finding.
-- [ ] T14 Confirm no test was skipped, deselected, or turned into a collect-only
-      smoke as a side effect: the selected/deselected counts from T13's two runs
-      must match exactly (issue acceptance criterion 3, "覆盖不降级").
+- [ ] T14 (orchestrator-owned) Confirm no test was skipped, deselected, or turned into a collect-only
+      smoke as a side effect (issue acceptance criterion 3, "覆盖不降级"). The
+      reconciliation is **not** "the counts match" -- this change adds tests, so
+      the selected count must rise. It must rise by *exactly* the number added:
+      **+10** (nine from T5-T10 plus one from T8b's type-coercion regression).
+      The **deselected** count must be identical between the two runs, and the
+      failure set must differ only by the #1707 red being present in both. A
+      selected delta other than +10, any deselected drift, or a collect-only
+      degradation is a finding.
+
+> Ownership note: T13/T14 are executed by the orchestrator, not the implementer.
+> Each full-suite run takes roughly 45 minutes and the before/after pair must run
+> **serially** on one machine or the two wall clocks contaminate each other —
+> wall clock being the entire point of the measurement. Running them outside the
+> implementer's session also keeps a session-length failure from discarding an
+> hour and a half of measurement. The "before" run is taken at the change's merge
+> base (`5063747c`) via a detached checkout of the main working tree once it is
+> clean, so both runs reuse the same `.venv` -- a separate worktree would need its
+> own `uv sync` and the bootstrap cost would land inside one of the two wall
+> clocks being compared.
 
 ## 4. Verification
 
-- [ ] T15 `uv run ruff check .` -> zero findings.
-- [ ] T16 `openspec validate scope-orchestrator-poll-floor-to-env --strict --no-interactive`
+- [x] T15 `uv run ruff check .` -> zero findings.
+- [x] T16 `openspec validate scope-orchestrator-poll-floor-to-env --strict --no-interactive`
       -> strict-valid.
 - [ ] T17 (orchestrator-owned, after the branch is pushed) Trigger
       `workflow_dispatch` on `Unit Tests (full)` for this branch and capture the

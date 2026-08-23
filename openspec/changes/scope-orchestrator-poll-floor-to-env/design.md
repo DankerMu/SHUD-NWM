@@ -65,8 +65,12 @@ Regression rows:
   config still carries 1.0
 - scheduler_core._default_orchestrator_for, source_id-mismatch branch (:470)
   with ORCHESTRATOR_POLL_INTERVAL_SECONDS="0" -> still 1.0
-- direct OrchestratorConfig(poll_interval_seconds=0) -> 0.0. This is the
-  deliberate new behavior; before this change it silently became 1.0.
+- direct OrchestratorConfig(poll_interval_seconds=0) -> 0.0 (a float). This is
+  the deliberate new behavior; before this change it silently became 1.0.
+- direct OrchestratorConfig(poll_interval_seconds="7") -> 7.0 (a float).
+  __post_init__ keeps coercing the field to float; only the floor moves out.
+  Dropping the coercion along with the floor would let a str reach
+  time.sleep() and raise TypeError -- see D6.
 - unchanged sibling consumer: GFSAdapterConfig(poll_interval_seconds=0)
   (workers/data_adapters/gfs_adapter.py:323) -> unchanged, different class
 - unchanged sibling consumer: IFSAdapterConfig(poll_interval_seconds=0)
@@ -139,6 +143,28 @@ Maintainer decision. The measured post-fix duration from this change is the
 input to that decision, so making both moves in one PR would mean setting the
 new number before the measurement that justifies it exists. Issue #1671's
 acceptance criterion 4 is conditional ("若采用加时") and stays open.
+
+### D6: the float coercion stays in `__post_init__`; the floor does not
+
+`__post_init__` held two things on one line: `max(..., 1.0)` (the floor) and
+`float(...)` (a type coercion enforcing the field's declared `float`
+annotation). Only the floor is being relocated. The coercion stays, as a bare
+`float()`, because the field's consumers pass it straight to `time.sleep`:
+without it, `OrchestratorConfig(poll_interval_seconds="7")` stores the string
+`"7"` and `time.sleep("7")` raises `TypeError` at the poll site. Production
+cannot reach that today -- `scheduler_core.py:452`/`:476` copy a `from_env`
+float -- but the dataclass's own contract should not degrade as a side effect of
+moving a floor.
+
+**Explicit negative values are outside the contract and MUST NOT be re-clamped.**
+`OrchestratorConfig(poll_interval_seconds=-3)` yields `-3.0`, and a caller who
+then reaches `time.sleep(-3.0)` gets `ValueError`. That is intended: the floor's
+job is to protect the *production* path, which constructs through `from_env`
+(where `-3` becomes `1.0`, a matrix row). Re-adding a clamp to `__post_init__`
+to "fix" the explicit negative would reinstate exactly the defect this change
+exists to remove -- silently rewriting an explicitly passed value. The contract
+is: explicit construction is honored verbatim after type coercion; the floor is
+the environment path's guarantee, not the dataclass's.
 
 ### D5: what the acceptance receipt must be
 
