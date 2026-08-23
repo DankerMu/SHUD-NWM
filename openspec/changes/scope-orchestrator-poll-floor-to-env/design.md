@@ -130,7 +130,7 @@ operationally than silently polling at the safe minimum. The existing behavior
 
 ### D3: no test file is edited
 
-The eleven files already pass `poll_interval_seconds=0`. This is what makes the
+The ten files already pass `poll_interval_seconds=0`. This is what makes the
 change auditable: if any test's behavior changes beyond getting faster, that is
 a real finding, because the only semantic difference is that an argument the
 tests already wrote now takes effect. Any test that *fails* after the change was
@@ -175,7 +175,12 @@ bound, with the measured duration recorded. `unit-test` runs on
 obtainable on this branch without merging. That dispatch run is the oracle for
 this change; local timings are supporting evidence, not the receipt.
 
-The pre-existing #1707 red in `tests/test_entropy_audit_script.py` will still
-fail in that run. The criterion is a natural terminal state and a measured
-duration, not a green suite; the receipt must state this explicitly so the
-failure is not mistaken for a regression from this change.
+The criterion is a natural terminal state and a measured duration, not a green
+suite -- a pre-existing unrelated red would not disqualify the receipt.
+
+**Retracted:** this paragraph originally asserted that the pre-existing #1707
+red in `tests/test_entropy_audit_script.py` "will still fail in that run", and
+instructed the receipt to say so. It did not fail. CI run `32625258977` is
+`conclusion=success` and both local full-suite runs are `rc=0` with zero
+failures. The instruction is withdrawn: a receipt written to that instruction
+would have claimed a failure the evidence disproves. See tasks.md T13/T17.

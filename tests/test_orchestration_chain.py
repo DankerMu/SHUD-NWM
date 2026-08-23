@@ -2420,7 +2420,7 @@ def test_orchestrator_config_from_env_reads_compute_state_terminal_profile(
 # The floor lives on ``OrchestratorConfig.from_env`` -- the only construction
 # path that reads the deployment environment -- and NOT in ``__post_init__``.
 # Before this change ``__post_init__`` floored unconditionally, which silently
-# rewrote the ``poll_interval_seconds=0`` that eleven test files already pass
+# rewrote the ``poll_interval_seconds=0`` that ten test files already pass
 # into a real 1s sleep per poll (measured: 844s of the 881s wall clock of this
 # file).  Nothing asserted the clamp at all, so it could have been moved or
 # deleted invisibly.  These tests pin every construction path.
@@ -2476,7 +2476,7 @@ def test_orchestrator_config_honours_explicitly_passed_poll_interval_verbatim(
 ) -> None:
     """An explicitly supplied interval is used exactly as given, including 0.
 
-    This is the behavior the eleven ``poll_interval_seconds=0`` test files rely
+    This is the behavior the ten ``poll_interval_seconds=0`` test files rely
     on, and it is what the environment floor must NOT reach.  The environment
     is set to a floored value here to prove the explicit argument wins on a
     path that never consults it.

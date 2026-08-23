@@ -9,7 +9,7 @@
 object.__setattr__(self, "poll_interval_seconds", max(float(self.poll_interval_seconds), 1.0))
 ```
 
-Eleven test files construct `OrchestratorConfig(poll_interval_seconds=0)`
+Ten test files construct `OrchestratorConfig(poll_interval_seconds=0)`
 believing they have turned polling delay off. They have not — the floor silently
 rewrites their `0` to `1.0`, and the poll loops at
 `services/orchestrator/chain_stage_execution.py:1026` and
@@ -53,7 +53,7 @@ The post-merge safety net is not "late", it is absent — and silently so.
 - A regression test pins the floor on the env path — **there is none today**;
   `grep` over `tests/` finds no assertion on this clamp at all, so the invariant
   is currently undefended and a silent removal would be invisible.
-- No test file is edited to gain the speedup: the eleven files already pass
+- No test file is edited to gain the speedup: the ten files already pass
   `poll_interval_seconds=0`, and that argument simply starts working.
 - `.github/workflows/ci.yml`'s `timeout-minutes: 45` (`:211`) is **not** touched
   in this change (see Out of scope).
@@ -94,15 +94,20 @@ must keep doing that. Three designs were on the table (issue #1671 comment
 ## Impact
 
 - `services/orchestrator/chain_config.py` — the floor's location.
-- Eleven test files get faster with no edit:
-  `test_analysis_pipeline.py`, `test_e2e.py`, `test_e2e_ifs.py`,
-  `test_e2e_m3.py`, `test_ifs_forecast_integration.py`,
-  `test_orchestration_chain.py`, `test_orchestrator.py`,
-  `test_pipeline_logs_artifacts.py`, `test_production_scheduler.py`,
-  `test_warm_start.py`, `test_warm_start_chaining.py`.
-  All eleven contribute tests to the full lane's marker expression
+- Ten test files pass `poll_interval_seconds=0` to `OrchestratorConfig`; **seven
+  of them actually get faster** (measured, tasks.md T11). The other three --
+  `test_e2e_ifs`, `test_e2e_m3`, `test_ifs_forecast_integration` -- record zero
+  `time.sleep` calls in both the before and after states: their selected tests
+  never enter a poll loop, so the floor never cost them anything. Passing the
+  argument and being slowed by it are different sets. The ten:
+  `test_analysis_pipeline.py`, `test_e2e_ifs.py`, `test_e2e_m3.py`,
+  `test_ifs_forecast_integration.py`, `test_orchestration_chain.py`,
+  `test_orchestrator.py`, `test_pipeline_logs_artifacts.py`,
+  `test_production_scheduler.py`, `test_warm_start.py`,
+  `test_warm_start_chaining.py`.
+  All ten contribute tests to the full lane's marker expression
   (`-m "not e2e and not grib and not integration"`), verified by
-  `--collect-only`: 8 / 2 / 2 / 3 / 10 / 382 / 5 / 21 / 1884 / 32 / 110.
+  `--collect-only`: 8 / 2 / 3 / 10 / 382 / 5 / 21 / 1884 / 32 / 110.
 
 ### Correction to the issue's stated blast radius
 
@@ -113,7 +118,24 @@ no `OrchestratorConfig` at all**; their argument goes to `GFSAdapterConfig`
 (`workers/data_adapters/gfs_adapter.py:323`) and `IFSAdapterConfig`
 (`workers/data_adapters/ifs_adapter.py:207`), which have their own defaults and
 their own wait seams (`self.sleeper`, `_bounded_wait`) and are untouched here.
-The correct count is eleven.
+The correct count is **ten**, not eleven.
+
+**This correction was itself wrong on first writing, and was caught by review.**
+The original text here said eleven, excluding only the two adapter files. But
+`tests/test_e2e.py` had to go too, for exactly the same reason: its only
+`poll_interval_seconds=0` (`test_e2e.py:763`) is inside a `GFSAdapterConfig(...)`
+construction at `:754`, and the one `OrchestratorConfig` that file builds
+(`:718`, imported as `ChainOrchestratorConfig` at `:19`) passes no
+`poll_interval_seconds` at all -- it takes the `30.0` default and gains nothing
+from this change. Applying a correction methodology to someone else's count and
+then not applying it to one's own is the failure mode this note exists to record.
+
+Supporting nuance, not a separate count: of the ten, only **nine** have that
+argument inside the *measured* lane. `tests/test_e2e_ifs.py`'s
+`OrchestratorConfig(poll_interval_seconds=0)` (`:105`) sits in a
+`@pytest.mark.grib` test (`:75`) and is deselected by
+`-m "not e2e and not grib and not integration"`; the two tests that file does
+contribute to the lane use no poll interval.
 
 ## Out of scope
 
@@ -129,6 +151,12 @@ The correct count is eleven.
   problem, not addressed here.
 - The pre-existing master red in `tests/test_entropy_audit_script.py`
   (`test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings`,
-  tracked as #1707). It is unrelated to timing and will still be red in the
-  receipt this change produces.
+  tracked as #1707). It is unrelated to timing and is not addressed here.
+
+  **Retracted:** this bullet originally predicted that red "will still be red in
+  the receipt this change produces". It was not. Both local full-suite runs are
+  `rc=0` (13679 and 13689 passed, zero failures) and CI run `32625258977` is
+  `conclusion=success`. The prediction is withdrawn rather than deleted, so that
+  a reader who saw the earlier text knows it was tested and found false. See
+  tasks.md T13/T17.
 - The adapter configs' own poll intervals (see the correction above).
