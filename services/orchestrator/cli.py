@@ -14,13 +14,24 @@ from services.tile_publisher.publisher import failure_payload
 from workers.data_adapters.base import parse_cycle_time
 
 from .chain import AnalysisOrchestrator, OrchestratorError
-from .file_orchestration_journal import FileOrchestrationJournalError
+from .file_orchestration_journal import (
+    FileOrchestrationJournalError,
+)
 from .file_orchestration_migration import (
     complete_file_journal_rollforward,
     export_scheduler_state_from_postgres,
     launch_file_journal_rollback_writer,
     prepare_file_journal_rollback,
     write_migration_receipt,
+)
+from .operator_released_reservation_recovery import (
+    RELEASED_RESERVATION_RECOVERY_COMMAND,
+    add_argparse_recovery_subparser,
+    register_click_recovery_command,
+    run_argparse_recovery_command,
+)
+from .operator_released_reservation_recovery import (
+    _recover_released_identity_blocked_reservation as _recover_released_identity_blocked_reservation,
 )
 from .operator_reserved_demotion import (
     _demote_reserved_job as _demote_reserved_job,
@@ -645,6 +656,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(str(error), err=True)
             raise SystemExit(2) from error
 
+    register_click_recovery_command(cli)
     register_click_demote_command(cli)
 
     @cli.command("plan-production")
@@ -786,6 +798,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollforward_parser.add_argument("--lock-path")
     rollforward_parser.add_argument("--scheduler-lock-backend", default="file")
     rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
+    add_argparse_recovery_subparser(subparsers)
     add_argparse_demote_subparser(subparsers)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
@@ -900,6 +913,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except (FileOrchestrationJournalError, ValueError) as error:
             print(str(error), file=sys.stderr)
             return 2
+    if args.command == RELEASED_RESERVATION_RECOVERY_COMMAND:
+        return run_argparse_recovery_command(args)
     if args.command == "demote-reserved-job":
         return run_argparse_demote_command(args)
     if args.command == "plan-production":

@@ -199,6 +199,18 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_scheduler_backfill.py",
 )
 
+# #1748 recovery-CLI helper extraction: the shared
+# released-identity-blocked-reservation body is exercised through both CLI
+# entrypoints by the journal suite's operator-channel tests, and the signal/
+# command e2e pair lives in the production-scheduler suite. The demote CLI
+# security suite shares the register boundary in _click_main/_argparse_main,
+# so a register-order change must run it too.
+RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
+    "tests/test_file_orchestration_journal.py",
+    "tests/test_production_scheduler.py",
+    "tests/test_orchestrator_demote_cli_security.py",
+)
+
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
     "tests/test_orchestrator_demote_cli_security.py",
@@ -507,6 +519,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[7],
         FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # #1748 recovery-CLI helper extraction.  Stop rule on
+        # purpose: without it the broad `services/orchestrator/**` rule would
+        # drag the full directory list for a module whose only production
+        # consumer is cli.py.  The two suites that drive the operator-facing
+        # channel and the signal/command e2e are named exactly, plus the demote
+        # CLI security suite which shares the register boundary.
+        "services/orchestrator/operator_released_reservation_recovery.py",
+        RELEASED_RESERVATION_RECOVERY_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(

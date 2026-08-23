@@ -6,6 +6,7 @@ from typing import Any
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import (
     ACCEPTED_SUBMIT_CONTRACT_VERSION,
+    IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     QUARANTINE_RERUN_PROVENANCE_FIELD,
     accepted_submit_contract_is_current,
@@ -20,7 +21,10 @@ from services.orchestrator.accepted_submit_identity import (
 from services.orchestrator.accepted_submit_identity import (
     OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
 )
-from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+from services.orchestrator.file_orchestration_journal import (
+    OPERATOR_RECOVERY_ATTESTATION_FIELD,
+    FileOrchestrationJournalError,
+)
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
 
 _FORCE_TERMINAL_RESUBMIT_DECISIONS = {
@@ -171,7 +175,15 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
         if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
-            return _verified_accepted_submit_forecast_retry(job)
+            # #1748: ADDITIVE disjunct.  The reconcile-verified door predicate
+            # below is untouched and still hard-pins ``absence_retry_permitted``;
+            # the operator attestation is a SECOND, separate way in, not a
+            # widening of that predicate.  Without this arm the released
+            # identity-blocked shape returns the door verdict unconditionally,
+            # which is why nothing -- not even
+            # ``_terminal_stage_needs_forced_resubmit`` below -- could ever reach
+            # a released row.
+            return _verified_accepted_submit_forecast_retry(job) or _operator_recovery_attested(job)
         if _terminal_stage_needs_forced_resubmit(context, job):
             return True
         if context.retry_attempt is None:
@@ -921,6 +933,35 @@ def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any
         in {"absence_retry_permitted", _OPERATOR_VERIFIED_ABSENCE_DECISION}
         and job.get("matched_slurm_job_id") is None
         and forecast_cohort_identity_is_valid(job)
+    )
+
+
+def _operator_recovery_attested(job: _chain.Mapping[str, _chain.Any]) -> bool:
+    """True for a released row an operator has explicitly attested (#1748).
+
+    Deliberately NOT part of ``_verified_accepted_submit_forecast_retry``: that
+    predicate is a reconcile-side *proof* of absence and must stay byte-identical.
+    This is an operator *attestation* -- on a cluster whose accounting does not
+    store job comments absence is unprovable, so the judgement sits with the
+    human.  Narrowed to the released terminal so the marker can never revive any
+    other shape.
+    """
+
+    return bool(
+        job.get(OPERATOR_RECOVERY_ATTESTATION_FIELD) not in (None, "")
+        # The call site already gates on ``status``, but the narrowing has to
+        # live here too or the predicate is unsafe to read -- and to reuse -- in
+        # isolation: a ``pending`` successor that somehow inherited both the
+        # attestation and the released decision would otherwise pass. Checking
+        # it here closes that shape at the consumer no matter how the write side
+        # evolves (#1804).
+        and str(job.get("status") or "") == "reservation_lost"
+        and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+        # Both bindings are treated the same way the recovery API's own
+        # admission guard treats them; an asymmetric ``is None`` here would let
+        # an empty-string-bound row through if a writer ever produced one.
+        and job.get("slurm_job_id") in (None, "")
+        and job.get("matched_slurm_job_id") in (None, "")
     )
 
 

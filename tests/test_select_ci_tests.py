@@ -27,6 +27,7 @@ from scripts.select_ci_tests import (
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    RELEASED_RESERVATION_RECOVERY_TESTS,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
@@ -351,6 +352,22 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_backfill.py",
         "tests/test_warm_start_chaining.py",
     } <= set(selected)
+
+
+def test_released_reservation_recovery_module_selects_its_exact_suites() -> None:
+    # #1748 recovery-CLI helper extraction: the new recovery-CLI helper module is owned by a stop
+    # rule that names exactly the suites exercising the #1748 operator channel
+    # and the shared register boundary. A module-only diff must run real
+    # assertions, never collapse to the collect-only smoke — so the set is
+    # pinned exactly, and no broad-orchestrator fallback may creep back in.
+    selected = select_tests(
+        ["services/orchestrator/operator_released_reservation_recovery.py"],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(RELEASED_RESERVATION_RECOVERY_TESTS)
+    assert "tests/test_state_clone.py" not in selected
+    assert "tests/test_select_ci_tests.py" not in selected
 
 
 def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:

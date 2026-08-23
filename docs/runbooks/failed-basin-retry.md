@@ -79,9 +79,21 @@ Do **not** try to reset, reclaim or hand-edit a released row:
   re-submitting the spent idempotency key.
 
 That is the intended anti-duplicate-submission direction: a reservation whose identity was
-never verifiable must not be revived under the same key. Liveness is preserved because
-each new attempt mints a **new** retry-suffixed idempotency key
-(`<run_id>:forecast:retry_<N>` / `job_..._forecast_retry_<N>`), which reserves normally
+never verifiable must not be revived under the same key. A released row that has been
+independently assessed by an operator now has a separate supported recovery door:
+
+```bash
+uv run nhms-pipeline recover-released-identity-blocked-reservation \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --job-id "<released_master_job_id>" \
+  --attest
+```
+
+Run the same command without `--attest` first to inspect eligibility. `--attest` records an
+operator judgement, not a Slurm-side absence proof; confirm the cohort is gone before using
+it. This command does **not** reclaim or revive the released key. It adds the attestation
+consumed by the ordinary scheduler path, which mints a **new** retry-suffixed idempotency key
+(`<run_id>:forecast:retry_<N>` / `job_..._forecast_retry_<N>`) and reserves that successor
 alongside the released row.
 
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
@@ -143,9 +155,9 @@ Manual re-entry, in order:
    unbounded-spin class #1160 guarded against.
    **Precondition — this only produces a new submission when a higher-attempt
    `*_forecast_retry_<N>` row outranks the released base row for the stage.** For a
-   released master (`reservation_lost` + unbound), `_terminal_stage_needs_manual_retry`
-   (`chain_forecast_orchestrator_cycle.py:154-158`) short-circuits to the reclaim
-   shortcut, which is `False` for `identity_mismatch_released`; which row represents the
+   released master (`reservation_lost` + unbound),
+   `ForecastOrchestratorCycleMixin._terminal_stage_needs_manual_retry` short-circuits to the
+   reclaim shortcut, which is `False` for `identity_mismatch_released`; which row represents the
    stage is decided by `_stage_job_sort_key` (highest attempt among the non-active
    matches). So:
    - **Retry-row geometry** (the real `2026072000` journal, which holds `retry_87` /
