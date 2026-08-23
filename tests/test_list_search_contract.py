@@ -311,8 +311,16 @@ def test_met_station_search_escapes_wildcards(monkeypatch: pytest.MonkeyPatch) -
     )
 
     count_statement = cursor.statements[0]
+    count_params = cursor.parameters[0]
+    # the raw value never appears in the SQL text; it is bound as a parameter.
     assert "DROP TABLE" not in count_statement
-    assert any("\\%\\_" in str(p) for p in cursor.parameters[0])
+    # Every %/_ in the user value is escaped so it matches literally (no
+    # widening). Pinned positionally on BOTH arms rather than with `any(...)`:
+    # the id arm and the name arm each get their own bind, and a version that
+    # escaped only one of them would satisfy an `any` check (issue #1669).
+    escaped = "%x\\%\\_'; DROP TABLE met.met\\_station;--%"
+    assert count_params[1] == escaped, count_params
+    assert count_params[2] == escaped, count_params
 
 
 def test_met_station_invalid_variable_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
