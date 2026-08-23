@@ -49,10 +49,15 @@ through the surrogate key. The completeness gate MUST be
 `h.status = 'published' OR h.parsed_at IS NOT NULL`; a bare `h.parsed_at IS NOT NULL`
 is forbidden because backfill leaves the NULL-key legacy cohort at NULL and a bare
 gate would judge those published runs incomplete, re-triggering the per-cycle handoff
-this requirement exists to prevent. For legacy runs without a backfillable parse
-timestamp `parsed_at` stays NULL, so recompute detection degrades to the init-state
-comparison only — a recorded, retention-bounded residual, unchanged in size from the
-fact-join form it replaces.
+this requirement exists to prevent. For runs whose fact rows cannot be aggregated by
+`run_key` — whether because the rows carry a NULL key or because retention dropped the
+chunks that held them — `parsed_at` stays NULL, so recompute detection degrades to the
+init-state comparison only. That residual MUST be reported by the delivery receipt as the
+count of runs left unstamped, broken down by `hydro_run.status`, and MUST NOT be reported
+solely as a NULL-key count: on node-27 the NULL-key count is zero while the genuinely
+unstamped published cohort is a majority-scale fraction. The residual is unchanged in size
+from the fact-join form it replaces, because the backfill aggregates by the same key over
+the same rows.
 
 #### Scenario: published run whose fact rows are NULL-key in a compressed chunk is complete
 
@@ -82,7 +87,8 @@ fact-join form it replaces.
 - **THEN** the run is not in the returned set
 - **AND WHEN** the manifest agrees and only the product mtime is newer
 - **THEN** the run stays in the returned set, and that residual is recorded
-  in the delivery receipt together with the size of the legacy cohort
+  in the delivery receipt as the unstamped count broken down by `hydro_run.status`,
+  not as a NULL-key count alone
 
 #### Scenario: a recomputed published run, once re-parsed, stays current on subsequent ticks
 

@@ -113,7 +113,14 @@ WHERE h.run_key = b.run_key AND h.parsed_at IS NULL;
 - 一次顺序解压，正是生产今天**每 tick** 付的那份代价，只付一次。
 - 与 master 判据同口径（同为 `rt.run_key = h.run_key`），漂移队列不退化。
 - `AND h.parsed_at IS NULL` 使其幂等、只填不覆盖，可安全重跑。
-- NULL-key legacy 队列仍得 NULL——与今天完全一致（must-preserve #5）。
+- 拿不到时间戳的队列仍得 NULL——与今天完全一致（must-preserve #5）。
+  **实测口径订正（node-27，2026-08-23 回填 receipt）**：`hydro_run` 侧 `run_key IS NULL`
+  的行数是 **0**，所以"NULL-key legacy 队列"在权威表这一侧是空的。真实残差是
+  **1630 个 published run**（占 published 3223 的 50.6%）的事实行按 `run_key` 在
+  `river_timeseries` 里聚合不出任何行——retention 丢块或从未写入。规模不是"小 legacy
+  队列"，是一半。但它是 **parity 而非回归**，且是构造性的：回填是全表 `GROUP BY run_key`
+  单程聚合、覆盖事实表全部行，master 用同一个键的 LEFT JOIN + `MAX(created_at)`
+  对这批同样得 NULL，新旧判据的退化程度逐字相同。
 - **需要第二次小回填**：迁移/回填与拉代码之间被解析的 run，在旧代码下不写
   `parsed_at`。拉代码后重跑同一脚本（幂等）。
   **但第二次回填只收口"窗内首次解析"的那部分**（`parsed_at` 仍为 NULL）。
@@ -188,8 +195,12 @@ PR body 从初稿起就必须这么写，并给出上面这条"无 savepoint"的
 
 ## Open Residuals（交付时必须仍然成立或被记账）
 
-- NULL-key legacy 队列 `parsed_at` 为 NULL，重算检测退化为 init-state 比较——
-  与今天一致，继续记账，不新增退化。
+- 拿不到时间戳的队列 `parsed_at` 为 NULL，重算检测退化为 init-state 比较——
+  与今天一致，继续记账，不新增退化。实测规模见上：published 3223 中 1630 个
+  （非 NULL-key 成因，而是事实行不可聚合）。
+- **回填 receipt 的字段口径会误导**：`unstamped_null_key_after=0` 读起来像"无残差"，
+  真实残差是 `unstamped_after`（pass1 后为 2729，其中 published 1630）。
+  E6 一律按 `unstamped_after` 加 status 拆分报，不引用 `unstamped_null_key_*` 单独作结论。
 - 迁移/回填与拉代码之间的解析窗口：第二次幂等回填只收口窗内**首次**解析的 run；
   窗内被旧代码**重**解析的已 stamp run 保留陈旧 `parsed_at`，代价为一次多余 handoff
   或一条误报 decline（D4）。D5 的 timer 暂停使该子情形为空。
