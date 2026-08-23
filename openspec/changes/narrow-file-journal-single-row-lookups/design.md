@@ -329,7 +329,7 @@ follow-up issue and is explicitly **not** implemented here (tasks.md §3).
 | I7 | Single lock order preserved; no new cache unless measurement demands one | D7 + existing concurrency test |
 | I8 | `query_pipeline_job_by_slurm_id` semantics byte-identical (untouched) | existing tests |
 
-## D9. Round 2: the D2a prefilter was applied to one of two near-identical readers
+## D9. Round 2: the two flat-directory readers disagree on a corrupt file's blast radius
 
 **Ruling: `_iter_direct_pipeline_job_records_for_cycle` (`:4857`) must delegate
 its flat leg to `_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`)
@@ -343,15 +343,71 @@ callers:
 |`_iter_flat_direct_pipeline_job_records_for_cycle` (`:4801`)|**filename-prefiltered (D2a)**|`_iter_pipeline_job_records_for_cycle` (`:4943`) — the narrowed path this change built|
 |`_iter_direct_pipeline_job_records_for_cycle` (`:4857`)|**unfiltered** — `self._read_optional_json(path)` at `:4883` runs on every file in the directory before any content check|`_direct_pipeline_job_records_for_cycle_cached` (`:4348`) → `_cycle_rows` (`:4216`, `:4283`)|
 
-D2a's fix landed on the first and not the second. The second's docstring-free
-flat leg reads the whole directory's *content* — 13.18 MB across 4,375 files on
-node-22 today — on every cache miss.
+D2a's fix landed on the first and not the second. The second's flat leg reads
+the whole directory's *content* — 13.18 MB across 4,375 files on node-22 today —
+on every cache miss.
 
-This is the same defect class as the two P1s in #1775: two near-identical code
-paths deciding the same thing, one corrected and one not. It is closed the same
-way — by **reference, not by a second fix**. A third copy of the filename filter
-would recreate the class. Delegating also preserves the fail-open-on-unparseable
--name property by construction rather than by re-argument.
+**CORRECTION TO THIS SECTION'S FIRST DRAFT, recorded rather than silently
+rewritten.** It was drafted as "the fix was applied to one of two near-identical
+functions", i.e. as an oversight of the same class as #1775's two P1s. That
+framing is wrong, and it was wrong because this change's own spec delta was not
+read before the ruling was written. The exclusion is **explicit, deliberate, and
+stated twice** in `specs/pipeline-job-persistence/spec.md` as merged:
+
+> Where an entrypoint satisfies a lookup from a pre-existing cycle-scoped direct
+> reader that establishes identity from record **content** rather than from a
+> file name, that reader is outside this requirement's scope and SHALL retain its
+> existing content-authoritative behaviour.
+>
+> ... it SHALL NOT be applied to a reader whose identity check is
+> content-authoritative, where a filename prefilter would change behaviour for a
+> name that contradicts its own content.
+
+`:4857` was not missed. It was carved out, with a stated reason. So the ruling
+this round has to make is not "apply the missing fix" but **"reverse a recorded
+exclusion"**, and it has to answer the exclusion's reason on the merits.
+
+**The exclusion's reason, tested:**
+
+- The hazard it names — a file whose name contradicts its content — is not
+  creatable by the writer. `_write_pipeline_job_direct_unlocked` names the file
+  `f"{job_id}.json"` from `_required_safe_identity(row, "job_id")` (`:6600`,
+  `:6611`): the name is *derived from* the content.
+- Where such a file does exist (corruption, or a hand-placed file), the reader
+  does not resolve it content-authoritatively either. `:4880-4884` passes
+  `expected_job_id=path.stem` into `_validated_direct_pipeline_job_record`
+  (`:6376`) → `_validate_pipeline_job_identity` (`:6395`), which **raises** on a
+  content/name disagreement. The current behaviour is an error, not a successful
+  content-authoritative match.
+
+So the exclusion protects a shape the writer cannot produce and the reader
+already rejects. But it is not *vacuous*, and the residue is the real decision:
+
+**What actually differs is a corrupt file's blast radius.** A file named for
+cycle X whose content is unreadable or belongs to cycle Y:
+
+|reader|behaviour when looking up cycle Y|
+|---|---|
+|`:4801` (prefiltered)|skipped — the corrupt foreign file cannot wedge cycle Y|
+|`:4857` (unfiltered)|opened, raises — one corrupt row wedges **every** cycle's lookup|
+
+The two readers already disagree, today, on master. The spec's exclusion froze
+that disagreement rather than resolving it. **Ruling: resolve it toward
+per-cycle isolation** — a corrupt row belonging to one cycle must not be able to
+wedge the lookups of every other cycle, which is the same containment property
+the narrowed replay was built to have. Fail-closed is preserved where it is
+load-bearing: a malformed file whose name resolves to **the cycle being looked
+up** still fails that lookup closed, and that must be pinned by an assertion, not
+left implied.
+
+This is a spec relaxation on an explicitly recorded carve-out. It is called out
+here so cross-review adjudicates the reversal itself, not just its
+implementation.
+
+Mechanically it is still closed by **reference, not by a second fix**: `:4857`
+delegates to the one filter definition. A third copy would recreate the parity
+class. Delegating also preserves the fail-open-on-unparseable-name property by
+construction rather than by re-argument.
 
 The by-cycle leg (`pipeline-jobs/by-cycle/<source>/<cycle>/`) is already
 partitioned and needs nothing.
