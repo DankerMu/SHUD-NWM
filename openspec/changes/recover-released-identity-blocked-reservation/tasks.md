@@ -54,5 +54,5 @@ absence is the root cause recorded in `.workplans/pr-1802/review/retro-round-3.m
 - [x] 6.1 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py` PASS.
 - [x] 6.2 `uv run ruff check .` PASS.
 - [x] 6.3 `openspec validate recover-released-identity-blocked-reservation --strict --no-interactive` PASS.
-- [ ] 6.5 Re-anchor and content-verify every `file:line` in this fixture **as the last action before push** — open each cited line and confirm it says what the citation asserts. Range-checking is not verification (see design D4c: drift caused by this PR's own commits bit four times, and every range-only check passed while the citations were wrong).
+- [x] 6.5 Re-anchor and content-verify every `file:line` in this fixture **as the last action before push** — open each cited line and confirm it says what the citation asserts. Range-checking is not verification (see design D4c: drift caused by this PR's own commits bit four times, and every range-only check passed while the citations were wrong).
 - [ ] 6.4 node-22 runtime receipt: scheduler behavior changed, so a post-deploy pass SHALL be observed on node-22 (or an explicit statement that no released row occurred in the window — the shape is rare, 4 in 4487 rows).
