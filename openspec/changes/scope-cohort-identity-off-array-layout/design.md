@@ -184,3 +184,44 @@ archive was moved into that same post-merge commit for this change.
 Recorded here rather than only in the loop log because the class has now fired
 three times (twice inside PR #1759, once here) and the first two fixes did not
 prevent the third.
+
+## D9. The same fix-the-named-item-not-the-class failure, three times in one PR
+
+Three review passes on this PR each found the same defect in a different file:
+
+| pass | where | what it said |
+|---|---|---|
+| round 1 (P1) | `openspec/specs/` | donor archived here, landing a clause this PR falsifies |
+| round 2 (P2) | `design.md` D6 | "now archived as `archive/2026-08-23-…`" |
+| Phase 7 (P2) | `proposal.md` | "corrected before archive on this branch" |
+
+Each fix corrected **the file it was shown** and left the others. The second and
+third findings are not new defects — they are the first defect, in the two
+places the first fix did not look.
+
+This is a recorded personal failure mode, not a novel one.
+`docs/review-loop-log.jsonl` carries it against issue #1671 under the class
+`same-defect-class-recurred-after-a-named-fix`, with the note: *"After T10/T10b's
+missing evidence was fixed, T11/T12 were still ticked with nothing pasted — the
+identical defect, one task later. I had fixed the two items that were named
+instead of sweeping the class."* That entry is from the day before this PR.
+
+**What actually closed it here**, and what should have been done at round 1: a
+mechanical sweep rather than a targeted edit —
+`grep -rn "archive\|archived\|before this change\|on this branch"` across every
+document of **both** changes, then adjudicating each hit individually. That pass
+found the live falsehood in `proposal.md`, a second stale claim in `tasks.md`'s
+risk-pack rationale that no reviewer had flagged, and two hits in the donor's
+own proposal that are about an unrelated NFS recovery bundle and correctly need
+no change.
+
+Standing rule, phrased so it is checkable rather than aspirational:
+
+> When a review finding is "document X asserts something no longer true",
+> the fix is not an edit to X. It is a grep for the assertion's *terms* across
+> every document in the change set, with a recorded ruling on every hit.
+> Fixing only X is how the same finding arrives again next round.
+
+The cost is visible: two extra review passes and two extra commits, on a PR
+whose production change is three deleted lines. Every one of the four verified
+findings on this PR was in orchestrator-authored prose; none was in the code.

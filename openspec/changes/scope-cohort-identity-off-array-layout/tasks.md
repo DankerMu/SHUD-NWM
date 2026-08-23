@@ -15,8 +15,8 @@
   `services/orchestrator/reconcile.py:1174`.
 - **Risk packs selected**: correctness-silent-miss (a gate that passes wrongly
   is silent by construction); spec-conformance (this change MODIFIES a
-  requirement and archives a corrected donor — the class that fired twice on
-  PR #1759); test-oracle-integrity (both new tests must be shown red first).
+  requirement and carries a corrected donor whose archive is deferred to
+  post-merge — the class that fired twice on PR #1759, and once more here); test-oracle-integrity (both new tests must be shown red first).
 - **Not selected**: concurrency-perf (no locking or read-path change);
   security (no auth surface).
 - **Reviewer lens names MUST be recorded** in the round ledger and the loop-log

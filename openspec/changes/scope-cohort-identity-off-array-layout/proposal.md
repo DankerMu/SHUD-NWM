@@ -33,8 +33,11 @@ their present-but-different-is-fatal semantics.
 
 The stale premise that produced the defect is corrected in two places, both
 recorded in place rather than rewritten away: the comment above the comparison,
-and the donor change's design (`2026-08-23-fix-cohort-runtime-identity-absent-fields`,
-corrected before archive on this branch).
+and the donor change's design (`fix-cohort-runtime-identity-absent-fields`).
+The donor is corrected on this branch but **not** archived here — see design D8
+for why archiving it in this PR would land a clause that this PR's own code
+falsifies. Both changes archive together in the post-merge chore commit, donor
+first.
 
 ## What does not change
 
