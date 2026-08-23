@@ -1396,6 +1396,36 @@ class FileOrchestrationJournalRepository:
         jobs.sort(key=lambda job: (_datetime_sort_key(job.created_at), str(job.job_id)))
         return jobs
 
+    def query_released_identity_blocked_jobs(self) -> list[dict[str, Any]]:
+        """Enumerate the released identity-blocked wedge for an OPERATOR (#1748).
+
+        Read-only, and deliberately consumed by nothing automatic: reconcile
+        iterates ``query_reserved_unbound_jobs``, which never yields this shape,
+        and that is the whole reason the shape is a permanent terminal.  This
+        exists so ``IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR`` is
+        ACTIONABLE -- the recovery API demands CAS values a human otherwise has
+        no supported way to read.  The filter mirrors that API's own admission
+        shape so a row listed here is one it will actually consider.
+        """
+
+        # Whole-tree replay, deliberately: the reconcile inventory prunes its
+        # anchor the moment a row stops needing restart reconcile, which is
+        # exactly what the release does -- ``_iter_reconcile_pipeline_job_records``
+        # returns nothing here.  The cost is acceptable because this is an
+        # operator command run by hand on a wedge, never a scheduler pass.
+        jobs = [
+            _public_scheduler_row(job)
+            for job in self._iter_pipeline_job_records()
+            if accepted_submit_contract_is_current(job)
+            and accepted_submit_row_kind(job) == "master"
+            and str(job.get("status") or "") == "reservation_lost"
+            and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+            and job.get("slurm_job_id") in (None, "")
+            and job.get("matched_slurm_job_id") in (None, "")
+        ]
+        jobs.sort(key=lambda job: str(job.get("job_id") or ""))
+        return jobs
+
     def query_inflight_jobs(self) -> list[SimpleNamespace]:
         jobs = [
             _file_reconcile_namespace(job)
