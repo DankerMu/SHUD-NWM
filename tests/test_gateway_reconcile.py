@@ -299,10 +299,13 @@ def _append_cohort_placeholders(
     source_id: str = "gfs",
     common_updates: dict[str, Any] | None = None,
     updates_by_index: dict[int, dict[str, Any]] | None = None,
-) -> None:
+) -> dict[str, dict[str, Any]]:
+    """Seed one ``hydro_run`` row per cohort member; return them by ``run_id``
+    so a caller can assert on what was actually persisted."""
     from packages.common.source_identity import normalize_source_id
     from services.orchestrator.chain_config import scenario_for_source
 
+    written: dict[str, dict[str, Any]] = {}
     canonical_source_id = normalize_source_id(source_id)
     source_id = canonical_source_id.lower()
     scenario_id = scenario_for_source(canonical_source_id)
@@ -332,7 +335,8 @@ def _append_cohort_placeholders(
         }
         row.update(common_updates or {})
         row.update((updates_by_index or {}).get(index) or {})
-        repository.append_historical_hydro_run(row)
+        written[str(row["run_id"])] = repository.append_historical_hydro_run(row) or row
+    return written
 
 
 def _seed_unrelated_history(repository: Any, *, count: int = 10) -> None:
@@ -2681,7 +2685,6 @@ def test_file_cohort_terminal_projects_when_hydro_run_rows_lack_planning_identit
     [
         {"candidate_id": "foreign-candidate"},
         {"basin_id": "foreign-basin"},
-        {"array_task_id": 99},
     ],
 )
 def test_file_cohort_present_but_different_runtime_identity_still_blocks(
@@ -2717,6 +2720,198 @@ def test_file_cohort_present_but_different_runtime_identity_still_blocks(
     assert outcome.action == "identity_mismatch_blocked"
     assert outcome.durable_write_count == 0
     assert repository.get_pipeline_job(job_id) == before
+
+
+# ---------------------------------------------------------------------------
+# #1749: cohort runtime identity is scoped off the array layout.
+#
+# ``hydro_run.array_task_id`` is the index a member occupied in the array
+# submission that *created* its row, and ``_write_hydro_run`` freezes that row
+# unless it is ``failed``/``cancelled``. Whenever a cohort's member set changes
+# the indices are renumbered, so surviving rows carry an index from the old
+# layout. Measured on node-22 (``gfs_2026080712``, issue #1749 triage): the
+# same ``run_id`` was task 10 in a 17-member cohort, 8 in a 15-member one, and
+# 12 in the 22-member one; 20 of 22 members disagreed with the new layout.
+# ---------------------------------------------------------------------------
+
+# Earlier-submission layouts for the 22-member cohort below, keyed by the
+# member's index in the *new* layout. Only the members that already existed in
+# the earlier submission carry a stale index; members 17.. (resp. 15..) were
+# first written by the current submission and so carry the current index.
+_STALE_LAYOUTS = {
+    # 17-member submission: new task 12 was old task 10 (triage datapoint).
+    17: {index: (index + 15) % 17 for index in range(17)},
+    # 15-member submission: new task 12 was old task 8.
+    15: {index: (index + 11) % 15 for index in range(15)},
+}
+
+
+def _stale_layout_updates(stale_layout: dict[int, int]) -> dict[int, dict[str, Any]]:
+    return {index: {"array_task_id": task_id} for index, task_id in stale_layout.items()}
+
+
+def test_file_cohort_renumbered_member_set_no_longer_fails_identity(
+    tmp_path: Any,
+) -> None:
+    """Delta scenario 1: a member set change renumbers the array, so the
+    surviving ``hydro_run`` rows carry the previous submission's task ids while
+    every other identity field agrees. That must reconcile, not wedge the whole
+    cohort on ``identity_mismatch_*`` (#1749, first link of the #1748 stall)."""
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    member_count = 22
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=member_count,
+        with_runtime_rows=False,
+    )
+    _append_cohort_placeholders(
+        repository,
+        member_count,
+        updates_by_index=_stale_layout_updates(_STALE_LAYOUTS[17]),
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    tasks = tuple(
+        SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+        for index in range(member_count)
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "terminal"
+    assert outcome.status == "succeeded"
+    cohort = repository.get_pipeline_job(job_id)
+    assert cohort["reconciliation_decision"] == "matched_bound"
+    assert all(
+        projection["array_task_outcome"] == "succeeded"
+        for projection in cohort["candidate_projections"]
+    )
+
+
+@pytest.mark.parametrize("earlier_member_count", [17, 15])
+def test_file_cohort_runtime_identity_tolerates_stale_task_id_not_only_absent(
+    tmp_path: Any,
+    earlier_member_count: int,
+) -> None:
+    """Delta scenario 1, second half, at the gate itself.
+
+    The donor change (``2026-08-23-fix-cohort-runtime-identity-absent-fields``)
+    only covers ``array_task_id is None``. The production failure is
+    present-but-**stale**, and on production data the absent branch is dead:
+    ``create_hydro_run_from_basin`` persists a real index on every row. This
+    test asserts the stored index is non-``None`` *and* different before
+    asserting the gate passes, so it cannot silently degrade into a re-test of
+    the absent branch.
+    """
+    member_count = 22
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=member_count,
+        with_runtime_rows=False,
+    )
+    stale_layout = _STALE_LAYOUTS[earlier_member_count]
+    rows = _append_cohort_placeholders(
+        repository,
+        member_count,
+        updates_by_index=_stale_layout_updates(stale_layout),
+    )
+    identity = _versioned_master_reservation_record(member_count=member_count)
+
+    stale_members = 0
+    for member in identity["cohort_members"]:
+        row = rows[str(member["run_id"])]
+        assert row["array_task_id"] is not None, "row must exercise the present branch"
+        if int(row["array_task_id"]) != int(member["array_task_id"]):
+            stale_members += 1
+    assert stale_members == len(stale_layout), (
+        "every member carried over from the earlier submission must disagree; "
+        f"only {stale_members} of {len(stale_layout)} differ"
+    )
+
+    assert repository.forecast_cohort_runtime_identity_matches(identity) is True
+
+
+@pytest.mark.parametrize("field", ["candidate_id", "basin_id"])
+def test_file_cohort_runtime_identity_sibling_fields_stay_fatal_when_present(
+    tmp_path: Any,
+    field: str,
+) -> None:
+    """Delta scenario 2 at the gate: dropping ``array_task_id`` must not drag
+    its siblings with it. ``candidate_id``/``basin_id`` are derived from
+    model/basin identity (not from the layout), so a present-but-different
+    value stays fatal; ``None`` still means "not stored" because some
+    ``create_hydro_run`` paths persist neither."""
+    member_count = 4
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=member_count,
+        with_runtime_rows=False,
+    )
+    _append_cohort_placeholders(
+        repository,
+        member_count,
+        updates_by_index={2: {field: f"foreign-{field}"}},
+    )
+    identity = _versioned_master_reservation_record(member_count=member_count)
+
+    assert repository.forecast_cohort_runtime_identity_matches(identity) is False
+
+
+@pytest.mark.parametrize(
+    ("row_updates", "member_updates", "identity_updates"),
+    [
+        # The journal ties ``run_id`` to ``model_id`` structurally, so a row
+        # cannot carry a foreign ``run_id`` and stay discoverable; the member
+        # side is mutated instead, which reaches the same comparison.
+        ({}, {"run_id": "fcst_gfs_2026071200_model_foreign"}, {}),
+        ({"scenario_id": "foreign_scenario"}, {}, {}),
+        # D4 / #1792: the identity side bumps ``submission_attempt`` on reclaim
+        # while a non-retriable ``hydro_run`` row stays frozen at attempt 1.
+        # That is a known defect of the same class as ``array_task_id`` and is
+        # deliberately NOT fixed here; this only pins that the comparison is
+        # still present and still fires, i.e. the removal did not over-reach.
+        ({}, {}, {"submission_attempt": 2}),
+    ],
+    ids=["run_id", "scenario_id", "submission_attempt"],
+)
+def test_file_cohort_runtime_identity_retained_strict_fields_still_bite(
+    tmp_path: Any,
+    row_updates: dict[str, Any],
+    member_updates: dict[str, Any],
+    identity_updates: dict[str, Any],
+) -> None:
+    """Delta scenario 3: the fields kept strict must still fail the gate.
+
+    The mutated rows stay discoverable (same ``model_id``/``source_id``/
+    ``cycle_time``) so the failure comes from the strict comparison, not from
+    the row-missing branch above it.
+    """
+    member_count = 4
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=member_count,
+        with_runtime_rows=False,
+    )
+    _append_cohort_placeholders(
+        repository,
+        member_count,
+        updates_by_index={2: row_updates} if row_updates else None,
+    )
+    identity = _versioned_master_reservation_record(member_count=member_count)
+    identity["cohort_members"][2].update(member_updates)
+    identity.update(identity_updates)
+
+    assert repository.forecast_cohort_runtime_identity_matches(identity) is False
 
 
 @pytest.mark.parametrize("member_count", [2, 256])
