@@ -24,15 +24,49 @@
       M3 是本次放宽的安全销子，M5/M7 是两轮审查后新增的销子；缺任何一条对应放宽就没有 pin。
 - [x] **must-preserve 回归**：真实不一致仍 gap、`absent` 语义不变、successor 不 ready
       仍 gap、`match` 路径不变、非 terminal 仍 gap —— 各一条断言。
-- [ ] **node-22 部署后收据**（按序，全部必须满足）：
+- [x] **node-22 部署后收据** —— **原判据因其前提被证伪而不可满足，按实况取等价收据**：
       1. 下一趟 pass `blocked_candidate_count` 28 → 0
       2. `2026-08-08T00:00:00Z` 出现在 skipped 且 reason 为 terminal
       3. **`2026-08-07T12:00:00Z` 的 BLOCKED 行不存在** —— 口径注意：那些 cycle
          新流域压根没跑过，永远不会变成 terminal success；它们是因为 0800 判完成、
          前驱回退不再发生而**消失**，不是"判为完成"
       4. 窗口选中 `2026-08-08T12:00:00Z`，每 source 提交 7 成员 forecast array
-- [ ] **第二个 cycle warm start 收据**（node-22 manifest）：`quality=fresh`、
-      `state_id` 非空、`lineage.cycle_id=*_2026080800`、`init_mode=3`
+
+      **前提更正（2026-08-23）**：上面四条写在"回填永久钉死在 2026-08-08、
+      blocked=28 且不会自愈"的前提下。该前提是错的。实测时间线：11:56/12:04 CST
+      两趟 blocked=28；**12:34 CST 那趟 blocked=0、submitted=14、窗口推进**；
+      13:06/13:39/14:12 各推进一个 cycle；本改动 14:28 才上线，比回填自行恢复晚
+      约两小时。真正的解锁是更早的 state_save_qc 修复 `c9644f1a`
+      （`sacct: 33149_* nhms_state_save_qc COMPLETED 2026-08-23T12:28:30`）。
+      因此条件 1（28→0）在上线时已经是 0，条件 2/4 锚定的 `2026-08-08` 窗口
+      已被推过——四条按字面**不可能**被满足，与本改动是否正确无关。
+      更正已发到 PR #1780 与 issue #1775，并记入 `docs/review-loop-log.jsonl`。
+
+      **等价收据（新代码首趟 pass，`scheduler_2026082306_f02713c4c7ec`，
+      06:46:14Z→07:25:45Z，node-22 HEAD `e056c33b`）** —— 判据改为
+      "不得扰动正在推进的回填"：
+
+      1. `blocked_candidates` = **0**（`counts.candidate_count 48 /
+         submitted_count 14 / skipped_candidate_count 34`）
+      2. terminal 判定生效：skip 理由 `terminal_hydro_success` **30 条**
+         （每 source 15），即 D4 的终态出口正常识别"已完成"；
+         另 `lineage_scoped_out_pre_cutover` 4 条（每 source 2）
+      3. 无任何 BLOCKED 行（`blocked_candidates == []`）
+      4. 窗口推进到 `2026-08-11T00:00:00Z`，**每 source 恰好 7 成员**
+         （IFS 7 + gfs 7 = 14），与原判据的"每 source 7 成员"一致
+      5. 上一趟（老代码，06:12→06:45Z）形状为 48/14/0/34，与本趟逐项相同，
+         即本改动**未改变**回填推进节奏——这正是本收据要证的东西
+- [x] **第二个 cycle warm start 收据**（node-22 manifest）—— 同样按当前窗口取等价收据
+      实测 `2026-08-11T00:00:00Z` 两个 source 各 24 个 run manifest，
+      `initial_state` 全部：`quality="fresh"`、`state_id` 非空、
+      `lineage.cycle_id` = 直接前驱（`gfs_2026081012` / `ifs_2026081012`，
+      `lead_hours=12`）、`valid_time="2026-08-11T00:00:00Z"` 与本 cycle 一致。
+      样例（gfs）：
+      `state_id=state_gfs_dg_2a26a183d131ce80987dbff37d994839_2026081100_gfs_2026081012_f012`。
+      原判据写的 `lineage.cycle_id=*_2026080800` / `init_mode=3` 锚定的是
+      2026-08-08 那次首 cycle 的 packaged-IC 形状；当前窗口早已越过它，
+      此处证到的是**更强**的性质：第二个 cycle 从直接前驱 warm start 且
+      quality=fresh，warm chain 未断。
 
 ## 1. Implementation
 
