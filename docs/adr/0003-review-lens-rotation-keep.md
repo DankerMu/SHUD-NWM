@@ -1015,3 +1015,200 @@ means the 66-vs-264 aggregate should not be read as a clean lens-vs-lens
 experiment. Fourth measurement gap, alongside the three already logged.
 
 Neither observation moves the keep/cut call, which stays on the aggregate.
+
+### Revisit 2026-08-22 — PR #1750 (#1646, pytest thread-exception policy)
+
+`loop_log_audit` reports **109 multi-round merged PRs**, with later-round catches
+**core=66 vs rotated=264**. PR #1750 itself is a single-round clean review:
+six Round 1 lenses returned zero candidate findings, no verifier batch existed,
+and the independent Phase 7 Gap Sweep was also clean. It therefore enters
+neither the multi-round denominator nor either later-round catch counter.
+
+This sample has **zero information about rotation**: no follow-up comprehensive
+round ran, so neither a rotated free slot nor a pinned-core recheck was applied.
+Treating the extra merged-PR/log denominator as evidence for keep or cut would
+repeat the measurement error already documented throughout this ADR—confusing
+"treatment not applied" with "treatment applied and found nothing."
+
+**Keep rotation remains unchanged.** The cumulative ratio still rules out an
+autonomous cut, but this PR adds no evidentiary strength in either direction.
+Any future reversal still requires the recorded attribution-schema and
+round-role fixes plus maintainer review.
+
+## Revisit 2026-08-22 — PR #1751 (#1736)
+
+Audit at 445 lines / 441 merged: 110 multi-round merged PRs, later-round catches
+`core=66 rotated=264`. The ratio is unchanged in direction from the previous
+revisit (108 multi-round); **keep**.
+
+Unlike the previous revisit, this PR **did** apply a rotated later-round lens and
+it **did** catch. Round 2 was a single targeted `spec-conformance-targeted` lens
+aimed at the round-1 fix, not a rebroadcast of the round-1 mix. It caught a P2
+the round-1 lenses structurally could not have: the round-1 fix itself replaced a
+wrong-but-unambiguous line-range citation with a prose locator that resolves to
+four gates instead of three. That defect did not exist during round 1 — it was
+created by the fix — so only a later round looking at the fix could see it.
+
+This is the cleanest instance so far of the mechanism the ADR claims: rotated
+later-round lenses find defects **introduced by the fix pass**, a class the
+round-1 mix cannot cover by construction because the class does not yet exist
+when round 1 runs. Recorded as supporting evidence, not as a change of ruling.
+
+Caveat carried forward unchanged: the attribution schema still cannot separate
+"rotated lens found it" from "lens ran later," and this PR is a single
+observation. The keep ruling continues to rest on the cumulative ratio plus the
+absence of a recorded cut rationale; any future reversal still requires the
+attribution-schema and round-role fixes plus maintainer review.
+
+## Revisit 2026-08-22 — PR #1759 (#1734)
+
+Audit at 446 lines / 442 merged: 111 multi-round merged PRs, later-round catches
+`core=68 rotated=264`. **Keep** — unchanged in direction.
+
+This revisit is the first to weaken, rather than strengthen, confidence in the
+number the keep ruling rests on.
+
+**An attribution schema gap was found while filing this line.**
+`loop_log_audit.rotation_attribution` reads `catch["round"]` and `catch["lens"]`.
+A catch object written without them hits `catch.get("round", 1)`, defaults to
+round 1, and is **silently skipped by the counter** — `continue`, no warning.
+
+**Correction, 2026-08-22 (same day).** The first version of this revisit claimed
+the ratio was "computed from an unknown subset" and that "most earlier lines do
+not" carry the keys. **Both statements were false, and they were asserted from
+two data points without measuring the log.** Measured over all 446 lines at
+`97f8116a`:
+
+| | count |
+|---|---|
+| catch objects total | 1331 |
+| carrying `round`+`lens` (counted) | **1314 (98.7%)** |
+| carrying `phase` only (skipped) | **17 (1.3%)** |
+
+The 17 sit in exactly **four** entries — log lines 440, 442, 443, 445 =
+PRs #1730, #1738, #1746, #1751. #1730 is `rounds=1` and never entered the numerator,
+so the upper bound on later-round catches lost to this is **14 of 332 (≤4.2%)**
+across three multi-round PRs. `phase`-only is a **recent write regression**, not
+a historical baseline: `round`/`lens` has been written continuously since
+PR #1126, and `references/phase-flow.md:566` already specifies `{"round":<n>,
+"lens":...}` as the canonical shape — those four entries violate an existing
+convention rather than reveal a missing one.
+
+So the ratio is **not** materially undermined, and the keep/cut direction is
+untouched. What the gap does show is an enforcement hole worth its own fix:
+`loop_log_audit.py:63-75` discards non-conforming catches **silently**, and
+`evidence_check.py:74-110` validates only entry-level keys and never descends
+into `catches` — which is how the drift ran unnoticed for four entries. Tracked
+as **#1764** (report, don't fix: the scripts live in the shared
+`subagent-workflow` skill, not project code).
+
+One concrete contradiction does survive the correction, unchanged: the
+**2026-08-22 revisit for PR #1751** above narrates a rotated later-round lens
+that caught a P2 and calls it "the cleanest instance so far of the mechanism the
+ADR claims" — that entry is log line 445, `phase`-only, so the counter never
+counted it. The narrative and the number disagree on the single instance this
+ADR leans on hardest.
+
+**Attribution for this PR is `core=2, rotated=0`**, and the reason matters more
+than the count. Both later-round catches came from lenses already present in the
+round-1 mix — `test-oracle-integrity` in round 2, `spec-conformance` in round 3.
+They were invisible to round 1 not because a lens rotated in, but because **the
+defects did not exist yet**: the round-2 coverage gap and the round-3 false spec
+clause were each introduced by the preceding fix pass.
+
+That is evidence for **later rounds** earning their keep. It is not evidence for
+**lens rotation** earning its keep. The two have been conflated throughout this
+ADR by an attribution schema that cannot separate "a rotated lens found it" from
+"a lens ran after the defect was created" — a caveat every prior revisit has
+carried forward verbatim, and which this PR now shows is not merely theoretical:
+under a correct-key reading, the strongest instance recorded so far attributes to
+core, not rotated.
+
+**Ruling: keep.** The ratio survives the measurement correction — at most 4.2%
+of later-round catches are uncounted, and the direction is unchanged — so keep
+continues to follow from the cumulative ratio plus the absence of a recorded cut
+rationale, as in every prior revisit.
+
+What this revisit *does* narrow is a different thing, and it is not about sample
+size: the ratio counts **when** a lens ran, not **whether rotating it in** is
+what found the defect. This PR is a clean demonstration — `core=2, rotated=0`,
+both from lenses already in the round-1 mix, both catching defects that round 1
+could not have seen because the fix passes had not yet created them. Every prior
+revisit carried the "cannot separate rotated-in from ran-later" caveat forward
+verbatim as a theoretical limitation; here it is the whole explanation of the
+result. Until the attribution schema can tell the two apart, the ratio supports
+"run later rounds", and only ambiguously supports "rotate the lenses".
+
+Reported, not fixed (**#1764**): the enforcement hole that let four entries drift
+to `phase`-only keys. `loop_log_audit.py` and `evidence_check.py` live in the
+shared `subagent-workflow` skill, not in project code, so the fix lands outside
+this repo while the affected log and this ADR are project-local — that split is
+part of why the drift went unnoticed. Any future reversal continues to require
+the attribution-schema and round-role fixes plus maintainer review.
+
+## Revisit 2026-08-23 (PR #1754, issues #1640 + #1654) — keep, and the sample moved by nothing
+
+`loop_log_audit --log docs/review-loop-log.jsonl` returns DECIDABLE at 111
+multi-round merged PRs, later-round catches **core=68 / rotated=264**. The
+previous revisit (PR #1746) read 109 PRs at core=66 / rotated=264.
+
+The rotated count did not move, and the core count moved by exactly this PR's
+two catches. That is not a signal about lens rotation — it is arithmetic about a
+PR that had **one** round. A compact fixture that goes clean in round 1 has no
+later rounds, so it contributes to the numerator of neither bucket and only
+enlarges the denominator's neighbourhood. Reading the ratio as having "shifted
+toward core" would be wrong.
+
+Decision unchanged: **keep** the rotation.
+
+Recorded because it is a fifth way this counter can mislead, alongside the four
+already listed above: single-round PRs contribute round-1 catches to the `core`
+tally while contributing no opportunity for a rotated lens to catch anything. The
+counter's denominator is multi-round PRs but its `core` numerator admits catches
+from PRs where rotation was never exercised. Anyone using this ratio to argue
+cut should first filter to PRs that actually reached round 2.
+
+## Revisit 2026-08-23 (PR #1773, issue #1743) — keep; a zero-round line cannot move this counter
+
+`loop_log_audit --log docs/review-loop-log.jsonl` returns DECIDABLE at 111
+multi-round merged PRs, later-round catches **core=68 / rotated=264** —
+identical to the previous revisit (PR #1754) in all three numbers.
+
+That identity is the whole content of this revisit. PR #1773 is a `fixture:
+none`, `rounds: 0` line: no cross-review round ran at all, so it contributes to
+neither numerator and does not even enter the multi-round denominator. The
+counter is unchanged because nothing about it was exercised.
+
+Decision unchanged: **keep** the rotation.
+
+Worth recording alongside the five ways this counter can already mislead: the
+audit emits DECIDABLE on every merge once the sample thresholds are met,
+*including* merges that carry zero review evidence in either direction. The
+obligation to record a keep/cut call therefore fires on lines that are, by
+construction, incapable of informing it. That is not an argument to weaken the
+obligation — a cheap recorded "unchanged, and here is why it could not change"
+is exactly what keeps the ledger honest — but a reader scanning revisit headings
+should not mistake the *number* of revisits for the amount of evidence
+accumulated. The prior revisit made the adjacent point about single-round PRs
+inflating `core`; this one makes the stronger version: zero-round PRs inflate the
+revisit count itself.
+
+## Revisit 2026-08-23 (PR #1771, issue #1669) — keep, counter did not move
+
+`loop_log_audit` returns DECIDABLE at **111 multi-round merged PRs, core=68 /
+rotated=264** — identical to the PR #1754 revisit above. This PR contributed
+nothing to either bucket: one round, and its single catch is a round-1 catch, so
+it lands in neither later-round tally.
+
+That is the fifth caveat from the #1754 revisit playing out exactly as described:
+single-round PRs enlarge the population without exercising rotation. Decision
+unchanged: **keep**.
+
+One observation worth recording anyway, because it is about where catches come
+from rather than which lens found them. This PR's most consequential correction
+did not come from a lens at all — it came from the **user** challenging the
+premise ("production already has too many indexes"), which forced a measurement
+that reversed the approach from rebuilding an index to deleting it. The
+rotation counter cannot see that, and a reader using this ADR to reason about
+where review value originates should know the instrument only counts one of the
+sources.

@@ -253,6 +253,14 @@ calibration_version_id / shud_code_version`，不读 `model_package_uri`。
   `mkdir -p <dir> && chgrp nwmuser <dir> && chmod 2775 <dir>`（两个账号共有组 `nwmuser`/1107）。
 - `--output-registry` 的**父目录不能组可写**，否则 `provider_lock_parent_unsafe`
   （`provider_atomic.py` 要求 `st_uid == geteuid()` 且 `mode & 0o022 == 0`）。`chmod 755` 即可。
+- **`--output-registry` 绝不能指向生产 canonical manifest。** 与 hop 1 的坑不同形：
+  这里 `--output-registry` 是 `required=True`（`scripts/provision_direct_grid_scheduler_registry.py:581`），
+  没有默认值、忘不了；危险的是**主动指过去**。该脚本在 `:558` 调
+  `publish_scheduler_registry_manifest(output_models, output_registry, ...)`，而后者把传入的
+  `output_models` 当作**完整 `models` 列表**整体写出（`scheduler_file_providers.py:586-594`），
+  **不与目标已有内容做任何合并**。指向生产 canonical 的后果是：生产 manifest 的 models 被本次
+  产出的 dg 变体行**整体替换**，其余所有流域的行当场消失。且此处未传 `expected_preimage`，
+  **没有 CAS 保护**兜底。正确姿势始终是：输出到本次 workspace 下的独立路径，再在 hop 4 合并发布。
 
 **hop 3b — 变体包回拷 node-22 scratch。** 用 `cp -r`，**不要 `cp -a`**：
 flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报

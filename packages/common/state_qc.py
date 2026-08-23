@@ -64,14 +64,46 @@ _MAX_STATE_VALUE_M = 1.0e6
 # negatives remain fatal because they are no longer harmless roundoff.
 _NEGATIVE_ZERO_TOLERANCE = 1.0e-2
 
-# SHUD's constitutive update treats a negative unsaturated-zone depth as the
-# dry lower bound, but the restart writer can still serialize a small negative
-# ODE residual.  Permit a narrowly bounded projection to that physical lower
-# bound.  A domain-mean correction cap prevents a basin-wide solver failure
-# from being hidden while avoiding false rejection when many cells contain
-# only sub-millimetre serialization residuals.
-MAX_UNSAT_NEGATIVE_REPAIR_M = 5.0e-2
+# Negative restart residuals are projected to the physical zero floor
+# UNCONDITIONALLY: there is no per-cell repair ceiling. SHUD maps a negative
+# unsaturated-zone depth and a negative channel stage to its dry constitutive
+# branch, but the restart writer still serializes the raw ODE residual, so the
+# published artifact has to be projected before QC sees it.
+#
+# The per-cell ceiling was removed by owner directive after production falsified
+# two successive attempts to size one. The population supports the removal: a
+# scan of all 4327 published ``state.cfg.ic`` files found 122,070 negative river
+# values across 539 files, and the distribution is bimodal --
+#
+#     < 1 cm      122,057   (99.99%)
+#     1 - 5 cm          2
+#     5 - 10 cm         5
+#     10 - 20 cm        3
+#     20 - 30 cm        3   (max 0.216031, seen twice)
+#
+# -- with every value above 1 cm belonging to two ``basins_dth_yj`` models at the
+# same reach. Above 0.216 m the data constrains nothing, so any ceiling in
+# [0.25, 1.0] would accept and reject exactly the same observed set; a ceiling
+# sized off the worst observation just re-stalls production on the next one.
+#
+# The domain-mean caps are therefore the ONLY rejection criteria, and they are
+# what still fails closed on a basin-wide solver collapse. Their denominators
+# are the mesh row count and the RIVER row count respectively. The river cap
+# cannot mirror the unsat cap: production river-row counts span 319..43799, so
+# 2.0e-4 would give the smallest basin a 0.064 m total budget and fail closed on
+# a single decimetre residual. 2.0e-3 leaves a 2 mm domain-average stage error,
+# hydrologically negligible, while a routing failure exceeds it by orders of
+# magnitude.
+#
+# Recorded trade: a lone insane value (one -17 m stage among 8622 reaches
+# averages ~2e-3) is now published rather than blocked. Availability was chosen
+# over strictness by owner directive; ``max_correction_m`` and
+# ``over_tolerance_clamp_count`` in the evidence keep it visible in the receipt.
+# ``_NEGATIVE_ZERO_TOLERANCE`` survives only as the line between routine cleanup
+# and a flagged clamp in that evidence, and as the raw-content range check in
+# :func:`run_state_variable_qc` (which always runs on already-projected bytes).
 MAX_UNSAT_MEAN_CORRECTION_M = 2.0e-4
+MAX_RIVER_MEAN_CORRECTION_M = 2.0e-3
 
 
 @dataclass(frozen=True)
@@ -84,10 +116,16 @@ class StateResidualNormalization:
     mesh_row_count: int
     max_unsat_correction_m: float
     mean_unsat_correction_m: float
+    normalized_river_row_count: int = 0
+    river_row_count: int = 0
+    max_river_correction_m: float = 0.0
+    mean_river_correction_m: float = 0.0
+    over_tolerance_clamp_count: int = 0
+    max_correction_m: float = 0.0
 
     def evidence(self) -> dict[str, Any]:
         return {
-            "policy": "bounded_physical_zero_projection_v2",
+            "policy": "unbounded_physical_zero_projection_v4",
             "accepted": self.accepted,
             "reason": self.reason,
             "normalized_value_count": self.normalized_value_count,
@@ -98,18 +136,31 @@ class StateResidualNormalization:
             ),
             "max_unsat_correction_m": self.max_unsat_correction_m,
             "mean_unsat_correction_m": self.mean_unsat_correction_m,
-            "max_unsat_negative_repair_m": MAX_UNSAT_NEGATIVE_REPAIR_M,
             "max_unsat_mean_correction_m": MAX_UNSAT_MEAN_CORRECTION_M,
+            "normalized_river_row_count": self.normalized_river_row_count,
+            "river_row_count": self.river_row_count,
+            "normalized_river_row_fraction": (
+                self.normalized_river_row_count / self.river_row_count if self.river_row_count else 0.0
+            ),
+            "max_river_correction_m": self.max_river_correction_m,
+            "mean_river_correction_m": self.mean_river_correction_m,
+            "max_river_mean_correction_m": MAX_RIVER_MEAN_CORRECTION_M,
+            "negative_zero_tolerance_m": _NEGATIVE_ZERO_TOLERANCE,
+            "over_tolerance_clamp_count": self.over_tolerance_clamp_count,
+            "max_correction_m": self.max_correction_m,
         }
 
 
 def normalize_state_negative_residuals(content: str) -> StateResidualNormalization:
-    """Project bounded negative restart residuals to the physical zero floor.
+    """Project every negative restart residual to the physical zero floor.
 
-    Other state variables retain the existing 10 mm numeric-zero tolerance.
-    ``Unsat`` alone receives the 50 mm repair ceiling because SHUD explicitly
-    maps negative unsaturated-zone depth to its dry constitutive branch.  Any
-    value beyond the ceiling remains untouched so normal QC rejects it.
+    There is no per-cell repair ceiling: any negative value in any state column,
+    of any magnitude, is written as ``0``. Rejection is decided solely by the two
+    domain-mean correction caps, which is what still fails closed on a
+    basin-wide solver collapse. ``_NEGATIVE_ZERO_TOLERANCE`` no longer gates the
+    projection; it only splits the evidence into routine sub-centimetre cleanup
+    and ``over_tolerance_clamp_count`` flagged clamps. See the module-level
+    comment on the caps for the population data and the recorded trade.
     """
 
     lines = content.splitlines()
@@ -119,18 +170,34 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
     if counts is None:
         return StateResidualNormalization(content, True, None, 0, 0, 0, 0.0, 0.0)
     mesh_count = counts[0]
+    # Only meaningful for compatibility (non-sectioned) files; the native header's
+    # second token is a mesh-state column count, so sectioned files derive river
+    # rows from section boundaries instead.
+    compat_river_count = counts[1]
     sectioned = any(_looks_like_column_header(line) for line in lines[1:])
     normalized_value_count = 0
     normalized_unsat_rows: set[int] = set()
     unsat_correction_sum = 0.0
     max_unsat_correction = 0.0
+    normalized_river_rows = 0
+    river_row_count = 0
+    river_correction_sum = 0.0
+    max_river_correction = 0.0
+    max_correction = 0.0
+    over_tolerance_clamps = 0
     mesh_row_index = 0
+    data_row_index = 0
+    stage_section_count = 0
     current_columns: list[str] | None = None
+    current_section: str | None = None
 
     for line_index in range(1, len(lines)):
         line = lines[line_index]
         if _looks_like_column_header(line):
             current_columns = [token.strip().lower() for token in line.split()]
+            current_section = _section_from_column_header(line, stage_section_count=stage_section_count)
+            if current_section in {"river", "lake"}:
+                stage_section_count += 1
             continue
         row = _numeric_row(line)
         if row is None:
@@ -138,49 +205,63 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
 
         is_mesh_row = False
         unsat_index: int | None = None
+        is_river_row = False
+        stage_index: int | None = None
         if sectioned:
             if current_columns is not None and "unsat" in current_columns and mesh_row_index < mesh_count:
                 is_mesh_row = True
                 unsat_index = current_columns.index("unsat")
+            elif current_section == "river" and current_columns is not None:
+                for candidate in ("stage", "river_stage"):
+                    if candidate in current_columns:
+                        is_river_row = True
+                        stage_index = current_columns.index(candidate)
+                        break
         elif mesh_row_index < mesh_count:
             is_mesh_row = True
             unsat_index = 4
+        elif data_row_index < mesh_count + compat_river_count:
+            is_river_row = True
+            stage_index = 1
 
         if is_mesh_row:
             mesh_row_index += 1
+        if is_river_row:
+            river_row_count += 1
+        data_row_index += 1
         tokens = line.split()
         if len(tokens) != len(row):
             continue
         changed = False
+        river_row_repaired = False
         for value_index in range(1, len(row)):
             value = row[value_index]
             if value >= 0.0:
                 continue
-            tolerance = (
-                MAX_UNSAT_NEGATIVE_REPAIR_M
-                if is_mesh_row and unsat_index == value_index
-                else _NEGATIVE_ZERO_TOLERANCE
-            )
-            if value < -tolerance:
-                continue
             tokens[value_index] = "0"
             changed = True
             normalized_value_count += 1
+            correction = -value
+            max_correction = max(max_correction, correction)
+            if correction > _NEGATIVE_ZERO_TOLERANCE:
+                over_tolerance_clamps += 1
             if is_mesh_row and unsat_index == value_index:
                 normalized_unsat_rows.add(mesh_row_index - 1)
-                correction = -value
                 unsat_correction_sum += correction
                 max_unsat_correction = max(max_unsat_correction, correction)
+            elif is_river_row and stage_index == value_index:
+                river_row_repaired = True
+                river_correction_sum += correction
+                max_river_correction = max(max_river_correction, correction)
+        if river_row_repaired:
+            normalized_river_rows += 1
         if changed:
             lines[line_index] = "\t".join(tokens)
 
     mean_correction = unsat_correction_sum / mesh_count if mesh_count else 0.0
-    if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
-        reason = (
-            "unsat negative-residual domain-mean correction is "
-            f"{mean_correction:.9f} m, above "
-            f"{MAX_UNSAT_MEAN_CORRECTION_M:.9f} m"
-        )
+    mean_river_correction = river_correction_sum / river_row_count if river_row_count else 0.0
+
+    def _rejected(reason: str) -> StateResidualNormalization:
         return StateResidualNormalization(
             content,
             False,
@@ -190,6 +271,25 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
             mesh_count,
             max_unsat_correction,
             mean_correction,
+            normalized_river_rows,
+            river_row_count,
+            max_river_correction,
+            mean_river_correction,
+            over_tolerance_clamps,
+            max_correction,
+        )
+
+    if mean_correction > MAX_UNSAT_MEAN_CORRECTION_M:
+        return _rejected(
+            "unsat negative-residual domain-mean correction is "
+            f"{mean_correction:.9f} m, above "
+            f"{MAX_UNSAT_MEAN_CORRECTION_M:.9f} m"
+        )
+    if mean_river_correction > MAX_RIVER_MEAN_CORRECTION_M:
+        return _rejected(
+            "river-stage negative-residual domain-mean correction is "
+            f"{mean_river_correction:.9f} m, above "
+            f"{MAX_RIVER_MEAN_CORRECTION_M:.9f} m"
         )
     trailing_newline = "\n" if content.endswith(("\n", "\r")) else ""
     normalized_content = "\n".join(lines) + trailing_newline if normalized_value_count else content
@@ -202,6 +302,12 @@ def normalize_state_negative_residuals(content: str) -> StateResidualNormalizati
         mesh_count,
         max_unsat_correction,
         mean_correction,
+        normalized_river_rows,
+        river_row_count,
+        max_river_correction,
+        mean_river_correction,
+        over_tolerance_clamps,
+        max_correction,
     )
 
 

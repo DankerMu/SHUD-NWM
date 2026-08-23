@@ -37,7 +37,7 @@ Selected packs: Config/project setup; Concurrency/shared state/ordering; Resourc
 - [x] 4.3 All 21 directly threaded test files pass under exact warning escalation (`4703 passed`, `23 skipped`); collection records 23 integration tests across the two threaded integration suites and no `e2e`/`grib` tests in the 21-file set today.
 - [x] 4.4 Node-27 explicit-opt-in real-DB integration at `2419026420b685bbd84fbc0346bd02cb66a5ed39` completed with `163 passed`, one expected real-Basins-data skip, `13617 deselected`, zero thread-warning failures, and zero leftover throwaway databases; node-22 is not applicable because Slurm/SHUD scheduling is unchanged.
 - [x] 4.5 The full master-lane expression reached a natural terminal result with zero unhandled-thread failures (`13381 passed`, `12 skipped`, `182 deselected`, one unrelated `UserWarning`). Its 13 failures are baseline defects, not #1646 regressions: entropy remains linked to #1662/#1707, and 12 state-clone tests also reproduce under the unmodified baseline pytest config (`12 failed`, `15 passed`) because a fixed index timestamp crossed its 168-hour freshness window; #1743 owns that date-driven failure. Policy/selector suites, Ruff, strict OpenSpec and diff check pass.
-- [ ] 4.6 Final-head PR CI executes policy + selector assertions (not collect-only), Governance succeeds on the same SHA, and branch-tip/evidence gates pass.
+- [x] 4.6 Final-head PR CI executed policy + selector assertions (`2838 passed`, not collect-only), Governance succeeded on the same SHA, and branch-tip/evidence gates passed before merge.
 
 ## 5. Non-goals and sibling audit
 
