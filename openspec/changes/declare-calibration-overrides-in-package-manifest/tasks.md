@@ -71,8 +71,8 @@ rather than reverting anything: the gate is closed in both directions.
 
 ## 6. Documentation
 
-- [ ] 6.1 Correct the runbook's provenance note: `SOIL_ALPHA <= 20` is a soft
+- [x] 6.1 Correct the runbook's provenance note: `SOIL_ALPHA <= 20` is a soft
       SHUD warning (`ModelConfigure.cpp:90`, `checkRange` only prints);
       `GEOL_DMAC <= 4` is an empirical stability bound with no SHUD counterpart.
-- [ ] 6.2 Record why a repository grep could not have found either bound
+- [x] 6.2 Record why a repository grep could not have found either bound
       (`SHUD/` is gitignored; the second exists in no source at all).

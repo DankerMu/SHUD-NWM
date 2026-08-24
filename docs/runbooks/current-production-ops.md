@@ -306,13 +306,28 @@ refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active�
 
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
-该 repair 已在 **#1816 中整体删除**——两个上界在仓库里没有任何出处，而被它改写的标定值
-是外部用户跑 SHUD 收敛得到的。现在 publisher 对标定文件是**纯拷贝**：包内的 `*.cfg.calib`
-与 Basins 树里的源文件逐字节相同，`cmp` 应当返回 0。
+该 repair 已在 **#1816 中整体删除**——它静默改写的是外部用户跑 SHUD 收敛得到的标定值。
+
+**两个上界的出处不同，且都不是仓库里 grep 得到的**（`SHUD/` 被 gitignore，见 `.gitignore:81`）：
+
+- `SOIL_ALPHA <= 20`：SHUD 里确有声明（`ModelConfigure.cpp:90`），但 `checkValue()` 调用
+  `checkRange()` 后**丢弃返回值**，而 `checkRange` 只 `fprintf` 一行——是**软告警，不是闸门**。
+  越界不会被拒，也不会崩。
+- `GEOL_DMAC <= 4`：**SHUD 里根本没有对应物**。源码声明的范围是 `[0, 10]`
+  （`ModelConfigure.cpp:109`），而源值 `GEOL_DMAC=5 × Dmac 列上限 1.0 = 5` 落在该范围内、
+  零告警、照样 NaN。4 是**实测稳定边界**（2×2 跨 gfs/IFS 两个独立源：4.5 跑通、4.75 NaN、
+  源值 5 两边都 NaN），任何源码里都不存在——所以它只能靠**显式声明**承载，见 #1832 的
+  `config/calibration_overrides.yaml`。
+
+publisher 对**未被声明**的标定文件是**纯拷贝**：包内的 `*.cfg.calib` 与 Basins 树里的
+源文件逐字节相同，`cmp` 应当返回 0。被声明覆盖的流域参数记在
+`manifest["calibration"]["overrides"]` 里——声明是唯一入口，没被点名的一律不动。
 2026-08-22 之前发布的包中有 8 个流域（含 `SHJ-2SHJ`、`hetianhe`）带着被改写的值，
 它们在 #1816 之后单独重发；重发前的历史预报不追溯、不重签。
 **仍在运行的 repair 只有缺失辐射模板那一条**（`basins.missing_tsd_rl_template_repair.v1`，
 staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标定值。
+（另有 staging 目录 `overridden-basins`，那是**声明式标定覆盖**的落点，不是 repair：
+它只对 `config/calibration_overrides.yaml` 点名的流域参数生效，且记进 manifest。）
 **它记在发布 receipt 的 `summary["repairs"]` 里，不在 package manifest 里**——
 `publish_basins_package` 不收 repair 参数，manifest 对任何 repair 都没有字段。
 而 receipt 只在显式传了 `--output` 时才落盘（`publish_scheduler_file_registry.py:396-397`），
