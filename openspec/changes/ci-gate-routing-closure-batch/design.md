@@ -147,13 +147,19 @@ live state returns no violations; the constructed mutant is passed through that
 same helper and must return a violation naming the missing root/target/source.
 Expected values remain independent from the monkeypatched production authority.
 
-The real-DB job receives the same treatment. A job-scoped contract helper must
-bind the `pytest -vv -rs -m integration` command, the dedicated
-`NHMS_INTEGRATION_DATABASE_URL` consumed by `tests/conftest.py`, the opt-in flag,
-Timescale service image, and existing job gate. Deleting only the dedicated DSN
-must produce a named violation; preserving generic `DATABASE_URL` is explicitly
-insufficient because the integration fixture ignores it without a compatibility
-flag.
+The real-DB job receives the same treatment. A structured job-scoped contract
+helper must bind job-level `needs`, the exact dispatch/database/push/non-draft
+condition, the Timescale service image, job-level opt-in, the dedicated
+`NHMS_INTEGRATION_DATABASE_URL` consumed by `tests/conftest.py`, and the named
+`pytest -vv -rs -m integration` step. Its finite load-bearing branch inventory
+must carry standing same-helper mutants for needs/gate, service image, opt-in
+scope and lexical truth, dedicated-DSN existence/scope/nonempty value, named-step
+identity, and command identity. The collection-smoke consumer likewise binds its
+condition, targeted-before-collection ordering, scoped collect command, truthful
+label, and nonzero collection-failure exit, with a standing mutant for each
+load-bearing predicate. The canonical inventory lives in
+`.workplans/pr-1834/review/round-2-branch-completeness-inventory.md`; evidence
+claims may not exceed the standing mutants in that inventory.
 
 ## Risk Packs Considered
 

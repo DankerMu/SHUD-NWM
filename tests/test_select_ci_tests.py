@@ -2980,38 +2980,116 @@ def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
     assert fields["collection_smoke_required"] == "false"
 
 
+COLLECTION_SMOKE_KEY = "collection_smoke_required"
 COLLECTION_SMOKE_MARKER = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}"'
 
 
-def _targeted_job_collection_block() -> str:
-    """ci.yml's collection-smoke branch, from its `if` to its matching `fi`.
+def _targeted_job_block(workflow_text: str | None = None) -> str:
+    """The `unit-test-targeted` job text, or ``""`` if the job is not present.
 
-    Driven by `collection_smoke_required` (not `meta_guard_only`): a
-    selector-source PR is collection-required by provenance even when the final
-    selection is non-collapsed. Slicing to the block instead of scanning the
-    whole job is what makes the coupling pin killable: a job that merely
-    MENTIONS the field, or that runs the smoke somewhere else entirely, no
-    longer satisfies it. The matching `fi` is the next one at the branch's own
-    12-space indent — the inner `if pytest … --collect-only` closes at 14
-    spaces and cannot truncate here.
+    Pure extraction seam for the collection-consumer positive helper and its
+    mutants: a missing/renamed job key returns an empty string rather than
+    raising, so the positive helper can report a named A1-style violation
+    instead of crashing on a constructible mutant.
     """
-    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    start = workflow.index("\n  unit-test-targeted:")
-    end = workflow.index("\n  frontend-build:", start)
-    targeted_job = workflow[start:end]
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8") if workflow_text is None else workflow_text
+    start = workflow.find("\n  unit-test-targeted:")
+    if start == -1:
+        return ""
+    end = workflow.find("\n  frontend-build:", start)
+    return workflow[start : end if end != -1 else len(workflow)]
 
+
+def _targeted_job_collection_block(targeted_job: str) -> str:
+    """The scoped ``collection_smoke_required == true`` outer branch, or ``""``.
+
+    Lower-level extraction used by the positive helper. Fail-soft: if the
+    condition marker is missing or the matching 12-space ``fi`` cannot be
+    found, returns ``""`` so the positive helper can report named violations
+    rather than raising on a constructible mutant. The inner
+    ``meta_guard_only`` ``if`` closes with a 14-space ``fi`` and must not
+    truncate the slice (the collect command sits after it, still inside the
+    outer branch).
+    """
     branch_start = targeted_job.find(COLLECTION_SMOKE_MARKER)
-    assert branch_start != -1, (
-        "ci.yml's unit-test-targeted job no longer contains the collection-smoke branch "
-        f"(looked for {COLLECTION_SMOKE_MARKER!r}); the #1454 collect-only smoke would be silently dead"
-    )
-    # The OUTER `if collection_smoke_required` branch closes with the 12-space
-    # `fi`; the inner meta_guard_only `if` closes with a 14-space `fi` and must
-    # not truncate the slice (the collect command sits after it, still inside
-    # the outer branch).
+    if branch_start == -1:
+        return ""
     branch_end = targeted_job.find("\n            fi\n", branch_start)
-    assert branch_end != -1, "collection-smoke branch in ci.yml has no matching 12-space `fi`"
+    if branch_end == -1:
+        return ""
     return targeted_job[branch_start:branch_end]
+
+
+def _collection_consumer_violations(targeted_job: str) -> list[str]:
+    """Positive oracle owning ALL FIVE load-bearing predicates (row A).
+
+    Accepts the full `unit-test-targeted` job text (see ``_targeted_job_block``)
+    and locates the exact outer ``collection_smoke_required == true`` branch
+    itself. No shell execution, no shell parser — plain indentation/text checks.
+
+    A1: the condition consumes the exact ``collection_smoke_required == true``
+        output key in its true sense (a renamed key, or a negated/wrong
+        sense, yields a named A1 violation);
+    A2: the targeted pytest command executes BEFORE the collection outer branch
+        (a collection failure cannot mask a targeted assertion failure);
+    A3: the full-tree ``pytest tests/ -q --collect-only`` command runs INSIDE
+        the scoped branch;
+    A4: the scoped branch does NOT claim ``0 assertions`` (targeted tests
+        already ran);
+    A5: the scoped failure path emits the collected log AND exits nonzero
+        (fail-closed; without ``exit 1`` bash returns success from
+        ``cat collect-only.log`` and hides a collection failure).
+
+    Must NOT raise on a missing/renamed condition: returns a named A1
+    violation. Deeper scoped checks stop when the branch cannot be located
+    (each contributes its own named violation, never a crash). Live state
+    yields no violations; every mutant uses this SAME helper.
+    """
+    violations: list[str] = []
+
+    # A1 — condition key/true sense. Exact marker match on the outer condition.
+    condition_line = 'if [ "${{ steps.targeted.outputs.%s }}" = "true" ]; then' % COLLECTION_SMOKE_KEY
+    if condition_line not in targeted_job:
+        violations.append(
+            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
+        )
+        # The branch cannot be located; deeper scoped predicates cannot be
+        # checked. Report the scoped-branch predicates as violated too so the
+        # mutant is fully named rather than partially green.
+        violations.append("collection branch must run `pytest tests/ -q --collect-only` inside it")
+        violations.append("collection branch must not claim zero assertions (targeted tests already ran)")
+        violations.append("collection failure must exit nonzero")
+        return violations
+
+    collection_block = _targeted_job_collection_block(targeted_job)
+    if collection_block == "":
+        violations.append(
+            f"collection branch must be a locatable `if ... {COLLECTION_SMOKE_KEY} == true` block"
+        )
+        return violations
+
+    # A2 — targeted pytest runs before the collection branch.
+    targeted_marker = 'subprocess.run(["pytest", "-q", *tests], check=True)'
+    targeted_idx = targeted_job.find(targeted_marker)
+    branch_idx = targeted_job.find(COLLECTION_SMOKE_MARKER)
+    if targeted_idx == -1 or branch_idx == -1 or targeted_idx > branch_idx:
+        violations.append("targeted pytest must run before the collection-smoke branch")
+
+    # A3 — scoped full-tree collect command.
+    if "pytest tests/ -q --collect-only" not in collection_block:
+        violations.append("collection branch must run `pytest tests/ -q --collect-only` inside it")
+
+    # A4 — truthful label: no zero-assertion wording in the scoped branch.
+    if "0 assertions" in collection_block:
+        violations.append("collection branch must not claim zero assertions (targeted tests already ran)")
+
+    # A5 — fail-closed failure propagation inside the scoped branch.
+    if "cat collect-only.log" not in collection_block:
+        violations.append("collection failure branch must emit the collected log")
+    if "exit 1" not in collection_block:
+        violations.append("collection failure must exit nonzero")
+
+    return violations
 
 
 def test_ci_workflow_consumes_the_collection_smoke_required_output(tmp_path: Path) -> None:
@@ -3021,28 +3099,177 @@ def test_ci_workflow_consumes_the_collection_smoke_required_output(tmp_path: Pat
     # stop running, silently, which is the exact failure mode #1454 exists to
     # end. The branch is driven by `collection_smoke_required` (round-1
     # cand-01), so a selector-source two-target selection still runs the smoke.
-    collection_block = _targeted_job_collection_block()
+    # ALL FIVE load-bearing predicates run through ONE positive helper over the
+    # full job text (branch-completeness inventory row A).
+    targeted_job = _targeted_job_block()
+    violations = _collection_consumer_violations(targeted_job)
+    assert not violations, "collection consumer contract violations:\n  " + "\n  ".join(violations)
 
-    # The condition runs the smoke ON collection-required, not on its negation.
-    assert collection_block.startswith(f'{COLLECTION_SMOKE_MARKER} = "true" ]; then')
-    # ...and the smoke it guards is the full-tree collect-only, INSIDE the block.
-    assert "pytest tests/ -q --collect-only" in collection_block
-    # The spec's wording constraint (this branch DID execute assertions) gets a
-    # pin, not just prose: a copy-paste from the count == 0 branch would lie.
-    assert "0 assertions" not in collection_block
     # ...and the producing side emits that exact key, read from behavior rather
     # than from the selector's source text. Both the shape flag and the
     # provenance signal must be present in the output stream.
     fields = _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
     assert "collection_smoke_required" in fields
     assert "meta_guard_only" in fields
-    # The targeted pytest runs FIRST, before the collection branch, so a
-    # collection failure cannot mask a targeted assertion failure.
-    targeted_job = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    start = targeted_job.index("\n  unit-test-targeted:")
-    end = targeted_job.index("\n  frontend-build:", start)
-    job = targeted_job[start:end]
-    assert job.index('subprocess.run(["pytest", "-q", *tests], check=True)') < job.index(COLLECTION_SMOKE_MARKER)
+
+
+def _job_block_and_collection(targeted_job: str) -> tuple[str, str]:
+    """(job text, scoped collection block) — shared by the A1-A5 mutants."""
+    block = _targeted_job_collection_block(targeted_job)
+    assert block != "", "expected the collection branch to be locatable in the live job"
+    return targeted_job, block
+
+
+def test_collection_consumer_reds_when_the_condition_key_is_renamed() -> None:
+    # Row A1 mutant: renaming the collection_smoke_required key ONLY in the
+    # outer condition must yield a named A1 condition violation through the SAME
+    # helper. The branch body (and the count==0 sibling) stay intact.
+    targeted_job, _ = _job_block_and_collection(_targeted_job_block())
+    renamed_marker = COLLECTION_SMOKE_MARKER.replace(
+        "collection_smoke_required", "renamed_smoke_required"
+    )
+    mutated = targeted_job.replace(COLLECTION_SMOKE_MARKER, renamed_marker)
+    assert "renamed_smoke_required" in mutated
+    assert COLLECTION_SMOKE_MARKER not in mutated
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "collection_smoke_required == true" in joined, f"expected a named A1 violation, got {violations}"
+
+
+def test_collection_consumer_reds_when_the_condition_true_sense_is_inverted() -> None:
+    # Row A1 mutant: changing the true-sense of the outer condition (to `!=`)
+    # must yield a named A1 condition violation through the SAME helper.
+    targeted_job, _ = _job_block_and_collection(_targeted_job_block())
+    true_cond = COLLECTION_SMOKE_MARKER + ' = "true" ]; then'
+    false_cond = COLLECTION_SMOKE_MARKER + ' != "true" ]; then'
+    mutated = targeted_job.replace(true_cond, false_cond)
+    assert ' != "true" ]; then' in mutated
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "collection_smoke_required == true" in joined, f"expected a named A1 violation, got {violations}"
+
+
+def test_collection_consumer_reds_when_the_collection_branch_moves_before_targeted_pytest() -> None:
+    # Row A2 mutant: moving the COMPLETE outer collection branch (including its
+    # closing `fi`) before the targeted `python -c ... subprocess.run` line must
+    # yield a named A2 ordering violation through the SAME helper.
+    #
+    # The branch text from `_targeted_job_collection_block` is the inner
+    # `if collection_smoke_required` body WITHOUT its closing `fi`; the complete
+    # outer branch is `block + "\n            fi"`. We remove the exact targeted
+    # python line (including its newline) once and re-insert it immediately
+    # AFTER that complete outer branch, so the collection branch runs FIRST.
+    # The mutated `Run targeted tests` step is parsed back with yaml.safe_load
+    # and syntax-checked with `bash -n` (valid YAML and valid shell), proving
+    # the moved unit is a coherent scalar — no raw block insertion that breaks
+    # the workflow YAML/shell.
+    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    complete_branch = block + "\n            fi"
+    assert targeted_job.count(complete_branch) == 1, "outer branch not uniquely locatable"
+
+    python_line = next(
+        line
+        for line in targeted_job.splitlines()
+        if 'subprocess.run(["pytest", "-q", *tests], check=True)' in line
+    )
+    assert targeted_job.count(python_line + "\n") == 1, "targeted python line not uniquely locatable"
+
+    without = targeted_job.replace(python_line + "\n", "", 1)
+    assert 'subprocess.run(["pytest", "-q", *tests], check=True)' not in without
+
+    branch_idx = without.find(complete_branch)
+    assert branch_idx != -1, "complete outer branch vanished after removing the targeted line"
+    mutated = (
+        without[: branch_idx + len(complete_branch)]
+        + "\n"
+        + python_line
+        + without[branch_idx + len(complete_branch) :]
+    )
+    # Sanity: both units appear exactly once and their order is reversed.
+    assert mutated.count(complete_branch) == 1
+    assert mutated.count(python_line) == 1
+    assert mutated.find(complete_branch) < mutated.find(
+        'subprocess.run(["pytest", "-q", *tests], check=True)'
+    ), "collection branch must now run before the targeted pytest line"
+
+    # Valid YAML sanity: the mutated full workflow parses and the named step
+    # still carries a run scalar.
+    full_workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    mutated_workflow = full_workflow.replace(targeted_job, mutated)
+    parsed = yaml.safe_load(mutated_workflow)
+    mutated_job = parsed["jobs"]["unit-test-targeted"]
+    run_scalar = next(
+        step["run"] for step in mutated_job["steps"] if step.get("name") == "Run targeted tests"
+    )
+    # Valid shell sanity: `bash -n` accepts the run scalar (GitHub expressions
+    # included) with exit 0. No temp file: the script is fed via stdin.
+    completed = subprocess.run(["bash", "-n"], input=run_scalar, text=True, capture_output=True)
+    assert completed.returncode == 0, f"mutated run scalar is not valid shell:\n{completed.stderr}"
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "before the collection-smoke branch" in joined, f"expected a named A2 violation, got {violations}"
+
+
+def test_collection_consumer_reds_when_the_scoped_collect_command_is_removed() -> None:
+    # Row A3 mutant: removing ONLY the scoped `pytest tests/ -q --collect-only`
+    # command (the count==0 sibling keeps its own copy) must yield a named A3
+    # scoped-command violation through the SAME helper.
+    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    assert block.count("pytest tests/ -q --collect-only") == 1
+    mutated_block = block.replace("pytest tests/ -q --collect-only", "pytest tests/ --collect-only")
+    mutated = targeted_job.replace(block, mutated_block)
+    # The count==0 sibling still has the full command.
+    count_zero_region = mutated.split("          else\n", 1)[1] if "          else\n" in mutated else ""
+    assert "pytest tests/ -q --collect-only" in count_zero_region
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "pytest tests/ -q --collect-only" in joined, f"expected a named A3 violation, got {violations}"
+
+
+def test_collection_consumer_reds_when_zero_assertions_wording_is_injected_scoped() -> None:
+    # Row A4 mutant: injecting `0 assertions` wording ONLY into the scoped
+    # branch (the count==0 sibling already carries it) must yield a named A4
+    # truthful-label violation through the SAME helper.
+    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    assert "0 assertions" not in block
+    mutated_block = block.replace(
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
+        'echo "Selector-development diff — 0 assertions executed"',
+    )
+    mutated = targeted_job.replace(block, mutated_block)
+    mutated_block_new = _targeted_job_collection_block(mutated)
+    assert "0 assertions" in mutated_block_new
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
+
+
+def test_collection_consumer_reds_when_the_scoped_exit_one_is_deleted() -> None:
+    # Row A5 mutant (cand-r2-01): the fail-closed `exit 1` inside the
+    # collection_smoke_required branch is load-bearing. A mutant deleting ONLY
+    # that scoped `exit 1` (the count==0 sibling keeps its own `exit 1`) must
+    # be rejected by the SAME positive helper with a named nonzero-exit
+    # violation. Without it, bash returns success from `cat collect-only.log`
+    # and hides a collection failure.
+    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    assert block.count("exit 1") == 1, (
+        f"expected exactly one exit 1 inside the collection branch, got {block.count('exit 1')}"
+    )
+    mutated_block = block.replace("exit 1", "", 1)
+    mutated = targeted_job.replace(block, mutated_block)
+    # The scoped branch lost its exit; the count==0 sibling's exit remains.
+    assert "exit 1" not in _targeted_job_collection_block(mutated)
+    count_zero_region = mutated.split(COLLECTION_SMOKE_MARKER, 1)[1]
+    assert "exit 1" in count_zero_region
+
+    violations = _collection_consumer_violations(mutated)
+    joined = "\n".join(violations)
+    assert "exit nonzero" in joined, f"expected a named nonzero-exit violation, got {violations}"
 
 
 def test_ci_concurrency_pins_pr_number_run_id_and_conditional_cancel() -> None:
@@ -5578,15 +5805,40 @@ def test_real_db_job_contract_reds_when_the_master_push_leg_is_removed() -> None
 
 def test_real_db_job_contract_reds_when_needs_changes_is_removed() -> None:
     # #1688 (round-1 invariant audit) mutant: removing `needs: changes` from the
-    # job must be rejected by the SAME helper with a named needs violation —
-    # without it the job has no `changes.database` output to gate on. The
-    # tracked workflow is untouched.
+    # JOB must be rejected by the SAME helper with a named needs violation —
+    # without it the job has no `changes.database` output to gate on.
+    #
+    # The mutation is SCOPED to the real-db job block only: the full workflow is
+    # never mutated, so every other job's identical `needs: changes` line stays
+    # byte-identical. (An unbounded `workflow.replace(line + "\n", "")` would
+    # delete all seven jobs' identical lines — the B1 scope defect.)
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     job = _real_db_job_block(workflow)
-    line = next(line for line in job.splitlines() if line.strip() == "needs: changes")
-    mutated = workflow.replace(line + "\n", "")
-    mutated_job = _real_db_job_block(mutated)
+    needs_lines = [line for line in job.splitlines() if line.strip() == "needs: changes"]
+    assert len(needs_lines) == 1, f"expected exactly one needs: changes in the real-db job, got {len(needs_lines)}"
+    line = needs_lines[0]
+
+    # Mutate ONLY the job text (one replacement); the full workflow text stays
+    # untouched.
+    mutated_job = job.replace(line + "\n", "", 1)
     assert "needs: changes" not in mutated_job
+    assert workflow == Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"), "full workflow was mutated"
+
+    # Independent scope proof: the full workflow still contains every original
+    # `needs: changes` line (count unchanged), and constructing the scoped
+    # workflow from the mutated job yields exactly one fewer overall.
+    original_needs_count = sum(
+        1 for line in workflow.splitlines() if line.strip() == "needs: changes"
+    )
+    assert workflow.count("    needs: changes\n") == original_needs_count
+    scoped_workflow = workflow.replace(job, mutated_job, 1)
+    assert scoped_workflow.count("    needs: changes\n") == original_needs_count - 1
+
+    # Valid YAML sanity: the mutated job parses and the real-db-integration
+    # mapping lacks `needs`.
+    parsed = yaml.safe_load(mutated_job)
+    assert "real-db-integration" in parsed
+    assert "needs" not in parsed["real-db-integration"]
 
     violations = _real_db_job_contract_violations(mutated_job)
     joined = "\n".join(violations)
@@ -5701,6 +5953,73 @@ def test_real_db_job_contract_reds_on_a_literal_quoted_opt_in(
 
     monkeypatch.setenv(REAL_DB_OPT_IN_ENV, parsed_value)
     assert conftest._env_flag(REAL_DB_OPT_IN_ENV) is False
+
+
+def test_real_db_job_contract_reds_on_a_wrong_service_image() -> None:
+    # Branch-completeness inventory row B (cand-r2-02): the service-image
+    # validator branch is load-bearing. Replacing the Timescale image with a
+    # different valid image must be rejected by the SAME structured helper with
+    # a named service-image violation. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith("image:"))
+    assert REAL_DB_SERVICE_IMAGE in line
+    mutated = workflow.replace(line, line.replace(REAL_DB_SERVICE_IMAGE, "timescale/timescaledb-ha:pg14-latest"))
+    mutated_job = _real_db_job_block(mutated)
+    # Parse-scope sanity: the mutated job is valid YAML and carries the wrong image.
+    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    assert parsed["services"]["db"]["image"] == "timescale/timescaledb-ha:pg14-latest"
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_SERVICE_IMAGE in joined, f"expected a named service-image violation, got {violations}"
+
+
+def test_real_db_job_contract_reds_when_the_named_step_is_renamed() -> None:
+    # Branch-completeness inventory row B (cand-r2-02): the named-step identity
+    # is load-bearing. Renaming the integration step (keeping its command) must
+    # be rejected by the SAME structured helper with a named missing-step
+    # violation — the helper locates the command by the step's exact name, so a
+    # renamed step is invisible to it. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    step_line = next(
+        line for line in job.splitlines() if line.strip().startswith(f"- name: {REAL_DB_COMMAND_STEP_NAME}")
+    )
+    mutated = workflow.replace(step_line, step_line.replace(REAL_DB_COMMAND_STEP_NAME, "Renamed integration step"))
+    mutated_job = _real_db_job_block(mutated)
+    # Parse-scope sanity: valid YAML, no step named as required, command intact.
+    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    assert REAL_DB_COMMAND_STEP_NAME not in [s.get("name") for s in parsed["steps"]]
+    assert any(REAL_DB_INTEGRATION_COMMAND in str(s.get("run", "")) for s in parsed["steps"])
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_COMMAND_STEP_NAME in joined, f"expected a named missing-step violation, got {violations}"
+
+
+def test_real_db_job_contract_reds_when_the_integration_command_is_changed() -> None:
+    # Branch-completeness inventory row B (cand-r2-02): the command identity is
+    # load-bearing. Keeping the named step but changing the command to the prior
+    # `pytest -q -m integration` must be rejected by the SAME structured helper
+    # with a named command violation. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    cmd_line = next(
+        line for line in job.splitlines() if line.strip().startswith(f"run: {REAL_DB_INTEGRATION_COMMAND}")
+    )
+    mutated = workflow.replace(cmd_line, cmd_line.replace(REAL_DB_INTEGRATION_COMMAND, "pytest -q -m integration"))
+    mutated_job = _real_db_job_block(mutated)
+    # Parse-scope sanity: valid YAML, named step present, command changed.
+    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    assert REAL_DB_COMMAND_STEP_NAME in [s.get("name") for s in parsed["steps"]]
+    assert "pytest -q -m integration" in [
+        str(s.get("run", "")) for s in parsed["steps"] if s.get("name") == REAL_DB_COMMAND_STEP_NAME
+    ]
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert "command" in joined, f"expected a named command violation, got {violations}"
 
 
 def test_workflow_path_matches_backend_and_database_filters() -> None:
