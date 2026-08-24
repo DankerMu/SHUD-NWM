@@ -21,7 +21,7 @@ Fixture level: expanded. Repair intensity: high because the hook is a shared com
 
 ## Decisions
 
-1. Track `.python-version` containing `3.11`. This shares the CI major/minor without pretending a patch release is portable. Multi-version checks use `uv run --python <version> ...`. Node-22 will intentionally converge from 3.12 to 3.11 on its next controlled sync; no Slurm job is needed because scheduling/runtime code is unchanged.
+1. Track `.python-version` containing `3.11`. This shares the CI major/minor without pretending a patch release is portable. Multi-version checks use `uv run --python <version> ...`. Node-22's active checkout intentionally remains on 3.12.7 until the next operator-approved service maintenance window because three live processes currently map the shared `.venv`; the exact implementation commit is independently accepted on node-22 with Python 3.11.15 in a disposable worktree. No Slurm job is needed because scheduling/runtime code is unchanged.
 2. Treat the tool-call `cwd` as the operation root, then resolve its Git top level before reading `.large-file-guard.json`. This binds config and `git -C` inspection to one worktree. `CLAUDE_PROJECT_DIR` remains only the fallback when `cwd` is absent, preserving non-worktree callers. Diagnostics print the effective config path.
 3. Replace the replay comment table with a reason-to-one-or-more-owning-functions mapping, preserving every function-level raise point represented by the old citations. Function names survive unrelated insertions and remain grep/AST-auditable. Focused tests compare mapping keys with `_PRE_COMMIT_INDEX_REASONS`, pin the known multi-owner rows, and confirm every mapped function contains the reason literal; the allowlist itself remains unchanged.
 4. Keep implementation serial. The surfaces are independent, but one implementer is cheaper than parallel write-worktree integration and avoids generated instruction conflicts.
@@ -61,7 +61,7 @@ Fixture level: expanded. Repair intensity: high because the hook is a shared com
 ## Risks / Trade-offs
 
 - [Existing local `.venv` uses 3.14] → `uv sync` recreates it once under 3.11; run the full required regression afterward.
-- [node-22 currently uses 3.12] → document and verify a controlled 3.11 sync without launching Slurm work.
+- [node-22's shared `.venv` is used by live services] → do not replace it in place; verify the exact commit in a disposable 3.11 worktree, restore any interrupted 3.12 packages, and defer the active cutover to an operator-approved maintenance window with service stop/restart receipts.
 - [tool-call `cwd` might be nested] → resolve `git rev-parse --show-toplevel` rather than assuming `cwd` itself is the root; fail-safe fallback preserves legacy callers.
 - [function names can also change] → completeness and literal-ownership tests fail on rename/move, forcing an intentional update without unrelated line churn.
 
@@ -69,9 +69,9 @@ Fixture level: expanded. Repair intensity: high because the hook is a shared com
 
 1. Commit pin, hook behavior/tests, stable replay mapping/tests, and generated instructions together.
 2. Verify locally on Python 3.11 and explicitly confirm Python 3.14 remains selectable.
-3. After push, fast-forward node-22 only if its worktree is clean; run `uv sync --all-extras --dev` and record `uv run python -V`. Do not trigger a compute job.
+3. After push, verify the exact commit on node-22 in an isolated worktree. Keep the active shared `.venv` on 3.12.7 while live services use it; at the next operator-approved maintenance window, stop its owning processes, run `uv sync --all-extras --dev`, assert Python 3.11.x, and restart/verify services. Do not trigger a compute job.
 4. Rollback is a normal revert of this PR; no persisted business data changes.
 
 ## Open Questions
 
-None. The issue's node-22 choice is resolved in favor of convergence to Python 3.11, matching CI and node-27.
+None. The issue's node-22 choice is explicitly resolved: the tracked default converges to Python 3.11 now; the active shared environment remains on 3.12.7 only until its next operator-approved service maintenance window. See `evidence/node22-python-pin-receipt.md`.

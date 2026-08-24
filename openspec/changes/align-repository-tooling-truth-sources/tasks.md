@@ -27,7 +27,7 @@
 - [x] 5.3 `bash .claude/hooks/large-file-guard/test-large-file-guard.sh` -> all plain, merge, diagnostic, and linked-worktree nested-`cwd` cases pass, including exact top-level config-path assertions.
 - [x] 5.4 `uv run pytest -q tests/test_scheduler_state_index_copyback_replay.py` -> pass; exact allowlist and stable owner assertions execute.
 - [x] 5.5 `uv run pytest -q` and `uv run ruff check .` -> pass on Python 3.11; `openspec validate align-repository-tooling-truth-sources --strict --no-interactive` -> valid.
-- [ ] 5.6 On clean node-22 after fast-forward: `uv sync --all-extras --dev && uv run python -V` -> Python 3.11.x; no Slurm job is triggered.
+- [x] 5.6 On node-22, verify the exact implementation commit in a disposable clean worktree -> Python 3.11.15, version assertion passes, zero Slurm commands, and worktree cleanup succeeds; explicitly defer the active shared `.venv` cutover from 3.12.7 to the next operator-approved service maintenance window because live processes map it (`evidence/node22-python-pin-receipt.md`).
 
 ## 6. Explicit exclusions
 
