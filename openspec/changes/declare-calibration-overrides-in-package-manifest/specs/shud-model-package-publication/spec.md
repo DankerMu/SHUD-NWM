@@ -25,13 +25,41 @@ living only in a publisher-workspace receipt.
 - **AND** the manifest records the parameter, the applied value, and the declared reason
 - **AND** the basin's source tree is unchanged after publication
 
-#### Scenario: A declaration that cannot be applied refuses the publish
+#### Scenario: A published basin whose declared override did not apply refuses
 
-- **WHEN** a declaration entry names a basin that is not being published, or a calibration
-  parameter that the basin's calibration file does not contain, or a value that cannot be
-  parsed
+- **WHEN** a basin is being published, the declaration names it, and the declared override was
+  not applied — the calibration parameter is absent from its calibration file, or the declared
+  value cannot be parsed
 - **THEN** the publish fails with a diagnosable error naming the offending entry
 - **AND** no package is published for that basin
+
+The refusal is keyed on *published but not applied*, not on *declared but not published*. The
+lie this requirement prevents is a package that carries the original value while the
+declaration claims otherwise, and only a published basin can tell that lie. Keying it the other
+way would make every narrowed publish — a `--basin-slug` run, a test fixture, any tree that
+legitimately does not contain the declared basin — fail on a declaration that is doing nothing
+wrong, which would in turn push operators toward not loading the declaration at all.
+
+#### Scenario: A declared basin outside the publish set is reported, not refused
+
+- **WHEN** the declaration names a basin that the current run does not publish
+- **THEN** the run records that entry as not applied in its summary
+- **AND** the publish proceeds for every other basin
+
+### Requirement: Every publishing lane loads the declaration by default
+
+Both the manual publisher CLI and the scheduler file-provider refresh lane MUST load the
+checked-in declaration without an operator having to name it. An override that only applies on
+one lane is worse than no override: the other lane republishes the source value, re-derives the
+original `model_id`, and silently reverts the registry to a model whose per-model artifacts
+have since been rebuilt under the overridden identity.
+
+#### Scenario: The refresh lane applies the same declaration as the manual publisher
+
+- **WHEN** the scheduler file-provider refresh republishes a basin the declaration names
+- **THEN** the published package carries the declared value
+- **AND** its `package_checksum` equals the one the manual publisher produces for the same
+  inputs
 
 #### Scenario: Recording an override re-derives the model identity
 
