@@ -9038,3 +9038,137 @@ def test_id_only_receipt_carrying_a_generation_is_rejected() -> None:
             classification, outcome="failed", reason="provider_invalid"
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# #1832 round-2 C1: the `calibration_overrides` receipt block.  The end-to-end
+# lane pins live in tests/test_publish_scheduler_file_registry.py (they need a
+# real Basins tree); these pin the receipt contract itself, on both readers --
+# the runtime validator and the JSON Schema must reject the same corpus, or a
+# receipt that one accepts and the other refuses breaks the emergency channel.
+# ---------------------------------------------------------------------------
+
+
+def _calibration_receipt(**overrides: Any) -> dict[str, Any]:
+    receipt = refresh._receipt(
+        run_id="run",
+        started=refresh.datetime.now(refresh.UTC),
+        outcome="failed",
+        reason=refresh.CALIBRATION_OVERRIDE_REFUSAL_REASON,
+        phase="precommit",
+        providers=[],
+        calibration_overrides={
+            "declaration_path": "/etc/nhms/calibration_overrides.yaml",
+            "not_applied": [],
+            "error": {
+                "error_code": "CALIBRATION_OVERRIDE_BASIN_NOT_IN_INVENTORY",
+                "message": "Declared calibration override(s) name a basin ...: charlie:GEOL_DMAC.",
+                "entries": [{"basin_slug": "charlie", "parameter": "GEOL_DMAC"}],
+            },
+        },
+    )
+    receipt.update(overrides)
+    return receipt
+
+
+def _receipt_schema_validator() -> Any:
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas"
+            / "scheduler_file_provider_refresh_receipt.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    return jsonschema.Draft202012Validator(schema)
+
+
+def test_calibration_override_refusal_receipt_validates_on_both_readers() -> None:
+    receipt = _calibration_receipt()
+
+    assert refresh._validate_receipt(receipt) == receipt
+    _receipt_schema_validator().validate(receipt)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda receipt: {k: v for k, v in receipt.items() if k != "calibration_overrides"},
+            id="block_absent",
+        ),
+        pytest.param(
+            lambda receipt: {
+                **receipt,
+                "calibration_overrides": {
+                    k: v for k, v in receipt["calibration_overrides"].items() if k != "error"
+                },
+            },
+            id="error_absent",
+        ),
+        pytest.param(
+            lambda receipt: {
+                **receipt,
+                "calibration_overrides": {
+                    **receipt["calibration_overrides"],
+                    "error": {**receipt["calibration_overrides"]["error"], "error_code": ""},
+                },
+            },
+            id="error_code_empty",
+        ),
+        pytest.param(
+            lambda receipt: {
+                **receipt,
+                "calibration_overrides": {
+                    **receipt["calibration_overrides"],
+                    "not_applied": [
+                        {
+                            "basin_slug": "bravo",
+                            "parameter": "GEOL_DMAC",
+                            "reason_not_applied": "basin_not_in_publish_set",
+                        }
+                    ],
+                },
+            },
+            id="pre_c2_reason_token",
+        ),
+        pytest.param(
+            lambda receipt: {
+                **receipt,
+                "calibration_overrides": {**receipt["calibration_overrides"], "surprise": 1},
+            },
+            id="unknown_field",
+        ),
+    ],
+)
+def test_calibration_override_block_is_rejected_by_both_readers(
+    mutate: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    """Absence on the refusal reason is itself forged: the block IS the refusal.
+
+    The stale `basin_not_in_publish_set` case is deliberate -- that token used to
+    cover both "narrowed out of this run" and "exists nowhere", so admitting it
+    now would let an old-vocabulary writer keep the two indistinguishable.
+    """
+    forged = mutate(_calibration_receipt())
+
+    with pytest.raises(ValueError, match="receipt_calibration_overrides_"):
+        refresh._validate_receipt(forged)
+    with pytest.raises(jsonschema.ValidationError):
+        _receipt_schema_validator().validate(forged)
+
+
+def test_receipt_without_the_calibration_block_stays_valid_on_other_reasons() -> None:
+    """A run that failed before the declaration was reached knows nothing about
+    it and must not be forced to invent a block."""
+    receipt = refresh._receipt(
+        run_id="run",
+        started=refresh.datetime.now(refresh.UTC),
+        outcome="failed",
+        reason="provider_invalid",
+        phase="precommit",
+        providers=[],
+    )
+
+    assert "calibration_overrides" not in receipt
+    assert refresh._validate_receipt(receipt) == receipt
+    _receipt_schema_validator().validate(receipt)

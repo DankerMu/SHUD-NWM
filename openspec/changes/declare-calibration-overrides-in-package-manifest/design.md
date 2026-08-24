@@ -77,10 +77,31 @@ the exact failure #1825 was built for.
 
 This is not something to design away; it is the standing consequence of content
 addressing (and the subject of #1813). It is called out here so the rollout is
-planned rather than discovered: publish → backfill forcing under the new id
-(`scripts/node22_backfill_forcing_for_model_ids.py`) → clone the warm state →
-release the failed run (`scripts/node22_manual_retry_failed_runs.py`) → one
-bounded pass.
+planned rather than discovered.
+
+**The publish of the merged manifest goes LAST.** Runbook 5.7.1 states the order
+as a hard constraint — provision the new id, write the clone rows, and only then
+publish — and the reason is stronger than the reason that runbook gives. The
+runbook says publishing first merely blocks fail-safe under
+`NHMS_REQUIRE_FORECAST_WARM_START=true`, costing one cycle. That text predates
+#1164. A freshly published id has no state rows in any generation, so the
+first-cycle branch runs (`services/orchestrator/scheduler_generation.py:1057`),
+and a production registry row carries `manifest_uri`, which yields a **qualified**
+packaged-IC signal — so the run is ADMITTED as `PACKAGED_IC_BOOTSTRAP`
+(`scheduler_generation.py:1057-1078`), not blocked. Publishing before the clone
+rows exist therefore does not cost a cycle; it publishes a forecast started from
+the packaged IC instead of the carried-over warm state, i.e. a discontinuous
+production hydrograph. `BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED` is only
+reached when the packaged IC is unreadable or unqualified.
+
+So the order is: provision → backfill forcing under the new id
+(`scripts/node22_backfill_forcing_for_model_ids.py`, #1825) → clone the warm
+state → **publish the merged manifest** → release the failed run
+(`scripts/node22_manual_retry_failed_runs.py`, #1825) → one bounded pass. The
+forcing backfill depends on the new `model_id` from the republish, not on the
+manifest publish, and like the clone it must be complete before the merged
+manifest is live for the scored cycle. Both node-22 scripts land on master with
+#1825 (PR #1833); they are not on this branch.
 
 ## D5 — Why `GEOL_DMAC = 4` and not 4.5
 

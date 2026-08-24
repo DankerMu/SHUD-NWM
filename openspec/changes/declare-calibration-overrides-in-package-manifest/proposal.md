@@ -59,9 +59,14 @@ the second.
 - **MODIFIED**: the publisher applies declared overrides on an isolated staging
   copy, never on the Basins source tree, and remains a pure copy for every
   basin and parameter not named in the declaration.
-- **ADDED** refusals: a declaration that names an unknown basin, an unknown
-  calibration parameter, or an unparseable value fails the publish rather than
-  being skipped.
+- **ADDED** refusals: a declaration that names a basin absent from the discovered
+  inventory, an unknown calibration parameter, or an unparseable value fails the
+  publish rather than being skipped. A declared basin that IS discovered but is
+  not selected for this run is reported, not refused, under a distinct value.
+- **ADDED**: the unattended refresh lane's receipt carries what the declaration did — the
+  override error code and the offending entry on a refusal, and the declared entries that did
+  not apply on a successful run. That lane persists no publisher summary, so without this a bad
+  declaration recurs every tick under the same generic reason a dozen unrelated causes emit.
 - **ADDED** first entry: `hetianhe` `GEOL_DMAC = 4`. `SOIL_ALPHA` is deliberately
   NOT overridden — the source value 8.193 is preserved.
 

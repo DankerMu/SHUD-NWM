@@ -21,8 +21,18 @@ but as an explicit, declared, recorded exception:
   otherwise, which is worse than having no declaration.  A declared basin that
   the current run does not publish is NOT a refusal — it publishes nothing, so
   it can tell no lie, and keying the refusal there would kill every narrowed
-  publish (`--basin-slug`, any tree that legitimately lacks the basin) and push
-  operators toward not loading the declaration at all.
+  publish (`--basin-slug`) and push operators toward not loading the
+  declaration at all.
+* **…except a slug the tree does not contain at all, which IS a refusal.**
+  Round 2 (#1832 C2) split the "not applied" case in two.  "Discovered but not
+  selected for this run" stays reported.  "Absent from the discovered
+  inventory" is a typo or a stale rename in checked-in config: the declaration
+  would never bite again, forever, with no signal — and after the hetianhe
+  rollout that silence republishes the source value, re-derives the ORIGINAL
+  ``model_id`` and reverts the registry onto the calibration that NaNs.  That
+  check needs the inventory, so it lives at the publisher's call site
+  (``_require_declared_basins_in_inventory``); this module never resolves a
+  Basins tree.
 
 Application itself happens on an isolated staging copy owned by the caller;
 this module never resolves the Basins source tree.

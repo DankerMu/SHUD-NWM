@@ -197,6 +197,24 @@ def publish_all_basin_scheduler_registry(
     _guard_resources(resource_validator, workspace)
 
     inventory = discover_basins_inventory(root)
+    # #1832 round-2 C2: a declared slug that the discovered inventory does not
+    # contain at all refuses HERE, before anything is selected, staged or
+    # written -- and on `dry_run` too.
+    #
+    # Refuse rather than report, because the two "not applied" situations are
+    # categorically different and only one of them is benign.  A basin that
+    # exists but was narrowed out of this run is legitimate (`--basin-slug`).  A
+    # basin that exists NOWHERE is a typo or a stale rename in checked-in
+    # config: the declaration will never bite, forever, with no signal.  After
+    # the hetianhe rollout that silence means the unattended refresh lane
+    # republishes the SOURCE value, re-derives the ORIGINAL `model_id` and
+    # reverts the registry straight back onto the NaN cliff the declaration
+    # exists to avoid.  The refusal is fail-safe (nothing is committed, the
+    # previous registry generation stays live) and the manual CLI lane catches a
+    # bad slug long before the timer ever sees it, so a loud, diagnosable,
+    # non-committing failure is strictly better than silently reverting one
+    # basin to a NaNing calibration.
+    _require_declared_basins_in_inventory(declared_overrides, inventory)
     inventory_path = workspace / "basins-inventory.json"
     _guard_resources(resource_validator, workspace)
     _write_workspace_inventory(inventory, inventory_path, workspace_budget)
@@ -429,9 +447,10 @@ def publish_all_basin_scheduler_registry(
         "calibration_overrides": [
             item for context in contexts for item in (context.calibration_overrides or ())
         ],
-        # A declared basin this run does not publish is REPORTED, not refused:
-        # it publishes nothing, so it can tell no lie.  Reporting keeps the fact
-        # visible without making every narrowed publish collateral damage.
+        # A declared basin that IS discovered but this run does not publish is
+        # REPORTED, not refused: it publishes nothing, so it can tell no lie.
+        # (A declared basin the tree does not contain AT ALL never gets here --
+        # `_require_declared_basins_in_inventory` refused it above.)
         "calibration_overrides_not_applied": _declared_entries_not_applied(declared_overrides, contexts),
         "calibration_overrides_declaration": (
             str(calibration_overrides_path) if calibration_overrides_path not in (None, "") else None
@@ -757,25 +776,80 @@ def _select_publishable_models(
     return selected
 
 
+# The single "declared but not applied" reason token.  Two other places pin the
+# same vocabulary and must move with it: `CALIBRATION_OVERRIDE_NOT_APPLIED_REASONS`
+# in `scripts/scheduler_file_provider_refresh.py` (which imports this constant)
+# and the `reason_not_applied` enum in
+# `schemas/scheduler_file_provider_refresh_receipt.schema.json`, which the
+# refresh receipt is validated against before it is published.
+CALIBRATION_OVERRIDE_NOT_SELECTED_REASON = "basin_not_selected_for_this_run"
+
+
+def _require_declared_basins_in_inventory(
+    declared_overrides: Sequence[CalibrationOverride],
+    inventory: Mapping[str, Any],
+) -> None:
+    """#1832 round-2 C2: refuse a declared slug that exists nowhere in the tree.
+
+    The discriminator between "typo/stale rename" and "narrowed out of this
+    run" is the DISCOVERED inventory, not the publish set: see the rationale at
+    the call site.  Only the former reaches here; the latter is reported by
+    ``_declared_entries_not_applied``.
+    """
+    if not declared_overrides:
+        return
+    discovered_slugs = {
+        str(model.get("basin_slug") or "") for model in inventory.get("models") or ()
+    }
+    missing = [
+        override for override in declared_overrides if override.basin_slug not in discovered_slugs
+    ]
+    if not missing:
+        return
+    labels = sorted(override.entry_label for override in missing)
+    raise CalibrationOverrideError(
+        "CALIBRATION_OVERRIDE_BASIN_NOT_IN_INVENTORY",
+        (
+            "Declared calibration override(s) name a basin the discovered Basins inventory does not "
+            f"contain: {', '.join(labels)}."
+        ),
+        details={
+            "entries": [
+                {"basin_slug": override.basin_slug, "parameter": override.parameter}
+                for override in sorted(missing, key=lambda item: item.entry_label)
+            ],
+            "basin_slugs": sorted({override.basin_slug for override in missing}),
+            "discovered_basin_count": len(discovered_slugs),
+        },
+    )
+
+
 def _declared_entries_not_applied(
     declared_overrides: Sequence[CalibrationOverride],
     contexts: Sequence[PublishContext],
 ) -> list[dict[str, Any]]:
-    """#1832: a declared basin outside this publish set is reported, not refused.
+    """#1832: a declared basin this run does not publish is reported, not refused.
 
     The lie the refusal exists to prevent is a PUBLISHED package carrying the
     original value while the declaration claims otherwise.  A basin this run
     does not publish cannot tell that lie, so keying the refusal on
-    "declared but not published" would only make every narrowed publish -- a
-    ``--basin-slug`` run, a test tree, a partial Basins mirror -- fail on a
-    declaration that is doing nothing wrong.  It is still a fact worth
-    persisting, so it lands on the run summary.
+    "declared but not published" would make every narrowed publish -- a
+    ``--basin-slug`` run, a partial Basins mirror -- fail on a declaration that
+    is doing nothing wrong.  It is still a fact worth persisting, so it lands on
+    the run summary (and, on the unattended lane, on the refresh receipt).
+
+    By the time this runs, ``_require_declared_basins_in_inventory`` has already
+    refused every declared basin the tree does not contain, so the only case
+    left here is "discovered, but not selected for this run" -- hence the
+    reason token, which is deliberately NOT the pre-C2
+    ``basin_not_in_publish_set``: that string covered both cases and therefore
+    means something different on receipts written before this change.
     """
     if not declared_overrides:
         return []
     published_slugs = {str(context.model.get("basin_slug") or "") for context in contexts}
     return [
-        {**override.as_entry(), "reason_not_applied": "basin_not_in_publish_set"}
+        {**override.as_entry(), "reason_not_applied": CALIBRATION_OVERRIDE_NOT_SELECTED_REASON}
         for override in declared_overrides
         if override.basin_slug not in published_slugs
     ]

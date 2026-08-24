@@ -47,6 +47,7 @@ from packages.scheduler.registry_audit import (
     normalize_cutover_gate_audit,
 )
 from scripts.publish_scheduler_file_registry import (
+    CALIBRATION_OVERRIDE_NOT_SELECTED_REASON,
     CALIBRATION_OVERRIDE_PATH_ENV_NAME,
     SchedulerRegistryPublishError,
     publish_all_basin_scheduler_registry,
@@ -61,7 +62,10 @@ from services.orchestrator.scheduler_file_providers import (
     publish_scheduler_registry_manifest,
     validate_catalog_bound_readiness_entries,
 )
-from workers.model_registry.basins_calibration_overrides import DEFAULT_CALIBRATION_OVERRIDES_PATH
+from workers.model_registry.basins_calibration_overrides import (
+    DEFAULT_CALIBRATION_OVERRIDES_PATH,
+    CalibrationOverrideError,
+)
 
 SCHEMA_VERSION = "nhms.scheduler.file_provider_refresh_receipt.v1"
 OUTCOMES = frozenset(
@@ -96,8 +100,20 @@ REASONS = frozenset(
         "registry_cutover_undeclared",
         "registry_cutover_removal_refused",
         "registry_cutover_declaration_invalid",
+        # #1832 round-2 C1: a declared calibration override that cannot be
+        # loaded or applied.  `CalibrationOverrideError` is a bare
+        # `RuntimeError` subclass, so before this token it fell through to the
+        # generic handler and was published as `provider_invalid` with the
+        # error code, the message and the offending entry all discarded -- the
+        # same reason a dozen unrelated causes already emit, on a lane that
+        # retries every tick.
+        "calibration_override_invalid",
     }
 )
+CALIBRATION_OVERRIDE_REFUSAL_REASON = "calibration_override_invalid"
+# Parity with the publisher's own token (`_declared_entries_not_applied`); the
+# receipt admits exactly the reasons the publisher can emit.
+CALIBRATION_OVERRIDE_NOT_APPLIED_REASONS = frozenset({CALIBRATION_OVERRIDE_NOT_SELECTED_REASON})
 REGISTRY_CUTOVER_REFUSAL_REASONS = frozenset(
     {
         "registry_cutover_undeclared",
@@ -193,7 +209,10 @@ RECEIPT_KEYS = frozenset(
 # whenever the runner constructed the audit block.  The allowed-set below is
 # exact-match, so a key missing here makes every receipt carrying it fail as
 # `receipt_shape_invalid`.
-RECEIPT_OPTIONAL_KEYS = frozenset({"registry_classification", "cutover_gate"})
+# `calibration_overrides` (#1832) is emitted whenever the run got far enough to
+# know what the declared overrides did -- a completed publish, or a refusal
+# raised while loading/applying them.
+RECEIPT_OPTIONAL_KEYS = frozenset({"registry_classification", "cutover_gate", "calibration_overrides"})
 
 
 class RefreshError(RuntimeError):
@@ -454,7 +473,10 @@ class RefreshConfig:
     # value it would re-derive the ORIGINAL `model_id` and silently revert the
     # registry to an identity whose per-model forcing and warm state have since
     # been rebuilt under the overridden one.
-    calibration_overrides_path: Path = DEFAULT_CALIBRATION_OVERRIDES_PATH
+    # `None` is the documented escape hatch the publisher already honours (a
+    # rehearsal / fixture run that must load no declaration at all); production
+    # never sets it, which is the point of the default.
+    calibration_overrides_path: Path | None = DEFAULT_CALIBRATION_OVERRIDES_PATH
 
     @classmethod
     def from_env(cls) -> RefreshConfig:
@@ -620,6 +642,9 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
     # receipts built before that (lock contention, provider-preimage failures)
     # pass None and omit the key.
     runner_cutover_gate_audit: dict[str, Any] | None = None
+    # #1832: what the declared calibration overrides did on this run.  Stays
+    # None until the publisher either returns a summary that ran them or raises.
+    calibration_overrides_audit: dict[str, Any] | None = None
     cutover_declaration_env = os.getenv(CUTOVER_DECLARATION_ENV, "").strip() or None
 
     def rollback_receipt_if_needed(*, preserve_failure: bool = False) -> dict[str, Any] | None:
@@ -930,6 +955,9 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 )
             else:
                 registry_result = publish_registry()
+            calibration_overrides_audit = _calibration_overrides_audit_from_summary(
+                registry_result, declaration_path=config.calibration_overrides_path
+            )
             if not readiness_entries or readiness_derivation.get("status") != "ready":
                 raise RefreshError("provider_invalid")
             _enforce_workspace_bounds(run_workspace)
@@ -1059,6 +1087,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_attempted_total=orphan_attempted_total,
                 registry_classification=registry_classification,
                 cutover_gate=runner_cutover_gate_audit,
+                calibration_overrides=calibration_overrides_audit,
             )
     except ProviderAtomicError as error:
         rollback_receipt = rollback_receipt_if_needed(
@@ -1080,7 +1109,16 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             registry_classification=registry_classification,
             cutover_gate=runner_cutover_gate_audit,
         )
-    except (RefreshError, SchedulerRegistryPublishError, SchedulerFileProviderError, StateManagerError) as error:
+    except (
+        RefreshError,
+        SchedulerRegistryPublishError,
+        SchedulerFileProviderError,
+        StateManagerError,
+        # #1832 round-2 C1: `CalibrationOverrideError` is a bare `RuntimeError`
+        # subclass and was in none of these tuples, so it landed on the generic
+        # handler below and lost its error code, message and offending entry.
+        CalibrationOverrideError,
+    ) as error:
         reason = getattr(error, "reason", None) or getattr(error, "error_code", None) or "provider_invalid"
         details = getattr(error, "details", {})
         if isinstance(details, Mapping):
@@ -1110,6 +1148,14 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
         detail_phase = details.get("provider_phase") if isinstance(details, Mapping) else None
         phase = str(getattr(error, "phase", None) or evidence_phase or detail_phase or "precommit")
         outcome = str(getattr(error, "outcome", "failed"))
+        if isinstance(error, CalibrationOverrideError):
+            # The raw `CALIBRATION_OVERRIDE_*` code is not a receipt reason, and
+            # the clamp below would otherwise reset it to `provider_invalid`.
+            # It travels in the block instead, with the offending entry.
+            calibration_overrides_audit = _calibration_overrides_audit_from_error(
+                error, declaration_path=config.calibration_overrides_path
+            )
+            reason = CALIBRATION_OVERRIDE_REFUSAL_REASON
         rollback_receipt = rollback_receipt_if_needed(
             preserve_failure=reason == "provider_preimage_changed"
         )
@@ -1137,6 +1183,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 orphan_attempted_total=orphan_attempted_total,
                 registry_classification=registry_classification,
                 cutover_gate=runner_cutover_gate_audit,
+                calibration_overrides=calibration_overrides_audit,
             )
     except Exception:
         rollback_receipt = rollback_receipt_if_needed()
@@ -1149,6 +1196,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
             providers=committed,
             registry_classification=registry_classification,
             cutover_gate=runner_cutover_gate_audit,
+            calibration_overrides=calibration_overrides_audit,
         )
 
     try:
@@ -1631,6 +1679,7 @@ def _receipt(
     orphan_attempted_total: int | None = None,
     registry_classification: Mapping[str, Any] | None = None,
     cutover_gate: Mapping[str, Any] | None = None,
+    calibration_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     evidence = list(orphan_paths[:MAX_ORPHAN_EVIDENCE])
     total = len(orphan_paths) if orphan_total is None else orphan_total
@@ -1666,6 +1715,9 @@ def _receipt(
         # audit block, and it returns a fresh scalar-only dict — no separate
         # freeze needed.  Runs that never built a block omit the key.
         receipt["cutover_gate"] = normalize_cutover_gate_audit(cutover_gate)
+    if calibration_overrides is not None:
+        # Same freeze-through-json treatment as `registry_classification`.
+        receipt["calibration_overrides"] = json.loads(json.dumps(calibration_overrides))
     return receipt
 
 
@@ -1866,8 +1918,179 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("receipt_orphan_limit")
     _validate_registry_classification_field(receipt)
     _validate_cutover_gate_field(receipt)
+    _validate_calibration_overrides_field(receipt)
     _validate_value_bounds(receipt)
     return json.loads(json.dumps(receipt, ensure_ascii=True))
+
+
+_CALIBRATION_OVERRIDE_BLOCK_KEYS = frozenset({"declaration_path", "not_applied", "error"})
+_CALIBRATION_OVERRIDE_BLOCK_REQUIRED_KEYS = frozenset({"declaration_path", "not_applied"})
+_CALIBRATION_OVERRIDE_ENTRY_KEYS = frozenset({"basin_slug", "parameter"})
+_CALIBRATION_OVERRIDE_NOT_APPLIED_KEYS = frozenset({"basin_slug", "parameter", "reason_not_applied"})
+_CALIBRATION_OVERRIDE_ERROR_KEYS = frozenset({"error_code", "message", "entries"})
+
+
+def _bounded_receipt_text(value: Any) -> str:
+    """Every string that enters the receipt is bounded at the source.
+
+    `_validate_value_bounds` rejects a receipt carrying any string longer than
+    `MAX_STRING_LENGTH`, and a rejected receipt is not published at all -- so an
+    over-long declared `reason` would destroy exactly the diagnosability this
+    block exists to add.  Truncate here instead.
+    """
+    text = "" if value is None else str(value)
+    return text[:MAX_STRING_LENGTH]
+
+
+def _calibration_entry_digest(entry: Mapping[str, Any]) -> dict[str, str]:
+    """The two fields that identify a declared entry.  Value/reason/approver stay
+    in the declaration file; the receipt only has to name WHICH entry."""
+    return {
+        "basin_slug": _bounded_receipt_text(entry.get("basin_slug")),
+        "parameter": _bounded_receipt_text(entry.get("parameter")),
+    }
+
+
+def _calibration_entry_list(value: Any) -> list[dict[str, str]]:
+    """Well-formed entries only.
+
+    A half-named entry would be rejected by `_validate_calibration_overrides_field`,
+    and a rejected receipt is not published at all -- dropping it keeps a
+    malformed detail payload from costing the operator the whole receipt.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    digests = [
+        _calibration_entry_digest(item)
+        for item in list(value)[:MAX_COLLECTION_ITEMS]
+        if isinstance(item, Mapping)
+    ]
+    return [item for item in digests if item["basin_slug"] and item["parameter"]]
+
+
+def _calibration_overrides_audit_from_summary(
+    summary: Mapping[str, Any],
+    *,
+    declaration_path: Path | None,
+) -> dict[str, Any] | None:
+    """#1832 round-2 C2: persist the declared-but-not-applied entries.
+
+    This lane never writes the publisher summary anywhere (it passes no
+    `output_path`), so without this the fact that a declared override did not
+    bite this tick had zero persisted trace.  Returns ``None`` for a summary
+    that never ran the declaration at all (the previous-snapshot republish
+    short-circuit), because claiming a declaration path there would be a
+    receipt asserting something the run did not do.
+    """
+    if "calibration_overrides_not_applied" not in summary:
+        return None
+    return {
+        "declaration_path": _bounded_receipt_text(
+            summary.get("calibration_overrides_declaration") or declaration_path
+        )
+        or None,
+        "not_applied": [
+            {
+                **_calibration_entry_digest(item),
+                "reason_not_applied": _bounded_receipt_text(item.get("reason_not_applied")),
+            }
+            for item in list(summary.get("calibration_overrides_not_applied") or [])[
+                :MAX_COLLECTION_ITEMS
+            ]
+            if isinstance(item, Mapping)
+        ],
+    }
+
+
+def _calibration_overrides_audit_from_error(
+    error: CalibrationOverrideError,
+    *,
+    declaration_path: Path | None,
+) -> dict[str, Any]:
+    """#1832 round-2 C1: carry the error code and the offending entry.
+
+    The publisher raises with either a plural ``entries`` list (declaration- and
+    staging-level refusals) or a single flat ``basin_slug``/``parameter`` pair
+    (the apply-time refusals); both are normalised to one list here.  A
+    declaration that fails to load names no basin at all, and then the message
+    is the whole evidence.
+    """
+    details = error.details if isinstance(error.details, Mapping) else {}
+    entries = _calibration_entry_list(details.get("entries"))
+    if not entries:
+        entries = _calibration_entry_list([details])
+    return {
+        "declaration_path": _bounded_receipt_text(declaration_path) or None,
+        "not_applied": [],
+        "error": {
+            "error_code": _bounded_receipt_text(error.error_code),
+            "message": _bounded_receipt_text(str(error)),
+            "entries": entries,
+        },
+    }
+
+
+def _validate_calibration_overrides_field(receipt: Mapping[str, Any]) -> None:
+    """Admit exactly the two builders' shape (#1832).
+
+    Optional at the key-set level, because a run that fails before the
+    declaration is reached (lock contention, provider preimage) legitimately
+    knows nothing about it.  But on the refusal reason the block -- and its
+    ``error`` -- is the entire point, so absence there is itself forged, the
+    same way `cutover_gate` is required on the cutover refusal reasons.
+    """
+    refusal = receipt.get("reason") == CALIBRATION_OVERRIDE_REFUSAL_REASON
+    if "calibration_overrides" not in receipt:
+        if refusal:
+            raise ValueError("receipt_calibration_overrides_missing")
+        return
+    block = receipt["calibration_overrides"]
+    if not isinstance(block, Mapping):
+        raise ValueError("receipt_calibration_overrides_invalid")
+    keys = set(block)
+    if not _CALIBRATION_OVERRIDE_BLOCK_REQUIRED_KEYS <= keys or keys - _CALIBRATION_OVERRIDE_BLOCK_KEYS:
+        raise ValueError("receipt_calibration_overrides_invalid")
+    declaration_path = block["declaration_path"]
+    if declaration_path is not None and (
+        not isinstance(declaration_path, str)
+        or not declaration_path
+        or len(declaration_path) > MAX_STRING_LENGTH
+    ):
+        raise ValueError("receipt_calibration_overrides_invalid")
+    not_applied = block["not_applied"]
+    if not isinstance(not_applied, list) or len(not_applied) > MAX_COLLECTION_ITEMS:
+        raise ValueError("receipt_calibration_overrides_invalid")
+    for item in not_applied:
+        if not isinstance(item, Mapping) or set(item) != _CALIBRATION_OVERRIDE_NOT_APPLIED_KEYS:
+            raise ValueError("receipt_calibration_overrides_invalid")
+        _require_calibration_entry_strings(item)
+        if item["reason_not_applied"] not in CALIBRATION_OVERRIDE_NOT_APPLIED_REASONS:
+            raise ValueError("receipt_calibration_overrides_invalid")
+    error = block.get("error")
+    if refusal and error is None:
+        raise ValueError("receipt_calibration_overrides_missing")
+    if error is None:
+        return
+    if not isinstance(error, Mapping) or set(error) != _CALIBRATION_OVERRIDE_ERROR_KEYS:
+        raise ValueError("receipt_calibration_overrides_invalid")
+    for field in ("error_code", "message"):
+        value = error[field]
+        if not isinstance(value, str) or not value or len(value) > MAX_STRING_LENGTH:
+            raise ValueError("receipt_calibration_overrides_invalid")
+    entries = error["entries"]
+    if not isinstance(entries, list) or len(entries) > MAX_COLLECTION_ITEMS:
+        raise ValueError("receipt_calibration_overrides_invalid")
+    for item in entries:
+        if not isinstance(item, Mapping) or set(item) != _CALIBRATION_OVERRIDE_ENTRY_KEYS:
+            raise ValueError("receipt_calibration_overrides_invalid")
+        _require_calibration_entry_strings(item)
+
+
+def _require_calibration_entry_strings(entry: Mapping[str, Any]) -> None:
+    for field in ("basin_slug", "parameter"):
+        value = entry.get(field)
+        if not isinstance(value, str) or not value or len(value) > MAX_STRING_LENGTH:
+            raise ValueError("receipt_calibration_overrides_invalid")
 
 
 _CUTOVER_GATE_KEYS = frozenset({"mode", "declaration_env", "declaration_present"})

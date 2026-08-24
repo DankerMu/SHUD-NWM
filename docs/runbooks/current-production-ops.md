@@ -694,6 +694,21 @@ canonical replace 前退出、非零：
   未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
   超过 256 KiB。
 
+第四个非 cutover 的 refusal 原因（#1832）：
+
+- `calibration_override_invalid`：`config/calibration_overrides.yaml`（或
+  `$NHMS_CALIBRATION_OVERRIDES_PATH` 指向的文件）里某条声明加载不了或应用不上。
+  receipt 的 `calibration_overrides.error` 带 `error_code` + `message` +
+  `entries`（`basin_slug`/`parameter`），直接点名是哪条：
+  `CALIBRATION_OVERRIDE_BASIN_NOT_IN_INVENTORY`（slug 打错或改名，discovery 里根本
+  没这个 basin）、`CALIBRATION_OVERRIDE_UNKNOWN_PARAMETER`（basin 的 `*.cfg.calib`
+  里没有这个参数）、`CALIBRATION_OVERRIDE_VALUE_UNPARSEABLE`、
+  `CALIBRATION_OVERRIDE_DECLARATION_UNREADABLE` / `_INVALID`。这条拒绝在 canonical
+  replace 之前退出，registry 保持上一代；timer 每 tick 都会复现，直到声明改对。
+  另外 `calibration_overrides.not_applied` 记录「声明了但这趟没发布」的 basin
+  （`reason_not_applied="basin_not_selected_for_this_run"`）——不是错误，但说明这条
+  override 本趟没生效。
+
 **分类 `mode`（#1140）**：`registry_classification` 还带一个 `mode` 字段，记录这次 refresh
 实际跑的分类分支。`id_only` 只来自 `dry_run`——prospective 行只有 `model_id`/`basin_id`、
 没有 checksum，所以观察不到漂移，也不评估 removal；`full` 来自真实 publish 路径的分类
@@ -1710,8 +1725,17 @@ provision M1′（node-27，写 core.model_instance）
   -> 最后才发布合并 manifest
 ```
 
-倒过来做的后果：`NHMS_REQUIRE_FORECAST_WARM_START=true` 下，manifest 先落地会让 `M1′`
-在 `t*` 没有 warm state 而 block——fail-safe，但白停一个 cycle。
+倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
+在任何 generation 都没有 state 行，走的是 first-cycle 分支
+（`services/orchestrator/scheduler_generation.py:1057`）；而生产 registry 行带
+`manifest_uri`，会产出一个**合格**的 packaged-IC 信号，于是该 run 被
+**放行**为 `PACKAGED_IC_BOOTSTRAP`（`scheduler_generation.py:1057-1078`），
+**不是 block**。也就是说代价不是"白停一个 cycle"，而是发出一份从包内 IC 起步、
+而非承接 warm state 的预报——生产水文过程线断一刀。
+只有 packaged IC 不可读或不合格时才落到
+`BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED` 那条 fail-safe 上。
+**所以顺序不是"省一个 cycle"的优化，是正确性约束**；稳妥做法是整段 rollout 期间
+让 `nhms-compute-scheduler.timer` 处于 disabled，从结构上关掉这个放行窗口。
 
 **`t*` 怎么选**：pass evidence 的 `cycle_window` 实测 `cycle_lag_hours=16`、
 `end_time_utc = now − 16h`、cycle 步长 12h。所以 cycle `C` 进入调度窗口的时刻是 `C + 16h`，

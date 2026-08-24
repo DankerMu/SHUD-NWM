@@ -53,7 +53,8 @@
         "emergency_record_invalid",
         "registry_cutover_undeclared",
         "registry_cutover_removal_refused",
-        "registry_cutover_declaration_invalid"
+        "registry_cutover_declaration_invalid",
+        "calibration_override_invalid"
       ],
       "maxLength": 64
     },
@@ -86,7 +87,8 @@
         "emergency_record_invalid",
         "registry_cutover_undeclared",
         "registry_cutover_removal_refused",
-        "registry_cutover_declaration_invalid"
+        "registry_cutover_declaration_invalid",
+        "calibration_override_invalid"
       ],
       "maxLength": 64
     },
@@ -165,6 +167,55 @@
       "maxItems": 64,
       "items": {"type": "string", "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
     },
+    "calibration_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declaration_path", "not_applied"],
+      "properties": {
+        "declaration_path": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 512},
+            {"type": "null"}
+          ]
+        },
+        "not_applied": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["basin_slug", "parameter", "reason_not_applied"],
+            "properties": {
+              "basin_slug": {"$ref": "#/$defs/calibration_override_name"},
+              "parameter": {"$ref": "#/$defs/calibration_override_name"},
+              "reason_not_applied": {"enum": ["basin_not_selected_for_this_run"]}
+            }
+          }
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["error_code", "message", "entries"],
+          "properties": {
+            "error_code": {"type": "string", "minLength": 1, "maxLength": 512},
+            "message": {"type": "string", "minLength": 1, "maxLength": 512},
+            "entries": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["basin_slug", "parameter"],
+                "properties": {
+                  "basin_slug": {"$ref": "#/$defs/calibration_override_name"},
+                  "parameter": {"$ref": "#/$defs/calibration_override_name"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "cutover_gate": {
       "type": "object",
       "additionalProperties": false,
@@ -229,6 +280,7 @@
   },
   "$defs": {
     "model_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$"},
+    "calibration_override_name": {"type": "string", "minLength": 1, "maxLength": 512},
     "package_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "model_id_group": {
       "type": "object",
@@ -425,6 +477,16 @@
         "required": ["reason"]
       },
       "then": {"required": ["registry_classification", "cutover_gate"]}
+    },
+    {
+      "if": {
+        "properties": {"reason": {"const": "calibration_override_invalid"}},
+        "required": ["reason"]
+      },
+      "then": {
+        "required": ["calibration_overrides"],
+        "properties": {"calibration_overrides": {"required": ["error"]}}
+      }
     }
   ]
 }
