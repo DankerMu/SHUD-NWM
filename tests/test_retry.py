@@ -17,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from apps.api.main import app
 from apps.api.routes import pipeline as pipeline_routes
+from packages.common.auth_policy import trusted_internal_policy_decision
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler_state_types
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
@@ -2783,3 +2784,86 @@ def _events(store: PipelineStore) -> list[PipelineEvent]:
 def _jobs(store: PipelineStore) -> list[str]:
     statement = select(PipelineJob.job_id).order_by(PipelineJob.job_id.asc())
     return [str(job_id) for job_id in store.session.scalars(statement)]
+
+
+# --- #1604/#1605/#1606: file-journal retry lineage + structured invalid evidence ---
+
+
+def test_retry_api_maps_file_journal_invalid_evidence_to_409(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The monitoring API maps RetryEvidenceInvalidError from the file retry lane.
+
+    The route's existing ``RetryError`` mapping stays the only HTTP adapter: a
+    file-journal retry whose private durable evidence fails validation must
+    surface as HTTP 409 with ``error.code == "RETRY_EVIDENCE_INVALID"`` and safe
+    details, never an unclassified 500, a bare journal error, or private paths.
+    """
+
+    import json as _json
+
+    from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository as _Repo,
+    )
+    from services.orchestrator.retry import RetryConfig as _RetryConfig
+
+    journal_root = tmp_path / "journal"
+    cycle_iso = "2026-07-20T00:00:00+00:00"
+    job_id = "job_fcst_gfs_2026060100_model_a_forecast"
+    repository = _Repo(journal_root)
+    record = {
+        "job_id": job_id,
+        "run_id": "fcst_gfs_2026072000_model_a",
+        "cycle_id": "gfs_2026072000",
+        "source_id": "gfs",
+        "cycle_time": cycle_iso,
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_a",
+        "status": "failed",
+        "stage": "forecast",
+        "idempotency_key": "gfs:gfs_2026072000:model_a:forecast",
+        "error_code": "SLURM_TIMEOUT",
+        "init_state_identities": [],
+        "created_at": cycle_iso,
+        "updated_at": cycle_iso,
+        "finished_at": cycle_iso,
+    }
+    repository.upsert_pipeline_job(record)
+    direct_path = journal_root / "pipeline-jobs" / f"{job_id}.json"
+    direct_record = _json.loads(direct_path.read_text(encoding="utf-8"))
+    direct_record["payload"]["error_code"] = {"nested": "not-a-scalar"}
+    direct_path.write_text(_json.dumps(direct_record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    class _FileGateway:
+        def submit_job(self, request):  # pragma: no cover - must not be reached
+            raise AssertionError("invalid evidence must fail before gateway submission")
+
+    service = FileJournalRetryService(repository, _RetryConfig(max_retries=3, backoff_schedule=[0]))
+    context = pipeline_routes._RetryExecutionContext(
+        policy_decision=trusted_internal_policy_decision(
+            "pipeline.retry_run",
+            target_type="pipeline_run",
+            target_id="fcst_gfs_2026072000_model_a",
+            actor_id="trusted-internal:test",
+            roles=("sys_admin",),
+        ),
+        service=service,  # type: ignore[arg-type]
+        gateway=_FileGateway(),  # type: ignore[arg-type]
+    )
+    app.dependency_overrides[pipeline_routes.get_retry_execution_context] = lambda: context
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    try:
+        client = TestClient(app)
+        response = client.post("/api/v1/runs/fcst_gfs_2026072000_model_a/retry", headers={"X-User-Role": "operator"})
+
+        assert response.status_code == 409
+        body = response.json()["error"]
+        assert body["code"] == "RETRY_EVIDENCE_INVALID"
+        assert body["details"]["run_id"] == "fcst_gfs_2026072000_model_a"
+        assert body["details"]["journal_reason"] == "file_journal_invalid_field"
+        assert body["details"]["journal_field"] == "error_code"
+        rendered = _json.dumps(body)
+        assert "Traceback" not in rendered
+        assert "/journal/pipeline-jobs" not in rendered
+        assert str(journal_root) not in rendered
+    finally:
+        app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
