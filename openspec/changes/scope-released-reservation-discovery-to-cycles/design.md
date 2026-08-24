@@ -270,15 +270,28 @@ candidate**, and that path reaches `_flat_direct_pipeline_job_paths_for_cycle`,
 which lists the WHOLE unpartitioned `pipeline-jobs/` directory (4,557 files on
 node-22) and only then filters by file name.
 
-The existing `_direct_jobs_cycle_cache` does not rescue this, and the reason is
-not that it goes unreached — the measured counts say it IS reached. Its
-VALIDATION fingerprint (`_cycle_rows_source_fingerprint`) builds
-`direct_signatures` by calling `_flat_direct_pipeline_job_paths_for_cycle`
-itself, so every cache *hit* still pays a whole-directory listing. Measured on
+The per-cycle record cache on this path does not rescue it, and the reason is
+not that it goes unreached — the measured counts say it IS reached. Measured on
 the fixture: M=2 over K=2 costs 5 listings, M=6 over K=2 costs 9 — i.e. 1
-(candidate scan) + 2 per cache-miss candidate (fingerprint + reader) + 1 per
-cache-hit candidate (fingerprint alone). Linear in the candidate count either
-way, each listing over the whole flat directory. That is structurally the same `O(N x flat-directory)` shape D9
+(candidate scan) + 2 per cache-miss candidate + 1 per cache-hit candidate.
+Linear in the candidate count either way, each listing over the whole flat
+directory.
+
+**Which cache this is (round-2 review correction).** An earlier draft of this
+section named `_direct_jobs_cycle_cache` and its fingerprint
+`_cycle_rows_source_fingerprint`. That is the wrong pair. The confirm loop goes
+`query_released_identity_blocked_jobs` -> `_iter_pipeline_job_records_scoped`
+-> `_iter_pipeline_job_records_for_cycle` -> `_cycle_job_records_memoized`,
+which uses `_cycle_job_records_cache` validated by
+`_cycle_job_records_signature`. `_direct_jobs_cycle_cache` /
+`_cycle_rows_source_fingerprint` is a sibling mechanism reached only from
+`_direct_pipeline_job_records_for_cycle_cached`, which this path never calls,
+and `_cycle_rows_source_fingerprint` does not call
+`_flat_direct_pipeline_job_paths_for_cycle` at all. The arithmetic above
+re-derives unchanged against the correct pair and was re-measured against it;
+only the names were wrong. Recorded rather than silently rewritten because
+commit `43b06d1b`'s message carries the same misattribution and cannot be
+edited after push. That is structurally the same `O(N x flat-directory)` shape D9
 measured at ">40 minutes for 230 cycles" and rejected as non-viable.
 
 N=4 today is a property of current DATA, not of the code. The admitted shape is
@@ -311,7 +324,7 @@ cycle: flat-directory listings are constant, independent of both M and K.
 point-in-time; that is safe only because the mutating path re-reads under
 `_locked_cycle_write` and compares there, so a stale listing costs at most a
 refused invocation. That property is preserved where the memo meets
-`_direct_jobs_cycle_cache`: only the path LIST is memoized, per-file
+`_cycle_job_records_cache`: only the path LIST is memoized, per-file
 `_stat_signature` calls stay live, and the next query recomputes the fingerprint
 from a fresh listing — so a mid-query add or removal produces a mismatch and a
 rebuild rather than a stale row surviving into a later call. The memo is
