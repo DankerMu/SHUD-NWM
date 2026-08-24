@@ -335,6 +335,46 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 `normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
 按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
 
+**receipt 里必须先看 `coverage`，再看 `work_item_count`。** `renamed_model_count: N,
+work_item_count: 0` 既是"全部已回补"的稳态，也是 `--forcing-root` 指错 / NFS 没挂 / 环境不对的
+样子——这两者用条目数分不开。所以 receipt 带一段 `coverage`：`source_dirs_probed`（探了哪些
+`<root>/<source>/` 路径）、`source_dirs_found`（其中真实存在的）、`previous_model_dirs_found`
+（扫到多少个旧 id 目录）。**一条 source 目录都不存在时工具直接拒绝**
+（`BACKFILL_FORCING_ROOT_UNCOVERED`，`--forcing-root` 本身不是目录则是
+`BACKFILL_FORCING_ROOT_ABSENT`），错误里就带上探过的路径，不会以 exit 0 冒充"没活可干"。
+部分漏覆盖不拒绝（`--cycle` 本来就会收窄扫描面），但在 `coverage` 里看得见：
+`source_dirs_found` 少于 `source_dirs_probed` 就该问为什么。
+
+**status 一览（除 `verified` / `dry_run` 之外都让命令 exit 非 0）**：
+
+| status | 含义 | 操作 |
+|---|---|---|
+| `verified` | 重放产物通过等价验收 | 无 |
+| `dry_run` | 缺省预览，没跑 producer | 核对后加 `--execute` |
+| `existing_target_unverified` | 新 id 目录**已存在但验收不过**——producer 是**按文件**原子写、不是按目录，中途被杀就会留下只有部分成员的目录 | 见下 |
+| `produce_failed` | producer 非 0 退出 | 看 `detail.stderr_tail`；残留目录已被隔离 |
+| `verification_failed` | 跑完了但与旧包不等价 | 看 `detail.verification`；产物已被隔离 |
+| `errored` | 该 item 处理时抛异常（成员不可读等），`detail.error` 里是异常 | 修掉底层故障后重跑该 cycle |
+
+`errored` 是**逐 item** 的：一个 item 出事不会吞掉整份 receipt，其余 item 的 status 照常落盘
+（`--output` 也照写），命令 exit 1。
+
+**`existing_target_unverified` 不会被跳过，但缺省也不会被动。** 老实现按
+`target_dir.is_dir()` 判"已完成"，于是半截目录在 receipt 里与"已正确回补"长得一模一样，且以后
+每一趟都继续跳过、永远修不到。现在这种目录会被**发现并报告**、命令 exit 非 0，产物**原样保留**
+——它不是本次跑出来的，删不删是运维的决定。确认要重做时加
+`--replace-unverified-target`（help 里写明是破坏性的）：它把该目录移到同级
+`_backfill_quarantine/` 下再重跑 producer。验收通过的已存在目录仍然照旧跳过。
+
+**验收不过 / producer 失败的产物一定不留在真实 model 路径上。** forecast 阶段是直接读
+`<basin_version_id>/<model_id>/` 的，留一份没通过验收的包在那儿就等于让 SHUD 静默吃下去。
+工具把它移到 `<basin_version_id>/_backfill_quarantine/quarantined-<model_id>.<status>.<UTC 时间戳>.pid<pid>/`，
+路径记在 receipt 的 `detail.quarantine_path` 里（移动失败则记 `detail.quarantine_error`）。
+目录名带前导下划线、条目名带 `quarantined-` 前缀，都不可能被当成合法的 `dg_*` model 目录。
+**下一步**：照 `detail.verification` / `detail.stderr_tail` 定位原因（原始输入被 retention 清了？
+盘满？成员不可读？），修掉之后重跑同一条命令——此时该 model 路径已经空了，会被当成正常的
+待回补项重新产出。隔离目录确认无用后手工删除，工具不自动清。
+
 **回补完不会自愈——已经跑失败的 run 必须单独放行。** `ARTIFACT_NOT_FOUND` 被分类器判为
 **永久失败**（`classify_failure` 给 `retryable=False, permanent=True`），与重试预算无关
 （实战 `submission_attempt=1`，limit 是 6）。所以产物补上之后，那些 run 仍然是

@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -118,6 +120,10 @@ class WorkItem:
     previous_dir: Path
     target_dir: Path
     status: str = "pending"
+    #: True when ``target_dir`` already existed at discovery time and FAILED
+    #: verification.  Such an item is reported, never silently skipped, and is
+    #: only replaced under the explicit opt-in flag.
+    existing_target: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -130,8 +136,50 @@ class WorkItem:
             "previous_dir": str(self.previous_dir),
             "target_dir": str(self.target_dir),
             "status": self.status,
+            "existing_target": self.existing_target,
             **({"detail": self.detail} if self.detail else {}),
         }
+
+
+#: Where an artifact that must not stay live is moved to.  The leading
+#: underscore is load-bearing: a model directory is always ``dg_<32hex>``, so a
+#: name under this directory can never be mistaken for one by the scheduler, by
+#: this tool's own scan, or by an operator reading a listing.
+_QUARANTINE_DIRNAME = "_backfill_quarantine"
+
+
+def _quarantine_dir(item: WorkItem, *, label: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = item.target_dir.parent / _QUARANTINE_DIRNAME
+    # The stamp has second resolution and `--jobs` runs several producers at
+    # once, so disambiguate by pid and by a counter rather than trusting it.
+    for attempt in range(1000):
+        suffix = "" if attempt == 0 else f".{attempt}"
+        candidate = base / f"quarantined-{item.model_id}.{label}.{stamp}.pid{os.getpid()}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"could not allocate a quarantine path under {base}")
+
+
+def quarantine_target(item: WorkItem, *, label: str) -> str | None:
+    """Move ``target_dir`` out of the live model path.
+
+    The forecast stage reads ``<basin_version_id>/<model_id>/`` directly, so an
+    artifact this tool produced and could not verify -- or the debris a
+    producer left behind when it exited non-zero -- must not be left standing
+    there.  Moving rather than deleting keeps it available for diagnosis.
+    """
+
+    if not item.target_dir.is_dir():
+        return None
+    try:
+        destination = _quarantine_dir(item, label=label)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        item.target_dir.rename(destination)
+    except (OSError, RuntimeError) as error:
+        item.detail["quarantine_error"] = f"{type(error).__name__}: {error}"
+        return None
+    return str(destination)
 
 
 def _load_models(path: Path) -> list[Mapping[str, Any]]:
@@ -256,12 +304,80 @@ def resolve_renames(previous: Path, current: Path) -> tuple[list[Rename], list[d
     return renames, rebindings
 
 
+def _source_dir(rename: Rename, forcing_root: Path) -> Path:
+    return forcing_root / _object_source_segment(rename.current.source_id)
+
+
+def probe_coverage(renames: Sequence[Rename], forcing_root: Path, cycles: Sequence[str]) -> dict[str, Any]:
+    """What the scan was pointed at, and what of it actually exists.
+
+    ``renamed_model_count: N, work_item_count: 0`` is the steady state of a
+    fully-covered rerun AND the signature of a wrong ``--forcing-root`` (or an
+    unmounted NFS share, or the wrong environment), so it cannot discriminate
+    the two.  This records the probe itself, which can.
+    """
+
+    probed = sorted({str(_source_dir(rename, forcing_root)) for rename in renames})
+    found = sorted(path for path in probed if Path(path).is_dir())
+    previous_dirs_found = 0
+    for rename in renames:
+        source_dir = _source_dir(rename, forcing_root)
+        if not source_dir.is_dir():
+            continue
+        candidates = sorted(cycles) if cycles else sorted(p.name for p in source_dir.iterdir() if p.is_dir())
+        for cycle in candidates:
+            if (source_dir / cycle / rename.current.basin_version_id / rename.previous.model_id).is_dir():
+                previous_dirs_found += 1
+    return {
+        "forcing_root": str(forcing_root),
+        "forcing_root_is_dir": forcing_root.is_dir(),
+        "cycle_filter": sorted(cycles),
+        "renames_probed": len(renames),
+        "source_dirs_probed": probed,
+        "source_dirs_found": found,
+        "previous_model_dirs_found": previous_dirs_found,
+    }
+
+
+def require_coverage(coverage: Mapping[str, Any]) -> None:
+    """Fail closed on total under-coverage.
+
+    Partial under-coverage stays visible in the receipt rather than fatal --
+    a cycle filter legitimately narrows the scan -- but "the tool looked and
+    found literally nothing" must never be reported as "nothing to do".
+    """
+
+    if not coverage["renames_probed"]:
+        return
+    if not coverage["forcing_root_is_dir"]:
+        raise BackfillError(
+            "BACKFILL_FORCING_ROOT_ABSENT",
+            "--forcing-root is not a directory; nothing could be scanned.",
+            dict(coverage),
+        )
+    if not coverage["source_dirs_found"]:
+        raise BackfillError(
+            "BACKFILL_FORCING_ROOT_UNCOVERED",
+            "No renamed model's source directory exists under --forcing-root; the root, the mount, or "
+            "the environment is wrong. Refusing rather than reporting zero work items.",
+            dict(coverage),
+        )
+
+
 def discover_work(renames: Sequence[Rename], forcing_root: Path, cycles: Sequence[str]) -> list[WorkItem]:
-    """Cycles that have the old id's artifacts but not the new id's."""
+    """Cycles that have the old id's artifacts but not a VERIFIED new one.
+
+    An existing ``target_dir`` is only skipped when it passes the same
+    acceptance oracle a fresh replay must pass.  Producer writes are atomic per
+    file, never per directory, so a producer killed mid-write leaves the
+    directory present holding only some members; gating on ``is_dir()`` alone
+    would drop that (cycle, model_id) out of the receipt forever, looking
+    exactly like a correct backfill.
+    """
 
     items: list[WorkItem] = []
     for rename in renames:
-        source_dir = forcing_root / _object_source_segment(rename.current.source_id)
+        source_dir = _source_dir(rename, forcing_root)
         if not source_dir.is_dir():
             continue
         candidates = sorted(cycles) if cycles else sorted(p.name for p in source_dir.iterdir() if p.is_dir())
@@ -271,19 +387,26 @@ def discover_work(renames: Sequence[Rename], forcing_root: Path, cycles: Sequenc
             target_dir = basin_dir / rename.current.model_id
             if not previous_dir.is_dir():
                 continue
-            if target_dir.is_dir():
-                continue
-            items.append(
-                WorkItem(
-                    source_id=rename.current.source_id,
-                    cycle=cycle,
-                    basin_version_id=rename.current.basin_version_id,
-                    previous_model_id=rename.previous.model_id,
-                    model_id=rename.current.model_id,
-                    previous_dir=previous_dir,
-                    target_dir=target_dir,
-                )
+            item = WorkItem(
+                source_id=rename.current.source_id,
+                cycle=cycle,
+                basin_version_id=rename.current.basin_version_id,
+                previous_model_id=rename.previous.model_id,
+                model_id=rename.current.model_id,
+                previous_dir=previous_dir,
+                target_dir=target_dir,
             )
+            if target_dir.is_dir():
+                try:
+                    verification = verify_item(item)
+                except Exception as error:  # noqa: BLE001 - an unreadable member is a finding, not a crash
+                    verification = {"verified": False, "reason": f"{type(error).__name__}: {error}"}
+                if verification.get("verified"):
+                    continue
+                item.existing_target = True
+                item.status = "existing_target_unverified"
+                item.detail["verification"] = verification
+            items.append(item)
     return items
 
 
@@ -313,18 +436,29 @@ def verify_item(item: WorkItem) -> dict[str, Any]:
             "only_previous": sorted(set(previous_names) - set(target_names))[:10],
             "only_target": sorted(set(target_names) - set(previous_names))[:10],
         }
-    mismatched_exact = [
-        name
-        for name in previous_names
-        if (previous_shud / name).read_bytes() != (target_shud / name).read_bytes()
-    ]
+    mismatched_exact = []
+    for name in previous_names:
+        try:
+            differs = (previous_shud / name).read_bytes() != (target_shud / name).read_bytes()
+        except OSError as error:
+            # A member we cannot read is a member we cannot accept.  Raising
+            # here would cost the whole receipt, not just this item.
+            mismatched_exact.append(f"{name} (unreadable: {type(error).__name__})")
+            continue
+        if differs:
+            mismatched_exact.append(name)
     mismatched_normalised = []
     for name in _NORMALISED_MEMBERS:
         previous_member, target_member = item.previous_dir / name, item.target_dir / name
         if not previous_member.is_file() or not target_member.is_file():
             mismatched_normalised.append(f"{name} (missing)")
             continue
-        if _normalise(previous_member.read_bytes()) != _normalise(target_member.read_bytes()):
+        try:
+            differs = _normalise(previous_member.read_bytes()) != _normalise(target_member.read_bytes())
+        except OSError as error:
+            mismatched_normalised.append(f"{name} (unreadable: {type(error).__name__})")
+            continue
+        if differs:
             mismatched_normalised.append(name)
     verified = not mismatched_exact and not mismatched_normalised
     return {
@@ -335,7 +469,46 @@ def verify_item(item: WorkItem) -> dict[str, Any]:
     }
 
 
-def run_item(item: WorkItem, producer_argv: Sequence[str], *, dry_run: bool) -> None:
+def run_item(
+    item: WorkItem,
+    producer_argv: Sequence[str],
+    *,
+    dry_run: bool,
+    replace_unverified_target: bool = False,
+) -> None:
+    """Replay one work item, and never raise.
+
+    A per-item fault costs that item's status, not the whole receipt: the loop
+    that calls this has no other record of the items that already finished.
+    """
+
+    try:
+        _run_item(item, producer_argv, dry_run=dry_run, replace_unverified_target=replace_unverified_target)
+    except Exception as error:  # noqa: BLE001 - deliberate: the receipt must survive any item
+        item.status = "errored"
+        item.detail["error"] = f"{type(error).__name__}: {error}"
+
+
+def _run_item(
+    item: WorkItem,
+    producer_argv: Sequence[str],
+    *,
+    dry_run: bool,
+    replace_unverified_target: bool,
+) -> None:
+    if item.existing_target:
+        if not replace_unverified_target:
+            # Reported, non-zero, and left exactly as found: this artifact was
+            # not written by this run, so destroying it is the operator's call.
+            item.status = "existing_target_unverified"
+            return
+        if dry_run:
+            item.status = "dry_run"
+            item.detail["would_replace_target"] = True
+            return
+        quarantined = quarantine_target(item, label="replaced_unverified")
+        item.detail["replaced_target"] = True
+        item.detail["replaced_target_quarantine_path"] = quarantined
     argv = [
         *producer_argv,
         "produce",
@@ -356,10 +529,17 @@ def run_item(item: WorkItem, producer_argv: Sequence[str], *, dry_run: bool) -> 
     item.detail["stderr_tail"] = completed.stderr[-2000:]
     if completed.returncode != 0:
         item.status = "produce_failed"
+        # A producer that died mid-write leaves a partial package standing on
+        # the path the forecast stage reads.  Move it out of the way.
+        item.detail["quarantine_path"] = quarantine_target(item, label="produce_failed")
         return
     verification = verify_item(item)
     item.detail["verification"] = verification
-    item.status = "verified" if verification.get("verified") else "verification_failed"
+    if verification.get("verified"):
+        item.status = "verified"
+        return
+    item.status = "verification_failed"
+    item.detail["quarantine_path"] = quarantine_target(item, label="verification_failed")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -381,6 +561,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--execute", action="store_true", help="Actually run the producer. Default is a dry run.")
     parser.add_argument(
+        "--replace-unverified-target",
+        action="store_true",
+        help="DESTRUCTIVE. For a target directory that already exists but does NOT pass verification (a "
+        "producer killed mid-write leaves one), remove it from the live model path and re-produce it from "
+        "scratch. Without this flag such an item is reported as 'existing_target_unverified', left exactly "
+        "as found, and the command exits non-zero. The removed directory is moved to "
+        f"<basin_version_id>/{_QUARANTINE_DIRNAME}/ rather than deleted outright.",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
@@ -395,6 +584,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         renames, rebindings = resolve_renames(args.previous_manifest, args.current_manifest)
+        coverage = probe_coverage(renames, args.forcing_root, args.cycles)
+        require_coverage(coverage)
         items = discover_work(renames, args.forcing_root, args.cycles)
     except BackfillError as error:
         json.dump(error.as_dict(), sys.stdout, indent=2, sort_keys=True)
@@ -411,12 +602,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         sys.stdout.write("\n")
         return 1
-    if args.jobs == 1 or not args.execute:
-        for item in items:
-            run_item(item, producer_argv, dry_run=not args.execute)
-    else:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            list(pool.map(lambda item: run_item(item, producer_argv, dry_run=False), items))
+    # Nothing between here and the receipt write may cost the receipt: it is
+    # the only record of what the completed items did.
+    loop_error: str | None = None
+    try:
+        if args.jobs == 1 or not args.execute:
+            for item in items:
+                run_item(
+                    item,
+                    producer_argv,
+                    dry_run=not args.execute,
+                    replace_unverified_target=args.replace_unverified_target,
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                list(
+                    pool.map(
+                        lambda item: run_item(
+                            item,
+                            producer_argv,
+                            dry_run=False,
+                            replace_unverified_target=args.replace_unverified_target,
+                        ),
+                        items,
+                    )
+                )
+    except Exception as error:  # noqa: BLE001 - the receipt is written either way
+        loop_error = f"{type(error).__name__}: {error}"
 
     statuses: dict[str, int] = {}
     for item in items:
@@ -426,6 +638,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "current_manifest": str(args.current_manifest),
         "forcing_root": str(args.forcing_root),
         "executed": bool(args.execute),
+        "replace_unverified_target": bool(args.replace_unverified_target),
+        "coverage": coverage,
         "renamed_model_count": len(renames),
         "renames": [
             {
@@ -439,6 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "work_item_count": len(items),
         "status_counts": statuses,
         "work_items": [item.as_dict() for item in items],
+        **({"loop_error": loop_error} if loop_error else {}),
     }
     text = json.dumps(receipt, indent=2, sort_keys=True)
     if args.output is not None:
@@ -446,9 +661,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.write_text(text + "\n", encoding="utf-8")
     sys.stdout.write(text + "\n")
 
-    if rebindings:
+    if rebindings or loop_error:
         return 1
-    failed = statuses.get("produce_failed", 0) + statuses.get("verification_failed", 0)
+    failed = sum(
+        statuses.get(status, 0)
+        for status in ("produce_failed", "verification_failed", "existing_target_unverified", "errored")
+    )
     return 1 if failed else 0
 
 

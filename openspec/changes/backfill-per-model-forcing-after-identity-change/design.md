@@ -111,12 +111,59 @@ test; and the receipt reports `renamed_model_count` alongside `work_item_count`
 so an operator can see that 16 renames produced 15 work items and ask why,
 rather than reading a bare item list as complete.
 
+## D6 — D5's failure mode has four instances, not one
+
+Round-2 review found that the first implementation guarded only the instance D5
+happened to describe (the lower-cased source segment). Three more shapes of the
+same "looked like nothing to do" failure were live, and one shape of losing the
+evidence entirely:
+
+1. **A partial `target_dir`** — producer writes are atomic per FILE, never per
+   directory (`producer.py:2101-2108`, `object_store.py:207-214`), so a killed
+   producer leaves the directory present with only some members. Gating
+   discovery on `is_dir()` made that item invisible in the receipt AND
+   unreachable by every later run. Now the existing directory must pass the
+   same oracle a replay must pass; if it does not, the item is reported
+   (`existing_target_unverified`, non-zero exit) and left untouched. Replacing
+   it is opt-in (`--replace-unverified-target`), because the tool did not write
+   it — destroying another writer's output is the operator's decision, not a
+   default. The replacement moves it to quarantine rather than deleting it.
+2. **A wrong `--forcing-root`** — every rename's source directory is absent, so
+   the receipt reads `renamed_model_count: N, work_item_count: 0`, which is
+   *also* the steady state of a legitimately fully-covered rerun. The count pair
+   cannot discriminate them; the probe can. `probe_coverage` records what was
+   probed and what was found, and total under-coverage refuses
+   (`BACKFILL_FORCING_ROOT_ABSENT` / `BACKFILL_FORCING_ROOT_UNCOVERED`). Partial
+   under-coverage stays non-fatal — `--cycle` narrows the scan by design — but
+   becomes legible in the receipt's `coverage` block.
+3. **A live `verification_failed` artifact** — the forecast stage reads
+   `<basin_version_id>/<model_id>/` directly, so a package that failed its own
+   acceptance oracle must not stand there. It is moved to
+   `_backfill_quarantine/quarantined-…` (leading underscore, and a name that
+   cannot match `dg_<32hex>`), with the path in the receipt. Moving, not
+   deleting: the bytes are the diagnosis. Same for a producer that exited
+   non-zero and left debris.
+4. **One item's exception discarding the whole receipt** — this is not a
+   `ThreadPoolExecutor` problem; the serial path lost it identically. Guarded at
+   three levels: `verify_item` treats an unreadable member as a mismatch rather
+   than a raise, `run_item` records any escaping exception as `errored` on its
+   own item, and the receipt build plus `--output` write sit outside the item
+   loop.
+
+The boundary between 1 and 3 is worth stating because it looks contradictory:
+**this tool quarantines what this run produced or replaced; it reports, and
+leaves in place, what it merely found.**
+
 ## Seams under test
 
 - `resolve_renames(previous, current)` — pairing and the two refusals.
 - `discover_work(renames, forcing_root, cycles)` — cycle selection, including
   the lower-cased source segment.
 - `verify_item(item)` — the equivalence oracle, in both directions.
+- `probe_coverage(renames, forcing_root, cycles)` — what was probed, what was
+  found; `require_coverage` turns total under-coverage into a refusal.
+- `run_item(item, argv, dry_run, replace_unverified_target)` — the replay, the
+  opt-in replacement, the quarantine, and the per-item error containment.
 - `_preview(service, run_id)` — per-run vs cohort-master row resolution.
 
 ## Evidence mapping

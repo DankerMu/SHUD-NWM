@@ -18,7 +18,9 @@ from scripts.node22_backfill_forcing_for_model_ids import (
     BackfillError,
     WorkItem,
     discover_work,
+    main,
     resolve_renames,
+    run_item,
     verify_item,
 )
 
@@ -253,3 +255,182 @@ def test_discover_work_finds_an_upper_cased_source_under_its_lower_cased_path(tm
     assert [(item.source_id, item.cycle, item.model_id) for item in items] == [
         ("IFS", "2026082300", "dg_" + "b" * 32)
     ]
+
+
+# --------------------------------------------------------------------------
+# Round-2 pins: the three remaining shapes of silent under-coverage (design
+# D5) plus the receipt's own survival.  D5 named the failure mode; the first
+# implementation only guarded the one instance D5 happened to describe.
+
+
+def _partial_target(root: Path, cycle: str, model_id: str) -> Path:
+    """What a producer killed mid-write leaves behind.
+
+    Producer writes are atomic per FILE, never per directory, so an interrupted
+    run leaves the model directory present holding only some members.
+    """
+
+    directory = root / "gfs" / cycle / "basins_heihe_vbasins" / model_id
+    directory.mkdir(parents=True)
+    (directory / "forcing.tsd.forc").write_text(
+        "valid_time,variable,dg-gfs-bbbbbbbbbbbb::cell:1001\n", encoding="utf-8"
+    )
+    return directory
+
+
+def _renames(tmp_path: Path):
+    previous = _write(tmp_path / "prev.json", _manifest([_model("dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")]))
+    current = _write(tmp_path / "cur.json", _manifest([_model("dg_" + "b" * 32, package_id="dg-gfs-bbbbbbbbbbbb")]))
+    renames, _ = resolve_renames(previous, current)
+    return previous, current, renames
+
+
+def test_a_partial_target_directory_is_discovered_not_silently_skipped(tmp_path: Path) -> None:
+    """An existing target that does not verify is work, not a completed item.
+
+    Gating discovery on ``target_dir.is_dir()`` alone makes an interrupted
+    producer indistinguishable, in the receipt, from a correct backfill -- and
+    makes it unreachable forever, because every later run skips it too.
+    """
+
+    _, _, renames = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    _partial_target(root, "2026082300", "dg_" + "b" * 32)
+
+    items = discover_work(renames, root, ["2026082300"])
+
+    assert [(item.cycle, item.model_id) for item in items] == [("2026082300", "dg_" + "b" * 32)]
+    assert items[0].existing_target is True
+    assert items[0].status == "existing_target_unverified"
+    assert items[0].detail["verification"]["verified"] is False
+
+
+def test_a_partial_target_is_not_replaced_without_the_opt_in_flag(tmp_path: Path) -> None:
+    _, _, renames = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _partial_target(root, "2026082300", "dg_" + "b" * 32)
+    item = discover_work(renames, root, ["2026082300"])[0]
+
+    run_item(item, ["/usr/bin/env", "true"], dry_run=False, replace_unverified_target=False)
+
+    assert item.status == "existing_target_unverified"
+    assert (target / "forcing.tsd.forc").is_file()
+    assert "command" not in item.detail
+
+
+def test_the_opt_in_flag_replaces_the_partial_target(tmp_path: Path) -> None:
+    _, _, renames = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _partial_target(root, "2026082300", "dg_" + "b" * 32)
+    item = discover_work(renames, root, ["2026082300"])[0]
+
+    run_item(item, ["/usr/bin/env", "true"], dry_run=False, replace_unverified_target=True)
+
+    assert not (target / "forcing.tsd.forc").exists()
+    assert item.detail["replaced_target"] is True
+    assert Path(item.detail["replaced_target_quarantine_path"]).is_dir()
+
+
+def test_a_forcing_root_that_holds_nothing_refuses_naming_the_probed_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Total under-coverage must fail closed.
+
+    ``renamed_model_count: N, work_item_count: 0`` is ALSO the steady state of a
+    fully-covered rerun, so it cannot discriminate a wrong ``--forcing-root``
+    (or an unmounted NFS share) from "nothing to do".
+    """
+
+    previous, current, _ = _renames(tmp_path)
+    root = tmp_path / "not-the-forcing-root"
+    root.mkdir()
+
+    code = main(
+        [
+            "--previous-manifest",
+            str(previous),
+            "--current-manifest",
+            str(current),
+            "--forcing-root",
+            str(root),
+        ]
+    )
+
+    assert code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_code"] == "BACKFILL_FORCING_ROOT_UNCOVERED"
+    assert payload["context"]["source_dirs_probed"] == [str(root / "gfs")]
+    assert payload["context"]["source_dirs_found"] == []
+
+
+def test_a_verification_failure_leaves_nothing_live_under_the_model_path(tmp_path: Path) -> None:
+    """A package that failed its own acceptance oracle must not stay readable.
+
+    The forecast stage reads the model path directly; leaving an unverified
+    package there would feed SHUD silently.
+    """
+
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _seed_forcing(root, "2026082300", "dg_" + "b" * 32, package_id="dg-gfs-bbbbbbbbbbbb")
+    (target / "shud" / "station_00001.csv").write_text("valid_time,PRCP\n2026-08-23T00:00:00Z,999\n", encoding="utf-8")
+    item = _item(root)
+
+    run_item(item, ["/usr/bin/env", "true"], dry_run=False)
+
+    assert item.status == "verification_failed"
+    assert not item.target_dir.exists()
+    quarantine = Path(item.as_dict()["detail"]["quarantine_path"])
+    assert quarantine.is_dir()
+    assert (quarantine / "shud" / "station_00001.csv").is_file()
+    assert quarantine.parent.name == "_backfill_quarantine"
+    assert not quarantine.name.startswith("dg_")
+
+
+def test_one_items_exception_does_not_discard_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A per-item fault must cost that item's status, not every item's."""
+
+    import scripts.node22_backfill_forcing_for_model_ids as backfill
+
+    previous, current, _ = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    for cycle in ("2026082212", "2026082300"):
+        _seed_forcing(root, cycle, "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+
+    def _explode(item: WorkItem) -> dict[str, object]:
+        if item.cycle == "2026082212":
+            raise PermissionError("member unreadable")
+        return {"verified": True, "shud_files_compared": 1}
+
+    monkeypatch.setattr(backfill, "verify_item", _explode)
+    receipt_path = tmp_path / "receipt.json"
+
+    code = backfill.main(
+        [
+            "--previous-manifest",
+            str(previous),
+            "--current-manifest",
+            str(current),
+            "--forcing-root",
+            str(root),
+            "--producer",
+            "/usr/bin/env true",
+            "--execute",
+            "--output",
+            str(receipt_path),
+        ]
+    )
+    capsys.readouterr()
+
+    assert code == 1
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status_counts"] == {"errored": 1, "verified": 1}
+    statuses = {item["cycle"]: item["status"] for item in receipt["work_items"]}
+    assert statuses == {"2026082212": "errored", "2026082300": "verified"}
+    errored = next(item for item in receipt["work_items"] if item["status"] == "errored")
+    assert "member unreadable" in errored["detail"]["error"]

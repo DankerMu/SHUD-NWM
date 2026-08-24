@@ -2,7 +2,7 @@
 
 ## Evidence Floor
 
-- `uv run pytest -q tests/test_node22_backfill_forcing_for_model_ids.py tests/test_node22_manual_retry_failed_runs.py`
+- `uv run pytest -q tests/test_node22_backfill_forcing_for_model_ids.py tests/test_node22_manual_retry_failed_runs.py tests/test_select_ci_tests.py`
 - `uv run ruff check .`
 - `openspec validate backfill-per-model-forcing-after-identity-change --strict --no-interactive`
 - node-22 live: backfill receipt with `status_counts` all `verified` and
@@ -26,6 +26,32 @@ operator decision; that is not a gate on this change.
       after identity normalisation, manifests excluded.
 - [x] 1.6 `--jobs` for bounded concurrency (each item writes its own directory).
 
+- [x] 1.7 An existing `target_dir` that does NOT verify is discovered and
+      reported (`existing_target_unverified`, non-zero exit), never silently
+      skipped; replacing it requires the opt-in `--replace-unverified-target`.
+      (Producer writes are atomic per FILE, so a killed producer leaves a
+      partial directory; gating discovery on `is_dir()` made it both invisible
+      and unreachable. Round-2 review finding.)
+- [x] 1.8 Total under-coverage fails closed: refuse when `--forcing-root` is not
+      a directory or when not one renamed model's source directory exists,
+      naming the probed paths; record `coverage` (probed / found /
+      previous-model-dirs) in the receipt so partial under-coverage is legible.
+      (`renamed_model_count: N, work_item_count: 0` is also the steady state of
+      a fully-covered rerun, so it cannot discriminate a wrong root.)
+- [x] 1.9 An artifact that fails verification, and the debris of a producer that
+      exited non-zero, are moved out of the live `<model_id>` path into
+      `_backfill_quarantine/quarantined-…`; the receipt records
+      `detail.quarantine_path`. Runbook hop 5 documents the branch.
+- [x] 1.10 No per-item failure discards the receipt: `run_item` records an
+      unexpected exception as `errored` against its own item, `verify_item`
+      treats an unreadable member as a mismatch, and the receipt build plus
+      `--output` write sit outside the protected item loop (serial and
+      `--jobs` paths alike).
+- [x] 1.11 CI test selection: `tests/test_node22_manual_retry_failed_runs.py`
+      joins `FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS` at the rule site — the
+      module it imports genuinely should run it, so a rule rather than an
+      `INTENTIONAL_RULE_GAP_EXCLUSIONS` entry.
+
 ## 2. Manual retry
 
 - [x] 2.1 Preview the row the marker would act on, distinguishing the per-run
@@ -48,6 +74,7 @@ operator decision; that is not a gate on this change.
 ## 4. Local verification
 
 - [x] 4.1 `uv run pytest -q tests/test_node22_backfill_forcing_for_model_ids.py tests/test_node22_manual_retry_failed_runs.py`
+- [x] 4.4 `uv run pytest -q tests/test_select_ci_tests.py` (the rule-gap gate)
 - [x] 4.2 `uv run ruff check .`
 - [x] 4.3 `openspec validate backfill-per-model-forcing-after-identity-change --strict --no-interactive`
 
