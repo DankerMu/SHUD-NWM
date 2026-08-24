@@ -492,6 +492,23 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+#: Exactly the master statuses the cohort task projection can DERIVE from task
+#: outcomes.  A persisted status inside this set is projection-owned and keeps
+#: being overwritten by the current pass; a persisted status outside it cannot
+#: be derived here, so the projection preserves it (status stickiness).  Under
+#: the routed domain that means ``permanently_failed`` and ``cancelled``.
+#: ``submission_failed`` and ``reservation_lost`` never reach this projection:
+#: their submit-outcome/inventory gates reject them before the accounting
+#: tuple could be rewritten as ``matched_bound``, so they are deliberately NOT
+#: listed here -- the derived-domain predicate must not be widened to accept
+#: an accounting tuple this function cannot legally write.
+PROJECTION_DERIVED_MASTER_STATUSES = frozenset(
+    {
+        "succeeded",
+        "partially_failed",
+        "failed",
+    }
+)
 #: The persisted master statuses a permanent-failure mark may transition FROM
 #: (#1312).  A live row (``reserved``/``running``/...) is a stale caller, never
 #: an error: the retry decline that owns the mark runs off its own snapshot and
@@ -2075,29 +2092,29 @@ class FileOrchestrationJournalRepository:
             existing = self._hydro_run_for(run_id)
             if existing is None:
                 raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
+            # The base row is the exact durable read (``_hydro_run_for``), so a
+            # non-clearing update that omits the error family keeps the durable
+            # value; only the clearing set writes the provided values, including
+            # ``None``.  Caller-supplied placeholders would be stripped by the
+            # write boundary, so they are resolved against the durable base the
+            # same way as the pipeline-job legs: a withheld value is not an
+            # overwrite instruction.
             row = dict(existing)
-            # #1589 (design D3): deliberately NOT resolved here, and the reason is
-            # not "benign".  ``_hydro_run_for`` returns ``_public_scheduler_row``,
-            # so ``existing`` is already the PUBLIC projection: a URI-valued
-            # ``error_message`` arrives as ``[object-uri]`` and the write boundary
-            # strips it, so even a bare ``update_hydro_run_status(run_id,
-            # "failed")`` that supplies no error at all drops the durable value.
-            # That is a read-path defect, not a caller-evidence one -- resolving
-            # the two parameters below would be a pure no-op against it, so this
-            # leg is deliberately left alone.  Fixing it means giving this leg a
-            # durable read, which is out of #1589's scope.
-            safe_error_message = _durable_error_message(error_message)
+            safe_error_message = _durable_error_message(
+                _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+            )
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
             for key, value in (("slurm_job_id", slurm_job_id),):
                 if value is not None:
                     row[key] = value
+            resolved_error_code = _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
             if status in {"pending", "created", "succeeded", "complete", "parsed", "published"}:
-                row["error_code"] = error_code
+                row["error_code"] = resolved_error_code
                 row["error_message"] = safe_error_message
             else:
-                if error_code is not None:
-                    row["error_code"] = error_code
-                if error_message is not None:
+                if resolved_error_code is not None:
+                    row["error_code"] = resolved_error_code
+                if safe_error_message is not None:
                     row["error_message"] = safe_error_message
             model_id = _required_safe_identity(row, "model_id")
             self._append_validated_record_unlocked(
@@ -4439,35 +4456,46 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
-            # Terminal stickiness (#1312, widened by #1589): a master already
-            # marked ``permanently_failed`` keeps that status AND the
-            # attribution family (``error_code``/``error_message``) it already
-            # carries, while the observational family (``finished_at`` /
-            # ``exit_code`` / ``log_uri``) still refreshes.  Without this, every
-            # later pass rewrote the derived
-            # ``{succeeded, partially_failed, failed}`` projection over the mark
-            # and oscillated; #1589 is the same disease one level down -- a row
+            # Terminal stickiness (#1312, widened by #1589/#1629): a master
+            # whose persisted status the projection cannot derive keeps that
+            # status, because the projection owns exactly
+            # ``PROJECTION_DERIVED_MASTER_STATUSES`` and must not overwrite a
+            # terminal truth it has no authority to produce.  Under the routed
+            # domain that means ``permanently_failed`` and ``cancelled``.  The
+            # attribution family sticks ONLY for ``permanently_failed``: a row
             # saying "permanently failed" while its error code is recomputed by
-            # the current pass is self-contradictory attribution.  Refreshing
-            # observational evidence under the mark is the intended behaviour
-            # and contradicts nothing, so it is deliberately NOT frozen (the
-            # defer path's whole-row short circuit is the rejected alternative).
+            # every pass is self-contradictory.  A ``cancelled`` row gets status
+            # stickiness only -- it still takes the current task-derived error
+            # family and refreshes ``candidate_projections`` plus the
+            # observational family (``finished_at`` / ``exit_code`` /
+            # ``log_uri``), because status preservation must not become a
+            # whole-row freeze.  Refreshing observational evidence under the
+            # mark is intended behaviour and contradicts nothing, so it is
+            # deliberately NOT frozen (the defer path's whole-row short circuit
+            # is the rejected alternative).
             #
-            # The trigger stays a literal ``permanently_failed`` comparison
-            # rather than ``in TERMINAL_PIPELINE_STATUSES``.  The criterion is a
-            # conjunction: the status must be externally applied -- not
-            # derivable by this projection, which yields only
-            # ``succeeded``/``partially_failed``/``failed`` -- AND already
-            # protected from status overwrite today.  ``permanently_failed`` is
-            # currently the only status meeting both; widening to the derived
-            # values would pin the first pass's conclusion forever, i.e. disable
-            # the projection.  ``cancelled`` meets the first condition but not
-            # the second (it has no status stickiness at all today); that is a
-            # pre-existing gap tracked separately, not something to fix here.
-            master_is_permanently_failed = str(existing.get("status") or "") == "permanently_failed"
-            sticky_master_status = (
-                "permanently_failed" if master_is_permanently_failed else projected_master_status
+            # The trigger is "terminal status outside the derived domain":
+            # widening to the derived values would pin the first pass's
+            # conclusion forever, i.e. disable the projection, and widening to
+            # every non-derived status (including live ``reserved``/``submitted``
+            # rows) would freeze a bound master before the projection could ever
+            # derive its terminal outcome.  ``submission_failed`` and
+            # ``reservation_lost`` are terminal yet still rejected before this
+            # projection by their submit-outcome/inventory gates, so they are
+            # never rewritten through a ``matched_bound`` accounting tuple; the
+            # terminal-membership predicate never sees them as ``existing``.
+            persisted_status = str(existing.get("status") or "")
+            # The derived domain is the *only* set this projection can overwrite:
+            # sticky means "the projection cannot derive this status", and the
+            # projection owns no non-terminal status (a ``reserved``/``submitted``
+            # bound master still derives its terminal outcome here).  Requiring
+            # terminal membership keeps the predicate from pinning a live row.
+            master_is_sticky = (
+                persisted_status in TERMINAL_PIPELINE_STATUSES
+                and persisted_status not in PROJECTION_DERIVED_MASTER_STATUSES
             )
+            master_is_permanently_failed = persisted_status == "permanently_failed"
+            sticky_master_status = persisted_status if master_is_sticky else projected_master_status
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
@@ -7680,6 +7708,18 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def _hydro_run_for(self, run_id: str) -> dict[str, Any] | None:
+        """Return the exact durable hydro row, never a public projection.
+
+        Every production caller of this private lookup uses it as the base of
+        a durable merge or read, so rendering ``_public_scheduler_row`` here
+        would hand placeholders back into the write path and erase real
+        attribution on a non-clearing update.  Public redaction belongs only
+        at the explicit return/query boundaries (``update_hydro_run_status``,
+        ``create_hydro_run_from_basin``, ``append_historical_hydro_run``), which
+        render through ``_public_scheduler_row`` themselves.  The returned row
+        is a copy; callers that mutate it must write it back under the same
+        cycle lock this read is performed under.
+        """
         safe_run_id = _safe_identity_text(str(run_id), field="run_id")
         match = _FORECAST_RUN_ID_RE.fullmatch(safe_run_id)
         model_id = _model_id_from_file_run_id(safe_run_id)
@@ -7692,7 +7732,7 @@ class FileOrchestrationJournalRepository:
         cycle_time = parse_cycle_time(run_cycle)
         rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         if rows.hydro_run is not None and str(rows.hydro_run.get("run_id") or "") == safe_run_id:
-            return _public_scheduler_row(rows.hydro_run)
+            return dict(rows.hydro_run)
         return None
 
     def _pipeline_job_row(
@@ -8988,17 +9028,35 @@ class FileJournalRetryService:
         current: Mapping[str, Any],
         source: Mapping[str, Any],
     ) -> SimpleNamespace:
-        """Route one master row through its typed permanent-failure transition."""
+        """Route one master row through its typed permanent-failure transition.
+
+        ``current`` is the freshly read PUBLIC row and ``source`` is the
+        caller's public snapshot, so both messages are display projections:
+        neither can carry authoritative text a durable value lacks.  A non-empty
+        source message that DIFFERS from the current public message is
+        caller-provided new text and SHALL be forwarded (the typed transition
+        sanitizes it durably).  A source message identical to the current public
+        message is round-tripped display evidence -- the same projection of the
+        same durable value -- so passing it back would feed ``[local-path]`` /
+        ``[object-uri]`` placeholders into durable state.  ``None`` is passed
+        instead and the typed transition preserves the durable value.
+        """
 
         last_error = source.get("error_code")
         if last_error in (None, ""):
             last_error = current.get("error_code")
         retry_count = int(source.get("retry_count") or current.get("retry_count") or 0)
         auto_retry_skipped = auto_retry_skipped_details(last_error)
+        source_message = source.get("error_message")
+        forwarded_message = (
+            source_message
+            if source_message not in (None, "") and source_message != current.get("error_message")
+            else None
+        )
         result = self.repository.mark_pipeline_job_permanently_failed(
             str(current["job_id"]),
             error_code=str(last_error) if last_error not in (None, "") else None,
-            error_message=source.get("error_message") or current.get("error_message"),
+            error_message=forwarded_message,
             finished_at=_utcnow(),
             event_details={
                 "final_retry_count": retry_count,
@@ -10957,15 +11015,15 @@ def _resolved_caller_evidence(value: Any, *, durable: Any = None) -> Any:
     * anything else -> unchanged (non-string evidence included).
 
     The "every write leg" above is the RULE, not a claim that every leg obeys it
-    today.  Four legs deliberately still write a caller error family unresolved:
+    today.  Two legs deliberately still write a caller error family unresolved:
     ``update_forecast_cycle_status`` builds a fresh row and never reads the
     persisted one, so it has nothing to resolve against;
     ``reject_pipeline_job_submit_attempt`` writes the rejection's own required
     error as the attempt's authoritative outcome and its idempotent branch never
-    compares the error fields, so neither displacement nor append growth bites;
-    ``update_hydro_run_status`` reads the PUBLIC projection as its base row, so
-    resolving its parameters would not save the value that read already lost;
-    ``mark_pipeline_job_permanently_failed`` is a real open gap tracked as #1630.
+    compares the error fields, so neither displacement nor append growth bites.
+    The hydro-run and retry-permanent-failure legs resolve against the durable
+    base/current row (their placeholders are withheld values), so they are NOT
+    exempt.
     """
 
     stripped = _strip_redaction_placeholders(value)
