@@ -226,3 +226,30 @@ def test_verify_rejects_a_missing_target(tmp_path: Path) -> None:
     result = verify_item(_item(root))
 
     assert result["verified"] is False
+
+
+def test_discover_work_finds_an_upper_cased_source_under_its_lower_cased_path(tmp_path: Path) -> None:
+    """Canonical ``IFS`` stores its forcing under ``forcing/ifs/``.
+
+    Scanning by the canonical id would find nothing and silently under-cover
+    half the work -- exactly the shape this backfill exists to catch.
+    """
+
+    previous = _write(
+        tmp_path / "prev.json",
+        _manifest([_model("dg_" + "a" * 32, package_id="dg-ifs-aaaaaaaaaaaa", source_id="IFS")]),
+    )
+    current = _write(
+        tmp_path / "cur.json",
+        _manifest([_model("dg_" + "b" * 32, package_id="dg-ifs-bbbbbbbbbbbb", source_id="IFS")]),
+    )
+    renames, _ = resolve_renames(previous, current)
+    root = tmp_path / "forcing"
+    directory = root / "ifs" / "2026082300" / "basins_heihe_vbasins" / ("dg_" + "a" * 32)
+    directory.mkdir(parents=True)
+
+    items = discover_work(renames, root, ["2026082300"])
+
+    assert [(item.source_id, item.cycle, item.model_id) for item in items] == [
+        ("IFS", "2026082300", "dg_" + "b" * 32)
+    ]

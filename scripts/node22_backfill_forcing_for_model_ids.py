@@ -33,6 +33,7 @@ import json
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -42,6 +43,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from packages.common.source_identity import normalize_source_id  # noqa: E402
+
+
+def _object_source_segment(source_id: str) -> str:
+    """The forcing path's source segment.
+
+    Mirrors ``workers.forcing_producer.producer._object_source_segment``: the
+    canonical id is lower-cased for the object key, so canonical ``IFS`` lives
+    under ``forcing/ifs/``.  Keying the scan on the canonical id instead would
+    silently find nothing for every upper-cased source.
+    """
+
+    return normalize_source_id(source_id).lower()
 
 #: ``dg-<source>-<hex>`` model-input package ids, as they appear standalone and
 #: as the ``…::cell:<n>`` station-id prefix.  Normalising these away is what
@@ -248,7 +261,7 @@ def discover_work(renames: Sequence[Rename], forcing_root: Path, cycles: Sequenc
 
     items: list[WorkItem] = []
     for rename in renames:
-        source_dir = forcing_root / rename.current.source_id
+        source_dir = forcing_root / _object_source_segment(rename.current.source_id)
         if not source_dir.is_dir():
             continue
         candidates = sorted(cycles) if cycles else sorted(p.name for p in source_dir.iterdir() if p.is_dir())
@@ -367,6 +380,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Producer CLI invocation prefix.",
     )
     parser.add_argument("--execute", action="store_true", help="Actually run the producer. Default is a dry run.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Run this many producer invocations at once. Each writes its own model directory, so they do not "
+        "contend; keep it well under the host's core count.",
+    )
     parser.add_argument("--output", type=Path, default=None, help="Write the receipt JSON here.")
     return parser
 
@@ -382,8 +402,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     producer_argv = args.producer.split()
-    for item in items:
-        run_item(item, producer_argv, dry_run=not args.execute)
+    if args.jobs < 1:
+        json.dump(
+            BackfillError("BACKFILL_JOBS_INVALID", "--jobs must be at least 1.", {"jobs": args.jobs}).as_dict(),
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
+        sys.stdout.write("\n")
+        return 1
+    if args.jobs == 1 or not args.execute:
+        for item in items:
+            run_item(item, producer_argv, dry_run=not args.execute)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            list(pool.map(lambda item: run_item(item, producer_argv, dry_run=False), items))
 
     statuses: dict[str, int] = {}
     for item in items:

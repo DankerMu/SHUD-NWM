@@ -330,6 +330,10 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 测站真移动了（`station_bindings` 归一化后仍不等）时工具**拒绝回补**并把该行记进
 `rebound_models_skipped`：那是重新绑定，得走正常 provisioning，不是回补。
 默认 dry-run；不传 `--cycle` 会扫出**所有**历史 cycle，而历史预报不追溯——按需只补下一趟要跑的。
+`--jobs N` 并发跑（每个 item 写各自的 model 目录，互不争用；实战 `--jobs 5`，单个 model
+约 20 分钟，node-22 48 核，注意别顶满）。注意 forcing 路径的 source 段是
+`normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
+按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
 
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
