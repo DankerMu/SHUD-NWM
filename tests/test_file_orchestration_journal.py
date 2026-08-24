@@ -15672,6 +15672,130 @@ def test_recovery_cli_attests_a_wedged_row_and_is_idempotent(
     _, after = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
     assert after["wedged"][0]["operator_recovery_attested_at"] == payload["operator_recovery_attested_at"]
 
+def _pad_journal_cycles_with_unrelated_records(
+    journal_root: Path, *, cycles: tuple[datetime, ...], records_per_cycle: int
+) -> int:
+    """Grow retained history in OTHER cycles, the way production actually grew.
+
+    ``journal/`` is append-only, so the whole-tree replay's aggregate budget is
+    a function of history, not of the cycle under inspection (#1810).  Padding
+    with unrelated cycles reproduces that growth law in a fixture.
+    """
+
+    for cycle_time in cycles:
+        _write_jsonl(
+            journal_root / f"journal/gfs/{format_cycle_time(cycle_time)}.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=_active_job(cycle_time),
+                    sequence=sequence,
+                )
+                for sequence in range(1, records_per_cycle + 1)
+            ],
+        )
+    return len(cycles) * records_per_cycle
+
+
+def test_released_identity_blocked_listing_survives_a_whole_tree_budget(tmp_path: Path) -> None:
+    """#1810 task 1.1: discovery is bounded by ONE cycle, not by history.
+
+    The shipped query replayed the whole tree, so its aggregate
+    ``_RecordBudget`` counted every retained ``journal/`` line in every cycle.
+    On node-22 that is 71,213 records against a 100,000 cap that history had
+    already crossed, and the operator-facing FIND half returned
+    ``file_journal_record_limit_exceeded`` instead of the wedge.
+
+    The oracle shape is deliberate (design D7).  ``max_records=1`` would redden
+    the FIXED code too -- the cycle-scoped replay consumes the same budget per
+    call -- and could only be "fixed" by exempting the scoped path, which is an
+    oracle weakening.  The discriminating shape is N cycles x M records with
+    M < max_records < N*M: three cycles of four records each under a budget of
+    six.  The two ``query_pipeline_jobs_by_cycle`` probes below assert that
+    shape in-test, so the pin cannot silently degrade into a tautology if the
+    fixtures grow a record.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released_cycle_time = _dt("2026-07-20T00:00:00Z")
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+
+    # The released cycle costs 3 journal lines + 1 flat direct record = 4.
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=6)
+
+    # Oracle self-check, half 1: the whole tree is OVER the budget. An
+    # underivable cycle id falls open to the full scan (#1734 D4), which is the
+    # public way to reach it.
+    assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026072000") is None
+    blocked = budgeted.query_pipeline_jobs_by_cycle("unknown-source_2026072000")
+    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert blocked[0]["file_journal"]["field"] == "pipeline_job_records"
+
+    # Oracle self-check, half 2: one cycle is UNDER it.
+    narrowed = budgeted.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", released_cycle_time))
+    assert [job["job_id"] for job in narrowed] == [job_id]
+    # A released row carries its own ``error_code`` (SLURM_RESERVATION_LOST), so
+    # the blocked-read marker is ``file_journal``, not the presence of a code.
+    assert "file_journal" not in narrowed[0]
+
+    # The pin. Not "no exception escaped" -- a silently empty listing would
+    # satisfy that and would be the fail-open this change exists to avoid.
+    listed = budgeted.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    assert listed[0]["identity_blocked_streak"] == 3
+    assert listed[0]["reconciliation_decision"] == "identity_mismatch_released"
+
+
+def test_released_identity_blocked_listing_discovers_an_unparsable_job_id(tmp_path: Path) -> None:
+    """#1810 task 1.3: scope comes from row CONTENT when the name will not parse.
+
+    ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`` judges the job_id STRING;
+    ``accepted_submit_row_kind`` judges the row CONTENT.  They are not the same
+    predicate, so a name-only enumeration would be an assumption rather than a
+    proof.  Production holds no such row today (74 unparsable flat names, all
+    non-current-contract), which is precisely why this needs a synthetic pin.
+
+    The budget is kept tight on purpose: a name-only implementation would fall
+    open to the whole-tree scan for this candidate and trip the very budget the
+    change removes, so this test also discriminates against that shortcut.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    parsable_job_id = str(record["job_id"])
+    residue_job_id = "legacy-master.cycle_gfs_2026072000_forecast"
+    assert journal_module._cycle_scope_from_job_id(residue_job_id) is None
+
+    flat_directory = repository.root / "pipeline-jobs"
+    released_record = json.loads((flat_directory / f"{parsable_job_id}.json").read_text(encoding="utf-8"))
+    residue_record = dict(released_record)
+    residue_record["payload"] = {**released_record["payload"], "job_id": residue_job_id}
+    (flat_directory / f"{residue_job_id}.json").write_text(
+        json.dumps(residue_record, sort_keys=True), encoding="utf-8"
+    )
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+
+    # An unparsable flat name is admitted to EVERY cycle's flat leg (the
+    # filename filter falls open), so the released cycle now costs 5.
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=6)
+    blocked = budgeted.query_pipeline_jobs_by_cycle("unknown-source_2026072000")
+    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+
+    listed = budgeted.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == sorted([parsable_job_id, residue_job_id])
+
 
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])
 def test_recovery_cli_refusals_name_the_failing_precondition(
