@@ -1827,3 +1827,23 @@ decisive: the raw 72/295 split mixes treatment, no-treatment, targeted rechecks,
 and workflow-role lenses. The cumulative direction still rules out an autonomous
 cut, while any future reversal still requires the recorded schema/round-role
 repairs plus maintainer review. No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-24, issue #1809 / PR #1824)
+
+After appending PR #1824's validated accountability line, `loop_log_audit`
+returns DECIDABLE at **124 multi-round merged PRs, later-round catches core=72 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated** later-round catches. Recorded decision: **keep rotation**,
+unchanged.
+
+This line does not test rotation. Round 1's initial six-lens review found the one
+net catch: a helper-only selector route omitted five assertion-bearing ultimate
+consumers behind support-to-support and function-local imports. Round 2 used the
+pinned integration, test-evidence, and invariant-state fix-regression core; it was
+clean, as was the independent final gap sweep. With no later-round catch, this PR
+adds no attribution evidence for either arm.
+
+The cumulative 72/295 direction still supports keeping rotation, while the
+standing attribution caveats remain decisive against treating one no-catch,
+no-rotation PR as a cut signal. No reviewer-set or rotation-policy change
+follows.
