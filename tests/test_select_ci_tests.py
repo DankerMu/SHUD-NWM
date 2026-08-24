@@ -4636,6 +4636,14 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
     # support module itself and never tests/test_production_scheduler.py — its
     # only consumption is a function-local import, which buys a fixture edit no
     # whole-1870-test lane and stays with the rules that own that suite.
+    #
+    # Round 1 closure fix: the five ultimate consumers reached through the
+    # demote helper (tests/orchestrator_demote_reserved_job_helpers.py imports
+    # `_file_cohort_repository` from the gateway helper at file level; the four
+    # split-demote suites import the demote helper at file level, and the public
+    # operator-recovery chain suite at function scope, so the derived AST scan
+    # sees none of them). They join the 22 partitions in the gateway-helper-only
+    # exact selection.
     selected_helpers = set(
         select_tests(["tests/gateway_reconcile_helpers.py"], repo_root=Path("."))
     )
@@ -4643,6 +4651,12 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         partition
         for partition in GATEWAY_RECONCILE_PARTITIONS
         if partition != "tests/test_gateway_reconcile_store_reset.py"
+    } | {
+        "tests/test_orchestrator_demote_cli_security.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+        "tests/test_orchestrator_demote_projection_faults.py",
+        "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        "tests/test_orchestration_chain.py",
     } | {SELECTOR_META_GUARD_TEST}
 
     selected_writer = set(

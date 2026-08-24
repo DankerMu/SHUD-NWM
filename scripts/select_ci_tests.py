@@ -436,11 +436,19 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         # #1809: the shared store/cohort/identity fixtures extracted from the
         # gateway-reconcile monolith. The 22 file-level importing partitions are
-        # named exactly (derived-set members, all sub-second to import; the
-        # demote helpers and the two function-local importers
-        # test_orchestrator_demote_core_cas.py / test_production_scheduler.py
-        # stay with the rules that own their own suites). store_reset is not a
-        # consumer: its shells build duck-typed stores and import nothing here.
+        # named exactly (derived-set members, all sub-second to import);
+        # store_reset is not a consumer — its shells build duck-typed stores and
+        # import nothing here. The five demote/chain suites below are the known
+        # ultimate consumers reached through the demote helper
+        # (tests/orchestrator_demote_reserved_job_helpers.py imports
+        # `_file_cohort_repository` from this module at file level; the four
+        # split-demote suites import that helper at file level and the public
+        # operator-recovery chain suite at function scope) — a
+        # support-to-support edge the derived AST scan cannot see, so they are
+        # listed explicitly here. tests/test_production_scheduler.py stays
+        # excluded on the deliberate 1870-test runtime-budget boundary: its only
+        # consumption is a function-local import that would buy a fixture edit
+        # the whole suite lane.
         "tests/gateway_reconcile_helpers.py",
         (
             "tests/test_gateway_reconcile_comment_accounting.py",
@@ -465,6 +473,12 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_quiescence.py",
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_gateway_reconcile_writer_rollforward.py",
+            # The five ultimate consumers via the demote helper (see above).
+            "tests/test_orchestrator_demote_cli_security.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+            "tests/test_orchestrator_demote_projection_faults.py",
+            "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+            "tests/test_orchestration_chain.py",
         ),
     ),
     PathTestRule(
