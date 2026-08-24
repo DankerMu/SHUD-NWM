@@ -201,6 +201,37 @@ _journal_read_lane: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+_flat_direct_job_listing_memo: contextvars.ContextVar[dict[str, list[Path]] | None] = contextvars.ContextVar(
+    "nhms_flat_direct_job_listing_memo",
+    default=None,
+)
+
+
+@contextmanager
+def _flat_direct_job_listing_memo_scope() -> Iterable[None]:
+    """Memoize the flat ``pipeline-jobs/`` LISTING for one read-only call.
+
+    Scope is deliberately narrow (#1810 design D14). The listing is
+    point-in-time on a live journal, which is only safe because the mutating
+    paths re-read under ``_locked_cycle_write`` and compare there; a memo that
+    outlived one query, or that any write path entered, would turn "at most a
+    refused invocation" into a bad write. So this is a ``ContextVar`` bound to
+    one call frame, never an instance cache, and it is entered from exactly one
+    read-only caller.
+
+    Only the raw, unfiltered directory listing is memoized — the per-cycle
+    filename filter still runs per call, so
+    ``_flat_direct_pipeline_job_paths_for_cycle`` stays the ONE definition of
+    that filter.
+    """
+
+    token = _flat_direct_job_listing_memo.set({})
+    try:
+        yield
+    finally:
+        _flat_direct_job_listing_memo.reset(token)
+
+
 @contextmanager
 def journal_read_lane(lane: str) -> Iterable[None]:
     """Tag every journal read made in this context with its reader lane.
@@ -1554,10 +1585,11 @@ class FileOrchestrationJournalRepository:
            ``_write_pipeline_job_direct_unlocked`` sends a current-contract
            *candidate* to ``by-cycle/`` and everything else, cohort masters
            included, to the flat file, and no pruning path unlinks it.
-        2. Confirm each candidate through the cycle-scoped replay, which is
-           what the returned row is built from.  The flat record is not treated
-           as authoritative: a stale one can only produce a candidate that
-           confirmation drops.
+        2. Confirm through the cycle-scoped replay, which is what the returned
+           row is built from.  The flat record is not treated as authoritative:
+           a stale one can only produce a candidate that confirmation drops.
+           Candidates are GROUPED by cycle first, so the cost is one replay per
+           distinct cycle rather than one per candidate (#1810 design D14).
 
         The reconcile inventory is NOT usable as the enumeration surface: it
         prunes its anchor the moment a row stops needing restart reconcile,
@@ -1580,14 +1612,24 @@ class FileOrchestrationJournalRepository:
 
         confirmed: dict[str, dict[str, Any]] = {}
         unscoped: set[str] = set()
+        scoped: dict[tuple[str, datetime], set[str]] = {}
         for job_id, candidate in candidates.items():
             cycle_scope = _released_candidate_cycle_scope(candidate)
             if cycle_scope is None:
                 unscoped.add(job_id)
                 continue
-            for job in self._iter_pipeline_job_records_scoped(cycle_scope):
-                if str(job.get("job_id") or "") == job_id and _released_identity_blocked_row(job):
-                    confirmed[job_id] = job
+            scoped.setdefault(cycle_scope, set()).add(job_id)
+        # Confirm ONCE PER CYCLE, not once per candidate, and list the flat
+        # directory once for the whole call (#1810 design D14). Candidate count
+        # is unbounded by construction -- the admitted shape is what a mass
+        # release puts many rows into at once -- so a per-candidate replay of a
+        # 4,557-file listing is D9's rejected growth law, re-entered.
+        with _flat_direct_job_listing_memo_scope():
+            for cycle_scope, scope_job_ids in scoped.items():
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope):
+                    job_id = str(job.get("job_id") or "")
+                    if job_id in scope_job_ids and _released_identity_blocked_row(job):
+                        confirmed[job_id] = job
         if unscoped:
             # #1734 D4, kept verbatim: an underivable scope costs the old
             # expensive read, never a false "not found".  ONE pass serves every
@@ -5808,6 +5850,34 @@ class FileOrchestrationJournalRepository:
             if payload is not None:
                 yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
 
+    def _flat_direct_pipeline_job_paths(self) -> list[Path]:
+        """The whole flat ``pipeline-jobs/`` listing, memoized per read call.
+
+        Unmemoized by default: a listing that outlived its call would make a
+        live journal look frozen. ``_flat_direct_job_listing_memo_scope``
+        activates it for the duration of ONE read-only query, which is what
+        keeps the confirm half of ``query_released_identity_blocked_jobs`` from
+        re-listing 4,557 files once per candidate (#1810 design D14).
+        """
+
+        memo = _flat_direct_job_listing_memo.get()
+        cache_key = str(self.root)
+        if memo is not None:
+            memoized = memo.get(cache_key)
+            if memoized is not None:
+                return list(memoized)
+        paths = sorted(
+            _iter_regular_json_files(
+                self.root / "pipeline-jobs",
+                root=self.root,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        )
+        if memo is not None:
+            memo[cache_key] = list(paths)
+        return paths
+
     def _flat_direct_pipeline_job_paths_for_cycle(
         self,
         *,
@@ -5843,14 +5913,7 @@ class FileOrchestrationJournalRepository:
         except FileOrchestrationJournalError:
             canonical_source_id = None
         cycle_segment = format_cycle_time(cycle_time)
-        paths = sorted(
-            _iter_regular_json_files(
-                self.root / "pipeline-jobs",
-                root=self.root,
-                max_files=self.max_files,
-                max_depth=self.max_depth,
-            )
-        )
+        paths = self._flat_direct_pipeline_job_paths()
         if canonical_source_id is None:
             return paths
         selected: list[Path] = []

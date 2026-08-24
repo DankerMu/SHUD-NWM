@@ -15869,6 +15869,133 @@ def test_released_identity_blocked_listing_never_replays_the_whole_tree(tmp_path
     assert "query_released_identity_blocked_jobs|cycle_replay" in tags, sorted(tags)
     assert not [tag for tag in tags if tag.endswith("|full_tree_replay")], sorted(tags)
 
+def _released_identity_blocked_wedge(
+    tmp_path: Path, *, cycle_times: tuple[datetime, ...], per_cycle: int
+) -> tuple[Any, list[str]]:
+    """A mass-release wedge: ``per_cycle`` released masters in each cycle.
+
+    Built through the production transitions (reserve -> identity-blocked
+    release) in ONE repository, so every row is a real member of the shape
+    ``_released_identity_blocked_row`` admits.
+    """
+
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        forecast_cohort_digest,
+    )
+    from services.orchestrator.chain_config import scenario_for_source
+
+    canonical_source_id = normalize_source_id("gfs")
+    scenario_id = scenario_for_source(canonical_source_id)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    job_ids: list[str] = []
+    for cycle_time in cycle_times:
+        stamp = format_cycle_time(cycle_time)
+        cycle_iso = cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        for cohort in range(per_cycle):
+            run_id = f"cycle_{canonical_source_id.lower()}_{stamp}_c{cohort}"
+            job_id = f"job_{run_id}_forecast"
+            record: dict[str, Any] = {
+                "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                "job_id": job_id,
+                "run_id": run_id,
+                "source_id": canonical_source_id,
+                "cycle_id": cycle_id_for(canonical_source_id, cycle_time),
+                "job_type": "run_shud_forecast_array",
+                "model_id": None,
+                "stage": "forecast",
+                "idempotency_key": f"{run_id}:forecast",
+                "slurm_comment": f"nhms_idem:{run_id}:forecast",
+                "submit_outcome": None,
+                "restart_stage": "forecast",
+                "cohort_members": [
+                    {
+                        "array_task_id": index,
+                        "candidate_id": f"{canonical_source_id}:{cycle_iso}:model_c{cohort}_{index}:{scenario_id}",
+                        "run_id": f"fcst_{canonical_source_id.lower()}_{stamp}_model_c{cohort}_{index}",
+                        "model_id": f"model_c{cohort}_{index}",
+                        "basin_id": f"basin_c{cohort}_{index}",
+                        "scenario_id": scenario_id,
+                        "restart_stage": "forecast",
+                    }
+                    for index in range(2)
+                ],
+                "submission_attempt": 1,
+                "submission_attempt_started_at": cycle_time,
+                "expected_slurm_user": None,
+                "expected_slurm_account": None,
+                "slurm_ownership_required": False,
+                "created_at": cycle_time,
+                "updated_at": cycle_time,
+            }
+            record["cohort_digest"] = forecast_cohort_digest(record)
+            assert repository.reserve_pipeline_job(dict(record)) is not None
+            reserved = repository.get_pipeline_job(job_id)
+            assert (
+                repository.release_identity_blocked_reservation(
+                    job_id,
+                    accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+                    expected_submission_attempt=int(reserved["submission_attempt"]),
+                    expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+                    identity_blocked_streak=3,
+                )
+                == 1
+            )
+            job_ids.append(job_id)
+    return repository, job_ids
+
+
+def test_released_identity_blocked_confirm_does_not_relist_the_flat_directory_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 3.1: the confirm half must not be O(candidates x flat dir).
+
+    The scoped confirm reaches ``_flat_direct_pipeline_job_paths_for_cycle``,
+    which lists the ENTIRE unpartitioned ``pipeline-jobs/`` directory (4,557
+    files on node-22) and only then filters by file name.  Called once per
+    candidate, that is the same O(N x flat-directory) growth law design D9
+    measured at ">40 minutes for 230 cycles" and rejected.  N is not bounded by
+    anything: the admitted shape (reservation_lost + identity_mismatch_released
+    + no slurm id) is exactly what a mass release or a SLURM outage produces in
+    bulk, which is the incident this operator command exists to serve.
+
+    The oracle is a direct COUNT of flat-directory listings, not wall time, so
+    it is independent of fixture size: after the fix the directory is listed
+    exactly twice per query -- once by the candidate scan
+    (``_iter_direct_pipeline_job_records``, which does not route through the
+    per-cycle helper) and once when the per-query memo fills.  A constant, not
+    ``<= M`` or ``<= K``, is what proves the growth law is gone.
+    """
+
+    cycle_times = (_dt("2026-07-20T00:00:00Z"), _dt("2026-07-20T12:00:00Z"))
+    per_cycle = 3
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+    flat_directory = repository.root / "pipeline-jobs"
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = journal_module._iter_regular_json_files
+    listings: list[Path] = []
+
+    def counting_iter_regular_json_files(directory: Path, **kwargs: Any) -> Any:
+        if directory == flat_directory:
+            listings.append(directory)
+        return original(directory, **kwargs)
+
+    monkeypatch.setattr(journal_module, "_iter_regular_json_files", counting_iter_regular_json_files)
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned. A memo keyed by
+    # the wrong thing would shrink this to one cycle's rows.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle
+    # Half 2: the growth law. Two listings, independent of M and of K.
+    assert len(listings) == 2, len(listings)
+
 
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])
 def test_recovery_cli_refusals_name_the_failing_precondition(

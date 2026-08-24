@@ -69,6 +69,21 @@
       `_write_pipeline_job_unlocked` (`:3425`), which writes the flat file
       unconditionally (`:7382`) — the releasing call is the one that rewrites it.
 
+## 3b. Confirm-half growth law (cross-review round 2 — design D14)
+
+- [x] 3b.1 Red-first pin: with M candidates over K distinct `(source_id, cycle)`
+      scopes, the number of whole-flat-directory listings SHALL NOT grow with M.
+      Counted directly by instrumenting `_iter_regular_json_files` on the
+      `pipeline-jobs/` directory; red at base with 5 listings for M=2 and 9 for
+      M=6, green at a constant 2 (candidate scan + one memo fill).
+- [x] 3b.2 Memoize the raw flat listing for the duration of ONE read-only query
+      only (`ContextVar`, never an instance cache, never on a mutating path), so
+      `_flat_direct_pipeline_job_paths_for_cycle` stays the ONE definition of the
+      filename filter.
+- [x] 3b.3 Group candidates by `cycle_scope` so each distinct cycle is confirmed
+      once. Fail-closed budget behaviour and the single whole-tree fall-open pass
+      are unchanged.
+
 ## 4. Local verification
 
 - [x] 4.1 `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_production_scheduler.py`

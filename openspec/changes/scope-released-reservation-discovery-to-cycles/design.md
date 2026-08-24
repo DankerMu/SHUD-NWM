@@ -260,3 +260,66 @@ inverse of the write and satisfies the "identifier does not parse" scenario
 vacuously rather than by a second, weaker predicate. The `None` fall-open branch
 is retained per the spec requirement and pinned by injecting the precondition at
 that one seam, with the unreachability asserted in the test rather than assumed.
+
+## D14. The confirm half re-entered D9's growth law — memo + group by cycle
+
+Cross-review found the fix incomplete on its own axis. D10's shape enumerates
+the flat directory ONCE as a candidate filter, and that is what the code does —
+but the confirm step then called `_iter_pipeline_job_records_scoped` **once per
+candidate**, and that path reaches `_flat_direct_pipeline_job_paths_for_cycle`,
+which lists the WHOLE unpartitioned `pipeline-jobs/` directory (4,557 files on
+node-22) and only then filters by file name.
+
+The existing `_direct_jobs_cycle_cache` does not rescue this, and the reason is
+not that it goes unreached — the measured counts say it IS reached. Its
+VALIDATION fingerprint (`_cycle_rows_source_fingerprint`) builds
+`direct_signatures` by calling `_flat_direct_pipeline_job_paths_for_cycle`
+itself, so every cache *hit* still pays a whole-directory listing. Measured on
+the fixture: M=2 over K=2 costs 5 listings, M=6 over K=2 costs 9 — i.e. 1
+(candidate scan) + 2 per cache-miss candidate (fingerprint + reader) + 1 per
+cache-hit candidate (fingerprint alone). Linear in the candidate count either
+way, each listing over the whole flat directory. That is structurally the same `O(N x flat-directory)` shape D9
+measured at ">40 minutes for 230 cycles" and rejected as non-viable.
+
+N=4 today is a property of current DATA, not of the code. The admitted shape is
+`reservation_lost` + `identity_mismatch_released` + no slurm id, which is
+exactly what a mass SLURM outage or a mass release puts many rows into at
+once — the incident this operator command exists to serve. So the wedge is
+largest precisely when the command is needed.
+
+The fix is two independent bounds, because the two costs are independent:
+
+1. **Memoize the raw flat LISTING for the duration of one query**
+   (`_flat_direct_pipeline_job_paths`, activated by
+   `_flat_direct_job_listing_memo_scope`). Only the unfiltered listing is
+   memoized; the per-cycle filename filter still runs per call, so
+   `_flat_direct_pipeline_job_paths_for_cycle` remains the ONE definition of
+   that filter (its docstring's commitment, and D9's parity requirement).
+   Memoizing the FILTERED result would fork that definition's output by cache
+   key.
+2. **Group candidates by `cycle_scope` before confirming**, so the cycle replay
+   runs once per distinct cycle rather than once per candidate. This alone does
+   NOT bound the work — K distinct cycles is still unbounded — which is why it
+   is paired with (1) rather than offered instead of it. It matters because the
+   incident shape concentrates many candidates in ONE cycle, where the memo
+   fixes the listing but the journal leg would still be replayed M times.
+
+Together the query costs one flat listing plus one cycle replay per distinct
+cycle: flat-directory listings are constant, independent of both M and K.
+
+**Correctness fence (D6, unchanged).** The listing is deliberately
+point-in-time; that is safe only because the mutating path re-reads under
+`_locked_cycle_write` and compares there, so a stale listing costs at most a
+refused invocation. That property is preserved where the memo meets
+`_direct_jobs_cycle_cache`: only the path LIST is memoized, per-file
+`_stat_signature` calls stay live, and the next query recomputes the fingerprint
+from a fresh listing — so a mid-query add or removal produces a mismatch and a
+rebuild rather than a stale row surviving into a later call. The memo is
+therefore a `ContextVar` scoped to one call frame — never an instance cache, never entered from a write path, and entered
+from exactly one read-only caller. Nothing else is weakened: the fail-closed
+`_RecordBudget` still propagates (no `try`/`except` was added around the confirm
+loops), and the D4 fall-open still runs ONE whole-tree replay for the entire
+unscoped set rather than one per row.
+
+The oracle is a direct COUNT of flat-directory listings rather than wall time,
+so the pin is independent of fixture size and cannot rot into a timing flake.
