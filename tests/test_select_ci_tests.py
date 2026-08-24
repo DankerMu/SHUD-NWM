@@ -145,6 +145,8 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # The three contract suites are the original pin. The four additions are
     # #1455's narrow `workers/shud_runtime/runtime.py` rule: every one is a
     # non-gated top-level importer of runtime.py that no rule reached before.
+    # The write-site invariant joins because runtime.py lives under workers/**
+    # (#1656 supplemental routing).
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
     assert selected == [
@@ -153,6 +155,7 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
         "tests/test_runtime_ic_header.py",
         "tests/test_runtime_mode.py",
         "tests/test_shud_runtime.py",
+        INVARIANT_SUITE_PATH,
         "tests/test_warm_start.py",
         "tests/test_warm_start_chaining.py",
     ]
@@ -166,8 +169,11 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
     # (the stop rule makes `workers/forcing_producer/**` unreachable here, and
     # DIRECT_GRID_SURFACE_TESTS itself must not move — the openspec-change rule
     # below shares it). The redirect intent is unchanged: the whole
-    # tests/test_forcing_producer.py never comes back.
-    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS})
+    # tests/test_forcing_producer.py never comes back. The write-site invariant
+    # joins because direct_grid_contract.py lives under workers/** (#1656).
+    assert selected == sorted(
+        {*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH}
+    )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
     assert all(
         target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
@@ -197,9 +203,12 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
     )
 
     # Still bounded, just by a bigger constant: the compact e2e fixture plus the
-    # five #1455 importer suites (all seconds-scale), and no core-smoke blowout.
-    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS})
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS)
+    # five #1455 importer suites (all seconds-scale), plus the write-site
+    # invariant (workers/** root, #1656) — and no core-smoke blowout.
+    assert selected == sorted(
+        {*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH}
+    )
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 1
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -252,16 +261,27 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # `tests/test_safe_fs.py` is #1192's at-site addition to the safe_fs.py rule:
     # the helper's own suite, which a safe_fs-only change could not reach before.
     # Additive to the redirect, exactly like the two journal importer targets.
+    # The write-site invariant joins via the packages/common/** root, and the
+    # full core-smoke baseline joins via #1744 shared-library additivity — that
+    # is exactly why the whole legacy suites now appear (safe_fs.py is a shared
+    # module; the scheduler/chain baseline is retained BY POLICY, never removed
+    # by the redirect). The redirect's focused node ids for the two slow
+    # orchestrator suites are still the mechanism that keeps their FULL files
+    # out when the surface is an orchestrator module (see the orchestrator
+    # manifest tests); for a shared-library module the baseline legitimately
+    # includes them.
     assert selected == sorted(
         {
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+            *CORE_SMOKE_TESTS,
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
+            INVARIANT_SUITE_PATH,
         }
     )
-    assert "tests/test_orchestration_chain.py" not in selected
-    assert "tests/test_production_scheduler.py" not in selected
+    assert "tests/test_orchestration_chain.py" in selected
+    assert "tests/test_production_scheduler.py" in selected
 
 
 def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:
@@ -391,20 +411,27 @@ def test_select_tests_maps_ci_workflow_change_to_the_meta_guard_suite() -> None:
 
 
 def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
+    # #1744 path B: forecast_store.py lives under packages/common/**, so the
+    # core-smoke baseline is now retained BY POLICY in addition to the explicit
+    # targets — it is no longer "without core smoke fallback" but "with the
+    # shared baseline". The invariant suite joins via the same root (#1656).
     selected = select_tests(["packages/common/forecast_store.py"], repo_root=Path("."))
-    fallback_only_tests = set(CORE_SMOKE_TESTS) - {"tests/test_migrations.py"}
 
-    assert selected == [
-        "tests/test_forecast_api.py",
-        "tests/test_list_search_contract.py",
-        "tests/test_migrations.py",
-        "tests/test_model_registry_list_basins.py",
-        "tests/test_qhh_latest_fallback_pushdown.py",
-        # #1442 added the zero-text-identity oracle for this file's nine
-        # registered statements.
-        "tests/test_river_ts_text_identity_cleanup.py",
-    ]
-    assert not fallback_only_tests & set(selected)
+    assert selected == sorted(
+        {
+            *CORE_SMOKE_TESTS,
+            "tests/test_forecast_api.py",
+            "tests/test_list_search_contract.py",
+            "tests/test_migrations.py",
+            "tests/test_model_registry_list_basins.py",
+            "tests/test_qhh_latest_fallback_pushdown.py",
+            # #1442 added the zero-text-identity oracle for this file's nine
+            # registered statements.
+            "tests/test_river_ts_text_identity_cleanup.py",
+            INVARIANT_SUITE_PATH,
+        }
+    )
+    assert set(CORE_SMOKE_TESTS) <= set(selected)
 
 
 def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
@@ -541,6 +568,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # statement; the ingest criterion's fact-table-free shape is pinned
         # by the same file.
         "tests/test_river_ts_text_identity_cleanup.py",
+        # #1656: scripts/** is a scanned invariant root.
+        INVARIANT_SUITE_PATH,
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -634,7 +663,9 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
         repo_root=Path("."),
     )
 
-    assert selected == ["tests/test_entropy_audit_script.py"]
+    # #1656: scripts/** is a scanned invariant root, so the invariant suite
+    # joins the entropy-rule target.
+    assert selected == ["tests/test_entropy_audit_script.py", INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -669,22 +700,25 @@ def test_select_tests_keeps_core_smoke_fallback_for_script_without_same_name_sui
 def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     selected = select_tests(["scripts/validate_readonly_db_boundary.py"], repo_root=Path("."))
 
-    assert selected == ["tests/test_readonly_db_validation.py"]
+    # #1656: scripts/** is a scanned invariant root.
+    assert selected == ["tests/test_readonly_db_validation.py", INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
 def test_select_tests_same_name_derivation_covers_all_backend_prefixes() -> None:
     # Every backend Python prefix gets the basename-derived mapping now, not just
-    # scripts/. packages/common/state_qc.py selects its same-name suite and does
-    # NOT fall back to unknown-backend core smoke; a backend source with no
-    # same-name suite (packages/common/auth_policy.py) keeps the fallback.
+    # scripts/. packages/common/state_qc.py selects its same-name suite plus the
+    # #1744 shared baseline (it is a shared-library module); a backend source
+    # with no same-name suite (packages/common/auth_policy.py) keeps the
+    # baseline too, now BY POLICY rather than by unknown-fallback.
     assert Path("tests/test_state_qc.py").is_file()
     assert not Path("tests/test_auth_policy.py").exists()
 
     selected = select_tests(["packages/common/state_qc.py"], repo_root=Path("."))
 
     assert "tests/test_state_qc.py" in selected
-    assert not set(CORE_SMOKE_TESTS) & set(selected)
+    assert set(CORE_SMOKE_TESTS) <= set(selected)
+    assert INVARIANT_SUITE_PATH in selected
 
     fallback = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
 
@@ -881,6 +915,14 @@ def _unowned_smoke_overlap(
     OTHER unowned smoke target is exactly what unknown-backend fallback would
     have added, so it stays red; no whole-pair exemption exists.
 
+    #1744 path B carve-out: a source under ``packages/common/**`` now retains
+    the FULL core-smoke baseline unconditionally (shared-library additivity),
+    so its smoke targets are owned BY POLICY rather than by a rule. Without
+    this carve-out the same-name completeness guard below would false-red every
+    ``packages/common/`` pair — the exact opposite of the requirement. The
+    carve-out is scoped to the shared root: a non-shared prefix still judges
+    smoke ownership through the effective-rule mirror, unchanged.
+
     ``rules`` is the injection seam for constructed stop-on-match topology:
     ownership is judged through ``_effective_explicit_targets``, which mirrors
     the production ``stop_on_match`` break, so a target owned only by a rule
@@ -891,7 +933,11 @@ def _unowned_smoke_overlap(
     return {
         target
         for target in set(CORE_SMOKE_TESTS) & selected
-        if target != accepted_same_name_test and target not in owned
+        if target != accepted_same_name_test
+        and target not in owned
+        # #1744 path B: shared-library additivity owns every smoke target for
+        # packages/common/** by policy.
+        and not source_path.startswith("packages/common/")
     }
 
 
@@ -1480,8 +1526,12 @@ def test_container_contract_change_selects_its_derived_dependent_closure() -> No
 
     missing = sorted(closure - set(selected))
     assert not missing, f"contract change does not select its dependent suites: {missing}"
-    smoke_overlap = sorted(set(CORE_SMOKE_TESTS) & set(selected))
-    assert not smoke_overlap, f"contract change still drags core smoke {smoke_overlap}"
+    # #1744 path B: node27_container_contract.py lives under packages/common/**,
+    # so the core-smoke baseline is now retained BY POLICY — this is no longer
+    # a smoke leak but the shared baseline. The invariant suite joins via the
+    # same root (#1656).
+    assert set(CORE_SMOKE_TESTS) <= set(selected)
+    assert INVARIANT_SUITE_PATH in selected
 
 
 def test_contract_snapshot_fixture_change_selects_its_snapshot_suite() -> None:
@@ -1664,6 +1714,15 @@ GUARDED_MODULE_CLOSURES: tuple[tuple[str, str, str], ...] = (
         "services/tiles/mvt.py",
         "services.tiles.mvt",
         "tests/test_hydro_display_mvt_scaling.py",
+    ),
+    # #1672: hydro_display joins the guarded-module registry. Its rule (in
+    # scripts/select_ci_tests.py) carries the derived direct UNION one-hop
+    # non-gated importer closure; this entry makes the closure guard derive it
+    # from the tracked tree, so a new importer suite reddens the guard.
+    (
+        "apps/api/routes/hydro_display.py",
+        "apps.api.routes.hydro_display",
+        "tests/test_direct_grid_display_cutover_flip.py",
     ),
 )
 
@@ -2297,7 +2356,11 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
 
     selected = select_tests([known, "services/new_surface/new_module.py"], repo_root=Path("."))
 
-    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST}) == selected
+    # The known path lives under workers/**, so #1656 adds the write-site
+    # invariant suite to the union too.
+    assert sorted(
+        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}
+    ) == selected
 
 
 def test_fallback_rider_mutant_reds_the_exact_no_suite_fallback_pin(
@@ -2361,7 +2424,8 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
     explicit = "scripts/validate_readonly_db_boundary.py"
     assert not Path(f"tests/test_{PurePosixPath(explicit).stem}.py").exists()
     explicit_sel = set(select_tests([explicit], repo_root=Path(".")))
-    assert explicit_sel == {"tests/test_readonly_db_validation.py"}
+    # #1656: scripts/** is a scanned invariant root.
+    assert explicit_sel == {"tests/test_readonly_db_validation.py", INVARIANT_SUITE_PATH}
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
     # a CORE_SMOKE member (row 4) both route; provenance — accepted derived —
@@ -2411,7 +2475,10 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # target. Missing meta-guard target under a temporary root is dropped with
     # a warning (row 7), not special-cased.
     no_suite = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
-    assert sorted(no_suite) == sorted(CORE_SMOKE_TESTS)
+    # #1744 path B + #1656: packages/common/** now retains the core-smoke
+    # baseline BY POLICY and routes the write-site invariant — no meta-guard
+    # rider (D6 unchanged).
+    assert sorted(no_suite) == sorted({*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH})
     assert SELECTOR_META_GUARD_TEST not in no_suite
 
     test_path = tmp_path / "tests" / "test_example.py"
@@ -2459,7 +2526,11 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
 
     assert suite in selected
     assert SELECTOR_META_GUARD_TEST in selected
-    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST}) == selected
+    # known lives under workers/** and auth_policy under packages/common/**,
+    # so both #1656 invariant roots add the write-site suite (deduplicated).
+    assert sorted(
+        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}
+    ) == selected
 
 
 def test_select_tests_ignores_docs_only_changes() -> None:
@@ -2752,6 +2823,47 @@ def test_main_writes_json_github_output(tmp_path: Path) -> None:
     assert 'tests_json=["tests/test_two_node_docker_runtime.py"]\n' in output
 
 
+def test_cli_runs_from_outside_the_repo_with_repo_root_and_mapping_builder_input(
+    tmp_path: Path,
+) -> None:
+    # Public CLI regression (#1711): the selector must be invocable from ANY
+    # cwd via `--repo-root`, including a temp directory with no git repository.
+    # A prior implementation ran `git ls-files` at IMPORT time (inside the
+    # production module) to derive MAPPING_BUILDER_TESTS, which died with a
+    # fatal 128 in a non-repo cwd before argparse ever parsed --repo-root.
+    # The selector imports must make no repository calls; the tracked-tree
+    # authority lives only in the meta-suite.
+    repo_root = Path(__file__).resolve().parents[1]
+    changed_file = tmp_path / "changed.txt"
+    changed_file.write_text("workers/mapping_builder/rewrite.py\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "select_ci_tests.py"),
+            "--changed-file",
+            str(changed_file),
+            "--repo-root",
+            str(repo_root),
+        ],
+        cwd=tmp_path,  # deliberately NOT the repo: the regression this pins.
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, f"selector exited {completed.returncode}:\n{completed.stderr}"
+    assert "Traceback" not in completed.stderr, completed.stderr
+
+    stdout_lines = completed.stdout.splitlines()
+    # Expected 8-suite set is tree-derived (never frozen), matching the
+    # meta-suite's authority for the mapping-builder package. The write-site
+    # invariant also joins (workers/** is a scanned #1656 root), so the
+    # assertion is a superset check: the 8 package suites must ALL be present.
+    expected = set(_tracked_mapping_builder_suites())
+    assert len(expected) == 8
+    assert expected <= set(stdout_lines), f"mapping-builder selection missing suites: {stdout_lines}"
+    assert INVARIANT_SUITE_PATH in stdout_lines, f"invariant suite missing from selection: {stdout_lines}"
+
+
 def _github_output_fields(tmp_path: Path, changed: Sequence[str], *, repo_root: Path) -> dict[str, str]:
     changed_file = tmp_path / "changed.txt"
     output_file = tmp_path / "github-output.txt"
@@ -2803,19 +2915,32 @@ def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None
     assert fields["meta_guard_only"] == "true"
 
 
-@pytest.mark.parametrize(
-    "changed_path",
-    ["scripts/select_ci_tests.py", "tests/test_select_ci_tests.py"],
-)
-def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path, changed_path: str) -> None:
+def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path) -> None:
     # Accepted shape-not-provenance semantics (design decision 2): these diffs
     # have the meta-guard suite as their diff-specific target, so they fire the
     # flag and pay one extra collection pass. Special-casing them would trade a
     # two-line predicate for a provenance rule on exactly the PR class that
     # rewrites the gate — the class least well served by a subtle exemption.
-    fields = _github_output_fields(tmp_path, [changed_path], repo_root=Path("."))
+    # NOTE (batch #1744/#1656): only tests/test_select_ci_tests.py keeps the
+    # collapse. A PR changing scripts/select_ci_tests.py now ALSO routes the
+    # write-site invariant (scripts/** is a scanned root, #1656), so its
+    # selection is [meta-guard, invariant] — not a collapse — and the smoke
+    # branch does not fire for it.
+    fields = _github_output_fields(tmp_path, ["tests/test_select_ci_tests.py"], repo_root=Path("."))
 
     assert fields["meta_guard_only"] == "true"
+
+
+def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Path) -> None:
+    # #1656: scripts/select_ci_tests.py lives under scripts/**, a scanned
+    # invariant root, so a selector-source diff selects the meta-guard PLUS the
+    # write-site invariant — not the meta-guard collapse, and therefore not the
+    # extra full-tree collection pass.
+    fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
+
+    assert fields["count"] == "2"
+    assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
+    assert fields["meta_guard_only"] == "false"
 
 
 @pytest.mark.parametrize(
@@ -3204,9 +3329,10 @@ def test_every_pinned_node_id_resolves_to_an_existing_test_function() -> None:
 # with a reason token.
 #
 # DOMAIN SPLIT vs test_guarded_module_rules_cover_their_non_gated_importer_closure
-# above: that guard owns the three GUARDED_MODULE_CLOSURES modules and derives
-# direct importers UNION a ONE-HOP module extension. This guard owns every
-# tracked module under the nine audited directory paths and derives DIRECT
+# above: that guard owns the four GUARDED_MODULE_CLOSURES modules (#1672 added
+# apps/api/routes/hydro_display.py) and derives direct importers UNION a ONE-HOP
+# module extension. This guard owns every tracked module under the TEN audited
+# directory paths (workers/mapping_builder joined in #1711) and derives DIRECT
 # importers only — those directories hold ~150 modules, so one-hop here would
 # grow the PR lane without a bound anyone chose. The two domains overlap on
 # services/slurm_gateway and neither subsumes the other; each keeps its own
@@ -3219,6 +3345,10 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
     "workers/forcing_producer",
     "workers/shud_runtime",
     "workers/model_registry",
+    # #1711: the mapping-builder package joined the audited directories with a
+    # package-wide rule, so future module/importer growth is dispositioned
+    # instead of silently falling out of the PR lane.
+    "workers/mapping_builder",
     "services/orchestrator",
     "services/slurm_gateway",
     "services/tile_publisher",
@@ -3450,6 +3580,23 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
         "services/production_closure/scale_validation.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
     ): "edge-consumer",
+    # -- edge-consumer: workers/mapping_builder/rewrite.py state-clone importers
+    # (#1711) ---------------------------------------------------------------
+    # rewrite.py's three non-gated importer suites OUTSIDE the mapping-builder
+    # package set each belong to an independent owning surface, never the
+    # mapping-builder lane: tests/test_state_clone.py rides the broad
+    # `services/orchestrator/**` rule; tests/test_state_clone_cutover_hook.py
+    # rides the `workers/data_adapters/base.py` and
+    # `packages/common/state_clone_hook.py` rules; tests/test_state_clone_
+    # recalibration.py rides the `scripts/node22_clone_direct_grid_cutover_
+    # states.py` rule. Copying any of them into `workers/mapping_builder/**`
+    # would make every mapping-builder PR pay for a state-clone surface — the
+    # exact contamination #1711 forbids. The edge-consumer liveness guard
+    # machine-checks each suite is selected by a rule whose pattern does not
+    # match rewrite.py.
+    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone.py"): "edge-consumer",
+    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
+    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
 }
 
 
@@ -4562,6 +4709,587 @@ def test_ci_workflow_self_change_gate_reds_when_the_path_leaves_the_backend_bloc
     moved_to_frontend = deleted.replace("            frontend:\n", "            frontend:\n" + entry)
     assert entry in moved_to_frontend
     assert entry not in _backend_filter_block(moved_to_frontend)
+
+
+# --------------------------------------------------------------------------
+# ci-gate-routing-closure-batch meta-guards (#1711 #1672 #1656 #1688 #1744)
+# --------------------------------------------------------------------------
+
+# The write-site invariant suite's repo-relative path, spelled locally so this
+# suite imports cleanly against PRE-change selector source (red-proof runs stash
+# scripts/select_ci_tests.py and ci.yml; the module-level import of the
+# invariant-test constant would otherwise fail the whole module with one
+# ImportError instead of the per-row named failures). An anchor test below
+# keeps this literal in sync with the production constant.
+INVARIANT_SUITE_PATH = "tests/test_timescale_write_guard_wire_site_invariant.py"
+
+
+def _supplemental_invariant_roots() -> tuple[str, ...]:
+    """The selector's supplemental root globs, read lazily from the source.
+
+    Lazy (function-level import) so pre-change-source red runs can still
+    exercise the routing tests without the constant existing.
+    """
+    from scripts.select_ci_tests import TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS
+
+    return TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS
+
+
+def _supplemental_invariant_roots_or_default() -> tuple[str, ...]:
+    try:
+        return _supplemental_invariant_roots()
+    except ImportError:
+        return ()
+
+
+def test_invariant_suite_literal_anchors_to_the_selector_constant() -> None:
+    # The local INVARIANT_SUITE_PATH literal and the production constant must
+    # agree. This anchor lets the rest of the suite use the literal (needed for
+    # pre-change red runs) without letting the two drift.
+    from scripts.select_ci_tests import TIMESCALE_WRITE_GUARD_INVARIANT_TEST
+
+    assert INVARIANT_SUITE_PATH == TIMESCALE_WRITE_GUARD_INVARIANT_TEST
+    assert Path(INVARIANT_SUITE_PATH).is_file()
+
+
+# The invariant suite's scan roots, read from its OWN `_scan_roots` function
+# (the authority) rather than frozen a second time. Derivation shape: find the
+# `_scan_roots` FunctionDef, take its body's final `return`, and read the
+# `ast.Constant` string parts joined by `/` from the `REPO_ROOT / <part>`
+# BinOp chain. The suite's roots are absolute (REPO_ROOT-based); we reduce them
+# to the repo-relative prefix (the last path part, e.g. `workers`) and glob
+# them the same way the selector's TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS
+# spells them. A rewrite of `_scan_roots` into a shape this derivation cannot
+# read fails loudly rather than returning an empty set.
+def _invariant_scan_roots() -> list[str]:
+    tree = _parse_tracked("tests/test_timescale_write_guard_wire_site_invariant.py")
+    fn = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_scan_roots"
+        ),
+        None,
+    )
+    assert fn is not None, "invariant suite no longer defines _scan_roots"
+    ret = next((node for node in fn.body if isinstance(node, ast.Return)), None)
+    assert ret is not None, "_scan_roots has no return statement"
+    assert isinstance(ret.value, ast.Tuple), f"_scan_roots must return a tuple, got {ast.dump(ret.value)!r}"
+
+    roots: list[str] = []
+    for el in ret.value.elts:
+        parts: list[str] = []
+        node = el
+        while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+                parts.append(node.right.value)
+            node = node.left
+        assert parts, f"_scan_roots element not a REPO_ROOT / <part> chain: {ast.dump(el)!r}"
+        roots.append("/".join(reversed(parts)))
+    assert roots, "_scan_roots derivation returned no roots"
+    return roots
+
+
+def _invariant_scan_root_globs() -> set[str]:
+    """The selector's supplemental root globs, mapped from the invariant's roots.
+
+    The invariant walks absolute directories; the selector matches repo-relative
+    globs. The mapping is: the invariant's last path component becomes the glob
+    prefix. (packages/common -> `packages/common/**`, workers -> `workers/**`.)
+    A root whose relative mapping is not a backend prefix (db) still matches —
+    the supplemental route is deliberately not gated on backend classification.
+    """
+    return {
+        f"{root}/**" for root in _invariant_scan_roots()
+    }
+
+
+def test_supplemental_invariant_roots_derive_from_the_invariant_scan() -> None:
+    # #1656: the four supplemental roots must equal the invariant suite's own
+    # `_scan_roots` set (as repo-relative globs), never a second frozen list.
+    # Adding a root to the scan without wiring it here reddens by name.
+    assert set(_supplemental_invariant_roots()) == _invariant_scan_root_globs()
+
+
+def test_supplemental_invariant_routing_is_set_union_and_monotonic() -> None:
+    # #1656: for every one of the four scanned roots, an existing writer/guard
+    # source and a FUTURE-shaped path both select the invariant suite IN
+    # ADDITION to their ordinary selection. The supplemental mapping must not
+    # suppress fallback (an unmapped future source still gets core smoke) and
+    # must not stop later rules.
+    probes = {
+        "workers/**": "workers/output_parser/parser.py",
+        "packages/common/**": "packages/common/timescale_write_guard.py",
+        "scripts/**": "scripts/reset_qhh_smoke_db.py",
+        "db/**": "db/seeds/seed_demo.py",
+    }
+    for root, probe in probes.items():
+        assert Path(probe).is_file(), f"supplemental probe missing: {probe}"
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert INVARIANT_SUITE_PATH in selected, f"{probe}: missing invariant suite"
+
+    # Future-shaped paths under each root: covered by the supplemental mapping
+    # even without any at-site rule. db/** HAS a broad rule (tests/test_migrations.py)
+    # — that is fine; the point is the invariant suite arrives regardless.
+    future = {
+        "workers/**": "workers/brand_new_thing.py",
+        "packages/common/**": "packages/common/brand_new_thing.py",
+        "scripts/**": "scripts/brand_new_thing.py",
+        "db/**": "db/brand_new_thing.py",
+    }
+    for root, probe in future.items():
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert INVARIANT_SUITE_PATH in selected, f"{probe}: future root path not covered"
+
+    # The unmapped future path under a NON-shared root still arms the
+    # unknown-backend fallback exactly as before (no invariant suite — the
+    # supplemental mapping is scoped to the four roots).
+    selected = set(select_tests(["services/brand_new_thing.py"], repo_root=Path(".")))
+    assert INVARIANT_SUITE_PATH not in selected
+    assert set(CORE_SMOKE_TESTS) <= selected
+
+
+def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1656 red arm: deleting a supplemental root mapping must red the exact
+    # future-shaped path under that root. Constructed via monkeypatch on the
+    # selector module, tracked source untouched.
+    from scripts import select_ci_tests
+
+    reduced = tuple(root for root in _supplemental_invariant_roots() if root != "scripts/**")
+    monkeypatch.setattr(select_ci_tests, "TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS", reduced)
+
+    selected = set(select_tests(["scripts/brand_new_thing.py"], repo_root=Path(".")))
+    assert INVARIANT_SUITE_PATH not in selected
+
+
+# The #1744 shared-library additivity authority: `packages/common/**` must
+# retain ALL of CORE_SMOKE_TESTS for every changed backend Python source, on
+# top of any explicit/same-name/supplemental targets.
+SHARED_LIBRARY_SOURCES: tuple[tuple[str, str], ...] = (
+    # (source, one narrow same-name or explicit target that must survive)
+    ("packages/common/state_cli.py", "tests/test_state_manager.py"),
+    ("packages/common/state_manager.py", "tests/test_scheduler_lineage.py"),
+    ("packages/common/state_qc.py", "tests/test_state_qc.py"),
+    ("packages/common/forecast_store.py", "tests/test_forecast_api.py"),
+    ("packages/common/display_coverage.py", "tests/test_display_coverage_refresh.py"),
+    ("packages/common/redaction.py", "tests/test_redaction.py"),
+    ("packages/common/timescale_write_guard.py", "tests/test_timescale_write_guard.py"),
+    ("packages/common/object_store.py", "tests/test_object_store_roots.py"),
+)
+
+
+def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
+    # #1744 path B: every packages/common/** source selects its narrow targets
+    # AND the complete core-smoke baseline — a narrow rule can never silently
+    # remove scheduler/API coverage for the shared library. The invariant suite
+    # also joins (packages/common/** is a scanned root, #1656).
+    for source, narrow_target in SHARED_LIBRARY_SOURCES:
+        assert Path(source).is_file(), f"shared-library source missing: {source}"
+        selected = set(select_tests([source], repo_root=Path(".")))
+        missing = set(CORE_SMOKE_TESTS) - selected
+        assert not missing, f"{source}: shared baseline lost {sorted(missing)}"
+        assert narrow_target in selected, f"{source}: narrow target {narrow_target} lost"
+        assert INVARIANT_SUITE_PATH in selected
+
+
+def test_shared_library_additivity_reds_when_a_baseline_target_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1744 red arm, constructed: dropping `test_production_scheduler.py` from
+    # the shared-baseline addition must red for state_cli.py (which only ever
+    # contributed its narrow state suites). This is the "adding a specific
+    # mapping never removes the shared baseline" invariant, made falsifiable.
+    from scripts import select_ci_tests
+
+    dropped = tuple(t for t in CORE_SMOKE_TESTS if t != "tests/test_production_scheduler.py")
+    monkeypatch.setattr(select_ci_tests, "CORE_SMOKE_TESTS", dropped)
+
+    selected = set(select_tests(["packages/common/state_cli.py"], repo_root=Path(".")))
+    assert "tests/test_production_scheduler.py" not in selected
+
+
+def test_shared_library_baseline_is_outside_stop_rule_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1744: the shared-baseline add must not be shadowable by an ordinary stop
+    # rule. A constructed stop-on-match rule that would otherwise stop the loop
+    # for state_cli.py must still let the baseline through — the add happens
+    # outside the PATH_TEST_RULES loop entirely.
+    from scripts import select_ci_tests
+
+    constructed = (
+        PathTestRule("packages/common/state_cli.py", ("tests/test_state_manager.py",), stop_on_match=True),
+        *PATH_TEST_RULES,
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", constructed)
+
+    selected = set(select_tests(["packages/common/state_cli.py"], repo_root=Path(".")))
+    assert "tests/test_production_scheduler.py" in selected
+
+
+# #1711: the mapping-builder package rule and its audit membership.
+MAPPING_BUILDER_MODULE_SAMPLE: tuple[str, ...] = (
+    "workers/mapping_builder/algorithm.py",
+    "workers/mapping_builder/binding.py",
+    "workers/mapping_builder/cli.py",
+    "workers/mapping_builder/evidence.py",
+    "workers/mapping_builder/integrity.py",
+    "workers/mapping_builder/rewrite.py",
+    "workers/mapping_builder/z_policy_verdict.py",
+    "workers/mapping_builder/__init__.py",
+)
+
+
+def _tracked_mapping_builder_suites() -> set[str]:
+    """All eight tracked tests/test_mapping_builder_*.py suites, tree-derived."""
+    return set(_tracked_python_files("tests/test_mapping_builder_*.py"))
+
+
+def test_mapping_builder_modules_select_all_package_suites() -> None:
+    # #1711: the rule target set is the explicit tuple, and the meta-suite is
+    # the tree-derived drift authority: the rule's targets MUST EQUAL the
+    # tracked `tests/test_mapping_builder_*.py` set. A ninth suite tracked in
+    # the tree without a rule entry reddens here (as does a rule entry whose
+    # file left the tree). Every mapping-builder module then selects the
+    # complete package set plus the invariant.
+    suites = _tracked_mapping_builder_suites()
+    assert len(suites) == 8, f"expected eight mapping-builder suites, got {sorted(suites)}"
+    assert MAPPING_BUILDER_MODULE_SAMPLE, "mapping-builder module sample empty"
+
+    rule_targets = {
+        rule.tests for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**"
+    }
+    assert len(rule_targets) == 1, "expected exactly one workers/mapping_builder/** rule"
+    assert set(next(iter(rule_targets))) == suites, (
+        "mapping-builder rule targets drifted from the tracked suite set: "
+        f"rule={sorted(next(iter(rule_targets)))}, tracked={sorted(suites)}"
+    )
+
+    for module in _tracked_python_files("workers/mapping_builder/*.py"):
+        selected = set(select_tests([module], repo_root=Path(".")))
+        missing = suites - selected
+        assert not missing, f"{module}: missing mapping-builder suites {sorted(missing)}"
+        assert INVARIANT_SUITE_PATH in selected, f"{module}: missing invariant suite"
+
+
+def test_mapping_builder_rule_does_not_carry_state_clone_suites() -> None:
+    # #1711: the mapping-builder rule must NOT contaminate the lane with the
+    # state-clone suites. The rewrite.py importer pairs are dispositioned as
+    # `edge-consumer` (they have independent owning surfaces); carrying them
+    # here would violate the issue's explicit exclusion of tests/test_state_clone.py.
+    # The three state-clone suites are all absent from the rule's targets.
+    mapping_builder_rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**"
+    )
+    state_clone_suites = {
+        "tests/test_state_clone.py",
+        "tests/test_state_clone_cutover_hook.py",
+        "tests/test_state_clone_recalibration.py",
+    }
+    assert not state_clone_suites & set(mapping_builder_rule.tests), (
+        f"mapping-builder rule carries state-clone suites: "
+        f"{sorted(state_clone_suites & set(mapping_builder_rule.tests))}"
+    )
+    assert set(mapping_builder_rule.tests) == _tracked_mapping_builder_suites()
+
+    # No state-clone suite leaks into any mapping-builder module's selection via
+    # the mapping-builder rule either.
+    for module in _tracked_python_files("workers/mapping_builder/*.py"):
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert not state_clone_suites & selected, f"{module}: selection leaks state-clone suites"
+
+
+def test_mapping_builder_rule_reds_when_a_suite_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1711 red arm, constructed: removing one suite from the mapping-builder
+    # rule's targets must red for `workers/mapping_builder/__init__.py` — the
+    # module with NO same-name suite, so the dropped target cannot be smuggled
+    # back in by the same-name derivation. The live rule table is untouched.
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != "tests/test_mapping_builder_integration.py"),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == "workers/mapping_builder/**"
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    selected = set(select_tests(["workers/mapping_builder/__init__.py"], repo_root=Path(".")))
+    assert "tests/test_mapping_builder_integration.py" not in selected
+
+
+def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> None:
+    # #1711 irregular mappings: the hook and the node-22 clone script have
+    # suite names that are deliberately NOT same-name derivable.
+    hook = select_tests(["packages/common/state_clone_hook.py"], repo_root=Path("."))
+    assert "tests/test_state_clone_cutover_hook.py" in hook
+
+    script = select_tests(["scripts/node22_clone_direct_grid_cutover_states.py"], repo_root=Path("."))
+    assert "tests/test_state_clone_recalibration.py" in script
+    assert "tests/test_state_clone_recalibration_cli.py" in script
+
+    # Neither irregular source may drag the unrelated tests/test_state_clone.py
+    # (it belongs to the broad services/orchestrator/** rule, not these rules).
+    assert "tests/test_state_clone.py" not in hook
+    assert "tests/test_state_clone.py" not in script
+
+
+def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
+    # #1711: workers/mapping_builder must be in DIRECTORY_RULE_AUDIT_PATHS, and
+    # its derived importer gaps must be EXACTLY the three rewrite.py state-clone
+    # pairs, each dispositioned as `edge-consumer` in the exclusion table (they
+    # belong to independent owning surfaces, never the mapping-builder lane).
+    # The global disposition guard therefore stays clean while the mapping
+    # rule itself carries no state-clone suites.
+    assert "workers/mapping_builder" in DIRECTORY_RULE_AUDIT_PATHS
+    universe, gaps = _directory_rule_importer_map()
+    assert any(module.startswith("workers/mapping_builder/") for module in universe)
+    mapping_gaps = {m: s for m, s in gaps.items() if m.startswith("workers/mapping_builder/")}
+
+    expected_gaps = {
+        "workers/mapping_builder/rewrite.py": {
+            "tests/test_state_clone.py",
+            "tests/test_state_clone_cutover_hook.py",
+            "tests/test_state_clone_recalibration.py",
+        }
+    }
+    assert mapping_gaps == expected_gaps, f"mapping-builder gap set changed: {mapping_gaps}"
+
+    for module, suites in mapping_gaps.items():
+        for suite in suites:
+            assert INTENTIONAL_RULE_GAP_EXCLUSIONS[(module, suite)] == "edge-consumer", (
+                f"{module} -> {suite} must be dispositioned as edge-consumer"
+            )
+
+    # The global disposition guard must stay green with these pairs excluded.
+    offenders = _disposition_offenders(
+        exclusions=INTENTIONAL_RULE_GAP_EXCLUSIONS,
+        gaps=gaps,
+    )
+    assert not offenders, "directory-rule importer gaps undispositioned:\n  " + "\n  ".join(offenders)
+
+
+def test_three_guarded_closures_is_now_four_with_hydro_display() -> None:
+    # #1672: hydro_display joins GUARDED_MODULE_CLOSURES. The existing guard
+    # test derives the required importer set from the tree, so this asserts the
+    # membership directly (the guard body in
+    # test_guarded_module_rules_cover_their_non_gated_importer_closure is what
+    # proves coverage).
+    guarded_sources = {source_path for source_path, _, _ in GUARDED_MODULE_CLOSURES}
+    assert "apps/api/routes/hydro_display.py" in guarded_sources
+    assert len(GUARDED_MODULE_CLOSURES) == 4
+
+
+def test_hydro_display_rule_covers_its_derived_importer_closure() -> None:
+    # #1672: the hydro_display rule must select every non-gated direct UNION
+    # one-hop importer suite, derived from the tracked tree (never frozen).
+    module = "apps.api.routes.hydro_display"
+    required = _non_gated_top_level_importer_tests(module) | _one_hop_importer_tests(module)
+    assert required, "hydro_display derived no importer suites — derivation broken"
+
+    # Anti-vacuity: one known direct and one known one-hop member must be in
+    # the derived set, so a derivation that collapses to silence reds here.
+    assert "tests/test_direct_grid_display_cutover_flip.py" in required
+    assert "tests/test_openapi_31_contract.py" in required
+
+    selected = set(select_tests(["apps/api/routes/hydro_display.py"], repo_root=Path(".")))
+    missing = required - selected
+    assert not missing, f"hydro_display rule misses importer suites {sorted(missing)}"
+
+    # The integration-marked importers stay out per the #1447 ruling.
+    assert "tests/test_display_coverage_residual_debt_integration.py" not in selected
+    assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
+
+
+# --------------------------------------------------------------------------
+# #1688: the finite real-DB integration-source registry and the ci.yml filter
+# --------------------------------------------------------------------------
+
+# The finite authority for which production sources must trigger the real-DB
+# integration lane. Every surface from design D4; nothing is silently deferred.
+# The three bounded package globs are expanded over the tracked tree in the
+# contract test, so the registry here only needs the root globs, not a frozen
+# member list.
+INTEGRATION_TRIGGER_SOURCES: tuple[str, ...] = (
+    "packages/common/forecast_store.py",
+    "packages/common/display_coverage.py",
+    "services/tiles/mvt.py",
+    "apps/api/routes/hydro_display.py",
+    "apps/api/main.py",
+    "scripts/node27_autopipeline.py",
+    "workers/output_parser/parser.py",
+    "packages/common/timescale_write_guard.py",
+    "packages/common/object_store.py",
+    "packages/common/model_registry.py",
+    "packages/common/grid_registry_store.py",
+)
+
+INTEGRATION_TRIGGER_ROOT_GLOBS: tuple[str, ...] = (
+    "workers/grid_registry/**",
+    "workers/model_registry/**",
+    "workers/forcing_producer/**",
+)
+
+INTEGRATION_TRIGGER_EXTRA_SOURCES: tuple[str, ...] = (
+    "services/orchestrator/scheduler.py",
+    ".github/workflows/ci.yml",
+)
+
+
+def _database_filter_patterns(workflow: str) -> list[str]:
+    """The `- '<pattern>'` entries inside ci.yml's `database:` block."""
+    block = _database_filter_block(workflow)
+    patterns = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- '"):
+            patterns.append(stripped[3:-1])
+    return patterns
+
+
+def _expand_tracked_members(globs: Sequence[str]) -> set[str]:
+    """Expand bounded package globs over the tracked tree (git ls-files)."""
+    members: set[str] = set()
+    for glob in globs:
+        prefix = glob.rstrip("*").rstrip("/")
+        members.update(_tracked_python_files(prefix))
+    return members
+
+
+def test_database_filter_covers_the_finite_integration_registry() -> None:
+    # #1688: every D4 registry surface must match at least one `database:`
+    # filter pattern. Exact sources are matched literally; the three bounded
+    # globs are expanded over the tracked tree so a newly tracked member of a
+    # registered package is covered the moment it lands.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    patterns = _database_filter_patterns(workflow)
+    assert patterns, "ci.yml `database:` filter block has no patterns"
+
+    registered = set(INTEGRATION_TRIGGER_SOURCES)
+    registered |= _expand_tracked_members(INTEGRATION_TRIGGER_ROOT_GLOBS)
+    registered |= set(INTEGRATION_TRIGGER_EXTRA_SOURCES)
+    assert registered, "integration-source registry empty"
+
+    uncovered = sorted(
+        source for source in registered if not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
+    )
+    assert not uncovered, (
+        "integration-owned production sources not matched by the ci.yml `database:` filter: " + ", ".join(uncovered)
+    )
+
+
+def test_database_filter_mutation_reds_and_names_forecast_store() -> None:
+    # #1688 red arm: removing ONLY the `packages/common/forecast_store.py`
+    # pattern from a constructed workflow copy must fail and NAME that source.
+    # The tracked ci.yml is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    entry = "              - 'packages/common/forecast_store.py'\n"
+    assert entry in _database_filter_block(workflow)
+    mutated = workflow.replace(entry, "")
+    assert entry not in _database_filter_block(mutated)
+
+    patterns = _database_filter_patterns(mutated)
+    source = "packages/common/forecast_store.py"
+    assert not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
+    uncovered = sorted(
+        s for s in set(INTEGRATION_TRIGGER_SOURCES) if not any(fnmatch.fnmatch(s, pattern) for pattern in patterns)
+    )
+    assert source in uncovered
+
+
+def test_database_filter_self_triggers_the_contract_suite() -> None:
+    # #1688: ci.yml is in the `database:` filter (a gate-changing PR runs the
+    # real-DB gate) AND in the `backend:` filter (so the selector meta-guard —
+    # which holds the registry contract — executes on a workflow-only PR).
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    assert "              - '.github/workflows/ci.yml'\n" in _database_filter_block(workflow)
+    assert "              - '.github/workflows/ci.yml'\n" in _backend_filter_block(workflow)
+
+    selected = set(select_tests([CI_WORKFLOW_PATH], repo_root=Path(".")))
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_real_db_job_uses_vv_rs_logging_flags_only() -> None:
+    # #1688: the real-DB pytest invocation gains `-vv -rs` (node-level pass and
+    # skip reasons) WITHOUT changing the marker expression, DSN, service, or
+    # suite selection. The marker expression and DSN stay pinned so a future
+    # edit that touches them reds here.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job_start = workflow.index("\n  real-db-integration:")
+    job_end = workflow.index("\n  unit-test:", job_start)
+    job = workflow[job_start:job_end]
+
+    assert "run: pytest -vv -rs -m integration" in job
+    assert "pytest -q -m integration" not in job
+    assert "DATABASE_URL: postgresql://nhms:nhms_dev@localhost:5432/nhms" in job
+    assert "NHMS_RUN_INTEGRATION: \"1\"" in job
+
+
+def test_workflow_path_matches_backend_and_database_filters() -> None:
+    # #1688: `.github/workflows/ci.yml` matches BOTH the backend and database
+    # filters, so a workflow-only PR runs the targeted Unit Tests (carrying the
+    # registry contract) and the real-DB gate.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    backend = _backend_filter_block(workflow)
+    database = _database_filter_block(workflow)
+    entry = ".github/workflows/ci.yml"
+    assert any(fnmatch.fnmatch(entry, pattern) for pattern in _filter_entries(backend))
+    assert any(fnmatch.fnmatch(entry, pattern) for pattern in _filter_entries(database))
+
+
+def _filter_entries(block: str) -> list[str]:
+    return [
+        line.strip()[3:-1]
+        for line in block.splitlines()
+        if line.strip().startswith("- '")
+    ]
+
+
+def test_supplemental_invariant_derivation_fails_loudly_on_an_unknown_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1656 seam test: a rewritten `_scan_roots` that the derivation cannot
+    # read must fail loudly (AssertionError) rather than returning an empty
+    # root set that would silently disarm the root-drift guard. The derivation
+    # reads the invariant file via _parse_tracked's cache keyed on path +
+    # stat identity, so we feed a rewritten copy through a tmp_path monkeypatch
+    # chdir (same resolved path trick the cache test uses is overkill here —
+    # the parse cache keys on absolute path + mtime + size, so rewriting the
+    # tracked file's bytes would be picked up, but we must not touch it).
+    #
+    # Instead, exercise the derivation on a constructed function body: a
+    # `_scan_roots` that returns a list (not a tuple) must raise.
+    source = Path("tests/test_timescale_write_guard_wire_site_invariant.py").read_text(encoding="utf-8")
+    assert "def _scan_roots" in source
+    # The derivation helper is read via _parse_tracked(relative path), which
+    # resolves against the CURRENT working directory. To test the loud failure
+    # without touching the tracked file, we temporarily chdir to a tmp repo
+    # whose tests/test_timescale_write_guard_wire_site_invariant.py contains a
+    # list-returning _scan_roots.
+    probe_dir = tmp_path / "tests"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_timescale_write_guard_wire_site_invariant.py").write_text(
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path('.')\n"
+        "def _scan_roots():\n"
+        "    return [REPO_ROOT / 'workers']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(AssertionError, match="_scan_roots must return a tuple"):
+        _invariant_scan_roots()
 
 
 def test_support_module_rule_patterns_are_distinct_exact_paths() -> None:
