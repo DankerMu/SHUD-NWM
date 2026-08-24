@@ -1,0 +1,130 @@
+# Design
+
+## Risk triage
+
+**Fixture level**: standard. Two operator scripts, no production runtime code
+touched. Blast radius is the node-22 object store and the DB-free file journal;
+both are recoverable, but a wrong write is expensive (a bad forcing package
+would feed SHUD silently, and a marker aimed at the wrong journal row would
+restart work that is already correct).
+
+**Risk surfaces selected**
+
+| Surface | Why | Mitigation under test |
+|---|---|---|
+| Identity/provenance | The whole change exists because identity moved | D1, D2 |
+| Destructive write | Producer writes into the live object store; the marker mutates the live journal | D3, D4 |
+| Silent under-coverage | A scan that finds nothing looks exactly like "nothing to do" | D5 |
+
+**Not selected**: concurrency (each work item writes its own `model_id`
+directory, and the marker takes the journal's cycle write lock), schema
+migration, auth (the marker uses the existing `pipeline.retry_run` policy gate
+rather than introducing a channel).
+
+**Must-preserve**: already-issued forecast history is never rewritten; the
+producer's own output format is authoritative; no journal row is hand-edited.
+
+## D1 — Replay, not copy, and not rewrite
+
+Three candidate mechanisms:
+
+1. **Copy** the old directory to the new id. Rejected: the old
+   `model_input_package_id` / `binding_uri` / station ids are embedded in every
+   member file (`forcing.tsd.forc` header, `forcing_debug.csv`'s `station_id`
+   column, `payloads/*.json`, and the three JSON manifests), while
+   `direct_grid_variant_registration.py:566` registers `met.met_station` under
+   the NEW binding identity. The copy is internally checksum-consistent, so it
+   would likely pass the runtime gate — it would just be lying.
+2. **Rewrite** the ids in place. Rejected: it must then recompute nested
+   checksums across five formats, and its correctness criterion is "equals what
+   the producer would have written". If that is the criterion, run the producer.
+3. **Replay** under the new id. Selected. Inputs are raw GRIB x station
+   bindings; the bindings are physically identical (D2), so the output is
+   numerically identical by construction, through the path production uses.
+
+Replay is only available while the raw inputs survive retention. If they do not,
+this tool must refuse rather than silently fall back to a copy — the fallback
+would be exactly the mechanism rejected above.
+
+## D2 — The equivalence oracle is free, and it is `shud/`
+
+Because the bindings are physically identical, the replay must reproduce the
+superseded package. That gives a bit-level acceptance check without inventing a
+tolerance:
+
+- `shud/*.csv` — what SHUD actually reads, keyed by filename and carrying no
+  identity string — MUST match **byte for byte**.
+- `forcing.tsd.forc`, `forcing_debug.csv`, `payloads/*.json` MUST match after
+  `dg-<src>-<hex>` and `dg_<32hex>` are normalised away.
+- The three JSON manifests are deliberately **excluded**. They carry member
+  checksums, which must differ once the members' identity strings do. Including
+  them would make a correct replay fail.
+
+Measured on node-22 for all 16 pairs: 0 `shud` mismatches (8–295 files per
+basin), 0 normalised mismatches.
+
+## D3 — Refuse the shapes that are not a backfill
+
+Two inputs look superficially like an id change and are not:
+
+- **Key set diverged** — the two manifests do not describe the same
+  `(sp_att_path, source_id)` set. That is an onboarding/retirement diff. Hard
+  error, exit non-zero, nothing produced.
+- **Bindings moved** — the normalised `station_bindings` still differ. That is a
+  real re-binding and must go through normal provisioning. Recorded in
+  `rebound_models_skipped`, skipped, non-zero exit.
+
+A changed `basin_version_id` on a renamed model is also a hard error: the
+forcing path root moved, so a replay would not land where the old artifacts are.
+
+Both scripts default to a preview. The backfill's default is a dry run; the
+marker's preview additionally **names the row it would act on**, because the
+forecast stage carries a cohort-master job covering every model in the cycle and
+a marker aimed at that row would restart the whole cohort. On the live incident
+the preview resolved to `job_fcst_..._forecast_reconciled_34817_6`, the per-run
+row — that distinction is worth seeing before writing, not after.
+
+## D4 — The marker is the sanctioned channel, not a journal edit
+
+`record_manual_repair` takes the cycle write lock, requires
+`pipeline.retry_run` policy evidence, refuses on conflict (`run_active`) and on
+absence (`no_retryable_failed_job`), and writes an evidence trail. The runbook's
+prohibition is on **hand-editing journal rows**; using the typed, gated mutation
+API is the alternative it points at, not a violation of it.
+
+Measured: `classify_failure('ARTIFACT_NOT_FOUND', ...)` gives
+`{'retryable': False, 'permanent': True}`; with `manual=True` it gives
+`{'retryable': False, 'permanent': False, 'manual_retry_marker': True}`. That
+flip, scoped to the marked run, is the entire mechanism.
+
+## D5 — Silent under-coverage is the failure mode to design against
+
+A scan keyed on a path that does not exist returns "no work" and looks identical
+to success. This bit during development: the forcing path's source segment is
+`normalize_source_id(x).lower()` (`producer.py:1959`), so canonical `IFS` lives
+under `forcing/ifs/`. Scanning by the canonical id found 7 gfs items and **zero**
+of the 8 IFS items, and the dry run reported that as a clean result.
+
+Consequences for the design: the source segment is derived by a helper that
+mirrors the producer's, with a comment naming the trap; the case is pinned by a
+test; and the receipt reports `renamed_model_count` alongside `work_item_count`
+so an operator can see that 16 renames produced 15 work items and ask why,
+rather than reading a bare item list as complete.
+
+## Seams under test
+
+- `resolve_renames(previous, current)` — pairing and the two refusals.
+- `discover_work(renames, forcing_root, cycles)` — cycle selection, including
+  the lower-cased source segment.
+- `verify_item(item)` — the equivalence oracle, in both directions.
+- `_preview(service, run_id)` — per-run vs cohort-master row resolution.
+
+## Evidence mapping
+
+| Requirement | Evidence |
+|---|---|
+| Replay reproduces the superseded package | node-22 receipt: 16/16 `verified`, 0 mismatches |
+| Refuses a real re-binding | unit test; live `rebound_models_skipped: 0` |
+| Does not silently under-cover a source | unit test for the lower-cased segment; live 15 items |
+| Marker targets the per-run row | unit test; live preview receipt |
+| Restarted run actually succeeds | node-22 pass receipt after the marker |

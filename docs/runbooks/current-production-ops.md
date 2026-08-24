@@ -335,6 +335,34 @@ forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域�
 `normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
 按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
 
+**回补完不会自愈——已经跑失败的 run 必须单独放行。** `ARTIFACT_NOT_FOUND` 被分类器判为
+**永久失败**（`classify_failure` 给 `retryable=False, permanent=True`），与重试预算无关
+（实战 `submission_attempt=1`，limit 是 6）。所以产物补上之后，那些 run 仍然是
+`blocked` / `permanent_failure_guard`，下一趟 pass 照样不会重跑它们。
+
+正规通道是 `pipeline.retry_run` 的 manual-retry marker（`record_manual_repair`：
+policy 门 + cycle 写锁 + 冲突/缺失拒绝 + 证据留痕），`classify_failure(..., manual=True)`
+只对被标记的那个 run 把 `permanent` 翻成 `False`。**不要改 journal 行**——8.5 禁的是手改行，
+用这个带门的类型化 API 正是它指向的替代路径。
+
+```bash
+.venv/bin/python scripts/node22_manual_retry_failed_runs.py \
+  --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
+  --run-id fcst_<source>_<cycle>_<model_id> \
+  --reason "<为什么重启>" --requested-by "<操作者>" --execute
+```
+
+**先看 preview（缺省就是 preview，不写）**：forecast 阶段除了逐 run 行，还有一条覆盖该
+cycle 全部 model 的 **cohort master** 行，标错它会把整个 cohort 重跑。preview 会把要动的
+行 id 打出来——实战命中的是 `job_fcst_..._forecast_reconciled_34817_6`（逐 run），不是
+`job_cycle_..._forecast_cohort_...`。逐 run 逐个标，不做批量扫。
+
+标完跑一趟 bounded pass（`systemctl --user start nhms-compute-scheduler.service`，
+timer 全程保持关闭），验收判据不是候选变成 `selected`，而是 **forecast 真跑成、
+`state_save_qc` 在新 id 下写出下一个 `valid_time` 的 state**——那才是接回 warm chain 的东西。
+顺带核对没被标记的 run 仍是 `blocked`，以证明 marker 是逐 run 生效的。全部通过后再
+`systemctl --user enable --now nhms-compute-scheduler.timer`。
+
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
 该 repair 已在 **#1816 中整体删除**——两个上界在仓库里没有任何出处，而被它改写的标定值
