@@ -54,6 +54,7 @@
 ## 开发环境约定
 
 - **Python 一律用 `uv`**（`uv run`、`uv pip`），禁止裸 `python` / `python3` / `pip`；装依赖 `uv sync --all-extras --dev`。node-27 上需 `export PATH=$HOME/.local/bin:$PATH`。
+- 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。node-22 将在下次受控同步时有意收敛到 3.11（与 CI/node-27 对齐）；该 pin 不含任何 Slurm 运行时验证。
 - 前端：`cd apps/frontend && pnpm install && pnpm test && pnpm build`；Linux 端用 `corepack pnpm`（版本以 `package.json` 的 `packageManager` 为准）。
 
 ## Issue 驱动开发

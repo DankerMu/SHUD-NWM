@@ -7,14 +7,19 @@
 # Reads the tool-call JSON on stdin (Claude Code and Codex use the same
 # shape) and exits 2 with a stderr explanation to deny.
 #
-# Optional config at <project>/.large-file-guard.json:
+# The tool-call JSON `cwd` decides which worktree is being committed: its Git
+# top level is resolved before anything else and is the root for the config
+# file, all `git -C` operations and worktree file reads.  CLAUDE_PROJECT_DIR
+# is a fallback only (JSON cwd absent, or not inside a Git worktree), which
+# preserves legacy/non-worktree callers.
+#
+# Optional config at <git-top-level>/.large-file-guard.json:
 #   { "enabled": true, "maxLines": 1000, "exclude": ["docs/data/*.csv"] }
 set -euo pipefail
 
 input=$(cat)
-root="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-LFG_INPUT="$input" LFG_ROOT="$root" python3 - <<'PY'
+LFG_INPUT="$input" LFG_FALLBACK_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}" python3 - <<'PY'
 import fnmatch
 import json
 import os
@@ -32,8 +37,19 @@ if not re.search(r"\bgit\b[^|;&]*\bcommit\b", command) and not re.search(
 ):
     sys.exit(0)
 
-root = os.environ["LFG_ROOT"]
-cwd = data.get("cwd") or root
+root = os.environ["LFG_FALLBACK_ROOT"]
+cwd = data.get("cwd") or ""
+if cwd:
+    # The tool call names the worktree it acts on; its Git top level is the
+    # single root for config, git operations and worktree file reads. A cwd
+    # outside any Git worktree falls back to the legacy root.
+    probed = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if probed.returncode == 0:
+        root = probed.stdout.strip()
 
 config = {}
 cfg_path = os.path.join(root, ".large-file-guard.json")
@@ -67,7 +83,7 @@ exclude = list(config.get("exclude", [])) + DEFAULT_EXCLUDE
 
 def git(*args):
     result = subprocess.run(
-        ["git", "-C", cwd, *args], capture_output=True, text=True
+        ["git", "-C", root, *args], capture_output=True, text=True
     )
     return result.stdout if result.returncode == 0 else ""
 
@@ -96,7 +112,8 @@ def merge_parent_shas():
     if not path:
         return []
     try:
-        with open(os.path.join(cwd, path), encoding="utf-8") as fh:
+        merge_head = path if os.path.isabs(path) else os.path.join(root, path)
+        with open(merge_head, encoding="utf-8") as fh:
             return [line.strip() for line in fh if line.strip()]
     except OSError:
         return []
@@ -123,7 +140,7 @@ for path in sorted(staged | worktree):
     if path in worktree:
         try:
             with open(
-                os.path.join(cwd, path), encoding="utf-8", errors="ignore"
+                os.path.join(root, path), encoding="utf-8", errors="ignore"
             ) as fh:
                 content = fh.read()
         except OSError:
@@ -140,7 +157,7 @@ if offenders:
         f"large-file-guard: commit blocked — file(s) exceed {max_lines} lines: "
         f"{listing}. Split the file into smaller modules before committing. If it "
         f'is legitimately large (generated/vendored/data), add it to "exclude" in '
-        f".large-file-guard.json at the project root and retry.\n"
+        f"{cfg_path} and retry.\n"
     )
     sys.exit(2)
 PY
