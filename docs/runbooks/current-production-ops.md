@@ -312,7 +312,11 @@ refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active�
 2026-08-22 之前发布的包中有 8 个流域（含 `SHJ-2SHJ`、`hetianhe`）带着被改写的值，
 它们在 #1816 之后单独重发；重发前的历史预报不追溯、不重签。
 **仍在运行的 repair 只有缺失辐射模板那一条**（`basins.missing_tsd_rl_template_repair.v1`，
-staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标定值，且会记进 package manifest。
+staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标定值。
+**它记在发布 receipt 的 `summary["repairs"]` 里，不在 package manifest 里**——
+`publish_basins_package` 不收 repair 参数，manifest 对任何 repair 都没有字段。
+而 receipt 只在显式传了 `--output` 时才落盘（`publish_scheduler_file_registry.py:396-397`），
+否则只打到 stdout。查 repair 溯源要找 receipt，不要翻 manifest。
 
 **当前 authority（2026-08-22 node-22 实测 canonical manifest）**：共 24 个业务流域，
 口径为 17 个既有流域加 #1699 上线的 7 个；每个流域有 GFS、IFS 两个 source-scoped

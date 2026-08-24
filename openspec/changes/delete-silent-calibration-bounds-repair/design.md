@@ -20,7 +20,7 @@ operation:
 | schema | `basins.calibration_repair.v1` | `basins.missing_tsd_rl_template_repair.v1` |
 | acts on | a value a human calibrated | a file that is absent |
 | recorded in package manifest | no | no |
-| recorded in publish receipt | yes, but only in the workspace | yes |
+| recorded in publish receipt `repairs` | yes | yes |
 | staging dir | `repaired-basins-soil-alpha` | `repaired-basins` |
 | disposition | **deleted** | **kept** |
 
@@ -28,7 +28,7 @@ Only the left column goes. Shared machinery — `PublishContext.repair`, the
 summary `repairs` list, `repaired-inventories`, `retain_repair_staging`,
 `REPAIR_STAGING_DIR_NAMES[0]`, and
 `SCHEDULER_REGISTRY_REPAIRED_MODEL_NOT_PUBLISHABLE` (also raised on the
-radiation path at `publish_scheduler_file_registry.py:834`) — stays.
+radiation path at `publish_scheduler_file_registry.py:805`) — stays.
 
 `_merge_repairs` and `basins.scheduler_source_repair.v1` die with the left
 column: with one repair kind left there is nothing to merge. `_isolated_root_
