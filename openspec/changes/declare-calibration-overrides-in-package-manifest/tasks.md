@@ -13,9 +13,14 @@
 
 - [x] 1.1 A checked-in declaration file: basin, calibration parameter, value,
       reason, approver, date. Nothing is overridden that is not declared.
-- [x] 1.2 Refuse an unknown basin, an unknown calibration parameter, an
-      unparseable value, and an entry that matched nothing — each with a
-      diagnosable error naming the entry.
+- [x] 1.2 For a basin this run PUBLISHES, refuse an unknown calibration
+      parameter, an unparseable value, and an entry that matched nothing —
+      each with a diagnosable error naming the entry.  A declared basin the run
+      does not publish is reported on the summary, not refused (the refusal key
+      is *published but not applied*).
+- [x] 1.3 Both lanes load the checked-in declaration by default — the manual
+      publisher CLI and `scheduler_file_provider_refresh`.  The flag / env var
+      only redirects the path.
 
 ## 2. Publication
 
@@ -41,13 +46,28 @@
 
 ## 5. Rollout (node-22, ordered — see design D4)
 
-- [ ] 5.1 Republish hetianhe; record the new `model_id`.
-- [ ] 5.2 Backfill forcing under the new id for the cycle the scheduler will run.
-- [ ] 5.3 Clone the warm state onto the new id.
-- [ ] 5.4 Release the failed run through the manual-retry marker.
-- [ ] 5.5 One bounded pass: forecast `succeeded`, state written at the next
+Identity changes on a direct-grid topology go through the **direct merged
+publish** of runbook 5.7.1, NOT a cutover declaration. The runbook is explicit:
+the refresh-side gate cannot see a direct-grid identity change, so a declaration
+matches nothing and, once stale, makes EVERY later refresh refuse with
+`registry_cutover_declaration_invalid` — stalling the daily pipeline. This is
+also why an unwired refresh lane refuses with `registry_cutover_undeclared`
+rather than reverting anything: the gate is closed in both directions.
+
+- [ ] 5.1 Republish hetianhe with the declared override; record the new
+      `model_id` and `package_checksum`.
+- [ ] 5.2 Merge-publish the registry directly (`publish_scheduler_registry_manifest`,
+      one shared `generated_at` for both targets, `expected_preimage` CAS on the
+      canonical side). Assert before publishing: row count unchanged, no
+      duplicate `model_id`, all rows `direct_grid`, per-basin row count unchanged.
+- [ ] 5.3 Backfill forcing under the new id for the cycle the scheduler will run
+      (`scripts/node22_backfill_forcing_for_model_ids.py`).
+- [ ] 5.4 Clone the warm state onto the new id.
+- [ ] 5.5 Release the failed run through the manual-retry marker
+      (`scripts/node22_manual_retry_failed_runs.py`).
+- [ ] 5.6 One bounded pass: forecast `succeeded`, state written at the next
       `valid_time`.
-- [ ] 5.6 Re-enable `nhms-compute-scheduler.timer`.
+- [ ] 5.7 Re-enable `nhms-compute-scheduler.timer`.
 
 ## 6. Documentation
 

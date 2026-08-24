@@ -2478,14 +2478,90 @@ def _refused(tmp_path: Path, entries: list[dict[str, Any]], *, run_name: str) ->
     return excinfo.value
 
 
-def test_declaration_naming_an_unknown_basin_refuses_the_publish(tmp_path: Path) -> None:
-    """#1832 refusal 1 -- a renamed/typo'd basin must not pass silently."""
-    error = _refused(tmp_path, [_declaration_entry(basin_slug="charlie")], run_name="unknown-basin")
+def test_declared_basin_outside_the_publish_set_is_reported_not_refused(tmp_path: Path) -> None:
+    """#1832: the refusal key is *published but not applied*, not *declared but not published*.
 
-    assert error.error_code == "CALIBRATION_OVERRIDE_UNKNOWN_BASIN"
-    assert "charlie" in str(error)
-    assert error.details["unknown_basin_slugs"] == ["charlie"]
-    assert error.details["entries"][0]["parameter"] == "GEOL_DMAC"
+    A basin the tree does not contain publishes nothing, so it can carry no
+    package that lies about its calibration.  Refusing here would kill every
+    narrowed publish on a declaration that is doing nothing wrong -- and would
+    push operators toward not loading the declaration at all, which is the
+    failure this change exists to prevent.
+    """
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(
+        tmp_path / "config" / "overrides.yaml", [_declaration_entry(basin_slug="charlie")]
+    )
+
+    summary, work_dir, object_root = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name="absent-basin"
+    )
+
+    assert summary["status"] == "published"
+    assert summary["package_status_counts"] == {"published": 2}
+    # Reported, not silent.
+    assert summary["calibration_overrides"] == []
+    not_applied = summary["calibration_overrides_not_applied"]
+    assert len(not_applied) == 1
+    assert not_applied[0]["basin_slug"] == "charlie"
+    assert not_applied[0]["parameter"] == "GEOL_DMAC"
+    assert not_applied[0]["reason_not_applied"] == "basin_not_in_publish_set"
+    # And nothing was overridden: both published basins keep the source value.
+    for model_id in ("basins_alpha_shud", "basins_bravo_shud"):
+        assert (
+            _published_calibration_bytes(
+                work_dir=work_dir, object_root=object_root, model_id=model_id
+            ).decode("utf-8")
+            == _SOURCE_CALIB_TEXT
+        )
+        assert "overrides" not in _package_manifest(work_dir, model_id)["calibration"]
+
+
+def test_declared_basin_filtered_out_of_this_run_is_reported_not_refused(tmp_path: Path) -> None:
+    """Same key, the other way in: the basin EXISTS but this run does not publish it.
+
+    This is the `--basin-slug` case the corrected key protects.
+    """
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(
+        tmp_path / "config" / "overrides.yaml", [_declaration_entry(basin_slug="bravo")]
+    )
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "filtered" / "providers" / "manifest-last.json",
+        object_store_root=tmp_path / "filtered" / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "filtered" / "work",
+        basin_slugs=["alpha"],
+        calibration_overrides_path=declaration,
+    )
+
+    assert summary["selected_basin_slugs"] == ["alpha"]
+    assert summary["calibration_overrides"] == []
+    assert [item["basin_slug"] for item in summary["calibration_overrides_not_applied"]] == ["bravo"]
+
+
+def test_checked_in_declaration_loads_without_anyone_naming_it(tmp_path: Path) -> None:
+    """#1832 §1.3: no opt-in.  Both lanes load `config/calibration_overrides.yaml`.
+
+    Nothing here names a declaration path, and `hetianhe` is not in this tree,
+    so the run must proceed AND still show that it read the checked-in file.
+    """
+    basins_root = _write_override_fixture(tmp_path)
+
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "default" / "providers" / "manifest-last.json",
+        object_store_root=tmp_path / "default" / "objects",
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "default" / "work",
+    )
+
+    assert summary["status"] == "published"
+    assert summary["calibration_overrides_declaration"] == str(
+        basins_calibration_overrides.DEFAULT_CALIBRATION_OVERRIDES_PATH
+    )
+    assert [item["basin_slug"] for item in summary["calibration_overrides_not_applied"]] == ["hetianhe"]
 
 
 def test_declaration_naming_an_unknown_parameter_refuses_the_publish(tmp_path: Path) -> None:
@@ -2552,3 +2628,158 @@ def test_checked_in_declaration_seeds_exactly_the_hetianhe_geol_dmac_entry() -> 
     # The reason has to carry the measurement, not just an assertion.
     for measured in ("4.75", "4.5", "NAN", "gfs", "IFS"):
         assert measured in reason, reason
+
+
+def test_refresh_lane_applies_the_same_declaration_as_the_manual_publisher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1832 §1.3: an override that applies on only one lane is worse than none.
+
+    The scheduler file-provider refresh calls the same publisher.  If it
+    republished a declared basin from the source value it would re-derive the
+    ORIGINAL `model_id` and silently revert the registry to an identity whose
+    per-model forcing and warm state have since been rebuilt under the
+    overridden one -- undoing the rollout without a single error.
+
+    Proven by call-through (the REAL publisher runs inside refresh) and by
+    byte-level agreement: the two lanes must produce the same
+    ``package_checksum`` for the same inputs.
+    """
+    from tests.test_basins_registry_import import _write_registry_fixture
+
+    basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
+        tmp_path / "fixture"
+    )
+    (input_dir / "alias-a.cfg.calib").write_text(_SOURCE_CALIB_TEXT, encoding="utf-8")
+    declaration = _write_declaration(
+        tmp_path / "config" / "overrides.yaml", [_declaration_entry(basin_slug="basin-a")]
+    )
+    expected_calibration = _SOURCE_CALIB_TEXT.replace("GEOL_DMAC\t5", "GEOL_DMAC\t4")
+
+    # Lane A: the manual publisher.
+    manual_work = tmp_path / "manual" / "work"
+    manual_objects = tmp_path / "manual" / "objects"
+    registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "manual" / "providers" / "manifest-last.json",
+        object_store_root=manual_objects,
+        object_store_prefix="s3://nhms",
+        work_dir=manual_work,
+        repair_missing_radiation=False,
+        calibration_overrides_path=declaration,
+    )
+    manual_manifest = _package_manifest(manual_work, model_id)
+    assert manual_manifest["calibration"]["overrides"][0]["value"] == "4"
+
+    # Lane B: the refresh runner, driving the real publisher.  Bootstrap its
+    # stores with a SOURCE-value publish first -- both because the #1080
+    # cutover gate needs a previous canonical manifest, and because that is the
+    # real situation: production is already carrying the un-overridden package
+    # when the declaration lands.
+    private_objects = tmp_path / "refresh" / "private-objects"
+    shared_providers = tmp_path / "refresh" / "shared-providers"
+    registry_manifest = shared_providers / "scheduler/registry/manifest-last.json"
+    bootstrap_work = tmp_path / "refresh" / "bootstrap-work"
+    registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=private_objects,
+        object_store_prefix="s3://nhms",
+        work_dir=bootstrap_work,
+        repair_missing_radiation=False,
+        calibration_overrides_path=None,
+    )
+    bootstrap_manifest = _package_manifest(bootstrap_work, model_id)
+    assert "overrides" not in bootstrap_manifest["calibration"]
+    assert bootstrap_manifest["package_checksum"] != manual_manifest["package_checksum"]
+    readiness = shared_providers / "scheduler/canonical-readiness/index-last.json"
+    state = shared_providers / "scheduler/state-index/index-last.json"
+    publish_canonical_readiness_index(
+        [], readiness, object_store_root=private_objects, object_store_prefix="s3://nhms"
+    )
+    publish_state_snapshot_index(
+        [], state, object_store_root=private_objects, object_store_prefix="s3://nhms"
+    )
+    _write_current_catalogs(private_objects)
+    runtime = tmp_path / "refresh" / "runtime"
+    work, receipts, emergency = runtime / "work", runtime / "receipts", runtime / "emergency"
+    for directory in (runtime, work, receipts, emergency):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700)
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    real_publish_all = refresh.publish_all_basin_scheduler_registry
+    captured: dict[str, Any] = {}
+
+    def _spy_publish_all(**kwargs: Any) -> dict[str, Any]:
+        captured["declaration"] = kwargs.get("calibration_overrides_path")
+        try:
+            summary = real_publish_all(**kwargs)
+        except registry_script.SchedulerRegistryPublishError as error:
+            # The #1080 cutover gate runs INSIDE the publisher, after the
+            # packages are written, so its refusal arrives as an exception
+            # carrying the package results.  Keep them; they are the #1832
+            # evidence.
+            captured["failure"] = error.to_payload()
+            raise
+        captured["summary"] = summary
+        return summary
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", _spy_publish_all)
+    receipt = refresh.refresh_scheduler_file_providers(
+        refresh.RefreshConfig(
+            basins_root=basins_root,
+            registry_uri=str(registry_manifest),
+            readiness_uri=str(readiness),
+            state_uri=str(state),
+            object_store_root=private_objects,
+            provider_store_root=shared_providers,
+            object_store_prefix="s3://nhms",
+            workspace_root=work,
+            receipt_root=receipts,
+            emergency_root=emergency,
+            refresh_lock=runtime / "refresh.lock",
+            calibration_overrides_path=declaration,
+        ),
+        dry_run=False,
+    )
+
+    # The declaration reached the publisher through the lane's own config.
+    assert captured["declaration"] == declaration
+    refresh_failure = captured["failure"]
+    assert refresh_failure["created_total"] == 1, refresh_failure
+
+    # Bullet 1 + 2 together: the refresh lane minted the SAME identity the
+    # manual publisher does.  The failure payload redacts manifest URIs, so
+    # look the package up by the version the manual lane produced -- if refresh
+    # had not loaded the declaration it would have derived the SOURCE version
+    # (the bootstrap one) and this path would not exist.
+    refresh_manifest_path = Path(
+        private_objects, "models", model_id, str(manual_manifest["version"]), "manifest.json"
+    )
+    assert refresh_manifest_path.is_file(), sorted(
+        path.name for path in (private_objects / "models" / model_id).iterdir()
+    )
+    assert manual_manifest["version"] != bootstrap_manifest["version"]
+    refresh_manifest = json.loads(refresh_manifest_path.read_text(encoding="utf-8"))
+
+    store = LocalObjectStore(private_objects, object_store_prefix="s3://nhms")
+    calibration_entry = next(
+        item
+        for item in refresh_manifest["included_files"]
+        if str(item["relative_path"]).endswith(".cfg.calib")
+    )
+    assert store.read_bytes(str(calibration_entry["object_uri"])).decode("utf-8") == expected_calibration
+    assert refresh_manifest["calibration"]["overrides"][0]["value"] == "4"
+    assert refresh_manifest["package_checksum"] == manual_manifest["package_checksum"]
+
+    # Pinned, not swallowed: the package publishes, but swapping the canonical
+    # registry onto the new identity is #1080's cutover gate, and it refuses
+    # without an operator declaration.  That is orthogonal to #1832 and is a
+    # constraint on the rollout, not a defect here -- an unattended refresh
+    # cannot silently move the registry onto the overridden model id either.
+    assert receipt["outcome"] == "failed"
+    assert receipt["reason"] == "registry_cutover_undeclared"
+    assert json.loads(registry_manifest.read_text(encoding="utf-8"))["models"][0][
+        "package_checksum"
+    ] == bootstrap_manifest["package_checksum"]

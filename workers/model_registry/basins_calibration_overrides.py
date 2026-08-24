@@ -15,9 +15,14 @@ but as an explicit, declared, recorded exception:
   ``(basin_slug, parameter)`` pair that a checked-in declaration names.
 * **Declared value, not derived value** — the declaration states the number;
   nobody has to re-derive it to know what a package will carry.
-* **Refuse, never skip** — an entry that cannot be applied fails the publish.
-  A silently unapplied entry would publish the ORIGINAL value while the
-  declaration claims otherwise, which is worse than having no declaration.
+* **Refuse, never skip — keyed on *published but not applied*.** If a basin is
+  being published and its declared override did not land, the publish fails:
+  otherwise the package carries the ORIGINAL value while the declaration claims
+  otherwise, which is worse than having no declaration.  A declared basin that
+  the current run does not publish is NOT a refusal — it publishes nothing, so
+  it can tell no lie, and keying the refusal there would kill every narrowed
+  publish (`--basin-slug`, any tree that legitimately lacks the basin) and push
+  operators toward not loading the declaration at all.
 
 Application itself happens on an isolated staging copy owned by the caller;
 this module never resolves the Basins source tree.
@@ -39,7 +44,6 @@ DECLARATION_SCHEMA_KEY = "calibration_overrides"
 DEFAULT_CALIBRATION_OVERRIDES_PATH = Path(__file__).resolve().parents[2] / "config" / "calibration_overrides.yaml"
 
 _REQUIRED_ENTRY_FIELDS = ("basin_slug", "parameter", "value", "reason", "approver", "date")
-_PARAMETER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 class CalibrationOverrideError(RuntimeError):
@@ -153,13 +157,19 @@ def apply_calibration_overrides_for_basin(
     ``isolated_root / basin_slug`` and refuses to escape it.  Returns the
     manifest-shaped record of what was applied, sorted deterministically.
 
-    Raises on an unknown parameter or on an entry that matched nothing.
+    Raises on an unparseable declared value, an unknown parameter, or an entry
+    that matched nothing.
     """
 
     root = Path(isolated_root).expanduser()
     basin_dir = root / basin_slug
     if not overrides:
         return []
+    # Value parsing is checked here, not at load: this basin is being published,
+    # so an entry that cannot be applied would otherwise publish the original
+    # value under a declaration that claims otherwise.
+    for override in overrides:
+        _require_parsed_value(override)
     input_parent = basin_dir / "input"
     calib_files = (
         sorted(
@@ -260,13 +270,11 @@ def _override_from_entry(
         )
     basin_slug = str(item["basin_slug"]).strip()
     parameter = str(item["parameter"]).strip()
-    if not _PARAMETER_RE.match(parameter):
-        raise CalibrationOverrideError(
-            "CALIBRATION_OVERRIDE_DECLARATION_INVALID",
-            f"Calibration override entry #{index} declares a malformed parameter name: {parameter!r}.",
-            details={**location, "entry": _stringify_entry(item)},
-        )
-    value = _parsed_value(item["value"], index=index, declaration_path=declaration_path, entry=item)
+    # The declared value is NOT number-checked here.  Load happens before the
+    # publish set is known, and an unparseable value is only a refusal for a
+    # basin this run actually publishes (spec: "published but not applied").
+    # `_require_parsed_value` runs at application time instead.
+    value = _declared_value_text(item["value"])
     key = (basin_slug, parameter)
     if key in seen:
         raise CalibrationOverrideError(
@@ -285,36 +293,45 @@ def _override_from_entry(
     )
 
 
-def _parsed_value(raw: Any, *, index: int, declaration_path: Path, entry: Mapping[str, Any]) -> str:
-    # bool is an int subclass; a YAML `true` is never a calibration value.
+def _declared_value_text(raw: Any) -> str:
+    """The declared scalar, verbatim, as it will be written into the file.
+
+    Deliberately lenient: anything that is not a plain scalar is kept as its
+    ``repr`` so it survives to ``_require_parsed_value`` and is reported as an
+    unparseable value against the basin that is actually being published.
+    """
     if isinstance(raw, bool) or not isinstance(raw, int | float | str):
-        raise _unparseable_value(raw, index=index, declaration_path=declaration_path, entry=entry)
-    text = str(raw).strip()
+        return repr(raw)
+    return str(raw).strip()
+
+
+def _require_parsed_value(override: CalibrationOverride) -> None:
+    """Refuse an unparseable declared value, at apply time.
+
+    Reached only for a basin that IS being published: a package that carried
+    the original value under a declaration claiming a different one is the lie
+    this refusal exists to prevent.
+    """
     try:
-        parsed = float(text)
+        parsed = float(override.value)
     except (TypeError, ValueError) as error:
-        raise _unparseable_value(raw, index=index, declaration_path=declaration_path, entry=entry) from error
+        raise _unparseable_value(override) from error
     if parsed != parsed or parsed in (float("inf"), float("-inf")):
-        raise _unparseable_value(raw, index=index, declaration_path=declaration_path, entry=entry)
-    return text
+        raise _unparseable_value(override)
 
 
-def _unparseable_value(
-    raw: Any,
-    *,
-    index: int,
-    declaration_path: Path,
-    entry: Mapping[str, Any],
-) -> CalibrationOverrideError:
-    label = f"{entry.get('basin_slug')}:{entry.get('parameter')}"
+def _unparseable_value(override: CalibrationOverride) -> CalibrationOverrideError:
     return CalibrationOverrideError(
         "CALIBRATION_OVERRIDE_VALUE_UNPARSEABLE",
-        f"Calibration override '{label}' declares a value that cannot be parsed as a number: {raw!r}.",
+        (
+            f"Declared calibration override '{override.entry_label}' declares a value that cannot be "
+            f"parsed as a number: {override.value!r}."
+        ),
         details={
-            "declaration_path": str(declaration_path),
-            "entry_index": index,
-            "entry": _stringify_entry(entry),
-            "declared_value": repr(raw),
+            "entry": override.as_entry(),
+            "basin_slug": override.basin_slug,
+            "parameter": override.parameter,
+            "declared_value": repr(override.value),
         },
     )
 

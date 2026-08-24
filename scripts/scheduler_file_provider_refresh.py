@@ -47,6 +47,7 @@ from packages.scheduler.registry_audit import (
     normalize_cutover_gate_audit,
 )
 from scripts.publish_scheduler_file_registry import (
+    CALIBRATION_OVERRIDE_PATH_ENV_NAME,
     SchedulerRegistryPublishError,
     publish_all_basin_scheduler_registry,
 )
@@ -60,6 +61,7 @@ from services.orchestrator.scheduler_file_providers import (
     publish_scheduler_registry_manifest,
     validate_catalog_bound_readiness_entries,
 )
+from workers.model_registry.basins_calibration_overrides import DEFAULT_CALIBRATION_OVERRIDES_PATH
 
 SCHEMA_VERSION = "nhms.scheduler.file_provider_refresh_receipt.v1"
 OUTCOMES = frozenset(
@@ -446,6 +448,13 @@ class RefreshConfig:
     emergency_root: Path
     refresh_lock: Path
     worker_registry_uri: str | None = None
+    # #1832: the checked-in calibration-override declaration.  Wired explicitly
+    # rather than left to the publisher's default so this lane's use of it is
+    # visible here: if THIS lane republished a declared basin from the source
+    # value it would re-derive the ORIGINAL `model_id` and silently revert the
+    # registry to an identity whose per-model forcing and warm state have since
+    # been rebuilt under the overridden one.
+    calibration_overrides_path: Path = DEFAULT_CALIBRATION_OVERRIDES_PATH
 
     @classmethod
     def from_env(cls) -> RefreshConfig:
@@ -464,6 +473,10 @@ class RefreshConfig:
             emergency_root=_absolute_env_path("NHMS_SCHEDULER_PROVIDER_REFRESH_EMERGENCY_ROOT"),
             refresh_lock=_absolute_env_path("NHMS_SCHEDULER_PROVIDER_REFRESH_LOCK"),
             worker_registry_uri=_required_env("NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST"),
+            calibration_overrides_path=_optional_absolute_env_path(
+                CALIBRATION_OVERRIDE_PATH_ENV_NAME,
+                DEFAULT_CALIBRATION_OVERRIDES_PATH,
+            ),
         )
 
 
@@ -898,6 +911,7 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                     resource_validator=_enforce_workspace_bounds,
                     workspace_budget=workspace_budget,
                     max_contexts=MAX_ORPHANS,
+                    calibration_overrides_path=config.calibration_overrides_path,
                     cutover_gate=runner_cutover_gate_audit,
                     skipped_model_sink=_skipped_model_sink,
                 )
@@ -1392,6 +1406,16 @@ def _ensure_private_directory(path: Path) -> None:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise RefreshError("configuration_invalid")
     verify_directory_no_follow(path)
+
+
+def _optional_absolute_env_path(name: str, default: Path) -> Path:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise RefreshError("configuration_invalid")
+    return path
 
 
 def _absolute_env_path(name: str) -> Path:

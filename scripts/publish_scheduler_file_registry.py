@@ -42,10 +42,10 @@ from services.orchestrator.scheduler_file_providers import (
     publish_scheduler_registry_manifest,
 )
 from workers.model_registry.basins_calibration_overrides import (
+    DEFAULT_CALIBRATION_OVERRIDES_PATH,
     CalibrationOverride,
     CalibrationOverrideError,
     apply_calibration_overrides_for_basin,
-    declared_basin_slugs,
     load_calibration_overrides,
     overrides_for_basin,
 )
@@ -152,7 +152,7 @@ def publish_all_basin_scheduler_registry(
     walltime_minutes: int = 720,
     repair_missing_radiation: bool = True,
     retain_repair_staging: bool = False,
-    calibration_overrides_path: str | Path | None = None,
+    calibration_overrides_path: str | Path | None = DEFAULT_CALIBRATION_OVERRIDES_PATH,
     dry_run: bool = False,
     output_path: str | Path | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
@@ -169,9 +169,10 @@ def publish_all_basin_scheduler_registry(
     skipped_model_sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     audited_cutover_gate = normalize_cutover_gate_audit(cutover_gate)
-    # #1832: parse the declaration before any tree is discovered or copied, so
-    # an unparseable value refuses with the offending entry instead of taking
-    # a half-published run down later.
+    # #1832: the checked-in declaration loads by default, on BOTH lanes -- an
+    # override that only applies on one lane is worse than no override, because
+    # the other lane republishes the source value and re-derives the original
+    # `model_id`.  An explicit ``None``/`""` is the test/rehearsal escape hatch.
     declared_overrides: tuple[CalibrationOverride, ...] = (
         load_calibration_overrides(calibration_overrides_path)
         if calibration_overrides_path not in (None, "")
@@ -200,8 +201,6 @@ def publish_all_basin_scheduler_registry(
     _guard_resources(resource_validator, workspace)
     _write_workspace_inventory(inventory, inventory_path, workspace_budget)
     _guard_resources(resource_validator, workspace)
-
-    _refuse_undiscovered_override_basins(declared_overrides, inventory)
 
     selected_models = _select_publishable_models(
         inventory,
@@ -430,6 +429,10 @@ def publish_all_basin_scheduler_registry(
         "calibration_overrides": [
             item for context in contexts for item in (context.calibration_overrides or ())
         ],
+        # A declared basin this run does not publish is REPORTED, not refused:
+        # it publishes nothing, so it can tell no lie.  Reporting keeps the fact
+        # visible without making every narrowed publish collateral damage.
+        "calibration_overrides_not_applied": _declared_entries_not_applied(declared_overrides, contexts),
         "calibration_overrides_declaration": (
             str(calibration_overrides_path) if calibration_overrides_path not in (None, "") else None
         ),
@@ -754,40 +757,28 @@ def _select_publishable_models(
     return selected
 
 
-def _refuse_undiscovered_override_basins(
+def _declared_entries_not_applied(
     declared_overrides: Sequence[CalibrationOverride],
-    inventory: Mapping[str, Any],
-) -> None:
-    """#1832 D3: a declared basin the tree does not contain fails the run.
+    contexts: Sequence[PublishContext],
+) -> list[dict[str, Any]]:
+    """#1832: a declared basin outside this publish set is reported, not refused.
 
-    Checked against the DISCOVERED inventory, before a single package is
-    published, so the refusal cannot leave a partially published run behind.
-    A declared basin that is discovered but filtered out of this run by
-    ``--basin-slug`` / ``--model-id`` is NOT a refusal: no package is published
-    for it, so no package can claim a value it does not carry.
+    The lie the refusal exists to prevent is a PUBLISHED package carrying the
+    original value while the declaration claims otherwise.  A basin this run
+    does not publish cannot tell that lie, so keying the refusal on
+    "declared but not published" would only make every narrowed publish -- a
+    ``--basin-slug`` run, a test tree, a partial Basins mirror -- fail on a
+    declaration that is doing nothing wrong.  It is still a fact worth
+    persisting, so it lands on the run summary.
     """
     if not declared_overrides:
-        return
-    models = inventory.get("models")
-    discovered = {
-        str(model.get("basin_slug"))
-        for model in (models if isinstance(models, Sequence) and not isinstance(models, str | bytes) else [])
-        if isinstance(model, Mapping) and model.get("basin_slug")
-    }
-    unknown = sorted(slug for slug in declared_basin_slugs(declared_overrides) if slug not in discovered)
-    if not unknown:
-        return
-    raise CalibrationOverrideError(
-        "CALIBRATION_OVERRIDE_UNKNOWN_BASIN",
-        f"Calibration override declaration names basin(s) that were not discovered: {', '.join(unknown)}.",
-        details={
-            "unknown_basin_slugs": unknown,
-            "entries": [
-                override.as_entry() for override in declared_overrides if override.basin_slug in set(unknown)
-            ],
-            "discovered_basin_slugs": sorted(discovered),
-        },
-    )
+        return []
+    published_slugs = {str(context.model.get("basin_slug") or "") for context in contexts}
+    return [
+        {**override.as_entry(), "reason_not_applied": "basin_not_in_publish_set"}
+        for override in declared_overrides
+        if override.basin_slug not in published_slugs
+    ]
 
 
 def _apply_calibration_override_contexts(
@@ -1185,11 +1176,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--calibration-overrides",
-        default=os.getenv(CALIBRATION_OVERRIDE_PATH_ENV_NAME, "").strip() or None,
+        default=(
+            os.getenv(CALIBRATION_OVERRIDE_PATH_ENV_NAME, "").strip()
+            or str(DEFAULT_CALIBRATION_OVERRIDES_PATH)
+        ),
         help=(
-            "Path to the declared calibration-override file (normally "
-            "config/calibration_overrides.yaml).  Omitted -> no calibration value is "
-            f"overridden.  Defaults to ${CALIBRATION_OVERRIDE_PATH_ENV_NAME}."
+            "Path to the declared calibration-override file.  The checked-in "
+            f"{DEFAULT_CALIBRATION_OVERRIDES_PATH.name} loads by default without anyone naming it; "
+            f"this flag (or ${CALIBRATION_OVERRIDE_PATH_ENV_NAME}) only redirects the path, for "
+            "rehearsal against an alternative declaration."
         ),
     )
     parser.add_argument(
