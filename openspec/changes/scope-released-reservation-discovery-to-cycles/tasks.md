@@ -83,6 +83,16 @@
 - [x] 3b.3 Group candidates by `cycle_scope` so each distinct cycle is confirmed
       once. Fail-closed budget behaviour and the single whole-tree fall-open pass
       are unchanged.
+- [x] 3b.4 Red-first pin for the GROUPING half specifically (round-2 P2: 3b.1
+      counts listings, which the 3b.2 memo alone holds at 2 even with the
+      grouping reverted, so it does not discriminate the two halves). Counts
+      scoped REPLAYS, which the memo does not deduplicate: C=12 candidates over
+      K=3 cycles SHALL cost exactly K replays, and the recorded scope set SHALL
+      equal the candidates' own cycles (a count alone would also admit three
+      replays of the wrong cycle; a `None` scope would mean the whole-tree
+      fall-open, not grouping). Red at 12 with a per-candidate loop that KEEPS
+      the memo; the 3b.1 pin stays green under that same revert, which is the
+      finding's own proof.
 
 ## 4. Local verification
 

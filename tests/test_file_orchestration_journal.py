@@ -15997,6 +15997,62 @@ def test_released_identity_blocked_confirm_does_not_relist_the_flat_directory_pe
     assert len(listings) == 2, len(listings)
 
 
+def test_released_identity_blocked_confirm_replays_once_per_cycle_not_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 design D14: the confirm half is grouped BY CYCLE, not per candidate.
+
+    The pin above counts flat-directory LISTINGS, and the per-query memo alone
+    holds that count at two even if the grouping is reverted to a per-candidate
+    loop -- so it does not discriminate the two halves of the fix.  This one
+    counts the scoped REPLAYS themselves, which the memo does not deduplicate:
+    a per-candidate loop costs one cycle replay per candidate, and a mass
+    release puts an unbounded number of rows into a handful of cycles.
+
+    The oracle is a constant times K, with the fixture built so C > K in-test
+    (12 candidates over 3 cycles), so the bound cannot silently degrade into a
+    tautology.  The recorded scopes are compared as a SET too: a count alone
+    would also be satisfied by three replays of the wrong cycle, and a
+    ``None`` scope would mean the fall-open whole-tree replay, not grouping.
+    """
+
+    cycle_times = (
+        _dt("2026-07-20T00:00:00Z"),
+        _dt("2026-07-20T12:00:00Z"),
+        _dt("2026-07-21T00:00:00Z"),
+    )
+    per_cycle = 4
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = reader._iter_pipeline_job_records_scoped
+    replayed: list[tuple[str, datetime] | None] = []
+
+    def counting_iter_pipeline_job_records_scoped(
+        cycle_scope: tuple[str, datetime] | None, **kwargs: Any
+    ) -> Any:
+        replayed.append(cycle_scope)
+        return original(cycle_scope, **kwargs)
+
+    monkeypatch.setattr(
+        reader, "_iter_pipeline_job_records_scoped", counting_iter_pipeline_job_records_scoped
+    )
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned, and the fixture
+    # really is C > K -- 12 candidates spread over 3 cycles.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle == 12
+    # Half 2: the growth law. One replay per DISTINCT cycle, exactly, and each
+    # one for a cycle a candidate actually lives in.
+    assert len(replayed) == len(cycle_times), replayed
+    assert set(replayed) == {("gfs", cycle_time) for cycle_time in cycle_times}
+
+
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])
 def test_recovery_cli_refusals_name_the_failing_precondition(
     tmp_path: Path, capsys: Any, entrypoint: str
