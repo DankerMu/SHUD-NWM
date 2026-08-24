@@ -55,6 +55,7 @@ from services.orchestrator.accepted_submit_identity import (
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
+    normalize_init_state_identities,
     normalize_quarantine_rerun_model_ids,
     ordered_cohort_members,
 )
@@ -8836,6 +8837,19 @@ class FileJournalRetryService:
                     "slurm_job_id": None,
                 }
             )
+        try:
+            durable_lineage = _strict_retry_init_state_identities(current.get(INIT_STATE_IDENTITY_FIELD))
+        except FileOrchestrationJournalError as error:
+            raise RetryError(
+                "AUTO_RETRY_EVIDENCE_UNAVAILABLE",
+                "Auto retry durable predecessor lineage is invalid.",
+                {
+                    "job_id": job_id,
+                    "journal_reason": str(error.reason),
+                    "journal_field": str(error.field),
+                },
+            ) from error
+        durable_previous_job_id = str(current["job_id"])
         source = _file_retry_job_record(job)
         previous_error = source.get("error_code")
         status_from = str(source.get("status") or "")
@@ -8853,7 +8867,7 @@ class FileJournalRetryService:
                         "existing_status": existing.get("status"),
                         "existing_slurm_job_id": existing.get("slurm_job_id"),
                         "existing_array_task_id": existing.get("array_task_id"),
-                        "previous_job_id": source["job_id"],
+                        "previous_job_id": durable_previous_job_id,
                     },
                 )
             reused_existing_retry_job = True
@@ -8879,12 +8893,11 @@ class FileJournalRetryService:
         # An auto retry attempt has a fresh job/idempotency identity with
         # nulled candidate/array discriminators: it cannot satisfy the
         # predecessor's accepted-submit authority contract and must not
-        # claim it.  Lineage comes from the durable row, never the caller
-        # snapshot, whose missing field would silently normalize to a false
-        # empty map.
+        # claim it.  Lineage and the immediate predecessor both come from
+        # the durable row; the caller snapshot must control neither.
         retry_record.pop(ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD, None)
-        if current is not None:
-            retry_record[INIT_STATE_IDENTITY_FIELD] = current.get(INIT_STATE_IDENTITY_FIELD) or []
+        retry_record[INIT_STATE_IDENTITY_FIELD] = durable_lineage
+        retry_record["previous_job_id"] = durable_previous_job_id
         written = self.repository.upsert_pipeline_job(retry_record)
         backoff_seconds = compute_backoff_seconds(int(source.get("retry_count") or 0), self.config.backoff_schedule)
         self.repository.insert_pipeline_event(
@@ -8898,7 +8911,7 @@ class FileJournalRetryService:
                 "retry_count": next_retry_count,
                 "previous_error": previous_error,
                 "backoff_seconds": backoff_seconds,
-                "previous_job_id": source["job_id"],
+                "previous_job_id": durable_previous_job_id,
                 "slurm_job_id": written.get("slurm_job_id"),
                 "failure": classify_failure(
                     previous_error,
@@ -9139,6 +9152,12 @@ class FileJournalRetryService:
                 # selection and this lock-held rebind; never mint a retry row
                 # off the projection.
                 raise RetryNotFoundError(run_id)
+            try:
+                _strict_retry_init_state_identities(failed_job.get(INIT_STATE_IDENTITY_FIELD))
+            except FileOrchestrationJournalError as error:
+                raise RetryEvidenceInvalidError(
+                    run_id, reason=str(error.reason), field=str(error.field)
+                ) from error
 
             previous_error = failed_job.get("error_code") or (
                 "cancelled" if failed_job.get("status") == "cancelled" else None
@@ -9285,6 +9304,14 @@ class FileJournalRetryService:
             )
 
         retry_job = self._create_pending_manual_retry_job(run_id)
+        # Trusted PRE-SUBMIT private snapshot: captured before any gateway
+        # call, so an external writer corrupting the durable pending row
+        # DURING the call cannot affect the lineage the success update must
+        # preserve.  Its lineage was already strictly validated when the
+        # pending row was constructed.
+        trusted_pending_snapshot = self.repository._pipeline_job_for_id_unlocked(retry_job.job_id)
+        if trusted_pending_snapshot is None:
+            raise RetryNotFoundError(retry_job.job_id)
         runtime_root_resolution: dict[str, Any] | None = None
         runtime_root_contract: dict[str, str] | None = None
         try:
@@ -9300,6 +9327,7 @@ class FileJournalRetryService:
         updated = self._record_manual_retry_submission_success(
             retry_job.job_id,
             submitted,
+            trusted_pending_snapshot,
             runtime_root_resolution=runtime_root_resolution,
             runtime_root_contract=runtime_root_contract,
         )
@@ -9652,11 +9680,20 @@ class FileJournalRetryService:
         self,
         job_id: str,
         submitted: Any,
+        trusted_pending_snapshot: Mapping[str, Any],
         *,
         runtime_root_resolution: dict[str, Any] | None = None,
         runtime_root_contract: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         payload = _file_retry_gateway_payload(submitted)
+        # The gateway side effect already happened, so a pending row whose
+        # lineage was corrupted DURING the call must not lose its submission
+        # binding: validate the trusted pre-submit snapshot and write its
+        # exact normalized lineage, never the later (possibly malformed or
+        # divergent) current row's copy and never a public projection.
+        trusted_lineage = _strict_retry_init_state_identities(
+            trusted_pending_snapshot.get(INIT_STATE_IDENTITY_FIELD)
+        )
         # Update the PRIVATE durable row: the public projection's lineage
         # and URI fields are display placeholders, and writing that copy
         # back would launder them over the pending row's real values.
@@ -9673,6 +9710,7 @@ class FileJournalRetryService:
                 "finished_at": _optional_format_datetime(payload.get("finished_at"), field="finished_at"),
                 "error_code": None,
                 "error_message": None,
+                INIT_STATE_IDENTITY_FIELD: trusted_lineage,
                 "updated_at": _format_utc(_utcnow()),
             }
         )
@@ -10223,6 +10261,47 @@ def _bounded_init_state_identities(value: Any) -> list[dict[str, Any]]:
         }
         result.append(entry)
     return result
+
+
+_RETRY_LINEAGE_PLACEHOLDER_TOKENS = frozenset(
+    {"[object-uri]", "[uri]", "[local-path]", "[redacted]", "sha256:[redacted]"}
+)
+
+
+def _retry_lineage_contains_placeholder(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(_retry_lineage_contains_placeholder(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return any(_retry_lineage_contains_placeholder(item) for item in value)
+    if isinstance(value, str):
+        return value in _RETRY_LINEAGE_PLACEHOLDER_TOKENS
+    return False
+
+
+def _strict_retry_init_state_identities(value: Any) -> list[dict[str, Any]]:
+    """Strict retry-lineage boundary shared by both retry producers.
+
+    Unlike ``_bounded_init_state_identities`` (which tolerantly normalizes
+    malformed input to a partial map), a retry row's inherited lineage must be
+    either genuinely empty (absent/None/``[]``) or fully valid: a malformed
+    map silently normalized to ``[]`` would falsify the attempt's warm-start
+    provenance, and a placeholder-bearing value would launder display
+    redaction into durable state.  Raises ``FileOrchestrationJournalError``
+    with stable reason/field only.
+    """
+
+    if value is None:
+        return []
+    try:
+        normalized = normalize_init_state_identities(value)
+    except AcceptedSubmitEvidenceError as error:
+        raise FileOrchestrationJournalError(error.reason, field=error.field) from error
+    if _retry_lineage_contains_placeholder(normalized):
+        raise FileOrchestrationJournalError(
+            "file_journal_evidence_placeholder_invalid",
+            field=INIT_STATE_IDENTITY_FIELD,
+        )
+    return normalized
 
 
 def _bounded_candidate_projections(value: Any) -> list[dict[str, Any]]:

@@ -12862,9 +12862,12 @@ def test_manual_retry_round_trip_keeps_the_real_log_uri(
     assert repository.get_pipeline_job(record["job_id"])["log_uri"] == _LAUNDERED_URI
     service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
 
+    trusted_snapshot = repository._pipeline_job_for_id_unlocked(record["job_id"])
+    assert trusted_snapshot is not None
     service._record_manual_retry_submission_success(
         record["job_id"],
         {"job_id": "7007", "status": "submitted"},
+        trusted_snapshot,
     )
 
     durable = _durable_pipeline_job_payloads(repository.root, record["job_id"])[-1]
@@ -16114,10 +16117,14 @@ def test_file_manual_retry_submission_success_update_cannot_launder_durable_line
     ]
     direct_path.write_text(json.dumps(direct_record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
+    trusted_snapshot = repository._pipeline_job_for_id_unlocked(retry_job_id)
+    assert trusted_snapshot is not None
+    assert trusted_snapshot["init_state_identities"] == real_lineage
     service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
     updated = service._record_manual_retry_submission_success(
         retry_job_id,
         {"job_id": "7161", "status": "submitted"},
+        trusted_snapshot,
     )
 
     assert updated["status"] == "submitted"
@@ -16511,6 +16518,403 @@ def test_file_auto_retry_master_virtual_row_renders_public_lineage(tmp_path: Pat
         and json.loads(line).get("payload", {}).get("event_type") == "retry"
     ]
     assert retry_events == []
+
+
+def _corrupt_direct_lineage(repository: FileOrchestrationJournalRepository, job_id: str, lineage: Any) -> None:
+    """Corrupt the row's durable lineage on the direct surface only.
+
+    The jsonl segments are blanked and the materialized latest views removed
+    so neither replay surface can shadow the corrupted direct record with
+    the last clean copy.
+    """
+
+    direct_path = repository.root / "pipeline-jobs" / f"{job_id}.json"
+    record = json.loads(direct_path.read_text(encoding="utf-8"))
+    record["payload"]["init_state_identities"] = lineage
+    direct_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    for jsonl_path in (repository.root / "journal").rglob("*.jsonl"):
+        jsonl_path.write_text("", encoding="utf-8")
+    for latest_path in (repository.root / "latest").rglob("*.json"):
+        latest_path.unlink()
+
+
+def _jsonl_payloads(repository: FileOrchestrationJournalRepository, record_type: str) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)["payload"]
+        for line in _lineage_jsonl_text(repository).splitlines()
+        if json.loads(line).get("record_type") == record_type
+    ]
+
+
+def _assert_no_retry_mutation(repository: FileOrchestrationJournalRepository) -> None:
+    assert [
+        payload for payload in _jsonl_payloads(repository, "pipeline_job") if "_retry_" in str(payload.get("job_id"))
+    ] == []
+    assert [
+        payload
+        for payload in _jsonl_payloads(repository, "pipeline_event")
+        if payload.get("event_type") == "retry"
+    ] == []
+    direct_paths = (
+        list((repository.root / "pipeline-jobs").rglob("*retry*"))
+        if (repository.root / "pipeline-jobs").exists()
+        else []
+    )
+    assert direct_paths == []
+
+
+def test_file_manual_retry_malformed_marker_free_lineage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Manual marker-free predecessor with a malformed string lineage map."""
+
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_manual_bad_lineage",
+        init_state_identities=[],
+    )
+    _corrupt_direct_lineage(repository, "job_manual_bad_lineage", "not-a-list")
+    repository = FileOrchestrationJournalRepository(repository.root)
+    gateway = _lineage_manual_retry_gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    with pytest.raises(RetryError) as caught:
+        service.attempt_manual_retry("fcst_gfs_2026072000_model_a", gateway, trusted_internal=True)
+
+    error = caught.value
+    assert isinstance(error, journal_module.RetryEvidenceInvalidError)
+    assert error.code == "RETRY_EVIDENCE_INVALID"
+    assert error.status_code == 409
+    assert error.details["journal_reason"] == "file_journal_evidence_type_invalid"
+    assert error.details["journal_field"] == "init_state_identities"
+    assert gateway.requests == []
+    _assert_no_retry_mutation(repository)
+
+
+@pytest.mark.parametrize(
+    "bad_lineage",
+    [
+        pytest.param(["not-a-mapping"], id="non_mapping_entry"),
+        pytest.param(
+            [{"array_task_id": 0, "model_id": "model_a", "init_state_id": "state", "bogus": "x"}],
+            id="unknown_entry_field",
+        ),
+        pytest.param(
+            [
+                {
+                    "array_task_id": 0,
+                    "model_id": "model_a",
+                    "init_state_id": "state",
+                    "init_state_uri": "[object-uri]",
+                }
+            ],
+            id="object_uri_placeholder",
+        ),
+        pytest.param(
+            [
+                {
+                    "array_task_id": 0,
+                    "model_id": "model_a",
+                    "init_state_id": "state",
+                    "init_state_uri": "[uri]",
+                }
+            ],
+            id="uri_placeholder",
+        ),
+        pytest.param(
+            [
+                {
+                    "array_task_id": 0,
+                    "model_id": "model_a",
+                    "init_state_id": "state",
+                    "init_state_uri": "[local-path]",
+                }
+            ],
+            id="local_path_placeholder",
+        ),
+        pytest.param(
+            [
+                {
+                    "array_task_id": 0,
+                    "model_id": "model_a",
+                    "init_state_id": "state",
+                    "init_state_checksum": "[redacted]",
+                }
+            ],
+            id="redacted_placeholder",
+        ),
+        pytest.param(
+            [
+                {
+                    "array_task_id": 0,
+                    "model_id": "model_a",
+                    "init_state_id": "state",
+                    "init_state_checksum": "sha256:[redacted]",
+                }
+            ],
+            id="sha256_redacted_placeholder",
+        ),
+    ],
+)
+def test_file_manual_retry_non_forecast_invalid_lineage_fails_closed(
+    tmp_path: Path,
+    bad_lineage: Any,
+) -> None:
+    """Manual non-forecast predecessor: non-mapping entry or placeholder."""
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    non_forecast = _source_job(
+        _LINEAGE_CYCLE_TIME,
+        source_id="gfs",
+        job_id="job_non_forecast_bad_lineage",
+        stage="state_save_qc",
+    )
+    non_forecast["init_state_identities"] = bad_lineage
+    non_forecast["status"] = "failed"
+    non_forecast["error_code"] = "STORAGE_WRITE_FAILED"
+    non_forecast["finished_at"] = "2026-07-20T00:05:00Z"
+    repository.upsert_pipeline_job(non_forecast)
+    _corrupt_direct_lineage(repository, "job_non_forecast_bad_lineage", bad_lineage)
+    repository = FileOrchestrationJournalRepository(repository.root)
+    gateway = _lineage_manual_retry_gateway()
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    with pytest.raises(journal_module.RetryEvidenceInvalidError) as caught:
+        service.attempt_manual_retry("fcst_gfs_2026072000_model_a", gateway, trusted_internal=True)
+
+    error = caught.value
+    assert error.code == "RETRY_EVIDENCE_INVALID"
+    assert error.status_code == 409
+    reason = error.details["journal_reason"]
+    field = error.details["journal_field"]
+    if reason == "file_journal_evidence_placeholder_invalid":
+        assert field == "init_state_identities"
+    else:
+        assert reason in {
+            "file_journal_evidence_type_invalid",
+            "file_journal_evidence_field_not_allowed",
+        }
+        assert field.startswith("init_state_identities")
+    assert gateway.requests == []
+    _assert_no_retry_mutation(repository)
+
+
+def test_file_auto_retry_narrow_snapshot_malformed_lineage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Auto narrow production snapshot + malformed durable lineage."""
+
+    from services.orchestrator.persistence import PipelineJob
+
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_auto_bad_lineage",
+        init_state_identities=[],
+    )
+    _corrupt_direct_lineage(repository, "job_auto_bad_lineage", "not-a-list")
+    repository = FileOrchestrationJournalRepository(repository.root)
+    narrow_snapshot = PipelineJob(
+        job_id="job_auto_bad_lineage",
+        run_id="fcst_gfs_2026072000_model_a",
+        cycle_id="gfs_2026072000",
+        job_type="run_shud_forecast_array",
+        slurm_job_id="3001",
+        model_id="model_a",
+        status="failed",
+        stage="forecast",
+    )
+    narrow_snapshot.error_code = "SLURM_TIMEOUT"
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    with pytest.raises(RetryError) as caught:
+        service.schedule_auto_retry(narrow_snapshot)
+
+    error = caught.value
+    assert error.code == "AUTO_RETRY_EVIDENCE_UNAVAILABLE"
+    assert error.details["journal_reason"] == "file_journal_evidence_type_invalid"
+    assert error.details["journal_field"] == "init_state_identities"
+    _assert_no_retry_mutation(repository)
+
+
+def test_file_handle_failed_job_production_path_malformed_lineage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """handle_failed_job (production entry) + malformed durable lineage."""
+
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_handle_bad_lineage",
+        init_state_identities=[],
+    )
+    _corrupt_direct_lineage(repository, "job_handle_bad_lineage", [{"no_task_id": True}])
+    repository = FileOrchestrationJournalRepository(repository.root)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    with pytest.raises(RetryError) as caught:
+        service.handle_failed_job(repository.get_pipeline_job("job_handle_bad_lineage"))
+
+    error = caught.value
+    assert error.code == "AUTO_RETRY_EVIDENCE_UNAVAILABLE"
+    _assert_no_retry_mutation(repository)
+
+
+@pytest.mark.parametrize("empty_lineage", [None, []])
+def test_file_retry_genuine_empty_lineage_stays_empty(
+    tmp_path: Path,
+    empty_lineage: Any,
+) -> None:
+    """Genuine absent/None/[] lineage keeps the existing empty semantics."""
+
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_genuine_empty",
+        init_state_identities=empty_lineage,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    retried = service.schedule_auto_retry(
+        repository._pipeline_job_for_id_unlocked("job_genuine_empty")
+    )
+    direct = _direct_row_payload(repository, str(retried.job_id))
+    assert direct["init_state_identities"] == []
+    jsonl = _durable_pipeline_job_payloads(repository.root, str(retried.job_id))[-1]
+    assert jsonl["init_state_identities"] == []
+
+
+def test_file_auto_retry_first_hop_and_retry_of_retry_bind_durable_predecessor(
+    tmp_path: Path,
+) -> None:
+    """previous_job_id comes from the durable row, hop by hop.
+
+    First hop (full-row and narrow-snapshot callers) and the retry-of-retry
+    second hop must each bind their IMMEDIATE durable predecessor in both the
+    direct payload and the jsonl replay row; the second retry points to the
+    first retry, not the original, and no authority marker is retained.
+    """
+
+    from services.orchestrator.persistence import PipelineJob
+
+    identities = _lineage_auto_retry_identities()
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_auto_chain",
+        init_state_identities=identities,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    full_row = repository._pipeline_job_for_id_unlocked("job_auto_chain")
+    assert full_row is not None
+    first_full = service.schedule_auto_retry(full_row)
+    first_full_direct = _direct_row_payload(repository, str(first_full.job_id))
+    first_full_jsonl = _durable_pipeline_job_payloads(repository.root, str(first_full.job_id))[-1]
+    for payload in (first_full_direct, first_full_jsonl):
+        assert payload["previous_job_id"] == "job_auto_chain"
+        assert payload["init_state_identities"] == identities
+        assert "accepted_submit_contract_version" not in payload
+
+    repository.update_pipeline_job_status(
+        str(first_full.job_id), "failed", error_code="SLURM_TIMEOUT", finished_at=_LINEAGE_CYCLE_TIME
+    )
+    narrow_snapshot = PipelineJob(
+        job_id=str(first_full.job_id),
+        run_id="fcst_gfs_2026072000_model_a",
+        cycle_id="gfs_2026072000",
+        job_type="run_shud_forecast_array",
+        slurm_job_id=None,
+        model_id="model_a",
+        status="failed",
+        stage="forecast",
+    )
+    narrow_snapshot.error_code = "SLURM_TIMEOUT"
+    narrow_snapshot.retry_count = 1
+    second_narrow = service.schedule_auto_retry(narrow_snapshot)
+    second_direct = _direct_row_payload(repository, str(second_narrow.job_id))
+    second_jsonl = _durable_pipeline_job_payloads(repository.root, str(second_narrow.job_id))[-1]
+    for payload in (second_direct, second_jsonl):
+        assert payload["previous_job_id"] == str(first_full.job_id)
+        assert payload["init_state_identities"] == identities
+        assert "accepted_submit_contract_version" not in payload
+    first_event = next(
+        payload
+        for payload in _jsonl_payloads(repository, "pipeline_event")
+        if payload.get("entity_id") == str(first_full.job_id)
+    )
+    second_event = next(
+        payload
+        for payload in _jsonl_payloads(repository, "pipeline_event")
+        if payload.get("entity_id") == str(second_narrow.job_id)
+    )
+    assert first_event["details"]["previous_job_id"] == "job_auto_chain"
+    assert second_event["details"]["previous_job_id"] == str(first_full.job_id)
+
+
+def test_file_manual_retry_submission_success_survives_gateway_time_corruption(
+    tmp_path: Path,
+) -> None:
+    """Submission-success keeps the PRE-SUBMIT snapshot lineage.
+
+    The trusted snapshot is captured before the gateway call; the callback
+    then corrupts the pending row's durable lineage (direct + jsonl + latest)
+    and swaps in a fresh repository so the success updater's current read
+    observes the malformed row.  The submission must still record the binding
+    with the exact pre-submit lineage, no placeholder, no false ``[]``,
+    marker absent, ``previous_job_id`` unchanged, exactly one gateway call.
+    """
+
+    original_lineage = _lineage_auto_retry_identities()
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_gateway_corrupt",
+        init_state_identities=original_lineage,
+    )
+    retry_job_id = "fcst_gfs_2026072000_model_a_retry_active"
+
+    class CorruptingGateway:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        def submit_job(self, request: Any) -> dict[str, Any]:
+            self.calls.append(request)
+            # Corrupt the winning pending row's durable lineage and remove the
+            # replay surfaces so the success updater's private current read
+            # MUST observe the malformed direct record.  Swap in a fresh
+            # repository so no in-memory cache of the writing instance can
+            # serve the clean pre-corruption row.
+            direct_path = repository.root / "pipeline-jobs" / f"{retry_job_id}.json"
+            record = json.loads(direct_path.read_text(encoding="utf-8"))
+            record["payload"]["init_state_identities"] = "not-a-list"
+            direct_path.write_text(json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            for jsonl_path in (repository.root / "journal").rglob("*.jsonl"):
+                jsonl_path.write_text("", encoding="utf-8")
+            for latest_path in (repository.root / "latest").rglob("*.json"):
+                latest_path.unlink()
+            service.repository = FileOrchestrationJournalRepository(repository.root)
+            return {"job_id": "7180", "status": "submitted"}
+
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    gateway = CorruptingGateway()
+    retried = service.attempt_manual_retry(
+        "fcst_gfs_2026072000_model_a", gateway, trusted_internal=True
+    )
+
+    assert retried.status == "submitted"
+    assert len(gateway.calls) == 1
+    assert retried.job_id == retry_job_id
+    assert retried.slurm_job_id == "7180"
+    assert retried.previous_job_id == "job_gateway_corrupt"
+    assert "accepted_submit_contract_version" not in vars(retried)
+    direct = _direct_row_payload(repository, retry_job_id)
+    assert direct["init_state_identities"] == original_lineage
+    assert direct["previous_job_id"] == "job_gateway_corrupt"
+    assert "accepted_submit_contract_version" not in direct
+    jsonl = _durable_pipeline_job_payloads(repository.root, retry_job_id)[-1]
+    assert jsonl["init_state_identities"] == original_lineage
+    assert jsonl["previous_job_id"] == "job_gateway_corrupt"
+    assert "accepted_submit_contract_version" not in jsonl
+    rendered = _lineage_jsonl_text(repository) + json.dumps(direct, sort_keys=True)
+    _lineage_assert_no_placeholders(rendered)
+    submission_events = [
+        payload
+        for payload in _jsonl_payloads(repository, "pipeline_event")
+        if payload.get("entity_id") == retry_job_id and payload.get("event_type") == "submission"
+    ]
+    assert len(submission_events) == 1
+    assert submission_events[0]["status_to"] == "submitted"
+    assert submission_events[0]["details"]["slurm_job_id"] == "7180"
 
 
 def test_file_auto_retry_full_row_and_narrow_snapshot_inherit_durable_lineage(
