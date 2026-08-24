@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import scripts.publish_scheduler_file_registry as registry_script
+import workers.model_registry.basins_calibration_overrides as basins_calibration_overrides
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.state_manager import publish_state_snapshot_index
 from scripts import scheduler_file_provider_refresh as refresh
@@ -2252,3 +2253,302 @@ def test_cli_startup_warning_coexists_with_failure_json_payload(
     assert json.loads(lines[-1]) == _PREFIX_MISSING_FAILURE_PAYLOAD, err
     # Exactly one added line: warning + payload, nothing else on the channel.
     assert len(lines) == 2, err
+
+
+# ---------------------------------------------------------------------------
+# #1832: declared calibration overrides.
+#
+# #1816 deleted a publisher step that scanned every basin and silently clamped
+# calibration values against two hard-coded bounds.  Deleting it was right in
+# substance, but one of the two bounds (`GEOL_DMAC <= 4`) is a real empirical
+# stability bound: with its source value 5, `hetianhe` makes SHUD produce NaN
+# and exit 10.  These tests pin the replacement -- an explicit, declared,
+# recorded exception -- and, above all, the properties #1816 existed to
+# protect: nothing undeclared is touched, and the Basins source tree is only
+# ever read.
+# ---------------------------------------------------------------------------
+
+_SOURCE_CALIB_TEXT = "GEOL_KSATH\t0.00977999747288218\nGEOL_DMAC\t5\nSOIL_ALPHA\t8.19327372615961\n"
+_OVERRIDE_REASON = "GEOL_DMAC 5 and 4.75 both NaN/EXIT 10; 4.5 and 4 run clean on gfs and IFS."
+
+
+def _write_declaration(path: Path, entries: list[dict[str, Any]]) -> Path:
+    import yaml
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump({"calibration_overrides": entries}, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _declaration_entry(
+    *,
+    basin_slug: str = "alpha",
+    parameter: str = "GEOL_DMAC",
+    value: Any = 4,
+) -> dict[str, Any]:
+    return {
+        "basin_slug": basin_slug,
+        "parameter": parameter,
+        "value": value,
+        "reason": _OVERRIDE_REASON,
+        "approver": "danker",
+        "date": "2026-08-24",
+    }
+
+
+def _write_override_fixture(tmp_path: Path) -> Path:
+    """Two publishable basins; only ``alpha`` is ever declared."""
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    for slug in ("alpha", "bravo"):
+        (basins_root / slug / "input" / slug / f"{slug}.cfg.calib").write_text(
+            _SOURCE_CALIB_TEXT, encoding="utf-8"
+        )
+    return basins_root
+
+
+def _tree_digest(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): sha256_bytes(path.read_bytes())
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _publish_with_declaration(
+    *,
+    basins_root: Path,
+    tmp_path: Path,
+    declaration: Path | None,
+    run_name: str,
+) -> tuple[dict[str, Any], Path, Path]:
+    object_root = tmp_path / run_name / "objects"
+    work_dir = tmp_path / run_name / "work"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / run_name / "providers" / "manifest-last.json",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=work_dir,
+        calibration_overrides_path=declaration,
+    )
+    return summary, work_dir, object_root
+
+
+def _package_manifest(work_dir: Path, model_id: str) -> dict[str, Any]:
+    return json.loads(
+        (work_dir / "package-manifests" / f"{model_id}.manifest.json").read_text(encoding="utf-8")
+    )
+
+
+def test_undeclared_basin_publishes_its_calibration_unchanged(tmp_path: Path) -> None:
+    """#1832 spec scenario 1: absent from the declaration -> pure byte copy.
+
+    ``bravo`` carries the same out-of-bound ``GEOL_DMAC 5`` as ``alpha``; the
+    only difference between them is that the declaration names one of them.
+    That is the whole point of "named, not scanned".
+    """
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(tmp_path / "config" / "overrides.yaml", [_declaration_entry()])
+    source_bytes = (basins_root / "bravo" / "input" / "bravo" / "bravo.cfg.calib").read_bytes()
+
+    summary, work_dir, object_root = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name="undeclared"
+    )
+
+    assert summary["selected_basin_slugs"] == ["alpha", "bravo"]
+    published = _published_calibration_bytes(
+        work_dir=work_dir, object_root=object_root, model_id="basins_bravo_shud"
+    )
+    assert published == source_bytes
+    assert b"GEOL_DMAC\t5" in published
+    # Absence, not an empty list: "not overridden" must not be readable as
+    # "considered and found nothing to do".
+    assert "overrides" not in _package_manifest(work_dir, "basins_bravo_shud")["calibration"]
+
+
+def test_declared_override_is_applied_recorded_and_never_written_to_source(tmp_path: Path) -> None:
+    """#1832 spec scenario 2, all four clauses on one real publish."""
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(tmp_path / "config" / "overrides.yaml", [_declaration_entry()])
+    before = _tree_digest(basins_root)
+
+    summary, work_dir, object_root = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name="declared"
+    )
+
+    assert summary["package_status_counts"] == {"published": 2}
+    published = _published_calibration_bytes(
+        work_dir=work_dir, object_root=object_root, model_id="basins_alpha_shud"
+    ).decode("utf-8")
+    # Clause 1: the declared value is what the package carries.
+    assert "GEOL_DMAC\t4\n" in published
+    # Clause 2: every OTHER calibration value is byte-identical to source.
+    assert published == _SOURCE_CALIB_TEXT.replace("GEOL_DMAC\t5", "GEOL_DMAC\t4")
+    # Clause 3: the manifest records parameter, applied value, and reason.
+    overrides = _package_manifest(work_dir, "basins_alpha_shud")["calibration"]["overrides"]
+    assert len(overrides) == 1
+    assert overrides[0]["parameter"] == "GEOL_DMAC"
+    assert overrides[0]["value"] == "4"
+    assert overrides[0]["source_value"] == "5"
+    assert overrides[0]["reason"] == _OVERRIDE_REASON
+    assert overrides[0]["approver"] == "danker"
+    # Clause 4: the Basins source tree is unwritten -- the property #1816
+    # existed to protect.  Whole-tree digest, not just the one file.
+    assert _tree_digest(basins_root) == before
+    # The run receipt echoes the same facts for an operator reading it.
+    assert [item["parameter"] for item in summary["calibration_overrides"]] == ["GEOL_DMAC"]
+    assert summary["calibration_overrides_declaration"] == str(declaration)
+
+
+def test_declared_override_changes_the_package_identity(tmp_path: Path) -> None:
+    """#1832 spec scenario 4, end to end: a different calibration IS a different package."""
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(tmp_path / "config" / "overrides.yaml", [_declaration_entry()])
+
+    _plain, plain_work, _plain_objects = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=None, run_name="identity-plain"
+    )
+    _overridden, override_work, _override_objects = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name="identity-override"
+    )
+
+    plain_manifest = _package_manifest(plain_work, "basins_alpha_shud")
+    override_manifest = _package_manifest(override_work, "basins_alpha_shud")
+    assert plain_manifest["package_checksum"] != override_manifest["package_checksum"]
+    assert plain_manifest["version"] != override_manifest["version"]
+    # And the undeclared basin's identity is untouched by the other basin's override.
+    assert (
+        _package_manifest(plain_work, "basins_bravo_shud")["package_checksum"]
+        == _package_manifest(override_work, "basins_bravo_shud")["package_checksum"]
+    )
+
+
+def test_declared_override_reaches_a_radiation_repaired_basin(tmp_path: Path) -> None:
+    """A basin that is BOTH declared AND radiation-repaired must get both edits.
+
+    A repaired basin enters through ``_repair_missing_radiation_contexts``, not
+    through plain selection.  If override staging only walked the plainly
+    selected models, this basin would publish the ORIGINAL calibration while
+    the declaration claims otherwise -- exactly the silent lie design D3
+    refuses.
+    """
+    basins_root = _write_override_fixture(tmp_path)
+    (basins_root / "bravo" / "input" / "bravo" / "bravo.tsd.rl").unlink()
+    declaration = _write_declaration(
+        tmp_path / "config" / "overrides.yaml", [_declaration_entry(basin_slug="bravo")]
+    )
+    radiation_template = (basins_root / "alpha" / "input" / "alpha" / "alpha.tsd.rl").read_bytes()
+    before = _tree_digest(basins_root)
+
+    summary, work_dir, object_root = _publish_with_declaration(
+        basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name="repaired"
+    )
+
+    assert summary["selected_basin_slugs"] == ["alpha", "bravo"]
+    assert len(summary["repairs"]) == 1
+    # Both edits landed in the same package.
+    assert (
+        _published_bytes_for_suffix(
+            work_dir=work_dir, object_root=object_root, model_id="basins_bravo_shud", suffix=".tsd.rl"
+        )
+        == radiation_template
+    )
+    published = _published_calibration_bytes(
+        work_dir=work_dir, object_root=object_root, model_id="basins_bravo_shud"
+    ).decode("utf-8")
+    assert published == _SOURCE_CALIB_TEXT.replace("GEOL_DMAC\t5", "GEOL_DMAC\t4")
+    assert _package_manifest(work_dir, "basins_bravo_shud")["calibration"]["overrides"][0]["value"] == "4"
+    assert _tree_digest(basins_root) == before
+
+
+def _refused(tmp_path: Path, entries: list[dict[str, Any]], *, run_name: str) -> Any:
+    basins_root = _write_override_fixture(tmp_path)
+    declaration = _write_declaration(tmp_path / "config" / "overrides.yaml", entries)
+    before = _tree_digest(basins_root)
+    object_root = tmp_path / run_name / "objects"
+    with pytest.raises(basins_calibration_overrides.CalibrationOverrideError) as excinfo:
+        _publish_with_declaration(
+            basins_root=basins_root, tmp_path=tmp_path, declaration=declaration, run_name=run_name
+        )
+    # "no package is published for that basin": the refusal lands before any
+    # object is written, and the source tree is untouched either way.
+    assert not list(object_root.rglob("manifest.json"))
+    assert _tree_digest(basins_root) == before
+    return excinfo.value
+
+
+def test_declaration_naming_an_unknown_basin_refuses_the_publish(tmp_path: Path) -> None:
+    """#1832 refusal 1 -- a renamed/typo'd basin must not pass silently."""
+    error = _refused(tmp_path, [_declaration_entry(basin_slug="charlie")], run_name="unknown-basin")
+
+    assert error.error_code == "CALIBRATION_OVERRIDE_UNKNOWN_BASIN"
+    assert "charlie" in str(error)
+    assert error.details["unknown_basin_slugs"] == ["charlie"]
+    assert error.details["entries"][0]["parameter"] == "GEOL_DMAC"
+
+
+def test_declaration_naming_an_unknown_parameter_refuses_the_publish(tmp_path: Path) -> None:
+    """#1832 refusal 2 -- a parameter the basin's cfg.calib does not contain."""
+    error = _refused(tmp_path, [_declaration_entry(parameter="GEOL_DMACC")], run_name="unknown-parameter")
+
+    assert error.error_code == "CALIBRATION_OVERRIDE_UNKNOWN_PARAMETER"
+    assert "alpha:GEOL_DMACC" in str(error)
+    assert error.details["entry"]["basin_slug"] == "alpha"
+    assert error.details["calibration_file"] == "input/alpha/alpha.cfg.calib"
+
+
+def test_declaration_with_an_unparseable_value_refuses_the_publish(tmp_path: Path) -> None:
+    """#1832 refusal 3 -- refused before any tree is discovered or copied."""
+    error = _refused(tmp_path, [_declaration_entry(value="four")], run_name="unparseable")
+
+    assert error.error_code == "CALIBRATION_OVERRIDE_VALUE_UNPARSEABLE"
+    assert "alpha:GEOL_DMAC" in str(error)
+    assert error.details["declared_value"] == "'four'"
+
+
+def test_declared_entry_that_matches_no_calibration_file_refuses(tmp_path: Path) -> None:
+    """#1832 refusal 4 -- a declaration that applies to nothing is still a lie.
+
+    Pinned at the application seam: a basin with no ``*.cfg.calib`` at all
+    cannot pass discovery, so this is the belt-and-braces refusal that keeps
+    ``apply_calibration_overrides_for_basin`` honest for any caller.
+    """
+    isolated_root = tmp_path / "staging"
+    (isolated_root / "alpha" / "input" / "alpha").mkdir(parents=True)
+    override = basins_calibration_overrides.CalibrationOverride(
+        basin_slug="alpha",
+        parameter="GEOL_DMAC",
+        value="4",
+        reason=_OVERRIDE_REASON,
+        approver="danker",
+        date="2026-08-24",
+    )
+
+    with pytest.raises(basins_calibration_overrides.CalibrationOverrideError) as excinfo:
+        basins_calibration_overrides.apply_calibration_overrides_for_basin(
+            isolated_root=isolated_root,
+            basin_slug="alpha",
+            overrides=[override],
+        )
+
+    assert excinfo.value.error_code == "CALIBRATION_OVERRIDE_MATCHED_NOTHING"
+    assert "alpha:GEOL_DMAC" in str(excinfo.value)
+    assert excinfo.value.details["calibration_file_count"] == 0
+
+
+def test_checked_in_declaration_seeds_exactly_the_hetianhe_geol_dmac_entry() -> None:
+    """#1832 §3.1/§3.2: the first entry, and the one deliberately NOT declared."""
+    overrides = basins_calibration_overrides.load_calibration_overrides(
+        Path(__file__).resolve().parents[1] / "config" / "calibration_overrides.yaml"
+    )
+
+    assert [(item.basin_slug, item.parameter, item.value) for item in overrides] == [
+        ("hetianhe", "GEOL_DMAC", "4")
+    ]
+    # §3.2: SOIL_ALPHA is not declared for ANY basin; the source value stands.
+    assert all(item.parameter != "SOIL_ALPHA" for item in overrides)
+    reason = overrides[0].reason
+    # The reason has to carry the measurement, not just an assertion.
+    for measured in ("4.75", "4.5", "NAN", "gfs", "IFS"):
+        assert measured in reason, reason
