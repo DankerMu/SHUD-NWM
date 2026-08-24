@@ -6,8 +6,16 @@
   over the previously enforced `SOIL_ALPHA` bound and asserts the published
   `cfg.calib` is byte-identical to source. It MUST fail on current `main`.
 - [x] 1.2 Same for `GEOL_DMAC`.
-- [x] 1.3 Add a test asserting the published package manifest records no
-  `basins.calibration_repair.v1` entry.
+- [x] 1.3 Add a test asserting the publication receipt's `repairs` list contains
+  no `basins.calibration_repair.v1` entry. (The package manifest has no repair
+  field for any repair kind, so the receipt is the only assertable seam.)
+- [x] 1.4 Add a test that runs the real (non-mocked) publish with
+  `repair_missing_radiation=True` on a basin missing only `*.tsd.rl` whose
+  `cfg.calib` is over the deleted bound, and asserts all three bullets of the
+  "missing radiation template" scenario together: the supplied `*.tsd.rl` is in
+  the package, the run records the
+  `basins.missing_tsd_rl_template_repair.v1` repair, and the published
+  `cfg.calib` is byte-identical to source.
 
 ## 2. Delete
 

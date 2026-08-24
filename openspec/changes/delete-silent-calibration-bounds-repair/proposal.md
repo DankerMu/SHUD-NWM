@@ -4,7 +4,7 @@
 
 `workers/model_registry/basins_soil_alpha_repair.py` rewrites externally
 calibrated SHUD parameters during package publication, without recording the
-rewrite in the package manifest. Measured on node-22 (#1816): **8 of 24
+rewrite anywhere that travels with the package. Measured on node-22 (#1816): **8 of 24
 published basins** carry a `cfg.calib` that differs from
 `/volume/nwm/Basins/<slug>`, with `SOIL_ALPHA` reduced by 14%–71% and, for
 `hetianhe`, `GEOL_DMAC` reduced from 5 to 4. **1242 forecast runs / 956
@@ -19,9 +19,14 @@ and no issue. The calibrations they override were produced by external users
 running SHUD to convergence; had the values been fatal, those calibrations
 could not exist.
 
-Traceability failed alongside the behavior: **zero** of the 24 package
-manifests record a repair. The only receipt lives in a scratch directory for
-one basin. The other seven rewrites left no trace at all.
+Traceability failed alongside the behavior. The package manifest has no repair
+field at all — `publish_basins_package` takes no repair argument — so **zero** of
+the 24 published packages are self-describing about the rewrite. The only
+recording seam is the publish receipt's `repairs` list, which is written into the
+publisher workspace and does not travel with the package. Of the eight rewrites,
+exactly one receipt survives, in a scratch directory, for `SHJ-2SHJ`. The
+remaining seven have no surviving record: the table above was reconstructed by
+byte-comparing published packages against their sources.
 
 ## What Changes
 

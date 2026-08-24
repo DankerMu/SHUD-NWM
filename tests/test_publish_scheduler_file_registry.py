@@ -1407,6 +1407,82 @@ def test_publish_records_no_calibration_repair(tmp_path: Path) -> None:
     assert "calibration_repair" not in package_manifest
 
 
+def _published_bytes_for_suffix(
+    *, work_dir: Path, object_root: Path, model_id: str, suffix: str
+) -> bytes:
+    manifest = json.loads(
+        (work_dir / "package-manifests" / f"{model_id}.manifest.json").read_text(encoding="utf-8")
+    )
+    matches = [
+        item for item in manifest["included_files"] if str(item["relative_path"]).endswith(suffix)
+    ]
+    assert len(matches) == 1, matches
+    store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
+    return store.read_bytes(str(matches[0]["object_uri"]))
+
+
+def test_radiation_repair_supplies_template_without_touching_calibration(tmp_path: Path) -> None:
+    """#1816 s1.4: the two halves of the radiation-repair scenario hold together.
+
+    Scenario "A missing radiation template is still supplied and recorded"
+    asserts a conjunction: the template IS added AND the calibration is NOT
+    touched.  Both halves must be observed on the same real (non-mocked)
+    publish, on a basin whose ``cfg.calib`` sits outside the deleted bound --
+    otherwise "we add files but never rewrite values" is only ever tested one
+    clause at a time.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    bravo_input = basins_root / "bravo" / "input" / "bravo"
+    # bravo is missing ONLY *.tsd.rl -- exactly the repairable shape.
+    (bravo_input / "bravo.tsd.rl").unlink()
+    template = _write_soil_alpha_model_files(tmp_path / "calibration-template", "basin-a", "alias-a")
+    for suffix in ("cfg.calib", "para.soil"):
+        (bravo_input / f"bravo.{suffix}").write_bytes((template / f"alias-a.{suffix}").read_bytes())
+
+    source_calib = bravo_input / "bravo.cfg.calib"
+    source_bytes = source_calib.read_bytes()
+    assert b"SOIL_ALPHA\t8.19327372615961" in source_bytes
+    radiation_template_bytes = (basins_root / "alpha" / "input" / "alpha" / "alpha.tsd.rl").read_bytes()
+
+    object_root = tmp_path / "objects"
+    work_dir = tmp_path / "work"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=work_dir,
+        repair_missing_radiation=True,
+    )
+
+    # Guard against a vacuous pass: bravo must actually have been repaired and
+    # published, not skipped.
+    assert summary["selected_basin_slugs"] == ["alpha", "bravo"]
+    assert summary["package_status_counts"] == {"published": 2}
+    model_id = "basins_bravo_shud"
+
+    # Bullet 1: the package carries the supplied template, byte-for-byte.
+    assert (
+        _published_bytes_for_suffix(
+            work_dir=work_dir, object_root=object_root, model_id=model_id, suffix=".tsd.rl"
+        )
+        == radiation_template_bytes
+    )
+    # Bullet 2: the run records the repair under the radiation schema.
+    assert len(summary["repairs"]) == 1
+    repair = summary["repairs"][0]
+    assert repair["schema_version"] == "basins.missing_tsd_rl_template_repair.v1"
+    assert repair["basin_slug"] == "bravo"
+    assert [item["status"] for item in repair["repairs"]] == ["repaired"]
+    # Bullet 3: the calibration rode through untouched, at source and published.
+    assert source_calib.read_bytes() == source_bytes
+    assert (
+        _published_calibration_bytes(work_dir=work_dir, object_root=object_root, model_id=model_id)
+        == source_bytes
+    )
+
+
 def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> dict[str, Any]:
     slug_id = registry_script._slug_id(basin_slug)
     input_name = shud_input_name or basin_slug.rsplit("/", maxsplit=1)[-1]

@@ -19,7 +19,8 @@ operation:
 |---|---|---|
 | schema | `basins.calibration_repair.v1` | `basins.missing_tsd_rl_template_repair.v1` |
 | acts on | a value a human calibrated | a file that is absent |
-| recorded in manifest | **no** (the defect) | yes |
+| recorded in package manifest | no | no |
+| recorded in publish receipt | yes, but only in the workspace | yes |
 | staging dir | `repaired-basins-soil-alpha` | `repaired-basins` |
 | disposition | **deleted** | **kept** |
 
