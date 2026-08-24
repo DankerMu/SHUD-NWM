@@ -1724,3 +1724,31 @@ strengthened oracle then made two independently replayed bounded-reader mutants
 red, and the pinned Round 2 lens verified closure. That supports keeping a
 pinned evidence lens plus independent adjudication. It says nothing about the
 marginal value of a rotated free slot, because none ran.
+
+## Revisit (2026-08-24, issue #1564 / PR #1755)
+
+After appending PR #1755's validated accountability line, `loop_log_audit`
+returns DECIDABLE at **121 multi-round merged PRs, later-round catches core=71 /
+rotated=293**. Relative to the preceding sample, this five-round PR contributes
+**3 core** and **8 rotated** later-round catches. The recorded human decision
+remains **keep rotation**: the cumulative attribution still concentrates far more
+catches in lenses absent from round 1, and this PR adds evidence in that same
+direction rather than reversing it.
+
+The three core catches were produced by exact round-1 lens tokens reused later:
+`test-evidence` in rounds 2 and 3, and `spec-compliance` in round 4. The eight
+rotated catches came from `correctness-state`, `spec-oracle`, and composite
+integration/state labels introduced after fixes. They were load-bearing: the
+round-2 old-ID routing defect, round-3 writer-authority / committed-reclaim /
+safe-root closure, and round-4 canonical-spec contradiction all survived local
+Phase 2 and CI.
+
+There is an attribution caveat rather than a reason to cut. The audit compares
+lens tokens literally, so a composite token such as
+`correctness-state+integration-security` counts as rotated even when it contains
+part of a round-1 perspective. Consequently the 8 should not be read as eight
+purely novel disciplines. The defensible conclusion is narrower: retaining a
+pinned core while allowing the follow-up mix to change scope continued to buy
+union recall, especially across fix-created and newly merged contract surfaces.
+That is exactly the current policy. No reviewer-set or rotation-policy change
+follows from this revisit.

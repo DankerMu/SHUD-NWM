@@ -1376,12 +1376,15 @@ success and stays governed by the partial-advance contract) and
 #### Scenario: Lost reservations are not mark sources
 
 - **WHEN** a decline exit or any caller invokes the mark on a master row
-  whose persisted status is `reservation_lost` (either durable sub-shape:
-  `absence_retry_permitted` or `identity_mismatch_released`)
+  whose persisted status is `reservation_lost` (one of the three durable
+  decision sub-shapes: `absence_retry_permitted`,
+  `operator_verified_absence`, or `identity_mismatch_released`)
 - **THEN** the mark SHALL be declined as stale with zero writes and zero
-  events and SHALL NOT raise — a lost reservation is reclaim-pending, not a
-  permanently failed job, and both reclaim doors (the reservation reclaim
-  predicate and the reconcile-verified retry shortcut) SHALL remain open
+  events and SHALL NOT raise — a lost reservation is not a permanently failed
+  job; the reservation reclaim predicate and reconcile-verified retry shortcut
+  SHALL remain open only for the two absence decisions
+  (`absence_retry_permitted` and `operator_verified_absence`) and SHALL remain
+  closed for `identity_mismatch_released`
 
 #### Scenario: Marked master rows do not resurrect via upstream refresh
 
@@ -2375,13 +2378,25 @@ cluster whose accounting does not store job comments, absence is not provable.
 Invoking it places that judgement with the operator rather than with the machine.
 Recording the attestation twice on the same row SHALL be idempotent.
 
-**The door predicate is unchanged; the operator disjunct is additive.** The
-reconcile-verified retry predicate SHALL keep requiring
-`absence_retry_permitted` byte-for-byte, and the reservation reclaim predicate
-SHALL keep requiring it too. The operator attestation SHALL be admitted as an
-additional, separate disjunct at the consuming call site — never by widening,
-weakening, or reordering either predicate itself. No automatic path SHALL be able
-to set the attestation or reach the recovery API.
+**The lower-level predicates accept exactly two absence decisions; the
+released-row disjunct is additive.** The reconcile-verified retry predicate SHALL
+retain all of its non-decision gates — the accepted or ambiguous submit outcome,
+the exact-comment source, the null matched Slurm job id, and the valid cohort
+identity — and SHALL accept exactly two legitimate absence decisions:
+`absence_retry_permitted` and `operator_verified_absence`. The file-journal
+reservation reclaim predicate SHALL likewise retain all of its non-decision gates
+— current-master/idempotency match, unbound, null reason class and null matched
+job id, exact expected attempt and anchor, and immutable cohort identity — and
+SHALL accept exactly the same two absence decisions. `absence_retry_permitted`
+retains its existing byte-for-byte meaning and automatic behavior.
+`operator_verified_absence` is the only second legitimate decision member and can
+be authored only by the dedicated typed operator-demotion path. The released-row
+geometry this requirement governs (`identity_mismatch_released` plus the
+`operator_recovery_attested_at` attestation field) remains an additive, separate
+disjunct at the consuming call site — neither `identity_mismatch_released` nor the
+attestation field may enter, widen, weaken, or reorder either lower-level
+predicate. No automatic path SHALL be able to set the attestation or reach the
+recovery API.
 
 **Signal.** The release write point SHALL emit, exactly once per release, a
 queryable operator-visible record carrying the searchable token
@@ -2485,4 +2500,33 @@ makes no release write SHALL remain write-free and signal-free.
 - **THEN** each release SHALL emit exactly one operator-visible record carrying
   the token `IDENTITY_RELEASED_RESERVATION_NEEDS_OPERATOR` and naming the job id,
   cohort digest, and `identity_blocked_streak`
+
+### Requirement: Operator-verified absence is a distinct reclaimable file-journal decision
+
+The file-journal reclaim predicate and the forecast-cycle reconcile-verified retry shortcut SHALL widen only their accepted decision membership to exactly two absence decisions, `absence_retry_permitted` and `operator_verified_absence`. The cycle retry door SHALL retain its existing composition: the caller requires an unbound `reservation_lost` row, while the shortcut requires an accepted or ambiguous outcome, exact-comment source, null matched job id, and valid cohort identity; existing marker-free automatic-absence rows satisfying that legacy contract SHALL remain compatible. The file-journal reclaim CAS SHALL additionally retain its current-master/idempotency match, unbound, null-reason/null-match, exact expected attempt and anchor, and immutable cohort-identity predicates. `operator_verified_absence` SHALL be an accepted accounting decision but SHALL NOT enter the generic versioned-transition whitelist, the manual-retry source-status set, or the identity-streak decision set. `identity_mismatch_released` and every other non-absence `reservation_lost` sub-shape SHALL remain non-reclaimable. A successful current-master reclaim SHALL derive the new attempt solely from durable state, increment it exactly once, and capture a fresh anchor under the lock rather than accepting either value from the lock-external request.
+
+#### Scenario: Operator-demoted cohort follows the existing reclaim and submit path
+
+- **WHEN** the typed operator transition has durably produced an unbound `reservation_lost/operator_verified_absence` master with a null reason class and intact cohort identity
+- **THEN** the cycle retry shortcut treats the forecast stage as retryable, reservation reclaim succeeds, the next attempt number is one greater, the new attempt anchor is lock-owned, and the existing submission path can submit the cohort once
+
+#### Scenario: Automatic absence reclaim remains unchanged
+
+- **WHEN** a current master has the existing `reservation_lost/absence_retry_permitted` shape, or the cycle shortcut receives a marker-free automatic-absence row satisfying its pre-existing status, binding, accounting, and cohort-identity checks
+- **THEN** lower-level automatic reclaim keeps its existing attempt, anchor, and identity derivation; automatic public cycles keep their retry-suffixed replacement identity, while only operator-demoted recovery reuses the old master's job id and idempotency key
+
+#### Scenario: Identity release remains a spent non-reclaimable key
+
+- **WHEN** a master has `reservation_lost/identity_mismatch_released` or any other non-absence decision
+- **THEN** both the cycle retry shortcut and file-journal reclaim reject it, so the new operator token does not broaden the identity-release path
+
+#### Scenario: Generic transition cannot forge operator authority
+
+- **WHEN** a caller attempts to write `operator_verified_absence` through the generic versioned accepted-submit transition
+- **THEN** the transition is rejected by the typed-authority gate and no journal evidence is changed
+
+#### Scenario: Reclaim still rejects stale attempt identity
+
+- **WHEN** an operator-demoted row is presented to reclaim with a stale attempt, stale anchor, mismatched immutable cohort identity, bound Slurm job id, non-null reason class, or matched job id
+- **THEN** reclaim returns no reservation and writes nothing
 
