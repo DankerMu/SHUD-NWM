@@ -22,7 +22,6 @@ from services.orchestrator.scheduler_file_providers import (
 from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import required_standard_variables_for_source
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
-from workers.model_registry.basins_soil_alpha_repair import repair_soil_alpha_calibration_for_basin
 
 
 @pytest.fixture(autouse=True)
@@ -1243,163 +1242,6 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
     assert classification["generation"] == refused_generation
 
 
-def test_soil_alpha_repair_reduces_calibrated_multiplier_inside_private_root(tmp_path: Path) -> None:
-    input_dir = _write_soil_alpha_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
-
-    dry_run = repair_soil_alpha_calibration_for_basin(
-        isolated_root=tmp_path / "isolated",
-        basin_slug="hetianhe",
-        dry_run=True,
-    )
-    assert dry_run["repairs"][0]["status"] == "would_repair"
-    assert "SOIL_ALPHA\t8.19327372615961" in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
-
-    report = repair_soil_alpha_calibration_for_basin(
-        isolated_root=tmp_path / "isolated",
-        basin_slug="hetianhe",
-    )
-
-    repair = report["repairs"][0]
-    assert repair["status"] == "repaired"
-    assert repair["soil_alpha_multiplier_before"] == pytest.approx(8.19327372615961)
-    assert repair["soil_alpha_multiplier_after"] == pytest.approx(19.999 / 6.380619)
-    assert repair["calibrated_alpha_max_after"] <= 20.0
-    assert "SOIL_ALPHA\t8.19327372615961" not in (input_dir / "hetian9000-2.cfg.calib").read_text(
-        encoding="utf-8"
-    )
-
-
-def test_soil_alpha_repair_budget_rejects_before_cfg_mutation(tmp_path: Path) -> None:
-    isolated = tmp_path / "isolated"
-    input_dir = _write_soil_alpha_model_files(isolated, "hetianhe", "hetian9000-2")
-    cfg = input_dir / "hetian9000-2.cfg.calib"
-    original = "GEOL_KSATH\t0.009\nSOIL_ALPHA\t9\nRIV_ROUGH\t0.2\n"
-    cfg.write_text(original, encoding="utf-8")
-    initial_bytes = sum(path.stat().st_size for path in isolated.rglob("*") if path.is_file())
-    budget = refresh._WorkspaceBudget(
-        isolated,
-        max_bytes=initial_bytes,
-        max_entries=32,
-        max_depth=8,
-    )
-
-    with pytest.raises(refresh.RefreshError, match="workspace_limit_exceeded"):
-        repair_soil_alpha_calibration_for_basin(
-            isolated_root=isolated,
-            basin_slug="hetianhe",
-            write_bytes=budget.write_bytes,
-        )
-
-    assert cfg.read_text(encoding="utf-8") == original
-
-
-def test_geol_dmac_repair_reduces_calibrated_depth_inside_private_root(tmp_path: Path) -> None:
-    input_dir = _write_geol_dmac_model_files(tmp_path / "isolated", "hetianhe", "hetian9000-2")
-
-    dry_run = repair_soil_alpha_calibration_for_basin(
-        isolated_root=tmp_path / "isolated",
-        basin_slug="hetianhe",
-        dry_run=True,
-    )
-    assert dry_run["repairs"][0]["status"] == "would_repair"
-    assert "GEOL_DMAC\t5" in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
-
-    report = repair_soil_alpha_calibration_for_basin(
-        isolated_root=tmp_path / "isolated",
-        basin_slug="hetianhe",
-    )
-
-    repair = report["repairs"][0]
-    assert repair["status"] == "repaired"
-    assert repair["parameter"] == "GEOL_DMAC"
-    assert repair["geol_dmac_multiplier_before"] == pytest.approx(5)
-    assert repair["geol_dmac_multiplier_after"] == pytest.approx(4)
-    assert repair["calibrated_dmac_max_after"] <= 4.0
-    assert "GEOL_DMAC\t5" not in (input_dir / "hetian9000-2.cfg.calib").read_text(encoding="utf-8")
-
-
-def test_publish_all_basin_scheduler_registry_repairs_calibrated_soil_alpha_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    basins_root = tmp_path / "Basins"
-    _write_soil_alpha_model_files(basins_root, "hetianhe", "hetian9000-2")
-    initial_model = _inventory_model("hetianhe", shud_input_name="hetian9000-2")
-    initial_model["source_path"] = str(basins_root / "hetianhe")
-    initial_model["resolved_source_path"] = str(basins_root / "hetianhe")
-    initial_model["input_dir"] = str(basins_root / "hetianhe" / "input" / "hetian9000-2")
-    initial_inventory = {
-        "schema_version": "basins.discovery.v1",
-        "root": str(basins_root),
-        "resolved_root": str(basins_root),
-        "model_count": 1,
-        "models": [initial_model],
-        "warnings": [],
-    }
-
-    def fake_discover(root: Path) -> dict[str, Any]:
-        if Path(root) == basins_root:
-            return initial_inventory
-        repaired = _inventory_model("hetianhe", shud_input_name="hetian9000-2")
-        repaired["source_path"] = str(Path(root) / "hetianhe")
-        repaired["resolved_source_path"] = str(Path(root) / "hetianhe")
-        repaired["input_dir"] = str(Path(root) / "hetianhe" / "input" / "hetian9000-2")
-        repaired["checksums"] = {"hetian9000-2.cfg.calib": "repaired-sha"}
-        return {
-            "schema_version": "basins.discovery.v1",
-            "root": str(root),
-            "resolved_root": str(root),
-            "model_count": 1,
-            "models": [repaired],
-            "warnings": [],
-        }
-
-    monkeypatch.setattr(registry_script, "discover_basins_inventory", fake_discover)
-    monkeypatch.setattr(registry_script, "publish_basins_package", _fake_publish_basins_package)
-    monkeypatch.setattr(
-        registry_script,
-        "prepare_basins_import_sources",
-        lambda inventory_path, package_manifest_path: _fake_sources(
-            _inventory_from_file(Path(inventory_path)),
-            Path(package_manifest_path),
-        ),
-    )
-
-    object_root = tmp_path / "object-store"
-    registry_manifest = object_root / "scheduler" / "registry" / "manifest-last.json"
-    run_workspace = tmp_path / "run-workspace"
-    run_workspace.mkdir()
-    work_dir = run_workspace / "registry"
-    workspace_budget = refresh._WorkspaceBudget(
-        run_workspace,
-        max_bytes=32 * 1024 * 1024,
-        max_entries=1024,
-        max_depth=16,
-    )
-    summary = registry_script.publish_all_basin_scheduler_registry(
-        basins_root=basins_root,
-        registry_manifest=registry_manifest,
-        object_store_root=object_root,
-        object_store_prefix="s3://nhms",
-        work_dir=work_dir,
-        retain_repair_staging=True,
-        resource_validator=refresh._enforce_workspace_bounds,
-        workspace_budget=workspace_budget,
-    )
-
-    assert summary["selected_basin_slugs"] == ["hetianhe"]
-    assert summary["repair_staging_cleanup"] == {"status": "retained", "reason": "retain_repair_staging"}
-    assert len(summary["repairs"]) == 1
-    assert summary["repairs"][0]["schema_version"] == "basins.calibration_repair.v1"
-    repair = summary["repairs"][0]["repairs"][0]
-    assert repair["soil_alpha_multiplier_after"] == pytest.approx(19.999 / 6.380619)
-    repaired_cfg = Path(repair["cfg_calib"])
-    assert repaired_cfg.is_file()
-    assert "SOIL_ALPHA\t8.19327372615961" not in repaired_cfg.read_text(encoding="utf-8")
-    payload = json.loads(registry_manifest.read_text(encoding="utf-8"))
-    assert {row["model_id"] for row in payload["models"]} == {"basins_hetianhe_shud"}
-
-
 def test_repaired_package_is_reused_across_run_scoped_workspaces(tmp_path: Path) -> None:
     from tests.test_basins_registry_import import _write_registry_fixture
 
@@ -1444,7 +1286,201 @@ def test_repaired_package_is_reused_across_run_scoped_workspaces(tmp_path: Path)
     assert row["resource_profile"]["source_path"] == str(basins_root / "basin-a")
     assert "run-one" not in json.dumps(row)
     assert "run-two" not in json.dumps(row)
-    assert not (tmp_path / "run-two" / "registry" / "repaired-basins-soil-alpha").exists()
+    # #1816 spec scenario "publication is a pure copy with respect to
+    # calibration": two runs from an unchanged source, both byte-identical to
+    # the source `cfg.calib` -- even though it is outside the deleted bounds.
+    source_calibration = (input_dir / "alias-a.cfg.calib").read_bytes()
+    for run_name, work_dir in (("run-one", tmp_path / "run-one" / "registry"),
+                               ("run-two", tmp_path / "run-two" / "registry")):
+        assert _published_calibration_bytes(
+            work_dir=work_dir, object_root=object_root, model_id=model_id
+        ) == source_calibration, run_name
+
+
+def _write_out_of_bounds_calibration_fixture(tmp_path: Path, *, parameter: str) -> tuple[Path, Path, str]:
+    """A real publishable basin whose ``cfg.calib`` sits outside the deleted bounds.
+
+    ``SHUD_SOIL_ALPHA_MAX = 20.0`` / ``SHUD_GEOL_DMAC_MAX = 4.0`` had no source
+    anywhere in the repository (#1816); the calibrations they overrode were
+    produced by external users running SHUD to convergence.  Publication must
+    now copy them through untouched.
+    """
+
+    from tests.test_basins_registry_import import _write_registry_fixture
+
+    basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
+        tmp_path / "fixture"
+    )
+    if parameter == "SOIL_ALPHA":
+        template = _write_soil_alpha_model_files(tmp_path / "calibration-template", "basin-a", "alias-a")
+        para_suffix = "para.soil"
+    else:
+        template = _write_geol_dmac_model_files(tmp_path / "calibration-template", "basin-a", "alias-a")
+        para_suffix = "para.geol"
+    for suffix in ("cfg.calib", para_suffix):
+        (input_dir / f"alias-a.{suffix}").write_bytes((template / f"alias-a.{suffix}").read_bytes())
+    return basins_root, input_dir / "alias-a.cfg.calib", model_id
+
+
+def _published_calibration_bytes(*, work_dir: Path, object_root: Path, model_id: str) -> bytes:
+    manifest = json.loads(
+        (work_dir / "package-manifests" / f"{model_id}.manifest.json").read_text(encoding="utf-8")
+    )
+    calibration_files = [
+        item for item in manifest["included_files"] if str(item["relative_path"]).endswith(".cfg.calib")
+    ]
+    assert len(calibration_files) == 1, calibration_files
+    store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
+    return store.read_bytes(str(calibration_files[0]["object_uri"]))
+
+
+def _publish_one_basin(*, basins_root: Path, tmp_path: Path, run_name: str) -> tuple[dict[str, Any], Path, Path]:
+    object_root = tmp_path / "object-store"
+    work_dir = tmp_path / run_name / "registry"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "providers" / f"{run_name}.json",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=work_dir,
+        repair_missing_radiation=False,
+        retain_repair_staging=True,
+    )
+    return summary, work_dir, object_root
+
+
+def test_published_calibration_is_byte_identical_for_out_of_bounds_soil_alpha(tmp_path: Path) -> None:
+    """#1816 §1.1: an over-bound ``SOIL_ALPHA`` publishes unchanged."""
+    basins_root, source_calib, model_id = _write_out_of_bounds_calibration_fixture(
+        tmp_path, parameter="SOIL_ALPHA"
+    )
+    source_bytes = source_calib.read_bytes()
+    assert b"SOIL_ALPHA\t8.19327372615961" in source_bytes
+
+    summary, work_dir, object_root = _publish_one_basin(
+        basins_root=basins_root, tmp_path=tmp_path, run_name="run-soil-alpha"
+    )
+
+    # Shared repair plumbing is untouched by the deletion: the staging-retention
+    # switch still reports, it simply has no calibration staging to retain.
+    assert summary["repair_staging_cleanup"] == {"status": "retained", "reason": "retain_repair_staging"}
+    assert source_calib.read_bytes() == source_bytes
+    assert (
+        _published_calibration_bytes(work_dir=work_dir, object_root=object_root, model_id=model_id)
+        == source_bytes
+    )
+
+
+def test_published_calibration_is_byte_identical_for_out_of_bounds_geol_dmac(tmp_path: Path) -> None:
+    """#1816 §1.2: same for ``GEOL_DMAC``."""
+    basins_root, source_calib, model_id = _write_out_of_bounds_calibration_fixture(
+        tmp_path, parameter="GEOL_DMAC"
+    )
+    source_bytes = source_calib.read_bytes()
+    assert b"GEOL_DMAC\t5" in source_bytes
+
+    _summary, work_dir, object_root = _publish_one_basin(
+        basins_root=basins_root, tmp_path=tmp_path, run_name="run-geol-dmac"
+    )
+
+    assert source_calib.read_bytes() == source_bytes
+    assert (
+        _published_calibration_bytes(work_dir=work_dir, object_root=object_root, model_id=model_id)
+        == source_bytes
+    )
+
+
+def test_publish_records_no_calibration_repair(tmp_path: Path) -> None:
+    """#1816 §1.3: no publication artefact claims a calibration repair."""
+    basins_root, _source_calib, model_id = _write_out_of_bounds_calibration_fixture(
+        tmp_path, parameter="SOIL_ALPHA"
+    )
+
+    summary, work_dir, _object_root = _publish_one_basin(
+        basins_root=basins_root, tmp_path=tmp_path, run_name="run-no-repair"
+    )
+
+    assert summary["repairs"] == []
+    package_manifest = (work_dir / "package-manifests" / f"{model_id}.manifest.json").read_text(
+        encoding="utf-8"
+    )
+    assert "calibration_repair" not in package_manifest
+
+
+def _published_bytes_for_suffix(
+    *, work_dir: Path, object_root: Path, model_id: str, suffix: str
+) -> bytes:
+    manifest = json.loads(
+        (work_dir / "package-manifests" / f"{model_id}.manifest.json").read_text(encoding="utf-8")
+    )
+    matches = [
+        item for item in manifest["included_files"] if str(item["relative_path"]).endswith(suffix)
+    ]
+    assert len(matches) == 1, matches
+    store = LocalObjectStore(object_root, object_store_prefix="s3://nhms")
+    return store.read_bytes(str(matches[0]["object_uri"]))
+
+
+def test_radiation_repair_supplies_template_without_touching_calibration(tmp_path: Path) -> None:
+    """#1816 s1.4: the two halves of the radiation-repair scenario hold together.
+
+    Scenario "A missing radiation template is still supplied and recorded"
+    asserts a conjunction: the template IS added AND the calibration is NOT
+    touched.  Both halves must be observed on the same real (non-mocked)
+    publish, on a basin whose ``cfg.calib`` sits outside the deleted bound --
+    otherwise "we add files but never rewrite values" is only ever tested one
+    clause at a time.
+    """
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    bravo_input = basins_root / "bravo" / "input" / "bravo"
+    # bravo is missing ONLY *.tsd.rl -- exactly the repairable shape.
+    (bravo_input / "bravo.tsd.rl").unlink()
+    template = _write_soil_alpha_model_files(tmp_path / "calibration-template", "basin-a", "alias-a")
+    for suffix in ("cfg.calib", "para.soil"):
+        (bravo_input / f"bravo.{suffix}").write_bytes((template / f"alias-a.{suffix}").read_bytes())
+
+    source_calib = bravo_input / "bravo.cfg.calib"
+    source_bytes = source_calib.read_bytes()
+    assert b"SOIL_ALPHA\t8.19327372615961" in source_bytes
+    radiation_template_bytes = (basins_root / "alpha" / "input" / "alpha" / "alpha.tsd.rl").read_bytes()
+
+    object_root = tmp_path / "objects"
+    work_dir = tmp_path / "work"
+    summary = registry_script.publish_all_basin_scheduler_registry(
+        basins_root=basins_root,
+        registry_manifest=tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        work_dir=work_dir,
+        repair_missing_radiation=True,
+    )
+
+    # Guard against a vacuous pass: bravo must actually have been repaired and
+    # published, not skipped.
+    assert summary["selected_basin_slugs"] == ["alpha", "bravo"]
+    assert summary["package_status_counts"] == {"published": 2}
+    model_id = "basins_bravo_shud"
+
+    # Bullet 1: the package carries the supplied template, byte-for-byte.
+    assert (
+        _published_bytes_for_suffix(
+            work_dir=work_dir, object_root=object_root, model_id=model_id, suffix=".tsd.rl"
+        )
+        == radiation_template_bytes
+    )
+    # Bullet 2: the run records the repair under the radiation schema.
+    assert len(summary["repairs"]) == 1
+    repair = summary["repairs"][0]
+    assert repair["schema_version"] == "basins.missing_tsd_rl_template_repair.v1"
+    assert repair["basin_slug"] == "bravo"
+    assert [item["status"] for item in repair["repairs"]] == ["repaired"]
+    # Bullet 3: the calibration rode through untouched, at source and published.
+    assert source_calib.read_bytes() == source_bytes
+    assert (
+        _published_calibration_bytes(work_dir=work_dir, object_root=object_root, model_id=model_id)
+        == source_bytes
+    )
 
 
 def _inventory_model(basin_slug: str, *, shud_input_name: str | None = None) -> dict[str, Any]:
