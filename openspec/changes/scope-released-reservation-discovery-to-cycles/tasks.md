@@ -13,13 +13,13 @@
       is FOUND, not merely that no exception escapes.
 - [x] 1.2 Prove 1.1 is red at base: run it on `origin/master` and record the exact
       failure (`file_journal_record_limit_exceeded`, `field=pipeline_job_records`).
-- [x] 1.3 Residue pin: a flat `pipeline-jobs/` row whose job_id does NOT match
+- [x] 1.3 (adapted — design D13) Residue pin: a flat `pipeline-jobs/` row whose job_id does NOT match
       `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE` but whose CONTENT is a current-contract
       master SHALL still be discovered. Production holds zero such rows today
       (74 unparsable names, all `(row_kind=None, contract_is_current=False)`), so
       only a synthetic row can exercise this path — which is exactly why it needs
       a pin rather than an assumption.
-- [x] 1.4 Fall-open pin: a row that yields no cycle scope from name OR content
+- [x] 1.4 (adapted — design D13) Fall-open pin: a row that yields no cycle scope from name OR content
       SHALL fall open to the full scan, preserving the #1734 D4 contract that an
       underivable key costs the old full scan and never a false "not found".
 - [x] 1.5 Unweakened-pin check: the existing single-row listing test
@@ -36,7 +36,7 @@
       cycle-scoped path (the same one `--job-id` already uses and which verifies
       on a real production row). The flat scan is a CANDIDATE filter; the
       cycle-scoped read is what the returned row is built from.
-- [x] 2.3 Residue: a flat entry whose job_id does not parse still yields a scope
+- [x] 2.3 (adapted — design D13) Residue: a flat entry whose job_id does not parse still yields a scope
       from row content (`_source_id_from_job` `:9983` / `_cycle_time_from_job`
       `:9991`); only when content also yields no scope does that ONE candidate
       fall open to the unscoped read.
