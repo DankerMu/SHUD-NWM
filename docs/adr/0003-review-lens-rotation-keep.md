@@ -1752,3 +1752,54 @@ pinned core while allowing the follow-up mix to change scope continued to buy
 union recall, especially across fix-created and newly merged contract surfaces.
 That is exactly the current policy. No reviewer-set or rotation-policy change
 follows from this revisit.
+
+## Revisit (2026-08-24, issue #1816 / PR #1817)
+
+After appending PR #1817's validated accountability line, `loop_log_audit`
+returns DECIDABLE at **122 multi-round merged PRs, later-round catches core=71 /
+rotated=295**. This three-round PR contributes **0 core** and **2 rotated**.
+Recorded human decision: **keep rotation**, unchanged.
+
+This is a clean data point rather than a marginal one, and it is worth recording
+why. Round 1 ran two lenses — `deletion-completeness` and
+`test-oracle-spec-conformance` — chosen because the change is a module deletion
+sharing plumbing with a second repair that had to survive. Both lenses did their
+job (one P2 coverage gap, one P3 refuted by measurement). Neither could have
+found what round 2 found, because neither was pointed at prose: the round-2 lens
+`prose-truth-class-sweep` caught a **false operator-facing claim in the runbook**
+that the round-1 fix pass had itself left behind while correcting the identical
+sentence in four OpenSpec documents.
+
+That is the same failure class recorded in `.workplans/pr-1793/review/retro-round-3.md`
+— a fix scoped to the file the finding named, with the assertion's *terms* never
+swept across the whole change set — recurring on a different PR three days later.
+Its recurrence here is evidence for two separate things, and they should not be
+conflated:
+
+1. **For rotation**: a lens absent from round 1 found a P1 that the round-1 mix
+   was structurally blind to. Union recall, exactly as the standing decision
+   predicts.
+2. **Against reading this as a rotation success story**: the defect did not exist
+   at round 1. It was *created* by the round-1 fix pass. Rotation caught damage
+   that a properly class-scoped fix would not have produced. Counting it as
+   evidence that rotation buys recall is therefore partly circular — the rotated
+   lens is being credited for catching the loop's own miss.
+
+The honest reading is that the counter's numerator is inflated by self-inflicted
+findings of this shape, and the #1793 retro's `depth` diagnosis (fix prompts too
+narrow) remains the unclosed root cause. No rotation-policy change follows. What
+does follow, and is recorded here rather than as a new ADR: **a fix brief that
+corrects a factual claim must name the claim's terms and require a whole-tree
+sweep for them, not name the file.** On this PR the round-2 fix did exactly that
+(`grep -rn` across the tree, one surviving copy found) and the final review
+confirmed no further copies — so the corrective action is known and it works; it
+is applying it at round 1 that keeps failing.
+
+Second, smaller note on a non-catch: round 1's P3 was refuted by measurement
+rather than fixed (node-22 has zero stale `repaired-basins-soil-alpha`
+directories, so the narrowed cleanup tuple has no orphan to strand). Refutation
+by measurement is recorded as `refuted` in the loop-log verdicts and does not
+enter `gate_net_catch`. That is the correct treatment — a finding disproved
+against production is not a caught defect — but it means the audit's catch
+counters systematically undercount the review loop's value on findings that turn
+out to be non-existent in production.
