@@ -1983,6 +1983,11 @@
           "pr": 1753,
           "outcome": "superseded-by-split",
           "rounds": 3
+        },
+        {
+          "pr": 1808,
+          "outcome": "merged",
+          "rounds": 2
         }
       ]
     },

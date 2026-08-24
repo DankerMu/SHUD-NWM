@@ -1697,3 +1697,30 @@ by +81 — the PR's own `design.md` D4c had recorded that re-anchoring "only wor
 if that head is final", and this is the first instance where the head moved for a
 reason outside the PR entirely. The discipline held only because the re-anchor
 was re-run after the merge rather than treated as done at push time.
+
+## Revisit (2026-08-24, issue #1185 / PR #1808)
+
+`loop_log_audit` now reports **120 multi-round merged PRs, later-round catches
+core=68 / rotated=285**. PR #1808 adds one multi-round sample and **zero** to
+either catch bucket: its only verified finding came from Round 1's pinned
+`test-evidence` lens, and the post-fix Round 2 deliberately reused the pinned
+subset `{correctness, test-evidence, invariant-state}`. The Round 2 manifest
+explicitly bought no rotating free slot because Round 1 had no P0/P1 and no
+repeated failure class. Round 2 and Phase 7 were clean.
+
+This is therefore another **rotation-not-applied** sample, not evidence that
+rotation did or did not buy recall. Counting the added denominator toward a
+keep/cut effect would repeat the instrumentation error already recorded above:
+the log records lens names and catches, but not whether rotation was applied as
+a treatment. The aggregate direction remains strongly on the keep side, so
+**keep rotation** remains the recorded decision; this PR adds no strength to
+that conclusion and no policy change follows.
+
+The useful process signal sits on a different axis. Local Phase 2 and CI were
+green while the Round 1 `test-evidence` lens found that the job-limit oracle
+left its authority row inside the bounded window, so a bounded-reader regression
+could still pass. Independent verification confirmed the false green; the
+strengthened oracle then made two independently replayed bounded-reader mutants
+red, and the pinned Round 2 lens verified closure. That supports keeping a
+pinned evidence lens plus independent adjudication. It says nothing about the
+marginal value of a rotated free slot, because none ran.
