@@ -1257,6 +1257,11 @@ def test_pre_commit_index_reason_ownership_keys_match_allowlist() -> None:
     assert set(replay.PRE_COMMIT_INDEX_REASON_OWNERS) == set(
         replay._PRE_COMMIT_INDEX_REASONS
     )
+    # An allowlisted reason whose owner tuple was emptied (or truncated by a
+    # careless edit) must fail here by name; the key-set check above cannot
+    # see it and the literal check below is vacuous over an empty tuple.
+    empty = [reason for reason, owners in replay.PRE_COMMIT_INDEX_REASON_OWNERS.items() if not owners]
+    assert empty == [], f"reasons with no owning function: {empty}"
 
 
 def test_pre_commit_index_reason_owners_contain_the_reason_literal() -> None:
