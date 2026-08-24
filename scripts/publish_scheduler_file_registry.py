@@ -20,7 +20,7 @@ import stat
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -40,6 +40,14 @@ from services.orchestrator.scheduler_file_providers import (
     ProviderPreimage,
     SchedulerFileProviderError,
     publish_scheduler_registry_manifest,
+)
+from workers.model_registry.basins_calibration_overrides import (
+    DEFAULT_CALIBRATION_OVERRIDES_PATH,
+    CalibrationOverride,
+    CalibrationOverrideError,
+    apply_calibration_overrides_for_basin,
+    load_calibration_overrides,
+    overrides_for_basin,
 )
 from workers.model_registry.basins_discovery import (
     BasinsDiscoveryError,
@@ -89,7 +97,9 @@ DEFAULT_SOURCE_POLICY = {
     "forcing_source": "node27_raw_handoff",
     "allowed_cycle_hours_utc": [0, 12],
 }
-REPAIR_STAGING_DIR_NAMES = ("repaired-basins",)
+CALIBRATION_OVERRIDE_STAGING_DIR_NAME = "overridden-basins"
+CALIBRATION_OVERRIDE_PATH_ENV_NAME = "NHMS_CALIBRATION_OVERRIDES_PATH"
+REPAIR_STAGING_DIR_NAMES = ("repaired-basins", CALIBRATION_OVERRIDE_STAGING_DIR_NAME)
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -99,6 +109,10 @@ class PublishContext:
     inventory_path: Path
     repair: dict[str, Any] | None = None
     source_lineage_model: dict[str, Any] | None = None
+    # #1832: the declared calibration overrides that were applied to THIS
+    # context's staging copy, in manifest shape.  ``None`` (never ``[]``) when
+    # the basin is absent from the declaration.
+    calibration_overrides: tuple[dict[str, Any], ...] | None = None
 
 
 class WorkspaceBudget(Protocol):
@@ -138,6 +152,7 @@ def publish_all_basin_scheduler_registry(
     walltime_minutes: int = 720,
     repair_missing_radiation: bool = True,
     retain_repair_staging: bool = False,
+    calibration_overrides_path: str | Path | None = DEFAULT_CALIBRATION_OVERRIDES_PATH,
     dry_run: bool = False,
     output_path: str | Path | None = None,
     expected_preimage: ProviderPreimage | Mapping[str, object] | None = None,
@@ -154,6 +169,15 @@ def publish_all_basin_scheduler_registry(
     skipped_model_sink: Callable[[Mapping[str, Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     audited_cutover_gate = normalize_cutover_gate_audit(cutover_gate)
+    # #1832: the checked-in declaration loads by default, on BOTH lanes -- an
+    # override that only applies on one lane is worse than no override, because
+    # the other lane republishes the source value and re-derives the original
+    # `model_id`.  An explicit ``None``/`""` is the test/rehearsal escape hatch.
+    declared_overrides: tuple[CalibrationOverride, ...] = (
+        load_calibration_overrides(calibration_overrides_path)
+        if calibration_overrides_path not in (None, "")
+        else ()
+    )
     root = resolve_basins_root(str(basins_root) if basins_root not in (None, "") else None)
     resolved_object_root = _required_path(
         object_store_root or os.getenv("OBJECT_STORE_ROOT"),
@@ -173,6 +197,24 @@ def publish_all_basin_scheduler_registry(
     _guard_resources(resource_validator, workspace)
 
     inventory = discover_basins_inventory(root)
+    # #1832 round-2 C2: a declared slug that the discovered inventory does not
+    # contain at all refuses HERE, before anything is selected, staged or
+    # written -- and on `dry_run` too.
+    #
+    # Refuse rather than report, because the two "not applied" situations are
+    # categorically different and only one of them is benign.  A basin that
+    # exists but was narrowed out of this run is legitimate (`--basin-slug`).  A
+    # basin that exists NOWHERE is a typo or a stale rename in checked-in
+    # config: the declaration will never bite, forever, with no signal.  After
+    # the hetianhe rollout that silence means the unattended refresh lane
+    # republishes the SOURCE value, re-derives the ORIGINAL `model_id` and
+    # reverts the registry straight back onto the NaN cliff the declaration
+    # exists to avoid.  The refusal is fail-safe (nothing is committed, the
+    # previous registry generation stays live) and the manual CLI lane catches a
+    # bad slug long before the timer ever sees it, so a loud, diagnosable,
+    # non-committing failure is strictly better than silently reverting one
+    # basin to a NaNing calibration.
+    _require_declared_basins_in_inventory(declared_overrides, inventory)
     inventory_path = workspace / "basins-inventory.json"
     _guard_resources(resource_validator, workspace)
     _write_workspace_inventory(inventory, inventory_path, workspace_budget)
@@ -206,6 +248,16 @@ def publish_all_basin_scheduler_registry(
         contexts.extend(repaired_radiation_contexts)
     if max_contexts is not None and len(contexts) > max_contexts:
         raise _context_limit_error(len(contexts), max_contexts)
+    # #1832: applied AFTER the full context list is assembled, so a basin that
+    # is both declared and radiation-repaired gets the override too.  Staging
+    # from that context's own (already isolated) tree keeps both edits.
+    contexts = _apply_calibration_override_contexts(
+        contexts=contexts,
+        declared_overrides=declared_overrides,
+        workspace=workspace,
+        resource_validator=resource_validator,
+        workspace_budget=workspace_budget,
+    )
     if not contexts:
         raise SchedulerRegistryPublishError(
             "SCHEDULER_REGISTRY_NO_PUBLISHABLE_MODELS",
@@ -260,6 +312,14 @@ def publish_all_basin_scheduler_registry(
                     }
                 )
             else:
+                # Passed only when non-empty: `calibration_overrides` is an
+                # added keyword, and an unconditional pass would break callers
+                # that substitute their own publisher.
+                override_kwargs: dict[str, Any] = (
+                    {"calibration_overrides": list(context.calibration_overrides)}
+                    if context.calibration_overrides
+                    else {}
+                )
                 package_result = publish_basins_package(
                     inventory_path=context.inventory_path,
                     model_id=model_id,
@@ -270,6 +330,7 @@ def publish_all_basin_scheduler_registry(
                     output_capacity_guard=(workspace_budget.reserve_external_write if workspace_budget else None),
                     output_write_guard=(workspace_budget.finalize_external_write if workspace_budget else None),
                     expected_source_identity=source_identity,
+                    **override_kwargs,
                 )
                 if workspace_budget is not None:
                     workspace_budget.verify_external_write(package_manifest_path)
@@ -379,6 +440,21 @@ def publish_all_basin_scheduler_registry(
         "selected_basin_slugs": [str(context.model.get("basin_slug")) for context in contexts],
         "selected_model_ids": [_required_model_str(context.model, "model_id") for context in contexts],
         "repairs": [context.repair for context in contexts if context.repair is not None],
+        # #1832: workspace-side echo of the authoritative record.  The record
+        # that matters is `calibration.overrides` in each package manifest;
+        # this one only exists so an operator reading the run receipt sees the
+        # same facts without opening the object store.
+        "calibration_overrides": [
+            item for context in contexts for item in (context.calibration_overrides or ())
+        ],
+        # A declared basin that IS discovered but this run does not publish is
+        # REPORTED, not refused: it publishes nothing, so it can tell no lie.
+        # (A declared basin the tree does not contain AT ALL never gets here --
+        # `_require_declared_basins_in_inventory` refused it above.)
+        "calibration_overrides_not_applied": _declared_entries_not_applied(declared_overrides, contexts),
+        "calibration_overrides_declaration": (
+            str(calibration_overrides_path) if calibration_overrides_path not in (None, "") else None
+        ),
         "registry_manifest": str(registry_manifest),
         "registry": registry_receipt,
         "package_status_counts": package_status_counts,
@@ -700,6 +776,186 @@ def _select_publishable_models(
     return selected
 
 
+# The single "declared but not applied" reason token.  Two other places pin the
+# same vocabulary and must move with it: `CALIBRATION_OVERRIDE_NOT_APPLIED_REASONS`
+# in `scripts/scheduler_file_provider_refresh.py` (which imports this constant)
+# and the `reason_not_applied` enum in
+# `schemas/scheduler_file_provider_refresh_receipt.schema.json`, which the
+# refresh receipt is validated against before it is published.
+CALIBRATION_OVERRIDE_NOT_SELECTED_REASON = "basin_not_selected_for_this_run"
+
+
+def _require_declared_basins_in_inventory(
+    declared_overrides: Sequence[CalibrationOverride],
+    inventory: Mapping[str, Any],
+) -> None:
+    """#1832 round-2 C2: refuse a declared slug that exists nowhere in the tree.
+
+    The discriminator between "typo/stale rename" and "narrowed out of this
+    run" is the DISCOVERED inventory, not the publish set: see the rationale at
+    the call site.  Only the former reaches here; the latter is reported by
+    ``_declared_entries_not_applied``.
+    """
+    if not declared_overrides:
+        return
+    discovered_slugs = {
+        str(model.get("basin_slug") or "") for model in inventory.get("models") or ()
+    }
+    missing = [
+        override for override in declared_overrides if override.basin_slug not in discovered_slugs
+    ]
+    if not missing:
+        return
+    labels = sorted(override.entry_label for override in missing)
+    raise CalibrationOverrideError(
+        "CALIBRATION_OVERRIDE_BASIN_NOT_IN_INVENTORY",
+        (
+            "Declared calibration override(s) name a basin the discovered Basins inventory does not "
+            f"contain: {', '.join(labels)}."
+        ),
+        details={
+            "entries": [
+                {"basin_slug": override.basin_slug, "parameter": override.parameter}
+                for override in sorted(missing, key=lambda item: item.entry_label)
+            ],
+            "basin_slugs": sorted({override.basin_slug for override in missing}),
+            "discovered_basin_count": len(discovered_slugs),
+        },
+    )
+
+
+def _declared_entries_not_applied(
+    declared_overrides: Sequence[CalibrationOverride],
+    contexts: Sequence[PublishContext],
+) -> list[dict[str, Any]]:
+    """#1832: a declared basin this run does not publish is reported, not refused.
+
+    The lie the refusal exists to prevent is a PUBLISHED package carrying the
+    original value while the declaration claims otherwise.  A basin this run
+    does not publish cannot tell that lie, so keying the refusal on
+    "declared but not published" would make every narrowed publish -- a
+    ``--basin-slug`` run, a partial Basins mirror -- fail on a declaration that
+    is doing nothing wrong.  It is still a fact worth persisting, so it lands on
+    the run summary (and, on the unattended lane, on the refresh receipt).
+
+    By the time this runs, ``_require_declared_basins_in_inventory`` has already
+    refused every declared basin the tree does not contain, so the only case
+    left here is "discovered, but not selected for this run" -- hence the
+    reason token, which is deliberately NOT the pre-C2
+    ``basin_not_in_publish_set``: that string covered both cases and therefore
+    means something different on receipts written before this change.
+    """
+    if not declared_overrides:
+        return []
+    published_slugs = {str(context.model.get("basin_slug") or "") for context in contexts}
+    return [
+        {**override.as_entry(), "reason_not_applied": CALIBRATION_OVERRIDE_NOT_SELECTED_REASON}
+        for override in declared_overrides
+        if override.basin_slug not in published_slugs
+    ]
+
+
+def _apply_calibration_override_contexts(
+    *,
+    contexts: Sequence[PublishContext],
+    declared_overrides: Sequence[CalibrationOverride],
+    workspace: Path,
+    resource_validator: Callable[[Path], None] | None = None,
+    workspace_budget: WorkspaceBudget | None = None,
+) -> list[PublishContext]:
+    """Re-stage every declared context onto a private copy carrying its override.
+
+    Mirrors ``_repair_missing_radiation_contexts``: copy into a workspace-owned
+    staging root, edit only there, then RE-DISCOVER from the copy so the
+    published content hash reflects the edit.  The Basins source tree is only
+    ever read.
+    """
+    if not declared_overrides:
+        return list(contexts)
+    staging_base = workspace / CALIBRATION_OVERRIDE_STAGING_DIR_NAME
+    inventory_dir = workspace / "overridden-inventories"
+    result: list[PublishContext] = []
+    staged_any = False
+    for context in contexts:
+        basin_slug = str(context.model.get("basin_slug") or "")
+        basin_overrides = overrides_for_basin(declared_overrides, basin_slug)
+        if not basin_overrides:
+            result.append(context)
+            continue
+        if not staged_any:
+            _guard_resources(resource_validator, workspace)
+            _ensure_workspace_directory(inventory_dir, workspace_budget)
+            _guard_resources(resource_validator, workspace)
+            staged_any = True
+        model_id = _required_model_str(context.model, "model_id")
+        source_path = Path(str(context.model.get("source_path") or ""))
+        if not source_path.is_dir():
+            raise CalibrationOverrideError(
+                "CALIBRATION_OVERRIDE_SOURCE_MISSING",
+                f"Calibration override for '{basin_slug}' cannot stage: source path is not a directory.",
+                details={
+                    "basin_slug": basin_slug,
+                    "model_id": model_id,
+                    "source_path": str(source_path),
+                    "entries": [override.as_entry() for override in basin_overrides],
+                },
+            )
+        staged_root = staging_base / _slug_id(basin_slug)
+        if staged_root.exists():
+            shutil.rmtree(staged_root, ignore_errors=True)
+            if workspace_budget is not None:
+                workspace_budget.rescan()
+        staged_target = staged_root / basin_slug
+        _guard_resources(resource_validator, workspace)
+        _ensure_workspace_directory(staged_target.parent, workspace_budget)
+        _copy_workspace_tree(source_path, staged_target, workspace_budget)
+        _guard_resources(resource_validator, workspace)
+        _strip_synology_sidecars(staged_target)
+        if workspace_budget is not None:
+            workspace_budget.rescan()
+        _guard_resources(resource_validator, workspace)
+        applied = apply_calibration_overrides_for_basin(
+            isolated_root=staged_root,
+            basin_slug=basin_slug,
+            overrides=basin_overrides,
+            write_bytes=(workspace_budget.write_bytes if workspace_budget else None),
+        )
+        if workspace_budget is not None:
+            workspace_budget.rescan()
+        _guard_resources(resource_validator, workspace)
+        staged_inventory = discover_basins_inventory(staged_root)
+        staged_model = _find_inventory_model(staged_inventory, model_id)
+        if staged_model.get("status") != "valid" or staged_model.get("default_publish_eligible") is not True:
+            raise CalibrationOverrideError(
+                "CALIBRATION_OVERRIDE_MODEL_NOT_PUBLISHABLE",
+                f"Basin '{basin_slug}' is no longer publishable after applying its declared calibration override.",
+                details={
+                    "basin_slug": basin_slug,
+                    "model_id": model_id,
+                    "status": staged_model.get("status"),
+                    "missing_required_files": staged_model.get("missing_required_files") or [],
+                    "invalid_required_files": staged_model.get("invalid_required_files") or [],
+                    "entries": [override.as_entry() for override in basin_overrides],
+                },
+            )
+        staged_inventory_path = inventory_dir / f"{model_id}.overridden.inventory.json"
+        _guard_resources(resource_validator, workspace)
+        _write_workspace_inventory(staged_inventory, staged_inventory_path, workspace_budget)
+        _guard_resources(resource_validator, workspace)
+        result.append(
+            replace(
+                context,
+                model=staged_model,
+                inventory_path=staged_inventory_path,
+                # Lineage keeps pointing at the real Basins tree (or, for a
+                # radiation-repaired context, whatever it already recorded).
+                source_lineage_model=context.source_lineage_model or context.model,
+                calibration_overrides=tuple(applied),
+            )
+        )
+    return result
+
+
 def _repair_missing_radiation_contexts(
     *,
     inventory: Mapping[str, Any],
@@ -993,6 +1249,19 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Do not synthesize missing *.tsd.rl files in private scratch copies.",
     )
     parser.add_argument(
+        "--calibration-overrides",
+        default=(
+            os.getenv(CALIBRATION_OVERRIDE_PATH_ENV_NAME, "").strip()
+            or str(DEFAULT_CALIBRATION_OVERRIDES_PATH)
+        ),
+        help=(
+            "Path to the declared calibration-override file.  The checked-in "
+            f"{DEFAULT_CALIBRATION_OVERRIDES_PATH.name} loads by default without anyone naming it; "
+            f"this flag (or ${CALIBRATION_OVERRIDE_PATH_ENV_NAME}) only redirects the path, for "
+            "rehearsal against an alternative declaration."
+        ),
+    )
+    parser.add_argument(
         "--retain-repair-staging",
         action="store_true",
         help="Keep repaired basin staging directories after publishing for manual debugging.",
@@ -1174,6 +1443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             walltime_minutes=args.walltime_minutes,
             repair_missing_radiation=not args.no_repair_missing_radiation,
             retain_repair_staging=args.retain_repair_staging,
+            calibration_overrides_path=args.calibration_overrides,
             dry_run=args.dry_run,
             output_path=args.output,
             precommit_validator=precommit_validator,
@@ -1185,6 +1455,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a successful summary would.  Otherwise bypass runs would be
         # byte-identical to gate-passing runs in every persisted artifact and
         # a later auditor could not tell them apart.
+        payload = {**error.to_payload(), "cutover_gate": cutover_gate_audit}
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        return 1
+    except CalibrationOverrideError as error:
         payload = {**error.to_payload(), "cutover_gate": cutover_gate_audit}
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1

@@ -5,7 +5,7 @@ import json
 import os
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -115,6 +115,7 @@ def publish_basins_package(
     output_capacity_guard: Callable[[Path, int], None] | None = None,
     output_write_guard: Callable[[Path, int], None] | None = None,
     expected_source_identity: dict[str, Any] | None = None,
+    calibration_overrides: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _validate_object_key_segment(model_id, "model_id", model_id=model_id, version=version)
     _validate_object_key_segment(version, "version", model_id=model_id, version=version)
@@ -323,7 +324,7 @@ def publish_basins_package(
             "source_is_symlink": bool(model.get("source_is_symlink", False)),
             "included_files": included_files,
             "forcing": forcing,
-            "calibration": _calibration_metadata(model, included_files),
+            "calibration": _calibration_metadata(model, included_files, calibration_overrides),
             "created_at": created_at,
         }
         manifest, manifest_bytes = _manifest_with_manifest_entry(
@@ -1442,13 +1443,24 @@ def _manifest_with_manifest_entry(
         manifest_entry = {**manifest_entry, "size_bytes": len(manifest_bytes)}
 
 
-def _calibration_metadata(model: dict[str, Any], included_files: list[dict[str, Any]]) -> dict[str, Any]:
+def _calibration_metadata(
+    model: dict[str, Any],
+    included_files: list[dict[str, Any]],
+    calibration_overrides: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     calibration_files = [item for item in included_files if item["role"] == "calibration"]
-    return {
+    metadata: dict[str, Any] = {
         "source_count": int(model.get("calibration_count") or 0),
         "included_count": len(calibration_files),
         "included_files": [item["relative_path"] for item in calibration_files],
     }
+    # #1832: absence is meaningful.  A package with no declared override carries
+    # NO `overrides` key at all -- an empty list would be indistinguishable from
+    # "this publisher does not record overrides", which is the ambiguity #1816
+    # was written against.
+    if calibration_overrides:
+        metadata["overrides"] = [dict(item) for item in calibration_overrides]
+    return metadata
 
 
 def _forcing_checksum_material(forcing: dict[str, Any]) -> dict[str, Any]:

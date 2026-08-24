@@ -677,6 +677,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_model_registry_basin_versions.py",
             "tests/test_model_registry_list_basins.py",
             "tests/test_basins_discovery.py",
+            # #1832: `tests/test_basins_package.py` top-level-imports
+            # `basins_discovery` (and `basins_calibration_overrides`), and is
+            # the suite that owns the packaging contract those modules feed.
+            # It rides the directory list for the same reason as the rest.
+            "tests/test_basins_package.py",
             "tests/test_basins_package_publication.py",
             "tests/test_basins_registry_import.py",
             "tests/test_basins_reingest.py",
