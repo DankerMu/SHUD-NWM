@@ -304,11 +304,15 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
 而一趟 pass 可以跑一小时以上）。
 
-**一条 provenance 备注**：publisher 会对越界标定参数在隔离副本上自动修复后再打包
-（`basins.calibration_repair.v1`）。2026-08-22 上线的 `SHJ-2SHJ` 触发了 SOIL_ALPHA 修复
-（multiplier 3.29079 → 2.29593，calibrated alpha max 28.6648 → 19.999，上界 20.0），
-**因此它的包内容与 Basins 树里的 `2SHJ.cfg.calib` 有意不同**。日后 diff 包与树的人别当成损坏，
-依据在发布 receipt 的 `repairs[]` 里。
+**一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
+`GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
+该 repair 已在 **#1816 中整体删除**——两个上界在仓库里没有任何出处，而被它改写的标定值
+是外部用户跑 SHUD 收敛得到的。现在 publisher 对标定文件是**纯拷贝**：包内的 `*.cfg.calib`
+与 Basins 树里的源文件逐字节相同，`cmp` 应当返回 0。
+2026-08-22 之前发布的包中有 8 个流域（含 `SHJ-2SHJ`、`hetianhe`）带着被改写的值，
+它们在 #1816 之后单独重发；重发前的历史预报不追溯、不重签。
+**仍在运行的 repair 只有缺失辐射模板那一条**（`basins.missing_tsd_rl_template_repair.v1`，
+staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标定值，且会记进 package manifest。
 
 **当前 authority（2026-08-22 node-22 实测 canonical manifest）**：共 24 个业务流域，
 口径为 17 个既有流域加 #1699 上线的 7 个；每个流域有 GFS、IFS 两个 source-scoped
