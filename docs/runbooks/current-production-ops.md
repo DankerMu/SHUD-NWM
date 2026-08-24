@@ -304,6 +304,33 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
 而一趟 pass 可以跑一小时以上）。
 
+**hop 5 — 改了 `model_id` 的流域必须回补 forcing（重发场景专有；纯新增流域不触发）。**
+forcing 是**按 model 分目录**存的：`<object-store>/forcing/<source>/<cycle>/<basin_version_id>/<model_id>/`。
+包内容一变，`dg_*` 身份就变，于是所有**已产过 forcing 的 cycle** 只有旧 id 的产物，新 id 一份没有。
+而调度器判 forcing 完成度是**按 cycle** 的，它不会为这种 cycle 重进 forcing 阶段——
+forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域时实测，16 个 model 全中）。
+
+正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
+`station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
+必然得到数值等价、且 id 与嵌套 checksum 自洽的包。拷贝旧目录则会把旧
+`model_input_package_id` / `binding_uri` / station id 焊进**每一个**成员文件，
+而 `met.met_station` 是按**新** binding 身份注册的。
+
+```bash
+.venv/bin/python scripts/node22_backfill_forcing_for_model_ids.py \
+  --previous-manifest <registry>/manifest-last.json.pre-<stamp> \
+  --current-manifest  <registry>/manifest-last.json \
+  --forcing-root /scratch/frd_muziyao/nhms-prod/object-store/forcing \
+  --cycle <只补调度器下一趟要跑的那个 cycle> --execute --output <receipts>/forcing-backfill.json
+```
+
+工具自带验收：`shud/*.csv`（SHUD 真正读的输入，不含任何身份串）必须**逐字节相同**，
+`forcing.tsd.forc` / `forcing_debug.csv` / `payloads/*.json` 在把身份串归一化后必须相同。
+三个 JSON manifest **不参与**比对——它们带成员 checksum，成员字节一变它们本就该变。
+测站真移动了（`station_bindings` 归一化后仍不等）时工具**拒绝回补**并把该行记进
+`rebound_models_skipped`：那是重新绑定，得走正常 provisioning，不是回补。
+默认 dry-run；不传 `--cycle` 会扫出**所有**历史 cycle，而历史预报不追溯——按需只补下一趟要跑的。
+
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
 该 repair 已在 **#1816 中整体删除**——两个上界在仓库里没有任何出处，而被它改写的标定值
