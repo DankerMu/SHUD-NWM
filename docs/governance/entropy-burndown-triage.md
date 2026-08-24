@@ -316,7 +316,7 @@ requirements for runtime behavior changes.
 | Frontend wrapper command | #769 | `cd apps/frontend && pnpm build` | BLOCKED before Vite by local `ERR_PNPM_IGNORED_BUILDS` for `esbuild@0.25.12`; no build executed |
 | Frontend map/API type successor gate | #766 / PR #825 | `cd apps/frontend && corepack pnpm test` | PASS, 34 files / 616 tests |
 | Frontend map/API type successor gate | #766 / PR #825 | `cd apps/frontend && corepack pnpm build` | PASS, Vite build completed |
-| Scheduler group | #720 / PR #779 | `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py` | PASS, 641 tests |
+| Scheduler group | #720 / PR #779 | `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py` | PASS, 641 tests |
 | Chain group | #731 / PR #790 | `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py` | PASS, 239 tests, 7 skipped |
 | Two-node and readiness groups | #744 / PR #803; #755 / PR #814 | `uv run pytest -q tests/test_two_node_e2e_evidence.py tests/test_production_readiness_validation.py` | PASS, 1181 tests, 2 skipped |
 | API bootstrap group | #760 / PR #819 | `uv run pytest -q tests/test_static_serving.py tests/test_runtime_mode.py tests/test_api.py tests/test_role_boundary_static.py tests/test_monitoring_api.py tests/test_openapi_drift.py` | PASS, 240 tests |

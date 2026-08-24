@@ -33,7 +33,7 @@
     inventoried scheduler alias/wrapper/import with owner, retention/removal, and verification metadata -> no finding;
     audit JSON/markdown report -> preserves compatibility guard schema and does not create/update `.entropy-baseline/latest.json`;
     existing scheduler monkeypatch path -> focused scheduler tests continue to pass.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
 - [x] 1.2 Scheduler state owner-family completion.
   - Module/Scope: `services.orchestrator.scheduler_state` state helpers, candidate-state re-exports, and legacy monkeypatch wrappers.
@@ -111,7 +111,7 @@
     avoid empty/half-written locks; heartbeat loss fences submission and healthy heartbeat does not fence a pass; Postgres
     advisory lock backend uses the scheduler compat lock-key lookup and does not touch file guard helpers; no state/
     discovery/candidate-construction/execution/evidence/cancellation inventory groups change in this slice.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile.py`;
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_gateway_reconcile_*.py`;
     `uv run pytest -q tests/test_entropy_audit_script.py`.
   - Inventory/Evidence Update: update scheduler inventory group `scheduler-lease-reexports`, or state that no lease facade
     surface changed and prove it with compatibility tests.
@@ -449,7 +449,7 @@
     commands pass after the evidence update; no scheduler runtime code,
     Slurm behavior, DB schema, API route, chain, readiness, two-node, or
     frontend groups change in this slice.
-  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
+  - Focused Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py tests/test_gateway_reconcile_*.py`; `uv run pytest -q tests/test_entropy_audit_script.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final scheduler issue/PR mapping in implementation evidence.
 
 ## 2. Chain Facade Deepening
@@ -507,7 +507,7 @@
     no-ownership-inversion justification; non-forwarding local chain growth still
     requires owner-hosting rationale, concrete follow-up issue, and removal
     condition; no owner-family behavior moves in this slice.
-  - Focused Verification: `uv run pytest -q tests/test_entropy_audit_script.py`; `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
+  - Focused Verification: `uv run pytest -q tests/test_entropy_audit_script.py`; `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile_*.py`; `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: update `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` with guard expectations and exact commands.
 - [x] 2.2 Chain stage catalog/type owner-family completion.
   - Module/Scope: `services.orchestrator.chain_stages`, `services.orchestrator.chain_types`, static catalog/type re-exports, and result/context type compatibility.
@@ -687,7 +687,7 @@
   - Regression Coverage: extend `tests/test_orchestration_chain.py` to prove owner/facade alias identity, owner wrapper map parity, legacy monkeypatch paths for `reserve_candidate` / `bind_reservation`, local gate behavior, stage-execution dependency bindings, and inventory token coverage.
   - Risk/Invariant: no repository extraction, retry behavior, stage-execution body, reservation protocol behavior, DB schema, Slurm behavior, API/frontend, or display behavior moves in this slice; this only makes the existing reservation compatibility surface executable and reviewable.
   - Focused Verification:
-    - `uv run pytest -q tests/test_gateway_reconcile.py tests/test_orchestration_chain.py`
+    - `uv run pytest -q tests/test_gateway_reconcile_*.py tests/test_orchestration_chain.py`
     - `uv run pytest -q tests/test_entropy_audit_script.py`
     - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
     - `openspec validate governance-8-module-deepening --strict --no-interactive`
@@ -909,7 +909,7 @@
       does not change artifact writes, discovery limits, credentials,
       packaging, geospatial/time-series formats, or display endpoints.
   - Focused Verification:
-    - `uv run pytest -q tests/test_gateway_reconcile.py tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py`
+    - `uv run pytest -q tests/test_gateway_reconcile_*.py tests/test_production_scheduler.py tests/test_retry_cancel_consistency.py tests/test_real_database_integration.py`
     - `uv run pytest -q tests/test_orchestration_chain.py -k "persistence_repository_compat"`
     - `uv run pytest -q tests/test_entropy_audit_script.py`
     - `uv run ruff check services/orchestrator/chain.py tests/test_orchestration_chain.py`
@@ -963,7 +963,7 @@
     no chain runtime code, Slurm behavior, DB schema, API route, scheduler,
     readiness, two-node, API-bootstrap, or frontend groups change in this
     slice.
-  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile.py tests/test_real_database_integration.py`;
+  - Focused Verification: `uv run pytest -q tests/test_orchestration_chain.py tests/test_retry_cancel_consistency.py tests/test_gateway_reconcile_*.py tests/test_real_database_integration.py`;
     `uv run pytest -q tests/test_entropy_audit_script.py`;
     `openspec validate governance-8-module-deepening --strict --no-interactive`; `git diff --check`.
   - Inventory/Evidence Update: record final chain issue/PR mapping in implementation evidence.

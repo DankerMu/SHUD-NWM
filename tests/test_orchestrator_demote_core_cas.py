@@ -858,7 +858,7 @@ def _legacy_marker_free_master_repository(tmp_path: Path) -> Any:
     upsert may legally upgrade to the current contract in one merge.
     """
 
-    from tests.test_gateway_reconcile import _file_cohort_repository
+    from tests.gateway_reconcile_helpers import _file_cohort_repository
 
     return _file_cohort_repository(tmp_path, member_count=2, versioned=False)
 
