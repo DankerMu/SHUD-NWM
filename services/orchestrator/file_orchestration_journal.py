@@ -597,6 +597,21 @@ class RetryEvidenceInvalidError(RetryError):
         )
 
 
+@dataclass(frozen=True)
+class _PendingManualRetryResult:
+    """Lock-held producer result: caller-facing row plus trusted private copy.
+
+    ``public_job`` keeps the pre-existing caller-facing retry namespace; the
+    ``private_snapshot`` is a copy of the already strict-validated private
+    ``retry_row`` the producer actually wrote under the cycle lock, so the
+    caller never needs (and must not perform) a new lock-outside durable
+    lookup to source exact lineage.
+    """
+
+    public_job: SimpleNamespace
+    private_snapshot: dict[str, Any]
+
+
 class _JournalProbeContainmentError(Exception):
     """A containment fault raised by an existence probe, carried to a choke frame.
 
@@ -9128,7 +9143,7 @@ class FileJournalRetryService:
             }
             return _file_retry_namespace(marker)
 
-    def _create_pending_manual_retry_job(self, run_id: str) -> SimpleNamespace:
+    def _create_pending_manual_retry_job(self, run_id: str) -> _PendingManualRetryResult:
         source_id, cycle_time = _source_cycle_from_file_run_id(run_id)
         with self.repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             failed_job, active_job = self._manual_retry_source_for_run(run_id)
@@ -9229,7 +9244,13 @@ class FileJournalRetryService:
                     ),
                 },
             )
-            return _file_retry_namespace(written)
+            # The private row actually written under this lock, captured BEFORE
+            # the public projection: exact lineage for the trusted pre-submit
+            # snapshot, marker absent, previous_job_id already bound.
+            return _PendingManualRetryResult(
+                public_job=_file_retry_namespace(written),
+                private_snapshot=dict(retry_row),
+            )
 
     def _append_pipeline_event_unlocked(
         self,
@@ -9303,15 +9324,20 @@ class FileJournalRetryService:
                 {"run_id": run_id},
             )
 
-        retry_job = self._create_pending_manual_retry_job(run_id)
-        # Trusted PRE-SUBMIT private snapshot: captured before any gateway
-        # call, so an external writer corrupting the durable pending row
-        # DURING the call cannot affect the lineage the success update must
-        # preserve.  Its lineage was already strictly validated when the
-        # pending row was constructed.
-        trusted_pending_snapshot = self.repository._pipeline_job_for_id_unlocked(retry_job.job_id)
-        if trusted_pending_snapshot is None:
-            raise RetryNotFoundError(retry_job.job_id)
+        pending = self._create_pending_manual_retry_job(run_id)
+        retry_job = pending.public_job
+        # Trusted PRE-SUBMIT private snapshot: carried out of the lock-held
+        # producer (no new lock-outside durable read), strictly validated
+        # again defensively before any gateway side effect.  This defensive
+        # failure converges onto the same 409 boundary as the producer's own
+        # evidence rejection (D4) instead of a generic 500.
+        trusted_pending_snapshot = pending.private_snapshot
+        try:
+            _strict_retry_init_state_identities(trusted_pending_snapshot.get(INIT_STATE_IDENTITY_FIELD))
+        except FileOrchestrationJournalError as error:
+            raise RetryEvidenceInvalidError(
+                run_id, reason=str(error.reason), field=str(error.field)
+            ) from error
         runtime_root_resolution: dict[str, Any] | None = None
         runtime_root_contract: dict[str, str] | None = None
         try:

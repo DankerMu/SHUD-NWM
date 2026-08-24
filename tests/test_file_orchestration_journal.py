@@ -16842,6 +16842,42 @@ def test_file_auto_retry_first_hop_and_retry_of_retry_bind_durable_predecessor(
     assert second_event["details"]["previous_job_id"] == str(first_full.job_id)
 
 
+def test_file_manual_retry_producer_result_carries_trusted_private_snapshot(
+    tmp_path: Path,
+) -> None:
+    """The producer result carries the exact private row; no reread needed.
+
+    ``_create_pending_manual_retry_job`` returns a frozen result with BOTH the
+    caller-facing public retry namespace (existing semantics) and a copy of the
+    strict-validated private ``retry_row`` actually written under the cycle
+    lock.  The private snapshot's lineage is exact (no placeholder), the
+    accepted-submit marker is absent, and ``previous_job_id`` is already bound
+    -- so ``attempt_manual_retry`` has everything it needs without a new
+    lock-outside durable lookup.
+    """
+
+    original_lineage = _lineage_auto_retry_identities()
+    repository = _lineage_marker_free_failed_row(
+        tmp_path,
+        job_id="job_producer_snapshot",
+        init_state_identities=original_lineage,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    result = service._create_pending_manual_retry_job("fcst_gfs_2026072000_model_a")
+
+    assert result.public_job.status == "pending"
+    assert result.public_job.manual_retry_marker is True
+    snapshot = result.private_snapshot
+    assert snapshot["init_state_identities"] == original_lineage
+    assert "accepted_submit_contract_version" not in snapshot
+    assert snapshot["previous_job_id"] == "job_producer_snapshot"
+    assert snapshot["status"] == "pending"
+    # The strict boundary already accepted the snapshot's lineage; a malformed
+    # durable predecessor would have failed the producer before this result.
+    strict = journal_module._strict_retry_init_state_identities(snapshot.get("init_state_identities"))
+    assert strict == original_lineage
+
+
 def test_file_manual_retry_submission_success_survives_gateway_time_corruption(
     tmp_path: Path,
 ) -> None:
