@@ -60,7 +60,8 @@ Do not hand-edit this file.
 ## 开发环境约定
 
 - **Python 一律用 `uv`**（`uv run`、`uv pip`），禁止裸 `python` / `python3` / `pip`；装依赖 `uv sync --all-extras --dev`。node-27 上需 `export PATH=$HOME/.local/bin:$PATH`。
-- 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。node-22 活动环境在运维批准的维护窗口前保持 3.12.7（其共享 `.venv` 有在线服务占用，例行 `uv sync` 已实测会被打断成半拆状态）；切换仅在维护窗口内执行：停用占用 `.venv` 的进程 → `uv sync --all-extras --dev` → 断言 `uv run python -V` 为 3.11.x → 按各自 runbook 重启并验证服务。该 pin 不含任何 Slurm 运行时验证。
+- 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。
+- **node-22 例外（维护窗口前）**：`/scratch/frd_muziyao/NWM` 的活动 checkout 在运维批准的维护窗口前保持 Python 3.12.7（共享 `.venv` 被在线服务占用，而新 pin 是 3.11——在此窗口前**禁止** `uv sync`，也禁止裸 `uv run` / 任何会隐式重建环境的 `uv run` 变体，否则 uv 会在 3.11 pin 下自动删除并重建 3.12 的 `.venv`，已实测会打断成半拆状态）。若需维护窗口前的只读 Python 观察，只用已验证的 `uv run --no-sync ...`——它执行的是仍活动的 3.12.7 环境、**不代表 3.11 pin 生效**；`--active` 并非安全替代（同样会重建）。切换仅在维护窗口内执行：停用占用 `.venv` 的进程 → `uv sync --all-extras --dev` → 断言 `uv run python -V` 为 3.11.x → 按各自 runbook 重启并验证服务。该 pin 不含任何 Slurm 运行时验证。
 - 前端：`cd apps/frontend && pnpm install && pnpm test && pnpm build`；Linux 端用 `corepack pnpm`（版本以 `package.json` 的 `packageManager` 为准）。
 
 ## Issue 驱动开发

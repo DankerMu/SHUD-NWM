@@ -70,7 +70,8 @@ Fixture level: expanded. Repair intensity: high because the hook is a shared com
 1. Commit pin, hook behavior/tests, stable replay mapping/tests, and generated instructions together.
 2. Verify locally on Python 3.11 and explicitly confirm Python 3.14 remains selectable.
 3. After push, verify the exact commit on node-22 in an isolated worktree. Keep the active shared `.venv` on 3.12.7 while live services use it; at the next operator-approved maintenance window, stop its owning processes, run `uv sync --all-extras --dev`, assert Python 3.11.x, and restart/verify services. Do not trigger a compute job.
-4. Rollback is a normal revert of this PR; no persisted business data changes.
+4. Before that maintenance window, node-22 instructions SHALL NOT permit any command that implicitly or explicitly creates/updates/replaces/syncs the shared `.venv`: this prohibits both `uv sync` and bare or environment-updating `uv run` in the active checkout (uv recreates a 3.12 venv under the 3.11 pin, verified in a disposable env). Pre-window read-only Python observation uses `uv run --no-sync ...` only, which executes the still-active 3.12.7 environment and is not pin proof; `--active` is not a safe substitute. The node-22 exception is documented in the root instructions and its generated projections.
+5. Rollback is a normal revert of this PR; no persisted business data changes.
 
 ## Open Questions
 

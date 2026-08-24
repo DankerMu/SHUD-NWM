@@ -6,7 +6,7 @@
 ## 2. Default Python truth source (#1571)
 
 - [x] 2.1 Track `.python-version` with `3.11` without changing `requires-python >=3.11` or CI's pip dependency resolution.
-- [x] 2.2 Update `instructions/agents/shared.md` and regenerate `CLAUDE.md`/`AGENTS.md` to document default 3.11, explicit `uv run --python <ver>`, and the operator-approved maintenance-window gate for node-22's active 3.12.7 -> 3.11 cutover.
+- [x] 2.2 Update `instructions/agents/shared.md` and regenerate `CLAUDE.md`/`AGENTS.md` to document default 3.11, explicit `uv run --python <ver>`, and the operator-approved maintenance-window gate for node-22's active 3.12.7 -> 3.11 cutover, including the pre-window prohibition of `uv sync` / bare `uv run` (implicit venv recreation) and the `uv run --no-sync`-only observation path.
 - [x] 2.3 Verify default Python 3.11, the expected 3.13-only `Path.rglob` TypeError, explicit Python 3.14 selection, and the full Python regression suite.
 
 ## 3. Worktree-local guard truth source (#1634)
