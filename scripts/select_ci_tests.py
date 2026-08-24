@@ -433,6 +433,67 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_orchestration_chain.py",
         ),
     ),
+    PathTestRule(
+        # #1809: the shared store/cohort/identity fixtures extracted from the
+        # gateway-reconcile monolith. The 22 file-level importing partitions are
+        # named exactly (derived-set members, all sub-second to import);
+        # store_reset is not a consumer — its shells build duck-typed stores and
+        # import nothing here. The five demote/chain suites below are the known
+        # ultimate consumers reached through the demote helper
+        # (tests/orchestrator_demote_reserved_job_helpers.py imports
+        # `_file_cohort_repository` from this module at file level; the four
+        # split-demote suites import that helper at file level and the public
+        # operator-recovery chain suite at function scope) — a
+        # support-to-support edge the derived AST scan cannot see, so they are
+        # listed explicitly here. tests/test_production_scheduler.py stays
+        # excluded on the deliberate 1870-test runtime-budget boundary: its only
+        # consumption is a function-local import that would buy a fixture edit
+        # the whole suite lane.
+        "tests/gateway_reconcile_helpers.py",
+        (
+            "tests/test_gateway_reconcile_comment_accounting.py",
+            "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_comment_sacct_bounds.py",
+            "tests/test_gateway_reconcile_file_cohort_authority.py",
+            "tests/test_gateway_reconcile_file_cohort_comment.py",
+            "tests/test_gateway_reconcile_file_cohort_identity.py",
+            "tests/test_gateway_reconcile_file_cohort_projection.py",
+            "tests/test_gateway_reconcile_file_submit_barrier.py",
+            "tests/test_gateway_reconcile_grace_guard.py",
+            "tests/test_gateway_reconcile_idempotency_barrier.py",
+            "tests/test_gateway_reconcile_identity_invariants.py",
+            "tests/test_gateway_reconcile_identity_release.py",
+            "tests/test_gateway_reconcile_inflight_identity.py",
+            "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_master_transitions.py",
+            "tests/test_gateway_reconcile_reservation_lifecycle.py",
+            "tests/test_gateway_reconcile_round10.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_gateway_reconcile_writer_rollforward.py",
+            # The five ultimate consumers via the demote helper (see above).
+            "tests/test_orchestrator_demote_cli_security.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+            "tests/test_orchestrator_demote_projection_faults.py",
+            "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+            "tests/test_orchestration_chain.py",
+        ),
+    ),
+    PathTestRule(
+        # #1809: the writer/barrier utilities extracted from the monolith. Its
+        # six file-level importing partitions are the derived consumer set.
+        "tests/gateway_reconcile_writer_helpers.py",
+        (
+            "tests/test_gateway_reconcile_idempotency_barrier.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_gateway_reconcile_writer_rollforward.py",
+        ),
+    ),
 )
 
 
@@ -722,7 +783,32 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "services/slurm_gateway/**",
         (
             "tests/test_gateway.py",
-            "tests/test_gateway_reconcile.py",
+            # #1809: the 14k-line gateway-reconcile monolith was physically
+            # partitioned into flat responsibility modules; every collectible
+            # partition replaces the deleted single target here, sorted.
+            "tests/test_gateway_reconcile_comment_accounting.py",
+            "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_comment_sacct_bounds.py",
+            "tests/test_gateway_reconcile_file_cohort_authority.py",
+            "tests/test_gateway_reconcile_file_cohort_comment.py",
+            "tests/test_gateway_reconcile_file_cohort_identity.py",
+            "tests/test_gateway_reconcile_file_cohort_projection.py",
+            "tests/test_gateway_reconcile_file_submit_barrier.py",
+            "tests/test_gateway_reconcile_grace_guard.py",
+            "tests/test_gateway_reconcile_idempotency_barrier.py",
+            "tests/test_gateway_reconcile_identity_invariants.py",
+            "tests/test_gateway_reconcile_identity_release.py",
+            "tests/test_gateway_reconcile_inflight_identity.py",
+            "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_master_transitions.py",
+            "tests/test_gateway_reconcile_reservation_lifecycle.py",
+            "tests/test_gateway_reconcile_round10.py",
+            "tests/test_gateway_reconcile_store_reset.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+            "tests/test_gateway_reconcile_writer_rollforward.py",
             "tests/test_slurm_gateway_app.py",
             "tests/test_slurm_route_contract.py",
             "tests/test_real_slurm_gateway.py",
@@ -769,8 +855,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # slurm_gateway path keeps today's seven targets. The set is DERIVED
         # from the tracked tree by tests/test_select_ci_tests.py, never frozen
         # there, so a new one-hop importer suite reddens the guard.
-        # tests/test_gateway_reconcile.py is a one-hop member too but already
-        # rides the `services/slurm_gateway/**` rule; it is not repeated here.
+        # The #1809 gateway-reconcile partitions are one-hop members too but
+        # already ride the `services/slurm_gateway/**` rule; they are not
+        # repeated here.
         # #1564: the split demote suites are one-hop members via
         # services/orchestrator/reconcile.py (see #1455 above) and are not
         # covered by either slurm_gateway rule, so they join this narrow rule.

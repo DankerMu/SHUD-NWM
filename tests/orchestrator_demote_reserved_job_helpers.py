@@ -14,7 +14,7 @@ from typing import Any
 
 from services.orchestrator import reconcile as reconcile_module
 from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
-from tests.test_gateway_reconcile import _file_cohort_repository
+from tests.gateway_reconcile_helpers import _file_cohort_repository
 
 JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
 STARTED_AT = datetime(2026, 7, 12, tzinfo=UTC)
@@ -112,7 +112,7 @@ def _production_faithful_held_cohort_repository(
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalRepository,
     )
-    from tests.test_gateway_reconcile import (
+    from tests.gateway_reconcile_helpers import (
         _append_cohort_placeholders,
         _versioned_master_reservation_record,
     )
