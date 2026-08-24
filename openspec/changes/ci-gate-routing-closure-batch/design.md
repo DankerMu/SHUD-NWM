@@ -120,6 +120,41 @@ comment/count update. Existing MVT exact-set and closure tests are part of the
 regression matrix. The PR body records #1597 as already delivered and closed by
 traceability, not newly implemented.
 
+### D6: Collection-smoke provenance is independent of final target shape
+
+Round-1 review confirmed that the `scripts/**` supplemental invariant target
+made a selector-source-only diff cease to be `meta_guard_only`, silently
+removing the canonical full-tree collection smoke. Keep `meta_guard_only` as its
+existing final-list shape property; do not overload or weaken it. Add a separate
+`collection_smoke_required` GitHub output that is true when either:
+
+- the final selection is exactly the selector meta-guard; or
+- the changed-file set contains `scripts/select_ci_tests.py` or
+  `tests/test_select_ci_tests.py`, even when supplemental targets make the final
+  selection non-collapsed.
+
+The workflow consumes this provenance field for the full-tree collect-only
+branch. Zero-selection behavior stays separate and unchanged. This preserves
+both #1656's Timescale invariant and the canonical selector-development oracle.
+
+### D7: One positive helper owns each standing mutation contract
+
+Round-1 verification confirmed four tests described a mutant's bad output while
+remaining green instead of proving that the live contract rejected the mutant.
+For supplemental roots, shared baseline, mapping-builder targets, and the
+`database` filter registry, extract one positive violation helper per invariant:
+live state returns no violations; the constructed mutant is passed through that
+same helper and must return a violation naming the missing root/target/source.
+Expected values remain independent from the monkeypatched production authority.
+
+The real-DB job receives the same treatment. A job-scoped contract helper must
+bind the `pytest -vv -rs -m integration` command, the dedicated
+`NHMS_INTEGRATION_DATABASE_URL` consumed by `tests/conftest.py`, the opt-in flag,
+Timescale service image, and existing job gate. Deleting only the dedicated DSN
+must produce a named violation; preserving generic `DATABASE_URL` is explicitly
+insufficient because the integration fixture ignores it without a compatibility
+flag.
+
 ## Risk Packs Considered
 
 Core:

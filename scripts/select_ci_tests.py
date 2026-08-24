@@ -1420,9 +1420,39 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
 )
 
 
+def normalize_changed_paths(changed_paths: Iterable[str]) -> list[str]:
+    """Normalize changed paths exactly as ``select_tests`` consumes them.
+
+    Single normalization authority so the selection loop and the
+    collection-smoke provenance computation cannot diverge: strip whitespace
+    and translate Windows separators to POSIX. Empty entries are dropped.
+    """
+    return [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
+
+
+def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool) -> bool:
+    """Provenance-independent answer to "must the full-tree collect smoke run?".
+
+    True when the final selection is exactly the selector meta-guard (the
+    #1454 shape: deleted test file, unrouted support module, or a selector-test
+    PR) OR when the changed-file set touches the selector itself
+    (``scripts/select_ci_tests.py`` or ``tests/test_select_ci_tests.py``) —
+    the class of diff that rewrites the gate and must not silently lose the
+    full-tree collection oracle, even when supplemental routing makes the
+    final selection non-collapsed (e.g. a selector-source PR also selects the
+    Timescale invariant). Deliberately independent of the final-list shape so a
+    supplemental target can never mask the provenance requirement.
+    """
+    if meta_guard_only:
+        return True
+    return any(
+        path in ("scripts/select_ci_tests.py", SELECTOR_META_GUARD_TEST) for path in changed
+    )
+
+
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
     selected: set[str] = set()
-    changed = [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
+    changed = normalize_changed_paths(changed_paths)
     unknown_backend_path = False
 
     for path in changed:
@@ -1631,7 +1661,12 @@ def _test_target_exists(target: str, *, repo_root: Path) -> bool:
     return (repo_root / test_path).is_file()
 
 
-def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
+def _write_github_output(
+    tests: Sequence[str],
+    *,
+    output_path: Path,
+    changed_paths: Sequence[str],
+) -> None:
     # `meta_guard_only` is a SHAPE property of the FINAL (post missing-target
     # filter) selection, not a claim about evidence provenance: it is true iff
     # the only target left is the selector's own suite. That covers the PR whose
@@ -1642,11 +1677,21 @@ def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
     # suite. That last class is accepted rather than special-cased: the cost is
     # one extra collection pass on exactly the PR class that changes the gate.
     meta_guard_only = list(tests) == [SELECTOR_META_GUARD_TEST]
+    # `collection_smoke_required` is INDEPENDENT provenance, not a restatement
+    # of the final-list shape: a selector-development PR stays collection-
+    # required even when supplemental routing makes the final selection
+    # non-collapsed (selector source + Timescale invariant, #1744/#1656).
+    # `changed_paths` is the already-normalized set the selection loop ran on;
+    # no ambient git state is inspected and no diff is re-run.
+    collection_smoke_required = _collection_smoke_required(
+        changed_paths, meta_guard_only=meta_guard_only
+    )
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(f"count={len(tests)}\n")
         handle.write(f"tests={' '.join(tests)}\n")
         handle.write(f"tests_json={json.dumps(list(tests), separators=(',', ':'))}\n")
         handle.write(f"meta_guard_only={'true' if meta_guard_only else 'false'}\n")
+        handle.write(f"collection_smoke_required={'true' if collection_smoke_required else 'false'}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1664,11 +1709,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         changed = sys.stdin.read().splitlines()
 
-    tests = select_tests(changed, repo_root=args.repo_root)
+    normalized = normalize_changed_paths(changed)
+    tests = select_tests(normalized, repo_root=args.repo_root)
     for test in tests:
         print(test)
     if args.github_output:
-        _write_github_output(tests, output_path=args.github_output)
+        _write_github_output(
+            tests,
+            output_path=args.github_output,
+            changed_paths=normalized,
+        )
     return 0
 
 

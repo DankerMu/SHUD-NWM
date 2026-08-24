@@ -38,6 +38,30 @@ A selector supplemental-rule authority SHALL map every Python source path under 
 - **WHEN** a scanned root is added or a supplemental mapping is deleted or narrowed
 - **THEN** the selector meta-test fails and names the uncovered root or source
 
+### Requirement: Selector-development changes MUST retain full-tree collection smoke
+
+The selector SHALL expose a `collection_smoke_required` GitHub output whose provenance is independent of the final selected-target list shape. It SHALL be true when the final selection is exactly the selector meta-guard or when the changed-file set contains `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`; otherwise it SHALL be false for non-empty ordinary selections. The `Unit Tests` workflow SHALL use this field to run the labeled full-tree collect-only smoke in addition to targeted assertions. The existing `meta_guard_only` field SHALL remain a final-list shape property and zero-selection behavior SHALL remain unchanged.
+
+#### Scenario: Selector source change keeps supplemental and collection oracles
+
+- **WHEN** the only changed path is `scripts/select_ci_tests.py`
+- **THEN** the selected targets include both `tests/test_select_ci_tests.py` and `tests/test_timescale_write_guard_wire_site_invariant.py`, `meta_guard_only=false`, `collection_smoke_required=true`, and the workflow also runs `pytest tests/ -q --collect-only`
+
+#### Scenario: Selector test change keeps its collapse semantics
+
+- **WHEN** the only changed path is `tests/test_select_ci_tests.py`
+- **THEN** `meta_guard_only=true` and `collection_smoke_required=true`, so assertions and full-tree collection both run
+
+#### Scenario: Ordinary non-collapsed selection does not pay collection smoke
+
+- **WHEN** a non-empty selection contains an ordinary target and neither selector-development path changed
+- **THEN** `collection_smoke_required=false` and the targeted job does not add the full-tree collection pass
+
+#### Scenario: Existing meta-guard collapse still requires collection
+
+- **WHEN** missing-target filtering or an unrouted support-module change leaves exactly the selector meta-guard suite
+- **THEN** both `meta_guard_only=true` and `collection_smoke_required=true`
+
 ### Requirement: Irregular source and package routes MUST select their owned suites
 
 The targeted selector SHALL map every tracked module under `workers/mapping_builder/**` to every tracked `tests/test_mapping_builder_*.py` suite, map `packages/common/state_clone_hook.py` to `tests/test_state_clone_cutover_hook.py`, and map `scripts/node22_clone_direct_grid_cutover_states.py` to both state-clone recalibration suites. Variable package sets SHALL be derived from the tracked tree where the naming/domain is stable, while intentionally irregular file-to-suite names remain explicit.
@@ -59,7 +83,7 @@ The targeted selector SHALL map every tracked module under `workers/mapping_buil
 
 ### Requirement: Integration-owned production sources MUST trigger real-database CI
 
-The CI `database` paths filter SHALL match every production source surface in the finite integration-trigger registry defined by this change: `packages/common/forecast_store.py`, `packages/common/display_coverage.py`, `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py`, `apps/api/main.py`, `scripts/node27_autopipeline.py`, `workers/output_parser/parser.py`, `packages/common/timescale_write_guard.py`, `packages/common/object_store.py`, `packages/common/model_registry.py`, `packages/common/grid_registry_store.py`, `workers/grid_registry/**`, `workers/model_registry/**`, `workers/forcing_producer/**`, and `services/orchestrator/scheduler.py`. The selector contract suite SHALL parse the `database:` filter and mechanically assert that each registered path or tracked member of a registered root matches at least one filter pattern; a workflow change SHALL self-select that contract suite. Matching the filter SHALL open the existing `real-db-integration` job, which runs the full `-m integration` suite with its PostgreSQL/Timescale service and DSN. The job SHALL expose node-level pass/skip evidence with pytest `-vv -rs`; this verbosity-only evidence change SHALL NOT alter its marker expression, DSN, service, or suite selection.
+The CI `database` paths filter SHALL match every production source surface in the finite integration-trigger registry defined by this change: `packages/common/forecast_store.py`, `packages/common/display_coverage.py`, `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py`, `apps/api/main.py`, `scripts/node27_autopipeline.py`, `workers/output_parser/parser.py`, `packages/common/timescale_write_guard.py`, `packages/common/object_store.py`, `packages/common/model_registry.py`, `packages/common/grid_registry_store.py`, `workers/grid_registry/**`, `workers/model_registry/**`, `workers/forcing_producer/**`, and `services/orchestrator/scheduler.py`. The selector contract suite SHALL parse the `database:` filter and mechanically assert that each registered path or tracked member of a registered root matches at least one filter pattern; a workflow change SHALL self-select that contract suite. Matching the filter SHALL open the existing `real-db-integration` job, which runs the full `-m integration` suite with its PostgreSQL/Timescale service and dedicated `NHMS_INTEGRATION_DATABASE_URL`. The job SHALL expose node-level pass/skip evidence with pytest `-vv -rs`; this verbosity-only evidence change SHALL NOT alter its marker expression, dedicated DSN, service, job gate, or suite selection. One positive job-contract helper SHALL validate those properties, and deletion of the dedicated DSN SHALL produce a named contract violation rather than a green job whose required nodes all skip.
 
 #### Scenario: Forecast-store-only diff opens the parity oracle lane
 
@@ -71,15 +95,20 @@ The CI `database` paths filter SHALL match every production source surface in th
 - **WHEN** any registered source path no longer matches a `database` pattern, including a mutation that removes the `packages/common/forecast_store.py` pattern
 - **THEN** `tests/test_select_ci_tests.py` fails and names the uncovered source
 
+#### Scenario: Dedicated integration DSN cannot disappear silently
+
+- **WHEN** the `real-db-integration` workflow block loses `NHMS_INTEGRATION_DATABASE_URL` while retaining generic `DATABASE_URL`, `NHMS_RUN_INTEGRATION`, and `pytest -vv -rs -m integration`
+- **THEN** the same positive job-contract helper used for the live workflow reports a violation naming `NHMS_INTEGRATION_DATABASE_URL`, because the integration fixture ignores generic `DATABASE_URL` without an explicit compatibility flag
+
 #### Scenario: Workflow changes execute the trigger contract
 
 - **WHEN** `.github/workflows/ci.yml` changes
-- **THEN** targeted selection includes `tests/test_select_ci_tests.py`, so the database-filter registry contract executes on that PR
+- **THEN** targeted selection includes `tests/test_select_ci_tests.py`, so the database-filter and real-DB job contracts execute on that PR
 
 #### Scenario: Existing CI lanes retain their contracts
 
 - **WHEN** the database filter gains the finite integration-owned source patterns and the real-DB pytest command gains `-vv -rs`
-- **THEN** `unit-test-targeted`, master `unit-test`, frontend/docs/openapi/schema filters, draft gating, the integration marker expression, PostgreSQL service, and DSN model remain unchanged
+- **THEN** `unit-test-targeted`, master `unit-test`, frontend/docs/openapi/schema filters, draft gating, the integration marker expression, dedicated integration DSN, PostgreSQL/Timescale service, real-DB job gate, and suite selection remain unchanged
 
 ## MODIFIED Requirements
 

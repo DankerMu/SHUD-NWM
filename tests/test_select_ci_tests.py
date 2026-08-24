@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 
 from scripts.select_ci_tests import (
     BACKEND_PYTHON_SOURCE_PREFIXES,
@@ -2745,8 +2746,10 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
 # carve-outs, or one deriving no importer suites) both leave a one-element
 # selection (the meta-guard suite), so they never reached this empty-selection
 # branch and lost the full-tree collect-only smoke they used to get. #1454's
-# `meta_guard_only` output field is what runs the smoke for them, in addition to
-# the targeted run — this branch's own semantics are untouched. A support module
+# `meta_guard_only` shape plus the round-1 `collection_smoke_required`
+# provenance output drive the collect smoke for them (the workflow's collection
+# branch fires when collection_smoke_required is true), in addition to the
+# targeted run — this branch's own semantics are untouched. A support module
 # WITH a SUPPORT_MODULE_TEST_RULES entry (#1487) is in neither class: it selects
 # real importer suites, so `meta_guard_only` is false and the targeted lane runs
 # assertions.
@@ -2896,7 +2899,8 @@ def test_github_output_flags_the_deleted_test_file_meta_guard_collapse(tmp_path:
     # survives the missing-target filter, so count is 1 and the smoke is lost —
     # even though a deletion is exactly what breaks cross-test imports. The flag
     # is computed on the POST-filter list, which is what makes this shape
-    # visible at all.
+    # visible at all. Both the shape flag and the provenance collection signal
+    # are true here.
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
     assert not (tmp_path / "tests" / "test_gone.py").exists()
@@ -2906,6 +2910,7 @@ def test_github_output_flags_the_deleted_test_file_meta_guard_collapse(tmp_path:
     assert fields["count"] == "1"
     assert fields["tests"] == SELECTOR_META_GUARD_TEST
     assert fields["meta_guard_only"] == "true"
+    assert fields["collection_smoke_required"] == "true"
 
 
 def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None:
@@ -2913,6 +2918,7 @@ def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None
 
     assert fields["tests"] == SELECTOR_META_GUARD_TEST
     assert fields["meta_guard_only"] == "true"
+    assert fields["collection_smoke_required"] == "true"
 
 
 def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path) -> None:
@@ -2921,26 +2927,28 @@ def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path)
     # flag and pay one extra collection pass. Special-casing them would trade a
     # two-line predicate for a provenance rule on exactly the PR class that
     # rewrites the gate — the class least well served by a subtle exemption.
-    # NOTE (batch #1744/#1656): only tests/test_select_ci_tests.py keeps the
-    # collapse. A PR changing scripts/select_ci_tests.py now ALSO routes the
-    # write-site invariant (scripts/** is a scanned root, #1656), so its
-    # selection is [meta-guard, invariant] — not a collapse — and the smoke
-    # branch does not fire for it.
+    # NOTE (batch #1744/#1656): tests/test_select_ci_tests.py keeps the
+    # collapse: meta_guard_only=true AND collection_smoke_required=true (the
+    # provenance leg fires for the changed selector suite itself).
     fields = _github_output_fields(tmp_path, ["tests/test_select_ci_tests.py"], repo_root=Path("."))
 
     assert fields["meta_guard_only"] == "true"
+    assert fields["collection_smoke_required"] == "true"
 
 
 def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Path) -> None:
     # #1656: scripts/select_ci_tests.py lives under scripts/**, a scanned
     # invariant root, so a selector-source diff selects the meta-guard PLUS the
-    # write-site invariant — not the meta-guard collapse, and therefore not the
-    # extra full-tree collection pass.
+    # write-site invariant — NOT the meta-guard collapse. The collection signal
+    # is still true by PROVENANCE (the selector source itself changed), so the
+    # workflow runs the full-tree collect smoke in addition to the two targeted
+    # suites — the round-1 cand-01 fix.
     fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
 
     assert fields["count"] == "2"
     assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
     assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -2966,53 +2974,75 @@ def test_github_output_suppresses_the_flag_for_non_collapsed_selections(
 
     assert fields["count"] == expected_count
     assert fields["meta_guard_only"] == "false"
+    # Ordinary non-empty selections and the zero-selection branch do not pay
+    # the provenance collection pass: the signal is false for these, and the
+    # count==0 branch continues to drive the empty-selection collect smoke.
+    assert fields["collection_smoke_required"] == "false"
 
 
-COLLAPSE_BRANCH_MARKER = 'if [ "${{ steps.targeted.outputs.meta_guard_only }}"'
+COLLECTION_SMOKE_MARKER = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}"'
 
 
-def _targeted_job_collapse_block() -> str:
-    """ci.yml's meta-guard-collapse branch, from its `if` to its matching `fi`.
+def _targeted_job_collection_block() -> str:
+    """ci.yml's collection-smoke branch, from its `if` to its matching `fi`.
 
-    Slicing to the block instead of scanning the whole job is what makes the
-    coupling pin killable: a job that merely MENTIONS the field, or that runs
-    the smoke somewhere else entirely, no longer satisfies it. The matching
-    `fi` is the next one at the branch's own 12-space indent — the inner
-    `if pytest … --collect-only` closes at 14 spaces and cannot truncate here.
+    Driven by `collection_smoke_required` (not `meta_guard_only`): a
+    selector-source PR is collection-required by provenance even when the final
+    selection is non-collapsed. Slicing to the block instead of scanning the
+    whole job is what makes the coupling pin killable: a job that merely
+    MENTIONS the field, or that runs the smoke somewhere else entirely, no
+    longer satisfies it. The matching `fi` is the next one at the branch's own
+    12-space indent — the inner `if pytest … --collect-only` closes at 14
+    spaces and cannot truncate here.
     """
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     start = workflow.index("\n  unit-test-targeted:")
     end = workflow.index("\n  frontend-build:", start)
     targeted_job = workflow[start:end]
 
-    branch_start = targeted_job.find(COLLAPSE_BRANCH_MARKER)
+    branch_start = targeted_job.find(COLLECTION_SMOKE_MARKER)
     assert branch_start != -1, (
-        "ci.yml's unit-test-targeted job no longer contains the meta-guard collapse branch "
-        f"(looked for {COLLAPSE_BRANCH_MARKER!r}); the #1454 collect-only smoke would be silently dead"
+        "ci.yml's unit-test-targeted job no longer contains the collection-smoke branch "
+        f"(looked for {COLLECTION_SMOKE_MARKER!r}); the #1454 collect-only smoke would be silently dead"
     )
+    # The OUTER `if collection_smoke_required` branch closes with the 12-space
+    # `fi`; the inner meta_guard_only `if` closes with a 14-space `fi` and must
+    # not truncate the slice (the collect command sits after it, still inside
+    # the outer branch).
     branch_end = targeted_job.find("\n            fi\n", branch_start)
-    assert branch_end != -1, "meta-guard collapse branch in ci.yml has no matching 12-space `fi`"
+    assert branch_end != -1, "collection-smoke branch in ci.yml has no matching 12-space `fi`"
     return targeted_job[branch_start:branch_end]
 
 
-def test_ci_workflow_consumes_the_meta_guard_only_output(tmp_path: Path) -> None:
+def test_ci_workflow_consumes_the_collection_smoke_required_output(tmp_path: Path) -> None:
     # String coupling across a boundary no test can execute: the field is
     # written by Python and read by a shell condition in a workflow file. Either
     # side can be renamed alone and nothing else notices — the smoke would just
     # stop running, silently, which is the exact failure mode #1454 exists to
-    # end.
-    collapse_block = _targeted_job_collapse_block()
+    # end. The branch is driven by `collection_smoke_required` (round-1
+    # cand-01), so a selector-source two-target selection still runs the smoke.
+    collection_block = _targeted_job_collection_block()
 
-    # The condition runs the smoke ON collapse, not on its negation.
-    assert collapse_block.startswith(f'{COLLAPSE_BRANCH_MARKER} = "true" ]; then')
+    # The condition runs the smoke ON collection-required, not on its negation.
+    assert collection_block.startswith(f'{COLLECTION_SMOKE_MARKER} = "true" ]; then')
     # ...and the smoke it guards is the full-tree collect-only, INSIDE the block.
-    assert "pytest tests/ -q --collect-only" in collapse_block
+    assert "pytest tests/ -q --collect-only" in collection_block
     # The spec's wording constraint (this branch DID execute assertions) gets a
     # pin, not just prose: a copy-paste from the count == 0 branch would lie.
-    assert "0 assertions" not in collapse_block
+    assert "0 assertions" not in collection_block
     # ...and the producing side emits that exact key, read from behavior rather
-    # than from the selector's source text.
-    assert "meta_guard_only" in _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
+    # than from the selector's source text. Both the shape flag and the
+    # provenance signal must be present in the output stream.
+    fields = _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
+    assert "collection_smoke_required" in fields
+    assert "meta_guard_only" in fields
+    # The targeted pytest runs FIRST, before the collection branch, so a
+    # collection failure cannot mask a targeted assertion failure.
+    targeted_job = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    start = targeted_job.index("\n  unit-test-targeted:")
+    end = targeted_job.index("\n  frontend-build:", start)
+    job = targeted_job[start:end]
+    assert job.index('subprocess.run(["pytest", "-q", *tests], check=True)') < job.index(COLLECTION_SMOKE_MARKER)
 
 
 def test_ci_concurrency_pins_pr_number_run_id_and_conditional_cancel() -> None:
@@ -4811,6 +4841,27 @@ def test_supplemental_invariant_roots_derive_from_the_invariant_scan() -> None:
     assert set(_supplemental_invariant_roots()) == _invariant_scan_root_globs()
 
 
+def _supplemental_roots_violations(roots: Sequence[str], *, probe: str) -> list[str]:
+    """Positive oracle: missing invariant-root coverage, naming the uncovered root.
+
+    ``roots`` are the supplemental root globs under test; the expected set is
+    the INDEPENDENT ``_invariant_scan_root_globs()`` derived from the invariant
+    suite's own ``_scan_roots`` — never the monkeypatched production constant.
+    Returns a violation naming each expected root whose glob does not match
+    ``probe``, plus (if the probe itself is unrooted) a violation naming the
+    probe. Live state yields an empty list; a mutant that drops ``scripts/**``
+    yields a named violation through this SAME helper.
+    """
+    expected = _invariant_scan_root_globs()
+    violations: list[str] = []
+    covered = any(fnmatch.fnmatch(probe, root) for root in roots)
+    if not covered:
+        violations.append(f"probe {probe} not covered by any supplemental root")
+    for root in sorted(expected - set(roots)):
+        violations.append(f"supplemental root {root} missing")
+    return violations
+
+
 def test_supplemental_invariant_routing_is_set_union_and_monotonic() -> None:
     # #1656: for every one of the four scanned roots, an existing writer/guard
     # source and a FUTURE-shaped path both select the invariant suite IN
@@ -4848,20 +4899,24 @@ def test_supplemental_invariant_routing_is_set_union_and_monotonic() -> None:
     assert INVARIANT_SUITE_PATH not in selected
     assert set(CORE_SMOKE_TESTS) <= selected
 
+    # Live state: the same positive oracle reports no violations.
+    assert not _supplemental_roots_violations(_supplemental_invariant_roots(), probe="scripts/brand_new_thing.py")
+
 
 def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #1656 red arm: deleting a supplemental root mapping must red the exact
-    # future-shaped path under that root. Constructed via monkeypatch on the
-    # selector module, tracked source untouched.
+    # #1656 mutant: deleting a supplemental root mapping must be rejected by
+    # the SAME positive oracle that the live test uses, naming the dropped
+    # root. Constructed via monkeypatch on the selector module, tracked source
+    # untouched.
     from scripts import select_ci_tests
 
     reduced = tuple(root for root in _supplemental_invariant_roots() if root != "scripts/**")
     monkeypatch.setattr(select_ci_tests, "TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS", reduced)
 
-    selected = set(select_tests(["scripts/brand_new_thing.py"], repo_root=Path(".")))
-    assert INVARIANT_SUITE_PATH not in selected
+    violations = _supplemental_roots_violations(reduced, probe="scripts/brand_new_thing.py")
+    assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
 
 
 # The #1744 shared-library additivity authority: `packages/common/**` must
@@ -4880,6 +4935,42 @@ SHARED_LIBRARY_SOURCES: tuple[tuple[str, str], ...] = (
 )
 
 
+# The INDEPENDENT current core-smoke contract set for the shared-baseline
+# oracle. NOT derived from the (possibly monkeypatched) production
+# CORE_SMOKE_TESTS: the positive helper's expected set must be an independent
+# literal/current contract so a mutant that shrinks the production constant is
+# caught, not mirrored. Kept in sync by the same-name/fallback pins elsewhere
+# in this suite (which assert the production constant's membership).
+SHARED_BASELINE_CONTRACT: tuple[str, ...] = (
+    "tests/test_api.py",
+    "tests/test_gateway.py",
+    "tests/test_migrations.py",
+    "tests/test_orchestration_chain.py",
+    "tests/test_production_scheduler.py",
+)
+
+
+def _shared_baseline_violations(
+    selected: set[str],
+    *,
+    source: str,
+    contract: Sequence[str] = SHARED_BASELINE_CONTRACT,
+) -> list[str]:
+    """Positive oracle: shared-baseline coverage, naming each missing target.
+
+    ``selected`` is the selection under test; the expected set is the
+    independent ``contract`` (literal, never the monkeypatched production
+    constant). Live state yields an empty list; a mutant whose production
+    constant is missing ``tests/test_production_scheduler.py`` yields a named
+    violation through this SAME helper.
+    """
+    return [
+        f"{source}: shared baseline lost {target}"
+        for target in contract
+        if target not in selected
+    ]
+
+
 def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
     # #1744 path B: every packages/common/** source selects its narrow targets
     # AND the complete core-smoke baseline — a narrow rule can never silently
@@ -4888,8 +4979,8 @@ def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
     for source, narrow_target in SHARED_LIBRARY_SOURCES:
         assert Path(source).is_file(), f"shared-library source missing: {source}"
         selected = set(select_tests([source], repo_root=Path(".")))
-        missing = set(CORE_SMOKE_TESTS) - selected
-        assert not missing, f"{source}: shared baseline lost {sorted(missing)}"
+        violations = _shared_baseline_violations(selected, source=source)
+        assert not violations, "shared baseline violations:\n  " + "\n  ".join(violations)
         assert narrow_target in selected, f"{source}: narrow target {narrow_target} lost"
         assert INVARIANT_SUITE_PATH in selected
 
@@ -4897,17 +4988,21 @@ def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
 def test_shared_library_additivity_reds_when_a_baseline_target_is_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #1744 red arm, constructed: dropping `test_production_scheduler.py` from
-    # the shared-baseline addition must red for state_cli.py (which only ever
-    # contributed its narrow state suites). This is the "adding a specific
-    # mapping never removes the shared baseline" invariant, made falsifiable.
+    # #1744 mutant: dropping `test_production_scheduler.py` from the production
+    # shared-baseline constant must be rejected by the SAME positive oracle that
+    # the live test uses, naming the missing scheduler target. The expected set
+    # is the independent SHARED_BASELINE_CONTRACT, so the mutant cannot pass by
+    # mirroring the shrunk constant.
     from scripts import select_ci_tests
 
     dropped = tuple(t for t in CORE_SMOKE_TESTS if t != "tests/test_production_scheduler.py")
     monkeypatch.setattr(select_ci_tests, "CORE_SMOKE_TESTS", dropped)
 
     selected = set(select_tests(["packages/common/state_cli.py"], repo_root=Path(".")))
-    assert "tests/test_production_scheduler.py" not in selected
+    violations = _shared_baseline_violations(selected, source="packages/common/state_cli.py")
+    assert any("tests/test_production_scheduler.py" in v for v in violations), (
+        f"expected a named scheduler-target violation, got {violations}"
+    )
 
 
 def test_shared_library_baseline_is_outside_stop_rule_ownership(
@@ -4969,8 +5064,11 @@ def test_mapping_builder_modules_select_all_package_suites() -> None:
 
     for module in _tracked_python_files("workers/mapping_builder/*.py"):
         selected = set(select_tests([module], repo_root=Path(".")))
-        missing = suites - selected
-        assert not missing, f"{module}: missing mapping-builder suites {sorted(missing)}"
+        # The LIVE path runs the SAME positive helper as the dropped-suite
+        # mutant, so live and mutant cannot diverge (round-1 invariant audit
+        # P2): no direct `suites - selected` here.
+        violations = _mapping_builder_suite_violations(selected, module=module, expected=suites)
+        assert not violations, "mapping-builder suite violations:\n  " + "\n  ".join(violations)
         assert INVARIANT_SUITE_PATH in selected, f"{module}: missing invariant suite"
 
 
@@ -5001,13 +5099,36 @@ def test_mapping_builder_rule_does_not_carry_state_clone_suites() -> None:
         assert not state_clone_suites & selected, f"{module}: selection leaks state-clone suites"
 
 
+def _mapping_builder_suite_violations(
+    selected: set[str],
+    *,
+    module: str,
+    expected: set[str] | None = None,
+) -> list[str]:
+    """Positive oracle: mapping-builder package coverage, naming each dropped suite.
+
+    ``selected`` is the selection under test; the expected set is the
+    tree-derived ``_tracked_mapping_builder_suites()`` (never a frozen list and
+    never the monkeypatched production rule). Live state yields an empty list;
+    a mutant rule missing one suite yields a named violation through this SAME
+    helper.
+    """
+    expected = _tracked_mapping_builder_suites() if expected is None else expected
+    return [
+        f"{module}: missing mapping-builder suite {suite}"
+        for suite in sorted(expected - selected)
+    ]
+
+
 def test_mapping_builder_rule_reds_when_a_suite_is_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #1711 red arm, constructed: removing one suite from the mapping-builder
-    # rule's targets must red for `workers/mapping_builder/__init__.py` — the
-    # module with NO same-name suite, so the dropped target cannot be smuggled
-    # back in by the same-name derivation. The live rule table is untouched.
+    # #1711 mutant: removing one suite from the mapping-builder rule's targets
+    # must be rejected by the SAME positive oracle that the live test uses,
+    # naming the dropped suite. Uses `workers/mapping_builder/__init__.py` —
+    # the module with NO same-name suite, so the dropped target cannot be
+    # smuggled back in by the same-name derivation. The live rule table is
+    # untouched.
     from scripts import select_ci_tests
 
     patched = tuple(
@@ -5024,7 +5145,10 @@ def test_mapping_builder_rule_reds_when_a_suite_is_dropped(
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
 
     selected = set(select_tests(["workers/mapping_builder/__init__.py"], repo_root=Path(".")))
-    assert "tests/test_mapping_builder_integration.py" not in selected
+    violations = _mapping_builder_suite_violations(selected, module="workers/mapping_builder/__init__.py")
+    assert any("test_mapping_builder_integration.py" in v for v in violations), (
+        f"expected a named mapping-builder suite violation, got {violations}"
+    )
 
 
 def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> None:
@@ -5165,6 +5289,26 @@ def _expand_tracked_members(globs: Sequence[str]) -> set[str]:
     return members
 
 
+def _database_registry_violations(patterns: Sequence[str]) -> list[str]:
+    """Positive oracle: database-filter coverage of the finite integration registry.
+
+    ``patterns`` are the `database:` filter patterns under test. The expected
+    set is the INDEPENDENT finite registry (``INTEGRATION_TRIGGER_SOURCES`` +
+    tree-expanded ``INTEGRATION_TRIGGER_ROOT_GLOBS`` + ``INTEGRATION_TRIGGER_EXTRA_SOURCES``),
+    never derived from the workflow text under test. Returns a violation naming
+    each registered source not matched by any pattern. Live state yields an
+    empty list; a mutant removing the ``forecast_store.py`` pattern yields a
+    named violation through this SAME helper.
+    """
+    registered = set(INTEGRATION_TRIGGER_SOURCES)
+    registered |= _expand_tracked_members(INTEGRATION_TRIGGER_ROOT_GLOBS)
+    registered |= set(INTEGRATION_TRIGGER_EXTRA_SOURCES)
+    assert registered, "integration-source registry empty"
+    return sorted(
+        source for source in registered if not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
+    )
+
+
 def test_database_filter_covers_the_finite_integration_registry() -> None:
     # #1688: every D4 registry surface must match at least one `database:`
     # filter pattern. Exact sources are matched literally; the three bounded
@@ -5174,36 +5318,27 @@ def test_database_filter_covers_the_finite_integration_registry() -> None:
     patterns = _database_filter_patterns(workflow)
     assert patterns, "ci.yml `database:` filter block has no patterns"
 
-    registered = set(INTEGRATION_TRIGGER_SOURCES)
-    registered |= _expand_tracked_members(INTEGRATION_TRIGGER_ROOT_GLOBS)
-    registered |= set(INTEGRATION_TRIGGER_EXTRA_SOURCES)
-    assert registered, "integration-source registry empty"
-
-    uncovered = sorted(
-        source for source in registered if not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
-    )
+    uncovered = _database_registry_violations(patterns)
     assert not uncovered, (
         "integration-owned production sources not matched by the ci.yml `database:` filter: " + ", ".join(uncovered)
     )
 
 
 def test_database_filter_mutation_reds_and_names_forecast_store() -> None:
-    # #1688 red arm: removing ONLY the `packages/common/forecast_store.py`
-    # pattern from a constructed workflow copy must fail and NAME that source.
-    # The tracked ci.yml is untouched.
+    # #1688 mutant: removing ONLY the `packages/common/forecast_store.py`
+    # pattern from a constructed workflow copy must be rejected by the SAME
+    # positive oracle that the live test uses, naming that source. The tracked
+    # ci.yml is untouched.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     entry = "              - 'packages/common/forecast_store.py'\n"
     assert entry in _database_filter_block(workflow)
     mutated = workflow.replace(entry, "")
     assert entry not in _database_filter_block(mutated)
 
-    patterns = _database_filter_patterns(mutated)
-    source = "packages/common/forecast_store.py"
-    assert not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
-    uncovered = sorted(
-        s for s in set(INTEGRATION_TRIGGER_SOURCES) if not any(fnmatch.fnmatch(s, pattern) for pattern in patterns)
+    uncovered = _database_registry_violations(_database_filter_patterns(mutated))
+    assert "packages/common/forecast_store.py" in uncovered, (
+        f"expected a named forecast_store violation, got {uncovered}"
     )
-    assert source in uncovered
 
 
 def test_database_filter_self_triggers_the_contract_suite() -> None:
@@ -5219,20 +5354,353 @@ def test_database_filter_self_triggers_the_contract_suite() -> None:
     assert SELECTOR_META_GUARD_TEST in selected
 
 
-def test_real_db_job_uses_vv_rs_logging_flags_only() -> None:
-    # #1688: the real-DB pytest invocation gains `-vv -rs` (node-level pass and
-    # skip reasons) WITHOUT changing the marker expression, DSN, service, or
-    # suite selection. The marker expression and DSN stay pinned so a future
-    # edit that touches them reds here.
-    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    job_start = workflow.index("\n  real-db-integration:")
-    job_end = workflow.index("\n  unit-test:", job_start)
-    job = workflow[job_start:job_end]
+def _real_db_job_block(workflow: str) -> str:
+    """ci.yml's `real-db-integration` job block, from its key to the next job."""
+    start = workflow.index("\n  real-db-integration:")
+    end = workflow.index("\n  unit-test:", start)
+    return workflow[start:end]
 
-    assert "run: pytest -vv -rs -m integration" in job
-    assert "pytest -q -m integration" not in job
-    assert "DATABASE_URL: postgresql://nhms:nhms_dev@localhost:5432/nhms" in job
-    assert "NHMS_RUN_INTEGRATION: \"1\"" in job
+
+# The dedicated integration DSN the real-DB job must carry. Only the VARIABLE
+# NAME appears in violation messages — never a credential value.
+REAL_DB_DEDICATED_DSN_ENV = "NHMS_INTEGRATION_DATABASE_URL"
+REAL_DB_OPT_IN_ENV = "NHMS_RUN_INTEGRATION"
+REAL_DB_SERVICE_IMAGE = "timescale/timescaledb-ha:pg15-latest"
+REAL_DB_INTEGRATION_COMMAND = "pytest -vv -rs -m integration"
+REAL_DB_COMMAND_STEP_NAME = "Run real database integration tests"
+
+
+# The exact normalized event-gate condition the real-db job must carry.
+# workflow_dispatch OR (database true AND (push OR non-draft PR)).
+# Comparison is on PyYAML-parsed `if:` text with every whitespace run collapsed
+# to a single space (the `if: >-` folded scalar yields an embedded-newline
+# string; both sides are normalized token-equivalently, so a pull-request-only
+# mutant retaining `push` tokens elsewhere cannot pass). This is the exact
+# single-space token form of the live expression.
+REAL_DB_GATE_IF_BLOCK = (
+    "github.event_name == 'workflow_dispatch' || "
+    "( needs.changes.outputs.database == 'true' && "
+    "(github.event_name == 'push' || github.event.pull_request.draft == false) )"
+)
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse every whitespace run to a single space, then strip."""
+    return " ".join(text.split())
+
+
+def _real_db_job_contract_violations(job: str) -> list[str]:
+    """Named violations of the real-db-integration job contract.
+
+    Pure helper over the job block TEXT, parsed with PyYAML (safe_load only —
+    never executes anything) into the `real-db-integration` mapping. The
+    positive oracle used by BOTH the live workflow test and every mutant, so a
+    mutant must be rejected by the SAME contract that the live job satisfies.
+    Violations name contract items only — never DSN credential values.
+
+    Contract (task 2.7 / spec D4):
+    - job `needs == "changes"` (job level);
+    - job-level `if` normalizes to the exact event gate
+      `workflow_dispatch OR (database true AND (push OR non-draft PR))`;
+    - `services.db.image` is `timescale/timescaledb-ha:pg15-latest`;
+    - job-level `env[NHMS_RUN_INTEGRATION]` is semantically "1";
+    - job-level `env[NHMS_INTEGRATION_DATABASE_URL]` is a scalar whose stripped
+      value is non-empty — a value relocated into `services.db.env`, a generic
+      DATABASE_URL, or a blank/whitespace/quoted-empty value all violate,
+      because tests/conftest.py reads the JOB env and strips the value to
+      empty, skipping all seven required nodes;
+    - the integration command comes from the named step
+      `Run real database integration tests` and normalizes to exactly
+      `pytest -vv -rs -m integration` (a comment or another step cannot satisfy).
+    """
+    violations: list[str] = []
+
+    try:
+        parsed = yaml.safe_load(job)
+        if not isinstance(parsed, dict) or "real-db-integration" not in parsed:
+            return ["real-db job block must parse to a mapping containing real-db-integration"]
+        job_data = parsed["real-db-integration"]
+        if not isinstance(job_data, dict):
+            return ["real-db-integration job must be a mapping"]
+    except yaml.YAMLError:
+        return ["real-db job block is not valid YAML"]
+
+    if job_data.get("needs") != "changes":
+        violations.append("real-db job must declare `needs: changes`")
+
+    gate = job_data.get("if")
+    if not isinstance(gate, str):
+        violations.append("real-db job must declare an `if` event gate block")
+    elif _normalize_ws(gate) != _normalize_ws(REAL_DB_GATE_IF_BLOCK):
+        violations.append(
+            "real-db job gate must be exactly workflow_dispatch OR "
+            "(database == 'true' AND (push OR non-draft PR))"
+        )
+
+    services = job_data.get("services")
+    service_image = None
+    if isinstance(services, dict):
+        db_service = services.get("db")
+        if isinstance(db_service, dict):
+            service_image = db_service.get("image")
+    if service_image != REAL_DB_SERVICE_IMAGE:
+        violations.append(f"real-db job service image must be {REAL_DB_SERVICE_IMAGE}")
+
+    env = job_data.get("env")
+    env_map = env if isinstance(env, dict) else {}
+
+    # Opt-in must be EXACTLY the string "1" — the fixture contract. Do NOT
+    # strip literal quote characters: raw YAML `NHMS_RUN_INTEGRATION: "'1'"`
+    # parses to the literal string `"'1'"`, which conftest's `_env_flag`
+    # (os.getenv(...).strip().lower() in TRUTHY_ENV_VALUES) evaluates as falsy,
+    # skipping every integration node. `str()` of a YAML numeric 1 would be
+    # "1" but is not the env-string contract either; the live quoted YAML
+    # parses to string "1" and satisfies.
+    opt_in = env_map.get(REAL_DB_OPT_IN_ENV)
+    if opt_in != "1":
+        violations.append(f"real-db job must set {REAL_DB_OPT_IN_ENV}")
+
+    # Dedicated DSN must be at JOB level (services.db.env does NOT satisfy —
+    # conftest reads process env) and its stripped scalar value non-empty.
+    if REAL_DB_DEDICATED_DSN_ENV not in env_map:
+        violations.append(f"real-db job must set the dedicated {REAL_DB_DEDICATED_DSN_ENV}")
+    else:
+        dsn_value = env_map[REAL_DB_DEDICATED_DSN_ENV]
+        if not isinstance(dsn_value, str) or not dsn_value.strip():
+            violations.append(
+                f"real-db job dedicated {REAL_DB_DEDICATED_DSN_ENV} must have a non-empty value"
+            )
+
+    steps = job_data.get("steps")
+    command = None
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict) and step.get("name") == REAL_DB_COMMAND_STEP_NAME:
+                run = step.get("run")
+                if isinstance(run, str):
+                    command = run
+                break
+    if command is None:
+        violations.append(
+            f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command"
+        )
+    elif _normalize_ws(command) != _normalize_ws(REAL_DB_INTEGRATION_COMMAND):
+        violations.append(f"real-db job command must be `{REAL_DB_INTEGRATION_COMMAND}`")
+
+    return violations
+
+
+def test_real_db_job_contract_has_no_violations() -> None:
+    # #1688 (round-1 closure): the live real-db job satisfies the full job
+    # contract — gate, service image, opt-in, DEDICATED DSN, and the `-vv -rs`
+    # command. The dedicated DSN is the requirement-owned consumer of
+    # tests/conftest.py, so a generic-DATABASE_URL-only job would be a violation
+    # even though the static command pin stays green.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+
+    violations = _real_db_job_contract_violations(job)
+    assert not violations, "real-db job contract violations:\n  " + "\n  ".join(violations)
+
+
+def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_deleted() -> None:
+    # #1688 (round-1 closure) mutant: removing ONLY the dedicated
+    # NHMS_INTEGRATION_DATABASE_URL env (while retaining generic DATABASE_URL,
+    # NHMS_RUN_INTEGRATION, and the command) must be rejected by the SAME
+    # positive helper, naming the dedicated DSN — because conftest ignores
+    # generic DATABASE_URL and all seven required nodes would skip with a green
+    # static contract. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    entry = f"      {REAL_DB_DEDICATED_DSN_ENV}: "
+    assert entry in job, "live job no longer contains the dedicated DSN line"
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
+    mutated = workflow.replace(line + "\n", "")
+    mutated_job = _real_db_job_block(mutated)
+    assert REAL_DB_DEDICATED_DSN_ENV not in mutated_job
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
+        f"expected a named dedicated-DSN violation, got {violations}"
+    )
+
+
+def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_blank() -> None:
+    # #1688 (round-1 invariant audit) mutant: blanking ONLY the dedicated DSN
+    # VALUE (retaining the key, generic DATABASE_URL, opt-in, and command) must
+    # be rejected by the SAME helper with a named dedicated-DSN violation —
+    # conftest strips the value to empty and all seven required nodes skip.
+    # The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
+    blank = f"      {REAL_DB_DEDICATED_DSN_ENV}: \"\""
+    mutated = workflow.replace(line, blank)
+    mutated_job = _real_db_job_block(mutated)
+    assert f'{REAL_DB_DEDICATED_DSN_ENV}: ""' in mutated_job
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
+        f"expected a named dedicated-DSN violation, got {violations}"
+    )
+
+
+def test_real_db_job_contract_reds_when_the_master_push_leg_is_removed() -> None:
+    # #1688 (round-1 invariant audit) mutant: making the gate pull-request-only
+    # (dropping the master-push leg) while retaining the database/non-draft
+    # tokens must be rejected by the SAME helper with a named gate violation —
+    # a database-changing master push would then never run the real-DB job.
+    # A loose-token check would pass this mutant; the normalized exact-block
+    # comparison must not. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    # (Sanity: the live gate parses and satisfies the contract.)
+    assert not [v for v in _real_db_job_contract_violations(job) if "gate" in v]
+
+    # Drop the push leg from the folded gate text. The workflow source uses the
+    # folded multi-line spelling, so the replacement must target the SOURCE
+    # lines that fold into the push leg, not the normalized single-line form.
+    # The mutant becomes `(github.event.pull_request.draft == false)` — a
+    # PR-only gate that retains the database/non-draft tokens.
+    push_leg_src = "github.event_name == 'push' || github.event.pull_request.draft == false"
+    assert push_leg_src in workflow
+    pr_only_src = "github.event.pull_request.draft == false"
+    mutated = workflow.replace(push_leg_src, pr_only_src)
+    assert mutated != workflow
+    mutated_job = _real_db_job_block(mutated)
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert "gate" in joined, f"expected a named gate violation, got {violations}"
+
+
+def test_real_db_job_contract_reds_when_needs_changes_is_removed() -> None:
+    # #1688 (round-1 invariant audit) mutant: removing `needs: changes` from the
+    # job must be rejected by the SAME helper with a named needs violation —
+    # without it the job has no `changes.database` output to gate on. The
+    # tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip() == "needs: changes")
+    mutated = workflow.replace(line + "\n", "")
+    mutated_job = _real_db_job_block(mutated)
+    assert "needs: changes" not in mutated_job
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert "needs: changes" in joined, f"expected a named needs violation, got {violations}"
+
+
+def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_relocated_to_service_env() -> None:
+    # #1688 (second phase-6.2 audit) mutant: moving the dedicated
+    # NHMS_INTEGRATION_DATABASE_URL from JOB-level env into `services.db.env`
+    # (removing the job env line) must be rejected by the SAME helper with a
+    # named dedicated-DSN violation — conftest reads the PROCESS env (the job
+    # env), so a service-container env value never reaches the fixture and all
+    # seven required nodes skip. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
+    value = line.split(":", 1)[1].strip()
+    # Remove from job env.
+    mutated = workflow.replace(line + "\n", "")
+    # Add into the db service env block (after POSTGRES_PASSWORD).
+    anchor = "          POSTGRES_PASSWORD: nhms_dev\n"
+    assert anchor in mutated
+    mutated = mutated.replace(anchor, anchor + f"          {REAL_DB_DEDICATED_DSN_ENV}: {value}\n")
+    mutated_job = _real_db_job_block(mutated)
+    # Structured check: the JOB-level env no longer has the dedicated DSN; the
+    # service env does.
+    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    assert REAL_DB_DEDICATED_DSN_ENV not in parsed["env"]
+    assert REAL_DB_DEDICATED_DSN_ENV in parsed["services"]["db"]["env"]
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
+        f"expected a named dedicated-DSN violation, got {violations}"
+    )
+
+
+def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_whitespace() -> None:
+    # #1688 (second phase-6.2 audit) mutant: a job-level dedicated DSN value of
+    # quoted whitespace `" "` must be rejected by the SAME helper with a named
+    # non-empty violation — conftest's `.strip()` makes it empty and all seven
+    # required nodes skip. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
+    mutated = workflow.replace(line, f"      {REAL_DB_DEDICATED_DSN_ENV}: \" \"")
+    mutated_job = _real_db_job_block(mutated)
+    assert f'{REAL_DB_DEDICATED_DSN_ENV}: " "' in mutated_job
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
+        f"expected a named dedicated-DSN violation, got {violations}"
+    )
+
+
+def test_real_db_job_contract_reds_when_the_opt_in_flag_is_relocated_to_service_env() -> None:
+    # #1688 (phase-6.2 hardening) mutant: moving NHMS_RUN_INTEGRATION from
+    # JOB-level env into `services.db.env` must be rejected by the SAME helper
+    # with a named opt-in violation — conftest reads the process env, so a
+    # service-container env value never enables integration and all seven
+    # required nodes skip. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_OPT_IN_ENV + ":"))
+    value = line.split(":", 1)[1].strip()
+    mutated = workflow.replace(line + "\n", "")
+    anchor = "          POSTGRES_PASSWORD: nhms_dev\n"
+    assert anchor in mutated
+    mutated = mutated.replace(anchor, anchor + f"          {REAL_DB_OPT_IN_ENV}: {value}\n")
+    mutated_job = _real_db_job_block(mutated)
+    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    assert REAL_DB_OPT_IN_ENV not in parsed["env"]
+    assert REAL_DB_OPT_IN_ENV in parsed["services"]["db"]["env"]
+
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_OPT_IN_ENV in joined, (
+        f"expected a named opt-in violation, got {violations}"
+    )
+
+
+def test_real_db_job_contract_reds_on_a_literal_quoted_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Third invariant audit (P1): raw YAML `NHMS_RUN_INTEGRATION: "'1'"` parses
+    # to the LITERAL string `"'1'"`. The helper must reject it with a named
+    # opt-in violation (NOT by stripping quote characters), because conftest's
+    # `_env_flag` only does `.strip().lower()` — literal quotes make it falsy
+    # and every integration node skips. The tracked workflow is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    job = _real_db_job_block(workflow)
+    line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_OPT_IN_ENV + ":"))
+    mutated = workflow.replace(line, f"      {REAL_DB_OPT_IN_ENV}: \"'1'\"")
+    mutated_job = _real_db_job_block(mutated)
+
+    # PyYAML yields the literal quoted string, not "1".
+    parsed_value = yaml.safe_load(mutated_job)["real-db-integration"]["env"][REAL_DB_OPT_IN_ENV]
+    assert parsed_value == "'1'"
+
+    # The helper reports a named opt-in violation through the same positive
+    # oracle used by the live test.
+    violations = _real_db_job_contract_violations(mutated_job)
+    joined = "\n".join(violations)
+    assert REAL_DB_OPT_IN_ENV in joined, f"expected a named opt-in violation, got {violations}"
+
+    # The helper mirrors RUNTIME semantics: conftest._env_flag must be False for
+    # the literal quoted value (os.getenv(...).strip().lower() — quotes are NOT
+    # stripped). This proves the helper is not stricter than runtime; it names
+    # exactly what runtime treats as off.
+    from tests import conftest
+
+    monkeypatch.setenv(REAL_DB_OPT_IN_ENV, parsed_value)
+    assert conftest._env_flag(REAL_DB_OPT_IN_ENV) is False
 
 
 def test_workflow_path_matches_backend_and_database_filters() -> None:
