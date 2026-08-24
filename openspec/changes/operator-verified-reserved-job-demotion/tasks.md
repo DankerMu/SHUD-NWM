@@ -43,4 +43,4 @@
 ## 7. Review boundary
 
 - [x] 7.1 Confirm no changes to the automatic comment-capability gate, manual-retry source statuses, PostgreSQL schema/reclaim, Slurm configuration, generic decision whitelist, or identity-release reclaim behavior.
-- [ ] 7.2 Completion self-audit maps every issue acceptance criterion and selected risk pack to the final diff, deterministic tests, durable audit evidence, final-head CI, the node-22 read-only census, and the conditional incident receipt procedure; record all deviations and route any deferral.
+- [x] 7.2 Completion self-audit maps every issue acceptance criterion and selected risk pack to the final diff, deterministic tests, durable audit evidence, final-head CI, the node-22 read-only census, and the conditional incident receipt procedure; record all deviations and route any deferral.
