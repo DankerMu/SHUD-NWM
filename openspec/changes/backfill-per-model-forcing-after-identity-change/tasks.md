@@ -52,6 +52,24 @@ operator decision; that is not a gate on this change.
       module it imports genuinely should run it, so a rule rather than an
       `INTENTIONAL_RULE_GAP_EXCLUSIONS` entry.
 
+- [x] 1.12 A quarantine that fails is its own outcome: `quarantine_target` reports
+      `moved` / `absent` / `failed` instead of collapsing the last two into
+      `None`, a failed move yields status `quarantine_failed` with
+      `detail.unverified_artifact_live` and `detail.live_target_dir`, the
+      command exits non-zero, per-attempt reasons accumulate in
+      `detail.quarantine_errors` (a second attempt no longer erases the first),
+      and the opt-in replace path does NOT invoke the producer when the
+      quarantine failed (writes are per-file atomic and never clear the target,
+      so producing would merge the two packages). Runbook hop 5 documents the
+      status and the operator's move-it-yourself step. (Round-3 re-review: the
+      round-2 fix left the artifact live while the status claimed otherwise.)
+- [x] 1.13 The preview of the opt-in replacement keeps the
+      `existing_target_unverified` status and the non-zero exit, carrying
+      `detail.would_replace_target` rather than downgrading to `dry_run`. The
+      spec delta's `unless` is scoped to "left as found", not to "exits
+      non-zero"; a script gating `--execute` on a clean dry-run exit was getting
+      a false green light. (Round-3 re-review.)
+
 ## 2. Manual retry
 
 - [x] 2.1 Preview the row the marker would act on, distinguishing the per-run
@@ -70,6 +88,10 @@ operator decision; that is not a gate on this change.
 - [x] 3.1 Runbook hop 5, first half: why a copy is wrong and how to replay.
 - [x] 3.2 Runbook hop 5, second half: an already-failed run does not self-heal;
       use the marker channel, never a journal edit.
+- [x] 3.3 Runbook hop 5 status table: `quarantine_failed`, the top-level
+      `loop_error` receipt field and the `pending` per-item status it leaves
+      behind, and the corrected "已被隔离" cells (which claimed the move had
+      succeeded unconditionally).
 
 ## 4. Local verification
 

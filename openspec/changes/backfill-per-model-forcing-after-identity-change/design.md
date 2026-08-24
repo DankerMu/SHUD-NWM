@@ -154,6 +154,29 @@ The boundary between 1 and 3 is worth stating because it looks contradictory:
 **this tool quarantines what this run produced or replaced; it reports, and
 leaves in place, what it merely found.**
 
+Round 3 found that the fix for 3 reopened 1. `quarantine_target` returned
+`None` both when there was nothing to move and when the move FAILED, and no
+call site checked; a failed rename therefore produced a `produce_failed` /
+`verification_failed` status byte-identical to a successful quarantine, while
+the unverified package went on standing on the path the forecast stage reads.
+That is not hypothetical on NFS-backed `/scratch`: ESTALE, permission drift, and
+a `mkdir` of the quarantine parent hitting quota all surface as `OSError`. The
+boundary gets a third clause: **a quarantine that fails is its own outcome
+(`quarantine_failed`), it says the artifact is still live and where, it exits
+non-zero, and on the replace path it does not produce** -- producing into a
+surviving partial package would overwrite the same-named members and leave the
+strays, because writes are atomic per file and never clear the target
+(`object_store.py:207`). Per-attempt reasons accumulate in a list rather than
+under one key that a second attempt would overwrite.
+
+The same round found the mirror-image error in the preview: dry run PLUS
+`--replace-unverified-target` overwrote the `existing_target_unverified` status
+with `dry_run` and so exited 0 for a state that exits 1 without the flag. The
+spec delta's "unless an explicit opt-in replacement flag was given" is scoped to
+*left as found*, not to *exits non-zero*. The preview now keeps the status and
+the exit code and carries `would_replace_target` as its preview signal: **a
+preview must never be a greener light than the state it previews.**
+
 ## Seams under test
 
 - `resolve_renames(previous, current)` — pairing and the two refusals.

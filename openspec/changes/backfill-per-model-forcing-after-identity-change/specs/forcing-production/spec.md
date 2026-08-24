@@ -62,6 +62,15 @@ not verify is debris, not an artifact.
   flag was given
 - **AND** an existing package that DOES verify is still skipped
 
+#### Scenario: A preview of the opt-in replacement is not a greener exit than the state it previews
+
+- **WHEN** the opt-in replacement flag is given without the execute flag and a cycle holds an
+  existing package under the new `model_id` that does not verify
+- **THEN** the receipt still reports that work item as an unverified existing target
+- **AND** the receipt marks it as one the execute run would replace
+- **AND** the command exits non-zero, exactly as it does without the replacement flag
+- **AND** no producer invocation is made and the existing directory is left exactly as found
+
 #### Scenario: A forcing root that holds nothing refuses instead of reporting no work
 
 - **WHEN** renamed models exist and the forcing root is not a directory, or not one renamed
@@ -84,6 +93,23 @@ not verify is debris, not an artifact.
   that cannot be mistaken for a valid model directory
 - **AND** the receipt records the quarantine path for that work item
 - **AND** the command exits non-zero
+
+#### Scenario: A quarantine that cannot complete is reported as such, not as a completed one
+
+- **WHEN** the move out of the live model path fails (the storage refuses the rename, or the
+  quarantine parent directory cannot be created)
+- **THEN** the work item carries a status distinct from the one a successful quarantine produces
+- **AND** the receipt states that the unverified artifact is still live and names the live path
+- **AND** every failed attempt's reason is retained, including when one work item attempted two
+  quarantines
+- **AND** the command exits non-zero
+
+#### Scenario: A failed quarantine on the replacement path does not produce into the surviving directory
+
+- **WHEN** the opt-in replacement flag is given and the existing unverified directory cannot be
+  moved out of the live model path
+- **THEN** no producer invocation is made for that work item
+- **AND** the receipt does not record the target as replaced
 
 #### Scenario: One item's failure does not discard the receipt
 

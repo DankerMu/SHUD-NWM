@@ -434,3 +434,127 @@ def test_one_items_exception_does_not_discard_the_receipt(
     assert statuses == {"2026082212": "errored", "2026082300": "verified"}
     errored = next(item for item in receipt["work_items"] if item["status"] == "errored")
     assert "member unreadable" in errored["detail"]["error"]
+
+
+# --------------------------------------------------------------------------
+# Round-3 pins: the fix round's own two holes.  A quarantine that cannot
+# complete left the unverified artifact live while the status claimed it had
+# been quarantined; and the replacement PREVIEW flipped the exit code to 0 for
+# a state that exits 1 without the flag.
+
+
+def _block_quarantine(target: Path) -> Path:
+    """Make the quarantine rename impossible, the way storage really does it.
+
+    A plain FILE occupying the quarantine directory's name is the cheapest
+    faithful stand-in for the real faults on this tool's NFS-backed ``/scratch``
+    (ESTALE, permission drift, ENOSPC on the ``mkdir``): ``mkdir(exist_ok=True)``
+    raises ``FileExistsError`` because the path is not a directory.
+    """
+
+    blocker = target.parent / "_backfill_quarantine"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    return blocker
+
+
+def test_a_failed_quarantine_is_not_reported_as_a_plain_verification_failure(tmp_path: Path) -> None:
+    """A quarantine that could not complete must be its own, louder outcome.
+
+    ``verification_failed`` with a successful quarantine and
+    ``verification_failed`` with a failed one were byte-identical statuses, so
+    nothing told the operator that an unverified package was still standing on
+    the path the forecast stage reads directly.
+    """
+
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _seed_forcing(root, "2026082300", "dg_" + "b" * 32, package_id="dg-gfs-bbbbbbbbbbbb")
+    (target / "shud" / "station_00001.csv").write_text("valid_time,PRCP\n2026-08-23T00:00:00Z,999\n", encoding="utf-8")
+    _block_quarantine(target)
+    item = _item(root)
+
+    run_item(item, ["/usr/bin/env", "true"], dry_run=False)
+
+    assert item.status == "quarantine_failed"
+    assert item.detail["quarantine_failed_after"] == "verification_failed"
+    assert item.detail["unverified_artifact_live"] is True
+    assert item.detail["live_target_dir"] == str(target)
+    assert (target / "shud" / "station_00001.csv").is_file()
+    assert [entry["label"] for entry in item.detail["quarantine_errors"]] == ["verification_failed"]
+
+
+def test_a_failed_quarantine_on_the_replace_path_exits_non_zero_and_does_not_produce(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the unverified directory could not be moved aside, do not produce into it.
+
+    Writes are atomic per file and never clear the target first, so producing
+    into a still-present partial package overwrites same-named members and
+    leaves the strays.
+    """
+
+    previous, current, _ = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _partial_target(root, "2026082300", "dg_" + "b" * 32)
+    _block_quarantine(target)
+
+    code = main(
+        [
+            "--previous-manifest",
+            str(previous),
+            "--current-manifest",
+            str(current),
+            "--forcing-root",
+            str(root),
+            "--producer",
+            "/usr/bin/env true",
+            "--execute",
+            "--replace-unverified-target",
+        ]
+    )
+
+    assert code == 1
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status_counts"] == {"quarantine_failed": 1}
+    detail = receipt["work_items"][0]["detail"]
+    assert detail["unverified_artifact_live"] is True
+    assert detail["quarantine_failed_after"] == "replaced_unverified"
+    assert "command" not in detail
+    assert "replaced_target" not in detail
+    assert (target / "forcing.tsd.forc").is_file()
+
+
+def test_the_replace_preview_still_reports_the_unverified_target_and_exits_non_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A preview must not be a greener light than the state it previews.
+
+    Without the flag this state exits 1.  Adding ``--replace-unverified-target``
+    to a dry run must not turn it into an exit 0 that a gating script reads as
+    "clean".
+    """
+
+    previous, current, _ = _renames(tmp_path)
+    root = tmp_path / "forcing"
+    _seed_forcing(root, "2026082300", "dg_" + "a" * 32, package_id="dg-gfs-aaaaaaaaaaaa")
+    target = _partial_target(root, "2026082300", "dg_" + "b" * 32)
+
+    code = main(
+        [
+            "--previous-manifest",
+            str(previous),
+            "--current-manifest",
+            str(current),
+            "--forcing-root",
+            str(root),
+            "--replace-unverified-target",
+        ]
+    )
+
+    assert code == 1
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["executed"] is False
+    assert receipt["status_counts"] == {"existing_target_unverified": 1}
+    assert receipt["work_items"][0]["detail"]["would_replace_target"] is True
+    assert (target / "forcing.tsd.forc").is_file()

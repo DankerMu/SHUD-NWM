@@ -161,25 +161,67 @@ def _quarantine_dir(item: WorkItem, *, label: str) -> Path:
     raise RuntimeError(f"could not allocate a quarantine path under {base}")
 
 
-def quarantine_target(item: WorkItem, *, label: str) -> str | None:
+@dataclass(frozen=True)
+class QuarantineResult:
+    """Why ``quarantine_target`` returned no path.
+
+    "Nothing was there to move" and "it is there and I could not move it" are
+    opposite facts, and the old ``str | None`` return collapsed them into the
+    same value.  The second one means an unverified artifact is still standing
+    on the path the forecast stage reads.
+    """
+
+    outcome: str  # "moved" | "absent" | "failed"
+    path: str | None = None
+    error: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.outcome == "failed"
+
+
+def quarantine_target(item: WorkItem, *, label: str) -> QuarantineResult:
     """Move ``target_dir`` out of the live model path.
 
     The forecast stage reads ``<basin_version_id>/<model_id>/`` directly, so an
     artifact this tool produced and could not verify -- or the debris a
     producer left behind when it exited non-zero -- must not be left standing
     there.  Moving rather than deleting keeps it available for diagnosis.
+
+    A failure here is never silent: the caller turns it into its own status.
+    Errors accumulate in a LIST -- one item can attempt two quarantines, and a
+    single ``quarantine_error`` key made the second attempt erase the first
+    attempt's diagnosis.
     """
 
     if not item.target_dir.is_dir():
-        return None
+        return QuarantineResult(outcome="absent")
     try:
         destination = _quarantine_dir(item, label=label)
         destination.parent.mkdir(parents=True, exist_ok=True)
         item.target_dir.rename(destination)
     except (OSError, RuntimeError) as error:
-        item.detail["quarantine_error"] = f"{type(error).__name__}: {error}"
-        return None
-    return str(destination)
+        message = f"{type(error).__name__}: {error}"
+        item.detail.setdefault("quarantine_errors", []).append({"label": label, "error": message})
+        return QuarantineResult(outcome="failed", error=message)
+    return QuarantineResult(outcome="moved", path=str(destination))
+
+
+def _record_quarantine_failure(item: WorkItem, *, label: str, result: QuarantineResult) -> None:
+    """The loud outcome: an unverified artifact is still live.
+
+    Distinct from ``produce_failed`` / ``verification_failed``, which mean the
+    same fault WITH the artifact moved aside.  The operator must be able to see
+    from the status alone that the model path is still occupied.
+    """
+
+    item.status = "quarantine_failed"
+    item.detail["quarantine_failed_after"] = label
+    item.detail["unverified_artifact_live"] = True
+    item.detail["live_target_dir"] = str(item.target_dir)
+    # The reason itself is not duplicated here: `quarantine_errors` already
+    # holds every attempt's, and one key that says "the" reason would be wrong
+    # the moment there are two.
 
 
 def _load_models(path: Path) -> list[Mapping[str, Any]]:
@@ -503,12 +545,22 @@ def _run_item(
             item.status = "existing_target_unverified"
             return
         if dry_run:
-            item.status = "dry_run"
+            # A preview of the replacement is still a report of an unverified
+            # target: it must not exit greener than the same state without the
+            # flag, or a script gating --execute on a clean dry run gets a
+            # false green light.
+            item.status = "existing_target_unverified"
             item.detail["would_replace_target"] = True
             return
         quarantined = quarantine_target(item, label="replaced_unverified")
+        if quarantined.failed:
+            # Producing now would write INTO the still-present unverified
+            # directory: writes are atomic per file and never clear the target
+            # first, so same-named members are overwritten and strays survive.
+            _record_quarantine_failure(item, label="replaced_unverified", result=quarantined)
+            return
         item.detail["replaced_target"] = True
-        item.detail["replaced_target_quarantine_path"] = quarantined
+        item.detail["replaced_target_quarantine_path"] = quarantined.path
     argv = [
         *producer_argv,
         "produce",
@@ -531,7 +583,10 @@ def _run_item(
         item.status = "produce_failed"
         # A producer that died mid-write leaves a partial package standing on
         # the path the forecast stage reads.  Move it out of the way.
-        item.detail["quarantine_path"] = quarantine_target(item, label="produce_failed")
+        quarantined = quarantine_target(item, label="produce_failed")
+        item.detail["quarantine_path"] = quarantined.path
+        if quarantined.failed:
+            _record_quarantine_failure(item, label="produce_failed", result=quarantined)
         return
     verification = verify_item(item)
     item.detail["verification"] = verification
@@ -539,7 +594,10 @@ def _run_item(
         item.status = "verified"
         return
     item.status = "verification_failed"
-    item.detail["quarantine_path"] = quarantine_target(item, label="verification_failed")
+    quarantined = quarantine_target(item, label="verification_failed")
+    item.detail["quarantine_path"] = quarantined.path
+    if quarantined.failed:
+        _record_quarantine_failure(item, label="verification_failed", result=quarantined)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -566,7 +624,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="DESTRUCTIVE. For a target directory that already exists but does NOT pass verification (a "
         "producer killed mid-write leaves one), remove it from the live model path and re-produce it from "
         "scratch. Without this flag such an item is reported as 'existing_target_unverified', left exactly "
-        "as found, and the command exits non-zero. The removed directory is moved to "
+        "as found, and the command exits non-zero; WITH the flag but without --execute it is still "
+        "reported that way and still exits non-zero, carrying detail.would_replace_target. If the "
+        "directory cannot be moved aside, the item becomes 'quarantine_failed' and the producer is NOT "
+        "run -- writes are atomic per file, so producing into the surviving directory would merge the "
+        "two packages. The removed directory is moved to "
         f"<basin_version_id>/{_QUARANTINE_DIRNAME}/ rather than deleted outright.",
     )
     parser.add_argument(
@@ -665,7 +727,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     failed = sum(
         statuses.get(status, 0)
-        for status in ("produce_failed", "verification_failed", "existing_target_unverified", "errored")
+        for status in (
+            "produce_failed",
+            "verification_failed",
+            "quarantine_failed",
+            "existing_target_unverified",
+            "errored",
+            "pending",
+        )
     )
     return 1 if failed else 0
 
