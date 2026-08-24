@@ -304,6 +304,122 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
 而一趟 pass 可以跑一小时以上）。
 
+**hop 5 — 改了 `model_id` 的流域必须回补 forcing（重发场景专有；纯新增流域不触发）。**
+forcing 是**按 model 分目录**存的：`<object-store>/forcing/<source>/<cycle>/<basin_version_id>/<model_id>/`。
+包内容一变，`dg_*` 身份就变，于是所有**已产过 forcing 的 cycle** 只有旧 id 的产物，新 id 一份没有。
+而调度器判 forcing 完成度是**按 cycle** 的，它不会为这种 cycle 重进 forcing 阶段——
+forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域时实测，16 个 model 全中）。
+
+正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
+`station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
+必然得到数值等价、且 id 与嵌套 checksum 自洽的包。拷贝旧目录则会把旧
+`model_input_package_id` / `binding_uri` / station id 焊进**每一个**成员文件，
+而 `met.met_station` 是按**新** binding 身份注册的。
+
+```bash
+.venv/bin/python scripts/node22_backfill_forcing_for_model_ids.py \
+  --previous-manifest <registry>/manifest-last.json.pre-<stamp> \
+  --current-manifest  <registry>/manifest-last.json \
+  --forcing-root /scratch/frd_muziyao/nhms-prod/object-store/forcing \
+  --cycle <只补调度器下一趟要跑的那个 cycle> --execute --output <receipts>/forcing-backfill.json
+```
+
+工具自带验收：`shud/*.csv`（SHUD 真正读的输入，不含任何身份串）必须**逐字节相同**，
+`forcing.tsd.forc` / `forcing_debug.csv` / `payloads/*.json` 在把身份串归一化后必须相同。
+三个 JSON manifest **不参与**比对——它们带成员 checksum，成员字节一变它们本就该变。
+测站真移动了（`station_bindings` 归一化后仍不等）时工具**拒绝回补**并把该行记进
+`rebound_models_skipped`：那是重新绑定，得走正常 provisioning，不是回补。
+默认 dry-run；不传 `--cycle` 会扫出**所有**历史 cycle，而历史预报不追溯——按需只补下一趟要跑的。
+`--jobs N` 并发跑（每个 item 写各自的 model 目录，互不争用；实战 `--jobs 5`，单个 model
+约 20 分钟，node-22 48 核，注意别顶满）。注意 forcing 路径的 source 段是
+`normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
+按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
+
+**receipt 里必须先看 `coverage`，再看 `work_item_count`。** `renamed_model_count: N,
+work_item_count: 0` 既是"全部已回补"的稳态，也是 `--forcing-root` 指错 / NFS 没挂 / 环境不对的
+样子——这两者用条目数分不开。所以 receipt 带一段 `coverage`：`source_dirs_probed`（探了哪些
+`<root>/<source>/` 路径）、`source_dirs_found`（其中真实存在的）、`previous_model_dirs_found`
+（扫到多少个旧 id 目录）。**一条 source 目录都不存在时工具直接拒绝**
+（`BACKFILL_FORCING_ROOT_UNCOVERED`，`--forcing-root` 本身不是目录则是
+`BACKFILL_FORCING_ROOT_ABSENT`），错误里就带上探过的路径，不会以 exit 0 冒充"没活可干"。
+部分漏覆盖不拒绝（`--cycle` 本来就会收窄扫描面），但在 `coverage` 里看得见：
+`source_dirs_found` 少于 `source_dirs_probed` 就该问为什么。
+
+**status 一览（除 `verified` / `dry_run` 之外都让命令 exit 非 0）**：
+
+| status | 含义 | 操作 |
+|---|---|---|
+| `verified` | 重放产物通过等价验收 | 无 |
+| `dry_run` | 缺省预览，没跑 producer | 核对后加 `--execute` |
+| `existing_target_unverified` | 新 id 目录**已存在但验收不过**——producer 是**按文件**原子写、不是按目录，中途被杀就会留下只有部分成员的目录 | 见下 |
+| `produce_failed` | producer 非 0 退出，残留目录**已成功隔离**（`detail.quarantine_path`；无残留时该键为 `null`） | 看 `detail.stderr_tail` |
+| `verification_failed` | 跑完了但与旧包不等价，产物**已成功隔离**（`detail.quarantine_path`） | 看 `detail.verification` |
+| `quarantine_failed` | **隔离动作本身失败**：`detail.unverified_artifact_live: true`，未通过验收的产物**仍然活在** `detail.live_target_dir` 上 | **最高优先级**，见下 |
+| `errored` | 该 item 处理时抛异常（成员不可读等），`detail.error` 里是异常 | 修掉底层故障后重跑该 cycle |
+| `pending` | 该 item 根本没被处理到——只会在 receipt 顶层出现 `loop_error` 时成片出现 | 看 `loop_error`，修掉后整条命令重跑 |
+
+`errored` 是**逐 item** 的：一个 item 出事不会吞掉整份 receipt，其余 item 的 status 照常落盘
+（`--output` 也照写），命令 exit 1。顶层 `loop_error` 则是 item 循环**外面**炸了（只在异常情况下
+出现）：receipt 照写、照 exit 1，但循环剩下的 item 停在 `pending`，它们的活一件没干。
+
+**`existing_target_unverified` 不会被跳过，但缺省也不会被动。** 老实现按
+`target_dir.is_dir()` 判"已完成"，于是半截目录在 receipt 里与"已正确回补"长得一模一样，且以后
+每一趟都继续跳过、永远修不到。现在这种目录会被**发现并报告**、命令 exit 非 0，产物**原样保留**
+——它不是本次跑出来的，删不删是运维的决定。确认要重做时加
+`--replace-unverified-target`（help 里写明是破坏性的）：它把该目录移到同级
+`_backfill_quarantine/` 下再重跑 producer。验收通过的已存在目录仍然照旧跳过。
+**只加 `--replace-unverified-target`、不加 `--execute` 的预览仍然报 `existing_target_unverified`、
+仍然 exit 非 0**（多一个 `detail.would_replace_target: true` 表明加 `--execute` 会替换它）——
+预览不该比它所预览的状态更绿，拿 dry-run 的 exit code 当放行闸的脚本要的就是这条。
+
+**验收不过 / producer 失败的产物一定不留在真实 model 路径上。** forecast 阶段是直接读
+`<basin_version_id>/<model_id>/` 的，留一份没通过验收的包在那儿就等于让 SHUD 静默吃下去。
+工具把它移到 `<basin_version_id>/_backfill_quarantine/quarantined-<model_id>.<status>.<UTC 时间戳>.pid<pid>/`，
+路径记在 receipt 的 `detail.quarantine_path` 里。
+目录名带前导下划线、条目名带 `quarantined-` 前缀，都不可能被当成合法的 `dg_*` model 目录。
+
+**下一步**：照 `detail.verification` / `detail.stderr_tail` 定位原因（原始输入被 retention 清了？
+盘满？成员不可读？），修掉之后重跑同一条命令——此时该 model 路径已经空了，会被当成正常的
+待回补项重新产出。隔离目录确认无用后手工删除，工具不自动清。
+
+**隔离也会失败，而失败时产物还站在活路径上——那是另一个 status，不是同一个。**
+`/scratch` 是 NFS 上的（ESTALE、权限漂移、`_backfill_quarantine` 父目录建不出来：配额 / ENOSPC /
+同名文件挡路），rename 就是会失败。此时 status 是 **`quarantine_failed`**，`detail.unverified_artifact_live: true`，
+`detail.live_target_dir` 是那条**仍然可被 forecast 读到**的路径，每次尝试的失败原因逐条记在
+`detail.quarantine_errors`（列表，两次尝试不会互相覆盖），`detail.quarantine_failed_after` 说明是哪一步
+（`produce_failed` / `verification_failed` / `replaced_unverified`）触发的隔离。**处置**：先手工把
+`detail.live_target_dir` 移走或删掉（**在下一趟 pass 跑到这个 cycle 之前**——留着它 SHUD 就会吃下去），
+再修存储故障，然后重跑同一条命令。带 `--replace-unverified-target` 时若隔离失败，工具**不会**去跑 producer：
+写是按文件原子的、不会先清目录，往还在的半截包里写等于把两份包搅在一起。
+
+**回补完不会自愈——已经跑失败的 run 必须单独放行。** `ARTIFACT_NOT_FOUND` 被分类器判为
+**永久失败**（`classify_failure` 给 `retryable=False, permanent=True`），与重试预算无关
+（实战 `submission_attempt=1`，limit 是 6）。所以产物补上之后，那些 run 仍然是
+`blocked` / `permanent_failure_guard`，下一趟 pass 照样不会重跑它们。
+
+正规通道是 `pipeline.retry_run` 的 manual-retry marker（`record_manual_repair`：
+policy 门 + cycle 写锁 + 冲突/缺失拒绝 + 证据留痕），`classify_failure(..., manual=True)`
+只对被标记的那个 run 把 `permanent` 翻成 `False`。**不要改 journal 行**——8.5 禁的是手改行，
+用这个带门的类型化 API 正是它指向的替代路径。
+
+```bash
+.venv/bin/python scripts/node22_manual_retry_failed_runs.py \
+  --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
+  --run-id fcst_<source>_<cycle>_<model_id> \
+  --reason "<为什么重启>" --requested-by "<操作者>" --execute
+```
+
+**先看 preview（缺省就是 preview，不写）**：forecast 阶段除了逐 run 行，还有一条覆盖该
+cycle 全部 model 的 **cohort master** 行，标错它会把整个 cohort 重跑。preview 会把要动的
+行 id 打出来——实战命中的是 `job_fcst_..._forecast_reconciled_34817_6`（逐 run），不是
+`job_cycle_..._forecast_cohort_...`。逐 run 逐个标，不做批量扫。
+
+标完跑一趟 bounded pass（`systemctl --user start nhms-compute-scheduler.service`，
+timer 全程保持关闭），验收判据不是候选变成 `selected`，而是 **forecast 真跑成、
+`state_save_qc` 在新 id 下写出下一个 `valid_time` 的 state**——那才是接回 warm chain 的东西。
+顺带核对没被标记的 run 仍是 `blocked`，以证明 marker 是逐 run 生效的。全部通过后再
+`systemctl --user enable --now nhms-compute-scheduler.timer`。
+
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
 该 repair 已在 **#1816 中整体删除**——它静默改写的是外部用户跑 SHUD 收敛得到的标定值。
