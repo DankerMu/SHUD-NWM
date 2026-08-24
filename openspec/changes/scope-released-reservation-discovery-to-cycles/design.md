@@ -190,3 +190,73 @@ candidate, which is routed to `by-cycle/` by design and cannot be a master). Tas
 3.1 requires this to be closed as an exhaustive list — every append of a
 `pipeline_job` payload either has a paired direct write, or provably cannot carry
 a current-contract master row. Eyeballing four pairs is not that proof.
+
+## D11. The write inventory, closed (task 3.1) — D10's list was incomplete
+
+Every durable pipeline-job row is written by exactly one of five paths, and all
+five pair a `_write_pipeline_job_direct_unlocked` call:
+
+| # | site | payload append | paired flat write | verdict |
+|---|---|---|---|---|
+| 1 | `_write_pipeline_job_unlocked` (`:7342`), 17 callers | `:7356` | `:7382`, unconditional | pairs itself |
+| 2 | `reject_pipeline_job_submit_attempt` | `:2959` master | `:3006` `records[-2]` | paired (pipeline_event is appended last) |
+| 3 | `mark_pipeline_job_permanently_failed` | `:3084` master | `:3111` `records[0]` | paired (master is first of two) |
+| 4 | `permit_pipeline_job_retry` | `:3311` cohort master | `:3336` `records[-1]` | paired (master is appended last) |
+| 5a | `project_forecast_cohort_tasks` | `:3931` candidates | `:4153` `zip(..., strict=True)` | paired; candidates route to `by-cycle/` |
+| 5b | `project_forecast_cohort_tasks` | `:4082` cohort master | `:4155` `pipeline_records[-1]` | paired |
+
+**5b is missing from D10's inventory paragraph and from the implementation
+brief.** It is a genuine second master write inside `project_forecast_cohort_tasks`
+and it IS paired, so coverage holds — but the eyeballed list was not closed, which
+is exactly what task 3.1 existed to catch.
+
+The list is exhaustive by two independent enumerations: every
+`payloads.append(("pipeline_job", ...))` and every `("pipeline_job", ...)` tuple
+literal in the file (5 sites, all above), and every
+`_append_validated_record_unlocked` call site (10 sites: `forecast_cycle` x3,
+`hydro_run` x3, `pipeline_event` x4 — **none** `pipeline_job`). No module outside
+`file_orchestration_journal.py` references `pipeline-jobs` at all.
+
+## D12. Retention, closed (task 3.2) — six unlink sites, not two
+
+`unlink|rmtree|os.remove|rmdir` over the whole file yields six sites, four more
+than D2 named: `:6031`, `:6074`, `:6113`, `:6292` (rollback/rollforward
+marker, fence and receipt files at the journal root, named by
+`_RECONCILE_INVENTORY_MIGRATION_MARKER` / `_ROLLBACK_PREP_RECEIPT` /
+`_ROLLFORWARD_RECEIPT`), `:6651` (`_remove_reconcile_atomic_residue_unlocked`,
+reached only for names matching `_RECONCILE_INVENTORY_TEMP_RE` /
+`_RECONCILE_MIGRATION_TEMP_RE`) and `:6928`
+(`_remove_reconcile_inventory_anchor_unlocked`, scoped to
+`_RECONCILE_INVENTORY_DIRECTORY`). None can name a path under `pipeline-jobs/`.
+D2's conclusion stands; its enumeration did not.
+
+## D13. Tasks 1.3 and 1.4 are unconstructible — and that makes the fix simpler
+
+D3 argued that `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE` (a predicate on the job_id
+STRING) and `accepted_submit_row_kind` (a predicate on row CONTENT) are not the
+same predicate, so a name-only enumeration would be an assumption. True in the
+abstract, and **false on the flat surface**, which is the surface that matters:
+
+`_iter_direct_pipeline_job_records` yields only rows that survive
+`_validated_direct_pipeline_job_record`, which runs
+`normalize_accepted_submit_evidence` -> `forecast_cohort_identity_is_valid`. That
+forces `run_id == cycle_{source}_{cycle}[_cohort]` and
+`job_id == job_{run_id}_forecast[_suffix]`, and no storage source id contains
+`_` (`gfs` / `IFS` / `ERA5`). So every current-contract master on the flat
+surface necessarily matches the regex. A synthetic counter-example is not
+discovered — it is REJECTED, with `file_journal_evidence_invariant_invalid`
+on `cohort_digest`. Task 1.3's end-to-end scenario cannot be built, and building
+it would make the flat scan raise rather than fall open.
+
+The same validator makes task 1.4 unreachable: every yielded row carries a
+`cycle_id` that round-trips through `_require_cycle_id`, so
+`_source_id_from_job` / `_cycle_time_from_job` cannot fail.
+
+The implementation therefore **drops the name-parse step entirely** (a deviation
+from task 2.3's ordering). `_released_candidate_cycle_scope` derives scope from
+row content with the same two functions `_write_pipeline_job_direct_unlocked` and
+`_write_pipeline_job_unlocked` used to place the row, which is the byte-exact
+inverse of the write and satisfies the "identifier does not parse" scenario
+vacuously rather than by a second, weaker predicate. The `None` fall-open branch
+is retained per the spec requirement and pinned by injecting the precondition at
+that one seam, with the unreachability asserted in the test rather than assumed.

@@ -1538,23 +1538,66 @@ class FileOrchestrationJournalRepository:
         ACTIONABLE -- the recovery API demands CAS values a human otherwise has
         no supported way to read.  The filter mirrors that API's own admission
         shape so a row listed here is one it will actually consider.
+
+        The constraint that binds is NOT wall time (#1810).  An earlier version
+        of this docstring defended a whole-tree replay as "acceptable because
+        this is an operator command run by hand on a wedge"; what actually
+        fired on node-22 was the fail-closed aggregate ``_RecordBudget`` the
+        replay opens, because ``journal/`` is append-only history that had
+        already crossed ``MAX_FILE_JOURNAL_RECORDS``.  No amount of operator
+        patience gets past a budget, and raising it only moves the cliff.  So
+        the read cost here is bounded by ONE cycle's records instead:
+
+        1. Enumerate the flat ``pipeline-jobs/`` directory ONCE as a CANDIDATE
+           filter.  That surface is guarded by ``max_files``, not by a record
+           budget, and every row in this shape is on it by construction --
+           ``_write_pipeline_job_direct_unlocked`` sends a current-contract
+           *candidate* to ``by-cycle/`` and everything else, cohort masters
+           included, to the flat file, and no pruning path unlinks it.
+        2. Confirm each candidate through the cycle-scoped replay, which is
+           what the returned row is built from.  The flat record is not treated
+           as authoritative: a stale one can only produce a candidate that
+           confirmation drops.
+
+        The reconcile inventory is NOT usable as the enumeration surface: it
+        prunes its anchor the moment a row stops needing restart reconcile,
+        which is exactly what the release does, so a released row is by
+        definition absent from it.
+
+        The listing is point-in-time on a live journal, exactly as the
+        whole-tree replay was.  That is safe because the recovery action
+        re-reads under ``_locked_cycle_write`` and compares there, so a stale
+        listing costs at most a refused invocation, never a bad write.
         """
 
-        # Whole-tree replay, deliberately: the reconcile inventory prunes its
-        # anchor the moment a row stops needing restart reconcile, which is
-        # exactly what the release does -- ``_iter_reconcile_pipeline_job_records``
-        # returns nothing here.  The cost is acceptable because this is an
-        # operator command run by hand on a wedge, never a scheduler pass.
-        jobs = [
-            _public_scheduler_row(job)
-            for job in self._iter_pipeline_job_records()
-            if accepted_submit_contract_is_current(job)
-            and accepted_submit_row_kind(job) == "master"
-            and str(job.get("status") or "") == "reservation_lost"
-            and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
-            and job.get("slurm_job_id") in (None, "")
-            and job.get("matched_slurm_job_id") in (None, "")
-        ]
+        candidates: dict[str, dict[str, Any]] = {}
+        # Eagerly consumed inside the lane, never across a ``yield`` of this
+        # frame: #1734 D11's rule for tagging a generator's reads.
+        with journal_read_lane("direct_flat_scan"):
+            for job in self._iter_direct_pipeline_job_records():
+                if _released_identity_blocked_row(job):
+                    candidates[_required_safe_identity(job, "job_id")] = job
+
+        confirmed: dict[str, dict[str, Any]] = {}
+        unscoped: set[str] = set()
+        for job_id, candidate in candidates.items():
+            cycle_scope = _released_candidate_cycle_scope(candidate)
+            if cycle_scope is None:
+                unscoped.add(job_id)
+                continue
+            for job in self._iter_pipeline_job_records_scoped(cycle_scope):
+                if str(job.get("job_id") or "") == job_id and _released_identity_blocked_row(job):
+                    confirmed[job_id] = job
+        if unscoped:
+            # #1734 D4, kept verbatim: an underivable scope costs the old
+            # expensive read, never a false "not found".  ONE pass serves every
+            # fallen-open candidate -- each call re-replays the whole tree.
+            for job in self._iter_pipeline_job_records():
+                job_id = str(job.get("job_id") or "")
+                if job_id in unscoped and _released_identity_blocked_row(job):
+                    confirmed[job_id] = job
+
+        jobs = [_public_scheduler_row(job) for job in confirmed.values()]
         jobs.sort(key=lambda job: str(job.get("job_id") or ""))
         return jobs
 
@@ -10461,6 +10504,47 @@ def _cycle_scope_from_job_id(job_id: Any) -> tuple[str, datetime] | None:
     try:
         return _normalize_file_source_id(match.group(1), field="job_id"), parse_cycle_time(match.group(2))
     except (TypeError, ValueError, FileOrchestrationJournalError):
+        return None
+
+
+def _released_identity_blocked_row(job: Mapping[str, Any]) -> bool:
+    """The ONE admission predicate for the released identity-blocked wedge.
+
+    Shared by ``query_released_identity_blocked_jobs``'s candidate filter and
+    by its authoritative confirmation, so "the same six clauses" is true by
+    construction rather than by two hand-kept copies (#1810).
+    """
+
+    return (
+        accepted_submit_contract_is_current(job)
+        and accepted_submit_row_kind(job) == "master"
+        and str(job.get("status") or "") == "reservation_lost"
+        and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+        and job.get("slurm_job_id") in (None, "")
+        and job.get("matched_slurm_job_id") in (None, "")
+    )
+
+
+def _released_candidate_cycle_scope(job: Mapping[str, Any]) -> tuple[str, datetime] | None:
+    """Scope a flat candidate the way its WRITER scoped it, or fall open.
+
+    ``_write_pipeline_job_direct_unlocked`` derives ``(source_id, cycle_time)``
+    from row CONTENT with these exact two functions, and
+    ``_write_pipeline_job_unlocked`` appends the journal record under the same
+    pair, so reading with them is the byte-exact inverse of the write. Deriving
+    from the job_id string instead would be a second, weaker predicate: it
+    judges a name where the writer judged content (#1810 design D3).
+
+    Both helpers RAISE rather than returning ``None``; the ``None`` here is the
+    #1734 D4 fall-open signal, never "row not found". It is unreachable from
+    the flat surface today -- ``_validated_direct_pipeline_job_record`` requires
+    a round-tripping ``cycle_id`` on every row it yields -- and is kept because
+    an underivable scope must cost the old expensive read, not a silent drop.
+    """
+
+    try:
+        return _source_id_from_job(job), _cycle_time_from_job(job)
+    except FileOrchestrationJournalError:
         return None
 
 

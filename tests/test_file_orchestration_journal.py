@@ -15754,47 +15754,120 @@ def test_released_identity_blocked_listing_survives_a_whole_tree_budget(tmp_path
     assert listed[0]["reconciliation_decision"] == "identity_mismatch_released"
 
 
-def test_released_identity_blocked_listing_discovers_an_unparsable_job_id(tmp_path: Path) -> None:
-    """#1810 task 1.3: scope comes from row CONTENT when the name will not parse.
+def test_released_identity_blocked_scope_is_derived_from_row_content(tmp_path: Path) -> None:
+    """#1810 task 1.3: the scope is the WRITER's, read back off row content.
 
-    ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`` judges the job_id STRING;
-    ``accepted_submit_row_kind`` judges the row CONTENT.  They are not the same
-    predicate, so a name-only enumeration would be an assumption rather than a
-    proof.  Production holds no such row today (74 unparsable flat names, all
-    non-current-contract), which is precisely why this needs a synthetic pin.
+    The fixture asked for an end-to-end pin: a flat ``pipeline-jobs/`` row whose
+    job_id does not match ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`` but whose content
+    is a current-contract master.  **That row cannot exist**, and this test pins
+    why rather than asserting the fixture's premise.  A current-contract master
+    must satisfy ``forecast_cohort_identity_is_valid``, which forces
+    ``run_id == cycle_{source}_{cycle}[_cohort]`` and
+    ``job_id == job_{run_id}_forecast[_suffix]``; no storage source id contains
+    ``_``; so every such job_id necessarily matches that regex.  The flat reader
+    validates every file it yields, so a synthetic counter-example is REJECTED by
+    ``_validated_direct_pipeline_job_record`` instead of being discovered.
 
-    The budget is kept tight on purpose: a name-only implementation would fall
-    open to the whole-tree scan for this candidate and trip the very budget the
-    change removes, so this test also discriminates against that shortcut.
+    What is therefore pinned is the property the fixture wanted: discovery never
+    consults the job_id string at all.  ``_released_candidate_cycle_scope`` reads
+    the same two content fields ``_write_pipeline_job_direct_unlocked`` and
+    ``_write_pipeline_job_unlocked`` used to place the row, so reader and writer
+    agree by construction and an unparsable name is a non-event.
     """
+
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
 
     repository, record = _released_identity_blocked_master(tmp_path)
     parsable_job_id = str(record["job_id"])
-    residue_job_id = "legacy-master.cycle_gfs_2026072000_forecast"
-    assert journal_module._cycle_scope_from_job_id(residue_job_id) is None
-
-    flat_directory = repository.root / "pipeline-jobs"
-    released_record = json.loads((flat_directory / f"{parsable_job_id}.json").read_text(encoding="utf-8"))
-    residue_record = dict(released_record)
-    residue_record["payload"] = {**released_record["payload"], "job_id": residue_job_id}
-    (flat_directory / f"{residue_job_id}.json").write_text(
-        json.dumps(residue_record, sort_keys=True), encoding="utf-8"
+    released_record = json.loads(
+        (repository.root / "pipeline-jobs" / f"{parsable_job_id}.json").read_text(encoding="utf-8")
     )
+    released_row = released_record["payload"]
+    assert journal_module._released_identity_blocked_row(released_row)
+
+    residue_job_id = "legacy-master.cycle_gfs_2026072000_forecast"
+    assert journal_module._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(residue_job_id) is None
+    assert journal_module._cycle_scope_from_job_id(residue_job_id) is None
+    residue_row = {**released_row, "job_id": residue_job_id}
+    residue_row["cohort_digest"] = forecast_cohort_digest(residue_row)
+
+    # The property: an unparsable name still yields the writer's exact scope.
+    scope = journal_module._released_candidate_cycle_scope(residue_row)
+    assert scope == (
+        journal_module._source_id_from_job(released_row),
+        journal_module._cycle_time_from_job(released_row),
+    )
+    assert scope == ("gfs", _dt("2026-07-20T00:00:00Z"))
+
+    # And the reason the end-to-end shape is unconstructible, asserted rather
+    # than asserted-about: the flat reader refuses the row.
+    with pytest.raises(FileOrchestrationJournalError) as rejected:
+        repository._validated_direct_pipeline_job_record(
+            {**released_record, "job_id": residue_job_id, "payload": residue_row},
+            expected_job_id=residue_job_id,
+        )
+    assert rejected.value.reason == "file_journal_evidence_invariant_invalid"
+    assert rejected.value.field == "cohort_digest"
+
+
+def test_released_identity_blocked_listing_falls_open_when_scope_is_underivable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 1.4: an underivable scope widens the read, never shortens it.
+
+    #1734's D4 contract is that an underivable key costs the OLD expensive read
+    and never a false "not found".  Like task 1.3's shape, this precondition is
+    unreachable from data -- every row the flat reader yields carries a
+    round-tripping ``cycle_id``, so ``_released_candidate_cycle_scope`` cannot
+    return ``None`` -- so the precondition is injected at that one seam.  The
+    branch would otherwise be unpinned and freely regressable, and deleting it
+    would be a silent deviation from the spec requirement.
+
+    Read attribution is the oracle, not just the returned row: a fall-open that
+    quietly dropped the candidate would also return nothing, and a fall-open
+    that never happened would tag no ``full_tree_replay``.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    monkeypatch.setattr(journal_module, "_released_candidate_cycle_scope", lambda job: None)
+    journal_module.reset_journal_read_counters()
+
+    listed = repository.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|full_tree_replay" in tags, sorted(tags)
+
+
+def test_released_identity_blocked_listing_never_replays_the_whole_tree(tmp_path: Path) -> None:
+    """#1810 tasks 2.1/2.2: flat scan as candidate filter, cycle-scoped confirm.
+
+    The budget pin above proves the read fits; this proves it is the SHAPE the
+    design chose and not an accident of fixture size.  D9 recorded that the
+    obvious alternative -- one cycle-scoped replay per distinct cycle -- did not
+    finish in 40 minutes against the real node-22 journal, so the lane split is
+    load-bearing: enumerate the flat directory ONCE, confirm per candidate.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
     _pad_journal_cycles_with_unrelated_records(
         repository.root,
         cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
         records_per_cycle=4,
     )
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    journal_module.reset_journal_read_counters()
 
-    # An unparsable flat name is admitted to EVERY cycle's flat leg (the
-    # filename filter falls open), so the released cycle now costs 5.
-    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=6)
-    blocked = budgeted.query_pipeline_jobs_by_cycle("unknown-source_2026072000")
-    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert [job["job_id"] for job in reader.query_released_identity_blocked_jobs()] == [
+        str(record["job_id"])
+    ]
 
-    listed = budgeted.query_released_identity_blocked_jobs()
-
-    assert [job["job_id"] for job in listed] == sorted([parsable_job_id, residue_job_id])
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|direct_flat_scan" in tags, sorted(tags)
+    assert "query_released_identity_blocked_jobs|cycle_replay" in tags, sorted(tags)
+    assert not [tag for tag in tags if tag.endswith("|full_tree_replay")], sorted(tags)
 
 
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])

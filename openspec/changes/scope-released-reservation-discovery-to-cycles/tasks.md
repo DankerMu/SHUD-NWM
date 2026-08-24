@@ -2,7 +2,7 @@
 
 ## 1. Red-first oracle (must be written and RED before any production edit)
 
-- [ ] 1.1 Regression pin: the discovery listing SHALL survive a record budget
+- [x] 1.1 Regression pin: the discovery listing SHALL survive a record budget
       that the whole-tree replay exceeds but no single cycle does.
       **Oracle shape matters.** The cycle-scoped replay consumes the SAME
       `_RecordBudget` per call (`file_orchestration_journal.py:5770`), so a naive
@@ -11,44 +11,44 @@
       4 records with `max_records=6`: whole-tree consumes 12 (red today),
       per-cycle consumes at most 4 (green after the fix). Assert the released row
       is FOUND, not merely that no exception escapes.
-- [ ] 1.2 Prove 1.1 is red at base: run it on `origin/master` and record the exact
+- [x] 1.2 Prove 1.1 is red at base: run it on `origin/master` and record the exact
       failure (`file_journal_record_limit_exceeded`, `field=pipeline_job_records`).
-- [ ] 1.3 Residue pin: a flat `pipeline-jobs/` row whose job_id does NOT match
+- [x] 1.3 Residue pin: a flat `pipeline-jobs/` row whose job_id does NOT match
       `_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE` but whose CONTENT is a current-contract
       master SHALL still be discovered. Production holds zero such rows today
       (74 unparsable names, all `(row_kind=None, contract_is_current=False)`), so
       only a synthetic row can exercise this path — which is exactly why it needs
       a pin rather than an assumption.
-- [ ] 1.4 Fall-open pin: a row that yields no cycle scope from name OR content
+- [x] 1.4 Fall-open pin: a row that yields no cycle scope from name OR content
       SHALL fall open to the full scan, preserving the #1734 D4 contract that an
       underivable key costs the old full scan and never a false "not found".
-- [ ] 1.5 Unweakened-pin check: the existing single-row listing test
+- [x] 1.5 Unweakened-pin check: the existing single-row listing test
       (`tests/test_file_orchestration_journal.py:14291`) SHALL pass with zero
       edited assertions.
 
 ## 2. Implementation (shape per design D10 — the per-cycle-replay shape of D9 was measured and rejected)
 
-- [ ] 2.1 Discovery reads the flat `pipeline-jobs/` directory once via
+- [x] 2.1 Discovery reads the flat `pipeline-jobs/` directory once via
       `_iter_direct_pipeline_job_records` (`file_orchestration_journal.py:5336`),
       which is guarded by `max_files`, NOT by `_RecordBudget`. Filter on the
       record's `payload` using the EXISTING six-clause predicate, byte-identical.
-- [ ] 2.2 Each surviving candidate gets an authoritative re-read through the
+- [x] 2.2 Each surviving candidate gets an authoritative re-read through the
       cycle-scoped path (the same one `--job-id` already uses and which verifies
       on a real production row). The flat scan is a CANDIDATE filter; the
       cycle-scoped read is what the returned row is built from.
-- [ ] 2.3 Residue: a flat entry whose job_id does not parse still yields a scope
+- [x] 2.3 Residue: a flat entry whose job_id does not parse still yields a scope
       from row content (`_source_id_from_job` `:9983` / `_cycle_time_from_job`
       `:9991`); only when content also yields no scope does that ONE candidate
       fall open to the unscoped read.
-- [ ] 2.4 Preserve the return contract: same `_public_scheduler_row` shaping, same
+- [x] 2.4 Preserve the return contract: same `_public_scheduler_row` shaping, same
       `job_id` sort, same list type. `cli.py` untouched.
-- [ ] 2.5 Rewrite the docstring's cost paragraph. The current text defends the
+- [x] 2.5 Rewrite the docstring's cost paragraph. The current text defends the
       whole-tree replay on wall-time grounds; what actually fires is a fail-closed
       budget. Name the constraint that binds.
 
 ## 3. Correctness argument (must be written down, not assumed)
 
-- [ ] 3.1 **Closed-list write inventory.** Enumerate EVERY site that appends a
+- [x] 3.1 **Closed-list write inventory.** Enumerate EVERY site that appends a
       `("pipeline_job", row, ...)` payload or otherwise persists a pipeline-job
       row, and show each either pairs a `_write_pipeline_job_direct_unlocked`
       call or provably cannot carry a current-contract master. Known pairs:
@@ -58,22 +58,22 @@
       eyeballed pairs are not the proof** — the deliverable is the exhaustive
       list with a verdict per site. If any site can persist a master row without
       a flat write, the flat scan is fail-open and the design changes.
-- [ ] 3.2 Retention: show no pruning path removes a flat master file while the row
+- [x] 3.2 Retention: show no pruning path removes a flat master file while the row
       is still retained. Candidate `unlink` sites are `:6646` (atomic residue) and
       `:6925` (scoped to `_RECONCILE_INVENTORY_DIRECTORY`); confirm these are all.
-- [ ] 3.3 State the snapshot property explicitly: the flat listing is
+- [x] 3.3 State the snapshot property explicitly: the flat listing is
       point-in-time on a live journal (observed 4531 -> 4555 -> 4557 across three
       reads minutes apart). Not a regression — the whole-tree replay had it too.
-- [ ] 3.4 Record why the flat record is current for THIS shape:
+- [x] 3.4 Record why the flat record is current for THIS shape:
       `release_identity_blocked_reservation` writes through
       `_write_pipeline_job_unlocked` (`:3425`), which writes the flat file
       unconditionally (`:7382`) — the releasing call is the one that rewrites it.
 
 ## 4. Local verification
 
-- [ ] 4.1 `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_production_scheduler.py`
-- [ ] 4.2 `uv run ruff check .`
-- [ ] 4.3 `openspec validate scope-released-reservation-discovery-to-cycles --strict --no-interactive`
+- [x] 4.1 `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_production_scheduler.py`
+- [x] 4.2 `uv run ruff check .`
+- [x] 4.3 `openspec validate scope-released-reservation-discovery-to-cycles --strict --no-interactive`
 
 ## 5. Production receipt (node-22) — Evidence Floor
 
