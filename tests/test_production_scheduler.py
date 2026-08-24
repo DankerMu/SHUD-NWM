@@ -49,6 +49,7 @@ from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_no_progress as scheduler_no_progress_module
 from services.orchestrator import scheduler_preflight as scheduler_preflight_module
 from services.orchestrator import scheduler_state as scheduler_state_module
+from services.orchestrator import scheduler_state_decision as scheduler_state_decision_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
@@ -38263,6 +38264,469 @@ def test_cycle_completion_verdict_gaps_on_genuine_disagreement_when_strict_not_r
     )
 
     assert ready_scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+
+_COHORT_MATCH_IDENTITY = {
+    "array_task_id": 0,
+    "model_id": "model_a",
+    "init_state_id": "state_gfs_model_a_2026072000_gfs_2026071912_f012",
+    "init_state_checksum": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_checksum"],
+    "init_state_uri": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_uri"],
+    "init_state_valid_time": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_valid_time"],
+}
+_COHORT_CONFLICT_IDENTITY = {
+    "array_task_id": 0,
+    "model_id": "model_a",
+    "init_state_id": "state_gfs_model_a_2026072000_gfs_2026071912_f012",
+    "init_state_checksum": "sha256:" + "z" * 64,
+}
+_COHORT_URI_CONFLICT_IDENTITY = {
+    "array_task_id": 0,
+    "model_id": "model_a",
+    "init_state_id": "state_gfs_model_a_2026072000_gfs_2026071912_f012",
+    "init_state_checksum": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_checksum"],
+    "init_state_uri": "s3://nhms/states/gfs/model_a/2026072000/wrong.cfg.ic",
+    "init_state_valid_time": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_valid_time"],
+}
+
+
+def _cohort_full_identity_repository(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    terminal_identity: dict[str, Any] | None,
+) -> tuple[Any, CycleDiscovery, list[Any]]:
+    """The absence-tolerance verdict seam on a REAL file journal with a cohort row.
+
+    The repository's full accessor reads the cohort terminal row's recorded
+    identity; the verdict must compare the FULL mapping (id plus optional
+    fields) when the accessor returns one.  The cycle is 2026072000 and the
+    strict resolution names ``state_gfs_model_a_2026072000_gfs_2026071912_f012``
+    (lead 12); the §8.7 predecessor filter for this cycle derives the same
+    lead, so a matching cohort token stays a no-judgement.
+    """
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import (
+        _cohort_candidate_terminal_row,
+        _latest_view,
+        _write_json,
+    )
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    if terminal_identity is not None:
+        terminal = _cohort_candidate_terminal_row(cycle_time, identity=terminal_identity)
+        _write_json(
+            journal_root / f"latest/gfs/{stamp}/model_a.json",
+            _latest_view(cycle_time=cycle_time, jobs=[terminal]),
+        )
+    repository = FileOrchestrationJournalRepository(journal_root)
+    model = _model("model_a", "basin_a")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
+        },
+    )
+    # The §8.7 predecessor filter derives lead 12 for this cycle (the strict
+    # resolution's own producer); the matching cohort token below is exactly
+    # that expected token so the filter stays a no-judgement.
+    monkeypatch.setattr(
+        scheduler,
+        "_required_warm_start_lead_hours",
+        lambda _candidate, _cycle: 12,
+    )
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026072000",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    return scheduler, discovery, [scheduler_module._coerce_registered_model(model)]
+
+
+def _published_hydro_candidate_state_decision(
+    candidate: Any, state: Mapping[str, Any] | None
+) -> Any:
+    return scheduler_state_decision_module._candidate_state_decision(
+        candidate,
+        {
+            **dict(state or {}),
+            "run_id": candidate.run_id,
+            "cycle_id": candidate.cycle_id,
+            "cycle_time": candidate.cycle_time_utc.isoformat().replace("+00:00", "Z"),
+            "model_id": candidate.model_id,
+            "source_id": candidate.source_id,
+            "hydro_status": "published",
+            "pipeline_status": "succeeded",
+            "hydro_run": {
+                "run_id": candidate.run_id,
+                "status": "published",
+                "output_uri": f"s3://nhms/runs/{candidate.run_id}/output/",
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("terminal_identity", "successor_state", "expected_status"),
+    [
+        pytest.param(
+            dict(_COHORT_CONFLICT_IDENTITY),
+            {"ready": True},
+            "gap",
+            id="cohort_conflict_successor_ready",
+        ),
+        pytest.param(
+            dict(_COHORT_CONFLICT_IDENTITY),
+            None,
+            "gap",
+            id="cohort_conflict_optional_field_no_successor",
+        ),
+        pytest.param(
+            dict(_COHORT_URI_CONFLICT_IDENTITY),
+            {"ready": True},
+            "gap",
+            id="cohort_conflict_uri_field_successor_ready",
+        ),
+        pytest.param(
+            dict(_COHORT_MATCH_IDENTITY),
+            None,
+            "complete",
+            id="cohort_match_no_successor",
+        ),
+        pytest.param(
+            None,
+            {"ready": True},
+            "complete",
+            id="cohort_absent_successor_ready",
+        ),
+        pytest.param(
+            None,
+            None,
+            "gap",
+            id="cohort_absent_no_successor",
+        ),
+    ],
+)
+def test_cycle_completion_verdict_consumes_full_cohort_identity_accessor(
+    monkeypatch: Any,
+    tmp_path: Path,
+    terminal_identity: dict[str, Any] | None,
+    successor_state: dict[str, Any] | None,
+    expected_status: str,
+) -> None:
+    """#1185 truth table: the verdict consumes the cohort full-identity mapping.
+
+    The candidate state must be a terminal-success decision; the cohort row
+    records the reservation-time identity; the verdict compares the full
+    mapping through the repository accessor, and the successor-readiness
+    fallback applies only to the ``absent`` shape.
+    """
+    scheduler, discovery, models = _cohort_full_identity_repository(
+        monkeypatch,
+        tmp_path,
+        terminal_identity=terminal_identity,
+    )
+    if successor_state is not None:
+        monkeypatch.setattr(
+            scheduler,
+            "_successor_warm_start_state_for_candidate",
+            lambda _candidate, _cycle: dict(successor_state),
+        )
+    else:
+        monkeypatch.setattr(
+            scheduler,
+            "_successor_warm_start_state_for_candidate",
+            lambda _candidate, _cycle: None,
+        )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        _published_hydro_candidate_state_decision,
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == expected_status
+
+
+def test_cycle_completion_verdict_no_accessor_and_legacy_hydro_paths_unchanged(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """A repository without the full accessor keeps the legacy hydro evidence.
+
+    The verdict falls back to ``decision.evidence['hydro_run']`` exactly when
+    the accessor is missing or returns ``None``.  A foreign provider that
+    violates its own contract by RAISING must propagate (CAND-02): the
+    documented optional-repo tolerance authorizes fallback only for a missing
+    method or a returned ``None``.
+    """
+    class NoFullAccessorRepository(FakeCandidateStateRepository):
+        pass
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        },
+        successor_state=None,
+        repository_factory=NoFullAccessorRepository,
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+    # The accessor present but returning None also keeps the hydro path.
+    class NoneFullAccessorRepository(FakeCandidateStateRepository):
+        def completed_pipeline_init_state_identity(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> None:
+            del source_id, cycle_time, model_id
+            return None
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        },
+        successor_state=None,
+        repository_factory=NoneFullAccessorRepository,
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+    # A foreign optional provider that violates its own contract by RAISING
+    # must propagate, not be silently downgraded to an absence (CAND-02).
+    class RaisingFullAccessorRepository(FakeCandidateStateRepository):
+        def completed_pipeline_init_state_identity(
+            self, *, source_id: str, cycle_time: datetime, model_id: str
+        ) -> dict[str, Any]:
+            del source_id, cycle_time, model_id
+            raise ValueError("optional accessor failed")
+
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+        },
+        successor_state=None,
+        repository_factory=RaisingFullAccessorRepository,
+    )
+    with pytest.raises(ValueError, match="optional accessor failed"):
+        scheduler._cycle_completion_status(discovery, models, horizon={})
+
+
+def test_cycle_completion_verdict_non_mapping_full_provider_falls_back_to_hydro_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """D3: a non-mapping full-accessor answer keeps the legacy hydro evidence.
+
+    The full accessor is OPTIONAL: only a returned mapping overrides the
+    terminal decision's ``hydro_run``.  A provider that answers a non-mapping
+    (list/string — a contract violation) must NOT be treated as observed
+    evidence: doing so would classify the matching legacy hydro row as
+    ``absent``/``gap``.  With ready + named-state strict evidence, matching
+    legacy hydro and no successor verdict, the expected status stays
+    ``complete`` for every non-mapping shape, while the raising provider keeps
+    propagating (CAND-02, covered above).
+    """
+    for non_mapping in (["not", "a", "mapping"], "not-a-mapping"):
+        class NonMappingFullAccessorRepository(FakeCandidateStateRepository):
+            def completed_pipeline_init_state_identity(
+                self, *, source_id: str, cycle_time: datetime, model_id: str
+            ) -> Any:
+                del source_id, cycle_time, model_id
+                return list(non_mapping) if isinstance(non_mapping, list) else str(non_mapping)
+
+        scheduler, discovery, models = _absence_tolerance_scheduler(
+            monkeypatch,
+            tmp_path,
+            hydro_run={
+                "run_id": "fcst_gfs_2026072000_model_a",
+                "status": "published",
+                "init_state_id": _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"],
+            },
+            successor_state=None,
+            repository_factory=NonMappingFullAccessorRepository,
+        )
+        # Ready + named-state: the verdict path does consult the accessor.
+        # (The discovery §8.7 predecessor filter would not: the repository has
+        # no string accessor, so it is a no-judgement on that side regardless.)
+        assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+def test_cycle_completion_verdict_direct_hydro_optional_field_conflict_stays_gap(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """Direct completed-hydro rows keep optional-field conflict.
+
+    The completed hydro row shares the selected ``init_state_id`` but carries a
+    conflicting checksum.  Before the fix the full accessor projected only the
+    id, so the verdict silently downgraded this conflict to a match and
+    completed a wrong-lineage cycle.  The verdict must still compare every
+    present optional field through the accessor.
+    """
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_file_orchestration_journal import _latest_view, _write_json
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    stamp = format_cycle_time(cycle_time)
+    journal_root = tmp_path / "journal"
+    latest = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    latest["hydro_run"]["init_state_id"] = _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"]
+    latest["hydro_run"]["init_state_checksum"] = "sha256:" + "z" * 64
+    _write_json(journal_root / f"latest/gfs/{stamp}/model_a.json", latest)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    # The repository exposes the full accessor, and it returns the hydro identity.
+    identity = repository.completed_pipeline_init_state_identity(
+        source_id="gfs", cycle_time=cycle_time, model_id="model_a"
+    )
+    assert identity is not None
+    assert identity["init_state_checksum"] == "sha256:" + "z" * 64
+
+    model = _model("model_a", "basin_a")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
+        },
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_required_warm_start_lead_hours",
+        lambda _candidate, _cycle: 12,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_successor_warm_start_state_for_candidate",
+        lambda _candidate, _cycle: None,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        _published_hydro_candidate_state_decision,
+    )
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026072000",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=0,
+        available=True,
+        status="discovered",
+    )
+    models = [scheduler_module._coerce_registered_model(model)]
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
+
+    # The same row with a matching optional field keeps completing.
+    matching_root = tmp_path / "matching-journal"
+    matching = _latest_view(cycle_time=cycle_time, hydro_status="complete")
+    matching["hydro_run"]["init_state_id"] = _ABSENCE_TOLERANCE_SELECTED_STATE["init_state_id"]
+    matching["hydro_run"]["init_state_checksum"] = _ABSENCE_TOLERANCE_SELECTED_STATE[
+        "init_state_checksum"
+    ]
+    _write_json(matching_root / f"latest/gfs/{stamp}/model_a.json", matching)
+    matching_repository = FileOrchestrationJournalRepository(matching_root)
+    matching_scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-07-20T12:00:00Z")),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=matching_repository,
+    )
+    monkeypatch.setattr(
+        matching_scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "candidate_state": dict(_ABSENCE_TOLERANCE_SELECTED_STATE),
+        },
+    )
+    monkeypatch.setattr(
+        matching_scheduler,
+        "_required_warm_start_lead_hours",
+        lambda _candidate, _cycle: 12,
+    )
+    monkeypatch.setattr(
+        matching_scheduler,
+        "_successor_warm_start_state_for_candidate",
+        lambda _candidate, _cycle: None,
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        _published_hydro_candidate_state_decision,
+    )
+    assert matching_scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+def test_cycle_completion_verdict_strict_not_ready_and_cold_start_never_call_accessor(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1775/#1185: not-ready and READY-but-names-no-state never invoke accessor.
+
+    The full-identity accessor is consumed only when the strict resolution is
+    READY AND names a canonical state id.  A provider failure on either of the
+    other two shapes must not veto the terminal-first verdict, so a sentinel
+    accessor that raises proves it is not called.
+    """
+    def _raising_accessor(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("full identity accessor must not be invoked")
+
+    for strict_evidence, label in (
+        (
+            {
+                "status": "blocked",
+                "ready": False,
+                "reason": "state_snapshot_index_exact_checkpoint_missing",
+            },
+            "not_ready",
+        ),
+        ({"status": "ready", "ready": True, "mode": "db_free_cold_new_model"}, "cold_start"),
+    ):
+        scheduler, discovery, models = _absence_tolerance_scheduler(
+            monkeypatch,
+            tmp_path,
+            hydro_run=dict(_ABSENT_INIT_STATE_HYDRO_RUN),
+            successor_state={"ready": True},
+            strict_evidence=strict_evidence,
+        )
+        scheduler.active_repository.completed_pipeline_init_state_identity = _raising_accessor
+        if label == "not_ready":
+            assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+        else:
+            assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
 
 
 def test_terminal_init_state_verdict_returns_unverifiable_only_when_not_ready(

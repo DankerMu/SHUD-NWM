@@ -375,7 +375,20 @@ def _cycle_completion_verdict(
             if successor_evidence is not None and not bool(successor_evidence.get("ready")):
                 return "gap"
             if strict_evidence is not None:
-                init_state_verdict = _terminal_init_state_verdict(decision.evidence, strict_evidence)
+                recorded = None
+                if (
+                    bool(strict_evidence.get("ready"))
+                    and isinstance(selected := strict_evidence.get("candidate_state"), Mapping)
+                    and init_state_field(selected, "state_id") not in (None, "")
+                ):
+                    provider = getattr(context.active_repository, "completed_pipeline_init_state_identity", None)
+                    if callable(provider):
+                        full_identity = provider(
+                            source_id=candidate.source_id, cycle_time=candidate.cycle_time_utc,
+                            model_id=candidate.model_id,
+                        )
+                        recorded = full_identity if isinstance(full_identity, Mapping) else None
+                init_state_verdict = _terminal_init_state_verdict(decision.evidence, strict_evidence, observed=recorded)
                 if init_state_verdict == TERMINAL_INIT_STATE_CONFLICT:
                     return "gap"
                 if init_state_verdict in {
@@ -577,6 +590,8 @@ def _breaker_engaged_gap_identities(
 def _terminal_init_state_verdict(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
+    *,
+    observed: Mapping[str, Any] | None = None,
 ) -> str:
     """Classify the terminal row's recorded init state for the cycle verdict.
 
@@ -619,7 +634,7 @@ def _terminal_init_state_verdict(
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or init_state_field(selected, "state_id") in (None, ""):
         return TERMINAL_INIT_STATE_CONFLICT
-    return terminal_init_state_match(selected, terminal_evidence.get("hydro_run"))
+    return terminal_init_state_match(selected, observed if observed is not None else terminal_evidence.get("hydro_run"))
 
 
 def _successor_state_proves_continuity(successor_evidence: Mapping[str, Any] | None) -> bool:
