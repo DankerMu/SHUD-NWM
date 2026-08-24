@@ -27,6 +27,7 @@ from scripts.select_ci_tests import (
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    RELEASED_RESERVATION_RECOVERY_TESTS,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
@@ -313,6 +314,10 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_monitoring_api.py",
         "tests/test_orchestration_chain.py",
         "tests/test_orchestrator.py",
+        "tests/test_orchestrator_demote_cli_security.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+        "tests/test_orchestrator_demote_projection_faults.py",
+        "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         "tests/test_pipeline_persistence.py",
         "tests/test_production_scheduler.py",
         "tests/test_publish_scheduler_file_registry.py",
@@ -347,6 +352,22 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_backfill.py",
         "tests/test_warm_start_chaining.py",
     } <= set(selected)
+
+
+def test_released_reservation_recovery_module_selects_its_exact_suites() -> None:
+    # #1748 recovery-CLI helper extraction: the new recovery-CLI helper module is owned by a stop
+    # rule that names exactly the suites exercising the #1748 operator channel
+    # and the shared register boundary. A module-only diff must run real
+    # assertions, never collapse to the collect-only smoke — so the set is
+    # pinned exactly, and no broad-orchestrator fallback may creep back in.
+    selected = select_tests(
+        ["services/orchestrator/operator_released_reservation_recovery.py"],
+        repo_root=Path("."),
+    )
+
+    assert selected == sorted(RELEASED_RESERVATION_RECOVERY_TESTS)
+    assert "tests/test_state_clone.py" not in selected
+    assert "tests/test_select_ci_tests.py" not in selected
 
 
 def test_select_tests_maps_compute_compose_to_two_node_runtime_tests() -> None:
@@ -3922,6 +3943,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # derivation that loses the consumption edge empties this anchor and reds
     # here rather than quietly re-collapsing the module.
     ("tests/mock_shud_omp.py", "tests/test_shud_runtime.py"),
+    # The #1564 split-demote suites' shared fixture module.
+    (
+        "tests/orchestrator_demote_reserved_job_helpers.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+    ),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -4511,6 +4537,29 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     # the closure guard above derives.
     assert SELECTOR_META_GUARD_TEST in selected
     assert selected != {SELECTOR_META_GUARD_TEST}
+
+
+def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
+    # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
+    # through a local (function-scope) import in tests/test_orchestration_chain.py,
+    # which the derived importer scan cannot see. The generic parametrized test
+    # above only checks the `required` table's members are PRESENT in the
+    # selection, so deleting the explicit chain entry there would stay green while
+    # a helper-only PR silently stopped running the public operator-recovery
+    # regression. This exact-set anchor makes the five-consumer contract
+    # load-bearing: it must equal the four split suites + the public chain suite
+    # + the meta-guard, nothing more and nothing less.
+    selected = set(
+        select_tests(["tests/orchestrator_demote_reserved_job_helpers.py"], repo_root=Path("."))
+    )
+    assert selected == {
+        "tests/test_orchestrator_demote_cli_security.py",
+        "tests/test_orchestrator_demote_core_cas.py",
+        "tests/test_orchestrator_demote_projection_faults.py",
+        "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+        "tests/test_orchestration_chain.py",
+        SELECTOR_META_GUARD_TEST,
+    }
 
 
 @pytest.mark.parametrize("module_path", _zero_consumer_collapse_params())

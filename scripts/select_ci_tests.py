@@ -194,12 +194,29 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
 ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_cli_cleanup_frontier.py",
     "tests/test_cli_publish_qdown.py",
+    "tests/test_orchestrator_demote_cli_security.py",
     "tests/test_retention_frontier.py",
     "tests/test_scheduler_backfill.py",
 )
 
+# #1748 recovery-CLI helper extraction: the shared
+# released-identity-blocked-reservation body is exercised through both CLI
+# entrypoints by the journal suite's operator-channel tests, and the signal/
+# command e2e pair lives in the production-scheduler suite. The demote CLI
+# security suite shares the register boundary in _click_main/_argparse_main,
+# so a register-order change must run it too.
+RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
+    "tests/test_file_orchestration_journal.py",
+    "tests/test_production_scheduler.py",
+    "tests/test_orchestrator_demote_cli_security.py",
+)
+
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    "tests/test_orchestrator_demote_cli_security.py",
+    "tests/test_orchestrator_demote_core_cas.py",
+    "tests/test_orchestrator_demote_projection_faults.py",
+    "tests/test_orchestrator_demote_reclaim_lifecycle.py",
     "tests/test_scheduler_backfill.py",
 )
 
@@ -401,6 +418,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_e2e.py",
         ),
     ),
+    PathTestRule(
+        # The #1564 split-demote suites' shared fixture module. The four split
+        # suites import it at file level, and the public operator-recovery cycle
+        # tests import it through a local (function-scope) import, which the
+        # derived importer scan does not see — so the rule names all five
+        # consumers explicitly.
+        "tests/orchestrator_demote_reserved_job_helpers.py",
+        (
+            "tests/test_orchestrator_demote_cli_security.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+            "tests/test_orchestrator_demote_projection_faults.py",
+            "tests/test_orchestrator_demote_reclaim_lifecycle.py",
+            "tests/test_orchestration_chain.py",
+        ),
+    ),
 )
 
 
@@ -487,6 +519,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[7],
         FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # #1748 recovery-CLI helper extraction.  Stop rule on
+        # purpose: without it the broad `services/orchestrator/**` rule would
+        # drag the full directory list for a module whose only production
+        # consumer is cli.py.  The two suites that drive the operator-facing
+        # channel and the signal/command e2e are named exactly, plus the demote
+        # CLI security suite which shares the register boundary.
+        "services/orchestrator/operator_released_reservation_recovery.py",
+        RELEASED_RESERVATION_RECOVERY_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
@@ -639,6 +682,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_warm_start_chaining.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
+            "tests/test_orchestrator_demote_cli_security.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+            "tests/test_orchestrator_demote_projection_faults.py",
+            "tests/test_orchestrator_demote_reclaim_lifecycle.py",
             "tests/test_file_orchestration_journal.py",
             "tests/test_file_orchestration_journal_read_cache.py",
             "tests/test_file_orchestration_migration.py",
@@ -724,6 +771,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # there, so a new one-hop importer suite reddens the guard.
         # tests/test_gateway_reconcile.py is a one-hop member too but already
         # rides the `services/slurm_gateway/**` rule; it is not repeated here.
+        # #1564: the split demote suites are one-hop members via
+        # services/orchestrator/reconcile.py (see #1455 above) and are not
+        # covered by either slurm_gateway rule, so they join this narrow rule.
         "services/slurm_gateway/real_backend.py",
         (
             "tests/test_production_e2e_validation.py",
@@ -734,6 +784,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scale_validation.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_reconcile_sacct_parse.py",
+            "tests/test_orchestrator_demote_cli_security.py",
+            "tests/test_orchestrator_demote_core_cas.py",
+            "tests/test_orchestrator_demote_projection_faults.py",
+            "tests/test_orchestrator_demote_reclaim_lifecycle.py",
         ),
     ),
     PathTestRule(

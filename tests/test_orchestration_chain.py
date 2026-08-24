@@ -13106,6 +13106,543 @@ def test_manual_retry_evidence_only_fresh_marker_keeps_precise_attempt_identity(
     assert repository.jobs[retry_job_id]["idempotency_key"] == "cycle_gfs_2026050100:convert:retry_4"
 
 
+# ---------------------------------------------------------------------------
+# #1564: public operator-recovery cycle must route through current-master reclaim
+# ---------------------------------------------------------------------------
+# A real #1116 held row -> typed operator demotion -> public
+# ``ForecastOrchestrator.orchestrate_cycle`` must REUSE the demoted master's job
+# id and idempotency key, so the reservation INSERT conflicts and the existing
+# current-master ``reclaim_pipeline_job_reservation`` CAS mints durable
+# attempt+1 and a fresh lock-owned anchor while preserving immutable cohort
+# identity.  Automatic ``absence_retry_permitted`` keeps its retry-suffixed
+# replacement behavior unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _operator_demoted_file_journal(
+    tmp_path: Path,
+    *,
+    member_count: int = 2,
+) -> tuple[Any, Any, dict[str, Any], Any]:
+    """Real #1116 held producer -> typed operator demotion on a real journal.
+
+    Returns ``(repository, orchestrator, demoted_row, client)``.  The cycle runs
+    only the ``forecast`` stage (``terminal_stage="forecast"``) so the demoted
+    forecast master is the one public path that must decide whether to reuse its
+    identity — convert/forcing/publish never enter the picture.
+    """
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        STARTED_AT as _DEMOTE_STARTED_AT,
+    )
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _demote_kwargs,
+        _production_faithful_held_cohort_repository,
+    )
+
+    repository = _production_faithful_held_cohort_repository(tmp_path, member_count=member_count)
+    held = repository.get_accepted_submit_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert held["status"] == "reserved"
+    assert repository.demote_operator_verified_reserved_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+        **_demote_kwargs(held),
+    ) is not None
+    demoted = repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    assert demoted["status"] == "reservation_lost"
+    assert demoted["reconciliation_decision"] == "operator_verified_absence"
+    assert demoted["submission_attempt"] == 1
+    assert demoted["submission_attempt_started_at"] == _DEMOTE_STARTED_AT.isoformat().replace("+00:00", "Z")
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast")
+    return repository, orchestrator, demoted, client
+
+
+def _operator_recovery_basins(member_count: int = 2) -> list[dict[str, Any]]:
+    basins = _basins(member_count)
+    for index, basin in enumerate(basins):
+        basin.update(
+            {
+                "run_id": f"fcst_gfs_2026071200_model_{index}",
+                "orchestration_run_id": "cycle_gfs_2026071200_forecast_fixture",
+                "restart_stage": "forecast",
+                "basin_version_id": f"basin_v{index}",
+                "river_network_version_id": f"river_v{index}",
+                "model_package_uri": f"s3://nhms/models/model_{index}.tar",
+                "model_package_checksum": f"sha256:model-{index}",
+                "state_evidence": {"restart_stage": "forecast"},
+            }
+        )
+    return basins
+
+
+def test_public_operator_recovery_reuses_demoted_master_identity_and_reclaims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: public cycle after operator demotion must reclaim the SAME row.
+
+    The old demoted master's job id / idempotency key become the submitted /
+    reclaimed identity; the old row flips to ``reserved`` attempt+1 with a fresh
+    lock-owned anchor (never the cycle's proposed attempt/anchor) and immutable
+    cohort members/digest survive.  Exactly one forecast submission; no
+    ``PIPELINE_ALREADY_ACTIVE``.
+    """
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    old_members = demoted["cohort_members"]
+    old_digest = demoted["cohort_digest"]
+    cycle_proposed_anchor = _dt("2026-07-12T05:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: cycle_proposed_anchor)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+
+    # The public cycle submitted exactly once, through the reclaimed old master.
+    assert result.status == "succeeded"
+    assert len(client.submissions) == 1
+    assert client.submissions[0]["stage"] == "forecast"
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{old_key}"
+    assert result.stages[-1].pipeline_job_id == old_job_id
+
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert current is not None
+    # The reclaimed master was submitted and reached the fake terminal state, so
+    # the durable status is bound/terminal — but the identity is the OLD master's.
+    assert current["job_id"] == old_job_id
+    assert current["idempotency_key"] == old_key
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    # The fresh anchor is lock-owned; the cycle's proposed attempt/anchor cannot
+    # override the durable derivation.
+    assert current["submission_attempt_started_at"] == cycle_proposed_anchor.isoformat().replace("+00:00", "Z")
+    # The operator absence decision was cleared by reclaim; after the fake client
+    # binds the submitted attempt the row is a normal bound master.
+    assert current["reconciliation_decision"] != "operator_verified_absence"
+    assert current["reconciliation_reason_class"] is None
+    # Immutable cohort identity is preserved for the same identity.
+    assert current["cohort_members"] == old_members
+    assert current["cohort_digest"] == old_digest
+
+
+def test_public_operator_recovery_hostile_context_attempt_and_anchor_cannot_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: a hostile cycle-proposed attempt/anchor never replaces durable values."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, _client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    locked_anchor = _dt("2026-07-12T06:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    basins = _operator_recovery_basins()
+    basins[0]["retry_attempt"] = 999
+    basins[0]["manual_retry_attempt"] = 998
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", basins)
+
+    assert result.status == "succeeded"
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    # Durable old attempt + 1 exactly once, never the hostile proposed attempt.
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    assert current["idempotency_key"] == old_key
+
+
+def test_two_concurrent_public_operator_recovery_cycles_submit_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 4.4: two public cycles deterministically rendezvous at the reclaim.
+
+    Two independent orchestrator/repository instances share ONE journal and
+    synchronize around the REAL old-ID reserve/reclaim boundary (a barrier
+    around the real ``reserve_pipeline_job`` / ``_append_journal_record_unlocked``
+    methods -- wrappers delegate to the real implementations, nothing is
+    mocked).  The winner owns attempt+1 and exactly one submission; the loser
+    actually attempts and loses the reclaim, so its public PipelineResult and
+    durable skip evidence carry the governed duplicate-skip semantics -- no
+    ``PIPELINE_ALREADY_ACTIVE``, identity/attempt/anchor preserved.
+    """
+    import threading
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _demote_kwargs,
+        _production_faithful_held_cohort_repository,
+    )
+
+    # The shared held producer appends its own ``/journal`` segment, so the
+    # authority root for both independent repository instances is
+    # ``tmp_path/journal``.
+    held_repository = _production_faithful_held_cohort_repository(tmp_path)
+    journal_root = held_repository.root
+    held = held_repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    assert held_repository.demote_operator_verified_reserved_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast", **_demote_kwargs(held)
+    ) is not None
+    demoted = held_repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    locked_anchor = _dt("2026-07-12T07:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repo_a = FileOrchestrationJournalRepository(journal_root)
+    repo_b = FileOrchestrationJournalRepository(journal_root)
+    client = FakeCycleSlurmClient()
+    orch_a = _orchestrator(tmp_path / "a", repo_a, client, terminal_stage="forecast")
+    orch_b = _orchestrator(tmp_path / "b", repo_b, client, terminal_stage="forecast")
+
+    # Deterministic rendezvous around the REAL old-ID reserve/reclaim boundary:
+    # A reaches the real reclaim and waits for B's preflight signal; B crosses
+    # the active-orchestration preflight (A has not appended yet), signals, then
+    # waits for A's committed attempt+1 append.  A commits attempt+1 and signals,
+    # so B's reserve/reclaim CAS ALWAYS runs against A's committed row and B
+    # loses -- the winner owns attempt+1 and the single submission, and the
+    # loser carries the governed duplicate-skip semantics.  Wrappers delegate to
+    # the real methods; nothing is mocked.
+    b_preflighted = threading.Event()
+    a_appended = threading.Event()
+    a_reclaim_original = repo_a.reclaim_pipeline_job_reservation
+
+    def a_reclaim(*args: Any, **kwargs: Any) -> Any:
+        assert b_preflighted.wait(timeout=15), "B never crossed the preflight"
+        result = a_reclaim_original(*args, **kwargs)
+        a_appended.set()
+        return result
+
+    repo_a.reclaim_pipeline_job_reservation = a_reclaim
+
+    b_reserve_original = repo_b.reserve_pipeline_job
+
+    def b_reserve(*args: Any, **kwargs: Any) -> Any:
+        b_preflighted.set()
+        assert a_appended.wait(timeout=15), "A never committed the reclaim append"
+        return b_reserve_original(*args, **kwargs)
+
+    repo_b.reserve_pipeline_job = b_reserve
+
+    outcomes: dict[str, Any] = {}
+
+    def run(name: str, orchestrator: Any) -> None:
+        outcomes[name] = orchestrator.orchestrate_cycle(
+            "gfs", "2026071200", _operator_recovery_basins()
+        )
+
+    threads = [
+        threading.Thread(target=run, args=("a", orch_a)),
+        threading.Thread(target=run, args=("b", orch_b)),
+    ]
+    # A first: it reaches the real reclaim append and waits for B's reserve
+    # signal; B then crosses the preflight (A has not appended yet), signals,
+    # and blocks on the cycle lock.  A commits attempt+1, releases the lock,
+    # and B loses the reclaim against A's committed row -- deterministic.
+    threads[0].start()
+    threads[1].start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "cycle thread hung at the rendezvous"
+
+    a_result = outcomes["a"]
+    b_result = outcomes["b"]
+    # The winner completed its single submission; the loser was governed to the
+    # duplicate-skip terminal -- never PIPELINE_ALREADY_ACTIVE.
+    assert a_result.status == "succeeded"
+    assert b_result.status == "skipped_duplicate_submission"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {s.error_code for s in b_result.stages}
+    assert len(client.submissions) == 1
+
+    current = repo_a.get_accepted_submit_pipeline_job(old_job_id)
+    assert current is not None
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    assert current["idempotency_key"] == old_key
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    # The loser's durable skip evidence was recorded through the real journal.
+    events = []
+    for path in sorted((journal_root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            payload = record.get("payload") or {}
+            if record.get("record_type") == "pipeline_event" and payload.get(
+                "event_type"
+            ) == "submission_skipped":
+                events.append(payload)
+    assert len(events) == 1
+    assert events[0]["entity_id"] == old_job_id
+    assert events[0]["status_to"] == "skipped_duplicate_submission"
+
+
+def test_public_operator_recovery_never_reports_pipeline_already_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.3: the reclaimed row is a fresh reserved attempt, never a wedge."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    repository, orchestrator, demoted, _client = _operator_demoted_file_journal(tmp_path)
+    locked_anchor = _dt("2026-07-12T08:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert result.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in result.stages}
+    # The reclaimed master advanced to a bound terminal; the second cycle resumes
+    # that terminal without submitting (no double submission).
+    client = FakeCycleSlurmClient()
+    second_orchestrator = _orchestrator(tmp_path / "second", repository, client, terminal_stage="forecast")
+    second = second_orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert len(client.submissions) == 0
+    assert second.status == "succeeded"
+    current = repository.get_accepted_submit_pipeline_job(str(demoted["job_id"]))
+    assert int(current["submission_attempt"]) == 2
+
+
+@pytest.mark.parametrize("projection_site", ["direct", "inventory"])
+def test_public_operator_recovery_post_append_projection_fault_still_submits_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    projection_site: str,
+) -> None:
+    """task 2.4 (public seam): a post-authority-append projection fault on the
+    operator old-ID reclaim still completes the single submission.
+
+    The fault is injected exactly once at the real reclaim's post-append
+    projection site -- the direct JSON write (``direct``) or the second
+    reconcile-inventory sync inside that same composite derived projection
+    (``inventory``) -- with every later projection write delegating to the real
+    implementation.  For ``inventory`` the first pre-append anchor sync and the
+    direct JSON write both succeed, then the post-append inventory sync raises
+    exactly once.  The same public pass must succeed, submit exactly once,
+    preserve old job id/key and immutable cohort identity, and keep durable
+    attempt+1 with a fresh lock-owned anchor.  A second independent public
+    orchestrator pass resumes the terminal, submits zero, and never reports
+    PIPELINE_ALREADY_ACTIVE.  The containment emits exactly one bounded
+    observable warning.
+    """
+    import logging
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.chain_types import OrchestratorError
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    old_job_id = str(demoted["job_id"])
+    old_key = str(demoted["idempotency_key"])
+    old_attempt = int(demoted["submission_attempt"])
+    old_members = demoted["cohort_members"]
+    old_digest = demoted["cohort_digest"]
+    locked_anchor = _dt("2026-07-12T09:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    # Inject the fault at exactly one post-append projection site on the
+    # operator old-ID reclaim, and only once; all later projection writes
+    # delegate to the real implementation.  The containment window is marked by
+    # the real ``_write_pipeline_job_unlocked`` wrapper (which passes
+    # ``_committed_projection_containment`` through unchanged), so the fault
+    # cannot fire on any other write.
+    original_direct = repository._write_pipeline_job_direct_unlocked
+    original_sync_inventory = repository._sync_reconcile_inventory_for_row_unlocked
+    original_write_unlocked = repository._write_pipeline_job_unlocked
+    faults_fired = 0
+    in_containment = [False]
+    direct_writes = [0]
+    inventory_syncs = [0]
+
+    def tracing_write_unlocked(
+        row: Any, *, exclusive_direct: bool, model_id: str | None, **kwargs: Any
+    ) -> Any:
+        containment = bool(kwargs.get("_committed_projection_containment"))
+        if containment:
+            in_containment[0] = True
+        try:
+            return original_write_unlocked(
+                row, exclusive_direct=exclusive_direct, model_id=model_id, **kwargs
+            )
+        finally:
+            if containment:
+                in_containment[0] = False
+
+    def counting_direct(row: Any, record: Any) -> None:
+        nonlocal faults_fired
+        # Count every direct projection write of the old job (delegating), so
+        # the inventory variant can prove the direct JSON write ran before the
+        # inventory fault.
+        if str(row.get("job_id") or "") == old_job_id:
+            direct_writes[0] += 1
+        if projection_site == "direct" and str(row.get("job_id") or "") == old_job_id and faults_fired == 0:
+            faults_fired += 1
+            raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+        return original_direct(row, record)
+
+    def failing_inventory_sync(row: Any) -> bool:
+        nonlocal faults_fired
+        # The operator old-ID reclaim's post-append inventory sync is the second
+        # ``_sync_reconcile_inventory_for_row_unlocked`` call for the old job
+        # inside the containment window: the first (pre-append anchor sync) and
+        # the direct JSON write both succeed, then this one faults exactly once.
+        if (
+            in_containment[0]
+            and str(row.get("job_id") or "") == old_job_id
+            and str(row.get("status") or "") == "reserved"
+            and faults_fired == 0
+        ):
+            inventory_syncs[0] += 1
+            if inventory_syncs[0] == 2:
+                faults_fired += 1
+                raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected inventory projection failure")
+        return original_sync_inventory(row)
+
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        monkeypatch.setattr(repository, "_write_pipeline_job_unlocked", tracing_write_unlocked)
+        monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", counting_direct)
+        if projection_site == "inventory":
+            monkeypatch.setattr(
+                repository, "_sync_reconcile_inventory_for_row_unlocked", failing_inventory_sync
+            )
+        result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+
+    # Same public pass succeeded with exactly one submission, no PAA.
+    assert result.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in result.stages}
+    assert len(client.submissions) == 1
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    # Both sites are the composite ``pipeline_job_direct`` derived projection:
+    # the direct JSON write itself, or the reconcile-inventory sync that is its
+    # second half inside ``_write_pipeline_job_direct_unlocked``.  Exactly one
+    # fault fired and exactly one bounded warning was emitted with the fixed
+    # code, stable projection name, and no exception/class/path/secret detail.
+    assert faults_fired == 1
+    assert len(warning_records) == 1
+    message = warning_records[0].getMessage()
+    assert "projection=pipeline_job_direct" in message
+    assert "code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT" in message
+    assert "injected" not in message
+    assert "FILE_JOURNAL_WRITE_FAILED" not in message
+    assert "OrchestratorError" not in message
+    if projection_site == "inventory":
+        # The direct JSON write ran before the inventory fault fired (the
+        # composite direct/inventory projection was entered and its first half
+        # completed), and the inventory fault was the second sync of the old
+        # job inside the containment window.
+        assert direct_writes[0] >= 1
+        assert inventory_syncs[0] == 2
+
+    # Identity/anchor/digest preserved; durable attempt+1 with fresh anchor.
+    current = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert current is not None
+    assert int(current["submission_attempt"]) == old_attempt + 1
+    assert current["idempotency_key"] == old_key
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")
+    assert current["cohort_members"] == old_members
+    assert current["cohort_digest"] == old_digest
+    assert current["status"] in {"submitted", "running", "succeeded"}
+
+    # A second independent public orchestrator pass resumes the terminal,
+    # submits zero, and never reports PIPELINE_ALREADY_ACTIVE.
+    second_client = FakeCycleSlurmClient()
+    second_orchestrator = _orchestrator(
+        tmp_path / "second", repository, second_client, terminal_stage="forecast"
+    )
+    second = second_orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert len(second_client.submissions) == 0
+    assert second.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in second.stages}
+
+
+def test_public_operator_recovery_identity_release_stays_non_reclaimable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 6.2: identity release is never selected for operator recovery.
+
+    The released master is a deliberate non-reclaimable terminal.  The public
+    cycle must NOT route it through current-master reclaim: it is never revived,
+    and the flat geometry (no retry-suffixed row) resumes the released terminal
+    and submits nothing — the runbook's documented released-row semantics.
+    """
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+
+    repository, orchestrator, demoted, client = _operator_demoted_file_journal(tmp_path)
+    released = repository.release_identity_blocked_reservation(
+        demoted["job_id"],
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=demoted["submission_attempt_started_at"],
+        expected_status="reservation_lost",
+        identity_blocked_streak=3,
+    )
+    assert released == 1
+    current = repository.get_accepted_submit_pipeline_job(demoted["job_id"])
+    assert current["reconciliation_decision"] == "identity_mismatch_released"
+    locked_anchor = _dt("2026-07-12T09:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    # The released master is never revived: it keeps its exact terminal state.
+    released_after = repository.get_accepted_submit_pipeline_job(demoted["job_id"])
+    assert released_after["reconciliation_decision"] == "identity_mismatch_released"
+    assert released_after["status"] == "reservation_lost"
+    assert released_after["submission_attempt"] == 1
+    # Flat geometry: nothing submits, exactly like the runbook documents.
+    assert len(client.submissions) == 0
+    assert result.status == "failed"
+
+
+def test_public_operator_recovery_automatic_absence_keeps_retry_suffix_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """task 2.2 sibling: automatic absence_retry_permitted keeps retry-suffix replacement."""
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _held_cohort_repository,
+    )
+
+    repository = _held_cohort_repository(tmp_path / "auto")
+    held = repository.get_accepted_submit_pipeline_job("job_cycle_gfs_2026071200_forecast_fixture_forecast")
+    assert repository.permit_pipeline_job_retry(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast",
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = repository.get_accepted_submit_pipeline_job(
+        "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    )
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path / "auto-orch", repository, client, terminal_stage="forecast")
+    locked_anchor = _dt("2026-07-12T10:00:00Z")
+    monkeypatch.setattr("services.orchestrator.file_orchestration_journal._utcnow", lambda: locked_anchor)
+    result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert result.status == "succeeded"
+    # Automatic absence keeps the existing retry-suffixed replacement identity.
+    old_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    retry_job_id = f"{old_job_id}_retry_1"
+    retry_key = "cycle_gfs_2026071200_forecast_fixture:forecast:retry_1"
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{retry_key}"
+    assert client.submissions[0]["stage"] == "forecast"
+    assert repository.get_accepted_submit_pipeline_job(retry_job_id) is not None
+
+
 def test_operator_direct_retry_attempt_fields_bypass_manual_retry_claim_judgement() -> None:
     """E3: direct basin fields are the invocation's own input, not a scheduler projection."""
 

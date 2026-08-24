@@ -49229,7 +49229,8 @@ def test_reclaimed_reservation_release_is_not_auto_retriable_either(tmp_path: Pa
     ``reclaim_pipeline_job_reservation`` re-seeds a reservation from scratch, and
     that seed is where the reclaimed row's ``error_code`` comes from -- the first
     write point never touches this row again. So the full production door has to
-    be walked: reserve, permit (``absence_retry_permitted`` is the ONLY shape
+    be walked: reserve, permit (this test's permit producer writes the automatic
+    ``absence_retry_permitted``, one of the exactly two lower-level decisions
     reclaim accepts), reclaim, then release. Stamping a transient code at the
     reclaim seed (``SLURM_RESERVATION_LOST`` is in ``TRANSIENT_ERROR_CODES``)
     would make every release of a reclaimed reservation an automatic duplicate

@@ -39,6 +39,7 @@ from services.orchestrator.accepted_submit_identity import (
     IDENTITY_MISMATCH_RELEASED_DECISION,
     INIT_STATE_IDENTITY_FIELD,
     MAX_FORECAST_COHORT_MEMBERS,
+    OPERATOR_VERIFIED_ABSENCE_DECISION,
     QUARANTINE_RERUN_PROVENANCE_FIELD,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
@@ -719,6 +720,54 @@ class _CycleSourceDiscovery:
     @property
     def source_segment(self) -> str:
         return self.source_segments[0]
+
+
+@dataclass(frozen=True)
+class ProjectionWarning:
+    """One bounded non-secret post-commit projection fault on an #1564 demotion.
+
+    The authority journal batch is already durable when these are recorded, so
+    the demotion is committed regardless.  Only the stable projection name,
+    model id, and the typed error token are carried: never the exception text,
+    filesystem path, or any secret-shaped detail.  ``model_id`` is ``None`` for
+    the master's direct-job projection and the model id for a latest-file
+    projection.
+    """
+
+    projection: str
+    model_id: str | None
+    error_type: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class OperatorDemoteReceipt:
+    """Typed success receipt for one #1564 operator-verified demotion.
+
+    The carried operator strings are exactly the normalized, secret-redacted
+    values the durable audit event recorded (single authority: the journal's
+    own ``_operator_evidence_text`` and anchor normalization).  Callers print
+    the receipt, never the raw CLI arguments, so success stdout cannot leak a
+    secret that the durable event already redacted.
+
+    ``warnings`` is empty on a clean projection pass.  Any non-empty entry
+    means the authority append committed but a derived direct/latest projection
+    failed afterwards; the demotion is still committed and journal replay stays
+    authoritative.
+    """
+
+    job_id: str
+    journal_root: str
+    status_from: str
+    status_to: str
+    reconciliation_decision: str
+    submission_attempt: int
+    submission_attempt_started_at: str
+    checked_by: str
+    checked_at: str
+    verification_note: str
+    written_record_count: int
+    warnings: tuple[ProjectionWarning, ...] = ()
 
 
 @dataclass
@@ -2034,6 +2083,17 @@ class FileOrchestrationJournalRepository:
                 "file_journal_authority_transition_requires_typed_api",
                 field=OPERATOR_RECOVERY_ATTESTATION_FIELD,
             )
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # durable provenance granted only by the dedicated typed demotion,
+        # never by an ordinary pipeline-job upsert -- including a marker-free
+        # legacy master upgraded to the current contract in this one merge,
+        # whose explicit raw token no other accepted-submit writer gate would
+        # see.  Refuse before any row construction, lock, mutation, or event.
+        if record.get("reconciliation_decision") == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         # Upserts may be partial status transitions for an existing cohort.
         # Validate the accepted-submit contract only after merging with its
         # canonical durable identity; fresh rows still validate in full.
@@ -2271,7 +2331,8 @@ class FileOrchestrationJournalRepository:
                     or existing.get("slurm_job_id") not in (None, "")
                     or existing.get("submit_outcome") != "submit_result_ambiguous"
                     or existing.get("reconciliation_source") != "slurm_exact_comment"
-                    or existing.get("reconciliation_decision") != "absence_retry_permitted"
+                    or existing.get("reconciliation_decision")
+                    not in {"absence_retry_permitted", OPERATOR_VERIFIED_ABSENCE_DECISION}
                     or existing.get("reconciliation_reason_class") is not None
                     or existing.get("matched_slurm_job_id") is not None
                     or expected_current_attempt is None
@@ -2356,10 +2417,19 @@ class FileOrchestrationJournalRepository:
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
-            row["submission_attempt"] = max(
-                int(existing.get("submission_attempt") or 1) + 1,
-                int(request_row.get("submission_attempt") or 1),
-            )
+            # The successful lock holder owns the new attempt: for a versioned
+            # master it is always the durable existing attempt + 1, exactly
+            # once, never taken from the lock-external reclaim request.  (The
+            # anchor below follows the same discipline.)  Legacy/non-versioned
+            # rows keep the historical max() so their existing behaviour is
+            # unchanged.
+            if versioned_master:
+                row["submission_attempt"] = int(existing.get("submission_attempt") or 1) + 1
+            else:
+                row["submission_attempt"] = max(
+                    int(existing.get("submission_attempt") or 1) + 1,
+                    int(request_row.get("submission_attempt") or 1),
+                )
             # The successful lock holder owns a new attempt. Its immutable
             # authority anchor is captured here, never copied from a stale
             # lock-external reclaim request.
@@ -2397,8 +2467,29 @@ class FileOrchestrationJournalRepository:
                 for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
                     if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
                         row[key] = request_row[key]
+            # #1564 D9 committed reclaim completion (operator old-ID route):
+            # the authority append inside ``_write_pipeline_job_unlocked`` is
+            # the commit point of the new attempt.  A derived direct/inventory
+            # projection failure after that append must never be reported as an
+            # uncommitted failure that strands a live pre-sbatch ``reserved``
+            # row -- the identical defect reachable through automatic
+            # ``absence_retry_permitted`` and other reservation writes is
+            # pre-existing and tracked in #1796.  This route is exactly the
+            # operator flow: the source row carried ``operator_verified_absence``
+            # (the begin-attempt transition clears the accounting tuple, so the
+            # durable pre-append decision is the only reliable marker here), and
+            # a non-operator claim can never match it.
+            operator_old_id_reclaim = bool(
+                str(existing.get("reconciliation_decision") or "")
+                == OPERATOR_VERIFIED_ABSENCE_DECISION
+            )
             model_id = _optional_safe_identity(row, "model_id")
-            return self._write_pipeline_job_unlocked(row, exclusive_direct=False, model_id=model_id)
+            return self._write_pipeline_job_unlocked(
+                row,
+                exclusive_direct=False,
+                model_id=model_id,
+                _committed_projection_containment=operator_old_id_reclaim,
+            )
 
     def bind_pipeline_job_reservation(
         self,
@@ -2471,6 +2562,15 @@ class FileOrchestrationJournalRepository:
             raise TypeError("transition must be AcceptedSubmitTransition")
         if transition.submit_outcome != "accepted":
             raise ValueError("submit-attempt commit requires an accepted transition")
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # durable provenance granted only by the dedicated typed demotion, never
+        # by an accepted-submit writer, even when a caller forges an accepted
+        # transition carrying the token.  Refuse before any mutation.
+        if transition.reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         if type(transition.status) is not str or transition.status not in {
             "submitted",
             "pending",
@@ -3404,6 +3504,240 @@ class FileOrchestrationJournalRepository:
                 )
             return len(records)
 
+    def demote_operator_verified_reserved_job(
+        self,
+        job_id: str,
+        *,
+        accepted_submit_contract_version: str | None,
+        expected_submission_attempt: int,
+        expected_submission_attempt_started_at: datetime,
+        checked_by: str,
+        checked_at: datetime,
+        verification_note: str,
+    ) -> OperatorDemoteReceipt | None:
+        """Atomically demote one operator-verified dead comment-unobservable reservation.
+
+        File-journal-only (#1564).  The cluster does not store job comments
+        (#1116), so no automatic reconcile pass can prove absence; an operator
+        who independently verified the job dead with Slurm evidence uses this
+        typed CAS to convert the narrowly-defined held shape
+        (``reserved`` / ``submit_result_ambiguous`` /
+        ``slurm_exact_comment`` / ``accounting_unavailable`` /
+        ``comment_accounting_unproven``, unbound) into the reclaimable
+        ``reservation_lost`` / ``operator_verified_absence`` terminal, with a
+        durable audit event carrying the operator evidence.
+
+        Everything is re-read under the cycle lock and every durable field is
+        compared, so a concurrent bind / permit / release / demote / reclaim
+        that advanced the row before this request obtained the lock loses the
+        compare-and-swap and this method writes zero bytes.  Invalid input
+        types/enums raise ``FileOrchestrationJournalError`` before any write;
+        a stale or mismatched durable row returns ``None`` (never raises).
+
+        On success the returned :class:`OperatorDemoteReceipt` carries the
+        exact normalized, secret-redacted operator strings the audit event
+        durably recorded, so a CLI can print the receipt without ever
+        re-deriving (or leaking) the raw inputs.  ``written_record_count`` is
+        the number of durable records appended (master + audit event + any
+        active hydro projections).
+        """
+
+        if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_enum_invalid",
+                field=ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD,
+            )
+        if type(expected_submission_attempt) is not int or expected_submission_attempt < 1:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_type_invalid", field="expected_submission_attempt"
+            )
+        if expected_submission_attempt_started_at is None:
+            raise FileOrchestrationJournalError(
+                "file_journal_evidence_required", field="expected_submission_attempt_started_at"
+            )
+        normalized_checked_at = _accepted_submit_attempt_anchor(checked_at)
+        checked_by_text = _operator_evidence_text(checked_by, field="checked_by")
+        verification_note_text = _operator_evidence_text(verification_note, field="verification_note")
+        expected_anchor = _accepted_submit_attempt_anchor(expected_submission_attempt_started_at)
+        source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
+        with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+            existing = self._accepted_submit_job_for_id_unlocked(
+                job_id,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            if existing is None:
+                return None
+            if (
+                not accepted_submit_contract_is_current(existing)
+                or accepted_submit_row_kind(existing) != "master"
+                or str(existing.get("status") or "") != "reserved"
+                or existing.get("slurm_job_id") not in (None, "")
+                or existing.get("matched_slurm_job_id") is not None
+                or existing.get("submit_outcome") != "submit_result_ambiguous"
+                or existing.get("reconciliation_source") != "slurm_exact_comment"
+                or existing.get("reconciliation_decision") != "accounting_unavailable"
+                or existing.get("reconciliation_reason_class") != "comment_accounting_unproven"
+                or existing.get("submission_attempt") != expected_submission_attempt
+                or _accepted_submit_attempt_anchor(existing.get("submission_attempt_started_at"))
+                != expected_anchor
+            ):
+                return None
+            # The operator's old anchor is only a CAS expectation, never a new
+            # authority value: the post-state keeps the persisted attempt and
+            # anchor untouched, so reclaim later mints attempt+1 under its own
+            # lock-owned anchor.
+            cohort_row = apply_accepted_submit_transition(
+                existing,
+                AcceptedSubmitTransition.accounting(
+                    OPERATOR_VERIFIED_ABSENCE_DECISION,
+                    submit_outcome="submit_result_ambiguous",
+                    status="reservation_lost",
+                ),
+            )
+            cohort_row["updated_at"] = _format_utc(_utcnow())
+            attempt = max(int(existing.get("submission_attempt") or 1), 1)
+            payloads: list[tuple[str, dict[str, Any], str | None]] = []
+            touched_models: set[str] = set()
+            members = _bounded_cohort_members(existing.get("cohort_members"))
+            model_rows = self._cycle_rows_by_model_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_ids=(str(member.get("model_id") or "") for member in members),
+                include_direct_jobs=False,
+            )
+            for member in members:
+                run_id = str(member.get("run_id") or "")
+                model_id = str(member.get("model_id") or "")
+                if not run_id or not model_id:
+                    continue
+                snapshot = model_rows.get(model_id)
+                hydro = snapshot.hydro_run if snapshot is not None else None
+                if isinstance(hydro, Mapping) and str(hydro.get("run_id") or "") != run_id:
+                    hydro = None
+                if (
+                    hydro is None
+                    or int(hydro.get("submission_attempt") or 1) != attempt
+                    or str(hydro.get("status") or "") not in ACTIVE_HYDRO_STATUSES
+                ):
+                    continue
+                hydro_row = dict(hydro)
+                hydro_row.update(
+                    {
+                        "status": "failed",
+                        "error_code": "SLURM_RESERVATION_LOST",
+                        "error_message": "Operator verified the forecast submission absent; this attempt is retryable.",
+                        "updated_at": _format_utc(_utcnow()),
+                    }
+                )
+                payloads.append(("hydro_run", hydro_row, model_id))
+                touched_models.add(model_id)
+            payloads.append(("pipeline_job", cohort_row, _optional_safe_identity(cohort_row, "model_id")))
+            event_id = self._next_accepted_submit_event_id_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+            event = {
+                "event_id": event_id,
+                "entity_type": "pipeline_job",
+                "entity_id": str(cohort_row["job_id"]),
+                "event_type": "operator_verified_absence",
+                "status_from": "reserved",
+                "status_to": "reservation_lost",
+                "message": "Operator verified the comment-unobservable reservation absent.",
+                "details": {
+                    "checked_by": checked_by_text,
+                    "checked_at": normalized_checked_at,
+                    "verification_note": verification_note_text,
+                    "expected_submission_attempt": expected_submission_attempt,
+                    "expected_submission_attempt_started_at": expected_anchor,
+                    "prior_reconciliation_decision": str(
+                        existing.get("reconciliation_decision") or ""
+                    ),
+                    "prior_reconciliation_reason_class": str(
+                        existing.get("reconciliation_reason_class") or ""
+                    ),
+                },
+                "created_at": _format_utc(_utcnow()),
+            }
+            payloads.append(("pipeline_event", event, None))
+            next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+            records: list[dict[str, Any]] = []
+            for offset, (record_type, payload, model_id) in enumerate(payloads):
+                record = _journal_record_for_write(
+                    record_type,
+                    payload,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                    sequence=next_sequence + offset,
+                )
+                self._validate_outgoing_record(
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    record_type=record_type,
+                    model_id=model_id,
+                )
+                records.append(record)
+            self._append_journal_records_unlocked(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                records=records,
+            )
+            # The append above is the authority commit point.  Direct/latest
+            # files are derived projections that cannot be rolled back with the
+            # journal: a failure here is contained to a bounded warning (the
+            # operation is already committed), every remaining independent
+            # projection is still attempted, and journal replay stays the
+            # source of truth for later reads/writes.  Never raise a false
+            # operation failure after authority state and audit evidence are
+            # durable -- a repeated operator request then loses CAS without
+            # appending a duplicate decision.
+            warnings: list[ProjectionWarning] = []
+            try:
+                self._write_pipeline_job_direct_unlocked(cohort_row, records[-2])
+            except Exception as error:
+                warnings.append(
+                    ProjectionWarning(
+                        projection="pipeline_job_direct",
+                        model_id=None,
+                        error_type=_projection_error_type(error),
+                        reason=_projection_error_reason(error),
+                    )
+                )
+            for model_id in sorted(touched_models):
+                try:
+                    self._materialize_latest_unlocked(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        model_id=model_id,
+                        include_direct_jobs=False,
+                    )
+                except Exception as error:
+                    warnings.append(
+                        ProjectionWarning(
+                            projection="latest",
+                            model_id=model_id,
+                            error_type=_projection_error_type(error),
+                            reason=_projection_error_reason(error),
+                        )
+                    )
+            return OperatorDemoteReceipt(
+                job_id=str(cohort_row["job_id"]),
+                journal_root=str(self.root),
+                status_from=str(existing.get("status") or ""),
+                status_to=str(cohort_row.get("status") or ""),
+                reconciliation_decision=str(cohort_row.get("reconciliation_decision") or ""),
+                submission_attempt=attempt,
+                submission_attempt_started_at=str(cohort_row.get("submission_attempt_started_at") or ""),
+                checked_by=checked_by_text,
+                checked_at=normalized_checked_at,
+                verification_note=verification_note_text,
+                written_record_count=len(records),
+                warnings=tuple(warnings),
+            )
+
     def release_identity_blocked_reservation(
         self,
         job_id: str,
@@ -3422,9 +3756,12 @@ class FileOrchestrationJournalRepository:
         attempt anchor, expected status, unbound required), so a concurrently
         advanced attempt loses the race and the caller keeps its blocked outcome.
 
-        The released row is a deliberate non-reclaimable terminal: reclaim only
-        accepts ``absence_retry_permitted``, so this idempotency key is spent.
-        Liveness comes from the next attempt minting a retry-suffixed key.
+        The released row is a deliberate non-reclaimable terminal: reclaim
+        accepts exactly two lower-level decisions -- ``absence_retry_permitted``
+        and the #1564 ``operator_verified_absence`` -- and an
+        ``identity_mismatch_released`` row matches neither, so this idempotency
+        key is spent.  Liveness comes from the next attempt minting a
+        retry-suffixed key.
         """
 
         if accepted_submit_contract_version != ACCEPTED_SUBMIT_CONTRACT_VERSION:
@@ -3658,10 +3995,13 @@ class FileOrchestrationJournalRepository:
 
         The released row is a permanent terminal for every AUTOMATIC arm: the
         release deliberately withholds ``error_code`` so ``should_auto_retry`` is
-        false by construction, and reclaim only accepts
-        ``absence_retry_permitted``.  This door records a durable operator
-        attestation ON THE RELEASED ROW and writes **no** successor pipeline-job
-        row.
+        false by construction, and lower-level reclaim accepts exactly two
+        absence decisions -- ``absence_retry_permitted`` and the
+        typed-demotion-only ``operator_verified_absence``.  This released row
+        carries ``identity_mismatch_released``, matches neither, and reaches
+        liveness only through the separate operator-attestation disjunct.  This
+        door records a durable operator attestation ON THE RELEASED ROW and
+        writes **no** successor pipeline-job row.
 
         Why a marker and not a row: the successor identity the ordinary retry
         path mints is exactly ``_next_current_master_retry_identity``'s, so
@@ -3774,6 +4114,15 @@ class FileOrchestrationJournalRepository:
         }:
             raise FileOrchestrationJournalError(
                 "file_journal_evidence_enum_invalid", field="master_status"
+            )
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # never a raw caller-supplied cohort-projection decision, on either the
+        # bound or the mismatched-ID branch.  Refuse before any source parsing,
+        # lock acquisition, mutation, or event.
+        if reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
             )
         del master_status, master_error_code
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
@@ -4242,6 +4591,14 @@ class FileOrchestrationJournalRepository:
     ) -> AcceptedSubmitCommitResult:
         """Fail one current forecast projection closed without touching cohort members."""
 
+        # Writer-authority closed world (#1564 D8): the operator decision is
+        # never a raw caller-supplied defer decision; only the dedicated typed
+        # demotion may write it.  Refuse before any mutation.
+        if reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             existing = self._accepted_submit_job_for_id_unlocked(
@@ -7406,6 +7763,7 @@ class FileOrchestrationJournalRepository:
         *,
         exclusive_direct: bool,
         model_id: str | None,
+        _committed_projection_containment: bool = False,
     ) -> dict[str, Any] | None:
         row = _redact_durable_error_message_fields("pipeline_job", row)
         source_id = _source_id_from_job(row)
@@ -7440,6 +7798,30 @@ class FileOrchestrationJournalRepository:
             if anchor_published and not anchor_preexisting:
                 self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
             raise
+        if _committed_projection_containment:
+            # #1564 D9 (operator old-ID reclaim route only): the authority
+            # append above is the commit point of the new attempt.  Derived
+            # projection faults after it are contained to bounded non-secret
+            # warnings (mirroring the dedicated demotion's committed-warning
+            # principle), every remaining independent projection is still
+            # attempted, and journal replay stays the source of truth.  This
+            # never raises, so the operator old-ID recovery path can never
+            # strand a live pre-sbatch ``reserved`` row.  Automatic and other
+            # reservation writes keep their pre-existing behavior (#1796).
+            try:
+                self._write_pipeline_job_direct_unlocked(row, record)
+            except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+                _emit_reclaim_projection_warning("pipeline_job_direct", None, error)
+            if model_id is not None:
+                try:
+                    self._materialize_latest_unlocked(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        model_id=model_id,
+                    )
+                except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+                    _emit_reclaim_projection_warning("latest", model_id, error)
+            return _public_scheduler_row(row)
         self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
             self._materialize_latest_unlocked(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
@@ -9337,7 +9719,7 @@ def _journal_record_for_write(
     # The layering that follows is therefore: an event that goes through
     # ``_append_validated_record_unlocked`` strips at that caller boundary,
     # where its raw un-sanitized payload still exists; the job lane strips here,
-    # at the record constructor.  That is NOT a guarantee for every event -- four
+    # at the record constructor.  That is NOT a guarantee for every event -- five
     # inline payload loops build their payload dicts and call this function
     # directly, so whatever they emit gets neither the caller-boundary strip nor
     # ``_public_pipeline_event_payload``:
@@ -9349,14 +9731,20 @@ def _journal_record_for_write(
     #   * ``permit_pipeline_job_retry`` (reservation-lost release) -- NO event
     #     payload at all, only ``hydro_run``/``pipeline_job`` rows;
     #   * ``project_forecast_cohort_tasks`` (cohort task projection) -- TWO
-    #     events, ``array_task_reconciled`` and ``status_change``.
+    #     events, ``array_task_reconciled`` and ``status_change``;
+    #   * ``demote_operator_verified_reserved_job`` (operator-verified demotion)
+    #     -- ONE ``operator_verified_absence`` event whose audited ``details``
+    #     (``checked_by`` / ``verification_note``) are pre-sanitized at the
+    #     single operator-evidence authority (``_operator_evidence_text``) so
+    #     they are bounded, secret-redacted, and local/object-path sanitized
+    #     before this loop; the remaining detail fields are fixed/typed values.
     #
-    # The three that do emit events are safe only because their ``details`` carry
+    # The four that do emit events are safe only because their ``details`` carry
     # no URI-bearing field, audited field by field in design D1 and re-audited
-    # for both projection payloads; that is the declared cost of the carve-out,
-    # not a structural property.  Anyone adding a fifth loop, or a second
-    # renderer, must apply the same rule to it rather than add another
-    # record_type here.
+    # for both projection payloads and the demotion audit details; that is the
+    # declared cost of the carve-out, not a structural property.  Anyone adding
+    # a sixth loop, or a second renderer, must apply the same rule to it rather
+    # than add another record_type here.
     if record_type != "pipeline_event":
         payload = _strip_redaction_placeholders(payload)
     payload = _redact_durable_error_message_fields(record_type, payload)
@@ -9505,6 +9893,65 @@ def _validate_private_runtime_root_recovery_record(
         raise FileOrchestrationJournalError("file_journal_event_mismatch", field="event_created_at")
 
 
+#: Fixed non-secret token for EVERY caught projection-warning exception.  The
+#: fixture only requires the warning to name the failed projection; projection
+#: and model_id already do that.  A constant (never a hash or any other
+#: deterministic derivation of the raw input) keeps the warning non-secret by
+#: construction: the arbitrary exception text, class name, ``.reason`` or
+#: ``.error_code`` is used only to decide *that* it must not be exposed, never
+#: to produce an output that a correlation or low-entropy dictionary attack
+#: could tie back to it.  Even exact ``OrchestratorError`` /
+#: ``FileOrchestrationJournalError`` instances are NOT trusted, because their
+#: constructors accept arbitrary code/reason strings that could be compact
+#: secrets.
+_PROJECTION_WARNING_FALLBACK_TOKEN = "projection_fault"
+
+
+def _projection_error_reason(error: Exception) -> str:
+    """A fixed, non-secret reason token for a post-commit projection fault.
+
+    Every caught exception maps to the same constant: never the exception
+    text, ``.error_code``, ``.reason``, class name, path, or any secret-shaped
+    detail, compact or otherwise.
+    """
+    del error
+    return _PROJECTION_WARNING_FALLBACK_TOKEN
+
+
+def _emit_reclaim_projection_warning(
+    projection: str, model_id: str | None, error: Exception
+) -> None:
+    """One bounded observable warning per failed committed-reclaim projection.
+
+    The authority append has already committed, so the warning is the only
+    surface that reports the fault; it must never turn committed success into
+    a failure.  Every field is a fixed non-secret token: the stable projection
+    name, the already-validated model id, and the fixed warning code.  Never
+    the exception text, class name, path, ``.error_code``, ``.reason``, repr,
+    or any secret-shaped detail.  A logger failure is absorbed so the reclaim
+    result is unaffected.
+    """
+    try:
+        LOGGER.warning(
+            "committed reclaim projection fault: projection=%s model_id=%s code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT",
+            projection,
+            model_id,
+        )
+    except Exception:  # noqa: BLE001 - observability must never fail the committed reclaim.
+        pass
+    del error
+
+
+def _projection_error_type(error: Exception) -> str:
+    """A fixed, non-secret ``error_type`` token for a projection warning.
+
+    Every caught exception maps to the same constant, so no class name -- even
+    an exact trusted-type label or a safe-looking identifier -- can be echoed.
+    """
+    del error
+    return _PROJECTION_WARNING_FALLBACK_TOKEN
+
+
 def _private_event_identity_value(value: Any) -> str:
     return "" if value in (None, "") else str(value)
 
@@ -9527,6 +9974,41 @@ def _durable_error_message(value: Any) -> str | None:
     if value is None:
         return None
     return _safe_error_message(str(value))
+
+
+#: Bounded operator attribution text for the #1564 demotion CAS.  The bounds
+#: keep one operator record far under the journal record/byte ceilings and the
+#: redaction keeps secrets out of the durable event and the CLI receipt.
+MAX_OPERATOR_CHECKED_BY_LENGTH = 256
+MAX_OPERATOR_VERIFICATION_NOTE_LENGTH = 2048
+
+
+def _operator_evidence_text(value: Any, *, field: str) -> str:
+    """Return one bounded, secret-redacted, path-sanitized operator attribution string.
+
+    This is the single authority for operator evidence text on the #1564
+    demotion: the returned value is exactly what the durable audit event stores
+    and what the CLI receipt echoes, so it must be non-secret and path/URI
+    sanitized by construction here -- the demotion inline batch bypasses
+    ``_public_pipeline_event_payload``.  Required (non-blank) and bounded on
+    every entry point, so no demotion can be recorded without a named checker
+    and a non-empty note, and no caller can smuggle an unbounded,
+    secret-bearing, or path-bearing value into the durable audit event.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise FileOrchestrationJournalError("file_journal_evidence_required", field=field)
+    limit = MAX_OPERATOR_CHECKED_BY_LENGTH if field == "checked_by" else MAX_OPERATOR_VERIFICATION_NOTE_LENGTH
+    if len(value) > limit:
+        raise FileOrchestrationJournalError("file_journal_evidence_limit_exceeded", field=field)
+    sanitized = _safe_error_message(value)
+    # Apply the same public evidence sanitizer the display/read path uses, so a
+    # local path, object URI, or credential never survives into the durable
+    # event or the CLI receipt.  The return stays a str and non-blank.
+    sanitized = _public_message(sanitized)
+    if not isinstance(sanitized, str) or not sanitized.strip():
+        raise FileOrchestrationJournalError("file_journal_evidence_required", field=field)
+    return sanitized
 
 
 def _redact_durable_error_message_fields(record_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:

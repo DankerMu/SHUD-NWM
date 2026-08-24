@@ -18,6 +18,9 @@ from services.orchestrator.accepted_submit_identity import (
     forecast_cohort_digest,
     forecast_cohort_identity_is_valid,
 )
+from services.orchestrator.accepted_submit_identity import (
+    OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
+)
 from services.orchestrator.file_orchestration_journal import (
     OPERATOR_RECOVERY_ATTESTATION_FIELD,
     FileOrchestrationJournalError,
@@ -172,10 +175,12 @@ class ForecastOrchestratorCycleMixin:
         context: _chain.CycleOrchestrationContext, job: _chain.Mapping[str, _chain.Any]
     ) -> bool:
         if str(job.get("status") or "") == "reservation_lost" and job.get("slurm_job_id") in (None, ""):
-            # #1748: ADDITIVE disjunct.  The reconcile-verified door predicate
-            # below is untouched and still hard-pins ``absence_retry_permitted``;
-            # the operator attestation is a SECOND, separate way in, not a
-            # widening of that predicate.  Without this arm the released
+            # #1748: ADDITIVE disjunct.  The reconcile-verified retry predicate
+            # below legitimately accepts exactly two absence decisions --
+            # ``absence_retry_permitted`` and the typed-demotion-only
+            # ``operator_verified_absence`` -- while the released-row attestation
+            # is additive here at this consuming call site and never enters that
+            # lower-level predicate.  Without this arm the released
             # identity-blocked shape returns the door verdict unconditionally,
             # which is why nothing -- not even
             # ``_terminal_stage_needs_forced_resubmit`` below -- could ever reach
@@ -926,7 +931,8 @@ def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any
     return bool(
         job.get("submit_outcome") in {"accepted", "submit_result_ambiguous"}
         and job.get("reconciliation_source") == "slurm_exact_comment"
-        and job.get("reconciliation_decision") == "absence_retry_permitted"
+        and job.get("reconciliation_decision")
+        in {"absence_retry_permitted", _OPERATOR_VERIFIED_ABSENCE_DECISION}
         and job.get("matched_slurm_job_id") is None
         and forecast_cohort_identity_is_valid(job)
     )
