@@ -1894,10 +1894,11 @@ def test_gated_display_coverage_importer_is_excluded_from_the_guarded_closure() 
 
 
 def test_top_level_import_walk_ignores_function_body_imports(tmp_path: Path) -> None:
-    # tests/test_analysis_pipeline.py and tests/test_gateway_reconcile.py reach
+    # tests/test_analysis_pipeline.py and the gateway-reconcile partitions
+    # (#1809; formerly one monolith) reach
     # real_backend only from inside a test body; treating those as importer
     # suites would drag whole slow files into every gateway PR. Pin the
-    # distinction on a fixture instead of on those two files, which may move.
+    # distinction on a fixture instead of on those files, which may move.
     probe = tmp_path / "tests" / "test_probe.py"
     probe.parent.mkdir()
     probe.write_text(
@@ -3245,9 +3246,40 @@ DIRECTORY_RULE_AUDIT_PATHS: tuple[str, ...] = (
 #                 does not fit the PR lane. Every entry names its number.
 RULE_GAP_REASON_TOKENS: frozenset[str] = frozenset({"fn-gated", "redirect", "edge-consumer", "runtime-budget"})
 
+# Every collectible gateway-reconcile partition (#1809 replaced the 14k-line
+# monolith with these 23 flat modules). Single source for the per-partition
+# runtime-budget dispositions below and the selector governance pins.
+GATEWAY_RECONCILE_PARTITIONS: tuple[str, ...] = (
+    "tests/test_gateway_reconcile_comment_accounting.py",
+    "tests/test_gateway_reconcile_comment_capability.py",
+    "tests/test_gateway_reconcile_comment_sacct_bounds.py",
+    "tests/test_gateway_reconcile_file_cohort_authority.py",
+    "tests/test_gateway_reconcile_file_cohort_comment.py",
+    "tests/test_gateway_reconcile_file_cohort_identity.py",
+    "tests/test_gateway_reconcile_file_cohort_projection.py",
+    "tests/test_gateway_reconcile_file_submit_barrier.py",
+    "tests/test_gateway_reconcile_grace_guard.py",
+    "tests/test_gateway_reconcile_idempotency_barrier.py",
+    "tests/test_gateway_reconcile_identity_invariants.py",
+    "tests/test_gateway_reconcile_identity_release.py",
+    "tests/test_gateway_reconcile_inflight_identity.py",
+    "tests/test_gateway_reconcile_inventory.py",
+    "tests/test_gateway_reconcile_master_transitions.py",
+    "tests/test_gateway_reconcile_reservation_lifecycle.py",
+    "tests/test_gateway_reconcile_round10.py",
+    "tests/test_gateway_reconcile_store_reset.py",
+    "tests/test_gateway_reconcile_writer_launch.py",
+    "tests/test_gateway_reconcile_writer_prepare.py",
+    "tests/test_gateway_reconcile_writer_quiescence.py",
+    "tests/test_gateway_reconcile_writer_receipts.py",
+    "tests/test_gateway_reconcile_writer_rollforward.py",
+)
+
 # The #1452 audit's verdicts, made checkable. 211 pairs derived at d02b4edb;
-# 156 of them are now closed by rules and these 56 are the reasoned remainder
-# (45 edge-consumer, 7 redirect, 4 runtime-budget, 0 fn-gated) — #1443 added the
+# the reasoned remainder is dominated by #1809's per-partition runtime-budget
+# dispositions (46 pairs: 23 gateway-reconcile partitions x reconcile.py /
+# persistence.py) on top of the #1452 verdicts (45 edge-consumer, 7 redirect,
+# 2 runtime-budget, 0 fn-gated) — #1443 added the
 # scale_validation.py -> read-path shape-pin pair at the end of the table.
 # Keys are per-pair on purpose — a wildcard would blunt exactly the staleness
 # check this table exists for, and the churn a new module causes here is the
@@ -3332,16 +3364,47 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # `cycle_id_for`, config.py for the gateway settings object.
     ("services/slurm_gateway/config.py", "tests/test_orchestration_chain.py"): "runtime-budget",
     ("workers/data_adapters/base.py", "tests/test_orchestration_chain.py"): "runtime-budget",
-    # tests/test_gateway_reconcile.py is the audit's second-heaviest suite:
-    # 246.5s for 487 assertions. Its primary subject IS
-    # services/orchestrator/reconcile.py (persistence.py supplies the rows it
-    # reconciles), so `edge-consumer` would be a lie — the suite does not belong
-    # to another surface; `services/slurm_gateway/**` picks it up on a filename
-    # coincidence. What actually keeps it off a reconcile.py PR is the 246.5s,
-    # against a ~5 min per-module line the orchestrator rule's own targets
-    # already spend most of.
-    ("services/orchestrator/persistence.py", "tests/test_gateway_reconcile.py"): "runtime-budget",
-    ("services/orchestrator/reconcile.py", "tests/test_gateway_reconcile.py"): "runtime-budget",
+    # The #1809 gateway-reconcile partitions (formerly one 14k-line suite, the
+    # audit's second-heaviest: 246.5s for 487 assertions) are collectively the
+    # same lane cost. Their primary subject IS
+    # services/orchestrator/reconcile.py (persistence.py supplies the rows they
+    # reconcile), so `edge-consumer` would be a lie — the suites do not belong
+    # to another surface; `services/slurm_gateway/**` picks them up on a
+    # filename coincidence. What actually keeps them off a reconcile.py PR is
+    # the lane cost, against a ~5 min per-module line the orchestrator rule's
+    # own targets already spend most of. Only the partitions that
+    # file-level-import each module derive as gaps (8 for reconcile.py, 4 for
+    # persistence.py); the dispositions stay per-partition either way.
+    **{
+        ("services/orchestrator/persistence.py", partition): "runtime-budget"
+        for partition in GATEWAY_RECONCILE_PARTITIONS
+        if partition
+        in (
+            "tests/test_gateway_reconcile_grace_guard.py",
+            "tests/test_gateway_reconcile_idempotency_barrier.py",
+            "tests/test_gateway_reconcile_inflight_identity.py",
+            "tests/test_gateway_reconcile_reservation_lifecycle.py",
+        )
+    },
+    **{
+        ("services/orchestrator/reconcile.py", partition): "runtime-budget"
+        for partition in GATEWAY_RECONCILE_PARTITIONS
+        if partition
+        not in (
+            "tests/test_gateway_reconcile_comment_capability.py",
+            "tests/test_gateway_reconcile_file_cohort_authority.py",
+            "tests/test_gateway_reconcile_file_submit_barrier.py",
+            "tests/test_gateway_reconcile_identity_invariants.py",
+            "tests/test_gateway_reconcile_inventory.py",
+            "tests/test_gateway_reconcile_master_transitions.py",
+            "tests/test_gateway_reconcile_round10.py",
+            "tests/test_gateway_reconcile_store_reset.py",
+            "tests/test_gateway_reconcile_writer_launch.py",
+            "tests/test_gateway_reconcile_writer_prepare.py",
+            "tests/test_gateway_reconcile_writer_quiescence.py",
+            "tests/test_gateway_reconcile_writer_receipts.py",
+        )
+    },
     # -- edge-consumer: orchestrator modules whose importers live elsewhere --
     # Each of these suites is selected by the rule for the surface it actually
     # tests: production-closure validation, model-registry bootstrap, the slurm
@@ -3948,6 +4011,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/orchestrator_demote_reserved_job_helpers.py",
         "tests/test_orchestrator_demote_core_cas.py",
     ),
+    # The #1809 gateway-reconcile split's two shared fixture modules.
+    ("tests/gateway_reconcile_helpers.py", "tests/test_gateway_reconcile_file_cohort_comment.py"),
+    ("tests/gateway_reconcile_writer_helpers.py", "tests/test_gateway_reconcile_idempotency_barrier.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -4560,6 +4626,40 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
         "tests/test_orchestration_chain.py",
         SELECTOR_META_GUARD_TEST,
     }
+
+
+def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> None:
+    # #1809: both gateway-reconcile support modules extracted from the monolith.
+    # Exact-set contracts modelled on the demote helper pin above: the derived
+    # consumer sets are all 23 collectible partitions' file-level importers
+    # (store_reset imports neither helper) plus the meta-guard, never the
+    # support module itself and never tests/test_production_scheduler.py — its
+    # only consumption is a function-local import, which buys a fixture edit no
+    # whole-1870-test lane and stays with the rules that own that suite.
+    selected_helpers = set(
+        select_tests(["tests/gateway_reconcile_helpers.py"], repo_root=Path("."))
+    )
+    assert selected_helpers == {
+        partition
+        for partition in GATEWAY_RECONCILE_PARTITIONS
+        if partition != "tests/test_gateway_reconcile_store_reset.py"
+    } | {SELECTOR_META_GUARD_TEST}
+
+    selected_writer = set(
+        select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path("."))
+    )
+    assert selected_writer == {
+        "tests/test_gateway_reconcile_idempotency_barrier.py",
+        "tests/test_gateway_reconcile_writer_launch.py",
+        "tests/test_gateway_reconcile_writer_prepare.py",
+        "tests/test_gateway_reconcile_writer_quiescence.py",
+        "tests/test_gateway_reconcile_writer_receipts.py",
+        "tests/test_gateway_reconcile_writer_rollforward.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+    assert "tests/gateway_reconcile_helpers.py" not in selected_helpers
+    assert "tests/gateway_reconcile_writer_helpers.py" not in selected_writer
+    assert "tests/test_production_scheduler.py" not in selected_helpers | selected_writer
 
 
 @pytest.mark.parametrize("module_path", _zero_consumer_collapse_params())

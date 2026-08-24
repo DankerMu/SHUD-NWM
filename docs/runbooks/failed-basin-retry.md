@@ -173,7 +173,7 @@ Manual re-entry, in order:
 
 Verified by:
 
-- `tests/test_gateway_reconcile.py::test_identity_mismatch_released_row_is_a_non_reclaimable_terminal`
+- `tests/test_gateway_reconcile_identity_release.py::test_identity_mismatch_released_row_is_a_non_reclaimable_terminal`
   — the released row is not reclaimable and a retry-suffixed key still reserves.
 - `tests/test_warm_start_chaining.py::test_released_reservation_reenters_only_through_a_higher_attempt_retry_row`
   — the step-3 precondition, both directions: with a higher-attempt retry row the chain
@@ -405,9 +405,9 @@ first step that is not satisfied:
 
 Verified by:
 
-- `tests/test_gateway_reconcile.py::test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments`
+- `tests/test_gateway_reconcile_comment_capability.py::test_reserved_row_stays_reserved_on_a_cluster_that_does_not_store_comments`
   — a genuinely in-flight job with an empty `Comment` no longer demotes the reservation.
-- `tests/test_gateway_reconcile.py::test_comment_storage_probe_requires_job_comment_in_accounting_store_flags`
+- `tests/test_gateway_reconcile_comment_capability.py::test_comment_storage_probe_requires_job_comment_in_accounting_store_flags`
   — the `(null)` / `job_comment` / missing-line parse vectors and the two distinct warnings.
 - `tests/test_orchestrator_demote_core_cas.py`, `tests/test_orchestrator_demote_projection_faults.py`,
   `tests/test_orchestrator_demote_reclaim_lifecycle.py`, `tests/test_orchestrator_demote_cli_security.py`

@@ -50505,7 +50505,7 @@ def test_reserved_unbound_wedge_opens_the_no_progress_circuit(
 ) -> None:
     """#1116 visibility: a deliberately non-convergent reserved row becomes legible."""
 
-    from tests.test_gateway_reconcile import _file_cohort_repository
+    from tests.gateway_reconcile_helpers import _file_cohort_repository
 
     caplog.set_level(logging.WARNING)
     _file_cohort_repository(tmp_path, member_count=1)
