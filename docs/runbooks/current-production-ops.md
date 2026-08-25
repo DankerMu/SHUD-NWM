@@ -1893,6 +1893,24 @@ provision M1′（node-27，写 core.model_instance）
 skip）。判据只有一个：`latest.json` 的 `started_at` 变新。**不要**用「receipt 文件数增加」
 判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、反复触发 refresh。
 
+**回补 forcing 时必须临时改指 registry，而不是提前发布 manifest。** forcing producer
+是从 **file model registry** 解析目标模型的（`Model instance '<model_id>' was not found
+in file model registry`），所以新 id 得先能被解析——这看着与"manifest 最后发"矛盾，
+其实不矛盾：顺序约束针对的是**调度器读的那份活 registry**。做法是只对这一次调用
+`export NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST=<workspace>/canonical-merged.json`，
+并在这一步前后各记一次活 canonical 的 sha，证明它没被动过。
+2026-08-24 hetianhe 实测：回补 `verified: 2`，活 canonical sha 前后逐字相同。
+
+**marker 不是每次切换都需要，先跑 preview 再下结论。** #1816 那次 8 个流域是
+`ARTIFACT_NOT_FOUND`（永久判死）且 id **留在** registry 里，所以要放行；hetianhe 是
+`SHUD_EXIT_10`（NaN 本身）而它的 id 被本次切换**退休**了。preview 的输出直接点破：
+唯一 `would_mark` 的是那个已退休的 gfs id，给它打 marker 等于去重启一个不在 registry
+里的模型。新 id 没有任何 journal 历史，本来就不需要放行。
+
+**5.1-5.7 每一步都要 detached 跑**（`{ setsid nohup ... & }`）。实测踩过：前台 producer
+熬过了 ssh 会话，父进程死了子进程还在写，随后补起的第二次调用与它并发写同一个目标目录。
+两个都按 PID 杀掉、目标目录核对干净才重跑的，但这个窗口是真的。
+
 **旧行标 `superseded` 必须等 M1′ 的首个 run 发布之后。** display 候选 SQL
 （`packages/common/forecast_store.py` 的 `_QHH_LATEST_CANDIDATE_RUNS_SQL`）是
 `h.status IN ('succeeded','parsed','published')`，`superseded` **不在**白名单；
