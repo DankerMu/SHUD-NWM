@@ -2105,7 +2105,6 @@ class FileOrchestrationJournalRepository:
             source_id = _normalize_file_source_id(identity.get("source_id"), field="source_id")
             cycle_id = _required_safe_identity(identity, "cycle_id")
             cycle_time = parse_cycle_time(cycle_id.split("_", maxsplit=1)[1])
-            submission_attempt = max(int(identity.get("submission_attempt") or 1), 1)
             expected_cycle_time = _format_utc(cycle_time)
             model_ids = [str(member.get("model_id") or "") for member in members]
             if any(not model_id for model_id in model_ids):
@@ -2146,6 +2145,13 @@ class FileOrchestrationJournalRepository:
                 # it), not an identity. A member-set change renumbers the array
                 # and every surviving row goes stale, which failed the whole
                 # cohort on layout churn alone.
+                #
+                # ``submission_attempt`` is likewise not compared (#1792): a
+                # successful per-model ``hydro_run`` row is frozen at the
+                # attempt that wrote it, while reclaim advances the
+                # accepted-submit master to a new attempt. The attempt number
+                # stays persisted on both rows as lineage evidence, but it is
+                # not cross-submission equality identity.
                 for field in ("candidate_id", "basin_id"):
                     observed = hydro_run.get(field)
                     if observed is not None and str(observed) != str(member.get(field) or ""):
@@ -2153,7 +2159,6 @@ class FileOrchestrationJournalRepository:
                 if (
                     _normalize_file_source_id(hydro_run.get("source_id"), field="source_id") != source_id
                     or _format_utc(_parse_cycle_time_field(hydro_run, "cycle_time")) != expected_cycle_time
-                    or max(int(hydro_run.get("submission_attempt") or 1), 1) != submission_attempt
                 ):
                     return False
         except (FileOrchestrationJournalError, IndexError, TypeError, ValueError):

@@ -391,27 +391,20 @@ def test_file_cohort_runtime_identity_sibling_fields_stay_fatal_when_present(
 
 
 @pytest.mark.parametrize(
-    ("row_updates", "member_updates", "identity_updates"),
+    ("row_updates", "member_updates"),
     [
         # The journal ties ``run_id`` to ``model_id`` structurally, so a row
         # cannot carry a foreign ``run_id`` and stay discoverable; the member
         # side is mutated instead, which reaches the same comparison.
-        ({}, {"run_id": "fcst_gfs_2026071200_model_foreign"}, {}),
-        ({"scenario_id": "foreign_scenario"}, {}, {}),
-        # D4 / #1792: the identity side bumps ``submission_attempt`` on reclaim
-        # while a non-retriable ``hydro_run`` row stays frozen at attempt 1.
-        # That is a known defect of the same class as ``array_task_id`` and is
-        # deliberately NOT fixed here; this only pins that the comparison is
-        # still present and still fires, i.e. the removal did not over-reach.
-        ({}, {}, {"submission_attempt": 2}),
+        ({}, {"run_id": "fcst_gfs_2026071200_model_foreign"}),
+        ({"scenario_id": "foreign_scenario"}, {}),
     ],
-    ids=["run_id", "scenario_id", "submission_attempt"],
+    ids=["run_id", "scenario_id"],
 )
 def test_file_cohort_runtime_identity_retained_strict_fields_still_bite(
     tmp_path: Any,
     row_updates: dict[str, Any],
     member_updates: dict[str, Any],
-    identity_updates: dict[str, Any],
 ) -> None:
     """Delta scenario 3: the fields kept strict must still fail the gate.
 
@@ -432,9 +425,39 @@ def test_file_cohort_runtime_identity_retained_strict_fields_still_bite(
     )
     identity = _versioned_master_reservation_record(member_count=member_count)
     identity["cohort_members"][2].update(member_updates)
-    identity.update(identity_updates)
 
     assert repository.forecast_cohort_runtime_identity_matches(identity) is False
+
+
+def test_file_cohort_reclaimed_attempt_two_accepts_frozen_attempt_one_runtime_rows(
+    tmp_path: Any,
+) -> None:
+    """#1792: reclaim advances the master to attempt 2 while every successful
+    per-model ``hydro_run`` row stays frozen at the attempt that wrote it (1).
+    ``submission_attempt`` is immutable lineage, not cross-submission equality
+    identity — the runtime cross-check must pass (this assertion was RED before
+    #1792 removed the equality comparison).
+    """
+    member_count = 4
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=member_count,
+        with_runtime_rows=False,
+    )
+    _append_cohort_placeholders(repository, member_count)
+    identity = _versioned_master_reservation_record(member_count=member_count)
+
+    # Prove the fixture geometry is the reclaim shape before asserting: the
+    # durable per-model rows are frozen at attempt 1 while the master advances
+    # to attempt 2. ``forecast_cohort_runtime_identity_matches`` must not read
+    # the attempt as cross-submission identity.
+    assert all(
+        repository._hydro_run_for(member["run_id"])["submission_attempt"] == 1
+        for member in identity["cohort_members"]
+    )
+    identity["submission_attempt"] = 2
+
+    assert repository.forecast_cohort_runtime_identity_matches(identity) is True
 
 
 @pytest.mark.parametrize("member_count", [2, 256])
@@ -829,3 +852,240 @@ def test_non_forecast_file_cohort_terminal_reconcile_never_projects_forecast_suc
     jobs = repository.query_pipeline_jobs_by_cycle("gfs_2026071200")
     assert all(job["job_type"] != "run_shud_forecast_array" for job in jobs)
     assert all(job.get("restart_stage") != "state_save_qc" for job in jobs)
+
+
+# ---------------------------------------------------------------------------
+# #1795: terminal file-cohort identity blocks carry one stable clause-level
+# reason token while preserving action, status, and zero durable writes.
+# ---------------------------------------------------------------------------
+
+
+def _terminal_validator_direct(identity: dict[str, Any], record: Any) -> tuple[bool, str | None]:
+    """Call the terminal validator with a fake store whose runtime identity gate
+    is always true, isolating the durable-unreachable reason sites."""
+    from types import SimpleNamespace
+
+    from services.orchestrator.reconcile import _terminal_file_cohort_identity_matches
+
+    store = SimpleNamespace(
+        forecast_cohort_runtime_identity_matches=lambda _identity: True,
+    )
+    job = SimpleNamespace(**identity)
+    return _terminal_file_cohort_identity_matches(store, record, job)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_reason"),
+    [
+        # Split folded validity/runtime predicates: distinct tokens.
+        ({"identity_invalid": True}, "cohort_identity_invalid"),
+        ({"break_runtime_rows": True}, "runtime_identity_mismatch"),
+        # Reconcile-side gates.
+        ({"master_id": "99999"}, "master_id_mismatch"),
+        ({"comment": "nhms_idem:wrong"}, "comment_mismatch"),
+        ({"stage": "forcing"}, "stage_family_mismatch"),
+        ({"user": None, "account": None}, "ownership_unproven"),
+        ({"user": "wrong-user"}, "ownership_user_mismatch"),
+        ({"account": "wrong-account"}, "ownership_account_mismatch"),
+        # Task-accounting gates.
+        ({"member_ids": "unparsable"}, "cohort_members_unparsable"),
+        ({"task_array_comment": "nhms_idem:wrong"}, "task_comment_mismatch"),
+        ({"task_job_name": "not_nhms"}, "task_job_name_mismatch"),
+        ({"task_mapping": "foreign"}, "task_mapping_mismatch"),
+        ({"task_id": "unparsable"}, "task_id_unparsable"),
+        ({"task_identity_mismatch": True}, "task_identity_values_mismatch"),
+        ({"task_identity_unparsable": True}, "task_identity_values_unparsable"),
+    ],
+    ids=[
+        "cohort_identity_invalid",
+        "runtime_identity_mismatch",
+        "master_id_mismatch",
+        "comment_mismatch",
+        "stage_family_mismatch",
+        "ownership_unproven",
+        "ownership_user_mismatch",
+        "ownership_account_mismatch",
+        "cohort_members_unparsable",
+        "task_comment_mismatch",
+        "task_job_name_mismatch",
+        "task_mapping_mismatch",
+        "task_id_unparsable",
+        "task_identity_values_mismatch",
+        "task_identity_values_unparsable",
+    ],
+)
+def test_file_cohort_terminal_identity_reason_tokens_are_exact_and_zero_write(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate: dict[str, Any],
+    expected_reason: str,
+) -> None:
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    if mutate.get("identity_invalid") or mutate.get("member_ids") == "unparsable":
+        # These two sites are unreachable through a durable journal (the write
+        # boundary refuses a corrupt digest / malformed member map, and the
+        # validity gate already proves member parseability), so they are
+        # exercised directly at the validator seam with a validly-shaped record.
+        from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+        record_template = _versioned_master_reservation_record(
+            member_count=18,
+            expected_user="scheduler-user",
+            expected_account="scheduler-account",
+        )
+        if mutate.get("identity_invalid"):
+            record_template["cohort_digest"] = "0" * 64
+        else:
+            # Malformed member map: validity (patched below) passes but the
+            # member_ids comprehension raises, hitting the defensive
+            # ``cohort_members_unparsable`` site.
+            record_template["cohort_members"] = [{"array_task_id": "not-an-int"}]
+            from services.orchestrator import reconcile as reconcile_module
+
+            monkeypatch.setattr(
+                reconcile_module,
+                "forecast_cohort_identity_is_valid",
+                lambda _identity: True,
+            )
+        record_template["slurm_job_id"] = "17667"
+        tasks = tuple(
+            SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+            for index in range(18)
+        )
+        sacct = SacctRecord(
+            "17667",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{record_template['idempotency_key']}",
+            user="scheduler-user",
+            account="scheduler-account",
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+        verdict, reason = _terminal_validator_direct(record_template, sacct)
+        assert verdict is False
+        assert reason == expected_reason
+        return
+    repository = _file_cohort_repository(
+        tmp_path / expected_reason,
+        expected_user="scheduler-user",
+        expected_account="scheduler-account",
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    before = repository.get_pipeline_job(job_id)
+
+    tasks = tuple(
+        SacctRecord(
+            f"17667_{index}",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=index,
+        )
+        for index in range(18)
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="scheduler-user",
+        account="scheduler-account",
+        array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+        array_task_records=tasks,
+    )
+
+    if mutate.get("break_runtime_rows"):
+        monkeypatch.setattr(
+            repository,
+            "forecast_cohort_runtime_identity_matches",
+            lambda _identity: False,
+        )
+    if mutate.get("master_id"):
+        record = SacctRecord(**{**record.__dict__, "slurm_job_id": mutate["master_id"]})
+    if mutate.get("comment"):
+        record = SacctRecord(**{**record.__dict__, "comment": mutate["comment"]})
+    if mutate.get("stage"):
+        record = SacctRecord(**{**record.__dict__, "stage": mutate["stage"]})
+    if "user" in mutate or "account" in mutate:
+        record = SacctRecord(
+            **{
+                **record.__dict__,
+                "user": mutate.get("user", record.user),
+                "account": mutate.get("account", record.account),
+            }
+        )
+    if mutate.get("task_array_comment"):
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            broken[0].slurm_job_id,
+            "COMPLETED",
+            "nhms_forecast",
+            comment=mutate["task_array_comment"],
+            array_task_id=0,
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+    if mutate.get("task_job_name"):
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            broken[0].slurm_job_id,
+            "COMPLETED",
+            "not_nhms",
+            comment=f"nhms_idem:{key}",
+            array_task_id=0,
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+    if mutate.get("task_mapping") == "foreign":
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            "17667_99",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=99,
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+    if mutate.get("task_id") == "unparsable":
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            "17667_0",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id="unparsable",
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+    if mutate.get("task_identity_mismatch"):
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            "17667_0",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=0,
+            task_id=1,
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+    if mutate.get("task_identity_unparsable"):
+        broken = list(record.array_task_records)
+        broken[0] = SacctRecord(
+            "17667_0",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=0,
+            task_id="bad",
+        )
+        record = SacctRecord(**{**record.__dict__, "array_task_records": tuple(broken)})
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "identity_mismatch_blocked"
+    assert outcome.status == "submitted"
+    assert outcome.reconciliation_reason_class == expected_reason
+    assert outcome.durable_write_count == 0
+    assert repository.get_pipeline_job(job_id) == before
+    assert len(repository.query_pipeline_jobs_by_cycle("gfs_2026071200")) == 1

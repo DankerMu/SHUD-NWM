@@ -254,7 +254,13 @@ class AcceptedSubmitTransition:
             return
         if decision not in ACCEPTED_RECONCILIATION_DECISIONS:
             raise ValueError("invalid accepted-submit accounting decision")
-        if self.reconciliation_source != "slurm_exact_comment":
+        if self.reconciliation_source == "slurm_name_window_unique":
+            # The comment-less name-window fallback (#1565) is the only
+            # producer of this source, and it may only ever bind: every other
+            # accounting decision stays exact-comment sourced.
+            if decision != "matched_bound":
+                raise ValueError("name-window fallback source requires matched_bound")
+        elif self.reconciliation_source != "slurm_exact_comment":
             raise ValueError("accounting transition requires exact-comment source")
         if decision == "matched_bound":
             if not isinstance(self.matched_slurm_job_id, str) or not self.matched_slurm_job_id.isdigit():
@@ -298,10 +304,11 @@ class AcceptedSubmitTransition:
         reconciliation_reason_class: str | None = None,
         status: str | None = None,
         identity_blocked_streak: int = 0,
+        reconciliation_source: str = "slurm_exact_comment",
     ) -> AcceptedSubmitTransition:
         return cls(
             submit_outcome=submit_outcome,
-            reconciliation_source="slurm_exact_comment",
+            reconciliation_source=reconciliation_source,
             reconciliation_decision=decision,
             matched_slurm_job_id=matched_slurm_job_id,
             reconciliation_reason_class=reconciliation_reason_class,
@@ -627,7 +634,14 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_enum_invalid", field="reconciliation_decision"
             )
-        if source != "slurm_exact_comment":
+        if source == "slurm_name_window_unique":
+            # #1565: the comment-less name-window fallback binds with its own
+            # source, legal only for the one decision it can produce.
+            if decision != "matched_bound":
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_enum_invalid", field="reconciliation_source"
+                )
+        elif source != "slurm_exact_comment":
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_enum_invalid", field="reconciliation_source"
             )

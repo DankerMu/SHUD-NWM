@@ -404,3 +404,112 @@ def test_normalization_isolates_the_foreign_decision_streak_invariant() -> None:
 
     assert error.value.reason == "file_journal_evidence_invariant_invalid"
     assert error.value.field == "identity_blocked_streak"
+
+
+# ---------------------------------------------------------------------------
+# #1565: the name-window fallback source is legal only for matched_bound.
+# ---------------------------------------------------------------------------
+
+
+def test_name_window_unique_source_is_legal_only_for_matched_bound() -> None:
+    """#1565 D3: ``slurm_name_window_unique`` may only ride ``matched_bound``;
+    every other accounting decision stays ``slurm_exact_comment`` sourced."""
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitTransition,
+        apply_accepted_submit_transition,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    valid = AcceptedSubmitTransition.accounting(
+        "matched_bound",
+        submit_outcome="accepted",
+        matched_slurm_job_id="72001",
+        status="submitted",
+        reconciliation_source="slurm_name_window_unique",
+    )
+    assert valid.reconciliation_source == "slurm_name_window_unique"
+    row = apply_accepted_submit_transition(
+        {
+            **_versioned_master_reservation_record(member_count=1),
+            "status": "reserved",
+            "submit_outcome": "submit_result_ambiguous",
+        },
+        valid,
+    )
+    assert row["reconciliation_source"] == "slurm_name_window_unique"
+    assert row["reconciliation_decision"] == "matched_bound"
+    assert normalize_accepted_submit_evidence(row)["reconciliation_source"] == "slurm_name_window_unique"
+
+    for decision in (
+        "accounting_unavailable",
+        "identity_mismatch_blocked",
+        "multiple_matches_blocked",
+        "absence_deferred",
+        "absence_retry_permitted",
+    ):
+        with pytest.raises(ValueError, match="name-window fallback source requires matched_bound"):
+            AcceptedSubmitTransition.accounting(
+                decision,
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                reconciliation_source="slurm_name_window_unique",
+            )
+
+
+def test_name_window_unique_normalization_rejects_non_matched_bound() -> None:
+    """#1565: the durable normalization boundary refuses the fallback source
+    on any decision other than ``matched_bound``."""
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    payload = {
+        **_versioned_master_reservation_record(member_count=1),
+        "status": "reserved",
+        "submit_outcome": "submit_result_ambiguous",
+        "reconciliation_source": "slurm_name_window_unique",
+        "reconciliation_decision": "accounting_unavailable",
+        "reconciliation_reason_class": "comment_accounting_unproven",
+    }
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(payload)
+    assert error.value.field == "reconciliation_source"
+
+
+def test_fallback_submit_unparsable_cannot_be_persisted_durably() -> None:
+    """#1565 Fix 2: ``fallback_submit_unparsable`` is pass-evidence only. It is
+    absent from the durable reason-class whitelist, so no accepted-submit
+    transition (or normalization) can ever persist it."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_RECONCILIATION_REASON_CLASSES,
+        AcceptedSubmitEvidenceError,
+        AcceptedSubmitTransition,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    assert "fallback_submit_unparsable" not in ACCEPTED_RECONCILIATION_REASON_CLASSES
+
+    with pytest.raises(ValueError, match="invalid accepted-submit accounting reason class"):
+        AcceptedSubmitTransition.accounting(
+            "accounting_unavailable",
+            submit_outcome="submit_result_ambiguous",
+            status="reserved",
+            reconciliation_reason_class="fallback_submit_unparsable",
+        )
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            {
+                **_versioned_master_reservation_record(member_count=1),
+                "status": "reserved",
+                "submit_outcome": "submit_result_ambiguous",
+                "reconciliation_source": "slurm_exact_comment",
+                "reconciliation_decision": "accounting_unavailable",
+                "reconciliation_reason_class": "fallback_submit_unparsable",
+            }
+        )
+    assert error.value.field == "reconciliation_reason_class"

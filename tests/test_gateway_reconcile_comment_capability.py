@@ -262,22 +262,25 @@ def _reconcile_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("flags_line", "expected"),
+    ("flags_line", "expected", "warning_token"),
     [
         # node-22 renders the production value with padded spaces around "=".
-        ("AccountingStoreFlags    = (null)", False),
-        ("AccountingStoreFlags    = job_comment", True),
-        ("AccountingStoreFlags    = job_comment,job_extra", True),
-        ("AccountingStoreFlags    = job_extra", False),
-        ("AccountingStoreFlags    = ", False),
-        (None, False),
+        # Tri-state (#1565): a present line lacking job_comment is explicit
+        # False; a missing line is unknown None; a probe failure is None.
+        ("AccountingStoreFlags    = (null)", False, "does not store job comments"),
+        ("AccountingStoreFlags    = job_comment", True, None),
+        ("AccountingStoreFlags    = job_comment,job_extra", True, None),
+        ("AccountingStoreFlags    = job_extra", False, "does not store job comments"),
+        ("AccountingStoreFlags    = ", False, "does not store job comments"),
+        (None, None, "capability unknown"),
     ],
 )
 def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     flags_line: str | None,
-    expected: bool,
+    expected: bool | None,
+    warning_token: str | None,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
@@ -293,10 +296,10 @@ def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
         assert reconcile_module.default_comment_storage_probe("/opt/slurm/bin")() is expected
     assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
     warnings = _reconcile_warnings(caplog)
-    if expected:
+    if warning_token is None:
         assert warnings == []
     else:
-        assert any("accounting does not store job comments" in message for message in warnings)
+        assert any(warning_token in message for message in warnings)
         assert not any("could not execute" in message for message in warnings)
 
 
@@ -314,11 +317,12 @@ def test_comment_storage_probe_swallows_an_unrunnable_probe_with_a_distinct_warn
 
     monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
     with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
-        assert reconcile_module.default_comment_storage_probe()() is False
+        assert reconcile_module.default_comment_storage_probe()() is None
     assert commands == [["scontrol", "show", "config"]]
     warnings = _reconcile_warnings(caplog)
     assert any("comment storage probe could not execute" in message for message in warnings)
     assert not any("accounting does not store job comments" in message for message in warnings)
+    assert not any("capability unknown" in message for message in warnings)
 
 
 @pytest.mark.parametrize(
@@ -360,10 +364,10 @@ def test_comment_sacct_refuses_every_scope_when_comment_storage_is_unproven(
     assert calls == []
 
 
-@pytest.mark.parametrize("proven", [True, False])
+@pytest.mark.parametrize("proven", [True, False, None])
 def test_comment_storage_probe_runs_once_per_querier_instance(
     monkeypatch: pytest.MonkeyPatch,
-    proven: bool,
+    proven: bool | None,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
@@ -375,7 +379,7 @@ def test_comment_storage_probe_runs_once_per_querier_instance(
     )
     probes = 0
 
-    def storage_probe() -> bool:
+    def storage_probe() -> bool | None:
         nonlocal probes
         probes += 1
         return proven
@@ -387,13 +391,15 @@ def test_comment_storage_probe_runs_once_per_querier_instance(
     page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
 
     for key in ("key-a", "key-b"):
-        if proven:
+        if proven is True:
             assert tuple(query(key)) == ()
         else:
+            # Explicit False and unknown None both refuse query-free; the probe
+            # still runs exactly once for the querier instance (#1565 D1).
             with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
                 query(key)
     assert probes == 1
-    assert len(calls) == (page_count if proven else 0)
+    assert len(calls) == (page_count if proven is True else 0)
 
 
 def test_comment_storage_gate_outranks_visibility_but_not_the_contract_version_check(
