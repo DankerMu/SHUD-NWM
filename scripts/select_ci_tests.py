@@ -47,6 +47,28 @@ CORE_SMOKE_TESTS: tuple[str, ...] = (
     "tests/test_production_scheduler.py",
 )
 
+# #1656: the structural write-site invariant suite. It AST-scans every Python
+# file under the four roots it derives from _scan_roots (workers/**,
+# packages/common/**, scripts/**, db/**) for unwired DELETEs against guarded
+# hypertables, so a future source under any of those roots that touches a
+# guarded table must route to it. Routed SUPPLEMENTALLY (set union only), never
+# through ordinary PATH_TEST_RULES: it does not set `matched`, does not
+# participate in stop rules, and cannot shadow the unknown-backend fallback or
+# any other rule's targets.
+TIMESCALE_WRITE_GUARD_INVARIANT_TEST = "tests/test_timescale_write_guard_wire_site_invariant.py"
+
+# #1656: the four source roots scanned by the write-site invariant suite,
+# expressed as the same root->glob authority shape the invariant's _scan_roots
+# uses. A selector meta-test derives the REQUIRED root set from the invariant
+# suite's own _scan_roots AST (tests/test_select_ci_tests.py), so adding a root
+# to the scan without wiring it here reddens that meta-test by name.
+TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
+    "workers/**",
+    "packages/common/**",
+    "scripts/**",
+    "db/**",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -65,6 +87,39 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
 # or lock change cannot ship without re-proving the policy.
 THREAD_EXCEPTION_POLICY_TESTS: tuple[str, ...] = (
     "tests/test_pytest_thread_exception_policy.py",
+)
+
+# #1711: every tracked `tests/test_mapping_builder_*.py` suite. Explicit sorted
+# tuple — deliberately NOT derived at import time: deriving it would run
+# `git ls-files` in the process CWD, which breaks the public CLI when invoked
+# from a temp directory with `--repo-root` (import fails before argparse
+# parses --repo-root). The meta-suite remains the tree-derived authority:
+# tests/test_select_ci_tests.py's `_tracked_mapping_builder_suites()` asserts
+# this tuple EQUALS the tracked `tests/test_mapping_builder_*.py` set, so a
+# ninth suite reddens the guard instead of silently falling out of the rule.
+MAPPING_BUILDER_TESTS: tuple[str, ...] = (
+    "tests/test_mapping_builder_algorithm.py",
+    "tests/test_mapping_builder_binding.py",
+    "tests/test_mapping_builder_cli.py",
+    "tests/test_mapping_builder_evidence.py",
+    "tests/test_mapping_builder_integration.py",
+    "tests/test_mapping_builder_integrity.py",
+    "tests/test_mapping_builder_rewrite.py",
+    "tests/test_mapping_builder_z_policy_verdict.py",
+)
+
+# #1711: irregular file-to-suite mappings whose suite names are deliberately NOT
+# same-name derivable. state_clone_hook.py has no tests/test_state_clone_hook.py
+# (its consumer suite is the cutover-hook suite), and the node-22 clone script
+# has no tests/test_node22_clone_direct_grid_cutover_states.py (its two suites
+# are the recalibration pair). Kept as explicit constants so the rule site and
+# the meta-tests read one authority.
+STATE_CLONE_HOOK_TESTS: tuple[str, ...] = (
+    "tests/test_state_clone_cutover_hook.py",
+)
+NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
+    "tests/test_state_clone_recalibration.py",
+    "tests/test_state_clone_recalibration_cli.py",
 )
 
 
@@ -703,6 +758,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #1711: every tracked module under workers/mapping_builder/ is owned by
+        # this one directory rule selecting all tracked `tests/test_mapping_builder_*.py`
+        # suites (MAPPING_BUILDER_TESTS — an explicit tuple today, guarded
+        # against drift by the selector meta-suite's tree-derived
+        # `_tracked_mapping_builder_suites()` equality assertion). Deliberately
+        # NOT a stop rule: nothing earlier shadows the directory, and the
+        # same-name derivation still adds tests/test_<module>.py where one
+        # exists. The directory also joins DIRECTORY_RULE_AUDIT_PATHS so future
+        # module/importer growth is dispositioned by the importer-gap guard
+        # instead of silently falling out of the PR lane.
+        #
+        # The rule carries ONLY the mapping-builder package suites. rewrite.py's
+        # three non-gated importer suites OUTSIDE the package (tests/test_state_clone.py,
+        # tests/test_state_clone_cutover_hook.py, tests/test_state_clone_recalibration.py)
+        # are deliberately NOT carried here: each already has an independent
+        # owning surface (services/orchestrator/**, the state_clone_hook and
+        # data_adapters/base rules, the node22-clone-script rule), so routing
+        # them on every mapping-builder change would contaminate the lane. They
+        # are dispositioned as `edge-consumer` pairs in
+        # tests/test_select_ci_tests.py's INTENTIONAL_RULE_GAP_EXCLUSIONS.
+        "workers/mapping_builder/**",
+        MAPPING_BUILDER_TESTS,
+    ),
+    PathTestRule(
+        # #1711: state_clone_hook.py's suite name is deliberately not same-name
+        # derivable (no tests/test_state_clone_hook.py; its consumer suite is
+        # the cutover-hook suite). Explicit irregular mapping.
+        "packages/common/state_clone_hook.py",
+        STATE_CLONE_HOOK_TESTS,
+    ),
+    PathTestRule(
+        # #1711: the node-22 clone script's two suites are the recalibration
+        # pair, not same-name derivable. Explicit irregular mapping.
+        "scripts/node22_clone_direct_grid_cutover_states.py",
+        NODE22_CLONE_CUTOVER_STATES_TESTS,
+    ),
+    PathTestRule(
         # #1455: `tests/test_output_parser.py` was the only target, so the cli
         # and dual-write suites — the ones that actually exercise the parser
         # package's entry points — never ran on an output_parser PR. Both are
@@ -958,8 +1050,35 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # pushdown pairing or reintroduces a text fact predicate in either file
     # reaches CI green unchallenged.
     PathTestRule(
+        # #1672: hydro_display.py joins GUARDED_MODULE_CLOSURES and its rule is
+        # extended to the current mechanically derived direct UNION one-hop
+        # non-gated importer closure (tests/test_select_ci_tests.py derives the
+        # required set from the tracked tree, never frozen). The three cutover
+        # suites, display status-only, HHE/MVT, node-27 compression and
+        # attribution suites are direct importers; the 3.1-contract and
+        # runtime-mode suites are the one-hop contributions via
+        # apps/api/openapi_patching.py and apps/api/route_registry.py. The two
+        # `integration`-marked importers (test_display_coverage_residual_debt_
+        # integration.py, test_mvt_national_identity_probe_integration.py) stay
+        # out per the #1447 ruling — they auto-skip in the PR lane. The #1341
+        # read-path shape pin rides along as an exact at-site entry.
         "apps/api/routes/hydro_display.py",
-        ("tests/test_river_ts_read_path_surrogate_keys.py",),
+        (
+            "tests/test_api_contract.py",
+            "tests/test_direct_grid_display_cutover_flip.py",
+            "tests/test_direct_grid_display_cutover_history.py",
+            "tests/test_direct_grid_display_cutover_model_resolution.py",
+            "tests/test_display_publish_status_only.py",
+            "tests/test_hhe_mvt_binding.py",
+            "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_openapi_31_contract.py",
+            "tests/test_openapi_drift.py",
+            "tests/test_river_ts_read_path_surrogate_keys.py",
+            "tests/test_runtime_mode.py",
+        ),
     ),
     PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
@@ -1316,9 +1435,39 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
 )
 
 
+def normalize_changed_paths(changed_paths: Iterable[str]) -> list[str]:
+    """Normalize changed paths exactly as ``select_tests`` consumes them.
+
+    Single normalization authority so the selection loop and the
+    collection-smoke provenance computation cannot diverge: strip whitespace
+    and translate Windows separators to POSIX. Empty entries are dropped.
+    """
+    return [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
+
+
+def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool) -> bool:
+    """Provenance-independent answer to "must the full-tree collect smoke run?".
+
+    True when the final selection is exactly the selector meta-guard (the
+    #1454 shape: deleted test file, unrouted support module, or a selector-test
+    PR) OR when the changed-file set touches the selector itself
+    (``scripts/select_ci_tests.py`` or ``tests/test_select_ci_tests.py``) —
+    the class of diff that rewrites the gate and must not silently lose the
+    full-tree collection oracle, even when supplemental routing makes the
+    final selection non-collapsed (e.g. a selector-source PR also selects the
+    Timescale invariant). Deliberately independent of the final-list shape so a
+    supplemental target can never mask the provenance requirement.
+    """
+    if meta_guard_only:
+        return True
+    return any(
+        path in ("scripts/select_ci_tests.py", SELECTOR_META_GUARD_TEST) for path in changed
+    )
+
+
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
     selected: set[str] = set()
-    changed = [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
+    changed = normalize_changed_paths(changed_paths)
     unknown_backend_path = False
 
     for path in changed:
@@ -1396,6 +1545,31 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     if unknown_backend_path:
         selected.update(CORE_SMOKE_TESTS)
 
+    # #1744 path B: shared-library additivity. For EVERY changed backend Python
+    # path under packages/common/**, the core-smoke baseline is retained IN
+    # ADDITION to any explicit/same-name/supplemental targets — a narrow rule
+    # for a shared module must never silently remove scheduler/API coverage.
+    # Implemented OUTSIDE the ordinary PATH_TEST_RULES stop-rule loop and
+    # independently of the unknown-backend fallback check (no ordering claim
+    # between the two: the add is unconditional over the changed set, so no
+    # stop rule and no fallback state can shadow it). Other backend roots keep
+    # today's known-rule suppression and unknown-path fallback semantics
+    # unchanged.
+    if any(_is_shared_common_python_path(path) for path in changed):
+        selected.update(CORE_SMOKE_TESTS)
+
+    # #1656: supplemental monotonic invariant routing. Every Python path under
+    # the four roots scanned by the write-site invariant suite selects that
+    # suite IN ADDITION to its ordinary selection. Purely additive: does not
+    # set `matched`, does not participate in stop rules, and does not change
+    # whether a path is known for fallback purposes. The root match is the only
+    # gate — the scan itself walks `*.py` under these roots regardless of the
+    # backend-prefix classification, so `db/` (not a backend prefix) is covered
+    # exactly as the invariant scans it.
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS):
+            selected.add(TIMESCALE_WRITE_GUARD_INVARIANT_TEST)
+
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish
     # here in silence, so the selection could shrink (even to empty) with no
@@ -1459,6 +1633,18 @@ def _is_backend_python_path(path: str) -> bool:
     return path.endswith(".py") and path.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
 
 
+def _is_shared_common_python_path(path: str) -> bool:
+    """True iff ``path`` is a backend Python file under the shared library root.
+
+    The #1744 path-B additivity predicate. Deliberately a strict prefix on the
+    POSIX-normalized path (the caller normalizes `\\` to `/` before this runs),
+    scoped to `packages/common/**` only — no other backend prefix participates
+    in the shared-baseline add-on, so non-shared known-rule suppression semantics
+    are untouched.
+    """
+    return path.endswith(".py") and path.startswith("packages/common/")
+
+
 def _is_backend_shell_path(path: str) -> bool:
     # scripts/**/*.sh is backend surface since #1138: the ci.yml `backend`
     # paths-filter matches it, so an unmapped wrapper must arm the core-smoke
@@ -1490,7 +1676,12 @@ def _test_target_exists(target: str, *, repo_root: Path) -> bool:
     return (repo_root / test_path).is_file()
 
 
-def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
+def _write_github_output(
+    tests: Sequence[str],
+    *,
+    output_path: Path,
+    changed_paths: Sequence[str],
+) -> None:
     # `meta_guard_only` is a SHAPE property of the FINAL (post missing-target
     # filter) selection, not a claim about evidence provenance: it is true iff
     # the only target left is the selector's own suite. That covers the PR whose
@@ -1501,11 +1692,21 @@ def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
     # suite. That last class is accepted rather than special-cased: the cost is
     # one extra collection pass on exactly the PR class that changes the gate.
     meta_guard_only = list(tests) == [SELECTOR_META_GUARD_TEST]
+    # `collection_smoke_required` is INDEPENDENT provenance, not a restatement
+    # of the final-list shape: a selector-development PR stays collection-
+    # required even when supplemental routing makes the final selection
+    # non-collapsed (selector source + Timescale invariant, #1744/#1656).
+    # `changed_paths` is the already-normalized set the selection loop ran on;
+    # no ambient git state is inspected and no diff is re-run.
+    collection_smoke_required = _collection_smoke_required(
+        changed_paths, meta_guard_only=meta_guard_only
+    )
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(f"count={len(tests)}\n")
         handle.write(f"tests={' '.join(tests)}\n")
         handle.write(f"tests_json={json.dumps(list(tests), separators=(',', ':'))}\n")
         handle.write(f"meta_guard_only={'true' if meta_guard_only else 'false'}\n")
+        handle.write(f"collection_smoke_required={'true' if collection_smoke_required else 'false'}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1523,11 +1724,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         changed = sys.stdin.read().splitlines()
 
-    tests = select_tests(changed, repo_root=args.repo_root)
+    normalized = normalize_changed_paths(changed)
+    tests = select_tests(normalized, repo_root=args.repo_root)
     for test in tests:
         print(test)
     if args.github_output:
-        _write_github_output(tests, output_path=args.github_output)
+        _write_github_output(
+            tests,
+            output_path=args.github_output,
+            changed_paths=normalized,
+        )
     return 0
 
 

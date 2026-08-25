@@ -68,7 +68,23 @@ jobs:
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
+              - 'packages/common/forecast_store.py'
+              - 'packages/common/display_coverage.py'
+              - 'packages/common/timescale_write_guard.py'
+              - 'packages/common/object_store.py'
+              - 'packages/common/model_registry.py'
+              - 'packages/common/grid_registry_store.py'
+              - 'services/tiles/mvt.py'
+              - 'apps/api/main.py'
+              - 'apps/api/routes/hydro_display.py'
+              - 'scripts/node27_autopipeline.py'
               - 'scripts/node27_timeseries_decompression_replay.py'
+              - 'workers/output_parser/parser.py'
+              - 'workers/grid_registry/**'
+              - 'workers/model_registry/**'
+              - 'workers/forcing_producer/**'
+              - 'services/orchestrator/scheduler.py'
+              - '.github/workflows/ci.yml'
               - 'pyproject.toml'
               - 'uv.lock'
               - 'tests/conftest.py'
@@ -199,7 +215,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Run real database integration tests
-        run: pytest -q -m integration
+        # #1688: `-vv -rs` only — node-level pass/skip reasons in the run log
+        # so the seven residual-debt tests appear as PASSED rather than skips.
+        # Marker expression (`-m integration`), DSN, service, and suite
+        # selection are unchanged.
+        run: pytest -vv -rs -m integration
 
   unit-test:
     name: Unit Tests (full)
@@ -274,17 +294,30 @@ jobs:
         run: |
           if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then
             python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
-            if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then
-              echo "Selection collapsed to the selector meta-guard — also running collect-only smoke (import/syntax across suite)"
-              echo "::warning title=Unit Tests selection collapsed to the selector meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted test file, tests/ support module, or a selector-development diff); that suite ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
-              {
-                echo "## Unit Tests: selection collapsed to the selector meta-guard"
-                echo ""
-                echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."
-                echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"
-                echo "check across the whole suite) ran in addition, because a diff of this shape can"
-                echo "break cross-test imports that the targeted run never touches."
-              } >> "$GITHUB_STEP_SUMMARY"
+            if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then
+              if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then
+                echo "Selection collapsed to the selector meta-guard — also running collect-only smoke (import/syntax across suite)"
+                echo "::warning title=Unit Tests selection collapsed to the selector meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted test file, tests/ support module, or a selector-development diff); that suite ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
+                {
+                  echo "## Unit Tests: selection collapsed to the selector meta-guard"
+                  echo ""
+                  echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."
+                  echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"
+                  echo "check across the whole suite) ran in addition, because a diff of this shape can"
+                  echo "break cross-test imports that the targeted run never touches."
+                } >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"
+                echo "::warning title=Unit Tests selector-development diff::select_ci_tests.py or its suite changed; the targeted selection ran its assertions and the full-tree collect-only smoke ran in addition (issue #1454)"
+                {
+                  echo "## Unit Tests: selector-development diff"
+                  echo ""
+                  echo "select_ci_tests.py or tests/test_select_ci_tests.py changed; the targeted selection"
+                  echo "ran its assertions and the full-tree collect-only smoke (import/syntax check across"
+                  echo "the whole suite) ran in addition, because a diff of this shape can break cross-test"
+                  echo "imports that the targeted run never touches."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
               # Redirect, never pipe: see the count == 0 branch below.
               if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
                 tail -n 5 collect-only.log
