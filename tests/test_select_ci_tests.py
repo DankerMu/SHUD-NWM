@@ -2548,18 +2548,23 @@ def test_missing_derived_importer_is_named_by_the_live_guard(
     # run through the SAME helper (`_suite_importer_closure_offenders`) the
     # live-tree guard executes — the constructed red cannot stay green while
     # the live guard's domain/comparison/message is corrupted, because they
-    # are one code path. The helper runs its REAL DEFAULTS for BOTH the owner
-    # domain and the derived authority: with no `owners=` injection, the
-    # recursive `_tracked_test_suites()` domain is discovered from the
-    # monkeypatched tracked file list, so the nested `tests/pkg/test_owner.py`
-    # stays in it — a guard loop that drops nested owners reddens this proof —
-    # and the REQUIRED importer set comes from the default independent
-    # authority (fixture text -> inverted index -> dotted-owner lookup). Only
-    # the SELECTION RESULT is injected: `select_omits_importer` returns what a
-    # broken selector would omit, the regression shape; a real `select_tests`
-    # call is unnecessary because the live-guard caller already exercises it
-    # against the live tree. The helper returns the same deterministic offender
-    # the live guard's assert would raise on.
+    # are one code path. The helper runs its REAL DEFAULTS for the owner
+    # domain, the derived authority, AND the redirect predicate: with no
+    # `owners=` injection, the recursive `_tracked_test_suites()` domain is
+    # discovered from the monkeypatched tracked file list, so the nested
+    # `tests/pkg/test_owner.py` stays in it — a guard loop that drops nested
+    # owners reddens this proof; the REQUIRED importer set comes from the
+    # default independent authority (fixture text -> inverted index ->
+    # dotted-owner lookup); and with no `redirects=` injection and no
+    # CHANGED_TEST_FILE_RULES blanking, the default redirect predicate runs
+    # against the REAL rule table — the synthetic nested owner matches no rule,
+    # so it returns False and the owner stays ordinary (an always-True default
+    # predicate would redden this proof). Only the SELECTION RESULT is
+    # injected: `select_omits_importer` returns what a broken selector would
+    # omit, the regression shape; a real `select_tests` call is unnecessary
+    # because the live-guard caller already exercises it against the live
+    # tree. The helper returns the same deterministic offender the live guard's
+    # assert would raise on.
     owner_rel = "tests/pkg/test_owner.py"
     importer_rel = "tests/pkg/test_importer.py"
     owner = tmp_path / "tests" / "pkg" / "test_owner.py"
@@ -2573,18 +2578,50 @@ def test_missing_derived_importer_is_named_by_the_live_guard(
         "tests.test_select_ci_tests._tracked_python_files",
         lambda pathspec: [owner_rel, importer_rel],
     )
-    monkeypatch.setattr("tests.test_select_ci_tests.CHANGED_TEST_FILE_RULES", ())
 
     def select_omits_importer(owner: str) -> set[str]:
         return {owner, SELECTOR_META_GUARD_TEST}
 
     offenders = _suite_importer_closure_offenders(
         select=select_omits_importer,
-        redirects=lambda _owner: False,
     )
 
     assert offenders == ["tests/pkg/test_owner.py: importer closure misses ['tests/pkg/test_importer.py']"]
     assert importer_rel in offenders[0]
+
+
+def test_redirected_owner_is_skipped_by_the_shared_closure_comparator() -> None:
+    # Helper-level branch proof for the redirect skip: a REDIRECTED owner —
+    # one whose ordinary selection is replaced by focused targets — must be
+    # excluded from the importer-closure guard even when its required importer
+    # is missing from the selection. Everything is injected so only the helper
+    # branch is exercised: `owners` names a single owner, `derived` reports one
+    # required importer, `select` omits that importer, and `redirects` returns
+    # True. The expected result is NO offender — the redirect skip means the
+    # helper never compares the omitted importer. Removing the
+    # ``if redirected_for(owner): continue`` branch reddens this proof by
+    # emitting the missing-importer offender. The injected `redirects=True` is
+    # deliberate: this test owns the helper's skip branch itself, while the
+    # ordinary constructed proof
+    # (``test_missing_derived_importer_is_named_by_the_live_guard``) exercises
+    # the REAL default predicate against the live rule table, and
+    # ``test_changed_test_rule_activation_predicate_matches_production`` /
+    # ``_changed_test_rule_redirects_for`` tests own the production classifier
+    # correctness.
+    owner = "tests/test_redirected_owner.py"
+    importer = "tests/test_redirected_importer.py"
+
+    offenders = _suite_importer_closure_offenders(
+        owners=[owner],
+        derived=lambda _owner: {importer},
+        select=lambda _owner: {owner, SELECTOR_META_GUARD_TEST},
+        redirects=lambda _owner: True,
+    )
+
+    assert offenders == [], (
+        "a redirected owner must be skipped by the closure comparator even when "
+        "its derived importer is missing from the selection"
+    )
 
 
 def test_suite_importer_closure_malformed_source_fails_loudly(tmp_path: Path) -> None:
