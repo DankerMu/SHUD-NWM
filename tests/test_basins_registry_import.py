@@ -15,7 +15,11 @@ import workers.model_registry.basins_geometry as basins_geometry
 from packages.common.auth_policy import cli_policy_decision_from_evidence
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
-from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
+from workers.model_registry.basins_discovery import (
+    BASINS_DISCOVERY_SCHEMA_VERSION_V1,
+    discover_basins_inventory,
+    write_inventory,
+)
 from workers.model_registry.basins_geometry import (
     BasinsGeometryError,
     CrosswalkRow,
@@ -3856,7 +3860,7 @@ def test_pre_migration_manifest_relocates_against_current_generation_inventory(t
     _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = BASINS_PACKAGE_SCHEMA_VERSION_V1
-    manifest["source_inventory_schema_version"] = "basins.discovery.v1"
+    manifest["source_inventory_schema_version"] = BASINS_DISCOVERY_SCHEMA_VERSION_V1
     manifest["source_inventory_checksum"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -3866,8 +3870,8 @@ def test_pre_migration_manifest_relocates_against_current_generation_inventory(t
         verified_package_checksum=str(manifest["package_checksum"]),
     )
 
-    assert sources.manifest["source_inventory_schema_version"] == "basins.discovery.v1"
-    assert sources.inventory["schema_version"] != "basins.discovery.v1"
+    assert sources.manifest["source_inventory_schema_version"] == BASINS_DISCOVERY_SCHEMA_VERSION_V1
+    assert sources.inventory["schema_version"] != BASINS_DISCOVERY_SCHEMA_VERSION_V1
 
 
 def test_import_refuses_unknown_package_manifest_schema_version(

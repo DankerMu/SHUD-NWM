@@ -3412,3 +3412,29 @@ def test_copied_forcing_payload_bytes_still_bind_to_package_identity(
     manifest = json.loads((tmp_path / "manifest-after.json").read_text(encoding="utf-8"))
     forcing_entries = [entry for entry in manifest["included_files"] if entry["role"] == "forcing"]
     assert len(forcing_entries) == 2
+
+
+def test_renaming_the_legacy_focing_directory_is_a_structural_identity_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 4.3, second leg of the spec's structural scenario.
+
+    The legacy `focing/` spelling is a source fact, not payload evidence: the
+    packager resolves the forcing source directory from it, so a rename must
+    stay visible even though the CSVs behind it never move identity.
+    """
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=3, calibration_count=1, forcing_dir_name="focing")
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before")
+
+    (root / "basin-a" / "focing").rename(root / "basin-a" / "forcing")
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after")
+
+    assert after["source_inventory_checksum"] != before["source_inventory_checksum"]
+    assert after["content_sha256"] == before["content_sha256"]
+    assert after["source_sha256"] == before["source_sha256"]
+    assert after["package_checksum"] == before["package_checksum"]
