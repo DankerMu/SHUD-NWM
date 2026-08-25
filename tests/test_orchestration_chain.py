@@ -7472,7 +7472,12 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage(tmp
     retry_job_id = "cycle_gfs_2026050100_forcing_model_b_retry_2"
     cycle_time = _dt("2026-05-01T00:00:00Z")
     object_store_root = tmp_path / "object-store"
-    forcing_package = object_store_root / "forcing" / "gfs" / "2026050100" / "basin_b" / "model_b" / "package.json"
+    # The production per-model key shape, identity-bound to this candidate
+    # (#1826): ``<basin_version_id>/<model_id>/forcing_package.json``.  A reference
+    # naming anything else is treated as absent and never probed.
+    forcing_package = (
+        object_store_root / "forcing" / "gfs" / "2026050100" / "basin_v1" / "model_b" / "forcing_package.json"
+    )
     forcing_package.parent.mkdir(parents=True)
     forcing_package.write_text("{}", encoding="utf-8")
     state = candidate_state_from_rows(
