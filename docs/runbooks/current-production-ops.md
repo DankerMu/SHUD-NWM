@@ -2220,19 +2220,28 @@ lifecycle 通道 deactivate。
 
 tile 前后字节数不变 = 缓存问题，回去查 `source_version` 与 nginx，不要直接宣布完成。
 
-**不属于展示面、无需处理（2026-08-25 复核）**：
+**静态 geojson 的残留（2026-08-25 已清，#1701 一并处理）**：
 
-- `apps/frontend/public/geo/national-basin-river.geojson`（45 MB，59702 features，
-  其中 43799 为 hhe）——前端**刻意不 fetch**，见
-  [`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
-  并有测试钉住。纯磁盘死重。
-- `apps/frontend/public/geo/national-basin-domain.geojson` 里的 `basins_hhe` 轮廓——
-  `withStaticBasinBoundaries()` 只对**服务端已返回的** basin 做 boundary 回填，
-  hhe 不在 `/api/v1/basins?has_display_product=true`（实测 24 个，无 hhe），
-  因此该 feature 永不渲染。
-- 裸 `/api/v1/basins`（不带 `has_display_product`）是 `core.basin` 原始目录，
-  含 hhe 属预期；前端走的是 `has_display_product=true`
-  （[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
+两份 `apps/frontend/public/geo/*.geojson` 曾长期留着已退役流域的几何。它们确实
+**不会被渲染**（`withStaticBasinBoundaries()` 只对**服务端已返回的** basin 按
+basinId 查表回填，而 basinId 来自 `has_display_product=true`；river 那份前端
+**刻意不 fetch**，见
+[`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
+并有测试钉住），但把退役流域的几何继续投递给浏览器没有道理，已清：
+
+| 文件 | before | after |
+|---|---|---|
+| `national-basin-river.geojson` | 45.0 MB / 59702 features（43799 为 hhe，5294 为 zhaochen） | **8.85 MB / 10609** |
+| `national-basin-domain.geojson` | 0.50 MB / 18 features | **0.34 MB / 14** |
+
+清理只过滤 `properties.basin_id`，不重建；退役新流域时照做一次即可。
+
+**`core.basin` 的退役行不要删**：`core.basin_version` 以 `NO ACTION` 外键引用
+`core.basin.basin_id`，每个退役流域各有 1 行 `basin_version`，硬删要连
+`basin_version` → `model_instance` → `hydro_run` 一起删，会毁掉血缘和上面的复活路径。
+裸 `/api/v1/basins`（不带 `has_display_product`）就是 `core.basin` 原始目录，
+含已退役流域**属预期**；前端走的是 `has_display_product=true`
+（[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
 
 ### 7.2 2026-08-25：zhaochen 系列退出业务化（#1701，owner 裁定不建后继）
 
@@ -2263,6 +2272,35 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
    走 §7.1.1 的进程内 lifecycle 通道，`override_missing_active=true`，一行一操作，
    preflight `blockers` 非空一律中止（本次三个都是 `[]`，唯一 warning
    `COPIED_ROOT_EVIDENCE_MISSING` 与 deactivate 无关）。
+
+**两个把这次退役做返工的坑（§7.1 / §7.1.1 的模板里没有，务必照做）**：
+
+1. **按 `basin_version_id` 查 `model_instance`，绝不要按 `model_id`。**
+   direct-grid 变体行的 `model_id` 是哈希（`dg_e8ced3a5…`），**不含流域名**，
+   `where model_id like '%<slug>%'` 会把它们全部漏掉，只查到 3 行 baseline
+   `_shud`。本次实际有 **9 行**（3 个 `_shud` + 6 个 `dg_*`，其中 3 个 `dg_*`
+   是 active）。只关 `_shud` 会出现一个骗人的中间态：`source_generation` 确实
+   从 `:31` 掉到 `:28`、tile 确实归零——因为那一刻 `dg_*` 恰好也没在 active 集里——
+   然后下一轮 autopipe 一跑，河网全回来了。正确查法：
+
+   ```sql
+   select model_id, basin_version_id, active_flag, lifecycle_state
+     from core.model_instance
+    where basin_version_id like '%<slug>%'
+    order by active_flag desc, model_id;
+   ```
+
+   §7.1.1 那句「不要动已经 inactive 的 `dg_*` 行」只在 hhe 的情形下成立
+   （hhe 的 dg 行本就全 inactive）；**active 的 `dg_*` 行必须一起 deactivate**。
+
+2. **先加 `AUTOPIPE_EXCLUDE_BASINS`，再 deactivate——顺序反了会被翻回来。**
+   `nhms-node27-autopipe.timer` 每 10 分钟一轮，
+   [`node27_autopipe_cron.sh:19/109`](../../scripts/node27_autopipe_cron.sh)
+   每轮重新 source `infra/env/node27-ingest.env`，其 register 步骤会把
+   `superseded` / `inactive` 翻回 active。本次 19:46:02 deactivate、19:48:47
+   autopipe 就把 3 个 `dg_*` 重新激活了，而排除项 19:48:50 才落盘——**差 3 秒**。
+   验收必须**跨至少一轮完整 autopipe** 再读数（本次 19:58:40 那轮跑完后
+   zhaochen active = 0、active 总数 28，才算数）。
 
 **不需要做的**（都核实过，别顺手做）：
 
