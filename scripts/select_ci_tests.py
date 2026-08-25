@@ -186,11 +186,13 @@ def _build_suite_importer_index(repo_root: Path) -> dict[str, set[str]]:
 
     Mechanically derived from the supplied ``repo_root`` filesystem — never
     the process CWD and never a Git call, so the selector keeps working from
-    any directory against a bare checkout or a synthetic fixture tree. Every
-    ``tests/**/*.py`` file pytest would collect as a suite
-    (``is_test_suite_path``, basename patterns) is walked; the file-level
-    ``integration``/``e2e`` suites are excluded (they skip in the PR lane), and
-    each remaining suite's module-scope import edges are inverted into
+    any directory against a bare checkout or a synthetic fixture tree. The
+    domain is RECURSIVE: every ``tests/**/*.py`` file pytest would collect as a
+    suite (``is_test_suite_path``, basename patterns, both ``test_*.py`` and
+    ``*_test.py`` names, nested or top-level) is walked via ``os.walk``; the
+    file-level ``integration``/``e2e`` suites are excluded (they skip in the PR
+    lane), and each remaining suite's module-scope import edges are inverted
+    into
     ``imported_dotted_module -> {importer_suite}``. ``from tests import X``
     contributes the package base ``tests`` as well as ``tests.X`` (the dotted
     names actually importable); the owner lookup only ever queries keys the
@@ -1678,7 +1680,7 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
             is_test_suite = is_test_suite_path(path)
             matched_changed_test = False
             for rule in CHANGED_TEST_FILE_RULES:
-                if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
+                if not _rule_activated(rule, path, changed):
                     continue
                 if fnmatch.fnmatch(path, rule.pattern):
                     selected.update(rule.tests)
@@ -1881,6 +1883,24 @@ def _same_name_backend_python_test(path: str) -> str | None:
     if not _is_backend_python_path(path):
         return None
     return f"tests/test_{PurePosixPath(path).stem}.py"
+
+
+def _rule_activated(rule: PathTestRule, path: str, changed: Sequence[str]) -> bool:
+    """Pure activation predicate for a ``CHANGED_TEST_FILE_RULES`` rule.
+
+    A single source of truth for whether ``rule`` may fire for changed file
+    ``path`` given the whole ``changed`` set: a rule with a non-empty
+    ``only_when_any_changed`` surface fires only when at least one changed path
+    matches that surface. No match against ``rule.pattern`` is attempted here —
+    the caller keeps the exact existing ordering, ``stop_on_match``, and
+    first-match semantics. Production and tests both call this predicate, so the
+    live-tree ordinary-domain classification in
+    tests/test_select_ci_tests.py (which must skip only an ACTUALLY active
+    redirect) cannot drift from the loop that applies the redirects.
+    """
+    if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
+        return False
+    return True
 
 
 def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:
