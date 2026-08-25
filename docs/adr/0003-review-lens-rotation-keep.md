@@ -2072,3 +2072,38 @@ rounds over diffs, and this repo's recent expensive mistakes have been
 operational judgements made outside any diff. That is not an argument for
 cutting the rotation; it is an argument that the keep/cut question is being
 asked about the cheaper lane.
+
+## Revisit 2026-08-25 (post #1744 / PR #1834) — keep; pinned-depth sample, not rotation evidence
+
+`loop_log_audit.py` now reports 130 multi-round merged PRs and later-round
+catches `core=79 / rotated=295`, moving from the previous `129 / 75 / 295`.
+The decision remains **keep**, but this PR's `core +4 / rotated +0` must not be
+read as evidence against rotation.
+
+No free-slot rotation was applied in the catch-producing rounds. Round 1 used
+correctness, integration, security/performance, test-evidence, spec-compliance,
+and invariant-state. Rounds 2 and 3 deliberately retained the pinned
+`test-evidence`/`invariant-state` owners of one recurring CI-oracle invariant:
+a permanent self-oracle must prove effective execution and fail-closed behavior,
+not token presence or nominal job fields. Their four catches are exactly what a
+depth loop is supposed to produce: each found that the preceding fix had closed
+a named mutant but left the same invariant weak at a deeper semantic layer.
+Round 4 added security/performance only after the redesign and was clean;
+Round 5 rechecked the master-sync interaction and was clean.
+
+This sample therefore supports **pinned-core fix-regression recall** and the
+independent verifier split, not a core-versus-rotation comparison. The verifier
+was load-bearing twice: it retained both Round 3 findings as P1 after one
+originating reviewer graded the collection gap P2, and it rejected the tempting
+shortcut of treating current green jobs as proof that future step-level metadata
+could not skip or de-fang them. The corrective action then changed proof shape
+rather than adding another lexical patch: full-workflow effective metadata,
+independent audited command identity, finite trusted behavior variants,
+arbitrary-payload non-execution, and bounded process-group cleanup.
+
+So the aggregate direction still permits no autonomous cut, and this PR adds no
+causal evidence about rotating free slots because the treatment was not applied.
+**Keep rotation** unchanged. The attribution caveats already recorded in this
+ADR remain mandatory: distinguish pinned depth/fix-verification rounds from
+actual free-slot rotation before any future reversal, and require maintainer
+review for that reversal.
