@@ -1340,11 +1340,17 @@ receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
 - `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读：62 行注册表的
   `source_policy.forcing_source` 全部是 `node27_raw_handoff`，运行时 forcing 走
   object store（`manifest["forcing"]["forcing_uri"]`），从不读 Basins 树里的 CSV。
-  2026-08-25 清理已执行（#1702 第 3 项）：14 个目录、**8329 个条目 / 50 G** 移到
-  `/volume/nwm/Basins-retired/forcing-cleanup-20260825/`，全树 66 G → **16 G**。
+  2026-08-25 清理已执行（#1702 第 3 项）：**15 个目录全清**，共 **10040 个条目 / 62 G**
+  移到 `/volume/nwm/Basins-retired/forcing-cleanup-20260825/`，全树 **66 G → 544 M**。
   清理**按 §5.5.1 的纪律**——清空目录、保留目录、不改名（含 `tailanhe/focing`
-  这个拼写错误）。`heihe/forcing`（12 G / 1711 文件）**未清**：它属第 2 项整目录退役，
-  需 `st_zhanghx` 确认后连同 `heihe/` 一起 `mv`。
+  这个拼写错误）。
+
+  > `heihe/forcing`（12 G / 1711 文件）一度被错划进第 2 项「整目录退役」而缓做。
+  > **划错了**：`heihe` 是活的生产流域（注册表 2 行 `active`、`basins_heihe_shud`
+  > 的 `active_flag = t`、350 条 published run、在展示的流域集里），它 12 G 里的
+  > 模型本体只有 `input/heihe/` 9.3 M，其余全是上一版率定留下的旧代站 CSV。
+  > **流域是活的、forcing 是旧的**——属第 3 项，不属第 2 项。判一个目录该不该
+  > 整体退役，看注册表和 `core.model_instance`，不要看它的体积。
 
 ### 3.2 Slurm Gateway
 
