@@ -47,6 +47,8 @@ The implementation SHALL preserve the existing attribution family only for `perm
 
 `submission_failed` is rejected before this projection by its submit-outcome/inventory gate. `reservation_lost` exits reconcile inventory and may carry an accounting decision that is valid only with that literal status; it must never be fed through a `matched_bound` projection. Tests keep those routing guards intact rather than widening this write path to accept them.
 
+A complete restart-reconcile receipt SHALL report the terminal status read back from the durable master after projection. The existing readback already owns this correction for `succeeded`, `partially_failed`, and `failed`; it must also accept `cancelled`, because this change makes that external truth sticky. The correction remains narrow and SHALL NOT admit `submission_failed` or `reservation_lost` into matched-bound projection.
+
 Rejected: `TERMINAL_PIPELINE_STATUSES - derived`. It accidentally includes statuses whose accounting tuple cannot legally pass this function. Rejected: `{permanently_failed, cancelled}` inline at the branch; naming the derived domain makes the ownership rule reviewable while the routing exclusions remain explicit.
 
 ## Invariant Matrix

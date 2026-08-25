@@ -12777,32 +12777,59 @@ def test_permanently_failed_master_still_refreshes_observational_evidence(tmp_pa
 # --- J8: stickiness does not spread to the derived terminal statuses -----
 
 
-@pytest.mark.parametrize("status", ["succeeded", "partially_failed", "failed"])
-def test_derived_terminal_masters_still_take_the_reprojected_error_code(
+@pytest.mark.parametrize(
+    ("seeded_status", "outcomes", "expected_status", "expected_error_code"),
+    [
+        ("succeeded", ["failed", "failed"], "failed", "SLURM_TIMEOUT"),
+        ("partially_failed", ["failed", "failed"], "failed", "SLURM_TIMEOUT"),
+        ("failed", ["succeeded", "succeeded"], "succeeded", None),
+    ],
+)
+def test_derived_terminal_masters_take_the_reprojected_status_and_error_family(
     tmp_path: Path,
-    status: str,
+    seeded_status: str,
+    outcomes: list[str],
+    expected_status: str,
+    expected_error_code: str | None,
 ) -> None:
-    """#1589 J8 (design D5): the reverse nail on the trigger condition.
+    """#1589 J8 (design D5): genuine transitions stay projection-owned.
 
     ``succeeded`` / ``partially_failed`` / ``failed`` are exactly the values the
-    projection derives for itself.  Making them sticky would pin the first
-    pass's conclusion forever, i.e. disable the projection rather than protect
-    it.  All three arms are parametrized so widening the trigger to
-    ``in TERMINAL_PIPELINE_STATUSES`` turns the whole set red.
+    projection derives for itself, so a later pass with a DIFFERENT task outcome
+    must overwrite both the status and the error family, not pin the first
+    pass's conclusion forever.  Each arm seeds one derived status and reprojects
+    with a genuinely different outcome: ``succeeded`` and ``partially_failed``
+    both fall to all-failed, and ``failed`` rises to all-succeeded (the
+    non-vacuous arm -- asserting only ``failed``->``failed`` would pass a
+    sticky predicate that never moves).  A sticky-all-terminal predicate leaves
+    the seeded status and stale error code in place, turning every arm red.
 
-    This does NOT catch a narrow widening to ``{permanently_failed, cancelled}``
-    — the cancelled arm is covered separately (the #1629 tests below assert
-    ``cancelled`` DOES stick), so this test is deliberately scoped to the three
-    derived values only.
+    The projection derives ``projected_master_status`` from the task outcomes
+    (``project_forecast_cohort_tasks`` deletes the caller-supplied
+    ``master_status``/``master_error_code``), so the expected status/error
+    family is exactly what the current pass's accounting produces.  Status and
+    error code/message are asserted on both durable surfaces (jsonl payload and
+    direct row) because both are independently materialized.
     """
 
-    repository, record = _cohort_master_in_status(tmp_path, status)
+    repository, record = _cohort_master_in_status(tmp_path, seeded_status)
 
-    _reproject_cohort(repository, record, error_code="NODE_FAILURE")
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="SLURM_TIMEOUT",
+        outcomes=outcomes,
+        master_error_message="a later accounting pass derived a different cause",
+    )
 
     durable = _durable_master_payload(repository, record)
-    assert durable["error_code"] == "NODE_FAILURE"
-    assert _direct_row_payload(repository, str(record["job_id"]))["error_code"] == "NODE_FAILURE"
+    assert durable["status"] == expected_status
+    assert durable["error_code"] == expected_error_code
+    assert durable["error_message"] == "a later accounting pass derived a different cause"
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert direct["status"] == expected_status
+    assert direct["error_code"] == expected_error_code
+    assert direct["error_message"] == "a later accounting pass derived a different cause"
 
 
 # --- J9: stickiness must not manufacture an empty write ------------------
@@ -12878,14 +12905,14 @@ def _durable_hydro_run_payloads(repository: Any, run_id: str) -> list[dict[str, 
     return payloads
 
 
-def _latest_hydro_run_message(repository: Any, run_id: str) -> Any:
-    """The exact ``hydro_run.error_message`` in the model's ``latest/`` view.
+def _latest_hydro_run_payload(repository: Any, run_id: str) -> dict[str, Any]:
+    """The full ``hydro_run`` row in the model's ``latest/`` view.
 
     The latest materialization is a durable surface too (tasks 1.1 requires
     JSONL/latest preservation), and the model view is keyed by ``model_id``
-    under ``latest/<source>/<cycle>/``.  Returns whatever the latest view
-    carries -- a raw URI, a byte-for-byte embedded message, or ``None`` after
-    successful-state clearing -- so the assertion compares against the exact
+    under ``latest/<source>/<cycle>/``.  Returning the WHOLE hydro payload --
+    not just ``error_message`` -- lets the non-clearing tests assert the full
+    error family (``error_code`` AND ``error_message``) against the exact
     durable value, never a redacted projection.
     """
 
@@ -12894,7 +12921,7 @@ def _latest_hydro_run_message(repository: Any, run_id: str) -> Any:
     hydro_run = payload.get("hydro_run")
     assert isinstance(hydro_run, dict), "expected a hydro_run in the model's latest view"
     assert hydro_run["run_id"] == run_id
-    return hydro_run.get("error_message")
+    return hydro_run
 
 
 @pytest.mark.parametrize("status", ["staged", "submitted", "running", "failed"])
@@ -12902,28 +12929,35 @@ def test_non_clearing_hydro_status_update_preserves_whole_object_uri(
     tmp_path: Path,
     status: str,
 ) -> None:
-    """#1652: a bare non-clearing update must not strip the durable URI.
+    """#1652: a bare non-clearing update must not strip the durable URI or code.
 
     The old read path rendered the PUBLIC row before the merge, so the
     URI-valued message arrived as ``[object-uri]`` and the write boundary
-    erased it on the next non-clearing status update.  The durable jsonl is
-    the oracle; the public return must stay the redacted projection.
+    erased it on the next non-clearing status update.  The source writes the
+    error CODE and MESSAGE independently, so a fix that preserves only one of
+    them must go red: both stay exact on the durable jsonl and the latest
+    materialization, while the public return stays the redacted projection.
     """
 
     whole_uri = "s3://nhms/logs/run.log"
     repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=whole_uri)
     seeded = _durable_hydro_run_payloads(repository, run_id)[-1]
     assert seeded["error_message"] == whole_uri
+    assert seeded["error_code"] == "SHUD_ABORTED"
 
     updated = repository.update_hydro_run_status(run_id, status)
 
     durable = _durable_hydro_run_payloads(repository, run_id)[-1]
     assert durable["error_message"] == whole_uri
+    assert durable["error_code"] == "SHUD_ABORTED"
     # The ``latest/`` materialization is a durable surface too: after EACH
-    # non-clearing update it must carry the exact whole URI, never a redaction
-    # placeholder.
-    assert _latest_hydro_run_message(repository, run_id) == whole_uri
+    # non-clearing update it must carry the exact whole URI and error code,
+    # never a redaction placeholder.
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_message"] == whole_uri
+    assert latest["error_code"] == "SHUD_ABORTED"
     assert updated["error_message"] == "[object-uri]"
+    assert updated["error_code"] == "SHUD_ABORTED"
 
 
 def test_non_clearing_hydro_status_update_preserves_embedded_uri_byte_for_byte(
@@ -12941,17 +12975,22 @@ def test_non_clearing_hydro_status_update_preserves_embedded_uri_byte_for_byte(
     repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=embedded)
     seeded = _durable_hydro_run_payloads(repository, run_id)[-1]
     assert seeded["error_message"] == embedded
+    assert seeded["error_code"] == "SHUD_ABORTED"
 
     updated = repository.update_hydro_run_status(run_id, "running")
 
     durable = _durable_hydro_run_payloads(repository, run_id)[-1]
     assert durable["error_message"] == embedded
+    assert durable["error_code"] == "SHUD_ABORTED"
     assert "[object-uri]" not in durable["error_message"]
     # The latest view must preserve the embedded message byte-for-byte with no
-    # ``[object-uri]`` substring.
-    assert _latest_hydro_run_message(repository, run_id) == embedded
-    assert "[object-uri]" not in _latest_hydro_run_message(repository, run_id)
+    # ``[object-uri]`` substring, and keep the error code exact.
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_message"] == embedded
+    assert latest["error_code"] == "SHUD_ABORTED"
+    assert "[object-uri]" not in latest["error_message"]
     assert updated["error_message"] == "SHUD aborted; see [object-uri] for detail"
+    assert updated["error_code"] == "SHUD_ABORTED"
 
 
 def test_succeeded_hydro_status_still_clears_durable_errors(tmp_path: Path) -> None:
@@ -12971,7 +13010,9 @@ def test_succeeded_hydro_status_still_clears_durable_errors(tmp_path: Path) -> N
     assert durable["error_code"] is None
     assert durable["error_message"] is None
     # The latest view clears the durable error family in lockstep with JSONL.
-    assert _latest_hydro_run_message(repository, run_id) is None
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_code"] is None
+    assert latest["error_message"] is None
 
 
 def test_private_hydro_lookup_returns_the_durable_row_copy(tmp_path: Path) -> None:
@@ -13227,8 +13268,7 @@ def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
     assert counts == {"total": 6, "pipeline_status": 3, "pipeline_event": 3}
     durable = _durable_master_payload(repository, record)
     assert durable["status"] == "cancelled"
-    assert _direct_row_payload(repository, str(record["job_id"]))["status"] == "cancelled"
-    assert durable["candidate_projections"] == [
+    expected_candidates = [
         {
             **{key: item[key] for key in ("array_task_id", "candidate_id", "run_id", "model_id")},
             "array_task_outcome": "failed",
@@ -13237,13 +13277,28 @@ def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
         }
         for item in _cancelled_projection_projections(record)
     ]
+    assert durable["candidate_projections"] == expected_candidates
     assert durable["error_code"] == "SLURM_JOB_CANCELLED"
     assert durable["error_message"] == "terminal array tasks were cancelled"
-    assert durable["finished_at"] == journal_module._format_utc(_dt("2026-07-21T03:00:00Z"))
+    expected_finished_at = journal_module._format_utc(_dt("2026-07-21T03:00:00Z"))
+    assert durable["finished_at"] == expected_finished_at
     assert durable["exit_code"] == 130
     assert durable["log_uri"] == _REAL_MASTER_LOG_URI
-    assert _direct_row_payload(repository, str(record["job_id"]))["log_uri"] == _REAL_MASTER_LOG_URI
     assert _REAL_MASTER_LOG_URI in _raw_journal_text(repository)
+
+    # Direct-row parity (#1629 tasks 1.4): the direct master row is a
+    # separately materialized durable surface, so it must equal the JSONL
+    # payload exactly -- status, candidate projections, error family, finished
+    # timestamp, exit code and log URI.  A fix that refreshes only the jsonl
+    # (or only the direct row) must go red here.
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert direct["status"] == "cancelled"
+    assert direct["candidate_projections"] == expected_candidates
+    assert direct["error_code"] == "SLURM_JOB_CANCELLED"
+    assert direct["error_message"] == "terminal array tasks were cancelled"
+    assert direct["finished_at"] == expected_finished_at
+    assert direct["exit_code"] == 130
+    assert direct["log_uri"] == _REAL_MASTER_LOG_URI
 
     public = repository.get_pipeline_job(str(record["job_id"]))
     assert public["status"] == "cancelled"
@@ -13291,26 +13346,6 @@ def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
         assert candidate["error_code"] == projection.get("error_code")
         assert candidate["restart_stage"] == "forecast"
         assert candidate["native_shud_resubmitted"] is False
-
-
-@pytest.mark.parametrize("status", ["succeeded", "partially_failed", "failed"])
-def test_derived_terminal_masters_stay_projection_owned_across_reprojection(
-    tmp_path: Path,
-    status: str,
-) -> None:
-    """#1629 (reverse lock): the three derived statuses remain projection-owned.
-
-    They are exactly what the projection derives, so a later pass with a
-    different task outcome and error code must overwrite them as before.
-    """
-
-    repository, record = _cohort_master_in_status(tmp_path, status)
-
-    _reproject_cohort(repository, record, error_code="NODE_FAILURE")
-
-    durable = _durable_master_payload(repository, record)
-    assert durable["error_code"] == "NODE_FAILURE"
-    assert _direct_row_payload(repository, str(record["job_id"]))["error_code"] == "NODE_FAILURE"
 
 
 # --- J10: the manual-retry round-trip residue ----------------------------

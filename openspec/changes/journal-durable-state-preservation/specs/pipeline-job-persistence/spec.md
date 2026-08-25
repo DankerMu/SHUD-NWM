@@ -73,6 +73,11 @@ An evidence field SHALL be treated as supplied by the caller only when it carrie
 - **WHEN** a cohort master whose status is any of the three projection-derived terminal values is reprojected with a different task outcome and error code
 - **THEN** its status and error family are overwritten as before, because those values remain owned by task projection
 
+#### Scenario: Restart reconcile reports preserved cancellation truth
+
+- **WHEN** complete restart accounting projects a supported historical accepted-submit master whose durable status is `cancelled`
+- **THEN** the durable/public master and the operator-facing reconcile outcome both report `cancelled`, and no resubmission is triggered
+
 #### Scenario: Projection-excluded terminal states keep their routing guards
 
 - **WHEN** a current-contract master is `submission_failed` or `reservation_lost`

@@ -9,6 +9,7 @@ Fixture level: expanded. Repair intensity: broad-expanded. Issues: #1652, #1630,
 - [x] 1.3 Add permanent-failure round-trip tests: a public snapshot cannot replace a richer durable path/URI message; a distinct new source message still overrides; status/error code/finished_at/event details and missing/stale/idempotent exits remain unchanged. Record a source-only mutation that restores the old public-message feedback and turns the preservation case red.
 - [x] 1.4 Add a validator-backed, test-only seed for a schema-valid durable `cancelled` accepted-submit master through the existing outgoing-record/direct-row seam (`tests/test_file_orchestration_journal.py::_cancelled_cohort_master`); do not add a production writer. Reproject it with explicit complete task projections, `complete=True`, the bound master Slurm ID, matched-bound decision, a fixed finished timestamp, exit code, real `s3://` log URI, and an exact derived error code/message. Assert the master’s exact refreshed candidate projections, derived error family, timestamp, exit code, and real log URI in JSONL and its direct row; assert the public query still reports `status="cancelled"` with `log_uri="[object-uri]"`. `latest/` intentionally excludes cohort masters, so verify only that its existing per-model candidate/hydro projection is refreshed and that no master copy is introduced. Include this new-behavior case in the batched pre-change red proof. Keep parameterized reverse locks for all three derived statuses.
 - [x] 1.5 Keep routing locks showing `submission_failed` and `reservation_lost` remain outside complete task projection; do not construct a projection that rewrites their accounting tuple.
+- [x] 1.6 Round-1 closure: assert non-clearing hydro `error_code` parity in JSONL/latest/public, cancelled master full direct-row parity, genuine derived-status transitions in JSONL/direct, and a restart-reconcile receipt that reports durable `cancelled` without resubmission. Prove each oracle with a bounded source mutant.
 
 ## 2. Durable/public read ownership
 
@@ -26,6 +27,7 @@ Fixture level: expanded. Repair intensity: broad-expanded. Issues: #1652, #1630,
 - [x] 4.1 Name the three task-projection-derived master statuses and derive the sticky-status decision from the current persisted status plus the routed domain; preserve `permanently_failed` and `cancelled` status without admitting `submission_failed` or `reservation_lost` into projection.
 - [x] 4.2 Keep attribution-family stickiness restricted to `permanently_failed`; a cancelled master continues to take current task-derived error values and all observational/task evidence.
 - [x] 4.3 Update the prior D5 comments/spec language that declared cancelled status stickiness out of scope; keep derived-status and no-empty-write guards intact.
+- [x] 4.4 After complete restart reconciliation, derive the operator receipt from the durable projected master for `cancelled` as well as the three projection-derived statuses; do not widen projection admission for `submission_failed` or `reservation_lost`.
 
 ## 5. Risk-pack evidence and verification
 
@@ -35,6 +37,7 @@ Fixture level: expanded. Repair intensity: broad-expanded. Issues: #1652, #1630,
 - [x] 5.4 Legacy compatibility: schema-valid historical `cancelled` rows load and preserve status; no migration or backfill; ops repair script remains correct with the now-durable private read.
 - [x] 5.5 Run `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_gateway_reconcile_*.py` (the #1809-partitioned gateway-reconcile suite).
 - [x] 5.6 Run `uv run ruff check .` and `openspec validate journal-durable-state-preservation --strict --no-interactive`.
+- [x] 5.7 Re-run the #1809-partitioned focused suite, exact round-1 closure nodes, ruff, strict OpenSpec, and diff-check on the fixed head; persist red/green mutation outputs with restored source hashes and no leftover stash/debug marker.
 
 ## 6. Evidence and deviation record
 
