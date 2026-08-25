@@ -38,8 +38,8 @@
 
 ## 6. Issue closeout
 
-- [ ] 6.1 Write the verified `dg_*` chain into #1813 (acceptance criterion 3).
-- [ ] 6.2 Post the correction comment on #1702 overriding the 2026-08-22T20:02 "won't trigger cutover" conclusion (acceptance criterion 5).
+- [x] 6.1 Write the verified `dg_*` chain into #1813 (acceptance criterion 3).
+- [x] 6.2 Post the correction comment on #1702 overriding the 2026-08-22T20:02 "won't trigger cutover" conclusion (acceptance criterion 5).
 
 ## Evidence Floor
 
