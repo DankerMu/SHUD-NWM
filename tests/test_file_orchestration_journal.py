@@ -15676,6 +15676,386 @@ def test_recovery_cli_attests_a_wedged_row_and_is_idempotent(
     _, after = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
     assert after["wedged"][0]["operator_recovery_attested_at"] == payload["operator_recovery_attested_at"]
 
+def _pad_journal_cycles_with_unrelated_records(
+    journal_root: Path, *, cycles: tuple[datetime, ...], records_per_cycle: int
+) -> int:
+    """Grow retained history in OTHER cycles, the way production actually grew.
+
+    ``journal/`` is append-only, so the whole-tree replay's aggregate budget is
+    a function of history, not of the cycle under inspection (#1810).  Padding
+    with unrelated cycles reproduces that growth law in a fixture.
+    """
+
+    for cycle_time in cycles:
+        _write_jsonl(
+            journal_root / f"journal/gfs/{format_cycle_time(cycle_time)}.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=_active_job(cycle_time),
+                    sequence=sequence,
+                )
+                for sequence in range(1, records_per_cycle + 1)
+            ],
+        )
+    return len(cycles) * records_per_cycle
+
+
+def test_released_identity_blocked_listing_survives_a_whole_tree_budget(tmp_path: Path) -> None:
+    """#1810 task 1.1: discovery is bounded by ONE cycle, not by history.
+
+    The shipped query replayed the whole tree, so its aggregate
+    ``_RecordBudget`` counted every retained ``journal/`` line in every cycle.
+    On node-22 that is 71,213 records against a 100,000 cap that history had
+    already crossed, and the operator-facing FIND half returned
+    ``file_journal_record_limit_exceeded`` instead of the wedge.
+
+    The oracle shape is deliberate (design D7).  ``max_records=1`` would redden
+    the FIXED code too -- the cycle-scoped replay consumes the same budget per
+    call -- and could only be "fixed" by exempting the scoped path, which is an
+    oracle weakening.  The discriminating shape is N cycles x M records with
+    M < max_records < N*M: three cycles of four records each under a budget of
+    six.  The two ``query_pipeline_jobs_by_cycle`` probes below assert that
+    shape in-test, so the pin cannot silently degrade into a tautology if the
+    fixtures grow a record.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released_cycle_time = _dt("2026-07-20T00:00:00Z")
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+
+    # The released cycle costs 3 journal lines + 1 flat direct record = 4.
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=6)
+
+    # Oracle self-check, half 1: the whole tree is OVER the budget. An
+    # underivable cycle id falls open to the full scan (#1734 D4), which is the
+    # public way to reach it.
+    assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026072000") is None
+    blocked = budgeted.query_pipeline_jobs_by_cycle("unknown-source_2026072000")
+    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert blocked[0]["file_journal"]["field"] == "pipeline_job_records"
+
+    # Oracle self-check, half 2: one cycle is UNDER it.
+    narrowed = budgeted.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", released_cycle_time))
+    assert [job["job_id"] for job in narrowed] == [job_id]
+    # A released row carries its own ``error_code`` (SLURM_RESERVATION_LOST), so
+    # the blocked-read marker is ``file_journal``, not the presence of a code.
+    assert "file_journal" not in narrowed[0]
+
+    # The pin. Not "no exception escaped" -- a silently empty listing would
+    # satisfy that and would be the fail-open this change exists to avoid.
+    listed = budgeted.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    assert listed[0]["identity_blocked_streak"] == 3
+    assert listed[0]["reconciliation_decision"] == "identity_mismatch_released"
+
+
+def test_released_identity_blocked_scope_is_derived_from_row_content(tmp_path: Path) -> None:
+    """#1810 task 1.3: the scope is the WRITER's, read back off row content.
+
+    The fixture asked for an end-to-end pin: a flat ``pipeline-jobs/`` row whose
+    job_id does not match ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`` but whose content
+    is a current-contract master.  **That row cannot exist**, and this test pins
+    why rather than asserting the fixture's premise.  A current-contract master
+    must satisfy ``forecast_cohort_identity_is_valid``, which forces
+    ``run_id == cycle_{source}_{cycle}[_cohort]`` and
+    ``job_id == job_{run_id}_forecast[_suffix]``; no storage source id contains
+    ``_``; so every such job_id necessarily matches that regex.  The flat reader
+    validates every file it yields, so a synthetic counter-example is REJECTED by
+    ``_validated_direct_pipeline_job_record`` instead of being discovered.
+
+    What is therefore pinned is the property the fixture wanted: discovery never
+    consults the job_id string at all.  ``_released_candidate_cycle_scope`` reads
+    the same two content fields ``_write_pipeline_job_direct_unlocked`` and
+    ``_write_pipeline_job_unlocked`` used to place the row, so reader and writer
+    agree by construction and an unparsable name is a non-event.
+    """
+
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    parsable_job_id = str(record["job_id"])
+    released_record = json.loads(
+        (repository.root / "pipeline-jobs" / f"{parsable_job_id}.json").read_text(encoding="utf-8")
+    )
+    released_row = released_record["payload"]
+    assert journal_module._released_identity_blocked_row(released_row)
+
+    residue_job_id = "legacy-master.cycle_gfs_2026072000_forecast"
+    assert journal_module._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(residue_job_id) is None
+    assert journal_module._cycle_scope_from_job_id(residue_job_id) is None
+    residue_row = {**released_row, "job_id": residue_job_id}
+    residue_row["cohort_digest"] = forecast_cohort_digest(residue_row)
+
+    # The property: an unparsable name still yields the writer's exact scope.
+    scope = journal_module._released_candidate_cycle_scope(residue_row)
+    assert scope == (
+        journal_module._source_id_from_job(released_row),
+        journal_module._cycle_time_from_job(released_row),
+    )
+    assert scope == ("gfs", _dt("2026-07-20T00:00:00Z"))
+
+    # And the reason the end-to-end shape is unconstructible, asserted rather
+    # than asserted-about: the flat reader refuses the row.
+    with pytest.raises(FileOrchestrationJournalError) as rejected:
+        repository._validated_direct_pipeline_job_record(
+            {**released_record, "job_id": residue_job_id, "payload": residue_row},
+            expected_job_id=residue_job_id,
+        )
+    assert rejected.value.reason == "file_journal_evidence_invariant_invalid"
+    assert rejected.value.field == "cohort_digest"
+
+
+def test_released_identity_blocked_listing_falls_open_when_scope_is_underivable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 1.4: an underivable scope widens the read, never shortens it.
+
+    #1734's D4 contract is that an underivable key costs the OLD expensive read
+    and never a false "not found".  Like task 1.3's shape, this precondition is
+    unreachable from data -- every row the flat reader yields carries a
+    round-tripping ``cycle_id``, so ``_released_candidate_cycle_scope`` cannot
+    return ``None`` -- so the precondition is injected at that one seam.  The
+    branch would otherwise be unpinned and freely regressable, and deleting it
+    would be a silent deviation from the spec requirement.
+
+    Read attribution is the oracle, not just the returned row: a fall-open that
+    quietly dropped the candidate would also return nothing, and a fall-open
+    that never happened would tag no ``full_tree_replay``.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    monkeypatch.setattr(journal_module, "_released_candidate_cycle_scope", lambda job: None)
+    journal_module.reset_journal_read_counters()
+
+    listed = repository.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|full_tree_replay" in tags, sorted(tags)
+
+
+def test_released_identity_blocked_listing_never_replays_the_whole_tree(tmp_path: Path) -> None:
+    """#1810 tasks 2.1/2.2: flat scan as candidate filter, cycle-scoped confirm.
+
+    The budget pin above proves the read fits; this proves it is the SHAPE the
+    design chose and not an accident of fixture size.  D9 recorded that the
+    obvious alternative -- one cycle-scoped replay per distinct cycle -- did not
+    finish in 40 minutes against the real node-22 journal, so the lane split is
+    load-bearing: enumerate the flat directory ONCE, confirm per candidate.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    journal_module.reset_journal_read_counters()
+
+    assert [job["job_id"] for job in reader.query_released_identity_blocked_jobs()] == [
+        str(record["job_id"])
+    ]
+
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|direct_flat_scan" in tags, sorted(tags)
+    assert "query_released_identity_blocked_jobs|cycle_replay" in tags, sorted(tags)
+    assert not [tag for tag in tags if tag.endswith("|full_tree_replay")], sorted(tags)
+
+def _released_identity_blocked_wedge(
+    tmp_path: Path, *, cycle_times: tuple[datetime, ...], per_cycle: int
+) -> tuple[Any, list[str]]:
+    """A mass-release wedge: ``per_cycle`` released masters in each cycle.
+
+    Built through the production transitions (reserve -> identity-blocked
+    release) in ONE repository, so every row is a real member of the shape
+    ``_released_identity_blocked_row`` admits.
+    """
+
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        forecast_cohort_digest,
+    )
+    from services.orchestrator.chain_config import scenario_for_source
+
+    canonical_source_id = normalize_source_id("gfs")
+    scenario_id = scenario_for_source(canonical_source_id)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    job_ids: list[str] = []
+    for cycle_time in cycle_times:
+        stamp = format_cycle_time(cycle_time)
+        cycle_iso = cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        for cohort in range(per_cycle):
+            run_id = f"cycle_{canonical_source_id.lower()}_{stamp}_c{cohort}"
+            job_id = f"job_{run_id}_forecast"
+            record: dict[str, Any] = {
+                "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                "job_id": job_id,
+                "run_id": run_id,
+                "source_id": canonical_source_id,
+                "cycle_id": cycle_id_for(canonical_source_id, cycle_time),
+                "job_type": "run_shud_forecast_array",
+                "model_id": None,
+                "stage": "forecast",
+                "idempotency_key": f"{run_id}:forecast",
+                "slurm_comment": f"nhms_idem:{run_id}:forecast",
+                "submit_outcome": None,
+                "restart_stage": "forecast",
+                "cohort_members": [
+                    {
+                        "array_task_id": index,
+                        "candidate_id": f"{canonical_source_id}:{cycle_iso}:model_c{cohort}_{index}:{scenario_id}",
+                        "run_id": f"fcst_{canonical_source_id.lower()}_{stamp}_model_c{cohort}_{index}",
+                        "model_id": f"model_c{cohort}_{index}",
+                        "basin_id": f"basin_c{cohort}_{index}",
+                        "scenario_id": scenario_id,
+                        "restart_stage": "forecast",
+                    }
+                    for index in range(2)
+                ],
+                "submission_attempt": 1,
+                "submission_attempt_started_at": cycle_time,
+                "expected_slurm_user": None,
+                "expected_slurm_account": None,
+                "slurm_ownership_required": False,
+                "created_at": cycle_time,
+                "updated_at": cycle_time,
+            }
+            record["cohort_digest"] = forecast_cohort_digest(record)
+            assert repository.reserve_pipeline_job(dict(record)) is not None
+            reserved = repository.get_pipeline_job(job_id)
+            assert (
+                repository.release_identity_blocked_reservation(
+                    job_id,
+                    accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+                    expected_submission_attempt=int(reserved["submission_attempt"]),
+                    expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+                    identity_blocked_streak=3,
+                )
+                == 1
+            )
+            job_ids.append(job_id)
+    return repository, job_ids
+
+
+def test_released_identity_blocked_confirm_does_not_relist_the_flat_directory_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 3.1: the confirm half must not be O(candidates x flat dir).
+
+    The scoped confirm reaches ``_flat_direct_pipeline_job_paths_for_cycle``,
+    which lists the ENTIRE unpartitioned ``pipeline-jobs/`` directory (4,557
+    files on node-22) and only then filters by file name.  Called once per
+    candidate, that is the same O(N x flat-directory) growth law design D9
+    measured at ">40 minutes for 230 cycles" and rejected.  N is not bounded by
+    anything: the admitted shape (reservation_lost + identity_mismatch_released
+    + no slurm id) is exactly what a mass release or a SLURM outage produces in
+    bulk, which is the incident this operator command exists to serve.
+
+    The oracle is a direct COUNT of flat-directory listings, not wall time, so
+    it is independent of fixture size: after the fix the directory is listed
+    exactly twice per query -- once by the candidate scan
+    (``_iter_direct_pipeline_job_records``, which does not route through the
+    per-cycle helper) and once when the per-query memo fills.  A constant, not
+    ``<= M`` or ``<= K``, is what proves the growth law is gone.
+    """
+
+    cycle_times = (_dt("2026-07-20T00:00:00Z"), _dt("2026-07-20T12:00:00Z"))
+    per_cycle = 3
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+    flat_directory = repository.root / "pipeline-jobs"
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = journal_module._iter_regular_json_files
+    listings: list[Path] = []
+
+    def counting_iter_regular_json_files(directory: Path, **kwargs: Any) -> Any:
+        if directory == flat_directory:
+            listings.append(directory)
+        return original(directory, **kwargs)
+
+    monkeypatch.setattr(journal_module, "_iter_regular_json_files", counting_iter_regular_json_files)
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned. A memo keyed by
+    # the wrong thing would shrink this to one cycle's rows.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle
+    # Half 2: the growth law. Two listings, independent of M and of K.
+    assert len(listings) == 2, len(listings)
+
+
+def test_released_identity_blocked_confirm_replays_once_per_cycle_not_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 design D14: the confirm half is grouped BY CYCLE, not per candidate.
+
+    The pin above counts flat-directory LISTINGS, and the per-query memo alone
+    holds that count at two even if the grouping is reverted to a per-candidate
+    loop -- so it does not discriminate the two halves of the fix.  This one
+    counts the scoped REPLAYS themselves, which the memo does not deduplicate:
+    a per-candidate loop costs one cycle replay per candidate, and a mass
+    release puts an unbounded number of rows into a handful of cycles.
+
+    The oracle is a constant times K, with the fixture built so C > K in-test
+    (12 candidates over 3 cycles), so the bound cannot silently degrade into a
+    tautology.  The recorded scopes are compared as a SET too: a count alone
+    would also be satisfied by three replays of the wrong cycle, and a
+    ``None`` scope would mean the fall-open whole-tree replay, not grouping.
+    """
+
+    cycle_times = (
+        _dt("2026-07-20T00:00:00Z"),
+        _dt("2026-07-20T12:00:00Z"),
+        _dt("2026-07-21T00:00:00Z"),
+    )
+    per_cycle = 4
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = reader._iter_pipeline_job_records_scoped
+    replayed: list[tuple[str, datetime] | None] = []
+
+    def counting_iter_pipeline_job_records_scoped(
+        cycle_scope: tuple[str, datetime] | None, **kwargs: Any
+    ) -> Any:
+        replayed.append(cycle_scope)
+        return original(cycle_scope, **kwargs)
+
+    monkeypatch.setattr(
+        reader, "_iter_pipeline_job_records_scoped", counting_iter_pipeline_job_records_scoped
+    )
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned, and the fixture
+    # really is C > K -- 12 candidates spread over 3 cycles.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle == 12
+    # Half 2: the growth law. One replay per DISTINCT cycle, exactly, and each
+    # one for a cycle a candidate actually lives in.
+    assert len(replayed) == len(cycle_times), replayed
+    assert set(replayed) == {("gfs", cycle_time) for cycle_time in cycle_times}
+
 
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])
 def test_recovery_cli_refusals_name_the_failing_precondition(
