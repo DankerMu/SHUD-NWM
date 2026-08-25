@@ -169,53 +169,57 @@ def _fence_logical(fence_lines: list[str]) -> list[str]:
             continue
         out.append(" ".join(part.strip() for part in buf))
         buf = []
-    if buf:
-        out.append(" ".join(part.strip() for part in buf))
-    return out
+    return out + ([" ".join(part.strip() for part in buf)] if buf else [])
 
 
 def _fence_tokens(command: str) -> list[str]:
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
-    return [tok for tok in tokens if not tok.startswith("#")]
+    """shlex(posix=False, punctuation_chars=";&|"): unquoted ; & | operators."""
+    lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|")
+    lexer.whitespace_split = False
+    lexer.commenters = "#"
+    lexer.wordchars += "+"  # keep `set +e`/`+o` flags glued like Bash
+    return [tok for tok in lexer if tok is not None]
 
 
-# ``set +euo`` / ``set +o errexit`` disable fail-fast; the authoritative lane
-# has no ``||`` at all, so every one is a potential status swallow.
+# ``set +euo`` / ``set +o errexit`` disable fail-fast; the lane has no ``||``.
 _SET_DISABLE_RE = re.compile(r"\+[euo]+")
 _SET_DISABLE_OPTS = frozenset({"errexit", "nounset", "pipefail"})
+_SEPARATORS = (";", "&&", "|", "&", ">", "<", ">>", ";;", "||")
+
+
+def _segments(tokens: list[str]) -> list[list[str]]:
+    """Split token runs into command segments at separator operator tokens."""
+    segments: list[list[str]] = []
+    seg: list[str] = []
+    for tok in tokens:
+        if tok in _SEPARATORS:
+            if seg:
+                segments.append(seg)
+                seg = []
+            continue
+        seg.append(tok)
+    return segments + ([seg] if seg else [])
 
 
 def _node27_lane_swallow_violations(fence_lines: list[str]) -> list[tuple[str, str]]:
-    """Classify the governed lane for status-swallowing.
-
-    Every logical command runs under fail-fast, so a failed guard or
-    pytest/tee pipeline must abort the lane (Evidence Floor 5.7). Returns
-    ``(command, reason)`` for (a) any ``||`` — each one can swallow a failure,
-    whatever the right side — and (b) any ``set +euo`` / ``set +o errexit``
-    disable. Scanning the full logical command, not its tail, means a trailing
-    safe token can never hide an earlier swallow.
-    """
+    """Lane-wide status swallow scan: unquoted ``||`` and ``set`` fail-fast disables."""
     violations: list[tuple[str, str]] = []
     for command in _fence_logical(fence_lines):
         tokens = _fence_tokens(command)
         if not tokens:
             continue
-        if tokens[0] == "set":
-            for j, tok in enumerate(tokens[1:], 1):
-                # `+e`/`+u`/`+euo` disable fail-fast; lone `+o` only disables
-                # the option it names (`set +o pipefail`).
+        # The lexer emits a bare ``||`` only for unquoted, unescaped chars.
+        if "||" in tokens:
+            violations.append((command, "|| swallows failure"))
+        for seg in _segments(tokens):
+            if len(seg) < 2 or seg[0] != "set" or seg[1] in ("-e", "-u", "-euo", "-eu"):
+                continue  # `set -euo pipefail` is the lane's own fail-fast set
+            for j, tok in enumerate(seg[1:], 1):
+                # `+e`/`+u`/`+euo` disable fail-fast; lone `+o` only names one.
                 if _SET_DISABLE_RE.fullmatch(tok) and tok != "+o":
                     violations.append((command, f"fail-fast disabled by set {tok}"))
-                elif tok == "+o" and j + 1 < len(tokens) and tokens[j + 1] in _SET_DISABLE_OPTS:
-                    violations.append(
-                        (command, f"fail-fast disabled by set +o {tokens[j + 1]}")
-                    )
-        for tok in tokens:
-            if tok == "||" or tok.startswith("||"):  # `||`, `||true`, `||:`
-                violations.append((command, f"{tok} swallows failure"))
+                elif tok == "+o" and j + 1 < len(seg) and seg[j + 1] in _SET_DISABLE_OPTS:
+                    violations.append((command, f"fail-fast disabled by set +o {seg[j + 1]}"))
     return violations
 
 
@@ -264,7 +268,8 @@ def test_ci_routing_lane_rejects_status_swallowing_mutations() -> None:
     shared lane validator must flag it. Covers the Phase-6.2 guard regression,
     the Round-3 pytest/tee regression, every ``||`` shape, and fail-fast
     disables whose trailing safe token would otherwise mask the earlier
-    swallow.
+    swallow. Green controls (quoted/escaped literals, comments, lone ``set
+    +o``, the authoritative fail-fast set) stay classified as clean.
     """
     lines = _node27_bash_fence(_read("docs/runbooks/ci-test-routing.md"))
     fence = "\n".join(lines)
@@ -273,44 +278,49 @@ def test_ci_routing_lane_rejects_status_swallowing_mutations() -> None:
     guard = 'uv run --no-sync python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"'
     tee = "| tee artifacts/ci-routing/e2e-grib-$(date +%F).log"
     set_failfast = "set -euo pipefail"
+    # (anchor, append, expected reason substring; the splice text must be
+    # flagged). Every ``||`` shape and every fail-fast disable goes red.
     mutations = [
-        ("guard || true", [(guard, guard + " || true")], ["sys.version", "|| true"]),
-        ("pytest/tee || true", [(tee, tee + " || true")], ["tee artifacts/ci-routing", "|| true"]),
-        ("set +e after fail-fast set", [(set_failfast, set_failfast + "\nset +e")], ["set +e"]),
-        (
-            "set +o pipefail after fail-fast set",
-            [(set_failfast, set_failfast + "\nset +o pipefail")],
-            ["set +o pipefail"],
-        ),
-        ("pytest/tee || echo", [(tee, tee + " || echo receipt")], ["tee artifacts/ci-routing", "|| echo"]),
-        (
-            "set +e then pytest/tee || true (masking)",
-            [(set_failfast, set_failfast + "\nset +e"), (tee, tee + " || true")],
-            ["set +e", "|| true"],
-        ),
-        (
-            "set +euo pipefail (multi-letter disable)",
-            [(set_failfast, set_failfast + "\nset +euo pipefail")],
-            ["set +euo"],
-        ),
-        (
-            "pytest/tee || exit 0 (propagator fake)",
-            [(tee, tee + " || exit 0")],
-            ["tee artifacts/ci-routing", "|| exit 0"],
-        ),
+        (tee, "||true", "|| swallows failure"), (tee, "|| true", "|| swallows failure"),
+        (tee, "||:", "|| swallows failure"), (guard, "||true", "|| swallows failure"),
+        (guard, " || true", "|| swallows failure"), (tee, " || true", "|| swallows failure"),
+        (tee, " || echo receipt", "|| swallows failure"), (tee, " || exit 0", "|| swallows failure"),
+        (set_failfast, "\nset +e", "fail-fast disabled by set +e"),
+        (set_failfast, "\nset +o pipefail", "set +o pipefail"),
+        (set_failfast, "\nset +euo pipefail", "set +euo"),
+        (set_failfast, "\nset +eu", "set +eu"),
+        (set_failfast, "\nset +e\n" + tee + " || true", "|| swallows failure"),
     ]
-    for name, edits, expected in mutations:
-        mutated = fence
-        for anchor, replacement in edits:
-            assert anchor in mutated, f"{name}: anchor not found: {anchor!r}"
-            mutated = mutated.replace(anchor, replacement, 1)
-        flagged = _node27_lane_swallow_violations(mutated.splitlines())
-        assert flagged, f"{name}: mutation must be red, validator reported nothing"
-        flagged_cmds = [cmd for cmd, _ in flagged]
-        for exp in expected:
-            assert any(exp in cmd for cmd in flagged_cmds), (
-                f"{name}: expected {exp!r} among flagged commands, got: {flagged}"
-            )
+    for anchor, append, expected_reason in mutations:
+        assert anchor in fence, f"anchor not found: {anchor!r}"
+        flagged = _node27_lane_swallow_violations(
+            fence.replace(anchor, anchor + append, 1).splitlines()
+        )
+        splice = append.strip().splitlines()[0]
+        assert flagged and any(expected_reason in r for _, r in flagged) and any(
+            splice in cmd for cmd, _ in flagged
+        ), f"{append!r}: expected red ({expected_reason!r}, {splice!r}), got {flagged}"
+
+    # Green controls: quoted/escaped literals are not operators, comments are
+    # stripped, lone ``set +o`` disables nothing, ``set -euo pipefail`` is the
+    # lane's own fail-fast set.
+    for cmd in ("echo 'a||b'", 'echo "a||b"', r"echo a\|\|b", "true # || true",
+                "set +o", "set -euo pipefail", "set -eu"):
+        assert _node27_lane_swallow_violations([cmd]) == [], f"green control flagged: {cmd}"
+
+
+def test_glued_operator_tokens_isolated() -> None:
+    """``||`` glued to a word is an operator token, never absorbed."""
+    for cmd in ("cmd >/tmp/log||true", "cmd >/tmp/log|| true", "cmd >/tmp/log||:",
+                'python -c "print(1)"||true'):
+        tokens = _fence_tokens(cmd)
+        assert "||" in tokens and not any(t != "||" and "||" in t for t in tokens), (
+            f"{cmd}: glued || not isolated: {tokens!r}"
+        )
+    # Separator-glued set disables land in a scanned segment and go red.
+    for cmd in ("cmd; set +e", "cmd && set +e", "cmd | set +e", "cmd & set +e",
+                "cmd;; set +e", "cmd; set +o pipefail"):
+        assert _node27_lane_swallow_violations([cmd]), f"{cmd}: separator set disable must be red"
 
 
 def test_conftest_skip_guidance_points_to_runbook() -> None:
