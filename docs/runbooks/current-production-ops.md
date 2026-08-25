@@ -214,6 +214,15 @@ uv run python scripts/publish_scheduler_file_registry.py \
 - `baseline-registry/` 目录 2026-08-22 前不存在，首次需 `mkdir -p`。
 - 缺 `PYTHONPATH` 会在 `_build_manual_cutover_gate` 处
   `ModuleNotFoundError: No module named 'scripts'`——门是默认开的，不是没跑。
+- **第二次及以后的上线，`--registry-manifest` 必须换成本次专属路径**，例如
+  `baseline-registry/<rollout>-<date>.json`。2026-08-22 #1699 是**首次**使用该目录，
+  属 bootstrap（无 previous manifest）所以不触发闸门；2026-08-25 黄河子流域复用
+  `manifest-last.json` 时当场被拒：publisher 把传入的 models **整体写出、不做合并**，
+  于是本次 7 行会**移除** #1699 留下的 7 行，#1080 cutover 闸门报
+  `registry_cutover_removal_refused` / `SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED`
+  （包已发布，registry 未动，重跑幂等）。不要用 `--allow-uncovered-cutover` 绕——
+  那会真的把上一批 baseline 行删掉。hop 3 的 `--baseline-registry` 只是个路径参数，
+  指向本次专属文件即可；该文件须落在 NFS 上，因为 hop 3 在 node-27 跑。
 - **`--basins-root` 要指向持久路径，不要指向临时 staging 目录。** 包版本号是纯内容派生、
   与路径无关（实测同一批树从 scratch staging 和从 NFS Basins 发布，7 个版本号逐字相同，
   第二次全部 `already_done`），但 registry 行会把 `source_path` 钉死成发布时的路径。
@@ -294,6 +303,16 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 行数 = 旧 + 2×新流域数、无重复 `model_id`、新 slug 与既有 slug 不相交、全部 `direct_grid`、
 每流域恰好一条 gfs 一条 IFS、每行都带 `shud_input_name` 与 `model_package_uri`。
 备份 stamp 每次换新，否则脚本会因备份已存在而拒跑。
+
+**registry manifest 有字节上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES`
+（`services/orchestrator/scheduler_file_providers.py`）同时管**写入后回读**和
+**所有消费者的读取**。2026-08-25 合并到 62 行时实测 4,250,534 B，超过当时的 4 MiB
+上限 56,230 B：原子写入器写完、回读时 `capture_provider_preimage` 报
+`provider_destination_size_limit_exceeded`，于是**回滚并抛 `provider_restored_previous`**
+（canonical 完好无损，这是闸门在正常工作，不是数据损坏）。已提到 16 MiB（约 160 行）。
+再撞时的处置顺序是死的：**改常量 → CI → merge → 22 与 27 都 `git pull --ff-only` → 才能发布**。
+先发布后升级 = 旧代码的调度器读不动新 manifest，等于全量停摆。
+覆盖坪估算：大流域一行约 100 KB（`direct_grid_forcing.station_bindings` 内联就占 ~60 KB）。
 
 **发布后必须手动跑一趟 refresh 重建 readiness。** readiness 索引条目与 registry identity
 是**逐一相等**关系（`validate_readiness_registry_model_set`），48 行 registry 配 34 行 readiness
