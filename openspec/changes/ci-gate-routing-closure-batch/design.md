@@ -151,15 +151,40 @@ The real-DB job receives the same treatment. A structured job-scoped contract
 helper must bind job-level `needs`, the exact dispatch/database/push/non-draft
 condition, the Timescale service image, job-level opt-in, the dedicated
 `NHMS_INTEGRATION_DATABASE_URL` consumed by `tests/conftest.py`, and the named
-`pytest -vv -rs -m integration` step. Its finite load-bearing branch inventory
-must carry standing same-helper mutants for needs/gate, service image, opt-in
-scope and lexical truth, dedicated-DSN existence/scope/nonempty value, named-step
-identity, and command identity. The collection-smoke consumer likewise binds its
-condition, targeted-before-collection ordering, scoped collect command, truthful
-label, and nonzero collection-failure exit, with a standing mutant for each
-load-bearing predicate. The canonical inventory lives in
-`.workplans/pr-1834/review/round-2-branch-completeness-inventory.md`; evidence
-claims may not exceed the standing mutants in that inventory.
+`pytest -vv -rs -m integration` step. The named step's **effective** execution
+context is part of that contract: it cannot override either integration gate
+environment variable, carry a disabling `if`, or opt the step or job into
+`continue-on-error`. Nominal job fields do not prove a blocking integration
+oracle when step-level semantics can replace or bypass them.
+
+The collection-smoke consumer likewise binds its condition,
+targeted-before-collection ordering, scoped collect command, truthful label,
+and nonzero collection-failure exit. Those are properties of the parsed named
+step's **effective behavior**, not raw source-token presence. The full workflow
+mapping is the metadata authority: the targeted and real-DB named steps, their
+jobs, and inherited workflow/job `defaults.run` must not carry a condition,
+error-continuation policy, environment override, custom shell, or working
+directory that skips an oracle, changes its checkout identity, or makes failure
+non-blocking.
+
+The test suite SHALL NOT execute arbitrary PR-editable workflow payload. It pins
+the targeted `run` scalar to an independently authored audited identity; any
+mismatch is rejected before execution. A bounded behavior probe executes only
+the test-owned trusted canonical fixture and finite test-owned semantic
+variants, substitutes the three known GitHub outputs, and observes exact command
+order, full-tree collection invocation, emitted labels/logs, summaries, and
+final status. Comments, quoted-token splits, no-op/dead branches, unreachable
+exits, or unapproved Python/absolute/sourced/evaluated commands cannot enter the
+execution seam. The probe runs in a new process group and cleans all descendants
+on success, failure, and timeout. This avoids both a general shell parser and a
+false `PATH`-only sandbox: exact identity owns trust; controlled execution owns
+behavior.
+
+The canonical inventory lives in
+`.workplans/pr-1834/review/round-2-branch-completeness-inventory.md`. Round 3
+superseded its original lexical `covered` verdicts; each row is complete only
+when full-workflow metadata/identity checks and trusted behavior fixtures carry
+standing scoped mutants. Evidence claims may not exceed that proof.
 
 ## Risk Packs Considered
 

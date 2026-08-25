@@ -40,7 +40,7 @@ A selector supplemental-rule authority SHALL map every Python source path under 
 
 ### Requirement: Selector-development changes MUST retain full-tree collection smoke
 
-The selector SHALL expose a `collection_smoke_required` GitHub output whose provenance is independent of the final selected-target list shape. It SHALL be true when the final selection is exactly the selector meta-guard or when the changed-file set contains `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`; otherwise it SHALL be false for non-empty ordinary selections. The `Unit Tests` workflow SHALL use this field to run the labeled full-tree collect-only smoke in addition to targeted assertions. The existing `meta_guard_only` field SHALL remain a final-list shape property and zero-selection behavior SHALL remain unchanged.
+The selector SHALL expose a `collection_smoke_required` GitHub output whose provenance is independent of the final selected-target list shape. It SHALL be true when the final selection is exactly the selector meta-guard or when the changed-file set contains `scripts/select_ci_tests.py` or `tests/test_select_ci_tests.py`; otherwise it SHALL be false for non-empty ordinary selections. The `Unit Tests` workflow SHALL use this field to run the labeled full-tree collect-only smoke in addition to targeted assertions. Targeted assertions SHALL execute before this smoke; when the smoke is required, the full-tree collect command SHALL be executable and reachable, its failure SHALL emit its log and return nonzero, and its label SHALL NOT claim zero assertions after targeted assertions ran. One full-workflow positive contract SHALL prove both effective Actions metadata and shell behavior. It SHALL require the audited named-step identity, exact targeted-test environment binding, default root checkout/shell semantics, and fail-closed step/job policy. It SHALL reject any unapproved `run` payload before execution. A bounded probe SHALL execute only an independently authored trusted fixture and finite test-owned semantic variants, clean its process group on every exit, and prove the behavior matrix without running real tests, database, network, or arbitrary workflow commands. The existing `meta_guard_only` field SHALL remain a final-list shape property and zero-selection behavior SHALL remain unchanged.
 
 #### Scenario: Selector source change keeps supplemental and collection oracles
 
@@ -61,6 +61,26 @@ The selector SHALL expose a `collection_smoke_required` GitHub output whose prov
 
 - **WHEN** missing-target filtering or an unrouted support-module change leaves exactly the selector meta-guard suite
 - **THEN** both `meta_guard_only=true` and `collection_smoke_required=true`
+
+#### Scenario: Collection consumer cannot be satisfied by inert shell text
+
+- **WHEN** a valid workflow mutation leaves required condition, targeted-test, collect, label, log, or exit tokens only in comments, quoted fragments, no-op/dead branches, or unreachable control-flow positions
+- **THEN** the same positive helper used for the live named step reports the corresponding condition, ordering, collection, truthful-label, or fail-closed violation
+
+#### Scenario: Collection failure remains an observable job failure
+
+- **WHEN** `collection_smoke_required=true` and the trusted behavior fixture makes the full-tree collect command fail
+- **THEN** the audited named-step program invokes targeted assertions first, invokes full-tree collection, emits the collection log, and returns nonzero
+
+#### Scenario: Workflow payload and metadata cannot bypass the collection oracle
+
+- **WHEN** a valid workflow mutation changes the named step payload, condition, continuation policy, `TARGETED_TESTS_JSON` binding, shell, working directory, or an inherited job/workflow `defaults.run` field
+- **THEN** the full-workflow positive helper reports a named identity or effective-metadata violation before any unapproved payload executes
+
+#### Scenario: Collection probe cleans timed-out descendants
+
+- **WHEN** a test-owned controlled fixture starts a descendant and the bounded probe times out
+- **THEN** the probe returns a named timeout violation and no process in its new process group remains alive
 
 ### Requirement: Irregular source and package routes MUST select their owned suites
 
@@ -83,7 +103,7 @@ The targeted selector SHALL map every tracked module under `workers/mapping_buil
 
 ### Requirement: Integration-owned production sources MUST trigger real-database CI
 
-The CI `database` paths filter SHALL match every production source surface in the finite integration-trigger registry defined by this change: `packages/common/forecast_store.py`, `packages/common/display_coverage.py`, `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py`, `apps/api/main.py`, `scripts/node27_autopipeline.py`, `workers/output_parser/parser.py`, `packages/common/timescale_write_guard.py`, `packages/common/object_store.py`, `packages/common/model_registry.py`, `packages/common/grid_registry_store.py`, `workers/grid_registry/**`, `workers/model_registry/**`, `workers/forcing_producer/**`, and `services/orchestrator/scheduler.py`. The selector contract suite SHALL parse the `database:` filter and mechanically assert that each registered path or tracked member of a registered root matches at least one filter pattern; a workflow change SHALL self-select that contract suite. Matching the filter SHALL open the existing `real-db-integration` job, which runs the full `-m integration` suite with its PostgreSQL/Timescale service and dedicated `NHMS_INTEGRATION_DATABASE_URL`. The job SHALL expose node-level pass/skip evidence with pytest `-vv -rs`; this verbosity-only evidence change SHALL NOT alter its marker expression, dedicated DSN, service, job gate, or suite selection. One positive job-contract helper SHALL validate those properties, and deletion of the dedicated DSN SHALL produce a named contract violation rather than a green job whose required nodes all skip.
+The CI `database` paths filter SHALL match every production source surface in the finite integration-trigger registry defined by this change: `packages/common/forecast_store.py`, `packages/common/display_coverage.py`, `services/tiles/mvt.py`, `apps/api/routes/hydro_display.py`, `apps/api/main.py`, `scripts/node27_autopipeline.py`, `workers/output_parser/parser.py`, `packages/common/timescale_write_guard.py`, `packages/common/object_store.py`, `packages/common/model_registry.py`, `packages/common/grid_registry_store.py`, `workers/grid_registry/**`, `workers/model_registry/**`, `workers/forcing_producer/**`, and `services/orchestrator/scheduler.py`. The selector contract suite SHALL parse the `database:` filter and mechanically assert that each registered path or tracked member of a registered root matches at least one filter pattern; a workflow change SHALL self-select that contract suite. Matching the filter SHALL open the existing `real-db-integration` job, which runs the full `-m integration` suite with its PostgreSQL/Timescale service and dedicated `NHMS_INTEGRATION_DATABASE_URL`. The job SHALL expose node-level pass/skip evidence with pytest `-vv -rs`; this verbosity-only evidence change SHALL NOT alter its marker expression, dedicated DSN, service, job gate, or suite selection. One full-workflow positive job-contract helper SHALL validate those properties and the named step's effective execution context: step-level environment SHALL NOT replace either integration gate variable, a step condition SHALL NOT disable the command, step/job error-continuation policy SHALL NOT make a failing integration command non-blocking, and direct or inherited custom shell/working-directory metadata SHALL NOT alter the audited root-checkout command semantics. Deletion or effective blanking/opt-out of the dedicated integration context SHALL produce a named contract violation rather than a green job whose required nodes all skip.
 
 #### Scenario: Forecast-store-only diff opens the parity oracle lane
 
@@ -99,6 +119,11 @@ The CI `database` paths filter SHALL match every production source surface in th
 
 - **WHEN** the `real-db-integration` workflow block loses `NHMS_INTEGRATION_DATABASE_URL` while retaining generic `DATABASE_URL`, `NHMS_RUN_INTEGRATION`, and `pytest -vv -rs -m integration`
 - **THEN** the same positive job-contract helper used for the live workflow reports a violation naming `NHMS_INTEGRATION_DATABASE_URL`, because the integration fixture ignores generic `DATABASE_URL` without an explicit compatibility flag
+
+#### Scenario: Named integration step cannot override or bypass its job contract
+
+- **WHEN** a valid workflow mutation adds a step-level opt-out or blank dedicated DSN, disables the named integration step with its `if`, enables step/job `continue-on-error`, or sets direct/inherited custom shell or working-directory metadata
+- **THEN** the same full-workflow structured positive helper used for the live job reports a named effective-environment, execution-condition, fail-closed-policy, shell, or working-directory violation
 
 #### Scenario: Workflow changes execute the trigger contract
 

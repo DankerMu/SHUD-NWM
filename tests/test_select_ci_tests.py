@@ -4,8 +4,11 @@ import ast
 import fnmatch
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path, PurePosixPath
@@ -3020,75 +3023,1006 @@ def _targeted_job_collection_block(targeted_job: str) -> str:
     return targeted_job[branch_start:branch_end]
 
 
-def _collection_consumer_violations(targeted_job: str) -> list[str]:
-    """Positive oracle owning ALL FIVE load-bearing predicates (row A).
+def _targeted_run_scalar(targeted_job: str) -> tuple[str, list[str]]:
+    """The parsed ``Run targeted tests`` step's run scalar, plus named failures.
 
-    Accepts the full `unit-test-targeted` job text (see ``_targeted_job_block``)
-    and locates the exact outer ``collection_smoke_required == true`` branch
-    itself. No shell execution, no shell parser — plain indentation/text checks.
-
-    A1: the condition consumes the exact ``collection_smoke_required == true``
-        output key in its true sense (a renamed key, or a negated/wrong
-        sense, yields a named A1 violation);
-    A2: the targeted pytest command executes BEFORE the collection outer branch
-        (a collection failure cannot mask a targeted assertion failure);
-    A3: the full-tree ``pytest tests/ -q --collect-only`` command runs INSIDE
-        the scoped branch;
-    A4: the scoped branch does NOT claim ``0 assertions`` (targeted tests
-        already ran);
-    A5: the scoped failure path emits the collected log AND exits nonzero
-        (fail-closed; without ``exit 1`` bash returns success from
-        ``cat collect-only.log`` and hides a collection failure).
-
-    Must NOT raise on a missing/renamed condition: returns a named A1
-    violation. Deeper scoped checks stop when the branch cannot be located
-    (each contributes its own named violation, never a crash). Live state
-    yields no violations; every mutant uses this SAME helper.
+    Returns ``(scalar, violations)``. ``scalar`` is ``""`` and ``violations``
+    carries a named row violation when the step is missing, duplicated, or
+    malformed (a non-string run value), so the positive helper can report a
+    named A1-style violation instead of crashing on a constructible mutant.
+    The name is the single identity the workflow uses to find the command; a
+    duplicate would silently pick the first (wrong) command, so duplicates are
+    rejected rather than accepted.
     """
+    try:
+        parsed = yaml.safe_load(targeted_job)
+    except yaml.YAMLError:
+        return "", ["targeted job block must parse as YAML"]
+    if not isinstance(parsed, dict) or "unit-test-targeted" not in parsed:
+        return "", ["targeted job block must parse to a mapping containing unit-test-targeted"]
+    job = parsed["unit-test-targeted"]
+    if not isinstance(job, dict):
+        return "", ["unit-test-targeted job must be a mapping"]
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return "", ["unit-test-targeted job must declare a steps list"]
+
+    named = [step for step in steps if isinstance(step, dict) and step.get("name") == "Run targeted tests"]
+    if not named:
+        return "", ["targeted job must have a step named `Run targeted tests` with a run command"]
+    if len(named) > 1:
+        return "", ["targeted job must have exactly one step named `Run targeted tests`"]
+    run = named[0].get("run")
+    if not isinstance(run, str) or not run.strip():
+        return "", ["targeted job step `Run targeted tests` must carry a non-empty run command"]
+    return run, []
+
+
+# The three GitHub output expressions the collection-consumer probe substitutes
+# with controlled literals. All three MUST be present and substituted; a mutant
+# that drops or renames one is a condition violation, never a silent pass.
+_COLLECTION_EXPRESSIONS = (
+    "${{ steps.targeted.outputs.count }}",
+    "${{ steps.targeted.outputs.collection_smoke_required }}",
+    "${{ steps.targeted.outputs.meta_guard_only }}",
+)
+
+# The named targeted step identity: exactly one step with this name and a
+# non-empty run scalar. A duplicate would silently pick the first (wrong)
+# command, so duplicates are rejected rather than accepted.
+TARGETED_COMMAND_STEP_NAME = "Run targeted tests"
+
+# The exact targeted step env binding the audited execution context requires.
+# No missing/changed/extra value may sneak in (extra env could inject
+# BASH_ENV/PYTHONPATH/… into the audited shell).
+TARGETED_STEP_ENV_EXPECTED = {"TARGETED_TESTS_JSON": "${{ steps.targeted.outputs.tests_json }}"}
+
+# The exact `runs-on` value both audited jobs must carry.
+TARGETED_RUNS_ON = "ubuntu-latest"
+
+# The targeted job's prerequisite: it must consume the `changes` job's backend
+# output, exactly as a scalar `changes`.
+TARGETED_NEEDS = "changes"
+
+# The exact targeted job event gate, normalized to single-space token form
+# (the live `if:` is a plain scalar already; both sides are whitespace-
+# normalized so a folded/reformatted mutant cannot pass). A PR-only job gate is
+# required — the required PR Unit Tests job must run on pull requests and must
+# be reachable from `changes`.
+TARGETED_GATE_IF_BLOCK = "needs.changes.outputs.backend == 'true' && github.event_name == 'pull_request'"
+
+
+# ---------------------------------------------------------------------------
+# Independently authored audited run identity (B).
+#
+# This is a TEST-OWNED canonical constant, copied and reviewed from the live
+# `Run targeted tests` run scalar (byte-for-byte), NOT derived from the
+# workflow at runtime. The full-workflow helper extracts the ACTUAL run and
+# compares it against this constant; any mismatch is a named identity
+# violation reported BEFORE the behavior probe is invoked, so a PR-editable
+# payload can never reach the execution seam. The behavior probe executes ONLY
+# this canonical fixture (or the finite test-owned variants below), never the
+# extracted workflow scalar.
+# ---------------------------------------------------------------------------
+AUDITED_TARGETED_RUN = "\n".join([
+    'if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then',
+    '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); ' +
+    'print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", ' +
+    '"-q", *tests], check=True)\'',
+    '  if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then',
+    '    if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then',
+    '      echo "Selection collapsed to the selector meta-guard — also running collect-only smoke ' +
+    '(import/syntax across suite)"',
+    '      echo "::warning title=Unit Tests selection collapsed to the selector ' +
+    'meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted ' +
+    'test file, tests/ support module, or a selector-development diff); that suite ran its assertions ' +
+    'and the full-tree collect-only smoke ran in addition (issue #1454)"',
+    '      {',
+    '        echo "## Unit Tests: selection collapsed to the selector meta-guard"',
+    '        echo ""',
+    '        echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."',
+    '        echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"',
+    '        echo "check across the whole suite) ran in addition, because a diff of this shape can"',
+    '        echo "break cross-test imports that the targeted run never touches."',
+    '      } >> "$GITHUB_STEP_SUMMARY"',
+    '    else',
+    '      echo "Selector-development diff — also running collect-only smoke (import/syntax across ' +
+    'suite)"',
+    '      echo "::warning title=Unit Tests selector-development diff::select_ci_tests.py or its suite ' +
+    'changed; the targeted selection ran its assertions and the full-tree collect-only smoke ran in ' +
+    'addition (issue #1454)"',
+    '      {',
+    '        echo "## Unit Tests: selector-development diff"',
+    '        echo ""',
+    '        echo "select_ci_tests.py or tests/test_select_ci_tests.py changed; the targeted selection"',
+    '        echo "ran its assertions and the full-tree collect-only smoke (import/syntax check across"',
+    '        echo "the whole suite) ran in addition, because a diff of this shape can break cross-test"',
+    '        echo "imports that the targeted run never touches."',
+    '      } >> "$GITHUB_STEP_SUMMARY"',
+    '    fi',
+    '    # Redirect, never pipe: see the count == 0 branch below.',
+    '    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then',
+    '      tail -n 5 collect-only.log',
+    '    else',
+    '      cat collect-only.log',
+    '      exit 1',
+    '    fi',
+    '  fi',
+    'else',
+    '  echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"',
+    '  echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files ' +
+    'for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"',
+    '  {',
+    '    echo "## Unit Tests: collect-only smoke (0 assertions executed)"',
+    '    echo ""',
+    '    echo "select_ci_tests.py selected no backend test files for this PR diff."',
+    '    echo "The suite was only collected (import/syntax check); no test assertions ran."',
+    '  } >> "$GITHUB_STEP_SUMMARY"',
+    '  # Redirect, never pipe: `bash -e` runs without pipefail, so piping',
+    "  # pytest into tail would report the tail's exit code and turn a",
+    '  # collection failure green. Collection output is ~12k lines.',
+    '  if pytest tests/ -q --collect-only > collect-only.log 2>&1; then',
+    '    tail -n 5 collect-only.log',
+    '  else',
+    '    cat collect-only.log',
+    '    exit 1',
+    '  fi',
+    'fi',
+]) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Finite trusted collection variants (C).
+#
+# A closed mapping of TEST-OWNED finite behaviors, each built from the audited
+# canonical fixture by a named mutation function/constant. `_collection_consumer_violations`
+# accepts ONLY these names; an unknown name is rejected with a named violation
+# and never executed. `_run_probe_script` also accepts only a name from this
+# mapping — no arbitrary run string can ever enter the probe.
+#
+# The semantic variants reproduce, in a controlled test-owned fixture, the exact
+# A1-A5 behavioral defects that the corresponding workflow-source mutant would
+# introduce, WITHOUT executing any PR-editable payload.
+# ---------------------------------------------------------------------------
+_TRUSTED_COLLECTION_VARIANTS: dict[str, Callable[[str], str]] = {
+    # The canonical audited fixture. Metadata + identity must pass and the
+    # canonical program executes under all four controlled scenarios (C0-C3).
+    "live": lambda run: run,
+    # A1 — the canonical collection condition survives only as a comment and
+    # the live condition is `if false`; collection never runs when required.
+    "condition_dead": lambda run: run.replace(
+        'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then',
+        '# if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then\n  if false; then',
+    ),
+    # A1 — the collection condition becomes a literal `if true`; collection
+    # would run even when not required.
+    "condition_always_true": lambda run: run.replace(
+        'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then',
+        "if true; then",
+    ),
+    # A2 — the targeted command survives only as a comment and executes AFTER
+    # the complete collection branch (collection-first masks targeted failure).
+    "reorder": lambda run: _reorder_trusted_variant(run),
+    # A3 — the exact collect token survives only in a comment; the branch is a
+    # no-op and collection never executes.
+    "no_op_collect": lambda run: run.replace(
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then",
+        "if true; then # pytest tests/ -q --collect-only > collect-only.log 2>&1",
+    ),
+    # A4 — shell quote concatenation emits `0 assertions` with no contiguous
+    # source substring, on stdout.
+    "zero_assertions_stdout": lambda run: run.replace(
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
+        'echo "Selector-development diff — 0 " \'assertions\' " (import/syntax across suite)"',
+    ),
+    # A4 — `0 assertions` emitted to stderr.
+    "zero_assertions_stderr": lambda run: run.replace(
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
+        'echo "Selector-development diff — 0 assertions executed" >&2',
+    ),
+    # A4 — `0 assertions` appended to GITHUB_STEP_SUMMARY in the C1 branch.
+    "zero_assertions_summary": lambda run: run.replace(
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"\n'
+        '        echo "0 assertions executed" >> "$GITHUB_STEP_SUMMARY"',
+    ),
+    # A5 — the scoped `exit 1` survives only in an unreachable `if false`
+    # branch; a real collection failure returns zero.
+    "dead_exit": lambda run: run.replace(
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "    fi\n"
+        "    if false; then\n"
+        "      exit 1\n"
+        "    fi",
+    ),
+    # A5 — the scoped failure-path `cat collect-only.log` is deleted while
+    # `exit 1` stays; the job fails but the log is never emitted.
+    "missing_log": lambda run: run.replace(
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      exit 1\n"
+        "    fi",
+    ),
+    # A5 — an unconditional `exit 1` after the successful collect branch makes
+    # a successful run fail (success-path forced failure).
+    "forced_success_failure": lambda run: run.replace(
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "      exit 1\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+    ),
+    # A2/A3 — an `exit 0` after the meta=true label makes C2 skip collection.
+    "meta_early_exit": lambda run: run.replace(
+        'echo "Selection collapsed to the selector meta-guard — '
+        'also running collect-only smoke (import/syntax across suite)"',
+        'echo "Selection collapsed to the selector meta-guard — '
+        'also running collect-only smoke (import/syntax across suite)"\n              exit 0',
+    ),
+    # A2 — an extra real targeted python invocation inside the collect-failure
+    # `else` adds a third pytest event in C3.
+    "c3_extra_targeted": lambda run: run.replace(
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+        "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
+        "      tail -n 5 collect-only.log\n"
+        "    else\n"
+        "      "
+        + "python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
+        'subprocess.run(["pytest", "-q", *tests], check=True)\''
+        + "\n"
+        "      cat collect-only.log\n"
+        "      exit 1\n"
+        "    fi",
+    ),
+    # A4 label pin — the observable selector-development label is generic.
+    "selector_label_replaced": lambda run: run.replace(
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
+        'echo "collection smoke"',
+    ),
+    # A4 label pin — the observable collapsed meta-guard label is generic.
+    "meta_label_replaced": lambda run: run.replace(
+        'echo "Selection collapsed to the selector meta-guard — '
+        'also running collect-only smoke (import/syntax across suite)"',
+        'echo "collection smoke"',
+    ),
+    # Closed-PATH proof — a trusted fixture that invokes an ambient-only
+    # executable; must be command-not-found (status 127) in the closed PATH.
+    "ambient_command": lambda run: "if true; then\n  unique_ambient_marker_xyz\nfi",
+    # Controlled descendant cleanup on TIMEOUT — starts a background child,
+    # records its PID, then stays alive forever so the probe times out and the
+    # new process group (including the child) must be killed.
+    "descendant_timeout": lambda run: (
+        "python -c 'import subprocess, os; "
+        'p = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"]); '
+        'open(os.environ["CI_PROBE_DESCENDANT_PID"],"w").write(str(p.pid))\'\n'
+        "python -c 'import time; time.sleep(300)'\n"
+    ),
+    # Controlled descendant cleanup on SUCCESS — starts a background child with
+    # its stdio detached (so the probe's pipe EOF resolves when the parent
+    # exits), records its PID, then the parent exits cleanly (0); the finally
+    # cleanup must still kill the surviving descendant.
+    "descendant_success": lambda run: (
+        "python -c 'import subprocess, os; "
+        'p = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"], '
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        'open(os.environ["CI_PROBE_DESCENDANT_PID"],"w").write(str(p.pid))\'\n'
+        "exit 0\n"
+    ),
+}
+
+
+def _reorder_trusted_variant(run: str) -> str:
+    """A2 trusted variant: comment the targeted line and move it after the branch."""
+    python_line = (
+        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
+        'subprocess.run(["pytest", "-q", *tests], check=True)\''
+    )
+    condition = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then'
+    branch_start = run.index(condition)
+    commented = run.replace(python_line, "# " + python_line.strip(), 1)
+    insert_at = commented.index("\n  else\n", branch_start)
+    return commented[:insert_at] + "\n" + python_line + commented[insert_at:]
+
+# The stub's unique full-tree-collection failure sentinel. The scoped failure
+# path must `cat collect-only.log` so this sentinel lands in the captured step
+# output; C3's log-emission check is the proof that the log was actually shown.
+COLLECTION_FAILURE_SENTINEL = "collect-only failure sentinel"
+
+# The absolute bash the probe launches (resolved from the PARENT environment,
+# so the child's closed PATH cannot break the launcher). Also the shebang for
+# the stub executables, so they never depend on an ambient PATH lookup.
+_PROBE_BASH = "/bin/bash"
+
+# Bounded post-timeout drain (Phase 6.2 P1 round-2): every `communicate` call
+# after a timeout must carry a SHORT FINITE timeout so a child that ignores
+# termination can never block the probe indefinitely. The test-owned trusted
+# fixtures need no graceful shutdown, so the group is SIGKILLed immediately on
+# timeout and drained with this bound; if a drain still cannot finish, the probe
+# returns a stable named cleanup-failure status instead of waiting forever.
+_PROBE_DRAIN_TIMEOUT = 5.0
+
+# Stable status reported when the new process group cannot be drained within the
+# finite bound even after repeated kills (never an unbounded wait).
+_PROBE_CLEANUP_FAILURE_STATUS = 125
+
+# Expected observable pytest argv: the targeted invocation the python -c line
+# builds from TARGETED_TESTS_JSON, and the exact full-tree collect invocation.
+TARGETED_ARGV = ("-q", "tests/test_a.py")
+COLLECT_ARGV = ("tests/", "-q", "--collect-only")
+
+# The exact observable labels the scoped collection branch must emit: C1 (the
+# selector-development diff) and C2 (the collapsed meta-guard). Pinned on the
+# emitted stdout/stderr, never on source tokens.
+_COLLECTION_SELECTOR_DEV_LABEL = (
+    "Selector-development diff — also running collect-only smoke (import/syntax across suite)"
+)
+_COLLECTION_META_GUARD_LABEL = (
+    "Selection collapsed to the selector meta-guard — also running collect-only smoke "
+    "(import/syntax across suite)"
+)
+
+
+def _substitute_collection_expressions(run: str, count: str, smoke: str, meta: str) -> str:
+    """Substitute all three GitHub output expressions with the given literals."""
+    runnable = run
+    for expression, value in zip(
+        _COLLECTION_EXPRESSIONS,
+        (count, smoke, meta),
+        strict=True,
+    ):
+        runnable = runnable.replace(expression, value)
+    return runnable
+
+
+def _probe_decode(value: bytes | str | None) -> str:
+    """Normalize subprocess output to ``str`` (bytes decode with replacement)."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _probe_events_from_file(events_file: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse the stub-written events file into ordered ``(kind, argv)`` pairs."""
+    events: list[tuple[str, tuple[str, ...]]] = []
+    if not events_file.is_file():
+        return events
+    for line in events_file.read_text(encoding="utf-8").splitlines():
+        if line == "collect-only failure":
+            events.append(("collect-only failure", ()))
+        elif line.startswith("pytest argv:"):
+            events.append(("pytest", tuple(line[len("pytest argv:"):].strip().split())))
+    return events
+
+
+def _probe_descendant_pid_gone(pid: int, *, deadline: float) -> bool:
+    """Boundedly prove a PID is gone (``os.kill(pid, 0)`` → ProcessLookupError).
+
+    Polls until ``deadline`` (monotonic seconds). A zombie that has not yet been
+    reaped still answers ``kill(pid, 0)``; after the whole new process group is
+    killed the child is reparented to init/launchd, which reaps it promptly, so
+    a short bounded poll is deterministic in this environment. ``PermissionError``
+    (PID exists but is not ours) counts as not gone.
+    """
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
+def _run_probe_script(
+    trusted_variant: str,
+    *,
+    count: str,
+    smoke: str,
+    meta: str,
+    collect_fails: bool,
+    tmp: Path,
+    timeout: float = 30.0,
+) -> tuple[list[tuple[str, tuple[str, ...]]], str, str, str, int]:
+    """Hermetically execute a TRUSTED collection variant in ``tmp``.
+
+    Accepts ONLY a trusted variant NAME from the closed
+    ``_TRUSTED_COLLECTION_VARIANTS`` mapping — never an arbitrary run string.
+    The resolved runnable is built from the audited canonical fixture by a
+    test-owned mutation, so no PR-editable workflow payload can ever enter this
+    execution seam.
+
+    Returns ``(events, stdout, stderr, step_summary, exit_status)``. ``events``
+    is an ordered list of ``(kind, argv)`` pairs written by the stub ``pytest``
+    on ``PATH``. The child environment's ``PATH`` is CLOSED to the temporary
+    ``bin`` only. The allowlisted external commands the audited scalar needs
+    are provided as narrow stubs in that ``bin``: ``python`` (forwards to the
+    interpreter running the suite), ``pytest`` (records argv; with
+    ``collect_fails`` it fails ONLY ``--collect-only`` and emits the unique
+    failure sentinel), ``cat`` and ``tail`` (safe single-argument readers).
+    Bash runs with GitHub's failure policy (``-e -o pipefail``).
+
+    The child runs in a NEW PROCESS GROUP (``start_new_session=True``). On
+    timeout the ENTIRE group is killed (immediately with SIGKILL — the trusted
+    test-owned fixtures need no graceful shutdown) and drained with a SHORT
+    FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after a
+    second group kill plus a direct-child fallback, the probe returns a stable
+    named cleanup-failure status (``_PROBE_CLEANUP_FAILURE_STATUS``) instead of
+    blocking forever. A ``finally`` path kills any remaining group descendants
+    on success, error, AND timeout, so a background child can never outlive the
+    probe. Only ``ProcessLookupError`` (group already gone) is ignored; no other
+    cleanup failure is masked. The parent test runner's process group is never
+    touched.
+    """
+    if trusted_variant not in _TRUSTED_COLLECTION_VARIANTS:
+        raise ValueError(f"unknown trusted collection variant: {trusted_variant}")
+    runnable = _TRUSTED_COLLECTION_VARIANTS[trusted_variant](AUDITED_TARGETED_RUN)
+    runnable = _substitute_collection_expressions(runnable, count, smoke, meta)
+
+    fail_collect = (
+        f'  echo "{COLLECTION_FAILURE_SENTINEL}"\n'
+        '  echo "collect-only failure" >> "$CI_PROBE_EVENTS"\n'
+        "  exit 1\n"
+    )
+    stub = (
+        "#!/bin/bash\n"
+        "echo \"pytest argv: $*\" >> \"$CI_PROBE_EVENTS\"\n"
+        "if [[ \"$*\" == *\"--collect-only\"* ]]; then\n"
+        '  echo "collect-only run"\n'
+        '  echo "= 0 tests collected in 0.00s ="\n'
+        + (fail_collect if collect_fails else "  exit 0\n")
+        + "fi\n"
+        'echo "targeted run"\n'
+        'echo "1 passed in 0.01s"\n'
+        "exit 0\n"
+    )
+    events: list[tuple[str, tuple[str, ...]]] = []
+    (tmp / "bin").mkdir()
+    (tmp / "bin" / "pytest").write_text(stub, encoding="utf-8")
+    os.chmod(tmp / "bin" / "pytest", 0o755)
+    (tmp / "bin" / "python").write_text(
+        "#!/bin/bash\n" + f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    os.chmod(tmp / "bin" / "python", 0o755)
+    # Narrow single-argument stubs for the only external readers the live
+    # scalar invokes (`cat collect-only.log`, `tail -n 5 collect-only.log`).
+    # They read ONLY from the temp cwd; `-n 5` is ignored for the tiny log.
+    # The internal read uses an ABSOLUTE `/bin/cat` so it never needs PATH.
+    (tmp / "bin" / "cat").write_text(
+        "#!/bin/bash\n"
+        'for f in "$@"; do\n'
+        '  if [[ "$f" == -* ]]; then continue; fi\n'
+        '  if [[ -f "$f" ]]; then /bin/cat "$f"; fi\n'
+        "done\n",
+        encoding="utf-8",
+    )
+    os.chmod(tmp / "bin" / "cat", 0o755)
+    (tmp / "bin" / "tail").write_text(
+        "#!/bin/bash\n"
+        'for f in "$@"; do\n'
+        '  if [[ "$f" == -* ]]; then continue; fi\n'
+        '  if [[ -f "$f" ]]; then /bin/cat "$f"; fi\n'
+        "done\n",
+        encoding="utf-8",
+    )
+    os.chmod(tmp / "bin" / "tail", 0o755)
+    events_file = tmp / "events"
+    summary_file = tmp / "summary.md"
+    descendant_pid_file = tmp / "descendant.pid"
+    script = tmp / "probe.sh"
+    script.write_text(runnable, encoding="utf-8")
+    env = {
+        "PATH": str(tmp / "bin"),
+        "CI_PROBE_EVENTS": str(events_file),
+        "CI_PROBE_DESCENDANT_PID": str(descendant_pid_file),
+        "GITHUB_STEP_SUMMARY": str(summary_file),
+        "TARGETED_TESTS_JSON": '["tests/test_a.py"]',
+    }
+    proc = subprocess.Popen(
+        [_PROBE_BASH, "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)],
+        cwd=tmp,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    status = 0
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            status = proc.returncode
+        except subprocess.TimeoutExpired:
+            # Kill the ENTIRE new process group and drain with a bounded,
+            # finite timeout on EVERY drain call. A child that ignores
+            # termination can never block the probe: after a second group kill
+            # plus a direct-child kill fallback, an undrainable group returns a
+            # stable named cleanup-failure status (never an unbounded wait).
+            stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
+    finally:
+        # On EVERY exit (success, error, timeout) terminate any background
+        # descendants still alive in the new process group. Ignore only
+        # ProcessLookupError (the group is already gone); do not silently mask
+        # other cleanup failures.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    events = _probe_events_from_file(events_file)
+    summary = summary_file.read_text(encoding="utf-8") if summary_file.is_file() else ""
+    return events, _probe_decode(stdout), _probe_decode(stderr), summary, status
+
+
+def _killpg_ignore_missing(pgid: int, sig: int) -> None:
+    """``os.killpg(pgid, sig)`` ignoring only ProcessLookupError."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _kill_probe_group_and_drain(
+    proc: subprocess.Popen,
+    *,
+    timeout: float,
+) -> tuple[bytes | str | None, bytes | str | None, int]:
+    """Kill the probe's ENTIRE new process group and drain it with finite bounds.
+
+    Every ``communicate`` call carries a short finite ``_PROBE_DRAIN_TIMEOUT``
+    (never ``None``), so a child that ignores termination cannot block the probe
+    indefinitely. The trusted test-owned fixtures need no graceful shutdown, so
+    the group is SIGKILLed immediately on the first drain.
+
+    Sequence:
+    1. ``killpg(SIGKILL)`` the whole group, then a bounded ``communicate``.
+    2. If it still times out: ``killpg(SIGKILL)`` again (ProcessLookupError only
+       ignored) AND ``proc.kill()`` as a direct-child fallback, then a second
+       bounded ``communicate``.
+    3. If it STILL cannot drain: return the partial output and the stable
+       ``_PROBE_CLEANUP_FAILURE_STATUS`` (125) — never an unbounded wait.
+
+    The caller's ``finally`` still SIGKILLs the group on every exit.
+    """
+    def _bounded_communicate() -> tuple[bytes | str | None, bytes | str | None] | None:
+        # Bounded drain: never pass timeout=None.
+        return proc.communicate(timeout=_PROBE_DRAIN_TIMEOUT)
+
+    _killpg_ignore_missing(proc.pid, signal.SIGKILL)
+    try:
+        stdout, stderr = _bounded_communicate()
+        return stdout, stderr, 124
+    except subprocess.TimeoutExpired as first:
+        # First bounded drain still blocked — kill the group again and the
+        # direct child, then one more bounded drain.
+        _killpg_ignore_missing(proc.pid, signal.SIGKILL)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = _bounded_communicate()
+            return stdout, stderr, 124
+        except subprocess.TimeoutExpired:
+            # Group still cannot be drained within the finite bound: report a
+            # stable named cleanup failure rather than blocking forever.
+            partial_out = _probe_decode(first.output)
+            partial_err = _probe_decode(first.stderr)
+            return partial_out, partial_err, _PROBE_CLEANUP_FAILURE_STATUS
+
+
+def _probe_collection_consumer(
+    trusted_variant: str,
+    *,
+    count: str,
+    smoke: str,
+    meta: str,
+    collect_fails: bool,
+    timeout: float = 30.0,
+) -> tuple[list[tuple[str, tuple[str, ...]]], str, str, str, int]:
+    """Execute a trusted collection variant hermetically; ``(events, stdout, stderr, summary, status)``.
+
+    Thin wrapper over ``_run_probe_script`` in a fresh temporary working
+    directory. Accepts only a trusted variant NAME. Output is always ``str``
+    (bytes decoded with replacement); a timeout is a status-124 result, never a
+    crash. See ``_run_probe_script``.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        return _run_probe_script(
+            trusted_variant,
+            count=count,
+            smoke=smoke,
+            meta=meta,
+            collect_fails=collect_fails,
+            tmp=Path(td),
+            timeout=timeout,
+        )
+
+
+def _run_scalar_violations(trusted_variant: str) -> list[str]:
+    """A1-A5 as properties of a TRUSTED variant's OBSERVABLE execution.
+
+    The named trusted variant (resolved from the closed test-owned mapping,
+    built from the audited canonical fixture) is executed with a hermetic
+    controlled probe (see ``_probe_collection_consumer``) in FOUR controlled
+    scenarios:
+
+    - C0: count=1, smoke=false, meta=false, targeted succeeds — collection must
+      NOT run; this is the A1 condition proof.
+    - C1: count=1, smoke=true, meta=false, targeted+collect succeed — targeted
+      before exact collect, status 0, no ``0 assertions``, selector-development
+      label observable.
+    - C2: count=1, smoke=true, meta=true, targeted+collect succeed — same plus
+      the collapsed meta-guard label observable.
+    - C3: count=1, smoke=true, meta=false, targeted succeeds / collect FAILS —
+      targeted before exact collect, the failure log is actually emitted (the
+      stub's unique sentinel lands in captured output via ``cat
+      collect-only.log``), and the job exits nonzero.
+
+    This is deliberately NOT a general shell parser — the trusted program
+    itself is the authority and controlled execution is the proof, so comments,
+    quoted fragments, no-op branches, reordering, and unreachable exits cannot
+    satisfy the contract. A missing/renamed GitHub expression is a named
+    condition violation, never a silent pass.
+
+    A1: C0 must not collect while C1/C3 must — a condition that cannot run on
+        ``collection_smoke_required == true`` is a violation.
+    A2: C1/C2/C3 must observe the exact targeted-then-collect event sequence
+        (any extra/missing/reordered pytest execution is a violation).
+    A3: C1/C2/C3 must observe the exact full-tree collect invocation.
+    A4: C1/C2 combined stdout+stderr+summary must not claim ``0 assertions``.
+    A5: C3 must emit the failure sentinel through captured output AND exit
+        nonzero; C1/C2 must exit 0 so a success-path forced failure is caught.
+        The observable labels must be pinned too: C1 must emit the exact
+        selector-development label and C2 the exact collapsed meta-guard label.
+    """
+    if trusted_variant not in _TRUSTED_COLLECTION_VARIANTS:
+        return ["unknown trusted collection variant"]
+    runnable = _TRUSTED_COLLECTION_VARIANTS[trusted_variant](AUDITED_TARGETED_RUN)
     violations: list[str] = []
 
-    # A1 — condition key/true sense. Exact marker match on the outer condition.
-    condition_line = 'if [ "${{ steps.targeted.outputs.%s }}" = "true" ]; then' % COLLECTION_SMOKE_KEY
-    if condition_line not in targeted_job:
+    if any(expression not in runnable for expression in _COLLECTION_EXPRESSIONS):
+        # All three known expressions must exist for substitution; a variant
+        # that drops or renames one cannot run the branch on the canonical
+        # condition.
         violations.append(
             f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
         )
-        # The branch cannot be located; deeper scoped predicates cannot be
-        # checked. Report the scoped-branch predicates as violated too so the
-        # mutant is fully named rather than partially green.
-        violations.append("collection branch must run `pytest tests/ -q --collect-only` inside it")
-        violations.append("collection branch must not claim zero assertions (targeted tests already ran)")
-        violations.append("collection failure must exit nonzero")
         return violations
 
-    collection_block = _targeted_job_collection_block(targeted_job)
-    if collection_block == "":
-        violations.append(
-            f"collection branch must be a locatable `if ... {COLLECTION_SMOKE_KEY} == true` block"
+    def probe(count: str, smoke: str, meta: str, *, collect_fails: bool):
+        return _probe_collection_consumer(
+            trusted_variant, count=count, smoke=smoke, meta=meta, collect_fails=collect_fails
         )
-        return violations
 
-    # A2 — targeted pytest runs before the collection branch.
-    targeted_marker = 'subprocess.run(["pytest", "-q", *tests], check=True)'
-    targeted_idx = targeted_job.find(targeted_marker)
-    branch_idx = targeted_job.find(COLLECTION_SMOKE_MARKER)
-    if targeted_idx == -1 or branch_idx == -1 or targeted_idx > branch_idx:
+    def pytest_events(events) -> tuple[str, ...]:
+        return tuple(a for kind, a in events if kind == "pytest")
+
+    # C0 — smoke=false: no collection may run; exact targeted once, status 0.
+    c0_events, _, _, _, c0_status = probe("1", "false", "false", collect_fails=False)
+    c0_pytest = pytest_events(c0_events)
+    if c0_pytest != (TARGETED_ARGV,) or c0_status != 0:
+        violations.append(
+            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
+        )
+
+    # C1 — smoke=true, meta=false, success.
+    c1_events, c1_output, c1_stderr, c1_summary, c1_status = probe(
+        "1", "true", "false", collect_fails=False
+    )
+    c1_pytest = pytest_events(c1_events)
+    c1_combined = c1_output + "\n" + c1_stderr + "\n" + c1_summary
+
+    # C2 — smoke=true, meta=true, success.
+    c2_events, c2_output, c2_stderr, c2_summary, c2_status = probe(
+        "1", "true", "true", collect_fails=False
+    )
+    c2_pytest = pytest_events(c2_events)
+    c2_combined = c2_output + "\n" + c2_stderr + "\n" + c2_summary
+
+    # A5 — C3 must fail closed: emitted log AND nonzero status. Probed here so
+    # the A1 gate check below can require C3 to collect.
+    c3_events, c3_output, c3_stderr, c3_summary, c3_status = probe(
+        "1", "true", "false", collect_fails=True
+    )
+    c3_pytest = pytest_events(c3_events)
+    c3_combined = c3_output + "\n" + c3_stderr + "\n" + c3_summary
+
+    # A timeout (124) OR an undrainable cleanup failure (125) means the probe
+    # did not complete; both are stable named violations, never an unbounded
+    # wait or a crash.
+    if any(
+        status == 124 or status == _PROBE_CLEANUP_FAILURE_STATUS
+        for status in (c0_status, c1_status, c2_status, c3_status)
+    ):
+        violations.append("collection-consumer probe must complete")
+
+    # A1 — the true-sense condition must gate collection: C0 must NOT collect
+    # while C1/C3 MUST. A comment/dead/always-true/inverted condition cannot
+    # run the branch on `collection_smoke_required == true`.
+    if c1_pytest != (TARGETED_ARGV, COLLECT_ARGV) or c3_pytest != (TARGETED_ARGV, COLLECT_ARGV):
+        violations.append(
+            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
+        )
+
+    # A2 — ordering/exactness: the EXACT sequence targeted-then-collect in C1,
+    # C2 and C3. Any extra/missing/reordered pytest execution is a violation.
+    if (
+        c1_pytest != (TARGETED_ARGV, COLLECT_ARGV)
+        or c2_pytest != (TARGETED_ARGV, COLLECT_ARGV)
+        or c3_pytest != (TARGETED_ARGV, COLLECT_ARGV)
+    ):
         violations.append("targeted pytest must run before the collection-smoke branch")
 
-    # A3 — scoped full-tree collect command.
-    if "pytest tests/ -q --collect-only" not in collection_block:
+    # A3 — the exact full-tree collect invocation must execute in C1 and C2.
+    if (
+        COLLECT_ARGV not in c1_pytest
+        or COLLECT_ARGV not in c2_pytest
+        or COLLECT_ARGV not in c3_pytest
+    ):
         violations.append("collection branch must run `pytest tests/ -q --collect-only` inside it")
 
-    # A4 — truthful label: no zero-assertion wording in the scoped branch.
-    if "0 assertions" in collection_block:
+    # A4 — C1/C2 combined stdout+stderr+summary must not claim zero assertions.
+    combined = c1_combined + "\n" + c2_combined
+    if re.sub(r"\s+", " ", "0 assertions") in re.sub(r"\s+", " ", combined):
         violations.append("collection branch must not claim zero assertions (targeted tests already ran)")
 
-    # A5 — fail-closed failure propagation inside the scoped branch.
-    if "cat collect-only.log" not in collection_block:
+    # A5 — C3 must fail closed: emitted log AND nonzero status.
+    if COLLECTION_FAILURE_SENTINEL not in c3_combined:
         violations.append("collection failure branch must emit the collected log")
-    if "exit 1" not in collection_block:
+    if c3_status == 0:
         violations.append("collection failure must exit nonzero")
 
+    # Observable labels — C1 must emit the selector-development label and C2
+    # the collapsed meta-guard label (missing or generic replacements are
+    # violations, not just source-token checks).
+    if _COLLECTION_SELECTOR_DEV_LABEL not in c1_output and _COLLECTION_SELECTOR_DEV_LABEL not in c1_stderr:
+        violations.append("selector-development collection label must be emitted")
+    if _COLLECTION_META_GUARD_LABEL not in c2_output and _COLLECTION_META_GUARD_LABEL not in c2_stderr:
+        violations.append("meta-guard collection label must be emitted")
+
+    # C1/C2 must exit 0 — a success-path forced failure (unconditional exit in
+    # the successful branch) is caught here.
+    if c1_status != 0 or c2_status != 0:
+        violations.append("collection success must exit zero")
+
+    return violations
+
+
+def _targeted_step_and_job(workflow_text: str) -> tuple[dict | None, dict | None, list[str]]:
+    """Parse the FULL workflow and return ``(step, job_data, violations)``.
+
+    The workflow is parsed with ``yaml.safe_load`` and ``jobs`` is the
+    authority. PyYAML 1.1 may represent the top-level ``on`` as a boolean, but
+    the parsed ``on`` identity is never used and the whole workflow is never
+    dumped. Exactly one ``unit-test-targeted`` job mapping is required; the
+    named step is located by its exact name. Returns ``(None, None, [violation])``
+    when the job/step cannot be located, so constructible mutants never crash
+    the helper.
+    """
+    try:
+        parsed = yaml.safe_load(workflow_text)
+    except yaml.YAMLError:
+        return None, None, ["targeted workflow must parse as YAML"]
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("jobs"), dict):
+        return None, None, ["targeted workflow must parse to a mapping containing jobs"]
+    jobs = parsed["jobs"]
+    targeted_keys = [k for k in jobs if k == "unit-test-targeted"]
+    if len(targeted_keys) != 1:
+        return None, None, ["targeted workflow must contain exactly one unit-test-targeted job"]
+    job = jobs["unit-test-targeted"]
+    if not isinstance(job, dict):
+        return None, None, ["unit-test-targeted job must be a mapping"]
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return None, None, ["targeted job must declare a steps list"]
+    named = [s for s in steps if isinstance(s, dict) and s.get("name") == TARGETED_COMMAND_STEP_NAME]
+    if not named:
+        return None, None, [
+            f"targeted job must have a step named `{TARGETED_COMMAND_STEP_NAME}` with a run command"
+        ]
+    if len(named) > 1:
+        return None, None, [
+            f"targeted job must have exactly one step named `{TARGETED_COMMAND_STEP_NAME}`"
+        ]
+    return named[0], job, []
+
+
+def _targeted_metadata_violations(workflow_text: str) -> list[str]:
+    """Named violations of the targeted job's effective execution metadata.
+
+    Operates on the FULL workflow source (parsed with ``yaml.safe_load``) so
+    inherited workflow/job ``defaults.run`` and workflow-level ``env`` cannot
+    be omitted. Rejects any metadata that could skip the oracle, change the
+    checkout identity, or make failure non-blocking:
+
+    - exactly one ``unit-test-targeted`` job and exactly one named step with a
+      non-empty string run;
+    - ``runs-on == ubuntu-latest`` and no job ``container``;
+    - the named step ``env`` is EXACTLY ``{TARGETED_TESTS_JSON: ${{ ... }}}``;
+    - the named step ``if`` is absent;
+    - named step and job ``continue-on-error`` absent or exactly boolean false;
+    - named step ``shell``/``working-directory`` absent;
+    - targeted job and workflow-level ``defaults.run.shell``/``.working-directory``
+      absent (or no defaults);
+    - targeted job ``env`` and workflow-level ``env`` absent/empty (so
+      BASH_ENV/PYTHONPATH/PATH cannot change the audited context);
+    - the targeted job declares ``needs: changes`` and its event gate
+      normalizes to exactly
+      ``needs.changes.outputs.backend == 'true' && github.event_name == 'pull_request'``
+      — removing the prerequisite or changing the gate (e.g. ``if: false``, a
+      push-only gate) would skip or de-scope the required PR Unit Tests job.
+
+    Direct job timeout/cancellation fields are separately fail-closed (a short
+    timeout fails the job, it cannot make it green), so no timeout metadata
+    requirement is added and none is claimed to prove shell propagation.
+    """
+    step, job, parse_violations = _targeted_step_and_job(workflow_text)
+    if parse_violations:
+        return list(parse_violations)
+    violations: list[str] = []
+
+    if job.get("needs") != TARGETED_NEEDS:
+        violations.append("unit-test-targeted job must declare `needs: changes`")
+
+    gate = job.get("if")
+    if not isinstance(gate, str):
+        violations.append("unit-test-targeted job must declare an `if` event gate block")
+    elif _normalize_ws(gate) != _normalize_ws(TARGETED_GATE_IF_BLOCK):
+        violations.append(
+            "unit-test-targeted job gate must be exactly "
+            "backend == 'true' && pull_request"
+        )
+
+    if job.get("runs-on") != TARGETED_RUNS_ON:
+        violations.append("unit-test-targeted job must run on ubuntu-latest")
+    if job.get("container") is not None:
+        violations.append("unit-test-targeted job must not declare a container")
+
+    run = step.get("run")
+    if not isinstance(run, str) or not run.strip():
+        violations.append(
+            f"targeted job step `{TARGETED_COMMAND_STEP_NAME}` must carry a non-empty run command"
+        )
+
+    if step.get("env") != TARGETED_STEP_ENV_EXPECTED:
+        violations.append(
+            "targeted step env must be exactly "
+            "{TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}}"
+        )
+
+    if step.get("if") is not None:
+        violations.append("targeted step must not carry a conditional `if`")
+
+    for scope, value in (("step", step.get("continue-on-error")), ("job", job.get("continue-on-error"))):
+        if value is True:
+            violations.append(
+                f"targeted {scope} `continue-on-error` must not be enabled"
+            )
+        elif value is not None and value is not False:
+            violations.append(
+                f"targeted {scope} `continue-on-error` must be absent or exactly false"
+            )
+
+    if step.get("shell") is not None:
+        violations.append("targeted step must not override the default shell")
+    if step.get("working-directory") is not None:
+        violations.append("targeted step must not override the default working-directory")
+
+    job_defaults = job.get("defaults")
+    if isinstance(job_defaults, dict) and isinstance(job_defaults.get("run"), dict):
+        job_run_defaults = job_defaults["run"]
+        if "shell" in job_run_defaults:
+            violations.append("targeted job defaults.run must not override the default shell")
+        if "working-directory" in job_run_defaults:
+            violations.append("targeted job defaults.run must not override the default working-directory")
+
+    try:
+        parsed = yaml.safe_load(workflow_text)
+    except yaml.YAMLError:
+        parsed = None
+    workflow_defaults = parsed.get("defaults") if isinstance(parsed, dict) else None
+    if isinstance(workflow_defaults, dict) and isinstance(workflow_defaults.get("run"), dict):
+        wf_run_defaults = workflow_defaults["run"]
+        if "shell" in wf_run_defaults:
+            violations.append("workflow defaults.run must not override the default shell")
+        if "working-directory" in wf_run_defaults:
+            violations.append("workflow defaults.run must not override the default working-directory")
+
+    job_env = job.get("env")
+    if isinstance(job_env, dict) and job_env:
+        violations.append("targeted job must not declare job-level env")
+    workflow_env = parsed.get("env") if isinstance(parsed, dict) else None
+    if isinstance(workflow_env, dict) and workflow_env:
+        violations.append("workflow must not declare workflow-level env")
+
+    return violations
+
+
+def _targeted_identity_violations(workflow_text: str) -> list[str]:
+    """The actual targeted run scalar must EXACTLY match the audited identity.
+
+    Any mismatch (including arbitrary Python, absolute commands, ``$BASH -c``,
+    eval/source, process substitution, or redirection outside the audited
+    program) is a named identity violation. The behavior probe is NEVER invoked
+    on the extracted scalar — only the trusted canonical fixture enters it, so
+    a PR-editable payload cannot execute even when the identity check fires.
+    """
+    step, _, parse_violations = _targeted_step_and_job(workflow_text)
+    if parse_violations:
+        return list(parse_violations)
+    run = step.get("run")
+    if not isinstance(run, str) or not run.strip():
+        return ["targeted step run must match the audited identity"]
+    if run != AUDITED_TARGETED_RUN:
+        return ["targeted step run must match the audited identity"]
+    return []
+
+
+def _collection_consumer_violations(
+    workflow_text: str, *, trusted_variant: str = "live"
+) -> list[str]:
+    """Positive oracle owning ALL FIVE load-bearing predicates (row A).
+
+    Accepts the FULL workflow source text and validates:
+    1. the effective execution metadata (``_targeted_metadata_violations``) —
+       conditions, continuation, env, shell/working-directory, and inherited
+       defaults cannot skip the oracle, change checkout identity, or make
+       failure non-blocking;
+    2. the audited run identity (``_targeted_identity_violations``) — the
+       actual ``Run targeted tests`` scalar must EXACTLY match the independent
+       ``AUDITED_TARGETED_RUN`` constant, and this is reported BEFORE any
+       probe executes;
+    3. the finite trusted behavior probe (``_run_scalar_violations``) — the
+       named ``trusted_variant`` from the closed test-owned mapping is executed
+       in the four controlled scenarios (C0-C3).
+
+    Live state (``trusted_variant="live"``) yields no violations. A semantic
+    mutant mutates the workflow source (so identity/metadata proof bites) AND
+    passes the corresponding finite ``trusted_variant``, so the result carries
+    BOTH the named identity/metadata violation AND the exact A-row behavior
+    violation from the same full helper. An unknown variant name is rejected
+    with a named violation without any execution. Must NOT raise on a
+    missing/renamed job, condition, or malformed workflow: returns named
+    violations.
+    """
+    if trusted_variant not in _TRUSTED_COLLECTION_VARIANTS:
+        return ["unknown trusted collection variant"]
+    violations = _targeted_metadata_violations(workflow_text)
+    violations.extend(_targeted_identity_violations(workflow_text))
+    violations.extend(_run_scalar_violations(trusted_variant))
     return violations
 
 
@@ -3100,9 +4034,11 @@ def test_ci_workflow_consumes_the_collection_smoke_required_output(tmp_path: Pat
     # end. The branch is driven by `collection_smoke_required` (round-1
     # cand-01), so a selector-source two-target selection still runs the smoke.
     # ALL FIVE load-bearing predicates run through ONE positive helper over the
-    # full job text (branch-completeness inventory row A).
-    targeted_job = _targeted_job_block()
-    violations = _collection_consumer_violations(targeted_job)
+    # FULL workflow source (branch-completeness inventory row A). The helper
+    # also enforces the audited run identity and the effective execution
+    # metadata (D6/D7, task 2.10), so the live workflow must be clean.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    violations = _collection_consumer_violations(workflow, trusted_variant="live")
     assert not violations, "collection consumer contract violations:\n  " + "\n  ".join(violations)
 
     # ...and the producing side emits that exact key, read from behavior rather
@@ -3123,32 +4059,53 @@ def _job_block_and_collection(targeted_job: str) -> tuple[str, str]:
 def test_collection_consumer_reds_when_the_condition_key_is_renamed() -> None:
     # Row A1 mutant: renaming the collection_smoke_required key ONLY in the
     # outer condition must yield a named A1 condition violation through the SAME
-    # helper. The branch body (and the count==0 sibling) stay intact.
-    targeted_job, _ = _job_block_and_collection(_targeted_job_block())
+    # full helper. The branch body (and the count==0 sibling) stay intact. The
+    # mutated run scalar trips the audited identity; the `condition_dead`
+    # trusted variant reports the exact A1 condition violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job, _ = _job_block_and_collection(_targeted_job_block(workflow))
     renamed_marker = COLLECTION_SMOKE_MARKER.replace(
         "collection_smoke_required", "renamed_smoke_required"
     )
-    mutated = targeted_job.replace(COLLECTION_SMOKE_MARKER, renamed_marker)
-    assert "renamed_smoke_required" in mutated
-    assert COLLECTION_SMOKE_MARKER not in mutated
+    mutated_block = targeted_job.replace(COLLECTION_SMOKE_MARKER, renamed_marker)
+    assert "renamed_smoke_required" in mutated_block
+    assert COLLECTION_SMOKE_MARKER not in mutated_block
+    mutated_workflow = workflow.replace(targeted_job, mutated_block)
 
-    violations = _collection_consumer_violations(mutated)
+    # The renamed key leaves the canonical condition unsubstitutable, so the
+    # helper reports the exact A1 condition violation.
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="condition_dead")
     joined = "\n".join(violations)
-    assert "collection_smoke_required == true" in joined, f"expected a named A1 violation, got {violations}"
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, (
+        f"expected a named A1 condition violation, got {violations}"
+    )
 
 
 def test_collection_consumer_reds_when_the_condition_true_sense_is_inverted() -> None:
     # Row A1 mutant: changing the true-sense of the outer condition (to `!=`)
-    # must yield a named A1 condition violation through the SAME helper.
-    targeted_job, _ = _job_block_and_collection(_targeted_job_block())
+    # must yield a named A1 condition violation through the SAME full helper.
+    # The `condition_dead` trusted variant reports the exact A1 violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job, _ = _job_block_and_collection(_targeted_job_block(workflow))
     true_cond = COLLECTION_SMOKE_MARKER + ' = "true" ]; then'
     false_cond = COLLECTION_SMOKE_MARKER + ' != "true" ]; then'
-    mutated = targeted_job.replace(true_cond, false_cond)
-    assert ' != "true" ]; then' in mutated
+    mutated_block = targeted_job.replace(true_cond, false_cond)
+    assert ' != "true" ]; then' in mutated_block
+    mutated_workflow = workflow.replace(targeted_job, mutated_block)
 
-    violations = _collection_consumer_violations(mutated)
+    # An inverted sense never runs the branch under the true literal, so the
+    # collect predicate is violated and named as the A1 condition violation.
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="condition_dead")
     joined = "\n".join(violations)
-    assert "collection_smoke_required == true" in joined, f"expected a named A1 violation, got {violations}"
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, (
+        f"expected a named A1 condition violation, got {violations}"
+    )
 
 
 def test_collection_consumer_reds_when_the_collection_branch_moves_before_targeted_pytest() -> None:
@@ -3208,44 +4165,61 @@ def test_collection_consumer_reds_when_the_collection_branch_moves_before_target
     completed = subprocess.run(["bash", "-n"], input=run_scalar, text=True, capture_output=True)
     assert completed.returncode == 0, f"mutated run scalar is not valid shell:\n{completed.stderr}"
 
-    violations = _collection_consumer_violations(mutated)
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="reorder")
     joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
     assert "before the collection-smoke branch" in joined, f"expected a named A2 violation, got {violations}"
 
 
 def test_collection_consumer_reds_when_the_scoped_collect_command_is_removed() -> None:
     # Row A3 mutant: removing ONLY the scoped `pytest tests/ -q --collect-only`
     # command (the count==0 sibling keeps its own copy) must yield a named A3
-    # scoped-command violation through the SAME helper.
-    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    # scoped-command violation through the SAME full helper. The `no_op_collect`
+    # trusted variant reports the exact A3 violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job, block = _job_block_and_collection(_targeted_job_block(workflow))
     assert block.count("pytest tests/ -q --collect-only") == 1
     mutated_block = block.replace("pytest tests/ -q --collect-only", "pytest tests/ --collect-only")
-    mutated = targeted_job.replace(block, mutated_block)
+    mutated_job = targeted_job.replace(block, mutated_block)
     # The count==0 sibling still has the full command.
-    count_zero_region = mutated.split("          else\n", 1)[1] if "          else\n" in mutated else ""
+    count_zero_region = mutated_job.split("          else\n", 1)[1] if "          else\n" in mutated_job else ""
     assert "pytest tests/ -q --collect-only" in count_zero_region
+    mutated_workflow = workflow.replace(targeted_job, mutated_job)
 
-    violations = _collection_consumer_violations(mutated)
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="no_op_collect")
     joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
     assert "pytest tests/ -q --collect-only" in joined, f"expected a named A3 violation, got {violations}"
 
 
 def test_collection_consumer_reds_when_zero_assertions_wording_is_injected_scoped() -> None:
     # Row A4 mutant: injecting `0 assertions` wording ONLY into the scoped
     # branch (the count==0 sibling already carries it) must yield a named A4
-    # truthful-label violation through the SAME helper.
-    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    # truthful-label violation through the SAME full helper. The
+    # `zero_assertions_stdout` trusted variant reports the exact A4 violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job, block = _job_block_and_collection(_targeted_job_block(workflow))
     assert "0 assertions" not in block
     mutated_block = block.replace(
         'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"',
         'echo "Selector-development diff — 0 assertions executed"',
     )
-    mutated = targeted_job.replace(block, mutated_block)
-    mutated_block_new = _targeted_job_collection_block(mutated)
+    mutated_job = targeted_job.replace(block, mutated_block)
+    mutated_block_new = _targeted_job_collection_block(mutated_job)
     assert "0 assertions" in mutated_block_new
+    mutated_workflow = workflow.replace(targeted_job, mutated_job)
 
-    violations = _collection_consumer_violations(mutated)
+    # The injected wording is echoed to the step log in C1, so the truthful-label
+    # predicate must name the A4 violation through the SAME helper.
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="zero_assertions_stdout")
     joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
     assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
 
 
@@ -3253,23 +4227,908 @@ def test_collection_consumer_reds_when_the_scoped_exit_one_is_deleted() -> None:
     # Row A5 mutant (cand-r2-01): the fail-closed `exit 1` inside the
     # collection_smoke_required branch is load-bearing. A mutant deleting ONLY
     # that scoped `exit 1` (the count==0 sibling keeps its own `exit 1`) must
-    # be rejected by the SAME positive helper with a named nonzero-exit
-    # violation. Without it, bash returns success from `cat collect-only.log`
-    # and hides a collection failure.
-    targeted_job, block = _job_block_and_collection(_targeted_job_block())
+    # be rejected by the SAME full helper with a named nonzero-exit violation.
+    # Without it, bash returns success from `cat collect-only.log` and hides a
+    # collection failure. The `dead_exit` trusted variant reports the exact A5
+    # violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job, block = _job_block_and_collection(_targeted_job_block(workflow))
     assert block.count("exit 1") == 1, (
         f"expected exactly one exit 1 inside the collection branch, got {block.count('exit 1')}"
     )
     mutated_block = block.replace("exit 1", "", 1)
-    mutated = targeted_job.replace(block, mutated_block)
+    mutated_job = targeted_job.replace(block, mutated_block)
     # The scoped branch lost its exit; the count==0 sibling's exit remains.
-    assert "exit 1" not in _targeted_job_collection_block(mutated)
-    count_zero_region = mutated.split(COLLECTION_SMOKE_MARKER, 1)[1]
+    assert "exit 1" not in _targeted_job_collection_block(mutated_job)
+    count_zero_region = mutated_job.split(COLLECTION_SMOKE_MARKER, 1)[1]
     assert "exit 1" in count_zero_region
+    mutated_workflow = workflow.replace(targeted_job, mutated_job)
 
-    violations = _collection_consumer_violations(mutated)
+    # The deleted exit absorbs the collection failure into a successful job,
+    # so the failure propagation predicate is violated even though the run
+    # scalar still carries the count==0 sibling's `exit 1`.
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="dead_exit")
     joined = "\n".join(violations)
-    assert "exit nonzero" in joined, f"expected a named nonzero-exit violation, got {violations}"
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "exit nonzero" in joined, f"expected a named A5 violation, got {violations}"
+
+
+def _splice_targeted_job_block(workflow: str, targeted_job: str, mutated_job: str) -> str:
+    """Splice the re-serialized targeted job block back into the full workflow.
+
+    Only ``unit-test-targeted`` is re-serialized (never the whole workflow, so
+    PyYAML 1.1 cannot re-render the top-level ``on:`` as ``true:``). The rest of
+    the source is preserved byte-identically. ``mutated_job`` is the output of
+    ``yaml.dump`` for the block mapping ``{"unit-test-targeted": {...}}``.
+    """
+    indented = "".join(
+        ("  " + line if line else line) + "\n" for line in mutated_job.splitlines()
+    ).rstrip("\n")
+    if not mutated_job.endswith("\n"):
+        indented += "\n"
+    indented_job = "\n  unit-test-targeted:" + indented[len("  unit-test-targeted:") :]
+    mutated_workflow = workflow.replace(targeted_job, indented_job)
+
+    # Source identity: the top-level `on:` key is preserved and the workflow
+    # outside the targeted job is byte-identical to the tracked source.
+    assert "on:\n" in mutated_workflow, "top-level `on:` key was lost in the semantic mutant"
+    assert not re.search(r"(?m)^true:\n", mutated_workflow), "PyYAML re-rendered `on:` as `true:`"
+    outside_start = mutated_workflow.index("\n  unit-test-targeted:")
+    outside_end = mutated_workflow.index("\n  frontend-build:", outside_start)
+    assert workflow.replace(targeted_job, "") == (
+        mutated_workflow[:outside_start] + mutated_workflow[outside_end:]
+    ), "workflow outside the targeted job changed"
+
+    # Sanity: the mutant is full-workflow YAML with the named step present.
+    reparsed = yaml.safe_load(mutated_workflow)
+    assert "unit-test-targeted" in reparsed["jobs"]
+    assert "Run targeted tests" in [
+        step.get("name") for step in reparsed["jobs"]["unit-test-targeted"]["steps"]
+    ]
+    return mutated_workflow
+
+
+def _semantic_mutant_job(mutate_run: Callable[[str], str]) -> str:
+    """Build a FULL-WORKFLOW mutant from the live `Run targeted tests` run scalar.
+
+    Applies ``mutate_run`` to the parsed named step's run scalar and splices the
+    re-serialized TARGETED JOB BLOCK ONLY back into the tracked workflow source.
+    Everything outside ``unit-test-targeted`` is preserved byte-identically —
+    including the top-level ``on:`` key, which PyYAML 1.1 would otherwise
+    re-render as ``true:`` if the whole workflow were dumped. The tracked
+    workflow is untouched (read-only). Returns the FULL mutated workflow text,
+    which the positive helper parses directly (identity/metadata proof bites).
+    """
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job = _targeted_job_block(workflow)
+    parsed = yaml.safe_load(targeted_job)
+    run = next(
+        step["run"]
+        for step in parsed["unit-test-targeted"]["steps"]
+        if step.get("name") == "Run targeted tests"
+    )
+    mutated_run = mutate_run(run)
+    for step in parsed["unit-test-targeted"]["steps"]:
+        if step.get("name") == "Run targeted tests":
+            step["run"] = mutated_run
+    mutated_workflow = _splice_targeted_job_block(workflow, targeted_job, yaml.dump(parsed, sort_keys=False))
+
+    # Sanity: the mutant's named scalar passes `bash -n` (GitHub expressions
+    # included), so it is a VALID workflow whose behavior differs only by
+    # execution, not syntax.
+    completed = subprocess.run(["bash", "-n"], input=mutated_run, text=True, capture_output=True)
+    assert completed.returncode == 0, f"mutated run scalar is not valid shell:\n{completed.stderr}"
+    return mutated_workflow
+
+
+def _targeted_metadata_mutant(mutate_job: Callable[[dict], None]) -> str:
+    """Build a FULL-WORKFLOW mutant by mutating the parsed targeted job mapping.
+
+    Re-serializes ONLY the ``unit-test-targeted`` block and splices it back, so
+    the top-level ``on:`` and everything outside the targeted job stay
+    byte-identical. The run scalar round-trips exactly through ``yaml.dump``,
+    so metadata-only mutants do NOT trip the audited-identity check.
+    """
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    targeted_job = _targeted_job_block(workflow)
+    parsed = yaml.safe_load(targeted_job)
+    mutate_job(parsed["unit-test-targeted"])
+    return _splice_targeted_job_block(workflow, targeted_job, yaml.dump(parsed, sort_keys=False))
+
+
+def _workflow_level_mutant(top_level_fragment: str) -> str:
+    """Build a FULL-WORKFLOW mutant by splicing a top-level YAML fragment before ``jobs:``.
+
+    Used for workflow-level ``defaults.run.*`` / ``env`` mutants. The fragment
+    must end with a blank line so the workflow remains valid YAML; the tracked
+    workflow is untouched (read-only).
+    """
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    anchor = "jobs:\n"
+    assert anchor in workflow
+    mutated = workflow.replace(anchor, top_level_fragment + "\n" + anchor, 1)
+    assert "on:\n" in mutated, "top-level `on:` key was lost in the workflow-level mutant"
+    assert not re.search(r"(?m)^true:\n", mutated), "PyYAML re-rendered `on:` as `true:`"
+    reparsed = yaml.safe_load(mutated)
+    assert "unit-test-targeted" in reparsed["jobs"]
+    return mutated
+
+
+def test_collection_consumer_semantic_mutant_reds_on_comment_and_dead_condition() -> None:
+    # cand-r3-01 / fixture A1: the canonical condition survives only in a
+    # comment and the live condition is `if false` — valid YAML and valid shell,
+    # but collection never runs when required. The SAME full helper must reject
+    # the mutated workflow with BOTH the audited-identity violation (the run
+    # scalar changed) AND the exact A1 condition violation reported by the
+    # corresponding finite trusted variant.
+    condition = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then'
+
+    def mutate(run: str) -> str:
+        return run.replace(condition, "# " + condition + "\n  if false; then")
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="condition_dead")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_always_true_condition() -> None:
+    # Parent probe: replacing the collection condition with a literal `if true`
+    # must be rejected — smoke=false would then run collection when not
+    # required, and the branch would run unconditionally. The SAME full helper
+    # reports the identity violation AND the exact A1 condition violation via
+    # the finite `condition_always_true` trusted variant.
+    condition = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then'
+
+    def mutate(run: str) -> str:
+        return run.replace(condition, "if true; then")
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="condition_always_true")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_commented_targeted_with_reorder() -> None:
+    # cand-r3-01 / fixture A2: the targeted command survives only as a comment
+    # before the branch while the ACTUAL command executes AFTER the complete
+    # collection branch. Collection-first would mask a targeted failure. The
+    # SAME full helper reports the identity violation AND the exact A2 ordering
+    # violation via the finite `reorder` trusted variant.
+    python_line = (
+        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
+        'subprocess.run(["pytest", "-q", *tests], check=True)\''
+    )
+    condition = 'if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then'
+
+    def mutate(run: str) -> str:
+        branch_start = run.index(condition)
+        commented = run.replace(python_line, "# " + python_line.strip(), 1)
+        insert_at = commented.index("\n  else\n", branch_start)
+        return commented[:insert_at] + "\n" + python_line + commented[insert_at:]
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="reorder")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "targeted pytest must run before the collection-smoke branch" in joined, (
+        f"expected a named A2 violation, got {violations}"
+    )
+
+
+def test_collection_consumer_semantic_mutant_reds_on_comment_only_collect() -> None:
+    # cand-r3-01 / fixture A3: the exact collect token survives only in a
+    # comment and the branch is a no-op (`if true; then # ...`). Collection
+    # never executes. The SAME full helper reports the identity violation AND
+    # the exact A3 collect violation via the `no_op_collect` trusted variant.
+    collect = "pytest tests/ -q --collect-only > collect-only.log 2>&1"
+
+    def mutate(run: str) -> str:
+        return run.replace("if " + collect + "; then", "if true; then # " + collect)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="no_op_collect")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "pytest tests/ -q --collect-only" in joined, f"expected a named A3 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_concatenated_zero_assertions() -> None:
+    # cand-r3-01 / fixture A4: shell quote concatenation emits `0 assertions`
+    # with no contiguous source substring. The executed output must be rejected
+    # by the SAME full helper with a named A4 truthful-label violation via the
+    # `zero_assertions_stdout` trusted variant (plus the identity violation).
+    old = 'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"'
+    new = 'echo "Selector-development diff — 0 " \'assertions\' " (import/syntax across suite)"'
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_stdout")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_dead_unreachable_exit() -> None:
+    # cand-r3-01 / fixture A5: the scoped `exit 1` survives only in an
+    # unreachable `if false` branch; a real collection failure then returns
+    # zero. The SAME full helper reports the identity violation AND the exact
+    # A5 nonzero-exit violation via the `dead_exit` trusted variant.
+    old = """    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+      tail -n 5 collect-only.log
+    else
+      cat collect-only.log
+      exit 1
+    fi"""
+    new = """    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+      tail -n 5 collect-only.log
+    else
+      cat collect-only.log
+    fi
+    if false; then
+      exit 1
+    fi"""
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="dead_exit")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "exit nonzero" in joined, f"expected a named A5 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_missing_collect_log_emission() -> None:
+    # Parent probe: deleting the scoped failure-path `cat collect-only.log`
+    # while keeping `exit 1` — the job still fails, but the collection log is
+    # never emitted. The SAME full helper reports the identity violation AND
+    # the exact A5 log-emission violation via the `missing_log` trusted variant.
+    old = """    else
+      cat collect-only.log
+      exit 1
+    fi"""
+    new = """    else
+      exit 1
+    fi"""
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="missing_log")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "must emit the collected log" in joined, f"expected a named A5 log-emission violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_forced_success_path_failure() -> None:
+    # Parent probe: an unconditional `exit 1` AFTER the successful collect
+    # branch makes a successful run fail. The SAME full helper reports the
+    # identity violation AND the exact A5 success-status violation via the
+    # `forced_success_failure` trusted variant.
+    old = """    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+      tail -n 5 collect-only.log
+    else
+      cat collect-only.log
+      exit 1
+    fi"""
+    new = """    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then
+      tail -n 5 collect-only.log
+      exit 1
+    else
+      cat collect-only.log
+      exit 1
+    fi"""
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="forced_success_failure")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "exit zero" in joined, f"expected a named success-status violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_meta_true_early_success() -> None:
+    # Second-audit gap: an `exit 0` inserted after the meta=true label makes C2
+    # skip collection entirely while remaining valid YAML/shell. C2's exact
+    # event sequence must be verified, so the SAME full helper names the exact
+    # C2 collect violation via the `meta_early_exit` trusted variant (plus the
+    # identity violation).
+    label = (
+        'echo "Selection collapsed to the selector meta-guard — '
+        'also running collect-only smoke (import/syntax across suite)"'
+    )
+    new = label + "\n              exit 0"
+
+    def mutate(run: str) -> str:
+        return run.replace(label, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="meta_early_exit")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "pytest tests/ -q --collect-only" in joined, f"expected a named C2 collect violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_extra_targeted_in_collect_failure() -> None:
+    # Third-audit gap: C3's exact event sequence was not verified. Inserting an
+    # extra real targeted `python -c ...` inside the collect-failure `else`
+    # (before `cat`) adds a third pytest event; the SAME full helper must reject
+    # it with a named exact-execution violation via the `c3_extra_targeted`
+    # trusted variant (plus the identity violation).
+    python_line = (
+        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
+        'subprocess.run(["pytest", "-q", *tests], check=True)\''
+    )
+    old = """    else
+      cat collect-only.log
+      exit 1
+    fi"""
+    new = """    else
+      %s
+      cat collect-only.log
+      exit 1
+    fi""" % ("      " + python_line.strip())
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="c3_extra_targeted")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "before the collection-smoke branch" in joined, (
+        f"expected a named exact-execution violation, got {violations}"
+    )
+
+
+def test_collection_consumer_semantic_mutant_reds_on_zero_assertions_in_summary() -> None:
+    # Third-audit gap: the probe never read GITHUB_STEP_SUMMARY. Appending
+    # `0 assertions executed` to the summary in the C1 branch must be caught by
+    # A4 through the captured summary, via the `zero_assertions_summary` trusted
+    # variant (plus the identity violation).
+    old = 'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"'
+    new = (
+        'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"\n'
+        '        echo "0 assertions executed" >> "$GITHUB_STEP_SUMMARY"'
+    )
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_summary")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
+
+
+def test_collection_consumer_semantic_mutant_reds_on_selector_label_replaced() -> None:
+    # Third-audit gap: the observable selector-development label must be pinned.
+    # Replacing it with a generic label must produce a named label violation via
+    # the `selector_label_replaced` trusted variant (plus the identity
+    # violation).
+    old = 'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"'
+    new = 'echo "collection smoke"'
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="selector_label_replaced")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "selector-development collection label must be emitted" in joined, (
+        f"expected a named selector-label violation, got {violations}"
+    )
+
+
+def test_collection_consumer_semantic_mutant_reds_on_meta_label_replaced() -> None:
+    # Third-audit gap: the observable collapsed meta-guard label must be pinned.
+    # Replacing it with a generic label must produce a named label violation via
+    # the `meta_label_replaced` trusted variant (plus the identity violation).
+    old = (
+        'echo "Selection collapsed to the selector meta-guard — '
+        'also running collect-only smoke (import/syntax across suite)"'
+    )
+    new = 'echo "collection smoke"'
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="meta_label_replaced")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "meta-guard collection label must be emitted" in joined, (
+        f"expected a named meta-label violation, got {violations}"
+    )
+
+
+def test_probe_closed_path_does_not_reach_ambient_commands() -> None:
+    # Third-audit gap (E): the probe's child PATH must be CLOSED to the temp
+    # `bin` only. A trusted fixture that invokes a unique ambient-only
+    # executable must be command-not-found (status 127, named in stderr) — it
+    # must never resolve from the ambient PATH. The probe accepts only a trusted
+    # variant NAME, so the `ambient_command` test-owned fixture is used.
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        events, stdout, stderr, summary, status = _run_probe_script(
+            "ambient_command",
+            count="1",
+            smoke="true",
+            meta="false",
+            collect_fails=False,
+            tmp=tmp,
+        )
+        assert status == 127, f"ambient command resolved in a closed PATH (stderr={stderr!r})"
+        assert "unique_ambient_marker_xyz: command not found" in stderr, (
+            f"expected command-not-found in stderr, got {stderr!r}"
+        )
+
+
+def test_collection_consumer_zero_assertions_on_stderr() -> None:
+    # Second-audit gap: `0 assertions` emitted to STDERR must be caught by A4.
+    # The SAME full helper reports the identity violation AND the exact A4
+    # violation via the `zero_assertions_stderr` trusted variant.
+    old = 'echo "Selector-development diff — also running collect-only smoke (import/syntax across suite)"'
+    new = 'echo "Selector-development diff — 0 assertions executed" >&2'
+
+    def mutate(run: str) -> str:
+        return run.replace(old, new)
+
+    mutated = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_stderr")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
+
+
+def test_collection_consumer_probe_timeout_is_a_stable_named_violation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Second-audit gap: a probe that never returns must produce a stable
+    # status-124 result (never a TypeError/crash) and the helper must name it.
+    # The probe now runs in a new process group and kills it on timeout, so the
+    # timeout is exercised through `Popen.communicate` raising TimeoutExpired
+    # with bytes output; `killpg` and `proc.kill` are stubbed to a no-op for the
+    # fake PID.
+    #
+    # Round-4 (coordinator) gap: EVERY post-timeout `communicate` call must
+    # carry a FINITE (never None) timeout — an unbounded drain would hang
+    # forever if a child ignores termination. This fake times out on the FIRST
+    # and SECOND communicate calls and succeeds on the THIRD, proving the
+    # bounded double-drain path returns cleanly with a stable status.
+    #
+    # The fake avoids instance attribute STORES (the meta-guard suite trips on
+    # any attribute assignment in this file), using a closure counter and
+    # read-only properties for the fields the probe reads.
+    calls: list[int] = []
+    observed_timeouts: list[object] = []
+
+    class FakePopen:
+        def __init__(self, *args, **kwargs):
+            # Accept the real constructor arguments without storing them (the
+            # meta-guard suite trips on any attribute store in this file).
+            pass
+
+        @property
+        def pid(self) -> int:
+            return 999999
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def communicate(self, timeout=None):
+            calls.append(1)
+            observed_timeouts.append(timeout)
+            if len(calls) <= 2:
+                raise subprocess.TimeoutExpired(
+                    cmd="probe", timeout=timeout, output=b"partial", stderr=b"err"
+                )
+            # Third call (post-double-drain) returns the partial output.
+            return b"partial", b"err"
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(os, "killpg", lambda *a, **k: None)
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    violations = _collection_consumer_violations(workflow, trusted_variant="live")
+    joined = "\n".join(violations)
+    assert "collection-consumer probe must complete" in joined, (
+        f"expected a named timeout violation, got {violations}"
+    )
+
+    # The live variant runs FOUR probes (C0-C3); each may reach the bounded
+    # drain path. Every communicate call — initial bounded run AND all
+    # post-timeout drains — must have a finite (non-None) timeout.
+    assert observed_timeouts, "no communicate call observed"
+    assert all(t is not None for t in observed_timeouts), (
+        f"an unbounded communicate() (timeout=None) was observed: {observed_timeouts}"
+    )
+
+
+def test_probe_undrainable_group_returns_stable_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round-4 (coordinator) gap: if a child ignores termination and the group
+    # STILL cannot be drained within the finite bound after repeated kills, the
+    # probe must return a stable named cleanup-failure status (125) — never an
+    # unbounded wait. The fake raises TimeoutExpired on EVERY communicate call;
+    # killpg and kill are no-ops. The helper reports the cleanup failure as the
+    # named probe-completion violation, and every drain timeout is finite.
+    calls: list[int] = []
+
+    class NeverDrains:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def pid(self) -> int:
+            return 999999
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def communicate(self, timeout=None):
+            calls.append(1)
+            assert timeout is not None, "unbounded communicate() observed"
+            raise subprocess.TimeoutExpired(
+                cmd="probe", timeout=timeout, output=b"partial", stderr=b"err"
+            )
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", NeverDrains)
+    monkeypatch.setattr(os, "killpg", lambda *a, **k: None)
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    violations = _collection_consumer_violations(workflow, trusted_variant="live")
+    joined = "\n".join(violations)
+    assert "collection-consumer probe must complete" in joined, (
+        f"expected a named cleanup-failure violation, got {violations}"
+    )
+    assert calls, "no communicate call observed"
+
+
+def test_semantic_mutant_builder_preserves_full_workflow_identity() -> None:
+    # Second-audit gap: the semantic-mutant builder must NEVER serialize the
+    # whole workflow (PyYAML 1.1 would re-render the top-level `on:` key as
+    # `true:`). Only the targeted job block is re-serialized; everything else
+    # is byte-identical and the top-level `on:` identity is authoritative.
+    # `_semantic_mutant_job` now returns the FULL mutated workflow.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    assert "on:\n" in workflow
+
+    def identity(run: str) -> str:
+        return run
+
+    mutated_workflow = _semantic_mutant_job(identity)
+    assert "on:\n" in mutated_workflow
+    assert not re.search(r"(?m)^true:\n", mutated_workflow)
+
+    # Everything outside the targeted job is byte-identical to the tracked source.
+    head = workflow[: workflow.index("\n  unit-test-targeted:")]
+    tail_start = workflow.index("\n  frontend-build:")
+    assert mutated_workflow.startswith(head)
+    assert mutated_workflow[mutated_workflow.index("\n  frontend-build:"):] == workflow[tail_start:]
+    targeted_job = _targeted_job_block(workflow)
+    assert workflow.replace(targeted_job, "") == mutated_workflow.replace(_targeted_job_block(mutated_workflow), "")
+
+
+# ---------------------------------------------------------------------------
+# E — targeted metadata mutants (task 2.10 / Phase 6.2 P1): every effective
+# metadata field that could skip the oracle, change checkout identity, or make
+# failure non-blocking is rejected by the SAME full-workflow helper. Each
+# mutant preserves the full workflow outside the intended mapping, safe-loads
+# as valid YAML, and names its exact violation. The audited run identity is
+# preserved (metadata-only), so no identity violation is expected here.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("mutate_job", "expected"),
+    [
+        (
+            lambda m: next(
+                s
+                for s in m["steps"]
+                if s.get("name") == TARGETED_COMMAND_STEP_NAME
+            ).update({"if": "${{ false }}"})
+            or None,
+            "targeted step must not carry a conditional `if`",
+        ),
+        (
+            lambda m: next(
+                s
+                for s in m["steps"]
+                if s.get("name") == TARGETED_COMMAND_STEP_NAME
+            ).update({"continue-on-error": True})
+            or None,
+            "targeted step `continue-on-error` must not be enabled",
+        ),
+        (
+            lambda m: m.update({"continue-on-error": True}) or None,
+            "targeted job `continue-on-error` must not be enabled",
+        ),
+        (
+            lambda m: next(
+                s
+                for s in m["steps"]
+                if s.get("name") == TARGETED_COMMAND_STEP_NAME
+            ).update({"env": {"TARGETED_TESTS_JSON": "${{ steps.targeted.outputs.tests_json }}", "EXTRA": "1"}})
+            or None,
+            "targeted step env must be exactly",
+        ),
+        (
+            lambda m: next(
+                s
+                for s in m["steps"]
+                if s.get("name") == TARGETED_COMMAND_STEP_NAME
+            ).update({"shell": "bash"})
+            or None,
+            "targeted step must not override the default shell",
+        ),
+        (
+            lambda m: next(
+                s
+                for s in m["steps"]
+                if s.get("name") == TARGETED_COMMAND_STEP_NAME
+            ).update({"working-directory": "sub/dir"})
+            or None,
+            "targeted step must not override the default working-directory",
+        ),
+        (
+            lambda m: m.update({"defaults": {"run": {"shell": "bash"}}}) or None,
+            "targeted job defaults.run must not override the default shell",
+        ),
+        (
+            lambda m: m.update({"defaults": {"run": {"working-directory": "sub/dir"}}}) or None,
+            "targeted job defaults.run must not override the default working-directory",
+        ),
+        (
+            lambda m: m.update({"env": {"PYTHONPATH": "/tmp/x"}}) or None,
+            "targeted job must not declare job-level env",
+        ),
+        (
+            lambda m: m.update({"container": {"image": "ubuntu:latest"}}) or None,
+            "unit-test-targeted job must not declare a container",
+        ),
+        (
+            lambda m: m.update({"runs-on": "macos-latest"}) or None,
+            "unit-test-targeted job must run on ubuntu-latest",
+        ),
+        (
+            lambda m: m.pop("needs", None) or None,
+            "unit-test-targeted job must declare `needs: changes`",
+        ),
+        (
+            lambda m: m.update({"if": "${{ false }}"}) or None,
+            "unit-test-targeted job gate must be exactly",
+        ),
+        (
+            lambda m: m.update({"if": "github.event_name == 'push'"}) or None,
+            "unit-test-targeted job gate must be exactly",
+        ),
+    ],
+    ids=[
+        "step_false_condition",
+        "step_continue_on_error_true",
+        "job_continue_on_error_true",
+        "step_env_extra_value",
+        "step_shell_override",
+        "step_working_directory_override",
+        "job_defaults_shell",
+        "job_defaults_working_directory",
+        "job_env_override",
+        "job_container",
+        "wrong_runs_on",
+        "remove_needs",
+        "job_if_false",
+        "job_push_only_gate",
+    ],
+)
+def test_targeted_metadata_mutants_produce_named_violations(
+    mutate_job: Callable[[dict], None],
+    expected: str,
+) -> None:
+    # Round-3 depth redesign (task 2.10): each valid full-workflow metadata
+    # mutant must be rejected by the SAME full-workflow positive helper with its
+    # own named violation. The run scalar is untouched, so the audited identity
+    # still matches; only the metadata violation fires.
+    mutated_workflow = _targeted_metadata_mutant(mutate_job)
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="live")
+    joined = "\n".join(violations)
+    assert expected in joined, f"expected `{expected}` in violations, got {violations}"
+    assert "must match the audited identity" not in joined, (
+        f"metadata-only mutant must not trip the audited identity, got {violations}"
+    )
+
+
+@pytest.mark.parametrize(
+    "top_level_fragment",
+    [
+        "defaults:\n  run:\n    shell: bash",
+        "defaults:\n  run:\n    working-directory: sub/dir",
+        "env:\n  PYTHONPATH: /tmp/x",
+    ],
+    ids=["workflow_defaults_shell", "workflow_defaults_working_directory", "workflow_env"],
+)
+def test_targeted_workflow_level_metadata_mutants_produce_named_violations(
+    top_level_fragment: str,
+) -> None:
+    # Round-3 depth redesign (task 2.10): workflow-level `defaults.run.shell`,
+    # `defaults.run.working-directory`, and `env` are inherited by the audited
+    # step, so each must be rejected by the SAME full-workflow helper. The run
+    # scalar is untouched (audited identity stays clean); only the metadata
+    # violation fires.
+    mutated_workflow = _workflow_level_mutant(top_level_fragment)
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="live")
+    joined = "\n".join(violations)
+    assert "defaults.run" in joined or "workflow-level env" in joined, (
+        f"expected a named workflow-level metadata violation, got {violations}"
+    )
+    assert "must match the audited identity" not in joined, (
+        f"metadata-only mutant must not trip the audited identity, got {violations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E — payload safety mutants (Phase 6.2 P1): arbitrary PR-editable payloads
+# (Python, absolute commands, `$BASH -c`, eval/source, process substitution,
+# redirection) must be rejected by the audited-identity check BEFORE any probe
+# executes, and their marker payload must NEVER run. The probe executes only
+# the trusted canonical fixture.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "payload_template",
+    [
+        'python -c \'open("{marker}","w").write("pwned")\'',
+        '/bin/touch {marker}',
+        '"$BASH" -c \'echo pwned > {marker}\'',
+        "eval 'echo pwned > {marker}'",
+        "source <(echo 'echo pwned > {marker}')",
+        "cat <(echo pwned > {marker})",
+        "echo pwned > {marker}",
+    ],
+    ids=[
+        "arbitrary_python_marker",
+        "absolute_command_marker",
+        "bash_dash_c_marker",
+        "eval_marker",
+        "source_process_substitution_marker",
+        "process_substitution_marker",
+        "redirection_marker",
+    ],
+)
+def test_payload_mutant_identity_violation_and_marker_absent(
+    tmp_path: Path, payload_template: str
+) -> None:
+    # Round-3 depth redesign (task 2.10): a workflow whose `Run targeted tests`
+    # run scalar carries arbitrary PR-editable payload must produce the named
+    # audited-identity violation and MUST NOT execute its payload. The marker
+    # file would be written by the payload if it ran; the helper only ever
+    # executes the trusted canonical fixture, so the marker stays absent.
+    marker = tmp_path / "marker_pwned"
+    payload = payload_template.format(marker=marker)
+
+    def mutate(run: str) -> str:
+        return payload
+
+    mutated_workflow = _semantic_mutant_job(mutate)
+    violations = _collection_consumer_violations(mutated_workflow, trusted_variant="live")
+    joined = "\n".join(violations)
+    assert "must match the audited identity" in joined, (
+        f"expected a named identity violation, got {violations}"
+    )
+    assert not marker.exists(), "mutated workflow payload executed"
+
+
+def test_unknown_trusted_variant_rejected_without_execution(tmp_path: Path) -> None:
+    # Round-3 depth redesign (task 2.10): an unknown trusted variant name is
+    # rejected with a named violation and NEVER executed. The live workflow
+    # would otherwise be clean; the unknown name short-circuits before any
+    # probe runs.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    violations = _collection_consumer_violations(workflow, trusted_variant="not_a_real_variant")
+    assert violations == ["unknown trusted collection variant"], violations
+    # The canonical fixture must not have executed (nothing would have been
+    # written by it, but the closed set guarantees the unknown name is inert).
+    assert "unknown trusted collection variant" in violations[0]
+
+
+# ---------------------------------------------------------------------------
+# E — controlled descendant cleanup (Phase 6.2 P1 / task 2.10): a trusted
+# fixture spawns a background child and records its PID; the probe runs in a
+# new process group and must kill all descendants on timeout AND on success.
+# No network/DB/real tests are involved; a short deterministic timeout and a
+# bounded polling proof are used, and no orphan may survive.
+# ---------------------------------------------------------------------------
+def test_probe_cleans_descendants_on_timeout(tmp_path: Path) -> None:
+    # The `descendant_timeout` trusted variant starts a Python background child
+    # (recording its PID) and then sleeps forever. The bounded probe times out,
+    # kills the ENTIRE new process group, and returns a stable status-124. The
+    # recorded descendant PID must be gone after the probe returns.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_timeout",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=2.0,
+    )
+    assert status == 124, f"expected a timeout status, got {status} (stderr={stderr!r})"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "descendant fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived the timeout process-group cleanup"
+    )
+
+
+def test_probe_cleans_descendants_on_successful_exit(tmp_path: Path) -> None:
+    # The `descendant_success` trusted variant starts a Python background child
+    # (recording its PID) and then the parent exits cleanly (status 0). The
+    # finally cleanup must still kill the surviving descendant, because the
+    # probe promises group cleanup on EVERY exit.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_success",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=10.0,
+    )
+    assert status == 0, f"expected a clean exit, got {status} (stderr={stderr!r})"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "descendant fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived the success-path process-group cleanup"
+    )
 
 
 def test_ci_concurrency_pins_pr_number_run_id_and_conditional_cancel() -> None:
@@ -5616,41 +7475,74 @@ def _normalize_ws(text: str) -> str:
     return " ".join(text.split())
 
 
-def _real_db_job_contract_violations(job: str) -> list[str]:
+# The generic DATABASE_URL the real-DB job carries alongside the two gate
+# variables. Only the VARIABLE NAME appears in violation messages.
+REAL_DB_DATABASE_URL_ENV = "DATABASE_URL"
+
+
+def _real_db_workflow_job(workflow_text: str) -> tuple[dict | None, dict | None, list[str]]:
+    """Parse the FULL workflow and return ``(job_data, parsed, violations)``.
+
+    The full workflow is parsed with ``yaml.safe_load``; ``jobs`` is the
+    authority and the parsed top-level ``on`` identity (which PyYAML 1.1 may
+    represent as a boolean) is never used. ``parsed`` is also returned so the
+    caller can check workflow-level ``env``/``defaults``. Missing/malformed
+    workflows yield ``(None, None, [violation])``.
+    """
+    try:
+        parsed = yaml.safe_load(workflow_text)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("jobs"), dict):
+            return None, None, ["real-db workflow must parse to a mapping with jobs"]
+        jobs = parsed["jobs"]
+    except yaml.YAMLError:
+        return None, None, ["real-db workflow is not valid YAML"]
+    if "real-db-integration" not in jobs:
+        return None, None, ["real-db workflow must contain the real-db-integration job"]
+    job_data = jobs["real-db-integration"]
+    if not isinstance(job_data, dict):
+        return None, None, ["real-db-integration job must be a mapping"]
+    return job_data, parsed, []
+
+
+def _real_db_job_contract_violations(workflow_text: str) -> list[str]:
     """Named violations of the real-db-integration job contract.
 
-    Pure helper over the job block TEXT, parsed with PyYAML (safe_load only —
-    never executes anything) into the `real-db-integration` mapping. The
-    positive oracle used by BOTH the live workflow test and every mutant, so a
-    mutant must be rejected by the SAME contract that the live job satisfies.
-    Violations name contract items only — never DSN credential values.
+    Pure helper over the FULL WORKFLOW source, parsed with PyYAML (safe_load
+    only — never executes anything) into the ``jobs["real-db-integration"]``
+    mapping. The positive oracle used by BOTH the live workflow test and every
+    mutant, so a mutant must be rejected by the SAME contract that the live job
+    satisfies. Violations name contract items only — never DSN credential
+    values.
 
-    Contract (task 2.7 / spec D4):
+    Contract (task 2.7 / spec D4, plus the full-workflow metadata additions of
+    task 2.10 / Phase 6.2 P1):
     - job `needs == "changes"` (job level);
     - job-level `if` normalizes to the exact event gate
       `workflow_dispatch OR (database true AND (push OR non-draft PR))`;
     - `services.db.image` is `timescale/timescaledb-ha:pg15-latest`;
+    - ``runs-on == ubuntu-latest`` and no job ``container``;
     - job-level `env[NHMS_RUN_INTEGRATION]` is semantically "1";
     - job-level `env[NHMS_INTEGRATION_DATABASE_URL]` is a scalar whose stripped
       value is non-empty — a value relocated into `services.db.env`, a generic
-      DATABASE_URL, or a blank/whitespace/quoted-empty value all violate,
-      because tests/conftest.py reads the JOB env and strips the value to
-      empty, skipping all seven required nodes;
+      DATABASE_URL, a blank/whitespace/quoted-empty value, or a STEP-level
+      blank/override all violate, because tests/conftest.py reads the PROCESS
+      env and strips the value to empty, skipping all seven required nodes;
+    - job env keys are EXACTLY `DATABASE_URL`, `NHMS_RUN_INTEGRATION`,
+      `NHMS_INTEGRATION_DATABASE_URL` (no extra key can introduce BASH/Python
+      behavior);
+    - workflow-level `env` absent/empty (no BASH_ENV/PYTHONPATH/PATH override);
     - the integration command comes from the named step
       `Run real database integration tests` and normalizes to exactly
-      `pytest -vv -rs -m integration` (a comment or another step cannot satisfy).
+      `pytest -vv -rs -m integration` (a comment or another step cannot satisfy);
+    - the named step's effective execution context (see
+      ``_real_db_named_step_violations``): no step env, no step condition, no
+      step/job `continue-on-error`, no step/job shell or working-directory, and
+      no job/workflow `defaults.run` override.
     """
+    job_data, parsed, parse_violations = _real_db_workflow_job(workflow_text)
+    if parse_violations:
+        return list(parse_violations)
     violations: list[str] = []
-
-    try:
-        parsed = yaml.safe_load(job)
-        if not isinstance(parsed, dict) or "real-db-integration" not in parsed:
-            return ["real-db job block must parse to a mapping containing real-db-integration"]
-        job_data = parsed["real-db-integration"]
-        if not isinstance(job_data, dict):
-            return ["real-db-integration job must be a mapping"]
-    except yaml.YAMLError:
-        return ["real-db job block is not valid YAML"]
 
     if job_data.get("needs") != "changes":
         violations.append("real-db job must declare `needs: changes`")
@@ -5664,6 +7556,11 @@ def _real_db_job_contract_violations(job: str) -> list[str]:
             "(database == 'true' AND (push OR non-draft PR))"
         )
 
+    if job_data.get("runs-on") != TARGETED_RUNS_ON:
+        violations.append("real-db job must run on ubuntu-latest")
+    if job_data.get("container") is not None:
+        violations.append("real-db job must not declare a container")
+
     services = job_data.get("services")
     service_image = None
     if isinstance(services, dict):
@@ -5675,6 +7572,14 @@ def _real_db_job_contract_violations(job: str) -> list[str]:
 
     env = job_data.get("env")
     env_map = env if isinstance(env, dict) else {}
+
+    # Job env keys must be EXACTLY the three live keys — no extra key can
+    # introduce BASH/Python behavior (e.g. BASH_ENV, PYTHONPATH, PATH).
+    if set(env_map) != {REAL_DB_DATABASE_URL_ENV, REAL_DB_OPT_IN_ENV, REAL_DB_DEDICATED_DSN_ENV}:
+        violations.append(
+            "real-db job env must be exactly "
+            f"{REAL_DB_DATABASE_URL_ENV}, {REAL_DB_OPT_IN_ENV}, {REAL_DB_DEDICATED_DSN_ENV}"
+        )
 
     # Opt-in must be EXACTLY the string "1" — the fixture contract. Do NOT
     # strip literal quote characters: raw YAML `NHMS_RUN_INTEGRATION: "'1'"`
@@ -5698,21 +7603,114 @@ def _real_db_job_contract_violations(job: str) -> list[str]:
                 f"real-db job dedicated {REAL_DB_DEDICATED_DSN_ENV} must have a non-empty value"
             )
 
+    # Workflow-level env must be absent/empty so BASH_ENV/PYTHONPATH/PATH cannot
+    # change the audited integration context.
+    workflow_env = parsed.get("env") if isinstance(parsed, dict) else None
+    if isinstance(workflow_env, dict) and workflow_env:
+        violations.append("workflow must not declare workflow-level env")
+
+    # The named integration step and its EFFECTIVE execution context. The step
+    # inherits the job env (job-level gate variables) and must not override
+    # them, must not carry a disabling condition, and must not be able to
+    # absorb its own failure (step/job continue-on-error). Nominal job fields
+    # cannot prove a blocking integration oracle when step-level semantics can
+    # replace or bypass them.
+    violations.extend(_real_db_named_step_violations(job_data, parsed))
+
+    return violations
+
+
+def _real_db_named_step_violations(job_data: dict, parsed: dict | None = None) -> list[str]:
+    """Named violations of the named integration step's effective context.
+
+    Identifies EXACTLY ONE step named ``Run real database integration tests``
+    (missing or duplicated steps are named violations — a duplicate would
+    silently pick the first, wrong command), then validates:
+
+    - the step's effective env is ABSENT or empty — no gate-variable or
+      BASH/Python override (the live contract inherits the gate variables from
+      job level, which conftest reads from process env);
+    - the step's ``if`` field is ABSENT (a disabling/conditional named step
+      would not execute the command). An always-true literal would need its
+      exact spelling pinned per-Actions-semantics; requiring absence is the
+      simplest safe contract;
+    - step-level and job-level ``continue-on-error`` are absent or exactly
+      boolean ``false`` — ``true``, strings, and expressions whose falsehood
+      cannot be proven are rejected, because a failing integration command
+      must block the job;
+    - the step and job carry no ``shell``/``working-directory`` override;
+    - the job and workflow carry no ``defaults.run.shell``/``working-directory``
+      override.
+
+    Violation messages name contract items only — never DSN credential values.
+    """
+    violations: list[str] = []
+
     steps = job_data.get("steps")
-    command = None
-    if isinstance(steps, list):
-        for step in steps:
-            if isinstance(step, dict) and step.get("name") == REAL_DB_COMMAND_STEP_NAME:
-                run = step.get("run")
-                if isinstance(run, str):
-                    command = run
-                break
-    if command is None:
+    if not isinstance(steps, list):
         violations.append(
             f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command"
         )
-    elif _normalize_ws(command) != _normalize_ws(REAL_DB_INTEGRATION_COMMAND):
+        return violations
+
+    named = [step for step in steps if isinstance(step, dict) and step.get("name") == REAL_DB_COMMAND_STEP_NAME]
+    if not named:
+        violations.append(
+            f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command"
+        )
+        return violations
+    if len(named) > 1:
+        violations.append(
+            f"real-db job must have exactly one step named `{REAL_DB_COMMAND_STEP_NAME}`"
+        )
+        return violations
+    step = named[0]
+
+    command = step.get("run")
+    if not isinstance(command, str) or _normalize_ws(command) != _normalize_ws(REAL_DB_INTEGRATION_COMMAND):
         violations.append(f"real-db job command must be `{REAL_DB_INTEGRATION_COMMAND}`")
+
+    step_env = step.get("env")
+    if isinstance(step_env, dict) and step_env:
+        violations.append("real-db integration step must not declare its own env")
+
+    step_if = step.get("if")
+    if step_if is not None:
+        violations.append("real-db integration step must not carry a conditional `if`")
+
+    if step.get("shell") is not None:
+        violations.append("real-db integration step must not override the default shell")
+    if step.get("working-directory") is not None:
+        violations.append("real-db integration step must not override the default working-directory")
+
+    job_defaults = job_data.get("defaults")
+    if isinstance(job_defaults, dict) and isinstance(job_defaults.get("run"), dict):
+        job_run_defaults = job_defaults["run"]
+        if "shell" in job_run_defaults:
+            violations.append("real-db job defaults.run must not override the default shell")
+        if "working-directory" in job_run_defaults:
+            violations.append("real-db job defaults.run must not override the default working-directory")
+
+    workflow_defaults = parsed.get("defaults") if isinstance(parsed, dict) else None
+    if isinstance(workflow_defaults, dict) and isinstance(workflow_defaults.get("run"), dict):
+        wf_run_defaults = workflow_defaults["run"]
+        if "shell" in wf_run_defaults:
+            violations.append("workflow defaults.run must not override the default shell")
+        if "working-directory" in wf_run_defaults:
+            violations.append("workflow defaults.run must not override the default working-directory")
+
+    for scope, value in (("step", step.get("continue-on-error")), ("job", job_data.get("continue-on-error"))):
+        if value is True:
+            violations.append(
+                f"real-db integration {scope} `continue-on-error` must not be enabled"
+            )
+        elif value is not None and value is not False:
+            # Strings (including expressions) and other non-boolean values
+            # cannot be proven false; only absent or exactly boolean false is
+            # acceptable.
+            violations.append(
+                f"real-db integration {scope} `continue-on-error` must be absent or exactly false"
+            )
 
     return violations
 
@@ -5720,13 +7718,15 @@ def _real_db_job_contract_violations(job: str) -> list[str]:
 def test_real_db_job_contract_has_no_violations() -> None:
     # #1688 (round-1 closure): the live real-db job satisfies the full job
     # contract — gate, service image, opt-in, DEDICATED DSN, and the `-vv -rs`
-    # command. The dedicated DSN is the requirement-owned consumer of
-    # tests/conftest.py, so a generic-DATABASE_URL-only job would be a violation
-    # even though the static command pin stays green.
+    # command — AND the full-workflow effective metadata additions of task 2.10
+    # (runs-on, no container, exact job env key set, no workflow env, no
+    # shell/working-directory/defaults overrides). The dedicated DSN is the
+    # requirement-owned consumer of tests/conftest.py, so a
+    # generic-DATABASE_URL-only job would be a violation even though the static
+    # command pin stays green.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    job = _real_db_job_block(workflow)
 
-    violations = _real_db_job_contract_violations(job)
+    violations = _real_db_job_contract_violations(workflow)
     assert not violations, "real-db job contract violations:\n  " + "\n  ".join(violations)
 
 
@@ -5743,10 +7743,9 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_deleted() -> None:
     assert entry in job, "live job no longer contains the dedicated DSN line"
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
     mutated = workflow.replace(line + "\n", "")
-    mutated_job = _real_db_job_block(mutated)
-    assert REAL_DB_DEDICATED_DSN_ENV not in mutated_job
+    assert REAL_DB_DEDICATED_DSN_ENV not in _real_db_job_block(mutated)
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_DEDICATED_DSN_ENV in joined, (
         f"expected a named dedicated-DSN violation, got {violations}"
@@ -5764,10 +7763,9 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_blank() -> No
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
     blank = f"      {REAL_DB_DEDICATED_DSN_ENV}: \"\""
     mutated = workflow.replace(line, blank)
-    mutated_job = _real_db_job_block(mutated)
-    assert f'{REAL_DB_DEDICATED_DSN_ENV}: ""' in mutated_job
+    assert f'{REAL_DB_DEDICATED_DSN_ENV}: ""' in _real_db_job_block(mutated)
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_DEDICATED_DSN_ENV in joined, (
         f"expected a named dedicated-DSN violation, got {violations}"
@@ -5782,9 +7780,8 @@ def test_real_db_job_contract_reds_when_the_master_push_leg_is_removed() -> None
     # A loose-token check would pass this mutant; the normalized exact-block
     # comparison must not. The tracked workflow is untouched.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    job = _real_db_job_block(workflow)
     # (Sanity: the live gate parses and satisfies the contract.)
-    assert not [v for v in _real_db_job_contract_violations(job) if "gate" in v]
+    assert not [v for v in _real_db_job_contract_violations(workflow) if "gate" in v]
 
     # Drop the push leg from the folded gate text. The workflow source uses the
     # folded multi-line spelling, so the replacement must target the SOURCE
@@ -5796,9 +7793,8 @@ def test_real_db_job_contract_reds_when_the_master_push_leg_is_removed() -> None
     pr_only_src = "github.event.pull_request.draft == false"
     mutated = workflow.replace(push_leg_src, pr_only_src)
     assert mutated != workflow
-    mutated_job = _real_db_job_block(mutated)
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert "gate" in joined, f"expected a named gate violation, got {violations}"
 
@@ -5834,13 +7830,13 @@ def test_real_db_job_contract_reds_when_needs_changes_is_removed() -> None:
     scoped_workflow = workflow.replace(job, mutated_job, 1)
     assert scoped_workflow.count("    needs: changes\n") == original_needs_count - 1
 
-    # Valid YAML sanity: the mutated job parses and the real-db-integration
+    # Valid YAML sanity: the scoped workflow parses and the real-db-integration
     # mapping lacks `needs`.
-    parsed = yaml.safe_load(mutated_job)
-    assert "real-db-integration" in parsed
-    assert "needs" not in parsed["real-db-integration"]
+    parsed = yaml.safe_load(scoped_workflow)
+    assert "real-db-integration" in parsed["jobs"]
+    assert "needs" not in parsed["jobs"]["real-db-integration"]
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(scoped_workflow)
     joined = "\n".join(violations)
     assert "needs: changes" in joined, f"expected a named needs violation, got {violations}"
 
@@ -5862,14 +7858,13 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_relocated_to_servic
     anchor = "          POSTGRES_PASSWORD: nhms_dev\n"
     assert anchor in mutated
     mutated = mutated.replace(anchor, anchor + f"          {REAL_DB_DEDICATED_DSN_ENV}: {value}\n")
-    mutated_job = _real_db_job_block(mutated)
     # Structured check: the JOB-level env no longer has the dedicated DSN; the
     # service env does.
-    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_DEDICATED_DSN_ENV not in parsed["env"]
     assert REAL_DB_DEDICATED_DSN_ENV in parsed["services"]["db"]["env"]
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_DEDICATED_DSN_ENV in joined, (
         f"expected a named dedicated-DSN violation, got {violations}"
@@ -5885,10 +7880,9 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_whitespace() 
     job = _real_db_job_block(workflow)
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
     mutated = workflow.replace(line, f"      {REAL_DB_DEDICATED_DSN_ENV}: \" \"")
-    mutated_job = _real_db_job_block(mutated)
-    assert f'{REAL_DB_DEDICATED_DSN_ENV}: " "' in mutated_job
+    assert f'{REAL_DB_DEDICATED_DSN_ENV}: " "' in _real_db_job_block(mutated)
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_DEDICATED_DSN_ENV in joined, (
         f"expected a named dedicated-DSN violation, got {violations}"
@@ -5909,12 +7903,11 @@ def test_real_db_job_contract_reds_when_the_opt_in_flag_is_relocated_to_service_
     anchor = "          POSTGRES_PASSWORD: nhms_dev\n"
     assert anchor in mutated
     mutated = mutated.replace(anchor, anchor + f"          {REAL_DB_OPT_IN_ENV}: {value}\n")
-    mutated_job = _real_db_job_block(mutated)
-    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_OPT_IN_ENV not in parsed["env"]
     assert REAL_DB_OPT_IN_ENV in parsed["services"]["db"]["env"]
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_OPT_IN_ENV in joined, (
         f"expected a named opt-in violation, got {violations}"
@@ -5933,15 +7926,14 @@ def test_real_db_job_contract_reds_on_a_literal_quoted_opt_in(
     job = _real_db_job_block(workflow)
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_OPT_IN_ENV + ":"))
     mutated = workflow.replace(line, f"      {REAL_DB_OPT_IN_ENV}: \"'1'\"")
-    mutated_job = _real_db_job_block(mutated)
 
     # PyYAML yields the literal quoted string, not "1".
-    parsed_value = yaml.safe_load(mutated_job)["real-db-integration"]["env"][REAL_DB_OPT_IN_ENV]
+    parsed_value = yaml.safe_load(mutated)["jobs"]["real-db-integration"]["env"][REAL_DB_OPT_IN_ENV]
     assert parsed_value == "'1'"
 
     # The helper reports a named opt-in violation through the same positive
     # oracle used by the live test.
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_OPT_IN_ENV in joined, f"expected a named opt-in violation, got {violations}"
 
@@ -5965,12 +7957,12 @@ def test_real_db_job_contract_reds_on_a_wrong_service_image() -> None:
     line = next(line for line in job.splitlines() if line.strip().startswith("image:"))
     assert REAL_DB_SERVICE_IMAGE in line
     mutated = workflow.replace(line, line.replace(REAL_DB_SERVICE_IMAGE, "timescale/timescaledb-ha:pg14-latest"))
-    mutated_job = _real_db_job_block(mutated)
-    # Parse-scope sanity: the mutated job is valid YAML and carries the wrong image.
-    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    # Parse-scope sanity: the mutated workflow is valid YAML and carries the
+    # wrong image.
+    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert parsed["services"]["db"]["image"] == "timescale/timescaledb-ha:pg14-latest"
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_SERVICE_IMAGE in joined, f"expected a named service-image violation, got {violations}"
 
@@ -5987,13 +7979,12 @@ def test_real_db_job_contract_reds_when_the_named_step_is_renamed() -> None:
         line for line in job.splitlines() if line.strip().startswith(f"- name: {REAL_DB_COMMAND_STEP_NAME}")
     )
     mutated = workflow.replace(step_line, step_line.replace(REAL_DB_COMMAND_STEP_NAME, "Renamed integration step"))
-    mutated_job = _real_db_job_block(mutated)
     # Parse-scope sanity: valid YAML, no step named as required, command intact.
-    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_COMMAND_STEP_NAME not in [s.get("name") for s in parsed["steps"]]
     assert any(REAL_DB_INTEGRATION_COMMAND in str(s.get("run", "")) for s in parsed["steps"])
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_COMMAND_STEP_NAME in joined, f"expected a named missing-step violation, got {violations}"
 
@@ -6009,17 +8000,234 @@ def test_real_db_job_contract_reds_when_the_integration_command_is_changed() -> 
         line for line in job.splitlines() if line.strip().startswith(f"run: {REAL_DB_INTEGRATION_COMMAND}")
     )
     mutated = workflow.replace(cmd_line, cmd_line.replace(REAL_DB_INTEGRATION_COMMAND, "pytest -q -m integration"))
-    mutated_job = _real_db_job_block(mutated)
     # Parse-scope sanity: valid YAML, named step present, command changed.
-    parsed = yaml.safe_load(mutated_job)["real-db-integration"]
+    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_COMMAND_STEP_NAME in [s.get("name") for s in parsed["steps"]]
     assert "pytest -q -m integration" in [
         str(s.get("run", "")) for s in parsed["steps"] if s.get("name") == REAL_DB_COMMAND_STEP_NAME
     ]
 
-    violations = _real_db_job_contract_violations(mutated_job)
+    violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert "command" in joined, f"expected a named command violation, got {violations}"
+
+
+def _splice_real_db_job_block(workflow: str, job: str, mutated_job: str) -> str:
+    """Splice the re-serialized real-db job block back into the full workflow.
+
+    Only ``real-db-integration`` is re-serialized (never the whole workflow, so
+    the top-level ``on:`` identity is preserved byte-identically). ``mutated_job``
+    is the output of ``yaml.dump`` for the block mapping
+    ``{"real-db-integration": {...}}``.
+    """
+    indented = "".join(
+        ("  " + line if line else line) + "\n" for line in mutated_job.splitlines()
+    ).rstrip("\n")
+    if not mutated_job.endswith("\n"):
+        indented += "\n"
+    indented_job = "\n  real-db-integration:" + indented[len("  real-db-integration:") :]
+    mutated_workflow = workflow.replace(job, indented_job)
+    assert "on:\n" in mutated_workflow, "top-level `on:` key was lost in the real-db mutant"
+    assert not re.search(r"(?m)^true:\n", mutated_workflow), "PyYAML re-rendered `on:` as `true:`"
+    reparsed = yaml.safe_load(mutated_workflow)
+    assert "real-db-integration" in reparsed["jobs"]
+    return mutated_workflow
+
+
+def _mutated_real_db_workflow(workflow: str, mutate: Callable[[dict], None]) -> str:
+    """Apply ``mutate`` to the parsed real-db job mapping, return the FULL workflow.
+
+    The mutation is applied to the PARSED ``jobs["real-db-integration"]``
+    mapping and the block is re-serialized with ``yaml.dump``, so every
+    effective-step mutant is valid workflow YAML by construction (same shape
+    the full-workflow structured helper parses). Only the real-db block is
+    re-serialized and spliced back; the rest of the workflow is byte-identical.
+    The tracked workflow is never touched.
+    """
+    job = _real_db_job_block(workflow)
+    parsed = yaml.safe_load(job)
+    mutate(parsed["real-db-integration"])
+    return _splice_real_db_job_block(workflow, job, yaml.dump(parsed, sort_keys=False))
+
+
+def _real_db_named_step(mapping: dict) -> dict:
+    return next(
+        step for step in mapping["steps"] if step.get("name") == REAL_DB_COMMAND_STEP_NAME
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (
+            lambda m: _real_db_named_step(m).update({"env": {"NHMS_RUN_INTEGRATION": "0"}}) or None,
+            "step must not declare its own env",
+        ),
+        (
+            lambda m: _real_db_named_step(m).update({"env": {"NHMS_INTEGRATION_DATABASE_URL": ""}}) or None,
+            "step must not declare its own env",
+        ),
+        (
+            lambda m: _real_db_named_step(m).update({"if": "${{ false }}"}) or None,
+            "must not carry a conditional `if`",
+        ),
+        (
+            lambda m: _real_db_named_step(m).update({"continue-on-error": True}) or None,
+            "step `continue-on-error` must not be enabled",
+        ),
+        (
+            lambda m: m.update({"continue-on-error": True}) or None,
+            "job `continue-on-error` must not be enabled",
+        ),
+        (
+            lambda m: _real_db_named_step(m).update({"shell": "bash"}) or None,
+            "step must not override the default shell",
+        ),
+        (
+            lambda m: _real_db_named_step(m).update({"working-directory": "sub/dir"}) or None,
+            "step must not override the default working-directory",
+        ),
+        (
+            lambda m: m.update({"defaults": {"run": {"shell": "bash"}}}) or None,
+            "job defaults.run must not override the default shell",
+        ),
+        (
+            lambda m: m.update({"defaults": {"run": {"working-directory": "sub/dir"}}}) or None,
+            "job defaults.run must not override the default working-directory",
+        ),
+        (
+            lambda m: m.update(
+                {
+                    "env": {
+                        "DATABASE_URL": "x",
+                        "NHMS_RUN_INTEGRATION": "1",
+                        "NHMS_INTEGRATION_DATABASE_URL": "y",
+                        "PYTHONPATH": "/tmp/x",
+                    }
+                }
+            )
+            or None,
+            "job env must be exactly",
+        ),
+        (
+            lambda m: m.update({"container": {"image": "ubuntu:latest"}}) or None,
+            "must not declare a container",
+        ),
+        (
+            lambda m: m.update({"runs-on": "macos-latest"}) or None,
+            "must run on ubuntu-latest",
+        ),
+    ],
+    ids=[
+        "step_opt_in_override_to_zero",
+        "step_dedicated_dsn_override_blank",
+        "step_false_condition",
+        "step_continue_on_error_true",
+        "job_continue_on_error_true",
+        "step_shell_override",
+        "step_working_directory_override",
+        "job_defaults_shell",
+        "job_defaults_working_directory",
+        "unexpected_job_env_key",
+        "job_container",
+        "wrong_runs_on",
+    ],
+)
+def test_real_db_job_effective_step_mutants_produce_named_violations(
+    mutate: Callable[[dict], None],
+    expected: str,
+) -> None:
+    # Round-3 depth redesign (cand-r3-02 / task 2.10): the named integration
+    # step's EFFECTIVE context is load-bearing — a step env override, a
+    # disabling step condition, step/job error-continuation, custom
+    # shell/working-directory, or job/workflow defaults each make the seven
+    # residual-debt nodes skip, not run, or cease to block while nominal job
+    # fields stay green. Each valid FULL-WORKFLOW mutant must be rejected by the
+    # SAME structured helper with its own named violation. The tracked workflow
+    # is untouched.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    mutated_workflow = _mutated_real_db_workflow(workflow, mutate)
+    parsed = yaml.safe_load(mutated_workflow)
+    assert parsed["jobs"]["real-db-integration"]["name"] == "SQL Migration Dry Run"
+
+    violations = _real_db_job_contract_violations(mutated_workflow)
+    joined = "\n".join(violations)
+    assert expected in joined, f"expected `{expected}` in violations, got {violations}"
+
+
+def test_real_db_job_effective_step_reds_on_a_duplicate_named_step() -> None:
+    # The named step's single identity is load-bearing: a duplicate would
+    # silently pick the first (wrong) command. The same structured helper must
+    # reject the duplicate with a named violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    def duplicate(mapping: dict) -> None:
+        mapping["steps"].append(dict(_real_db_named_step(mapping)))
+
+    mutated_workflow = _mutated_real_db_workflow(workflow, duplicate)
+    parsed = yaml.safe_load(mutated_workflow)
+    named = [s for s in parsed["jobs"]["real-db-integration"]["steps"] if s.get("name") == REAL_DB_COMMAND_STEP_NAME]
+    assert len(named) == 2
+
+    violations = _real_db_job_contract_violations(mutated_workflow)
+    joined = "\n".join(violations)
+    assert "exactly one step named" in joined, f"expected a duplicate-step violation, got {violations}"
+
+
+def test_real_db_job_effective_step_reds_on_non_boolean_continue_on_error() -> None:
+    # `continue-on-error` whose falsehood cannot be proven (a string/expression)
+    # must be rejected — only absent or exactly boolean false is acceptable.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+    def stringify(mapping: dict) -> None:
+        _real_db_named_step(mapping)["continue-on-error"] = "${{ github.event_name == 'push' }}"
+
+    mutated_workflow = _mutated_real_db_workflow(workflow, stringify)
+    violations = _real_db_job_contract_violations(mutated_workflow)
+    joined = "\n".join(violations)
+    assert "absent or exactly false" in joined, f"expected a continuation-policy violation, got {violations}"
+
+
+def test_real_db_workflow_level_metadata_mutants_produce_named_violations() -> None:
+    # Round-3 depth redesign (task 2.10): workflow-level `defaults.run.shell`,
+    # `defaults.run.working-directory`, and `env` are inherited by the real-DB
+    # integration step, so each must be rejected by the SAME full-workflow
+    # helper. The tracked workflow is untouched.
+    mutants = {
+        "defaults:\n  run:\n    shell: bash": "workflow defaults.run must not override the default shell",
+        "defaults:\n  run:\n    working-directory: sub/dir": (
+            "workflow defaults.run must not override the default working-directory"
+        ),
+        "env:\n  PYTHONPATH: /tmp/x": "workflow must not declare workflow-level env",
+    }
+    for fragment, expected in mutants.items():
+        mutated_workflow = _workflow_level_mutant(fragment)
+        violations = _real_db_job_contract_violations(mutated_workflow)
+        joined = "\n".join(violations)
+        assert expected in joined, f"expected `{expected}` in violations, got {violations}"
+
+
+def test_real_db_effective_env_matches_conftest_runtime_skip_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Runtime authority anchor: the same values conftest evaluates must agree
+    # with the structured helper. Live job env yields NO skip reason; a step
+    # opt-out to "0" and a blank dedicated DSN each yield a skip reason, which
+    # is exactly why the helper rejects them as step-level overrides.
+    from tests import conftest
+
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    live_env = yaml.safe_load(workflow)["jobs"]["real-db-integration"]["env"]
+    monkeypatch.setenv(REAL_DB_OPT_IN_ENV, str(live_env[REAL_DB_OPT_IN_ENV]))
+    monkeypatch.setenv(REAL_DB_DEDICATED_DSN_ENV, str(live_env[REAL_DB_DEDICATED_DSN_ENV]))
+    assert conftest._integration_skip_reason() is None
+
+    monkeypatch.setenv(REAL_DB_OPT_IN_ENV, "0")
+    assert conftest._integration_skip_reason() is not None
+
+    monkeypatch.setenv(REAL_DB_OPT_IN_ENV, "1")
+    monkeypatch.setenv(REAL_DB_DEDICATED_DSN_ENV, "")
+    assert conftest._integration_skip_reason() is not None
 
 
 def test_workflow_path_matches_backend_and_database_filters() -> None:
