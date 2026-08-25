@@ -12288,6 +12288,22 @@ def test_recorded_reference_too_short_to_carry_the_identity_pair_is_not_bound() 
     assert binds(candidate, f"s3://elsewhere/x/{candidate.basin_version_id}/{candidate.model_id}/") is True
 
 
+def test_recorded_reference_under_a_different_basin_never_binds_this_candidate() -> None:
+    """#1826: BOTH halves of the identity pair are load-bearing.
+
+    A reference whose last two segments are a DIFFERENT ``basin_version_id``
+    followed by this candidate's OWN ``model_id`` is foreign and must not bind.
+    Checking the ``model_id`` segment alone re-opens the #1816 fail-open for
+    cross-basin references, and no other case discriminates it: every existing
+    input either keeps the candidate's own ``basin_version_id`` or is decided by
+    the ``len(segments) < 2`` guard.
+    """
+
+    candidate = _scheduler_candidate_fixture()
+    binds = scheduler_state_failure_module._recorded_forcing_reference_binds_candidate
+    assert binds(candidate, f"other_basin_v1/{candidate.model_id}/") is False
+
+
 @pytest.mark.parametrize("manifest_present", [True, False])
 def test_file_shaped_package_uri_probe_behaviour_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
