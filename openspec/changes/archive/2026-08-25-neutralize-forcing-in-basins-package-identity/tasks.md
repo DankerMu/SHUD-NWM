@@ -45,7 +45,7 @@
 
 - `uv run ruff check .` clean.
 - `openspec validate neutralize-forcing-in-basins-package-identity --strict --no-interactive` passes.
-- `uv run pytest -q tests/test_basins_package_publication.py tests/test_basins_discovery.py tests/test_basins_registry_import.py tests/test_publish_scheduler_file_registry.py tests/test_object_store_validation.py` — all pass, with the new tests in 4.1-4.5 present and asserting.
+- `uv run pytest -q tests/test_basins_package_publication.py tests/test_basins_discovery.py tests/test_basins_registry_import.py tests/test_publish_scheduler_file_registry.py tests/test_production_object_store_validation.py` — all pass, with the new tests in 4.1-4.5 present and asserting.
 - `uv run pytest -q tests/test_scheduler_file_provider_refresh.py` — the cutover gate's existing fail-safe tests still pass unmodified.
 - The 4.1 red test demonstrably fails on `master` and passes on the branch.
 - No node-27/node-22 receipt required: this change is pure packaging-identity Python with no DB, display, or Slurm surface. Stated as a deliberate scope call, not an omission.

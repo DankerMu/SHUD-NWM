@@ -45,7 +45,9 @@ The system SHALL discover real SHUD model assets only from an explicit Basins ro
 
 ### Requirement: SHUD model directory inventory is complete
 
-The system SHALL produce a structured JSON inventory for each discovered SHUD model directory containing normalized model identity, source path components, `source_path`, `resolved_source_path`, `source_is_symlink`, `shud_input_name`, `input_dir`, `gis_dir`, required SHUD input files, GIS sidecars, `forcing_dir`, `forcing_dir_original_name`, calibration count, forcing count, file checksums, known `quirks[]`, validation status, and suggested registry IDs.
+The system SHALL produce a structured JSON inventory for each discovered SHUD model directory containing normalized model identity, source path components, `source_path`, `resolved_source_path`, `source_is_symlink`, `shud_input_name`, `input_dir`, `gis_dir`, required SHUD input files, GIS sidecars, `forcing_dir`, `forcing_dir_original_name`, calibration count, file checksums, known `quirks[]`, validation status, and suggested registry IDs.
+
+The inventory document is hashed raw into the package manifest's `source_inventory_checksum`, which the cutover gate treats as a model identity field. It SHALL therefore carry no field whose value is derived from forcing CSV payloads: the inventory SHALL NOT include a forcing CSV count. Structural forcing facts — which directory was selected and under which spelling — SHALL be retained, because downstream packaging resolves the forcing source directory from them.
 
 #### Scenario: Known 13-model Basins dataset is discovered
 
@@ -60,17 +62,17 @@ The system SHALL produce a structured JSON inventory for each discovered SHUD mo
 #### Scenario: Legacy forcing directory spelling is normalized
 
 - **WHEN** discovery finds `tailanhe/focing`
-- **THEN** the inventory records `forcing_dir` as that path, includes the forcing CSV count, and records a `legacy_focing_dir` quirk
+- **THEN** the inventory records `forcing_dir` as that path and records a `legacy_focing_dir` quirk
 
 #### Scenario: Forcing directory spelling conflict
 
 - **WHEN** both `forcing/` and `focing/` exist for the same model
 - **THEN** discovery either chooses canonical `forcing/` and records a conflict warning, or exits with a structured ambiguity error before producing an importable inventory
 
-#### Scenario: Large forcing directory is bounded
+#### Scenario: Forcing payload volume does not reach the inventory
 
-- **WHEN** a model has a large forcing directory such as 10000 CSV files
-- **THEN** discovery records the CSV count using bounded metadata traversal and does not read all CSV payloads for discovery-only inventory generation
+- **WHEN** a model has a large forcing directory such as 10000 CSV files, and CSV files are later added to or removed from it
+- **THEN** discovery neither counts nor reads the CSV payloads for inventory generation, and the inventory document bytes are unchanged across those payload changes
 
 ### Requirement: Required SHUD files are validated
 

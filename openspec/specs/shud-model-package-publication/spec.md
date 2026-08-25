@@ -26,7 +26,9 @@ The manifest schema SHALL include at least these fields:
 
 Each `included_files[]` entry SHALL include `relative_path`, `object_uri`, `size_bytes`, `sha256`, and `role`. Runtime package files SHALL use object keys under `models/<model_id>/<version>/package/`; manifest JSON SHALL use `models/<model_id>/<version>/manifest.json`; explicit forcing copies SHALL use `models/<model_id>/<version>/forcing/`.
 
-The manifest itself SHALL be represented in `included_files[]` with `role=manifest` and `relative_path=manifest.json`. To avoid recursive manifest checksums, `package_checksum` SHALL exclude the manifest self-entry and cover source package plus forcing evidence; the manifest self-entry `sha256` SHALL cover the deterministic manifest payload before that self-entry is appended, and its `size_bytes` SHALL record the final object-store manifest byte length.
+The manifest itself SHALL be represented in `included_files[]` with `role=manifest` and `relative_path=manifest.json`. To avoid recursive manifest checksums, `package_checksum` SHALL exclude the manifest self-entry and cover the source package contents; the manifest self-entry `sha256` SHALL cover the deterministic manifest payload before that self-entry is appended, and its `size_bytes` SHALL record the final object-store manifest byte length.
+
+Package identity SHALL be derived only from what the package contains plus the declared policy governing it. Concretely, the forcing contribution to `package_checksum` and to `content_sha256` SHALL be limited to the declared `policy` and `payload_copied` values, and SHALL NOT include `csv_count`, `byte_count`, `aggregate_checksum`, `copied_file_count`, or `copied_byte_count`. When forcing payloads are copied, those payloads SHALL enter identity as ordinary `included_files[]` entries with `role=forcing`, exactly as calibration content does. The version-string source material SHALL NOT include `forcing_dir_original_name`.
 
 #### Scenario: Package publication writes manifest and checksum
 
@@ -35,67 +37,31 @@ The manifest itself SHALL be represented in `included_files[]` with `role=manife
 - **AND** the manifest identifies the source inventory schema version, source path, resolved source path, source symlink status, basin/model IDs, package version, included file list, excluded forcing payload policy, and creation timestamp
 - **AND** the included file list contains a manifest entry whose URI points at `manifest_uri` and whose byte-size evidence matches the object-store manifest
 
-#### Scenario: Partial models are not published by default
+#### Scenario: Excluded forcing payloads do not move package identity
 
-- **WHEN** a Basins inventory model has `status=partial` or `default_publish_eligible=false`
-- **THEN** package publication refuses the model with stable error code `BASINS_MODEL_NOT_PUBLISHABLE` unless a later explicit partial-acceptance option is defined
+- **WHEN** a model is published without the historical forcing copy option, its `forcing/` directory is then emptied of CSV payloads while the directory itself is retained, discovery is re-run, and the model is published again
+- **THEN** `content_sha256`, the version-string source hash, `package_checksum`, and `source_inventory_checksum` are all identical to the first publication
+- **AND** the same holds when forcing CSV bytes are mutated in place rather than removed
 
-#### Scenario: Required runtime and GIS roles are revalidated before publication
+#### Scenario: Structural forcing changes remain visible
 
-- **WHEN** a selected inventory model claims `status=valid` and `default_publish_eligible=true` but omits canonical required SHUD runtime or GIS sidecar roles from `required_files`
-- **THEN** package publication refuses the inventory with stable error code `BASINS_REQUIRED_FILES_MISSING`
-- **AND** it does not publish an immutable package or local manifest that omits required runtime/GIS assets
-- **WHEN** `required_files` contains extra non-canonical paths or roles after the canonical runtime/GIS files are present
-- **THEN** package publication refuses the inventory with stable error code `BASINS_REQUIRED_FILES_NON_CANONICAL`
-- **AND** it does not publish package entries or local manifests for the extra inventory-controlled paths
+- **WHEN** the `forcing/` directory is removed outright rather than emptied, or its legacy `focing/` spelling is renamed
+- **THEN** package identity changes, because `forcing_dir` and `forcing_dir_original_name` are structural source facts rather than payload evidence
 
-#### Scenario: Package publication is idempotent
+#### Scenario: Copied forcing payloads still bind to identity
 
-- **WHEN** publication is run again for unchanged source files and the same target version
-- **THEN** it returns `already_done` or equivalent status without rewriting a different package checksum
-- **AND** benign inventory JSON formatting, unrelated inventory fields, unrelated model records, or raw inventory checksum changes SHALL NOT change the package checksum when selected model package material is unchanged
-- **AND** the manifest still records `source_inventory_checksum` as evidence separate from the package checksum
-
-#### Scenario: Source checksum changes for same target version
-
-- **WHEN** publication is run for the same target version but source file checksums differ from the existing package manifest
-- **THEN** it refuses to overwrite the package, reports stable error code `BASINS_PACKAGE_CHECKSUM_CONFLICT`, and preserves the existing manifest/package
-- **AND** #135 provides no force-overwrite behavior; users must choose a new version when source checksums change
-
-#### Scenario: Inventory source paths are revalidated
-
-- **WHEN** a Basins inventory record contains absolute source paths or input/forcing paths that do not match `resolved_root` plus the model root-relative path
-- **THEN** package publication refuses the inventory with stable error code `BASINS_INVENTORY_PATH_MISMATCH` or `BASINS_PACKAGE_PATH_UNSAFE`
-- **AND** it does not publish package files or a manifest from attacker-controlled absolute paths outside the inventory root
-
-#### Scenario: Publication uses a local object-store lock and verified writes
-
-- **WHEN** a package manifest does not already exist for `models/<model_id>/<version>/manifest.json`
-- **THEN** publication SHALL acquire an exclusive `models/<model_id>/<version>/.publish.lock` marker before writing package objects
-- **AND** an existing lock SHALL fail deterministically with `BASINS_PACKAGE_PUBLISH_IN_PROGRESS`
-- **AND** an existing unchanged manifest SHALL still return `already_done` without requiring the lock
-- **AND** package object entries SHALL record size and SHA-256 from the exact bytes written and verified in the object store before the final manifest is written
-- **AND** requested local `--output` manifest JSON SHALL only be written after the object-store manifest has been written and verified
-- **AND** package object verification SHALL stream from the resolved object path in chunks instead of loading full object bytes into memory
-
-#### Scenario: Publication command failure payload
-
-- **WHEN** `publish-basins` fails
-- **THEN** stderr contains JSON with `error_code`, `message`, and relevant `model_id`, `version`, `path`, or `manifest_uri` fields
-- **AND** the command does not emit a success payload claiming `status=published`
-- **AND** requested local output JSON write failures SHALL use stable error code `BASINS_PACKAGE_OUTPUT_WRITE_FAILED`
-- **AND** malformed or non-UTF-8 inventory input SHALL use stable error code `BASINS_INVENTORY_INVALID` rather than an uncaught traceback
-- **AND** stale inventory source-file stat/read failures during planning or checksum calculation SHALL fail with structured JSON including `model_id`, `version`, source `path`, and `manifest_uri`
+- **WHEN** publication runs with the explicit historical forcing copy option and a copied forcing CSV's bytes differ
+- **THEN** `package_checksum` differs, because the copied payload is an `included_files[]` entry whose `sha256` is covered by the package checksum material
 
 ### Requirement: Historical forcing is represented without accidental bulk duplication
 
-The system SHALL record historical forcing CSV metadata separately from the runtime model input package and SHALL only copy forcing CSV payloads when explicitly requested.
+The system SHALL record historical forcing CSV metadata separately from the runtime model input package and SHALL only copy forcing CSV payloads when explicitly requested. When payloads are not copied, the system SHALL NOT read forcing CSV payload bytes to produce an aggregate payload checksum, because that checksum has no consumer once forcing leaves the identity material.
 
 #### Scenario: Forcing metadata inventory
 
 - **WHEN** a model has CMFD forcing CSV files under `forcing/` or `focing/`
-- **THEN** the package manifest records the forcing directory, CSV count, time coverage when parsable from file headers, and aggregate checksum metadata
-- **AND** header/time evidence sampling SHALL be bounded by recorded file/byte/line limits while aggregate count, bytes, and checksum are computed by streaming file metadata and hashes
+- **THEN** the package manifest records the forcing directory, CSV count, byte count, and time coverage when parsable from file headers
+- **AND** header/time evidence sampling SHALL be bounded by recorded file/byte/line limits while aggregate count and bytes are obtained from file metadata without reading payload bytes
 - **AND** the file sampling limit SHALL count sampled CSV files rather than unique headers, so duplicate headers cannot cause unbounded time-evidence reads
 
 #### Scenario: Runtime package excludes bulk forcing by default
@@ -103,24 +69,13 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 - **WHEN** publication runs without an explicit historical forcing copy option
 - **THEN** the runtime model package excludes the full forcing CSV payloads but retains forcing metadata needed for migration planning
 - **AND** the package file list contains no `forcing/*.csv` or `focing/*.csv` payload entries
+- **AND** no forcing CSV payload is read end-to-end, so publication cost SHALL NOT scale with historical forcing volume
 
 #### Scenario: Historical forcing copy is explicit
 
 - **WHEN** publication runs with an explicit option to copy historical forcing payloads
 - **THEN** forcing CSV files are written under a separate object-store prefix and the manifest records forcing payload URI, file count, and checksum evidence
 - **AND** copied forcing payloads SHALL be streamed to object storage without reading whole files into memory
-
-#### Scenario: Symlink descendants are rejected during package traversal
-
-- **WHEN** runtime, calibration, forcing, or migration evidence traversal encounters a symlink descendant below the selected source root
-- **THEN** the command refuses the traversal with stable error code `BASINS_PACKAGE_PATH_UNSAFE`
-- **AND** it emits structured JSON rather than an uncaught traceback
-
-#### Scenario: Explicit package source paths reject symlinks
-
-- **WHEN** `input_dir`, `forcing_dir`, `CALIB`, or required runtime/GIS files are symlinks below the selected model source root, even if they resolve inside the Basins source root
-- **THEN** package publication refuses the path with stable error code `BASINS_PACKAGE_PATH_UNSAFE`
-- **AND** a symlink Basins discovery root itself remains supported when the selected model source root resolves to real copied data
 
 ### Requirement: Production migration rejects symlink-only evidence
 
@@ -216,4 +171,18 @@ The receipt is the only recording seam that exists.)
 - **THEN** the package SHALL contain the supplied template
 - **AND** the publication receipt's `repairs` list SHALL record the repair
 - **AND** the model's calibration files SHALL remain byte-identical to source
+
+### Requirement: Published package checksums stay reconstructable across schema generations
+
+Any component that reconstructs `package_checksum` from a stored manifest SHALL select the checksum material shape declared by that manifest's own `schema_version`, so manifests published before the forcing-identity migration continue to verify. Where the stored manifest does not carry enough evidence to reconstruct, the component SHALL report a recorded reconstruction limitation rather than a verification failure.
+
+#### Scenario: Pre-migration manifest still verifies
+
+- **WHEN** production-closure validation reconstructs `package_checksum` for a manifest published with the pre-migration schema version
+- **THEN** the reconstruction uses the pre-migration forcing material shape and the checksum matches the stored value
+
+#### Scenario: Post-migration manifest verifies with the reduced material
+
+- **WHEN** the same validation runs against a manifest published after the migration
+- **THEN** the reconstruction uses the reduced forcing material and the checksum matches the stored value
 
