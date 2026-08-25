@@ -7,14 +7,26 @@
 # Reads the tool-call JSON on stdin (Claude Code and Codex use the same
 # shape) and exits 2 with a stderr explanation to deny.
 #
-# Optional config at <project>/.large-file-guard.json:
+# The tool-call JSON `cwd` decides which worktree is being committed: its Git
+# top level is resolved (the probe runs at the raw JSON cwd) before anything
+# else and is the root for the config file, all `git -C` operations, worktree
+# file reads and the MERGE_HEAD lookup (which runs at the resolved root, so an
+# absent or non-Git cwd still sees the active/fallback repo's merge metadata).
+# CLAUDE_PROJECT_DIR is a fallback only (JSON cwd absent, or not inside a Git
+# worktree), which preserves legacy/non-worktree callers.
+#
+# Path-valued Git output (`--show-toplevel`, `--git-path MERGE_HEAD`) is
+# captured as raw bytes, stripped of exactly one protocol LF byte, and decoded
+# losslessly via os.fsdecode — generic whitespace stripping would truncate
+# legal trailing-space/CR path bytes and text mode would translate CR to LF.
+#
+# Optional config at <git-top-level>/.large-file-guard.json:
 #   { "enabled": true, "maxLines": 1000, "exclude": ["docs/data/*.csv"] }
 set -euo pipefail
 
 input=$(cat)
-root="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-LFG_INPUT="$input" LFG_ROOT="$root" python3 - <<'PY'
+LFG_INPUT="$input" LFG_FALLBACK_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}" python3 - <<'PY'
 import fnmatch
 import json
 import os
@@ -32,8 +44,35 @@ if not re.search(r"\bgit\b[^|;&]*\bcommit\b", command) and not re.search(
 ):
     sys.exit(0)
 
-root = os.environ["LFG_ROOT"]
-cwd = data.get("cwd") or root
+root = os.environ["LFG_FALLBACK_ROOT"]
+cwd = data.get("cwd") or ""
+
+
+def git_path_output(raw):
+    # Git emits one path plus a protocol LF byte; the path itself is legal
+    # filesystem bytes (trailing spaces/tabs, CR, even embedded newlines) and
+    # must survive intact, so exactly that one trailing byte is removed and
+    # the rest is decoded losslessly through the filesystem encoding.  Text
+    # mode is not used: universal-newline translation would rewrite legal CR
+    # path bytes before this helper could see them.
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    return os.fsdecode(raw)
+
+
+def git_path(*args, run_cwd=None):
+    return subprocess.run(
+        ["git", "-C", run_cwd if run_cwd is not None else cwd, *args],
+        capture_output=True,
+    )
+
+
+if cwd:
+    # The tool call names the worktree it acts on; its Git top level is the
+    # single root for config, git operations and worktree file reads. A cwd
+    # outside any Git worktree falls back to the legacy root.
+    probed = git_path("rev-parse", "--show-toplevel")
+    if probed.returncode == 0:
+        root = git_path_output(probed.stdout)
 
 config = {}
 cfg_path = os.path.join(root, ".large-file-guard.json")
@@ -67,7 +106,7 @@ exclude = list(config.get("exclude", [])) + DEFAULT_EXCLUDE
 
 def git(*args):
     result = subprocess.run(
-        ["git", "-C", cwd, *args], capture_output=True, text=True
+        ["git", "-C", root, *args], capture_output=True, text=True
     )
     return result.stdout if result.returncode == 0 else ""
 
@@ -92,11 +131,17 @@ def excluded(path):
 def merge_parent_shas():
     # Non-empty only while a merge awaits conclusion (git commit /
     # git merge --continue). May list several heads for octopus merges.
-    path = git("rev-parse", "--git-path", "MERGE_HEAD").strip()
+    # MERGE_HEAD lives in the resolved repo's admin directory, so it is
+    # queried at the active/fallback root — not the raw JSON cwd, which may be
+    # absent or outside any Git repository.
+    path = git_path_output(
+        git_path("rev-parse", "--git-path", "MERGE_HEAD", run_cwd=root).stdout
+    )
     if not path:
         return []
     try:
-        with open(os.path.join(cwd, path), encoding="utf-8") as fh:
+        merge_head = path if os.path.isabs(path) else os.path.join(root, path)
+        with open(merge_head, encoding="utf-8") as fh:
             return [line.strip() for line in fh if line.strip()]
     except OSError:
         return []
@@ -123,7 +168,7 @@ for path in sorted(staged | worktree):
     if path in worktree:
         try:
             with open(
-                os.path.join(cwd, path), encoding="utf-8", errors="ignore"
+                os.path.join(root, path), encoding="utf-8", errors="ignore"
             ) as fh:
                 content = fh.read()
         except OSError:
@@ -140,7 +185,7 @@ if offenders:
         f"large-file-guard: commit blocked — file(s) exceed {max_lines} lines: "
         f"{listing}. Split the file into smaller modules before committing. If it "
         f'is legitimately large (generated/vendored/data), add it to "exclude" in '
-        f".large-file-guard.json at the project root and retry.\n"
+        f"{cfg_path} and retry.\n"
     )
     sys.exit(2)
 PY
