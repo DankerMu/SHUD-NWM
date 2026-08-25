@@ -43,8 +43,8 @@ Fixture level: expanded. Project profile: NHMS. Repair intensity: medium. Upstre
 
 - `select_tests(changed_paths, repo_root=...)`: real-tree and synthetic-tree selections, including lazy-build and parse-reuse seams.
 - Selector CLI GitHub output: `meta_guard_only` remains false for a changed suite.
-- Mechanically derived recursive live-tree invariant: every non-gated module-scope importer of each ordinary owner suite is selected, including future nested and `*_test.py` suites; only redirects active for `changed=[owner]` are excluded.
-- Synthetic tree mutation: added and rewritten importer files invalidate discovery/parse state; unchanged files reuse parse work.
+- Mechanically derived recursive live-tree invariant: every non-gated module-scope importer of each ordinary owner suite is selected, including future nested and `*_test.py` suites; only redirects active for `changed=[owner]` are excluded. The live guard and its constructed red share one test-side offender helper whose defaults own recursive owner discovery, one dotted-module importer index, real selection, effective redirects, and deterministic missing-importer messages.
+- Synthetic tree mutation: added and rewritten importer files invalidate discovery/parse state; unchanged files reuse parse work. Constructed comparator proofs run the same offender helper and its default recursive/dotted authorities as the live guard, injecting only the omitted actual selection.
 
 ## Risks / Trade-offs
 

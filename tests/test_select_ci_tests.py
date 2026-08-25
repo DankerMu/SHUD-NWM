@@ -2540,16 +2540,26 @@ def test_missing_derived_importer_is_named_by_the_live_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Constructed red evidence for the live-tree guard's comparator seam: a
-    # derived importer the selector does not select must be named by the guard
-    # as an "importer closure misses [...]" offender — the missing-suite-by-name
-    # requirement. Built on a synthetic tree (via a monkeypatched tracked-suite
-    # domain) so no tracked file is touched: the derived importer is derived by
-    # the independent authority from fixture text, and the selection is a real
-    # `select_tests` call against the fixture tree whose index is made to DROP
-    # the edge (the production mutation this guard exists to catch). The guard
-    # computes missing from the independent authority, not from the index the
-    # selection ran on, so the constructed miss is a genuine comparison.
+    # Constructed red evidence for the live-tree guard's SHARED comparator
+    # seam: a derived importer the selector does not select must be named by
+    # the guard as an "importer closure misses [...]" offender — the
+    # missing-suite-by-name requirement. Built on a synthetic tree (via a
+    # monkeypatched tracked-suite domain) so no tracked file is touched, and
+    # run through the SAME helper (`_suite_importer_closure_offenders`) the
+    # live-tree guard executes — the constructed red cannot stay green while
+    # the live guard's domain/comparison/message is corrupted, because they
+    # are one code path. The helper runs its REAL DEFAULTS for BOTH the owner
+    # domain and the derived authority: with no `owners=` injection, the
+    # recursive `_tracked_test_suites()` domain is discovered from the
+    # monkeypatched tracked file list, so the nested `tests/pkg/test_owner.py`
+    # stays in it — a guard loop that drops nested owners reddens this proof —
+    # and the REQUIRED importer set comes from the default independent
+    # authority (fixture text -> inverted index -> dotted-owner lookup). Only
+    # the SELECTION RESULT is injected: `select_omits_importer` returns what a
+    # broken selector would omit, the regression shape; a real `select_tests`
+    # call is unnecessary because the live-guard caller already exercises it
+    # against the live tree. The helper returns the same deterministic offender
+    # the live guard's assert would raise on.
     owner_rel = "tests/pkg/test_owner.py"
     importer_rel = "tests/pkg/test_importer.py"
     owner = tmp_path / "tests" / "pkg" / "test_owner.py"
@@ -2565,28 +2575,16 @@ def test_missing_derived_importer_is_named_by_the_live_guard(
     )
     monkeypatch.setattr("tests.test_select_ci_tests.CHANGED_TEST_FILE_RULES", ())
 
-    assert _changed_test_rule_redirects_for(owner_rel, [owner_rel]) == set()
+    def select_omits_importer(owner: str) -> set[str]:
+        return {owner, SELECTOR_META_GUARD_TEST}
 
-    import scripts.select_ci_tests as _prod
+    offenders = _suite_importer_closure_offenders(
+        select=select_omits_importer,
+        redirects=lambda _owner: False,
+    )
 
-    # The independent authority derives the edge from the fixture text.
-    assert importer_rel in _non_gated_top_level_importer_tests("tests.pkg.test_owner")
-    # The selection runs on an index that DROPS the edge — the regression shape.
-    monkeypatch.setattr(_prod, "_build_suite_importer_index", lambda _root: {})
-    selected = set(select_tests([owner_rel], repo_root=tmp_path))
-    assert selected == {owner_rel}
-    assert importer_rel not in selected
-
-    importers = _non_gated_top_level_importer_tests("tests.pkg.test_owner")
-    missing = sorted(importers - selected)
-    assert missing == [importer_rel]
-    # The live-tree guard must NAME the missing suite in its offender message —
-    # "importer closure misses [...]" — so a future nested live edge reddens by
-    # name. The message text is pinned here (the guard's own format), so a
-    # guard that stopped naming the suite would redden this test.
-    offender = f"{owner_rel}: importer closure misses {missing}"
-    assert offender == "tests/pkg/test_owner.py: importer closure misses ['tests/pkg/test_importer.py']"
-    assert importer_rel in offender
+    assert offenders == ["tests/pkg/test_owner.py: importer closure misses ['tests/pkg/test_importer.py']"]
+    assert importer_rel in offenders[0]
 
 
 def test_suite_importer_closure_malformed_source_fails_loudly(tmp_path: Path) -> None:
@@ -2621,6 +2619,71 @@ def test_suite_importer_closure_github_output_stays_meta_guard_only_false(
     assert fields["collection_smoke_required"] == "false"
 
 
+def _suite_importer_closure_offenders(
+    *,
+    owners: Sequence[str] | None = None,
+    derived: Callable[[str], set[str]] | None = None,
+    select: Callable[[str], set[str]] | None = None,
+    redirects: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """The ONE comparator the live suite-importer closure guard and its proof share.
+
+    For every ordinary owner with a non-empty required importer set, compute
+    ``missing = sorted(required - selected)`` and emit exactly
+    ``<owner>: importer closure misses <missing>`` — deterministic, sorted
+    offenders. Both callers run this same code path, so corrupting the guard's
+    domain/comparison/message cannot leave the constructed proof green.
+
+    Defaults are the LIVE tree behavior (the live guard passes nothing):
+    - ``owners``: the recursive tracked-suite domain ``_tracked_test_suites()``;
+    - ``derived``: the independent test-side authority — the inverted index
+      ``_non_gated_top_level_importer_index()``, built ONCE per helper call and
+      looked up by the owner's dotted module (``_dotted_module_name(owner)``).
+      The authority is keyed by dotted identity, never by repo-relative path,
+      so a path fed in would derive an empty set and silently vacate the guard.
+    - ``select``: the real selector ``select_tests([owner], repo_root=Path("."))``;
+    - ``redirects``: the effective redirect predicate
+      ``bool(_changed_test_rule_redirects_for(owner, [owner]))``.
+
+    Explicit injection is authoritative for constructed tests: a supplied
+    nested owner is evaluated as given even when absent from the live tree
+    (injection, not a live lookup), and a supplied ``derived`` callable replaces
+    the default index lookup entirely (its contract is per-owner required
+    importer set, dotted key). The helper is immutable/read-only — it never
+    mutates any of its inputs, and a default ``select`` never modifies the
+    changed-path set it derives from ``owners``.
+    """
+    owner_list = list(_tracked_test_suites() if owners is None else owners)
+    if derived is None:
+        importer_index = _non_gated_top_level_importer_index()
+
+        def required_for(owner: str) -> set[str]:
+            return importer_index.get(_dotted_module_name(owner), set())
+    else:
+        required_for = derived
+    select_for = (
+        (lambda owner: set(select_tests([owner], repo_root=Path(".")))) if select is None else select
+    )
+    redirected_for = (
+        (lambda owner: bool(_changed_test_rule_redirects_for(owner, [owner])))
+        if redirects is None
+        else redirects
+    )
+
+    offenders: list[str] = []
+    for owner in owner_list:
+        required = required_for(owner)
+        if not required:
+            continue
+        if redirected_for(owner):
+            continue
+        selected = select_for(owner)
+        missing = sorted(required - selected)
+        if missing:
+            offenders.append(f"{owner}: importer closure misses {missing}")
+    return offenders
+
+
 def _changed_test_rule_redirects_for(owner: str, changed: Sequence[str]) -> set[str]:
     """``CHANGED_TEST_FILE_RULES`` redirect targets that fire for ``owner`` in ``changed``.
 
@@ -2646,34 +2709,29 @@ def test_live_suite_importer_edges_all_join_the_ordinary_selection() -> None:
     # never a frozen filename routing table — so a newly added module-scope
     # edge reddens here by name instead of silently escaping the selector.
     #
-    # The ordinary-domain classification skips only an ACTUALLY ACTIVE redirect
-    # for the single changed owner: a `CHANGED_TEST_FILE_RULES` rule whose
-    # `only_when_any_changed` surface is absent from `changed=[owner]` is NOT
-    # active and the owner stays ordinary (and therefore guard-covered). This is
-    # what keeps the standalone conditional-rule owners — the two slow
-    # orchestrator suites tests/test_orchestration_chain.py and
+    # The guard body is the SHARED comparator helper
+    # `_suite_importer_closure_offenders` with live defaults (recursive
+    # tracked-suite owner domain, independent derived importer mapping, real
+    # `select_tests`, effective redirect predicate) — the same code path the
+    # constructed red `test_missing_derived_importer_is_named_by_the_live_guard`
+    # injects into, so corrupting the live guard's domain/comparison/message
+    # reddens that proof too. The ordinary-domain classification skips only an
+    # ACTUALLY ACTIVE redirect for the single changed owner: a
+    # `CHANGED_TEST_FILE_RULES` rule whose `only_when_any_changed` surface is
+    # absent from `changed=[owner]` is NOT active and the owner stays ordinary
+    # (and therefore guard-covered). This is what keeps the standalone
+    # conditional-rule owners — the two slow orchestrator suites
+    # tests/test_orchestration_chain.py and
     # tests/test_production_scheduler.py — inside the guard: production checks
     # `only_when_any_changed` BEFORE `matched_changed_test` (see
     # `select_tests`), so with `changed=[owner]` none of their conditional
-    # rules' surfaces fire and both take the ordinary branch. tests/test_sql_shape_helpers.py
-    # is the one owner whose rule is UNCONDITIONAL, so it is excluded here and
-    # its focused redirect is pinned by
+    # rules' surfaces fire and both take the ordinary branch.
+    # tests/test_sql_shape_helpers.py is the one owner whose rule is
+    # UNCONDITIONAL, so it is excluded here and its focused redirect is pinned
+    # by
     # test_redirected_changed_suite_keeps_its_focused_targets_without_the_closure.
-    import tests.test_select_ci_tests as _self
+    offenders = _suite_importer_closure_offenders()
 
-    index = _self._non_gated_top_level_importer_index()
-
-    offenders: list[str] = []
-    for owner in _tracked_test_suites():
-        importers = index.get(_dotted_module_name(owner), set())
-        if not importers:
-            continue
-        if _changed_test_rule_redirects_for(owner, [owner]):
-            continue
-        selected = set(select_tests([owner], repo_root=Path(".")))
-        missing = sorted(importers - selected)
-        if missing:
-            offenders.append(f"{owner}: importer closure misses {missing}")
     assert not offenders, "suite importer closure incomplete:\n  " + "\n".join(offenders)
 
 
