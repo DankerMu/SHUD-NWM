@@ -102,23 +102,66 @@
 
 ## 5. Production receipt (node-22) — Evidence Floor
 
-- [ ] 5.1 Equivalence diff on the real journal: run the OLD whole-tree replay with
+- [x] 5.1 Equivalence diff on the real journal: run the OLD whole-tree replay with
       an injected huge budget (`max_records=10**9`, diagnostic script only, never
       production code, read-only) and diff its released-row set against the NEW
       flat-scan result. **Identical sets** proves coverage over the entire retained
       history rather than over four known rows. Prior art for the new side already
       measured: 4 557 flat files read in 1.44 s, FOUND 4, matching the independent
       ground truth from a full `journal/` scan for `identity_mismatch_released`.
-- [ ] 5.2 Red/green on the same journal: default budget raises
+- [x] 5.2 Red/green on the same journal: default budget raises
       `file_journal_record_limit_exceeded` at base; the deployed fix returns the
       same four rows with `budget_errors == 0`.
-- [ ] 5.3 CLI end-to-end on node-22 after deploy:
+- [x] 5.3 CLI end-to-end on node-22 after deploy:
       `nhms-pipeline recover-released-identity-blocked-reservation --journal-root <prod>`
       returns `decision: "listed"` with `wedged_count == 4`, write-free.
 
+### Live receipt (node-22, 2026-08-25)
+
+Run from two throwaway clones (`/scratch/frd_muziyao/nwm-1810-live` on
+`a7a98755`, `/scratch/frd_muziyao/nwm-1810-control` on master `ce49e5c6`).
+`/scratch/frd_muziyao/NWM` is the tree the scheduler executes from and was NOT
+moved off `master` at any point — every step logged its branch and HEAD.
+
+Journal at measurement time, against the numbers D4 recorded — every one grew,
+which is the append-only property D4 relies on:
+
+| | D4 (at design time) | 2026-08-25 |
+|---|---|---|
+| `journal/` files | 232 | 241 |
+| `journal/` records | 71 213 | **72 996** |
+| journal tree files | 21 499 | 22 221 |
+
+- **5.2 red/green, same journal, same day.** Base (master) raises
+  `file_journal_record_limit_exceeded` after 56.9 s. The fix returns the four
+  rows in 26.6 s.
+- **5.1 equivalence.** The OLD whole-tree replay with the record budget raised
+  to 1e9 (constant edited in the throwaway control clone; read-only against the
+  journal) completes in 73.9 s and returns **exactly the same four `job_id`s**
+  as the new flat scan. Identical sets over the entire retained history, not
+  over four known rows.
+- **5.3 CLI.** `nhms-pipeline recover-released-identity-blocked-reservation
+  --journal-root <prod>` returns `decision: "listed"`, `wedged_count: 4`,
+  exit 0, write-free.
+
+A method note worth keeping, because the first attempt at 5.1 produced a
+plausible-looking wrong answer: patching `MAX_FILE_JOURNAL_RECORDS` on the
+module AFTER import does nothing — `max_records: int = MAX_FILE_JOURNAL_RECORDS`
+binds the default at def-time, so the run still raised
+`file_journal_record_limit_exceeded` and read as "even unbudgeted, the old path
+cannot finish". It can. Edit the constant in the source of the throwaway clone
+before import, and assert the budget actually in effect from inside the process
+(this run printed `budget_in_effect: 1000000000`) before trusting the result.
+
 ## 6. Process (carried from PR #1802's ADR 0003 revisit)
 
-- [ ] 6.1 Persist per-round lens lists to `.workplans/pr-<N>/review/round-<K>-lenses.txt`.
+- [~] 6.1 Persist per-round lens lists to `.workplans/pr-<N>/review/round-<K>-lenses.txt`.
       PR #1802's line is excluded from the lens-rotation sample entirely because
       this was skipped (`loop_log_audit.py:124`); repeating it would be the same
       finding twice.
+      **Partially satisfied.** Round 3's lens list is persisted at
+      `.workplans/pr-1819/review/round-3-lenses.txt`. Rounds 1 and 2 predate the
+      record and their lens lists are not reconstructible from branch history,
+      so they are recorded as unknown rather than guessed — see the README in
+      that directory. This line therefore still carries an attribution gap, and
+      the loop-log entry says so instead of claiming a clean lens record.
