@@ -2025,8 +2025,10 @@
       ]
     },
     "1571": {
-      "ceilingPrs": [],
-      "gateEntries": 4,
+      "ceilingPrs": [
+        1822
+      ],
+      "gateEntries": 5,
       "closed": []
     },
     "1605": {
