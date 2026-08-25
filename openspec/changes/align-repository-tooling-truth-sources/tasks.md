@@ -8,6 +8,9 @@
 - [x] 2.1 Track `.python-version` with `3.11` without changing `requires-python >=3.11` or CI's pip dependency resolution.
 - [x] 2.2 Update `instructions/agents/shared.md` and regenerate `CLAUDE.md`/`AGENTS.md` to document default 3.11, explicit `uv run --python <ver>`, and the operator-approved maintenance-window gate for node-22's active 3.12.7 -> 3.11 cutover, including the pre-window prohibition of `uv sync` / bare `uv run` (implicit venv recreation) and the `uv run --no-sync`-only observation path.
 - [x] 2.3 Verify default Python 3.11, the expected 3.13-only `Path.rglob` TypeError, explicit Python 3.14 selection, and the full Python regression suite.
+- [x] 2.4 Close the pre-maintenance invariant across active node-22 automatic and operator entrypoints: use checked-in wrappers or the exact active `.venv` interpreter, preserve the intentionally isolated rollback-worktree sync, and remove current instructions that can implicitly recreate the shared environment.
+- [x] 2.5 Reconcile the stale e2e/grib node-22 guidance with the current node-27 oracle: assert node-27's existing Python is 3.11, fail before pytest on assertion failure, preserve pytest's non-zero status through the receipt `tee`, run through `uv run --no-sync`, and make the pytest skip message point to that single runbook authority rather than duplicating a command.
+- [x] 2.6 Mark the QHH bring-up runbook as a governed whole-document historical baseline and make the production-topology audit consume the central complete-marker classifier: `historical baseline` does not require `superseded_by`, incomplete markers remain visible, and current authority paths cannot self-exempt.
 
 ## 3. Worktree-local guard truth source (#1634)
 
@@ -28,6 +31,8 @@
 - [x] 5.4 `uv run pytest -q tests/test_scheduler_state_index_copyback_replay.py` -> pass; exact allowlist and stable owner assertions execute.
 - [x] 5.5 `uv run pytest -q` and `uv run ruff check .` -> pass on Python 3.11; `openspec validate align-repository-tooling-truth-sources --strict --no-interactive` -> valid.
 - [x] 5.6 On node-22, verify the exact implementation commit in a disposable clean worktree -> Python 3.11.15, version assertion passes, zero Slurm commands, and worktree cleanup succeeds; explicitly defer the active shared `.venv` cutover from 3.12.7 to the next operator-approved service maintenance window because live processes map it (`evidence/node22-python-pin-receipt.md`).
+- [x] 5.7 Static regressions prove every tracked active node-22 automatic/operator surface in this change uses the required exact active interpreter or isolated checkout, current runbooks contain no contradictory active-checkout bare/environment-updating `uv` or system-Python command, the node-27 guard/receipt shell control flow fails closed, historical/diagnostic exceptions are explicitly classified, and the source/generated instruction projections remain byte-exact; the seam turns red for a `PYTHONPATH`-prefixed `python3` substitute (direct or through `env`/`usr/bin/env`), a wrong gateway template root, and a status-swallowing `|| true` guard.
+- [x] 5.8 Entropy regressions prove a complete non-current `historical baseline` marker without `superseded_by` suppresses preserved topology text, an incomplete marker does not, and `docs/runbooks/current-production-ops.md` remains gate-eligible even if given a forged non-current marker; the repository hard gate returns pass.
 
 ## 6. Explicit exclusions
 

@@ -19,6 +19,30 @@ def _candidate() -> runner.CandidateCycle:
     return runner.CandidateCycle("gfs", datetime(2026, 5, 21, 6, tzinfo=UTC))
 
 
+def test_detached_checkout_guard_rejects_canonical_active_root() -> None:
+    """QHH chain must fail closed on the canonical active node-22 checkout."""
+    assert str(runner.CANONICAL_ACTIVE_ROOT) == "/scratch/frd_muziyao/NWM"
+    with pytest.raises(SystemExit, match="BLOCKED: the QHH diagnostic chain cannot run"):
+        runner._require_detached_diagnostic_checkout(runner.CANONICAL_ACTIVE_ROOT)
+
+
+def test_detached_checkout_guard_rejects_canonically_equivalent_active_root(tmp_path: Path) -> None:
+    """A symlink resolving to the canonical active root must also be rejected."""
+    alias = tmp_path / "active-root-alias"
+    alias.symlink_to(runner.CANONICAL_ACTIVE_ROOT)
+
+    with pytest.raises(SystemExit, match="BLOCKED: the QHH diagnostic chain cannot run"):
+        runner._require_detached_diagnostic_checkout(alias)
+
+
+def test_detached_checkout_guard_accepts_detached_root(tmp_path: Path) -> None:
+    """A detached diagnostic root (not the active checkout) passes the guard."""
+    detached = tmp_path / "detached"
+    detached.mkdir()
+
+    runner._require_detached_diagnostic_checkout(detached)
+
+
 def test_slurm_preflight_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
 

@@ -5,6 +5,13 @@
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
 
+> **node-22 维护窗口前执行说明**：node-22 活动 checkout 的共享 `.venv` 在
+> 运维批准的维护窗口前保持 Python 3.12.7，**禁止**在其中运行裸 `uv run` /
+> `uv sync`（会在 3.11 pin 下重建环境，已实测会打断成半拆状态）。本文中所有
+> node-22 活动操作一律使用精确活动解释器
+> `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m services.orchestrator.cli`）；
+> node-27 命令与孤立 rollback checkout 的 `uv sync` 不受此限。
+
 本文是当前生产值守手册。物理部署事实以
 [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"
 段为准；[`two-node-deployment-overview.md`](two-node-deployment-overview.md)
@@ -47,7 +54,7 @@
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
-| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `python -m services.slurm_gateway`, Slurm jobs |
+| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
 Node-22 historical PostgreSQL `:55433` was archived and stopped on 2026-06-29
@@ -201,7 +208,7 @@ require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror �
 
 ```bash
 PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
-uv run python scripts/publish_scheduler_file_registry.py \
+/scratch/frd_muziyao/NWM/.venv/bin/python scripts/publish_scheduler_file_registry.py \
   --basins-root /ghdc/data/nwm/Basins \
   --basin-slug <每个新流域重复> \
   --object-store-root /ghdc/data/nwm/object-store --object-store-prefix s3://nhms \
@@ -272,7 +279,7 @@ flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
 `{model_package_uri}{shud_input_name}.cfg.ic` 推出并在 **scratch 根**上解析。用现成工具，别手搓：
 
 ```bash
-PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_initial_state.py \
+PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python scripts/audit_first_cycle_initial_state.py \
   --registry-manifest <candidate>.json \
   --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
   --object-store-prefix s3://nhms --workspace-root /scratch/frd_muziyao/nhms-prod/workspace \
@@ -402,7 +409,7 @@ test -x "$ROLLBACK_CHECKOUT/.venv/bin/python"
 test -z "$(git -C "$ROLLBACK_CHECKOUT" status --porcelain=v1 --untracked-files=all)"
 
 systemctl --user stop nhms-compute-scheduler.timer nhms-compute-scheduler.service
-uv run nhms-pipeline prepare-file-journal-rollback \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli prepare-file-journal-rollback \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --scheduler-lock-backend file \
@@ -426,7 +433,7 @@ controller 读取；不要在 gate 运行中执行 `uv sync`、切换 checkout �
 `--workspace-root`/`--lock-path` 覆盖，都会在 writer 零启动时拒绝：
 
 ```bash
-uv run nhms-pipeline launch-file-journal-rollback-writer \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli launch-file-journal-rollback-writer \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --receipt-id '<preparation-receipt-id>' \
@@ -469,7 +476,7 @@ file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/re
 旧 writer 停止后，从当前版本执行前滚，成功消费 fence 后才能恢复 timer：
 
 ```bash
-uv run nhms-pipeline complete-file-journal-rollforward \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli complete-file-journal-rollforward \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --scheduler-lock-backend file \
@@ -1594,7 +1601,7 @@ RECEIPT_DIR=/scratch/frd_muziyao/nhms-prod/workspace/recalibration
 RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，receipt 路径不得重复
 
 # 1) dry-run：跑完全部校验与八面门，但不写任何索引行
-uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_clone_direct_grid_cutover_states \
   --transfer-mode recalibration \
   --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
   --state-index "$CANONICAL" \
@@ -1605,7 +1612,7 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   --receipt "$RECEIPT_DIR/$RUN_TAG-dry-run.json"
 
 # 2) 逐项核对 dry-run receipt 后再执行（--apply）
-uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_clone_direct_grid_cutover_states \
   ... 同上 ... --apply \
   --receipt "$RECEIPT_DIR/$RUN_TAG-apply.json"
 ```
@@ -2338,9 +2345,9 @@ cd /scratch/frd_muziyao/NWM
 JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
 grep -rlE 'OBJECT_STORE_COPYBACK_STATE_INDEX_(FAILED|COMMIT_UNCERTAIN)' "$JOURNAL" | tail -20
 # 两份 index 的 entry 数（shared 是调度器实际读的那份）
-uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+/scratch/frd_muziyao/NWM/.venv/bin/python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
   /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
-uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+/scratch/frd_muziyao/NWM/.venv/bin/python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
   /ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
 ```
 
@@ -2384,7 +2391,7 @@ set +a
 install -d -m 0700 "$NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
 
 # 1) 只读预览（默认 dry-run：不调用 merge、不改 index、不拷对象）
-uv run python -m scripts.scheduler_state_index_copyback_replay \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000
 
 # 2) 逐项核对 dry-run 输出后再执行：
@@ -2392,7 +2399,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 #    - destination_entry_count_before 与共享 index 现有条数一致（当前 ~1645），而不是 0
 #      （0 = 根写错 / NFS 没挂，别 enforce）
 #    - destination_index_existed 为 true
-uv run python -m scripts.scheduler_state_index_copyback_replay \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000 --enforce
 ```
 

@@ -1,10 +1,18 @@
 # QHH 后端完整链路复测记录
 
-最后更新：2026-05-26
+最后更新：2026-08-24
 
 > 历史证据说明：本文记录 2026-05-26 QHH smoke 的现场结果，其中“发现 13 个
 > 模型目录”只描述该次复测，不是当前生产 registry authority。当前模型清单与
 > 数量见 [`current-production-ops.md`](current-production-ops.md)。
+
+> 执行边界（DIAGNOSTIC-ONLY）：本文件的可执行 recipe 只适用于 **detached
+> diagnostic worktree**，禁止在 canonical active checkout（node-22
+> `/scratch/frd_muziyao/NWM`）里执行——它共享的 `.venv` 归在线服务所有，任何
+> bare `uv run` / `uv sync` / system `python` 都不得触碰它。backend smoke 自身
+> 在 header 就 fail closed（拒绝 active root、要求 detached 的 exact
+> `.venv/bin/python`），runbook 的 copy-paste 必须先显式落到 detached root。
+> 权威 run boundary 见 [`../../scripts/diagnostic/qhh/README.md`](../../scripts/diagnostic/qhh/README.md)。
 
 ## 目标
 
@@ -31,6 +39,16 @@ Issue #214 evidence freeze 的索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-sm
 
 ## 环境与入口
 
+本节的执行 recipe 只适用于 **detached diagnostic worktree**（见文首执行边界）。
+
+```bash
+export QHH_DIAGNOSTIC_CHECKOUT=/path/to/detached/qhh-diagnostic-worktree  # never /scratch/frd_muziyao/NWM
+QHH_DIAGNOSTIC_CHECKOUT="$(cd "$QHH_DIAGNOSTIC_CHECKOUT" && pwd -P)"
+[[ "$QHH_DIAGNOSTIC_CHECKOUT" != "/scratch/frd_muziyao/NWM" ]] || { echo "QHH_DIAGNOSTIC_CHECKOUT must be a detached worktree, not the active root" >&2; exit 2; }
+[[ -x "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" ]] || { echo "missing $QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python (detached worktree has no virtualenv)" >&2; exit 2; }
+cd "$QHH_DIAGNOSTIC_CHECKOUT"
+```
+
 - Basins 根：`data/Basins -> /volume/data/nwm/Basins`
 - 选定流域：`qhh`
 - 模型 ID：`basins_qhh_shud`
@@ -41,7 +59,11 @@ Issue #214 evidence freeze 的索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-sm
 - 本地 PostgreSQL URL：`postgresql://nhms:nhms_dev@127.0.0.1:55432/nhms`
 - SHUD executable：`SHUD/shud`
 
-启动或查看本地 PostgreSQL：
+上面的 `cd` 已落在已验证的 detached root；**不要**在 canonical active checkout
+里运行下列命令。local_pg 的所有写入（`.pgdata/`、socket、log）都只在 detached
+root 发生。
+
+启动或查看本地 PostgreSQL（从 detached root 调用，脚本相对路径基于 `$PWD`）：
 
 ```bash
 ./scripts/local_pg.sh start
@@ -59,6 +81,12 @@ export SHUD_TIMEOUT_SECONDS=1800
 ./scripts/run_qhh_backend_smoke.sh
 ```
 
+`run_qhh_backend_smoke.sh` 自身在 header 做 detached boundary 校验：`ROOT_DIR` 用
+`pwd -P` 物理 canonicalize，拒绝 `/scratch/frd_muziyao/NWM`，并要求 detached root
+的 exact `.venv/bin/python` 存在（否则 exit 2）。所有直接 Python snippets/scripts/
+modules 都走该 exact 解释器；`uv run nhms-*` / dynamic forcing CLI 只在 detached
+guard 之后可达。不要用 bare `uv run python` 或 system `python` 启动本链路。
+
 脚本默认设置：
 
 - `QHH_PACKAGE_VERSION=v0.0.1-qhh-smoke-lake2`
@@ -66,7 +94,7 @@ export SHUD_TIMEOUT_SECONDS=1800
 - `QHH_GFS_FORECAST_END_HOUR=24`
 - `QHH_MODEL_OUTPUT_INTERVAL=180`
 - `QHH_SHUD_COMMAND_STYLE=shud_project`
-- `SHUD_EXECUTABLE=$PWD/SHUD/shud`
+- `SHUD_EXECUTABLE=$QHH_DIAGNOSTIC_CHECKOUT/SHUD/shud`
 
 ## 本次闭环结果
 

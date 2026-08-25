@@ -15,6 +15,41 @@ The repository SHALL track a Python 3.11 major/minor pin used by default `uv` co
 - **WHEN** default `uv run python` invokes `Path.rglob(..., recurse_symlinks=True)`
 - **THEN** Python 3.11 raises `TypeError` instead of allowing a 3.13-only API to escape local verification
 
+#### Scenario: Active node-22 entrypoints preserve the deferred environment
+
+- **GIVEN** `/scratch/frd_muziyao/NWM/.venv` remains the active Python 3.12.7 environment until an operator-approved maintenance window
+- **WHEN** an automatic service or required operator command runs from that active checkout before the cutover
+- **THEN** it invokes a checked-in wrapper or the exact active `.venv` interpreter without running bare or environment-updating `uv`
+- **AND** a missing or unusable exact interpreter fails closed instead of creating or replacing the shared environment
+
+#### Scenario: Environment-coupled validation follows the current oracle
+
+- **GIVEN** the active node-22 checkout still uses the deferred Python 3.12.7 environment and the current project oracle routes e2e/grib validation to node-27
+- **WHEN** an operator follows the e2e/grib runbook or pytest skip guidance
+- **THEN** the guidance names node-27, asserts the existing interpreter is Python 3.11, and invokes pytest through `uv run --no-sync`
+- **AND** a failed interpreter assertion stops the lane before pytest starts
+- **AND** a failing pytest remains a non-zero command even when its receipt is piped through `tee`
+- **AND** it does not synchronize either node's project environment or direct the operator to use node-22's shared `.venv` for that validation lane
+
+### Requirement: Historical topology authority uses governed markers
+
+The production-topology audit SHALL classify a non-current whole document through the complete archive-status marker contract in `docs/governance/DOC_STATUS.md`, without allowing incomplete markers or named current authorities to hide drift.
+
+#### Scenario: Historical baseline marker separates preserved evidence
+
+- **WHEN** a non-current runbook has a complete `historical baseline` whole-document marker with `current_authority`, `status_since`, `archive_scope`, and `retained_for`, but no `superseded_by`
+- **THEN** preserved current-looking topology text in that document is not treated as active production guidance
+
+#### Scenario: Incomplete marker remains visible
+
+- **WHEN** a non-current-looking document omits any field required for its marker status or scope
+- **THEN** production-topology checks continue scanning its current-looking topology text
+
+#### Scenario: Current authority cannot self-exempt
+
+- **WHEN** a named current authority document carries non-current front matter while containing active node-22 topology drift
+- **THEN** production-topology checks still emit their gate-eligible findings
+
 ### Requirement: Hook configuration follows the active Git worktree
 
 The large-file guard SHALL resolve `.large-file-guard.json` from the Git top level governing the tool-call `cwd`, use the same worktree for Git inspection, and identify the effective config path when blocking.

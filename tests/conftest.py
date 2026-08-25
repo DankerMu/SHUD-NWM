@@ -63,9 +63,9 @@ def build_canonical_nc(
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "integration: tests that require explicitly configured external services")
-    config.addinivalue_line("markers", "e2e: end-to-end pipeline tests; opt-in via NHMS_RUN_E2E=1 (node-22)")
+    config.addinivalue_line("markers", "e2e: end-to-end pipeline tests; opt-in via NHMS_RUN_E2E=1 (node-27 oracle)")
     config.addinivalue_line("markers", "real_disk: tests that require node-27 DATABASE_URL and OBJECT_STORE_ROOT")
-    config.addinivalue_line("markers", "grib: real GRIB2 decode tests; opt-in via NHMS_RUN_GRIB=1 (node-22)")
+    config.addinivalue_line("markers", "grib: real GRIB2 decode tests; opt-in via NHMS_RUN_GRIB=1 (node-27 oracle)")
     config.addinivalue_line(
         "markers",
         "timescaledb_210: compression-semantics tests whose only valid oracle is a node-27 "
@@ -207,8 +207,8 @@ def _opt_in_skip_reason(marker: str, env_var: str) -> str | None:
         return None
     return (
         f"{marker} tests require explicit opt-in with {env_var}=1; "
-        f"run on node-22 (outside production windows) via "
-        f'`NHMS_RUN_E2E=1 NHMS_RUN_GRIB=1 uv run pytest -m "e2e or grib"`'
+        f"run on the node-27 oracle (outside production windows) — see "
+        f"docs/runbooks/ci-test-routing.md"
     )
 
 
