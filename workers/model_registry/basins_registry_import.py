@@ -30,6 +30,7 @@ from .basins_geometry import (
     safe_basins_file_sha256,
     trusted_basins_root,
 )
+from .basins_package import SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS
 
 BASINS_REGISTRY_IMPORT_SCHEMA_VERSION = "basins.registry_import.v1"
 RIVER_SEGMENT_INSERT_PAGE_SIZE = 1000
@@ -199,10 +200,12 @@ def _prepare_sources(
 ) -> ImportSources:
     model_id = _required_str(manifest, "model_id", "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID")
     model = _find_inventory_model(inventory, model_id)
-    if manifest.get("schema_version") != "basins.package.v1":
+    if manifest.get("schema_version") not in SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS:
         raise BasinsRegistryImportError(
             "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID",
-            "Basins package manifest schema_version must be basins.package.v1.",
+            "Basins package manifest schema_version must be one of "
+            + ", ".join(SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS)
+            + ".",
             model_id=model_id,
         )
     if (
@@ -1907,12 +1910,19 @@ def _validate_manifest_source_identity(
         "source_inventory_schema_version": inventory.get("schema_version"),
     }
     missing = [key for key in expected if key not in manifest or manifest.get(key) in (None, "")]
+    # Relocation re-presents an already byte-verified historical package against
+    # a freshly regenerated inventory.  The recorded absolute paths and the
+    # whole-inventory checksum are workspace-scoped facts, and since #1813 the
+    # inventory schema generation is too: a pre-migration manifest records the
+    # generation it was published under, while the regenerated inventory carries
+    # the current one.  Selected model identity stays fully validated.
+    relocation_exempt_fields = {"source_path", "resolved_source_path", "source_inventory_schema_version"}
     mismatches = [
         key
         for key, expected_value in expected.items()
         if key not in missing
         and manifest.get(key) != expected_value
-        and not (allow_source_relocation and key in {"source_path", "resolved_source_path"})
+        and not (allow_source_relocation and key in relocation_exempt_fields)
     ]
     source_inventory_checksum = manifest.get("source_inventory_checksum")
     if not isinstance(source_inventory_checksum, str) or not source_inventory_checksum:

@@ -692,6 +692,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_basins_reingest.py",
             "tests/test_direct_grid_variant_registration.py",
             "tests/test_hhe_mvt_binding.py",
+            # #1813: this suite top-level-imports `basins_package` because it
+            # owns the parity test binding the packager's forcing checksum
+            # material to production-closure's reconstruction of it.  A change
+            # to one implementation must run the test that pins both.
+            "tests/test_production_object_store_validation.py",
             "tests/test_publish_scheduler_file_registry.py",
             "tests/test_qhh_production_bootstrap.py",
             "tests/test_qhh_scripts_static.py",

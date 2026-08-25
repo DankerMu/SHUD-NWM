@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -77,7 +78,7 @@ def test_valid_minimal_model_tree_inventory_fields(tmp_path: Path) -> None:
     assert model["suggested_ids"]["model_id"] == "basins_basin_a_shud"
     assert model["forcing_dir_original_name"] == "forcing"
     assert model["calibration_count"] == 1
-    assert model["forcing_csv_count"] == 1
+    assert "forcing_csv_count" not in model
     assert model["missing_required_files"] == []
     assert model["generated_sidecar_count"] == 0
     assert model["default_import_eligible"] is True
@@ -129,7 +130,7 @@ def test_sidecar_recursion_is_ignored(tmp_path: Path) -> None:
     model = one_model(discover_basins_inventory(root))
 
     assert model["status"] == "valid"
-    assert model["forcing_csv_count"] == 1
+    assert "forcing_csv_count" not in model
     assert model["calibration_count"] == 0
     assert model["generated_sidecar_count"] == 4
     assert "generated_sidecars_ignored" in model["quirks"]
@@ -150,7 +151,7 @@ def test_forcing_focing_conflict_prefers_canonical_with_warning(tmp_path: Path) 
 
     assert model["status"] == "valid"
     assert model["forcing_dir_original_name"] == "forcing"
-    assert model["forcing_csv_count"] == 1
+    assert "forcing_csv_count" not in model
     assert "forcing_dir_conflict" in model["quirks"]
     assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_FORCING_DIR_CONFLICT"]
 
@@ -231,7 +232,7 @@ def test_dangling_forcing_symlink_inside_root_is_not_reported_unresolvable(tmp_p
     assert model["status"] == "valid"
     assert model["default_import_eligible"] is True
     assert model["forcing_dir"] is None
-    assert model["forcing_csv_count"] == 0
+    assert "forcing_csv_count" not in model
 
 
 def test_symlink_loop_behind_missing_component_is_treated_as_nonexistence(tmp_path: Path) -> None:
@@ -258,7 +259,7 @@ def test_symlink_loop_behind_missing_component_is_treated_as_nonexistence(tmp_pa
     assert model["status"] == "valid"
     assert model["default_import_eligible"] is True
     assert model["forcing_dir"] is None
-    assert model["forcing_csv_count"] == 0
+    assert "forcing_csv_count" not in model
 
 
 def test_dangling_forcing_symlink_outside_root_is_reported_outside_root(tmp_path: Path) -> None:
@@ -282,7 +283,7 @@ def test_dangling_forcing_symlink_outside_root_is_reported_outside_root(tmp_path
     assert model["default_import_eligible"] is False
     assert "unsafe_symlink_outside_root" in model["quirks"]
     assert model["forcing_dir"] is None
-    assert model["forcing_csv_count"] == 0
+    assert "forcing_csv_count" not in model
 
 
 def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: Path) -> None:
@@ -301,7 +302,7 @@ def test_symlinked_forcing_outside_root_is_not_counted_or_importable(tmp_path: P
     assert inventory["importable"] is False
     assert model["status"] == "partial"
     assert model["forcing_dir"] is None
-    assert model["forcing_csv_count"] == 0
+    assert "forcing_csv_count" not in model
     assert model["default_import_eligible"] is False
     assert "unsafe_symlink_outside_root" in model["quirks"]
     assert [warning["code"] for warning in inventory["warnings"]] == ["BASINS_SYMLINK_OUTSIDE_ROOT"]
@@ -319,15 +320,33 @@ def test_nested_zhaochen_style_models_are_discovered(tmp_path: Path) -> None:
     assert [model["model_id"] for model in inventory["models"]] == ["basins_qhh_shud", "basins_zhaochen_wem_shud"]
 
 
-def test_bounded_large_forcing_directory_counts_csv_without_checksums(tmp_path: Path) -> None:
+def test_forcing_payload_volume_does_not_reach_the_inventory(tmp_path: Path) -> None:
+    """#1813: the inventory document is hashed raw into package identity.
+
+    Adding or removing historical forcing CSVs must therefore leave the
+    inventory bytes -- not merely the checksum map -- untouched.
+    """
+
     root = tmp_path / "basins"
     make_valid_model(root / "large", "large", forcing_count=10_000)
+    forcing_dir = root / "large" / "forcing"
 
     model = one_model(discover_basins_inventory(root))
-
     assert model["status"] == "valid"
-    assert model["forcing_csv_count"] == 10_000
+    assert "forcing_csv_count" not in model
     assert all(not name.endswith(".csv") for name in model["checksums"])
+
+    baseline_bytes = _inventory_document_bytes(discover_basins_inventory(root))
+    for path in sorted(forcing_dir.glob("*.csv"))[:5000]:
+        path.unlink()
+    (forcing_dir / "Z999999.csv").write_text("time,value\n2026-02-02,7\n", encoding="utf-8")
+
+    assert _inventory_document_bytes(discover_basins_inventory(root)) == baseline_bytes
+    assert forcing_dir.is_dir()
+
+
+def _inventory_document_bytes(inventory: dict[str, Any]) -> bytes:
+    return (json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def test_walk_files_streams_paths_without_returning_list(tmp_path: Path) -> None:

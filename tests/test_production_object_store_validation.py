@@ -29,6 +29,12 @@ from services.production_closure.object_store_validation import (
     write_synthetic_basins_fixture,
 )
 from workers.model_registry.basins_geometry import parse_seg_shp_crosswalk
+from workers.model_registry.basins_package import (
+    BASINS_PACKAGE_SCHEMA_VERSION,
+    BASINS_PACKAGE_SCHEMA_VERSION_V1,
+    SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS,
+    forcing_checksum_material_for_schema_version,
+)
 
 
 def _assert_summary_files_match_lane_json(summary: dict[str, object], lane_dir: Path) -> None:
@@ -2026,3 +2032,165 @@ def test_validate_object_store_refuses_nested_local_store_symlink_without_extern
     assert exc_info.value.error_code == "PRODUCTION_OBJECT_STORE_EVIDENCE_SYMLINK"
     assert external_file.read_text(encoding="utf-8") == "external must remain\n"
     assert sorted(path.name for path in external_dir.iterdir()) == ["sentinel.txt"]
+
+
+# #1813: the pre-migration forcing material is written out literally here, not
+# derived from the packager.  A refactor that silently moved the historical
+# shape would keep a derived expectation green while every published manifest
+# stopped verifying.
+def _historical_v1_forcing_material(forcing: dict[str, object]) -> dict[str, object]:
+    return {
+        "policy": forcing.get("policy"),
+        "csv_count": forcing.get("csv_count"),
+        "byte_count": forcing.get("byte_count"),
+        "aggregate_checksum": forcing.get("aggregate_checksum"),
+        "payload_copied": forcing.get("payload_copied"),
+        "copied_file_count": forcing.get("copied_file_count"),
+        "copied_byte_count": forcing.get("copied_byte_count"),
+    }
+
+
+def _canonical_sha256_json(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _stored_manifest_for_schema_version(schema_version: str, forcing_material: dict[str, object]) -> dict[str, object]:
+    included_files = [
+        {
+            "relative_path": "alias-a.sp.mesh",
+            "role": "runtime_input",
+            "size_bytes": 21,
+            "sha256": "a" * 64,
+            "object_uri": "s3://nhms/models/basins_basin_a_shud/vbasins-test/package/alias-a.sp.mesh",
+        }
+    ]
+    forcing = {
+        "policy": "excluded_by_default",
+        "forcing_dir": "/srv/Basins/basin-a/forcing",
+        "forcing_dir_original_name": "forcing",
+        "csv_count": 7,
+        "byte_count": 4096,
+        "aggregate_checksum": "b" * 64,
+        "payload_copied": False,
+        "copied_file_count": 0,
+        "copied_byte_count": 0,
+    }
+    checksum_material = {
+        "schema_version": schema_version,
+        "model_id": "basins_basin_a_shud",
+        "version": "vbasins-test",
+        "included_files": [
+            {
+                "relative_path": entry["relative_path"],
+                "role": entry["role"],
+                "size_bytes": entry["size_bytes"],
+                "sha256": entry["sha256"],
+            }
+            for entry in included_files
+        ],
+        "forcing": forcing_material,
+        "copy_forcing": False,
+        "source_model_identity": {
+            "basin_slug": "basin-a",
+            "shud_input_name": "alias-a",
+            "root_relative_resolved_path": "basin-a",
+        },
+    }
+    return {
+        "schema_version": schema_version,
+        "model_id": "basins_basin_a_shud",
+        "version": "vbasins-test",
+        "basin_slug": "basin-a",
+        "shud_input_name": "alias-a",
+        "root_relative_resolved_path": "basin-a",
+        "package_checksum": _canonical_sha256_json(checksum_material),
+        "included_files": included_files,
+        "forcing": forcing,
+    }
+
+
+def test_pre_migration_stored_manifest_package_checksum_still_reconstructs() -> None:
+    forcing_material = _historical_v1_forcing_material(
+        {
+            "policy": "excluded_by_default",
+            "csv_count": 7,
+            "byte_count": 4096,
+            "aggregate_checksum": "b" * 64,
+            "payload_copied": False,
+            "copied_file_count": 0,
+            "copied_byte_count": 0,
+        }
+    )
+    stored_manifest = _stored_manifest_for_schema_version(BASINS_PACKAGE_SCHEMA_VERSION_V1, forcing_material)
+
+    reconstruction = object_store_validation._package_checksum_from_stored_manifest(stored_manifest)
+
+    assert reconstruction.status == "confirmed"
+    assert reconstruction.checksum == stored_manifest["package_checksum"]
+
+
+def test_post_migration_stored_manifest_reconstructs_with_the_reduced_material() -> None:
+    stored_manifest = _stored_manifest_for_schema_version(
+        BASINS_PACKAGE_SCHEMA_VERSION,
+        {"policy": "excluded_by_default", "payload_copied": False},
+    )
+
+    reconstruction = object_store_validation._package_checksum_from_stored_manifest(stored_manifest)
+
+    assert reconstruction.status == "confirmed"
+    assert reconstruction.checksum == stored_manifest["package_checksum"]
+
+
+def test_unknown_stored_manifest_schema_version_is_a_recorded_limitation() -> None:
+    stored_manifest = _stored_manifest_for_schema_version(
+        "basins.package.v99",
+        {"policy": "excluded_by_default", "payload_copied": False},
+    )
+
+    reconstruction = object_store_validation._package_checksum_from_stored_manifest(stored_manifest)
+
+    assert reconstruction.status == "limited"
+    assert reconstruction.checksum is None
+    assert reconstruction.limitation == "stored_manifest_package_schema_version_unsupported"
+
+
+@pytest.mark.parametrize("schema_version", SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS)
+def test_packager_and_validator_forcing_material_agree_on_every_schema_generation(schema_version: str) -> None:
+    """#1813 task 3.3: the two implementations of the material must not drift."""
+
+    forcing = {
+        "policy": "copied_explicitly",
+        "csv_count": 3,
+        "byte_count": 120,
+        "aggregate_checksum": "c" * 64,
+        "payload_copied": True,
+        "copied_file_count": 3,
+        "copied_byte_count": 120,
+    }
+
+    validator_material = object_store_validation._forcing_checksum_material(forcing, schema_version)
+
+    assert validator_material == forcing_checksum_material_for_schema_version(forcing, schema_version)
+    if schema_version == BASINS_PACKAGE_SCHEMA_VERSION_V1:
+        assert validator_material == _historical_v1_forcing_material(forcing)
+    else:
+        assert validator_material == {"policy": "copied_explicitly", "payload_copied": True}
+
+
+def test_current_packager_material_carries_no_forcing_payload_evidence() -> None:
+    material = forcing_checksum_material_for_schema_version(
+        {
+            "policy": "excluded_by_default",
+            "csv_count": 9,
+            "byte_count": 1024,
+            "aggregate_checksum": "d" * 64,
+            "payload_copied": False,
+            "copied_file_count": 0,
+            "copied_byte_count": 0,
+        },
+        BASINS_PACKAGE_SCHEMA_VERSION,
+    )
+
+    assert material == {"policy": "excluded_by_default", "payload_copied": False}

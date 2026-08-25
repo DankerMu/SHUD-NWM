@@ -2,37 +2,37 @@
 
 ## 1. Packager identity material
 
-- [ ] 1.1 Reduce `_forcing_checksum_material` (`workers/model_registry/basins_package.py:1466`) to `{"policy", "payload_copied"}` for both policies.
-- [ ] 1.2 Remove `forcing_dir_original_name` from `source_material` (`basins_package.py:1294`).
-- [ ] 1.3 Skip the per-file sha256 loop in `_forcing_metadata` (`basins_package.py:1155-1221`) when `copy_forcing=False`; keep `csv_count`/`byte_count` on `stat` alone and emit `aggregate_checksum: None`. Manifest evidence fields otherwise unchanged.
-- [ ] 1.4 Bump `BASINS_PACKAGE_SCHEMA_VERSION` (`basins_package.py:30`). Note it is already inside `content_material` (`basins_package.py:1284`), so the bump is itself the named identity migration.
-- [ ] 1.5 Replace the hardcoded literal at `workers/model_registry/basins_registry_import.py:202` — `if manifest.get("schema_version") != "basins.package.v1"` — with acceptance of a declared set of known package schema versions referencing `BASINS_PACKAGE_SCHEMA_VERSION`, not a literal. This is the only such pin in production code, and without it every post-bump publish is rejected at import with `BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID`. The relocation path (`prepare_relocated_basins_import_sources_after_package_verification`, `:185`) can legitimately present a pre-bump manifest, so the old version stays accepted rather than being swapped out.
-- [ ] 1.6 Confirm `copy_forcing=True` loses no identity coverage — forcing files remain `included_files` role entries hashed into `actual_checksum_material`; assert it in a test rather than in prose.
+- [x] 1.1 Reduce `_forcing_checksum_material` (`workers/model_registry/basins_package.py:1466`) to `{"policy", "payload_copied"}` for both policies.
+- [x] 1.2 Remove `forcing_dir_original_name` from `source_material` (`basins_package.py:1294`).
+- [x] 1.3 Skip the per-file sha256 loop in `_forcing_metadata` (`basins_package.py:1155-1221`) when `copy_forcing=False`; keep `csv_count`/`byte_count` on `stat` alone and emit `aggregate_checksum: None`. Manifest evidence fields otherwise unchanged.
+- [x] 1.4 Bump `BASINS_PACKAGE_SCHEMA_VERSION` (`basins_package.py:30`). Note it is already inside `content_material` (`basins_package.py:1284`), so the bump is itself the named identity migration.
+- [x] 1.5 Replace the hardcoded literal at `workers/model_registry/basins_registry_import.py:202` — `if manifest.get("schema_version") != "basins.package.v1"` — with acceptance of a declared set of known package schema versions referencing `BASINS_PACKAGE_SCHEMA_VERSION`, not a literal. This is the only such pin in production code, and without it every post-bump publish is rejected at import with `BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID`. The relocation path (`prepare_relocated_basins_import_sources_after_package_verification`, `:185`) can legitimately present a pre-bump manifest, so the old version stays accepted rather than being swapped out.
+- [x] 1.6 Confirm `copy_forcing=True` loses no identity coverage — forcing files remain `included_files` role entries hashed into `actual_checksum_material`; assert it in a test rather than in prose.
 
 ## 2. Discovery inventory
 
-- [ ] 2.1 Stop emitting `forcing_csv_count` (`workers/model_registry/basins_discovery.py:291`) and drop the now-unused `_count_csv_files` call at `:239-249` if nothing else uses it.
-- [ ] 2.2 Keep `forcing_dir`, `forcing_dir_original_name`, and forcing-related `quirks` — all have production readers or are ambiguity evidence.
-- [ ] 2.3 Bump the inventory schema version; verify no validator pins the old value (`basins_registry_import.py:1908` compares manifest-vs-current-inventory at build time, so fresh publishes stay consistent — confirm, don't assume).
+- [x] 2.1 Stop emitting `forcing_csv_count` (`workers/model_registry/basins_discovery.py:291`) and drop the now-unused `_count_csv_files` call at `:239-249` if nothing else uses it.
+- [x] 2.2 Keep `forcing_dir`, `forcing_dir_original_name`, and forcing-related `quirks` — all have production readers or are ambiguity evidence.
+- [x] 2.3 Bump the inventory schema version; verify no validator pins the old value (`basins_registry_import.py:1908` compares manifest-vs-current-inventory at build time, so fresh publishes stay consistent — confirm, don't assume).
 
 ## 3. Production-closure reconstruction parity
 
-- [ ] 3.1 Mirror the new material into `services/production_closure/object_store_validation.py:971-983`.
-- [ ] 3.2 Branch `_package_checksum_from_stored_manifest` (`:870-905`) on the stored manifest's `schema_version`: pre-bump manifests reconstruct with the old seven-field shape, post-bump with the constant. Reuse the reconstruction-limitation plumbing at `:849-851` for anything undecidable.
-- [ ] 3.3 Parity test asserting the packager's and the validator's `_forcing_checksum_material` agree on both schema generations.
+- [x] 3.1 Mirror the new material into `services/production_closure/object_store_validation.py:971-983`.
+- [x] 3.2 Branch `_package_checksum_from_stored_manifest` (`:870-905`) on the stored manifest's `schema_version`: pre-bump manifests reconstruct with the old seven-field shape, post-bump with the constant. Reuse the reconstruction-limitation plumbing at `:849-851` for anything undecidable.
+- [x] 3.3 Parity test asserting the packager's and the validator's `_forcing_checksum_material` agree on both schema generations.
 
 ## 4. Tests
 
-- [ ] 4.1 Red test via re-discovery: publish with `forcing/` populated -> empty `forcing/` (directory kept) -> re-run discovery -> re-publish -> assert `content_sha256`, `source_sha256`, `package_checksum`, `source_inventory_checksum` all identical.
-- [ ] 4.2 CSV-byte-mutation test: mutate a forcing CSV in place, re-discover, re-publish, assert the same four values unchanged.
-- [ ] 4.3 Negative control: deleting the `forcing/` directory outright DOES change identity (structural change, correctly distinguishable from payload cleanup).
-- [ ] 4.4 Historical-manifest reconstruction test: a stored pre-bump manifest still verifies its `package_checksum`.
-- [ ] 4.5 End-to-end schema-bump test: publish a package with the real packager and import it with `import_basins_registry` — no hand-built manifest fixture. Hand-built fixtures carrying the literal `"basins.package.v1"` (`tests/test_basins_registry_import.py:2324`, `tests/test_publish_scheduler_file_registry.py:1573`) cannot catch the `:202` pin, because updating the fixture literal makes them pass while real publishes still fail.
-- [ ] 4.6 Update the existing assertions that pin the old behavior — `tests/test_basins_package_publication.py:270-271,655-657`, `tests/test_basins_discovery.py` `forcing_csv_count` cases, `tests/test_basins_registry_import.py:2338`, and the schema-version literals at `tests/test_basins_package_publication.py:231`, `tests/test_basins_registry_import.py:2324`, `tests/test_publish_scheduler_file_registry.py:1573`.
+- [x] 4.1 Red test via re-discovery: publish with `forcing/` populated -> empty `forcing/` (directory kept) -> re-run discovery -> re-publish -> assert `content_sha256`, `source_sha256`, `package_checksum`, `source_inventory_checksum` all identical.
+- [x] 4.2 CSV-byte-mutation test: mutate a forcing CSV in place, re-discover, re-publish, assert the same four values unchanged.
+- [x] 4.3 Negative control: deleting the `forcing/` directory outright DOES change identity (structural change, correctly distinguishable from payload cleanup).
+- [x] 4.4 Historical-manifest reconstruction test: a stored pre-bump manifest still verifies its `package_checksum`.
+- [x] 4.5 End-to-end schema-bump test: publish a package with the real packager and import it with `import_basins_registry` — no hand-built manifest fixture. Hand-built fixtures carrying the literal `"basins.package.v1"` (`tests/test_basins_registry_import.py:2324`, `tests/test_publish_scheduler_file_registry.py:1573`) cannot catch the `:202` pin, because updating the fixture literal makes them pass while real publishes still fail.
+- [x] 4.6 Update the existing assertions that pin the old behavior — `tests/test_basins_package_publication.py:270-271,655-657`, `tests/test_basins_discovery.py` `forcing_csv_count` cases, `tests/test_basins_registry_import.py:2338`, and the schema-version literals at `tests/test_basins_package_publication.py:231`, `tests/test_basins_registry_import.py:2324`, `tests/test_publish_scheduler_file_registry.py:1573`.
 
 ## 5. Contract and documentation
 
-- [ ] 5.1 Spec deltas: `basins-asset-discovery` (inventory no longer carries the forcing CSV count) and `shud-model-package-publication` (declared-excluded forcing is not identity material).
+- [x] 5.1 Spec deltas: `basins-asset-discovery` (inventory no longer carries the forcing CSV count) and `shud-model-package-publication` (declared-excluded forcing is not identity material).
 - [ ] 5.2 ADR `docs/adr/0006-*.md`: the ruling, the rejected options B and C with reasons, and the one-time named churn.
 - [ ] 5.3 Runbook: pin #1702 item 3's cleanup semantics — empty `forcing/`, do not remove the directory.
 
