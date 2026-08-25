@@ -1295,6 +1295,13 @@ packaged IC 的规范路径 `<package>/<模型名>.cfg.ic`，写错就是 IC 探
 2026-08 出现过整棵树 20304 个文件对组只读、平台无法 staging 的情况。
 交付后自查：`find <你的目录> -not -writable | wc -l` 应为 0（以 `nwmuser` 组成员身份）。
 
+2026-08-25 复测：全树 **220** 个（不是历史峰值 20304），全部属 `st_zhanghx`、模式
+`-rw-r-----` / `drwxr-s---`，集中在 7 个黄河流域（`longmen_zhi_sanmenxia` 32、
+`lanzhou_zhi_hekouzhen` 32、`hekouzhen_zhi_longmen` 32、`sanmenxia_zhi_huayuankou` 31、
+`neiliuqu` 31、`longyangxia_zhi_lanzhou` 31、`longyangxia_yishang` 31）。
+**它复发在最新一批投递上**，即本条约束尚未被投递方执行；与 `forcing/` 零交集
+（`find ! -writable -path "*/forcing/*"` = 0），不阻塞 forcing 清理。
+
 本条即 #1702 长期方案的 (b) 支：**由投递者保证 `umask 002`**。另一支 (a)——把
 `Basins/` 的 owner 改成平台账号 `nwm`——尚未采纳，属 owner 决策；在它落地之前，
 (b) 是唯一在册的约束，一次性的 root `setfacl` 修复只是补救、不是机制。
@@ -1330,9 +1337,14 @@ receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
 - 旧目录**不要自删**。退役由平台 `mv` 到 `/volume/nwm/Basins-retired/issue-<N>-<slug>/`
   （同 xfs，rename 不拷贝），保留 90 天后由 owner 决定删除。自删会让还在引用该路径的
   注册行失去溯源根。
-- `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读。
-  2026-08-22 实测：`/volume/nwm/Basins` 总计 127 G，其中 18 个 `forcing/` 目录占
-  **126 G / 19078 文件**——整棵树几乎全是不再被读的代站 CSV。已有的由平台清理。
+- `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读：62 行注册表的
+  `source_policy.forcing_source` 全部是 `node27_raw_handoff`，运行时 forcing 走
+  object store（`manifest["forcing"]["forcing_uri"]`），从不读 Basins 树里的 CSV。
+  2026-08-25 清理已执行（#1702 第 3 项）：14 个目录、**8329 个条目 / 50 G** 移到
+  `/volume/nwm/Basins-retired/forcing-cleanup-20260825/`，全树 66 G → **16 G**。
+  清理**按 §5.5.1 的纪律**——清空目录、保留目录、不改名（含 `tailanhe/focing`
+  这个拼写错误）。`heihe/forcing`（12 G / 1711 文件）**未清**：它属第 2 项整目录退役，
+  需 `st_zhanghx` 确认后连同 `heihe/` 一起 `mv`。
 
 ### 3.2 Slurm Gateway
 
