@@ -117,38 +117,66 @@ _PRE_COMMIT_PROVIDER_REASONS = frozenset(
 
 # Index-level merge failure reasons raised while reading/validating either index,
 # resolving merge collisions, or copying checkpoint objects -- all strictly before
-# the destination compare-and-swap.  Raise points (packages/common/state_manager.py):
-#   state_snapshot_index_unreadable        :1925 (source), :1983,:1987 (destination)
-#   state_snapshot_index_not_object        :1927
-#   state_snapshot_index_copyback_conflict :2013
-#   state_snapshot_index_schema_unsupported :2192
-#   state_snapshot_index_entries_invalid   :2162,:2164,:2203
-#   state_snapshot_index_entry_not_object  :2168,:2214
-#   state_snapshot_index_entry_limit_exceeded :2206
-#   state_snapshot_index_required_field_missing :2271,:2277
-#   state_snapshot_index_duplicate_identity :2233
-#   state_snapshot_index_duplicate_state_id :2246
-#   state_snapshot_index_checksum_missing  :3040
-#   state_snapshot_index_checksum_mismatch :3042
-#   state_snapshot_index_generated_at_future :2982
-#   state_snapshot_index_stale             :2985 (freshness enforcement only; the
-#       merge's own reads pass enforce_freshness=False, listed for completeness)
-#   state_snapshot_index_time_invalid      :2998
-#   state_snapshot_index_source_id_invalid :3005
-#   state_snapshot_index_int_invalid       :3012-:3027
-#   state_snapshot_index_usable_flag_invalid :3033
-#   state_snapshot_index_json_node_limit_exceeded :3120
-#   state_snapshot_index_json_depth_exceeded :3126
-#   state_snapshot_index_size_limit_exceeded :1823 (publish), :2677
-#   state_snapshot_index_object_missing    :2547,:2550
-#   state_snapshot_index_object_unreadable :2127,:2551,:2553
-#   state_snapshot_index_object_checksum_mismatch :2093,:2103,:2120,:2556
-#   state_snapshot_index_object_unsafe_uri :2087,:2089,:2137,:2578,:2582,:2653,:2655,:2743
-#   state_snapshot_index_object_unsupported_uri :2602,:2604,:2819
-#   state_snapshot_index_write_failed      :2711-:2718, a remap that fires only for
-#       the five precommit provider reasons listed there.
-# Object copies happen before the index commit, so a refusal here still means
-# "index unchanged, some winning objects may already be on the shared root".
+# the destination compare-and-swap.  Each reason names every merge-path function
+# in packages/common/state_manager.py that raises it (each owner holds the reason
+# literal, enforced by test); object copies happen before the index commit, so a
+# refusal here still means "index unchanged, some winning objects may already be
+# on the shared root".
+PRE_COMMIT_INDEX_REASON_OWNERS: Mapping[str, tuple[str, ...]] = {
+    "state_snapshot_index_unreadable": ("_merge_state_snapshot_index_copyback_locked",),
+    "state_snapshot_index_not_object": ("_merge_state_snapshot_index_copyback_locked",),
+    "state_snapshot_index_copyback_conflict": ("_merge_state_snapshot_index_copyback_locked",),
+    "state_snapshot_index_copyback_lock_identical": ("_copyback_lock_identical_error",),
+    "state_snapshot_index_copyback_lock_identity_unavailable": ("_copyback_lock_probe_error",),
+    "state_snapshot_index_entries_invalid": (
+        "_copyback_raw_entries",
+        "_validate_state_snapshot_index",
+    ),
+    "state_snapshot_index_entry_not_object": (
+        "_copyback_raw_entries",
+        "_validate_state_snapshot_index",
+    ),
+    "state_snapshot_index_object_unsafe_uri": (
+        "_copyback_state_checkpoint",
+        "_ensure_copyback_state_parent",
+        "_require_supported_state_object_reference",
+        "_require_no_encoded_unsafe_object_key",
+        "_state_index_destination_path",
+    ),
+    "state_snapshot_index_object_unreadable": (
+        "_copyback_state_checkpoint",
+        "_verify_state_index_object",
+    ),
+    "state_snapshot_index_object_checksum_mismatch": (
+        "_copyback_state_checkpoint",
+        "_verify_state_index_object",
+    ),
+    "state_snapshot_index_duplicate_identity": ("_validate_state_snapshot_index",),
+    "state_snapshot_index_duplicate_state_id": ("_validate_state_snapshot_index",),
+    "state_snapshot_index_schema_unsupported": ("_validate_state_snapshot_index",),
+    "state_snapshot_index_entry_limit_exceeded": ("_validate_state_snapshot_index",),
+    "state_snapshot_index_generated_at_future": ("_parse_state_index_generated_at",),
+    "state_snapshot_index_stale": ("_parse_state_index_generated_at",),
+    "state_snapshot_index_time_invalid": ("_parse_state_index_time",),
+    "state_snapshot_index_source_id_invalid": ("_normalize_state_index_source_id",),
+    "state_snapshot_index_int_invalid": ("_optional_state_index_int",),
+    "state_snapshot_index_usable_flag_invalid": ("_require_state_index_bool",),
+    "state_snapshot_index_json_node_limit_exceeded": ("_validate_state_index_json_complexity",),
+    "state_snapshot_index_json_depth_exceeded": ("_validate_state_index_json_complexity",),
+    "state_snapshot_index_size_limit_exceeded": (
+        "publish_state_snapshot_index",
+        "_read_state_index_bytes",
+    ),
+    "state_snapshot_index_object_missing": ("_verify_state_index_object",),
+    "state_snapshot_index_object_unsupported_uri": (
+        "_require_supported_state_object_reference",
+        "_state_index_control_object_path",
+    ),
+    "state_snapshot_index_required_field_missing": ("_normalize_state_index_entry",),
+    "state_snapshot_index_checksum_missing": ("_require_state_index_checksum",),
+    "state_snapshot_index_checksum_mismatch": ("_require_state_index_checksum",),
+    "state_snapshot_index_write_failed": ("_write_state_index_bytes",),
+}
 _PRE_COMMIT_INDEX_REASONS = frozenset(
     {
         "state_snapshot_index_checksum_mismatch",
