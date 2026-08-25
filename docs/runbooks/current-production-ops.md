@@ -2234,6 +2234,80 @@ tile 前后字节数不变 = 缓存问题，回去查 `source_version` 与 nginx
   含 hhe 属预期；前端走的是 `has_display_product=true`
   （[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
 
+### 7.2 2026-08-25：zhaochen 系列退出业务化（#1701，owner 裁定不建后继）
+
+`basins_zhaochen_{bst,mc,wem}` 三个流域整体退出生产。**owner 裁定「彻底退出，不建
+basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」整条路作废——没有目标
+包，就没有克隆对，`#1697` 的 `--transfer-mode recalibration` 不参与本次操作。
+
+地理位置与名字无关，别按名字找：`bst` 在新疆天山（83.0–88.3°E / 41.5–43.3°N，
+**9572 河段**），`mc` 在四川（103.8–104.0°E / 28.8–29.0°N，708 段），
+`wem` 在 102.0°E / 34.1°N（308 段）。验收挑 tile 时按这三个 bbox 挑，不要按名字猜。
+
+**本次五步全做了**（§7.1 的 hhe 退役漏了第 5 步，见 §7.1.1）：
+
+1. **注册表两份**（NFS + `/scratch/frd_muziyao/nhms-prod` 本地）各移除 6 条
+   `dg_*`（3 流域 × gfs/ifs），62 → 56。checksum **复用仓库自己的
+   `scheduler_file_provider_refresh._prospective_registry_content`** 重算，
+   不要手写 canonical 序列化；写入后立刻用 `_load_previous_canonical_registry`
+   原地回读校验（sha 相符 + 56 行）才算成功。备份
+   `manifest-last.json.bak-zhaochen-retire-20260825`。
+2. **node-27 `hydro.hydro_run`**：552 条 published（184 × 3）翻 `superseded`，
+   行级备份 `/home/nwm/zhaochen-published-runs-backup-20260825.csv`。
+3. **`infra/env/node27-ingest.env`**：`AUTOPIPE_EXCLUDE_BASINS` 追加
+   `zhaochen_bst,zhaochen_mc,zhaochen_wem`（保留原有 `zhaochen_hhy,hhe`），
+   备份同名 `.bak-zhaochen-retire-20260825`。
+4. **目录**：`zhaochen/` 两棵树各自 `mv` 到
+   `<root>/Basins-retired/issue-1701-20260825/`（各 4.2 G，同盘 rename），不删。
+5. **baseline `core.model_instance` deactivate ×3**：`basins_zhaochen_{bst,mc,wem}_shud`
+   走 §7.1.1 的进程内 lifecycle 通道，`override_missing_active=true`，一行一操作，
+   preflight `blockers` 非空一律中止（本次三个都是 `[]`，唯一 warning
+   `COPIED_ROOT_EVIDENCE_MISSING` 与 deactivate 无关）。
+
+**不需要做的**（都核实过，别顺手做）：
+
+- **不需要 retirement declaration**。`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 让刷新走
+  [`scheduler_file_provider_refresh.py:896`](../../scripts/scheduler_file_provider_refresh.py)
+  的 replay 分支，`previous_models_snapshot` 由
+  `_load_previous_canonical_registry(registry_uri)` 直接读 manifest——手工删行之后
+  previous 本身就是 56，分类器看到的是 `56/56 unchanged`，**根本不产生 `removed`**，
+  `enforced` 门不会 refuse。`declared_retirements` 机制是给非 replay 路径用的。
+- **不需要 geo 重建**。前端 geojson 刻意不 fetch（§7.1.1 末尾），成员判据在 DB 侧，
+  正是第 5 步翻的那一行。
+- **不需要维护窗口**。删行只停未来调度；已发布的包仍在 object store。动手前确认
+  `squeue` 里没有这 6 个 `dg_*` 在飞即可（本次在跑的是 `dg_3264c89a`/gfs 与
+  `dg_30a94855`/ifs，无交集）。
+
+**验收 receipt（2026-08-25 实测）**：
+
+| 项 | before | after |
+|---|---|---|
+| 注册表 `entry_count`（4 个 provider 全部） | 62 | **56** |
+| 刷新分类 `refresh_20260825T114421Z_16c2c2f7df62` | — | `56/56 unchanged`，`removed 0`，`refused 0`，`package_changed 0` |
+| `generation` | `manifest-c76de906099f` | `manifest-c5d926ff02b8` |
+| active `core.model_instance` / active river networks | 31 / 31 | **28 / 28** |
+| `/api/v1/layers` river-network `source_generation` | `…:a4559c13156eb0ea8b29:31` | `…:2f80d8c240118084e6fa:28` |
+| `/api/v1/basins?has_display_product=true` | 24（含 3 个 zhaochen） | **21**（无 zhaochen） |
+| tile `6/47/23`、`7/94/47`、`8/188/94`（bst） | 有内容 | **0 B** |
+| tile `7/100/53`、`8/201/106`（mc） | 有内容 | **0 B** |
+| 仍有内容的 tile 里 `zhaochen` 字符串出现次数 | — | **0**（`5/23/11`、`8/200/102`、`9/401/204`、`4/12/6`） |
+| 公网 `test.nwm.ac.cn` 同 tile 字节 | — | 与内网一致（nginx 无陈旧缓存） |
+| `ops.audit_log` | — | `log_id` 15/16/17，`models.deactivate` / `sys_admin` |
+
+> **读 `source_generation` 有个坑**：deactivate 之后立刻读可能仍是旧值（显示 API 的
+> 连接池会话快照）。不要据此判定「没生效」——先用 SQL 直接数 digest 行数
+> （`JOIN core.model_instance ... WHERE mi.active_flag = true`），DB 是真值。
+>
+> **tile 字节不变不一定是缓存**。`cache_key` 含 `tile.source_version`
+> （[`services/tiles/mvt.py:139`](../../services/tiles/mvt.py)），source_version 一变缓存键必变，
+> 取到的就是新生成的 tile。字节不变要先确认挑的 tile **真的覆盖**该流域——
+> 本次第一轮就是按名字猜到 98°E/34°N，五个 tile 全部不覆盖，白测一遍。
+
+**复活路径**：恢复两份 manifest 备份（或重新 provision）＋ 目录从
+`Basins-retired/issue-1701-20260825/` 移回＋ 27 侧 `--force` 注册（会把
+`superseded` 翻回 active）＋ `AUTOPIPE_EXCLUDE_BASINS` 去掉三项＋ baseline
+`core.model_instance` 三行 `activate` 回来（少这一步 = 底图上没有河网）。
+
 ## 8. 当前已知卡点
 
 ### 8.1 Display port drift
