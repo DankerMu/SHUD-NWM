@@ -80,29 +80,29 @@ This closes the admission window structurally rather than relying on the
 ordering alone. (It is already disabled — it was stopped when hetianhe started
 NaNing.)
 
-- [ ] 5.0 Provision the new model instance on node-27 (`core.model_instance`),
+- [x] 5.0 Provision the new model instance on node-27 (`core.model_instance`),
       per runbook 5.7.1's first step.
-- [ ] 5.1 Republish hetianhe with the declared override; record the new
+- [x] 5.1 Republish hetianhe with the declared override; record the new
       `model_id` and `package_checksum`. Assert the packaged `*.cfg.calib`
       carries `GEOL_DMAC 4` and differs from the Basins source file in exactly
       that one line.
-- [ ] 5.2 Backfill forcing under the new id for the cycle the scheduler will run
+- [x] 5.2 Backfill forcing under the new id for the cycle the scheduler will run
       (`scripts/node22_backfill_forcing_for_model_ids.py`, lands with #1825 /
       PR #1833). Depends on 5.1's `model_id`, not on the manifest publish.
-- [ ] 5.3 Clone the warm state onto the new id — both state-index copies (NFS
+- [x] 5.3 Clone the warm state onto the new id — both state-index copies (NFS
       and scratch), `valid_time` equal to the target cycle `C` itself, not
       `C − lead` (runbook 5.7.1).
-- [ ] 5.4 **Now** merge-publish the registry directly
+- [x] 5.4 **Now** merge-publish the registry directly
       (`publish_scheduler_registry_manifest`, one shared `generated_at` for both
       targets, `expected_preimage` CAS on the canonical side). Assert before
       publishing: row count unchanged, no duplicate `model_id`, all rows
       `direct_grid`, per-basin row count unchanged.
-- [ ] 5.5 Manual refresh to rebuild readiness; judge by `latest.json`'s
+- [x] 5.5 Manual refresh to rebuild readiness; judge by `latest.json`'s
       `started_at` going newer, NOT by receipt file count (`latest.json` is
       overwritten in place).
-- [ ] 5.6 Release the failed run through the manual-retry marker
+- [x] 5.6 Release the failed run through the manual-retry marker
       (`scripts/node22_manual_retry_failed_runs.py`, #1825).
-- [ ] 5.7 One bounded pass: forecast `succeeded`, state written at the next
+- [x] 5.7 One bounded pass: forecast `succeeded`, state written at the next
       `valid_time`, and the transition decision is `warm_continue` — NOT
       `PACKAGED_IC_BOOTSTRAP`. That assertion is the whole point of the ordering
       above.
@@ -110,7 +110,59 @@ NaNing.)
       `superseded` is not in the display candidate whitelist
       (`packages/common/forecast_store.py`), so marking early blanks the basin's
       frontend.
-- [ ] 5.9 Re-enable `nhms-compute-scheduler.timer`.
+- [x] 5.9 Re-enable `nhms-compute-scheduler.timer`.
+
+### What the live rollout corrected in this plan (2026-08-24/25 receipts)
+
+Both corrections are load-bearing for the next recalibration; neither was
+visible from reading the code.
+
+- **5.2 has a dependency this plan did not state.** The forcing producer
+  resolves its target model out of the FILE MODEL REGISTRY
+  (`Model instance '<model_id>' was not found in file model registry`), so the
+  new id must be resolvable before the backfill can run — which reads as a
+  contradiction of "publish the manifest last". It is not: the ordering
+  constraint is about the registry THE SCHEDULER READS. Point
+  `NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST` at the workspace's merged CANDIDATE
+  for the backfill invocation only, and assert the live canonical's sha is
+  unchanged before and after. Done that way here: backfill `verified: 2`, live
+  canonical sha identical across the step.
+- **5.6 was a no-op for this basin, and the plan generalised the wrong case.**
+  The 8-basin repair released runs that died `ARTIFACT_NOT_FOUND` on ids that
+  STAYED in the registry. hetianhe died `SHUD_EXIT_10` — the NaN itself — on an
+  id this rollout RETIRED. The marker preview named it exactly: the only
+  `would_mark` row was the retired gfs id, and marking it would restart a model
+  no longer in the registry. The new ids carry no journal history, so there is
+  nothing to release. Run the preview and read it before assuming a marker is
+  needed.
+- **Operational**: run every step of 5.1-5.7 detached
+  (`{ setsid nohup ... & }`). A foreground producer outlived its ssh session
+  here and a second invocation then wrote the same target directory
+  concurrently; both were killed by PID and the target verified clean, but the
+  window is real.
+
+### Live receipts
+
+Workspace `/scratch/frd_muziyao/nhms-prod/workspace/republish-1832` on node-22.
+
+- 5.1 package `vbasins-hetianhe-ec6692ff9f6e-b5e6c701`; packaged `*.cfg.calib`
+  differs from the Basins source in exactly one line, `GEOL_DMAC 5 -> 4`;
+  `SOIL_ALPHA` untouched at the source value.
+- 5.2 `status_counts {"verified": 2}`, both sources byte-equivalent.
+- 5.3 both state-index copies written; `state_compatibility_fingerprint`
+  identical old-to-new (`fa9c9f08...`) — the calibration file is not part of
+  that fingerprint, which is why warm start legitimately continues.
+- 5.4 48 rows in / 48 out, both targets `content_sha256 844507849a04...`, CAS
+  preimage matched the sha frozen at 5.1.
+- 5.5 refresh `outcome=published reason=success`, `started_at` advanced, and the
+  registry did NOT revert — hetianhe still on the new ids, readiness 48 = registry 48.
+- 5.7 gfs `2026082300` slurm `34893_0` **succeeded**, `init_state_uri` a
+  `s3://nhms/states/...` path (the clone), NOT a package path — so warm
+  continuation, not `PACKAGED_IC_BOOTSTRAP`. IFS `2026082312` slurm `34945_2`
+  succeeded; that cycle ran 24/24 basins green.
+- 5.8 deferred: `superseded` must wait until the new run is published, and the
+  new run wins the display candidate query on `cycle_time DESC` regardless, so
+  nothing is blank in the meantime.
 
 ## 6. Documentation
 

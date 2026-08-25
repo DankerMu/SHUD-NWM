@@ -1847,3 +1847,40 @@ The cumulative 72/295 direction still supports keeping rotation, while the
 standing attribution caveats remain decisive against treating one no-catch,
 no-rotation PR as a cut signal. No reviewer-set or rotation-policy change
 follows.
+
+## Revisit (2026-08-24, issues #1832 / PR #1835 and #1825 / PR #1833)
+
+After appending both accountability lines, `loop_log_audit` returns DECIDABLE at
+**126 multi-round merged PRs, later-round catches core=74 / rotated=295**.
+Relative to the preceding sample these two PRs contribute **2 core** and **0
+rotated** later-round catches. Recorded decision: **keep rotation**, unchanged.
+
+Both later-round catches came from the pinned core, and both from
+`invariant-state` on PR #1833's round 2. That round is worth naming rather than
+counting: round 1 fixed "an unverified artifact must not be left live on the
+path the forecast stage reads", and the fix reintroduced exactly that failure —
+`quarantine_target` returned `None` on a failed rename, no call site checked it,
+and the resulting status was byte-identical to a successful quarantine while the
+runbook asserted the artifact had been moved. The second catch on the same round
+was an exit-code mask (a preview greener than the state it previewed).
+
+That is a *fix-regression* signal, not a rotation signal: the core lens is
+pinned into follow-up rounds precisely to re-check the invariant the previous
+round claimed to restore, and here it paid. Two core catches move the cumulative
+ratio a little toward the core arm without disturbing the direction, and the
+standing attribution caveats (the raw split mixes treatment, no-treatment,
+targeted rechecks, and workflow-role lenses) remain decisive against reading two
+PRs either way.
+
+PR #1835's rounds contribute nothing to attribution: its round 2 was clean.
+
+One process deviation is recorded on the #1825 line and repeated here because it
+bears on how these catches should be weighted: round 2 skipped the independent
+verifier gate. Both candidates were mechanically checkable by reading the diff
+(an unchecked return value; a status overwritten before a tally), and the tool
+was in live production use restoring a basin that was down. Recorded as a
+one-off deviation with its reason, not as a precedent — the round-3 review that
+followed was scoped explicitly to "did this close the hole or move it", which is
+the check the skipped gate would otherwise have supplied.
+
+No reviewer-set or rotation-policy change follows.
