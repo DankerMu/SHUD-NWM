@@ -2093,7 +2093,77 @@ forecast 运行超 2 小时后由操作员决定取消），暂时退出业务�
 
 复活路径：恢复 manifest 备份（或重新 provision registry）＋ 27 侧
 `--force` 注册（其 register 步骤会把 `superseded` 翻回 active）＋
-移除 `AUTOPIPE_EXCLUDE_BASINS` 中的 `hhe`。
+移除 `AUTOPIPE_EXCLUDE_BASINS` 中的 `hhe`＋把 baseline `core.model_instance`
+行 `activate` 回来（见 §7.1.1，否则全国底图上没有这个流域的河网）。
+
+#### 7.1.1 2026-08-25 补漏：baseline `core.model_instance` 必须一并 deactivate
+
+上面 2026-08-07 的四步**漏了一步**，导致 hhe 退役 18 天后仍在公网底图上显示全部
+43799 条河网：`core.model_instance` 的 baseline 行 `basins_hhe_shud` 一直是
+`active_flag = t / lifecycle_state = active`（当时只处理了 registry 里的两条 `dg_*` 行）。
+全国 river-network MVT 的成员判据就是这一条
+（[`services/tiles/mvt.py:361`](../../services/tiles/mvt.py) 的
+`EXISTS (... model_instance mi WHERE mi.river_network_version_id = rnv.river_network_version_id AND mi.active_flag = true)`），
+且 `national_river_network_source_version`（同文件 `:1374`）的 digest 也只看 active 集合——
+所以这条行不翻，tile 内容和 ETag 都不会变。
+
+**退役流域时必须做的第 5 步**：把该流域的 baseline `basins_<slug>_shud` 行走
+lifecycle 通道 deactivate。
+
+- 通道：`POST /api/v1/models/{model_id}/lifecycle`，`operation=deactivate`，
+  `override_missing_active=true`（退役后该 basin_version 为零 active，属合法终态，
+  数据里已有先例），非空 `reason`，actor 角色需 `sys_admin`
+  （[`packages/common/model_registry.py:2925`](../../packages/common/model_registry.py)
+  的 `MISSING_ACTIVE_RISK` / `OVERRIDE_REQUIRES_SYS_ADMIN` 前置判据）。
+- node-27 的 `:8080` 是 display-readonly 部署（`nhms_display_ro` +
+  `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`），**不要**为了这一次操作放开写权限。
+  用仓库自身代码在 27 上以 owner DSN 进程内调用同一个 store 方法即可——
+  route 只是 `store.model_lifecycle_operation(...)` 的薄封装：
+
+  ```python
+  decision = trusted_internal_policy_decision(
+      "models.deactivate", target_type="model_instance",
+      target_id=MODEL_ID, actor_id="ops:<who>-<date>", roles=("sys_admin",))
+  store.preflight_model_operation(MODEL_ID, operation="deactivate",
+      policy_decision=decision, override_missing_active=True, reason=REASON)
+  # blockers 非空一律中止，不要改用 trusted_internal=True 硬闯
+  store.model_lifecycle_operation(...)   # 同参数
+  ```
+
+  跑之前 `env -u NHMS_AUTH_MODE -u AUTH_BACKEND`，只 source
+  `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
+  会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
+  manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义），
+  也不要动已经 inactive 的 `dg_*` 行。一行一操作。
+
+**验收 receipt（必须前后对照，只翻旗不算修好）**：
+
+| 项 | 2026-08-25 实测 |
+|---|---|
+| `/api/v1/layers` river-network `source_generation` | `…:34c95f183d39f2504658:25` → `…:5cd1a080b67a0da5d6ca:24` |
+| active `model_instance` / active river networks | 25 → 24，diff 只少 `basins_hhe_shud` 一行 |
+| tile `river-network-national/5/25/12.pbf` | 65023 B → 10443 B |
+| tile `…/6/50/24.pbf` | 14023 B → 467 B |
+| tile `…/4/12/6.pbf` | 67700 B → 31865 B |
+| 公网 `https://test.nwm.ac.cn` 同一 tile | 10443 B（与内网一致，nginx 无陈旧缓存） |
+| `ops.audit_log` | `log_id=14`，`models.deactivate` / `sys_admin` / `basins_hhe_shud` |
+
+tile 前后字节数不变 = 缓存问题，回去查 `source_version` 与 nginx，不要直接宣布完成。
+
+**不属于展示面、无需处理（2026-08-25 复核）**：
+
+- `apps/frontend/public/geo/national-basin-river.geojson`（45 MB，59702 features，
+  其中 43799 为 hhe）——前端**刻意不 fetch**，见
+  [`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
+  并有测试钉住。纯磁盘死重。
+- `apps/frontend/public/geo/national-basin-domain.geojson` 里的 `basins_hhe` 轮廓——
+  `withStaticBasinBoundaries()` 只对**服务端已返回的** basin 做 boundary 回填，
+  hhe 不在 `/api/v1/basins?has_display_product=true`（实测 24 个，无 hhe），
+  因此该 feature 永不渲染。
+- 裸 `/api/v1/basins`（不带 `has_display_product`）是 `core.basin` 原始目录，
+  含 hhe 属预期；前端走的是 `has_display_product=true`
+  （[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
 
 ## 8. 当前已知卡点
 
