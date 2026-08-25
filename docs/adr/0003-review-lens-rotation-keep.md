@@ -1945,3 +1945,37 @@ measurement error of treating a non-applied treatment as an observed result.
 
 The cumulative direction and the existing default-keep decision remain
 unchanged. No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-25, issue #1826 / PR #1843)
+
+After appending PR #1843's accountability line, `loop_log_audit` returns
+DECIDABLE at **129 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated**. Recorded decision: **keep rotation**, unchanged.
+
+Another no-information increment for the rotation question, for the same reason
+as the PR #1836 entry: round 1 ran three lenses (`correctness`,
+`invariant-state`, `test-evidence`) and round 2 was the Phase 7 final review
+(`spec-compliance`, `test-evidence`, `integration`), which returned no verified
+finding. With no later-round catch there is nothing to attribute, and reading
+the added denominator as evidence either way would repeat the standing
+measurement error of treating a non-applied treatment as an observed result.
+
+This line does carry one observation that is orthogonal to rotation and worth
+recording precisely because the audit cannot see it: **both of this run's
+highest-value catches landed in round 0 — the read-only fixture review, before
+any implementation existed.** One was a P1 that would have shipped a
+fail-CLOSED regression (an `endswith`-shaped identity comparison that rejects a
+candidate's own forcing reference in two of the three shapes production
+actually records, blocking a healthy basin's forecast for a full 00/12 UTC
+cycle); the other redirected the change's three insertion points from payload
+constructors that lack the required arguments to the caller that owns them,
+avoiding a signature widening that would have broken five existing tests.
+
+The loop log's `catches[].round` field admits `0`, so these are recorded, but
+the rotation metric counts only *later-round* catches and therefore attributes
+neither. That is correct for the rotation question and misleading for any
+broader reading of where the review loop earns its cost on this repo. No
+reviewer-set or rotation-policy change follows; the note exists so a future
+keep/cut reader does not mistake a run with two P1/P2 pre-implementation catches
+for a run in which review found little.
