@@ -2019,3 +2019,18 @@ DISCARD-grade findings. If a future reader wants to cut review cost, the
 evidence so far points at the later rounds, not at the fixture review — and
 would need the loop log's `catches[].round == 0` entries counted, which today
 no audit does.
+
+## Revisit 2026-08-25 (post #1702 / PR #1848) — keep, unchanged
+
+The rotation metric is bit-identical to the previous revisit (129 multi-round
+merged PRs; later-round catches core=75, rotated=295) because PR #1848 was a
+zero-round, fixture-tier-`none` docs PR and contributes nothing to it.
+
+Recorded only to discharge the audit's DECIDABLE obligation, not as new
+evidence. One observation worth keeping: #1848's whole risk sat in three
+pre-flight verifications on a production node, none of which any review lens
+would have covered — the review track was correctly recorded as "not required",
+and the safety came from refusing to move bytes until the timer's replay branch,
+the runtime forcing source, and the sole filesystem reader of `forcing_dir` were
+each proved. That is a third consecutive run whose leverage sat outside the
+rotated lenses.
