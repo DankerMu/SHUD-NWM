@@ -16,6 +16,11 @@ from pathlib import Path, PurePosixPath
 import pytest
 import yaml
 
+# The shared pure activation predicate is deliberately accessed through the
+# production module (not imported by name): the #1561 guard-domain classifier
+# must use the EXACT predicate the selection loop runs, and routing it through
+# the module keeps the two from drifting even when the name is private.
+import scripts.select_ci_tests as _prod_module
 from scripts.select_ci_tests import (
     BACKEND_PYTHON_SOURCE_PREFIXES,
     CHAIN_IMPORTER_TESTS,
@@ -301,12 +306,21 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
 
 
 def test_select_tests_keeps_standalone_changed_test_file_whole_file_selection() -> None:
+    # #1561: the ordinary changed-suite branch now also selects the suite's
+    # direct non-gated module-scope importers, so this suite's whole-file
+    # selection grew by its two derived importers (test_e2e_m3.py,
+    # test_pipeline_logs_artifacts.py) — the meta-guard and the owner stay.
+    # Deriving the expected importers from the index would be
+    # self-referential, so the growth is pinned with the owner anchors and the
+    # redirect test guards the unchanged redirect class.
     selected = select_tests(["tests/test_orchestration_chain.py"], repo_root=Path("."))
 
-    assert selected == [
+    assert {
         "tests/test_orchestration_chain.py",
         "tests/test_select_ci_tests.py",
-    ]
+    } <= set(selected)
+    assert "tests/test_e2e_m3.py" in selected
+    assert "tests/test_pipeline_logs_artifacts.py" in selected
 
 
 def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_changes() -> None:
@@ -1739,27 +1753,29 @@ DISPLAY_COVERAGE_GATED_IMPORTER = "tests/test_display_coverage_residual_debt_int
 REAL_BACKEND_ONE_HOP_MEMBER = "tests/test_reconcile_sacct_parse.py"
 
 
-def _tracked_top_level_test_files() -> list[str]:
-    """Tracked files directly under `tests/` that pytest collects by name.
+def _tracked_test_suites() -> list[str]:
+    """Tracked files under `tests/**` that pytest collects by name, nested or top-level.
 
     Classification goes through `is_test_suite_path` — the selector's own
-    predicate, both `python_files` patterns, matched on the basename — rather
-    than a hand-rolled `tests/test_*.py` fnmatch. That path-shaped spelling was
-    wrong twice (PR #1486): fnmatch's `*` crosses `/`, so it reads
-    `tests/test_pkg/helper.py` as a suite, and its single pattern reads
-    `tests/x_test.py` as a support module. Every derivation below — the
-    importer index, the guarded-module closure, the disposition guard — inherits
-    that classification, so it has to equal pytest's.
+    predicate, both `python_files` patterns (`test_*.py` and `*_test.py`),
+    matched on the basename — rather than a hand-rolled `tests/test_*.py`
+    fnmatch. That path-shaped spelling was wrong twice (PR #1486): fnmatch's
+    `*` crosses `/`, so it reads `tests/test_pkg/helper.py` as a suite, and its
+    single pattern reads `tests/x_test.py` as a support module. Every
+    derivation below — the suite-importer index (#1561), the guarded-module
+    closure, the disposition guard — inherits that classification, so it has to
+    equal pytest's.
 
-    "Top level" is enforced by the parent check, not by the pattern: `git
-    ls-files` glob magic also crosses `/`, and the derivations here are about
-    collectible top-level suites.
+    The domain is RECURSIVE on purpose (#1561 closure fix): production
+    (`scripts/select_ci_tests.py`'s `_build_suite_importer_index`) walks
+    `os.walk(tests_root)` and collects every nested suite by `is_test_suite_path`,
+    so the test-side importer index must see the same domain — a production
+    regression that narrows the walk back to top-level only would otherwise
+    redden here by name. The current tracked tree has no nested suites (the
+    only non-top-level `tests/**` files are fixtures), so the recursive edge is
+    proven on synthetic fixture trees, never vacuous against the live tree.
     """
-    return [
-        path
-        for path in _tracked_python_files("tests")
-        if PurePosixPath(path).parent == PurePosixPath("tests") and is_test_suite_path(path)
-    ]
+    return sorted(path for path in _tracked_python_files("tests") if is_test_suite_path(path))
 
 
 def _file_level_gating_markers(tree: ast.Module) -> set[str]:
@@ -1795,9 +1811,15 @@ def _file_level_gating_markers(tree: ast.Module) -> set[str]:
 
 
 def _non_gated_top_level_importer_tests(module: str) -> set[str]:
-    """Tracked `tests/test_*.py` importing ``module`` at file level, un-gated."""
+    """Tracked `tests/**` suite importing ``module`` at file level, un-gated.
+
+    Domain is the recursive tracked suite set (`_tracked_test_suites`): a
+    nested `tests/pkg/test_x.py` or alternate `tests/x_test.py` suite that
+    imports the module at module scope is an importer exactly like a top-level
+    `tests/test_x.py` would be — pytest collects all of them by name.
+    """
     importers: set[str] = set()
-    for test_path in _tracked_top_level_test_files():
+    for test_path in _tracked_test_suites():
         tree = _parse_tracked(test_path)
         if module not in _top_level_imported_module_names(test_path, tree):
             continue
@@ -2058,12 +2080,17 @@ def test_parse_cache_observes_a_rewrite_of_an_already_parsed_file(tmp_path: Path
 def test_changed_test_file_also_selects_the_selector_meta_guards() -> None:
     # #1254: the tree-derived meta-guards above are only worth having if they
     # run on the PR class that can invalidate them — a PR touching test files.
+    # #1561: this particular changed suite now also drags its derived direct
+    # non-gated module-scope importer
+    # (tests/test_node27_timeseries_compression_live_evidence.py) — the
+    # meta-guard accumulation claim itself is unchanged.
     selected = select_tests(["tests/test_node27_timeseries_compression_capture.py"], repo_root=Path("."))
 
-    assert selected == [
+    assert {
         "tests/test_node27_timeseries_compression_capture.py",
         "tests/test_select_ci_tests.py",
-    ]
+        "tests/test_node27_timeseries_compression_live_evidence.py",
+    } == set(selected)
 
 
 def test_changed_selector_suite_selects_only_itself() -> None:
@@ -2072,6 +2099,855 @@ def test_changed_selector_suite_selects_only_itself() -> None:
     assert select_tests(["tests/test_select_ci_tests.py"], repo_root=Path(".")) == [
         "tests/test_select_ci_tests.py",
     ]
+
+
+# --------------------------------------------------------------------------
+# Suite-to-suite importer closure (#1561)
+#
+# A PR that changes a test suite self-selects that suite, but not the other
+# suites that import its top-level helpers at module scope — renaming or
+# removing such a helper then breaks the importer during PR-lane collection
+# only after merge. The closure is a one-hop, module-scope, non-gated reverse
+# index derived mechanically from the supplied `repo_root` filesystem (never
+# git, never the process CWD), applied ONLY in the ordinary changed-suite
+# branch — redirects, support modules, and the meta-guard collapse are
+# untouched. Function-local imports and importer-of-importer edges stay out,
+# file-level `integration`/`e2e` suites stay out (they skip in the PR lane),
+# and a malformed discovered suite fails selection loudly instead of silently
+# shrinking the index.
+# --------------------------------------------------------------------------
+
+# Owner suites whose ordinary selection must cover the mechanically derived
+# non-gated module-scope importer closure (task 2.1 / issue acceptance). Only
+# the OWNERS are listed; the required importer sets are recomputed on every run
+# from the independent test-side authority (_non_gated_top_level_importer_index
+# + _dotted_module_name), never frozen here. test_analysis_pipeline.py is the
+# zero-importer owner: its derived set is empty, so the assertion below proves
+# the zero-importer ordinary branch mechanically rather than by a hardcoded
+# empty tuple.
+#
+# tests/test_orchestration_chain.py joins the mechanically exact owner
+# evidence (#1561 round-1 finding 1): it is an ordinary owner for a standalone
+# change (its CHANGED_TEST_FILE_RULES entries are all conditional on
+# orchestrator source surfaces, absent from changed=[owner]), so the exact-set
+# assertion below now covers its derived importers too — the scheduler had
+# separate mechanically exact evidence but the chain did not, and the live-tree
+# guard alone would have let the chain fall out of exact coverage.
+SUITE_IMPORTER_CLOSURE_OWNERS: tuple[str, ...] = (
+    "tests/test_real_slurm_gateway.py",
+    "tests/test_production_scheduler.py",
+    "tests/test_orchestration_chain.py",
+    "tests/test_analysis_pipeline.py",
+)
+
+
+@pytest.mark.parametrize("owner", SUITE_IMPORTER_CLOSURE_OWNERS)
+def test_changed_suite_selects_its_direct_non_gated_module_scope_importers(
+    owner: str,
+) -> None:
+    # Acceptance 2.1: an ordinary changed suite must select EXACTLY itself, the
+    # selector meta-guard, and every CURRENT derived non-gated module-scope
+    # importer suite — with the required set recomputed mechanically from the
+    # tracked tree, never frozen. The exact-set assertion proves the
+    # zero-importer owner keeps exactly the two-target shape (owner +
+    # meta-guard) and that no unrelated target leaks in. A useful failure
+    # message names whichever side carries the unexpected targets.
+    import tests.test_select_ci_tests as _self
+
+    required = _self._non_gated_top_level_importer_index().get(_dotted_module_name(owner), set())
+    expected = {owner, SELECTOR_META_GUARD_TEST} | set(required)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+
+    assert selected == expected, (
+        f"{owner}: expected {len(expected)} targets, got {len(selected)}"
+        + (
+            f"; missing {sorted(expected - selected)}"
+            if expected - selected
+            else f"; unexpected {sorted(selected - expected)}"
+        )
+    )
+
+
+def test_suite_importer_closure_anchor_anti_vacuity_real_slurm_gateway() -> None:
+    # Anti-vacuity for the real_slurm owner WITHOUT freezing its whole set: the
+    # historical tests/test_gateway_reconcile.py monolith was deleted/split
+    # (#1809), and issue acceptance says its current importers are the split
+    # partitions — so the derived closure must contain at least one current
+    # split importer AND must never name the deleted monolith (restoring or
+    # hardcoding it would redden here). The derived set, not a frozen filename,
+    # is the requirement.
+    import tests.test_select_ci_tests as _self
+
+    owner = "tests/test_real_slurm_gateway.py"
+    required = _self._non_gated_top_level_importer_index().get(_dotted_module_name(owner), set())
+
+    assert "tests/test_gateway_reconcile_comment_capability.py" in required, (
+        f"expected a current split importer in the derived closure, got {sorted(required)}"
+    )
+    assert "tests/test_gateway_reconcile.py" not in required, (
+        "the deleted historical monolith must not be part of the derived closure"
+    )
+
+
+def test_suite_importer_closure_anchor_anti_vacuity_production_scheduler() -> None:
+    # Anti-vacuity for the production_scheduler owner WITHOUT enumerating all
+    # five filenames: issue acceptance explicitly requires its FIVE current
+    # direct importers, so the derived cardinality is asserted as exactly 5 and
+    # one representative importer is pinned. The cardinality itself is derived
+    # (it is the size of the independent authority's set), never frozen.
+    import tests.test_select_ci_tests as _self
+
+    owner = "tests/test_production_scheduler.py"
+    required = _self._non_gated_top_level_importer_index().get(_dotted_module_name(owner), set())
+
+    assert len(required) == 5, (
+        f"tests/test_production_scheduler.py derived {sorted(required)} — "
+        "issue acceptance requires exactly its five current direct importers"
+    )
+    assert "tests/test_scheduler_backfill.py" in required, (
+        f"expected a representative importer in the derived closure, got {sorted(required)}"
+    )
+
+
+def test_redirected_changed_suite_keeps_its_focused_targets_without_the_closure() -> None:
+    # Acceptance 2.5/6: `tests/test_sql_shape_helpers.py` matches an explicit
+    # CHANGED_TEST_FILE_RULES redirect (SQL_SHAPE_ORACLE_TESTS), so the ordinary
+    # importer closure must NOT apply to it — its derived module-scope importers
+    # would otherwise join and break the redirect's focused contract. The exact
+    # redirect set is read from the rule table through the shared activation
+    # predicate, never frozen.
+    owner = "tests/test_sql_shape_helpers.py"
+    redirect_targets = _changed_test_rule_redirects_for(owner, [owner])
+    assert redirect_targets
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+
+
+def test_suite_importer_closure_is_derived_from_repo_root_not_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The derivation must read the SUPPLIED repository tree, never the process
+    # CWD: a selector invoked from a foreign directory against a synthetic
+    # `--repo-root` must derive edges from that root, and a real-tree selection
+    # run from inside a synthetic tree must not pick up the synthetic edges.
+    # Build a synthetic repo whose owner is imported by two suites and whose
+    # tree does NOT contain the meta-guard suite (so the selection is a clean
+    # two-target shape).
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_importer_a.py").write_text(
+        "from tests.test_owner import HELPER\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_importer_b.py").write_text(
+        "def test_b():\n    from tests.test_owner import HELPER\n    assert HELPER\n",
+        encoding="utf-8",
+    )
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    monkeypatch.chdir(foreign)
+
+    selected = select_tests(["tests/test_owner.py"], repo_root=tmp_path)
+
+    # importer_a (module-scope) joins; importer_b (function-local) does not.
+    assert selected == ["tests/test_importer_a.py", "tests/test_owner.py"]
+
+
+def test_suite_importer_closure_supports_all_three_module_scope_forms(
+    tmp_path: Path,
+) -> None:
+    # Acceptance 2.3: all three supported module-scope spellings must each
+    # contribute the importer suite. Each form lives in its own suite so the
+    # forms cannot mask each other.
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    forms = {
+        "import_form": "import tests.test_owner\n",
+        "from_import_form": "from tests.test_owner import HELPER\n",
+        "from_tests_form": "from tests import test_owner\n",
+    }
+    for name, body in forms.items():
+        (tmp_path / "tests" / f"test_{name}.py").write_text(body, encoding="utf-8")
+
+    selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+
+    assert selected == {"tests/test_owner.py"} | {f"tests/test_{name}.py" for name in forms}
+
+
+def test_suite_importer_closure_is_direct_only_no_transitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Acceptance 2.3: one hop only. `test_chain.py` imports `test_owner.py`, and
+    # `test_leaf.py` imports `test_chain.py` — the leaf is an importer-of-an-
+    # importer and must NOT join the owner's closure (it imports the owner's
+    # module nowhere). The direct importer still joins; the second-hop leaf does
+    # not. Pinned on a synthetic tree because the live tree happens to have no
+    # second-hop chain for these owners, which would let a recursive
+    # implementation pass unnoticed.
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_chain.py").write_text(
+        "from tests.test_owner import HELPER\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_leaf.py").write_text(
+        "from tests.test_chain import HELPER\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+
+    assert selected == {"tests/test_owner.py", "tests/test_chain.py"}
+    assert "tests/test_leaf.py" not in selected
+
+
+def test_suite_importer_closure_excludes_file_level_gated_importers(
+    tmp_path: Path,
+) -> None:
+    # Acceptance 2.3: a suite importing the owner at module scope but carrying a
+    # file-level `integration` or `e2e` marker skips in the PR lane, so it must
+    # not join the ordinary closure. Function-level marks are NOT file gates and
+    # must not hide an otherwise runnable suite.
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_gated_integration.py").write_text(
+        "import pytest\npytestmark = pytest.mark.integration\nfrom tests.test_owner import HELPER\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_gated_e2e.py").write_text(
+        "import pytest\npytestmark = [pytest.mark.e2e]\nfrom tests.test_owner import HELPER\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_function_marked.py").write_text(
+        "import pytest\nfrom tests.test_owner import HELPER\n\n"
+        "@pytest.mark.integration\ndef test_marked():\n    assert HELPER\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_plain.py").write_text(
+        "from tests.test_owner import HELPER\n", encoding="utf-8"
+    )
+
+    selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+
+    assert selected == {
+        "tests/test_owner.py",
+        "tests/test_function_marked.py",
+        "tests/test_plain.py",
+    }
+
+
+def test_suite_importer_closure_ignores_nested_suite_paths(tmp_path: Path) -> None:
+    # Acceptance 2.3: nested suite paths keep working — the owner lookup uses
+    # the dotted module name, so a nested suite whose path maps to the owner's
+    # module joins exactly like a top-level suite would.
+    owner = tmp_path / "tests" / "pkg" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_importer.py").write_text(
+        "from tests.pkg.test_owner import HELPER\n", encoding="utf-8"
+    )
+
+    selected = select_tests(["tests/pkg/test_owner.py"], repo_root=tmp_path)
+
+    assert selected == ["tests/pkg/test_owner.py", "tests/test_importer.py"]
+
+
+@pytest.mark.parametrize(
+    "importer_rel",
+    [
+        # #1561 importer-side gap: a nested `tests/pkg/test_*.py` suite must be
+        # part of the tracked-suite domain. The pre-fix production walk
+        # (`os.walk` -> `is_test_suite_path`) already collects nested suites, so
+        # the bite for this pair is on the TEST-SIDE authority: a test-side
+        # domain that collapsed back to top-level-only would let a nested
+        # importer pass unnoticed, which is the regression this row pins.
+        "tests/pkg/test_nested_importer.py",
+        # The alternate `*_test.py` suffix pytest ALSO collects (both
+        # `python_files` patterns). A domain that kept only `test_*.py` would
+        # silently drop this importer — the exact misclassification PR #1486
+        # documented twice.
+        "tests/pkg/importer_probe_test.py",
+    ],
+)
+def test_suite_importer_closure_selects_nested_and_alternate_suffix_importers(
+    tmp_path: Path,
+    importer_rel: str,
+) -> None:
+    # #1561 round-1 closure: the importer-side domain is recursive over tracked
+    # `tests/**/*.py` suites and both canonical `is_test_suite_path` patterns.
+    # A top-level-only builder implementation must FAIL this test: the fixture
+    # importer is nested, so a production `os.walk` narrowed back to top-level
+    # files, or a test-side index with a top-level-only domain, both drop it
+    # from the required set.
+    owner_rel = "tests/pkg/test_owner.py"
+    owner = tmp_path / "tests" / "pkg" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    importer = tmp_path / importer_rel
+    importer.parent.mkdir(parents=True, exist_ok=True)
+    importer.write_text("from tests.pkg.test_owner import HELPER\n", encoding="utf-8")
+
+    selected = set(select_tests([owner_rel], repo_root=tmp_path))
+
+    assert selected == {owner_rel, importer_rel}
+
+
+def test_suite_importer_closure_recursive_domain_sees_nested_suite_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The recursive live-tree guard must police a future NESTED live edge by
+    # name: the guard's ordinary-domain walk and the importer index share the
+    # recursive tracked-suite domain, so a nested suite that imports an ordinary
+    # owner is REQUIRED by the guard's own derivation — no future test edit
+    # needed for the guard to see it. The bite here is on the independent
+    # test-side authority (the semantic helper `_non_gated_top_level_importer_
+    # tests`), which is what the live-tree guard's derived set is built from; a
+    # helper that dropped nested suites would redden the derived-required set
+    # for the nested owner. Proved on a synthetic fixture tree so the live tree
+    # (which has no nested suites today) cannot make the edge vacuous.
+    owner = tmp_path / "tests" / "pkg" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    nested = tmp_path / "tests" / "pkg" / "nested" / "test_importer.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("from tests.pkg.test_owner import HELPER\n", encoding="utf-8")
+
+    # `_parse_tracked` resolves relative paths against the process cwd, so the
+    # fixture tree must be cwd for the derivation to read it.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("tests.test_select_ci_tests._tracked_python_files", lambda pathspec: [
+        "tests/pkg/test_owner.py",
+        "tests/pkg/nested/test_importer.py",
+    ])
+
+    required = _non_gated_top_level_importer_tests("tests.pkg.test_owner")
+    assert required == {"tests/pkg/nested/test_importer.py"}
+
+
+def test_conditional_redirect_owner_stays_ordinary_when_surface_absent() -> None:
+    # #1561 round-1 finding 1: production checks `only_when_any_changed` BEFORE
+    # the pattern match, so a standalone `changed=[tests/test_orchestration_chain.py]`
+    # or `changed=[tests/test_production_scheduler.py]` PR does NOT fire any of
+    # that file's conditional CHANGED_TEST_FILE_RULES entries (their surfaces are
+    # orchestrator source patterns, absent from the changed set) and takes the
+    # ordinary branch. The guard-domain classifier must agree — otherwise these
+    # two owners fall out of the mechanical live-tree guard while the scheduler
+    # (which has separate mechanically exact owner evidence) stays covered but
+    # the chain does not.
+    for owner in (
+        "tests/test_orchestration_chain.py",
+        "tests/test_production_scheduler.py",
+    ):
+        assert _changed_test_rule_redirects_for(owner, [owner]) == set(), (
+            f"{owner} classified as redirected for a standalone change, but "
+            "its only_when_any_changed surfaces are absent from changed=[owner]"
+        )
+        assert Path(owner).is_file()
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert owner in selected, f"{owner} did not self-select in the ordinary branch"
+        assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_conditional_redirect_owner_focused_when_surface_present() -> None:
+    # The same owner with its activating surface present MUST be excluded from
+    # the ordinary domain and take the focused redirect — the compatibility
+    # half of the split: the redirect contract is unchanged when the surface
+    # fires, and the guard-domain classifier must say so.
+    owner = "tests/test_orchestration_chain.py"
+    surface = "services/orchestrator/chain_types.py"
+    assert Path(surface).is_file()
+
+    redirect_targets = _changed_test_rule_redirects_for(owner, [owner, surface])
+    assert redirect_targets, "conditional rule did not activate with its surface present"
+
+    selected = set(select_tests([owner, surface], repo_root=Path(".")))
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+    assert owner not in selected
+
+
+def test_unconditional_redirect_owner_is_excluded_from_ordinary_domain() -> None:
+    # tests/test_sql_shape_helpers.py's rule is unconditional (no
+    # only_when_any_changed), so its redirect fires for changed=[owner] and the
+    # owner is excluded from the ordinary importer-closure guard — the closure
+    # must NOT apply to it (its derived module-scope importers would otherwise
+    # break the focused redirect contract).
+    owner = "tests/test_sql_shape_helpers.py"
+
+    assert _changed_test_rule_redirects_for(owner, [owner])
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == _changed_test_rule_redirects_for(owner, [owner]) | {SELECTOR_META_GUARD_TEST}
+
+
+def test_changed_test_rule_activation_predicate_matches_production() -> None:
+    # The pure `_rule_activated` predicate is a single authority shared by the
+    # selection loop and the guard-domain classifier. Prove it on the live rule
+    # table: for a standalone changed suite, exactly the UNCONDITIONAL rules may
+    # be active; adding an activating surface flips the matching conditional
+    # rules on; a non-matching surface flips nothing. Constructed on the real
+    # rules (no global mutation needed) so the classifier and the loop cannot
+    # drift apart.
+    owner = "tests/test_orchestration_chain.py"
+    surface = "services/orchestrator/chain_types.py"
+
+    conditional = [
+        rule
+        for rule in CHANGED_TEST_FILE_RULES
+        if rule.pattern == owner and rule.only_when_any_changed
+    ]
+    assert conditional, "expected at least one conditional rule for the chain owner"
+
+    # Standalone: every conditional rule is inert (surface absent).
+    assert not any(_prod_module._rule_activated(rule, owner, [owner]) for rule in conditional)
+    # Surface present: activation must equal the INDEPENDENT surface-match
+    # computation, per rule — chain_types.py activates the manifest rule but
+    # not the file-journal rule, so `all(...)` would be the wrong claim.
+    for rule in conditional:
+        matching_surface = any(
+            fnmatch.fnmatch(surface, pattern) for pattern in rule.only_when_any_changed
+        )
+        assert _prod_module._rule_activated(rule, owner, [owner, surface]) is matching_surface, (
+            f"rule surface={rule.only_when_any_changed} activated "
+            f"{_prod_module._rule_activated(rule, owner, [owner, surface])} but surface-match says {matching_surface}"
+        )
+    assert any(
+        fnmatch.fnmatch(surface, pattern) for rule in conditional for pattern in rule.only_when_any_changed
+    ), "the surface used above must genuinely match at least one rule's only_when_any_changed patterns"
+    # Non-matching surface: still inert.
+    assert not any(
+        _prod_module._rule_activated(rule, owner, [owner, "services/orchestrator/other.py"])
+        for rule in conditional
+    )
+
+    unconditional = [
+        rule
+        for rule in CHANGED_TEST_FILE_RULES
+        if rule.pattern == "tests/test_sql_shape_helpers.py" and not rule.only_when_any_changed
+    ]
+    assert unconditional, "expected the unconditional sql_shape_helpers rule"
+    assert all(_prod_module._rule_activated(rule, "tests/test_sql_shape_helpers.py", [owner]) for rule in unconditional)
+
+
+def test_missing_derived_importer_is_named_by_the_live_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constructed red evidence for the live-tree guard's SHARED comparator
+    # seam: a derived importer the selector does not select must be named by
+    # the guard as an "importer closure misses [...]" offender — the
+    # missing-suite-by-name requirement. Built on a synthetic tree (via a
+    # monkeypatched tracked-suite domain) so no tracked file is touched, and
+    # run through the SAME helper (`_suite_importer_closure_offenders`) the
+    # live-tree guard executes — the constructed red cannot stay green while
+    # the live guard's domain/comparison/message is corrupted, because they
+    # are one code path. The helper runs its REAL DEFAULTS for the owner
+    # domain, the derived authority, AND the redirect predicate: with no
+    # `owners=` injection, the recursive `_tracked_test_suites()` domain is
+    # discovered from the monkeypatched tracked file list, so the nested
+    # `tests/pkg/test_owner.py` stays in it — a guard loop that drops nested
+    # owners reddens this proof; the REQUIRED importer set comes from the
+    # default independent authority (fixture text -> inverted index ->
+    # dotted-owner lookup); and with no `redirects=` injection and no
+    # CHANGED_TEST_FILE_RULES blanking, the default redirect predicate runs
+    # against the REAL rule table — the synthetic nested owner matches no rule,
+    # so it returns False and the owner stays ordinary (an always-True default
+    # predicate would redden this proof). Only the SELECTION RESULT is
+    # injected: `select_omits_importer` returns what a broken selector would
+    # omit, the regression shape; a real `select_tests` call is unnecessary
+    # because the live-guard caller already exercises it against the live
+    # tree. The helper returns the same deterministic offender the live guard's
+    # assert would raise on.
+    owner_rel = "tests/pkg/test_owner.py"
+    importer_rel = "tests/pkg/test_importer.py"
+    owner = tmp_path / "tests" / "pkg" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / importer_rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer_rel).write_text("from tests.pkg.test_owner import HELPER\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "tests.test_select_ci_tests._tracked_python_files",
+        lambda pathspec: [owner_rel, importer_rel],
+    )
+
+    def select_omits_importer(owner: str) -> set[str]:
+        return {owner, SELECTOR_META_GUARD_TEST}
+
+    offenders = _suite_importer_closure_offenders(
+        select=select_omits_importer,
+    )
+
+    assert offenders == ["tests/pkg/test_owner.py: importer closure misses ['tests/pkg/test_importer.py']"]
+    assert importer_rel in offenders[0]
+
+
+def test_redirected_owner_is_skipped_by_the_shared_closure_comparator() -> None:
+    # Helper-level branch proof for the redirect skip: a REDIRECTED owner —
+    # one whose ordinary selection is replaced by focused targets — must be
+    # excluded from the importer-closure guard even when its required importer
+    # is missing from the selection. Everything is injected so only the helper
+    # branch is exercised: `owners` names a single owner, `derived` reports one
+    # required importer, `select` omits that importer, and `redirects` returns
+    # True. The expected result is NO offender — the redirect skip means the
+    # helper never compares the omitted importer. Removing the
+    # ``if redirected_for(owner): continue`` branch reddens this proof by
+    # emitting the missing-importer offender. The injected `redirects=True` is
+    # deliberate: this test owns the helper's skip branch itself, while the
+    # ordinary constructed proof
+    # (``test_missing_derived_importer_is_named_by_the_live_guard``) exercises
+    # the REAL default predicate against the live rule table, and
+    # ``test_changed_test_rule_activation_predicate_matches_production`` /
+    # ``_changed_test_rule_redirects_for`` tests own the production classifier
+    # correctness.
+    owner = "tests/test_redirected_owner.py"
+    importer = "tests/test_redirected_importer.py"
+
+    offenders = _suite_importer_closure_offenders(
+        owners=[owner],
+        derived=lambda _owner: {importer},
+        select=lambda _owner: {owner, SELECTOR_META_GUARD_TEST},
+        redirects=lambda _owner: True,
+    )
+
+    assert offenders == [], (
+        "a redirected owner must be skipped by the closure comparator even when "
+        "its derived importer is missing from the selection"
+    )
+
+
+def test_suite_importer_closure_malformed_source_fails_loudly(tmp_path: Path) -> None:
+    # Acceptance 2.4: a discovered suite with unparsable Python must fail the
+    # selector with the parse error rather than silently omitting the suite from
+    # the importer index (which would shrink a PR lane's coverage with no trace).
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    with pytest.raises(SyntaxError, match="invalid syntax"):
+        select_tests(["tests/test_owner.py"], repo_root=tmp_path)
+
+
+def test_suite_importer_closure_github_output_stays_meta_guard_only_false(
+    tmp_path: Path,
+) -> None:
+    # Acceptance 2.5: a changed ordinary suite keeps a non-collapsed GitHub
+    # selection — `meta_guard_only=false` — containing the owner and the
+    # selector meta-guard even when its importer closure is empty.
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_select_ci_tests.py").write_text("def test_x(): pass\n", encoding="utf-8")
+
+    fields = _github_output_fields(tmp_path, ["tests/test_owner.py"], repo_root=tmp_path)
+
+    assert fields["count"] == "2"
+    assert fields["tests"] == "tests/test_owner.py tests/test_select_ci_tests.py"
+    assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "false"
+
+
+def _suite_importer_closure_offenders(
+    *,
+    owners: Sequence[str] | None = None,
+    derived: Callable[[str], set[str]] | None = None,
+    select: Callable[[str], set[str]] | None = None,
+    redirects: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """The ONE comparator the live suite-importer closure guard and its proof share.
+
+    For every ordinary owner with a non-empty required importer set, compute
+    ``missing = sorted(required - selected)`` and emit exactly
+    ``<owner>: importer closure misses <missing>`` — deterministic, sorted
+    offenders. Both callers run this same code path, so corrupting the guard's
+    domain/comparison/message cannot leave the constructed proof green.
+
+    Defaults are the LIVE tree behavior (the live guard passes nothing):
+    - ``owners``: the recursive tracked-suite domain ``_tracked_test_suites()``;
+    - ``derived``: the independent test-side authority — the inverted index
+      ``_non_gated_top_level_importer_index()``, built ONCE per helper call and
+      looked up by the owner's dotted module (``_dotted_module_name(owner)``).
+      The authority is keyed by dotted identity, never by repo-relative path,
+      so a path fed in would derive an empty set and silently vacate the guard.
+    - ``select``: the real selector ``select_tests([owner], repo_root=Path("."))``;
+    - ``redirects``: the effective redirect predicate
+      ``bool(_changed_test_rule_redirects_for(owner, [owner]))``.
+
+    Explicit injection is authoritative for constructed tests: a supplied
+    nested owner is evaluated as given even when absent from the live tree
+    (injection, not a live lookup), and a supplied ``derived`` callable replaces
+    the default index lookup entirely (its contract is per-owner required
+    importer set, dotted key). The helper is immutable/read-only — it never
+    mutates any of its inputs, and a default ``select`` never modifies the
+    changed-path set it derives from ``owners``.
+    """
+    owner_list = list(_tracked_test_suites() if owners is None else owners)
+    if derived is None:
+        importer_index = _non_gated_top_level_importer_index()
+
+        def required_for(owner: str) -> set[str]:
+            return importer_index.get(_dotted_module_name(owner), set())
+    else:
+        required_for = derived
+    select_for = (
+        (lambda owner: set(select_tests([owner], repo_root=Path(".")))) if select is None else select
+    )
+    redirected_for = (
+        (lambda owner: bool(_changed_test_rule_redirects_for(owner, [owner])))
+        if redirects is None
+        else redirects
+    )
+
+    offenders: list[str] = []
+    for owner in owner_list:
+        required = required_for(owner)
+        if not required:
+            continue
+        if redirected_for(owner):
+            continue
+        selected = select_for(owner)
+        missing = sorted(required - selected)
+        if missing:
+            offenders.append(f"{owner}: importer closure misses {missing}")
+    return offenders
+
+
+def _changed_test_rule_redirects_for(owner: str, changed: Sequence[str]) -> set[str]:
+    """``CHANGED_TEST_FILE_RULES`` redirect targets that fire for ``owner`` in ``changed``.
+
+    Uses the selector's own pure activation predicate (`_rule_activated`) for
+    the `only_when_any_changed` gate and the selector's own fnmatch for the
+    pattern, then unions the targets of every rule whose pattern matches — the
+    exact `selected.update(rule.tests)` semantics of the selection loop, without
+    the `stop_on_match` short-circuit (target-set union is what the ordinary
+    branch must be skipped for).
+    """
+    return {
+        target
+        for rule in CHANGED_TEST_FILE_RULES
+        if _prod_module._rule_activated(rule, owner, changed) and fnmatch.fnmatch(owner, rule.pattern)
+        for target in rule.tests
+    }
+
+
+def test_live_suite_importer_edges_all_join_the_ordinary_selection() -> None:
+    # Acceptance 2.2 (mechanical live-tree guard): EVERY ordinary owner suite's
+    # derived direct non-gated module-scope importer edge must join the owner's
+    # ordinary selection. Derived mechanically from the live repository tree —
+    # never a frozen filename routing table — so a newly added module-scope
+    # edge reddens here by name instead of silently escaping the selector.
+    #
+    # The guard body is the SHARED comparator helper
+    # `_suite_importer_closure_offenders` with live defaults (recursive
+    # tracked-suite owner domain, independent derived importer mapping, real
+    # `select_tests`, effective redirect predicate) — the same code path the
+    # constructed red `test_missing_derived_importer_is_named_by_the_live_guard`
+    # injects into, so corrupting the live guard's domain/comparison/message
+    # reddens that proof too. The ordinary-domain classification skips only an
+    # ACTUALLY ACTIVE redirect for the single changed owner: a
+    # `CHANGED_TEST_FILE_RULES` rule whose `only_when_any_changed` surface is
+    # absent from `changed=[owner]` is NOT active and the owner stays ordinary
+    # (and therefore guard-covered). This is what keeps the standalone
+    # conditional-rule owners — the two slow orchestrator suites
+    # tests/test_orchestration_chain.py and
+    # tests/test_production_scheduler.py — inside the guard: production checks
+    # `only_when_any_changed` BEFORE `matched_changed_test` (see
+    # `select_tests`), so with `changed=[owner]` none of their conditional
+    # rules' surfaces fire and both take the ordinary branch.
+    # tests/test_sql_shape_helpers.py is the one owner whose rule is
+    # UNCONDITIONAL, so it is excluded here and its focused redirect is pinned
+    # by
+    # test_redirected_changed_suite_keeps_its_focused_targets_without_the_closure.
+    offenders = _suite_importer_closure_offenders()
+
+    assert not offenders, "suite importer closure incomplete:\n  " + "\n".join(offenders)
+
+
+def test_synthetic_tree_new_module_scope_edge_changes_selection(
+    tmp_path: Path,
+) -> None:
+    # Acceptance 2.2 (synthetic anti-vacuity): adding a new module-scope edge to
+    # a repository tree must change the required selection. The expected value
+    # is derived INDEPENDENTLY of the production derivation — the added suite
+    # spells the owner's module at module scope, so the requirement is written
+    # from the fixture's import text, not from the selector's index. Without
+    # the importer closure this test fails (the new importer is absent); with a
+    # frozen routing table that happens to list the anchor names it fails too,
+    # because the synthetic suite name is not in any table.
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_existing_importer.py").write_text(
+        "from tests.test_owner import HELPER\n", encoding="utf-8"
+    )
+
+    before = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert before == {"tests/test_owner.py", "tests/test_existing_importer.py"}
+
+    (tmp_path / "tests" / "test_new_importer.py").write_text(
+        "import tests.test_owner\n", encoding="utf-8"
+    )
+
+    after = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert after == {"tests/test_owner.py", "tests/test_existing_importer.py", "tests/test_new_importer.py"}
+    assert before != after
+
+
+def test_suite_importer_closure_never_returns_self_edges(tmp_path: Path) -> None:
+    # Acceptance 4: a suite that imports ITS OWN module (a helper-only suite
+    # that also imports its own module at module scope for some reason) is not
+    # an importer of itself. The ordinary selection must contain the owner
+    # exactly once — the owner's own path — and the closure must not add the
+    # owner back through a self edge (which a set-union implementation would
+    # hide today, so this pins the derivation directly).
+    import scripts.select_ci_tests as _prod
+
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("import tests.test_owner\nHELPER = 1\n", encoding="utf-8")
+
+    index = _prod._build_suite_importer_index(tmp_path)
+
+    assert "tests/test_owner.py" not in index.get("tests.test_owner", set())
+
+    selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert selected == {"tests/test_owner.py"}
+
+
+def test_suite_importer_closure_reuses_parse_work_across_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Acceptance 5 (parse-reuse seam): repeated selection on an unchanged
+    # synthetic root must not re-parse the suite tree — the per-file derivation
+    # is cached by absolute path + strong stat identity. The parse count is the
+    # call-count seam; no wall-clock threshold is asserted.
+    import scripts.select_ci_tests as _prod
+
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_importer.py").write_text(
+        "from tests.test_owner import HELPER\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(_prod, "_SUITE_IMPORTER_PARSE_STATS", {"parses": 0})
+
+    first = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    parses_first = _prod._SUITE_IMPORTER_PARSE_STATS["parses"]
+    assert parses_first > 0, "first selection should parse the suite tree"
+
+    second = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert second == first
+    assert _prod._SUITE_IMPORTER_PARSE_STATS["parses"] == parses_first, (
+        "unchanged tree re-parsed suites across calls"
+    )
+
+
+def test_suite_importer_closure_rewrite_to_module_scope_edge_is_observed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Acceptance 5 (rewrite discovery): an existing importer file rewritten from
+    # a function-local/no edge to a module-scope edge is observed even though
+    # the filename is unchanged. The rewrite changes the file's stat identity,
+    # so the cache must not serve the stale derivation.
+    import scripts.select_ci_tests as _prod
+
+    owner = tmp_path / "tests" / "test_owner.py"
+    owner.parent.mkdir(parents=True)
+    owner.write_text("HELPER = 1\n", encoding="utf-8")
+    importer = tmp_path / "tests" / "test_importer.py"
+    importer.write_text("def test_lazy():\n    from tests.test_owner import HELPER\n", encoding="utf-8")
+
+    monkeypatch.setattr(_prod, "_SUITE_IMPORTER_PARSE_STATS", {"parses": 0})
+
+    before = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert "tests/test_importer.py" not in before, "function-local import must not join the closure"
+
+    # Same filename, new content: module-scope edge. mtime may not advance on
+    # coarse filesystems, so force ctime/mtime identity to change the stat key.
+    importer.write_text("from tests.test_owner import HELPER\n", encoding="utf-8")
+    _bump_stat(importer)
+
+    after = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
+    assert "tests/test_importer.py" in after, (
+        "rewrite to a module-scope edge was not discovered (stale cache?)"
+    )
+
+
+def test_suite_importer_closure_not_parsed_for_redirect_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Acceptance 5 (lazy scan): a selection that never reaches the ordinary
+    # changed-suite branch must not invoke the importer scan at all — a
+    # production-only, support-module-only, or redirect selection pays nothing
+    # and cannot fail on a malformed unrelated suite. The builder is
+    # monkeypatched to FAIL if called.
+    import scripts.select_ci_tests as _prod
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("importer index built for a non-ordinary selection")
+
+    monkeypatch.setattr(_prod, "_build_suite_importer_index", boom)
+
+    # production-only (backend path).
+    assert set(select_tests(["services/slurm_gateway/gateway.py"], repo_root=Path(".")))
+    # support-module routing.
+    assert set(select_tests(["tests/provider_mode_helpers.py"], repo_root=Path(".")))
+    # explicit redirect (CHANGED_TEST_FILE_RULES).
+    assert set(select_tests(["tests/test_sql_shape_helpers.py"], repo_root=Path(".")))
+
+
+def test_suite_importer_closure_malformed_only_fails_when_needed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Acceptance 5 (narrowed fail-loud): a malformed suite under the root must
+    # fail a selection that actually needs the importer closure (an ordinary
+    # changed suite), but must NOT fail a production-only selection — the
+    # closure is only built when the feature's path is taken.
+    import scripts.select_ci_tests as _prod
+
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "tests" / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
+    real_builder = _prod._build_suite_importer_index
+
+    # Production-only: no suite tree parse, no failure — the selection completes
+    # (all rule targets are dropped as missing under this root; the point is the
+    # malformed suite is never read, so the builder must never be called).
+    monkeypatch.setattr(
+        _prod, "_build_suite_importer_index", lambda _root: (_ for _ in ()).throw(AssertionError())
+    )
+    assert select_tests(["services/slurm_gateway/gateway.py"], repo_root=tmp_path) == []
+
+    # Ordinary changed suite: the closure is needed, the malformed suite is
+    # discovered, and selection fails loudly.
+    (tmp_path / "tests" / "test_owner.py").write_text("HELPER = 1\n", encoding="utf-8")
+    monkeypatch.setattr(_prod, "_build_suite_importer_index", real_builder)
+    with pytest.raises(SyntaxError, match="invalid syntax"):
+        select_tests(["tests/test_owner.py"], repo_root=tmp_path)
+
+
+def _bump_stat(path: Path) -> None:
+    """Force a different stat identity for ``path`` without changing its size.
+
+    mtime_ns advances by one second (or more) and ctime_ns follows where the
+    filesystem reports it; ``size`` is unchanged, so the test proves the cache
+    keys on identity beyond byte count.
+    """
+    before = path.stat()
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
 
 
 @pytest.mark.parametrize(
@@ -2094,10 +2970,10 @@ def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str)
 def _tracked_tests_support_modules() -> list[str]:
     """Tracked `tests/**.py` that pytest cannot collect as a suite.
 
-    Deliberately NOT `_tracked_top_level_test_files()`: that helper matches the
-    repo-relative path against `tests/test_*.py` for the importer-closure
-    domain, which would count a nested `tests/pkg/test_x.py` as a support module
-    here and cement the misclassification this test exists to catch.
+    Deliberately NOT `_tracked_test_suites()`: that helper matches the
+    repo-relative path against `is_test_suite_path` for the importer-closure
+    domain, which would count a nested `tests/pkg/test_x.py` as a suite here and
+    cement the misclassification this test exists to catch.
 
     It calls the selector's own `is_test_suite_path` rather than restating the
     pattern list. That looks like the expectation moving with the bug, and it
@@ -2957,8 +3833,9 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
 @pytest.mark.parametrize(
     ("changed_path", "expected_count"),
     [
-        # Two targets: the changed suite plus the accumulated meta-guard.
-        ("tests/test_orchestration_chain.py", "2"),
+        # #1561: the changed suite plus its two derived direct non-gated
+        # module-scope importers plus the accumulated meta-guard.
+        ("tests/test_orchestration_chain.py", "4"),
         # Empty selection: route C, whose own collect-only branch is unchanged.
         ("docs/runbooks/current-production-ops.md", "0"),
         # The discrimination boundary. A single-target selection that is NOT the
@@ -5726,7 +6603,7 @@ def _non_gated_top_level_importer_index() -> dict[str, set[str]]:
     filter — only the loop order differs.
     """
     index: dict[str, set[str]] = {}
-    for test_path in _tracked_top_level_test_files():
+    for test_path in _tracked_test_suites():
         tree = _parse_tracked(test_path)
         if _file_level_gating_markers(tree):
             continue
@@ -6337,7 +7214,7 @@ def _literal_path_consumer_index(
     tracked tree minus `LITERAL_CONSUMER_SCAN_EXCLUSIONS`.
     """
     scanned = (
-        [path for path in _tracked_top_level_test_files() if path not in LITERAL_CONSUMER_SCAN_EXCLUSIONS]
+        [path for path in _tracked_test_suites() if path not in LITERAL_CONSUMER_SCAN_EXCLUSIONS]
         if suites is None
         else list(suites)
     )
@@ -8467,7 +9344,7 @@ def test_literal_path_scan_excludes_the_meta_guard_suite_that_lists_paths_as_dat
     excluded = _literal_path_consumer_index()
     assert not [module for module, suites in excluded.items() if SELECTOR_META_GUARD_TEST in suites]
 
-    unexcluded = _literal_path_consumer_index(suites=_tracked_top_level_test_files())
+    unexcluded = _literal_path_consumer_index(suites=_tracked_test_suites())
     phantom = sorted(module for module, suites in unexcluded.items() if SELECTOR_META_GUARD_TEST in suites)
     fabricated = sorted(set(phantom) - set(excluded))
     assert fabricated, (
