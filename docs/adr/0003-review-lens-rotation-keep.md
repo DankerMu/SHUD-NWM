@@ -2054,3 +2054,20 @@ lenses, and this one puts it outside review entirely: the operational lane has
 no equivalent of a fixture review, and its receipts can be sampled at a moment
 when they are transiently true. Whoever revisits this should weigh whether the
 loop log is measuring the right lane, not just the right lenses.
+
+## Revisit 2026-08-25 (post #1702 / PR #1851) — keep, unchanged
+
+Metric bit-identical for the third time today (129 multi-round merged PRs;
+later-round catches core=75, rotated=295) — PR #1851 is zero-round.
+
+Recorded to discharge the audit. It reinforces the previous entry rather than
+adding to it: #1851 exists only because a wrong judgement of mine survived a
+clean receipt and a merged PR, and the user caught it in one sentence. As with
+#1849, no review lens was positioned to catch it — the defect was a scoping
+call made against an issue body's stale prose, not a property of any diff.
+
+Two consecutive entries now say the same thing: the loop log measures review
+rounds over diffs, and this repo's recent expensive mistakes have been
+operational judgements made outside any diff. That is not an argument for
+cutting the rotation; it is an argument that the keep/cut question is being
+asked about the cheaper lane.
