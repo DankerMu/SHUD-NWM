@@ -34,9 +34,9 @@ forcing/*.csv -> aggregate_checksum -> checksum_material -> package_checksum
   -> hydro.hydro_run.model_id
 ```
 
-So each declared cutover is equivalent to a new model downstream, requiring
-#1698-style warm carry-over. Huai-MAIN's fragmentation into 96/2/3/4 runs across
-three days of identity churn is the observed form of this.
+So each declared cutover is equivalent to a new model downstream, requiring an
+issue-#1698-style warm carry-over. Huai-MAIN fragmented into 96/2/3/4 runs
+across three days of identity churn is the observed form of this.
 
 The standing cost, paid every baseline publish round: ~126 GB of forcing tree
 read across 18 basins, to produce an aggregate checksum whose only consumer was
