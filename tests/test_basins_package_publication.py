@@ -49,14 +49,18 @@ def test_package_source_identity_is_stable_across_repair_workspaces(tmp_path: Pa
     ) == scheduler_registry.package_version_for_model(second_model, source_identity=second_identity)
 
 
+# #1813: `forcing/X000001.csv` used to be a member of this parametrization.  It
+# is no longer a published source class -- a package that declares forcing
+# excluded does not carry its payloads, so their bytes cannot move its identity.
+# The replacement coverage is
+# test_excluded_forcing_payload_changes_do_not_move_package_identity.
 @pytest.mark.parametrize(
     "relative_path",
     (
         "CALIB/top01.calib",
         "input/kashigeer/kashigeer.lake.sp",
-        "forcing/X000001.csv",
     ),
-    ids=("calibration", "optional-runtime", "forcing"),
+    ids=("calibration", "optional-runtime"),
 )
 def test_package_source_identity_changes_for_every_published_source_class(
     tmp_path: Path,
@@ -146,8 +150,10 @@ def test_publish_rejects_source_change_after_version_planning_without_outputs(
         inventory_path=inventory_path,
         model_id=model_id,
     )
-    forcing = tmp_path / "basins" / "basin-a" / "forcing" / "X000001.csv"
-    forcing.write_text("time,value\n2026-01-01,2\n", encoding="utf-8")
+    # #1813: an excluded forcing CSV is deliberately no longer a source change,
+    # so this guard is exercised with a real package file.
+    mesh = tmp_path / "basins" / "basin-a" / "input" / "alias-a" / "alias-a.sp.mesh"
+    mesh.write_text("484\t8\nID\tNode1\tchanged\n", encoding="utf-8")
 
     with pytest.raises(basins_package.BasinsPackageError) as exc_info:
         basins_package.publish_basins_package(
@@ -228,7 +234,7 @@ def test_publish_basins_writes_manifest_package_and_success_payload(
         "manifest_uri": f"s3://nhms/models/{model_id}/vbasins-test/manifest.json",
         "package_checksum": manifest["package_checksum"],
     }
-    assert manifest["schema_version"] == "basins.package.v1"
+    assert manifest["schema_version"] == basins_package.BASINS_PACKAGE_SCHEMA_VERSION
     assert manifest["model_id"] == model_id
     assert manifest["source_inventory_checksum"]
     assert manifest["source_path"]
@@ -268,7 +274,8 @@ def test_publish_basins_writes_manifest_package_and_success_payload(
     assert manifest["calibration"]["included_count"] == 1
     assert manifest["forcing"]["policy"] == "excluded_by_default"
     assert manifest["forcing"]["csv_count"] == 1
-    assert manifest["forcing"]["aggregate_checksum"]
+    # #1813: no aggregate payload digest is produced when payloads are excluded.
+    assert manifest["forcing"]["aggregate_checksum"] is None
     assert manifest["forcing"]["sample_headers"] == ["time,value"]
     assert manifest["forcing"]["time_coverage"] == {"start": "2026-01-01", "end": "2026-01-01"}
 
@@ -654,7 +661,8 @@ def test_publish_basins_excludes_forcing_payloads_by_default(
 
     assert manifest["forcing"]["csv_count"] == 10
     assert manifest["forcing"]["byte_count"] > 0
-    assert manifest["forcing"]["aggregate_checksum"]
+    # Count and bytes survive on stat alone; no payload is read end-to-end.
+    assert manifest["forcing"]["aggregate_checksum"] is None
     assert manifest["forcing"]["payload_copied"] is False
     assert manifest["forcing"]["forcing_payload_uri"] is None
     assert all(entry["role"] != "forcing" for entry in manifest["included_files"])
@@ -1772,7 +1780,6 @@ def test_publish_basins_rejects_same_root_tampered_forcing_dir_without_outputs(
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     model = inventory["models"][0]
     model["forcing_dir"] = str(alt_forcing_dir)
-    model["forcing_csv_count"] = 1
     write_inventory(inventory, inventory_path)
     object_root = _object_store_env(tmp_path, monkeypatch)
     output = tmp_path / "manifest.json"
@@ -2421,19 +2428,22 @@ def test_publish_basins_rejects_forcing_csv_replaced_with_symlink_before_samplin
     forcing_file = tmp_path / "basins" / "basin-a" / "forcing" / "X000001.csv"
     outside_file = tmp_path / "outside-forcing.csv"
     outside_file.write_text("time,value\n2026-01-01,999\n", encoding="utf-8")
-    original_source_file_evidence = basins_package._source_file_evidence
+    # #1813: excluded forcing is stat-ed, not hashed, so the pre-sampling seam
+    # for this TOCTOU is now _source_file_size.  The guarantee under test is
+    # unchanged: a CSV swapped for a symlink before sampling must be refused.
+    original_source_file_size = basins_package._source_file_size
     mutated = False
 
-    def symlink_swapping_source_file_evidence(
+    def symlink_swapping_source_file_size(
         path: Path,
         source_root: Path,
         *,
         model_id: str | None = None,
         version: str | None = None,
         manifest_uri: str | None = None,
-    ) -> tuple[int, str]:
+    ) -> int:
         nonlocal mutated
-        evidence = original_source_file_evidence(
+        size_bytes = original_source_file_size(
             path,
             source_root,
             model_id=model_id,
@@ -2447,9 +2457,9 @@ def test_publish_basins_rejects_forcing_csv_replaced_with_symlink_before_samplin
                 path.symlink_to(outside_file)
             except (NotImplementedError, OSError) as error:
                 pytest.skip(f"symlink support unavailable: {error}")
-        return evidence
+        return size_bytes
 
-    monkeypatch.setattr(basins_package, "_source_file_evidence", symlink_swapping_source_file_evidence)
+    monkeypatch.setattr(basins_package, "_source_file_size", symlink_swapping_source_file_size)
 
     exit_code = _argparse_main(
         [
@@ -2491,7 +2501,7 @@ def test_publish_basins_rejects_forcing_ancestor_replaced_with_symlink_before_sa
     outside_dir = tmp_path / "outside-forcing"
     outside_dir.mkdir()
     (outside_dir / forcing_file.name).write_text("time,value\n2026-01-01,999\n", encoding="utf-8")
-    original_source_file_evidence = basins_package._source_file_evidence
+    original_source_file_size = basins_package._source_file_size
     original_open = basins_package.os.open
     enabled = False
     mutated = False
@@ -2514,18 +2524,18 @@ def test_publish_basins_rejects_forcing_ancestor_replaced_with_symlink_before_sa
                 pytest.skip(f"symlink support unavailable: {error}")
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
-    def enabling_source_file_evidence(
+    def enabling_source_file_size(
         path: Path,
         source_root: Path,
         *,
         model_id: str | None = None,
         version: str | None = None,
         manifest_uri: str | None = None,
-    ) -> tuple[int, str]:
+    ) -> int:
         nonlocal enabled
         if path == forcing_file:
             enabled = True
-        return original_source_file_evidence(
+        return original_source_file_size(
             path,
             source_root,
             model_id=model_id,
@@ -2534,7 +2544,7 @@ def test_publish_basins_rejects_forcing_ancestor_replaced_with_symlink_before_sa
         )
 
     monkeypatch.setattr(basins_package.os, "open", swapping_open)
-    monkeypatch.setattr(basins_package, "_source_file_evidence", enabling_source_file_evidence)
+    monkeypatch.setattr(basins_package, "_source_file_size", enabling_source_file_size)
 
     exit_code = _argparse_main(
         [
@@ -3225,3 +3235,206 @@ def _make_valid_model(
             (forcing_dir / f"X{index + 1:06d}.csv").write_text("time,value\n2026-01-01,1\n", encoding="utf-8")
 
     return input_dir
+
+
+def _publish_identity_snapshot(
+    root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    *,
+    copy_forcing: bool = False,
+) -> dict[str, str]:
+    """Re-discover `root` and publish it into its own object store, returning the four identity values."""
+
+    inventory = discover_basins_inventory(root)
+    inventory_path = tmp_path / f"inventory-{label}.json"
+    write_inventory(inventory, inventory_path)
+    model_id = inventory["models"][0]["model_id"]
+    source_identity = basins_package.basins_package_source_identity(
+        inventory_path=inventory_path,
+        model_id=model_id,
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / f"object-store-{label}"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    manifest_path = tmp_path / f"manifest-{label}.json"
+    result = basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version="vbasins-identity",
+        output_path=manifest_path,
+        copy_forcing=copy_forcing,
+    )
+    assert result["status"] == "published"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return {
+        "content_sha256": source_identity["content_sha256"],
+        "source_sha256": source_identity["source_sha256"],
+        "package_checksum": manifest["package_checksum"],
+        "source_inventory_checksum": manifest["source_inventory_checksum"],
+    }
+
+
+def test_emptying_excluded_forcing_directory_does_not_move_package_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 4.1: #1702 item 3's cleanup must be a true no-op for package identity.
+
+    Driven through real re-discovery rather than a hand-edited inventory, so any
+    forcing-derived inventory field is caught mechanically.
+    """
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=4, calibration_count=1)
+    forcing_dir = root / "basin-a" / "forcing"
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before")
+
+    for path in sorted(forcing_dir.glob("*.csv")):
+        path.unlink()
+    assert forcing_dir.is_dir()
+    assert not list(forcing_dir.iterdir())
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after")
+
+    assert after == before
+
+
+def test_emptied_forcing_republishes_the_same_immutable_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production-shaped form of task 4.1: same store, same version, no checksum conflict."""
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=4, calibration_count=1)
+    forcing_dir = root / "basin-a" / "forcing"
+    _object_store_env(tmp_path, monkeypatch)
+
+    def publish(label: str) -> dict[str, object]:
+        inventory = discover_basins_inventory(root)
+        inventory_path = tmp_path / f"inventory-{label}.json"
+        write_inventory(inventory, inventory_path)
+        return basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=inventory["models"][0]["model_id"],
+            version="vbasins-test",
+            output_path=tmp_path / f"manifest-{label}.json",
+        )
+
+    first = publish("first")
+    for path in sorted(forcing_dir.glob("*.csv")):
+        path.unlink()
+    second = publish("second")
+
+    assert first["status"] == "published"
+    assert second["status"] == "already_done"
+    assert second["package_checksum"] == first["package_checksum"]
+
+
+def test_excluded_forcing_payload_changes_do_not_move_package_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 4.2: mutating excluded forcing CSV bytes in place moves nothing."""
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=4, calibration_count=1)
+    forcing_dir = root / "basin-a" / "forcing"
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before")
+
+    for path in sorted(forcing_dir.glob("*.csv")):
+        path.write_text("time,value\n2026-01-01,999\n2026-01-02,1000\n", encoding="utf-8")
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after")
+
+    assert after == before
+
+
+def test_removing_the_forcing_directory_outright_is_a_structural_identity_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 4.3 negative control.
+
+    Emptying the directory is a payload cleanup; removing it is a structural
+    source change and must stay visible.  It surfaces through the raw inventory
+    hash, which the cutover gate treats as a nested identity field.
+    """
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=4, calibration_count=1)
+    forcing_dir = root / "basin-a" / "forcing"
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before")
+
+    for path in sorted(forcing_dir.glob("*.csv")):
+        path.unlink()
+    forcing_dir.rmdir()
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after")
+
+    assert after["source_inventory_checksum"] != before["source_inventory_checksum"]
+    # The package content itself is unchanged, which is exactly the
+    # discrimination this change buys: payload cleanup is invisible, the
+    # structural fact is not.
+    assert after["content_sha256"] == before["content_sha256"]
+    assert after["source_sha256"] == before["source_sha256"]
+    assert after["package_checksum"] == before["package_checksum"]
+
+
+def test_copied_forcing_payload_bytes_still_bind_to_package_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 1.6: copy_forcing=True loses no identity coverage.
+
+    Copied payloads are ordinary `included_files` entries with role=forcing, so
+    their sha256 is covered by the package checksum material directly.
+    """
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=2, calibration_count=1)
+    forcing_dir = root / "basin-a" / "forcing"
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before", copy_forcing=True)
+
+    (forcing_dir / "X000001.csv").write_text("time,value\n2026-01-01,999\n", encoding="utf-8")
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after", copy_forcing=True)
+
+    # `basins_package_source_identity` plans the production (excluded) shape, so
+    # only the published package checksum is expected to move here.
+    assert after["package_checksum"] != before["package_checksum"]
+    assert after["content_sha256"] == before["content_sha256"]
+    manifest = json.loads((tmp_path / "manifest-after.json").read_text(encoding="utf-8"))
+    forcing_entries = [entry for entry in manifest["included_files"] if entry["role"] == "forcing"]
+    assert len(forcing_entries) == 2
+
+
+def test_renaming_the_legacy_focing_directory_is_a_structural_identity_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1813 task 4.3, second leg of the spec's structural scenario.
+
+    The legacy `focing/` spelling is a source fact, not payload evidence: the
+    packager resolves the forcing source directory from it, so a rename must
+    stay visible even though the CSVs behind it never move identity.
+    """
+
+    root = tmp_path / "basins"
+    _make_valid_model(root / "basin-a", "alias-a", forcing_count=3, calibration_count=1, forcing_dir_name="focing")
+
+    before = _publish_identity_snapshot(root, tmp_path, monkeypatch, "before")
+
+    (root / "basin-a" / "focing").rename(root / "basin-a" / "forcing")
+
+    after = _publish_identity_snapshot(root, tmp_path, monkeypatch, "after")
+
+    assert after["source_inventory_checksum"] != before["source_inventory_checksum"]
+    assert after["content_sha256"] == before["content_sha256"]
+    assert after["source_sha256"] == before["source_sha256"]
+    assert after["package_checksum"] == before["package_checksum"]

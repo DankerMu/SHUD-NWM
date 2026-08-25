@@ -15,12 +15,21 @@ import workers.model_registry.basins_geometry as basins_geometry
 from packages.common.auth_policy import cli_policy_decision_from_evidence
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
-from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
+from workers.model_registry.basins_discovery import (
+    BASINS_DISCOVERY_SCHEMA_VERSION_V1,
+    discover_basins_inventory,
+    write_inventory,
+)
 from workers.model_registry.basins_geometry import (
     BasinsGeometryError,
     CrosswalkRow,
     parse_basins_geometry,
     parse_seg_shp_crosswalk,
+)
+from workers.model_registry.basins_package import (
+    BASINS_PACKAGE_SCHEMA_VERSION,
+    BASINS_PACKAGE_SCHEMA_VERSION_V1,
+    publish_basins_package,
 )
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
@@ -2307,6 +2316,7 @@ def _package_manifest_for_model(
     model_id: str,
     *,
     inventory: dict[str, Any],
+    package_schema_version: str = BASINS_PACKAGE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     version = "vbasins-test"
     package_uri = f"s3://nhms/models/{model_id}/{version}/package/"
@@ -2321,7 +2331,7 @@ def _package_manifest_for_model(
         for relative_path, checksum in sorted(model["checksums"].items())
     ]
     return {
-        "schema_version": "basins.package.v1",
+        "schema_version": package_schema_version,
         "model_id": model_id,
         "version": version,
         "basin_slug": model["basin_slug"],
@@ -2330,7 +2340,7 @@ def _package_manifest_for_model(
         "manifest_uri": f"s3://nhms/models/{model_id}/{version}/manifest.json",
         "package_checksum": "package-sha-1",
         "source_inventory_checksum": _sha256_inventory_document(inventory),
-        "source_inventory_schema_version": "basins.discovery.v1",
+        "source_inventory_schema_version": inventory["schema_version"],
         "source_path": model["source_path"],
         "resolved_source_path": model["resolved_source_path"],
         "source_is_symlink": False,
@@ -3773,3 +3783,120 @@ def test_refresh_parent_version_materialization_updates_mesh_and_model_instance(
     assert any("UPDATE core.mesh_version" in s for s in update_statements)
     assert any("UPDATE core.model_instance" in s for s in update_statements)
     assert len(update_statements) == 4
+
+
+def test_freshly_published_package_imports_after_package_schema_bump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#1813 task 4.5: the real packager's manifest must survive the import schema pin.
+
+    A hand-built fixture cannot cover this -- updating its literal makes it green
+    while real publishes are still rejected with
+    BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID.
+    """
+
+    _, _, inventory_path, _, model_id = _write_registry_fixture(tmp_path)
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
+    manifest_path = tmp_path / "published.manifest.json"
+    publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version="vbasins-test",
+        output_path=manifest_path,
+    )
+    published_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert published_manifest["schema_version"] == BASINS_PACKAGE_SCHEMA_VERSION
+
+    sources = prepare_basins_import_sources(
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+    assert sources.manifest["schema_version"] == BASINS_PACKAGE_SCHEMA_VERSION
+    assert sources.model["model_id"] == model_id
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
+        ]
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    # Manifest validation is fully past; only the unreachable database remains.
+    assert error["error_code"] == "BASINS_REGISTRY_DATABASE_ERROR"
+
+
+def test_pre_migration_package_manifest_still_imports(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = BASINS_PACKAGE_SCHEMA_VERSION_V1
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    sources = prepare_basins_import_sources(
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+
+    assert sources.manifest["schema_version"] == BASINS_PACKAGE_SCHEMA_VERSION_V1
+    assert sources.model["model_id"] == model_id
+
+
+def test_pre_migration_manifest_relocates_against_current_generation_inventory(tmp_path: Path) -> None:
+    """A pre-bump manifest records the inventory generation it was published under.
+
+    The relocation path regenerates the inventory with current discovery code, so
+    the recorded and the presented inventory schema versions legitimately differ.
+    """
+
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = BASINS_PACKAGE_SCHEMA_VERSION_V1
+    manifest["source_inventory_schema_version"] = BASINS_DISCOVERY_SCHEMA_VERSION_V1
+    manifest["source_inventory_checksum"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    sources = prepare_relocated_basins_import_sources_after_package_verification(
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+        verified_package_checksum=str(manifest["package_checksum"]),
+    )
+
+    assert sources.manifest["source_inventory_schema_version"] == BASINS_DISCOVERY_SCHEMA_VERSION_V1
+    assert sources.inventory["schema_version"] != BASINS_DISCOVERY_SCHEMA_VERSION_V1
+
+
+def test_import_refuses_unknown_package_manifest_schema_version(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "basins.package.v99"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            *_CLI_MODEL_ADMIN_AUTH_ARGS,
+        ]
+    )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID"
+    assert error["model_id"] == model_id

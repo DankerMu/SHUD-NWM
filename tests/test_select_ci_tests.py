@@ -3431,13 +3431,13 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # tests/test_production_scheduler.py is a scheduler suite (owned by
     # `services/orchestrator/**`) that imports the SHUD runtime to drive it;
     # tests/test_source_scoped_dispatch.py likewise imports the producer only to
-    # assert the scheduler's missing-source dispatch; and
-    # tests/test_production_object_store_validation.py is a production-closure
-    # suite reading basin geometry.
+    # assert the scheduler's missing-source dispatch.
+    # (#1813 removed the basins_geometry -> test_production_object_store_validation
+    # exclusion: that suite now rides the `workers/model_registry/**` directory
+    # list, because it owns the packager/production-closure checksum parity test.)
     ("workers/shud_runtime/__init__.py", "tests/test_production_scheduler.py"): "edge-consumer",
     ("workers/shud_runtime/runtime.py", "tests/test_production_scheduler.py"): "edge-consumer",
     ("workers/forcing_producer/producer.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
-    ("workers/model_registry/basins_geometry.py", "tests/test_production_object_store_validation.py"): "edge-consumer",
     # -- edge-consumer: #1341 read-path shape pins --------------------------
     # tests/test_river_ts_read_path_surrogate_keys.py belongs to the #1341
     # display-boundary read surface (services/tiles/mvt.py,

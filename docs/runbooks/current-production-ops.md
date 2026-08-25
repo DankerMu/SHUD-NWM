@@ -1645,6 +1645,44 @@ ssh -p 32099 nwm@210.77.77.27 \
    find /home/ghdc/nwm/Basins -maxdepth 2 -type d | sort | head -40'
 ```
 
+#### 5.5.1 清理已注册流域的 `forcing/`：清空目录，不要删目录（#1813 / #1702 第 3 项）
+
+`forcing/` 下的 IDW 代站 CSV direct-grid 已不读，可以清理。但清理方式决定它是不是
+**真 no-op**，因为 basins 包身份对 `forcing/` 的依赖不是一刀切的（裁定见
+[ADR 0006](../adr/0006-forcing-csv-out-of-basins-package-identity.md)）：
+
+| 对已注册流域的操作 | 包身份 | 下次 baseline publish |
+|---|---|---|
+| 删除/修改 `forcing/*.csv`，**保留** `forcing/` 目录 | 不变 | 无 cutover |
+| 整个 `forcing/` 目录 `mv` 走或删除 | **变** | 需要逐流域 declared cutover |
+| 把 legacy `focing/` 改名成 `forcing/` | **变** | 需要 declared cutover |
+
+原因：CSV 载荷证据（数量、字节、聚合校验和）自 `basins.package.v2` 起已不进
+`content_sha256` / `package_checksum`，discovery 也不再把 `forcing_csv_count` 写进
+inventory；但 `forcing_dir` / `forcing_dir_original_name` 仍在 inventory 里（打包要靠
+它们定位源目录），它们随目录存在与否变化，进而改变
+`source_inventory_checksum`——而 cutover 门把该字段算作 model identity
+（`scripts/scheduler_file_provider_refresh.py:164`）。目录是结构事实，载荷不是。
+
+所以清理动作是：
+
+```bash
+# 已注册流域：搬走 CSV，留下空目录
+ssh -p 32099 nwm@210.77.77.27 \
+  'set -e
+   d=/home/ghdc/nwm/Basins/<basin>/forcing
+   dest=/home/ghdc/nwm/Basins-retired/forcing-csv-$(date +%Y%m%d)/<basin>
+   mkdir -p "$dest"
+   find "$d" -maxdepth 1 -type f -name "*.csv" -exec mv -t "$dest" {} +
+   ls -A "$d" | wc -l   # 期望 0；目录本身必须还在'
+```
+
+留一个空目录的代价是零，换来的是清理当天和往后每次 publish 都不触发 cutover。
+
+**新流域投递**则相反：新流域根本不带 `forcing/` 是对的——它没有历史身份要延续，
+首次 publish 不存在 `package_changed`。投递规范禁止再带 `forcing/`，只约束新投递，
+不要拿它去反推已注册流域可以直接删目录。
+
 ### 5.6 新增或恢复流域的运维入口
 
 后续增加新的 `Basins/` 流域时，当前生产入口固定为：

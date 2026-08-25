@@ -13,6 +13,11 @@ from typing import Any
 
 from packages.common.state_qc import cfg_ic_header_shape
 
+# #1813: v2 dropped `forcing_csv_count`, so inventory bytes no longer move with
+# forcing CSV payload volume.
+BASINS_DISCOVERY_SCHEMA_VERSION = "basins.discovery.v2"
+BASINS_DISCOVERY_SCHEMA_VERSION_V1 = "basins.discovery.v1"
+
 DEFAULT_BASINS_ROOT = Path("data/Basins")
 NHMS_BASINS_ROOT_ENV = "NHMS_BASINS_ROOT"
 
@@ -135,7 +140,7 @@ def discover_basins_inventory(basins_root: str | Path, *, budget: DiscoveryBudge
     has_blocking_warnings = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings)
 
     return {
-        "schema_version": "basins.discovery.v1",
+        "schema_version": BASINS_DISCOVERY_SCHEMA_VERSION,
         "root": str(root),
         "resolved_root": str(resolved_root),
         "source_is_symlink": root.is_symlink(),
@@ -235,18 +240,14 @@ def _inventory_for_model(
         budget=budget,
         depth=_relative_depth(root, model_dir / "CALIB"),
     )
+    # #1813: the inventory document is hashed raw into the package manifest's
+    # `source_inventory_checksum`, which the cutover gate treats as a model
+    # identity field.  Counting forcing CSVs here made adding or deleting a
+    # historical CSV indistinguishable from a mesh recalibration, so the count
+    # is not collected at all.  Structural facts (`forcing_dir`,
+    # `forcing_dir_original_name`, forcing quirks) stay: packaging resolves the
+    # forcing source directory from them.
     forcing_info = _forcing_info(model_dir, quirks, warnings, resolved_root)
-    if forcing_info["forcing_dir"] is not None:
-        forcing_dir = Path(forcing_info["forcing_dir"])
-        forcing_count = _count_csv_files(
-            forcing_dir,
-            resolved_root,
-            warnings,
-            budget=budget,
-            depth=_relative_depth(root, forcing_dir),
-        )
-    else:
-        forcing_count = 0
 
     unsafe_descendant = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings[warning_start:])
     if unsafe_descendant:
@@ -288,7 +289,6 @@ def _inventory_for_model(
         "unreadable_required_files": unreadable_required_files,
         "required_files": required_files,
         "calibration_count": calibration_count,
-        "forcing_csv_count": forcing_count,
         "model_id": model_id,
         "suggested_ids": suggested_ids,
         "checksums": checksums,
@@ -518,21 +518,6 @@ def _glob_non_sidecar_files(
         ):
             matches.append(path)
     return sorted(matches, key=lambda path: path.name.lower())
-
-
-def _count_csv_files(
-    root: Path,
-    resolved_root: Path,
-    warnings: list[DiscoveryWarning],
-    *,
-    budget: DiscoveryBudget | None = None,
-    depth: int = 0,
-) -> int:
-    return sum(
-        1
-        for path in _walk_files(root, resolved_root, warnings, budget=budget, start_depth=depth)
-        if path.suffix.lower() == ".csv"
-    )
 
 
 def _count_files(
