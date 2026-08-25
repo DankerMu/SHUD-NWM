@@ -2107,3 +2107,33 @@ causal evidence about rotating free slots because the treatment was not applied.
 ADR remain mandatory: distinguish pinned depth/fix-verification rounds from
 actual free-slot rotation before any future reversal, and require maintainer
 review for that reversal.
+
+## Revisit 2026-08-25 (post #1561 / PR #1855) — keep; another pinned-depth sample
+
+`loop_log_audit.py` now reports 131 multi-round merged PRs and later-round
+catches `core=80 / rotated=295`, moving from `130 / 79 / 295`. The decision
+remains **keep**. As with PR #1834, this PR's `core +1 / rotated +0` is not a
+controlled test of free-slot rotation: the one later-round catch came from the
+pinned `test-evidence` lens while following the same CI-oracle invariant deeper.
+
+Round 1 found two P1 evidence gaps: the live guard used a coarser conditional-
+redirect domain than production, and nested / `*_test.py` importer discovery
+had no biting recursive proof. Round 2's full-scope `test-evidence` reviewer
+then found that the attempted constructed proof still rebuilt the comparator
+and message locally instead of calling the live guard. That repeat triggered a
+same-invariant depth retro. Diagnosis first proved the failure shape in a
+disposable copy: corrupting importer derivation made the real live guard red
+while the constructed proof stayed green. The corrective action therefore
+changed proof ownership, not another named assertion — one shared offender
+helper now owns recursive owner discovery, dotted-module authority, effective
+redirect handling, comparison, and the named missing-importer message.
+
+The rotated slots did useful independent checking but produced no catch:
+`spec-compliance` in round 2 confirmed the fixture and implementation still
+agreed, and `invariant-compatibility` in round 3 adversarially mapped every
+helper branch to a mutation red before the round returned clean. This sample
+therefore supports the standing split: pinned lenses retain fix-regression
+recall, while rotated lenses remain available for blind-spot recall. It does
+not support removing either. The aggregate remains overwhelmingly rotated
+(`295` versus `80`), so **keep rotation** unchanged; the attribution caveats and
+maintainer-only reversal rule above continue to apply.
