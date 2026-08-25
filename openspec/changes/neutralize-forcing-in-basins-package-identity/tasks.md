@@ -33,8 +33,8 @@
 ## 5. Contract and documentation
 
 - [x] 5.1 Spec deltas: `basins-asset-discovery` (inventory no longer carries the forcing CSV count) and `shud-model-package-publication` (declared-excluded forcing is not identity material).
-- [ ] 5.2 ADR `docs/adr/0006-*.md`: the ruling, the rejected options B and C with reasons, and the one-time named churn.
-- [ ] 5.3 Runbook: pin #1702 item 3's cleanup semantics — empty `forcing/`, do not remove the directory.
+- [x] 5.2 ADR `docs/adr/0006-*.md`: the ruling, the rejected options B and C with reasons, and the one-time named churn.
+- [x] 5.3 Runbook: pin #1702 item 3's cleanup semantics — empty `forcing/`, do not remove the directory.
 
 ## 6. Issue closeout
 
