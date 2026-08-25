@@ -2157,8 +2157,17 @@ def test_unknown_stored_manifest_schema_version_is_a_recorded_limitation() -> No
 
 
 @pytest.mark.parametrize("schema_version", SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS)
-def test_packager_and_validator_forcing_material_agree_on_every_schema_generation(schema_version: str) -> None:
-    """#1813 task 3.3: the two implementations of the material must not drift."""
+def test_forcing_material_of_every_schema_generation_matches_its_pinned_shape(schema_version: str) -> None:
+    """#1813 task 3.3: pin the material of every supported schema generation to a hand-authored expectation.
+
+    The validator delegates to ``forcing_checksum_material_for_schema_version``, so there is no second
+    implementation to compare against. What is worth guarding is the shape itself: each generation's
+    material is asserted against a literal written out here independently of the production branch, so
+    editing either branch of ``forcing_checksum_material_for_schema_version`` fails this test. The v1
+    expectation is spelled out longhand (``_historical_v1_forcing_material``) rather than derived because
+    v1 material is what historical stored manifests are reconstructed from — getting it wrong silently
+    breaks checksum reconstruction of already-published packages.
+    """
 
     forcing = {
         "policy": "copied_explicitly",
@@ -2172,7 +2181,6 @@ def test_packager_and_validator_forcing_material_agree_on_every_schema_generatio
 
     validator_material = object_store_validation._forcing_checksum_material(forcing, schema_version)
 
-    assert validator_material == forcing_checksum_material_for_schema_version(forcing, schema_version)
     if schema_version == BASINS_PACKAGE_SCHEMA_VERSION_V1:
         assert validator_material == _historical_v1_forcing_material(forcing)
     else:
