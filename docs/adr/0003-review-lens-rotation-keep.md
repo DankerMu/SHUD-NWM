@@ -2062,9 +2062,10 @@ later-round catches core=75, rotated=295) — PR #1851 is zero-round.
 
 Recorded to discharge the audit. It reinforces the previous entry rather than
 adding to it: #1851 exists only because a wrong judgement of mine survived a
-clean receipt and a merged PR, and the user caught it in one sentence. As with
-#1849, no review lens was positioned to catch it — the defect was a scoping
-call made against an issue body's stale prose, not a property of any diff.
+clean receipt and a merged PR, and the user caught it in one sentence. Just as
+with PR #1849, no review lens was positioned to catch it — the defect was a
+scoping call made against an issue body's stale prose, not a property of any
+diff.
 
 Two consecutive entries now say the same thing: the loop log measures review
 rounds over diffs, and this repo's recent expensive mistakes have been
