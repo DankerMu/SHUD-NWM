@@ -58,10 +58,11 @@ Consequences, in the order they bite:
 
 ## Impact
 
-- Affected specs: `basins-asset-discovery`, `shud-model-package-publication`
+- Affected specs: `basins-asset-discovery`, `shud-model-package-publication`, `basins-registry-import`
 - Affected code: `workers/model_registry/basins_package.py`,
   `workers/model_registry/basins_discovery.py`,
-  `services/production_closure/object_store_validation.py`
+  `services/production_closure/object_store_validation.py`,
+  `workers/model_registry/basins_registry_import.py`
 - Unblocks: #1702 item 3 (cleanup becomes a true no-op)
 - Not touched: the cutover gate and its fail-safe `refused` semantics (#1080),
   `Basins/` directory contents, #1720's prospective≡previous defect

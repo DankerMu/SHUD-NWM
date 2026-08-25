@@ -112,15 +112,15 @@ Hashing a *projection* of the document was considered and rejected: it forks the
 the forcing-derived fields that the cleanup would flip are removed at the source.
 
 Full enumeration of forcing-derived inventory fields
-(`basins_discovery.py:275-300`):
+(`basins_discovery.py:272-294`):
 
 | field | varies with | disposition |
 |---|---|---|
 | `forcing_dir` (`:282`) | directory presence + name | **kept** — real readers: `basins_package.py:1115`, `forcing_producer/file_store.py:511` |
 | `forcing_dir_original_name` (`:283`) | directory presence + name | **kept** — real reader: `basins_package.py:1071-1080` resolves the source dir from it |
 | `forcing_csv_count` (`:291`) | CSV count | **dropped** — grep across `*.py`/`*.json`/`*.ts`/`*.md`/`*.sql` finds only the writer, tests, and an archived tasks.md |
-| `quirks[]` (`:286`) | `forcing_dir_conflict` when both `forcing/` and `focing/` exist (`:487`) | **kept** — genuine ambiguity evidence, not payload-derived |
-| `checksums` (`:293`) | — | not forcing-derived; `_checksums_for_required_files` covers required input files only |
+| `quirks[]` (`:285`) | `forcing_dir_conflict` when both `forcing/` and `focing/` exist (`:487`) | **kept** — genuine ambiguity evidence, not payload-derived |
+| `checksums` (`:294`) | — | not forcing-derived; `_checksums_for_required_files` covers required input files only |
 
 This is why the cleanup semantics must be pinned: with the directory kept and
 only its CSVs removed, `forcing_dir`, `forcing_dir_original_name`, and `quirks`
@@ -147,6 +147,32 @@ degradation channel to reuse rather than reinvent.
 A parity test binding the two implementations across both schema generations is
 non-negotiable; whether they are additionally unified into one shared function is
 the implementer's call by import-graph convention.
+
+## The schema-version pin (found in fixture review)
+
+`BASINS_PACKAGE_SCHEMA_VERSION` (`basins_package.py:30`) is already inside
+`content_material` (`basins_package.py:1284`), so bumping it *is* the named
+identity migration — no separate mechanism is needed.
+
+But the bump has one hard consumer: `basins_registry_import.py:202` compares
+`manifest["schema_version"]` against the string literal `"basins.package.v1"`.
+It is the only such pin in production code, and it sits in `_prepare_sources`,
+on the path every freshly published package takes into the registry
+(`:118`, `:147`, `:185`). Bumping the constant without changing it rejects every
+post-bump publish with `BASINS_REGISTRY_PACKAGE_MANIFEST_INVALID` — breaking
+precisely the baseline-publish workflow this change exists to unblock.
+
+The pin must become a supported-version set referencing the constant, keeping the
+previous version accepted: the relocation path
+(`prepare_relocated_basins_import_sources_after_package_verification`, `:185`)
+can legitimately re-present an already-verified pre-bump manifest.
+
+The three hand-built manifest fixtures carrying the literal
+(`tests/test_basins_registry_import.py:2324`,
+`tests/test_publish_scheduler_file_registry.py:1573`,
+`tests/test_basins_package_publication.py:231`) cannot catch this: updating the
+fixture literal makes them green while real publishes still fail. Hence task 4.5
+requires an end-to-end publish-then-import test using the real packager.
 
 ## Churn: amortized, not big-bang
 
