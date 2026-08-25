@@ -1979,3 +1979,58 @@ broader reading of where the review loop earns its cost on this repo. No
 reviewer-set or rotation-policy change follows; the note exists so a future
 keep/cut reader does not mistake a run with two P1/P2 pre-implementation catches
 for a run in which review found little.
+
+## Revisit 2026-08-25 (post #1813 / PR #1847) — keep, unchanged
+
+`loop_log_audit.py` reports the rotation attribution **verbatim unchanged** from
+the previous revisit: 129 multi-round merged PRs, later-round catches core=75 /
+rotated=295. That is not a coincidence to explain away — PR #1847 closed in a
+single comprehensive round, so it is not a multi-round PR and contributes
+0 to both buckets. The denominator did not move, the numerators did not move,
+and the standing **keep** therefore stands on exactly the evidence it stood on
+before. Nothing was re-derived and no new inference is drawn from a metric that
+received no new data.
+
+What this line does add is a **second consecutive run whose leverage sat in
+round 0**, which the rotation metric structurally cannot see. On #1847 the
+fixture review caught a P1 that every hand-built test fixture in the repo is
+blind to by construction: `basins_registry_import.py:202` hardcoded the string
+`"basins.package.v1"` on the path every fresh publish takes into the registry,
+so bumping the schema constant would have rejected every post-bump publish —
+and because the three manifest fixtures that exercise that path build their
+manifests by hand with the same literal, an implementer who bumped the constant
+and updated those literals would have shipped a green PR that breaks the very
+baseline-publish workflow the change exists to unblock.
+
+Round 1 then bought no fix pass at all: one P2 CONFIRMED-but-DISCARD and one P2
+REFUTED. The refuted one is worth recording, because acting on it would have
+made the change worse rather than merely wasting effort — it recommended
+telling operators to hand-pin `--version` after the migration, on the one
+publish path that derives its version from `content_sha256` and must stay
+content-addressed. The verifier gate is what kept that recommendation out of
+the runbook.
+
+Two runs is not a trend and no policy changes here. But the pattern now has a
+shape worth naming for whoever eventually revisits the keep/cut question: on
+this repo, contract-and-identity changes appear to concentrate their expensive
+defects *before* implementation, where the rotation metric does not look, while
+the later-round comprehensive rounds increasingly return REFUTED or
+DISCARD-grade findings. If a future reader wants to cut review cost, the
+evidence so far points at the later rounds, not at the fixture review — and
+would need the loop log's `catches[].round == 0` entries counted, which today
+no audit does.
+
+## Revisit 2026-08-25 (post #1702 / PR #1848) — keep, unchanged
+
+The rotation metric is bit-identical to the previous revisit (129 multi-round
+merged PRs; later-round catches core=75, rotated=295) because PR #1848 was a
+zero-round, fixture-tier-`none` docs PR and contributes nothing to it.
+
+Recorded only to discharge the audit's DECIDABLE obligation, not as new
+evidence. One observation worth keeping: #1848's whole risk sat in three
+pre-flight verifications on a production node, none of which any review lens
+would have covered — the review track was correctly recorded as "not required",
+and the safety came from refusing to move bytes until the timer's replay branch,
+the runtime forcing source, and the sole filesystem reader of `forcing_dir` were
+each proved. That is a third consecutive run whose leverage sat outside the
+rotated lenses.

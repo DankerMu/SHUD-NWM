@@ -28,7 +28,9 @@ from packages.common.safe_fs import (
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.basins_geometry import RIVER_SHP_REQUIRED_DBF_FIELDS
 from workers.model_registry.basins_package import (
+    SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS,
     BasinsPackageError,
+    forcing_checksum_material_for_schema_version,
     publish_basins_package,
     write_basins_migration_report,
 )
@@ -876,6 +878,19 @@ def _package_checksum_from_stored_manifest(stored_manifest: dict[str, Any]) -> P
             identity_basis=str(source_model_identity["basis"]),
             limitation="stored_manifest_does_not_prove_root_relative_resolved_path",
         )
+    # #1813: the checksum material shape is a property of the generation the
+    # manifest was published under, not of the code reading it.  An unknown
+    # generation is a recorded reconstruction limitation, never a verification
+    # failure -- this validator must not accuse an immutable package of drift
+    # because it predates or postdates the packager it runs beside.
+    stored_schema_version = stored_manifest.get("schema_version")
+    if stored_schema_version not in SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS:
+        return PackageChecksumReconstruction(
+            checksum=None,
+            status="limited",
+            identity_basis=str(source_model_identity["basis"]),
+            limitation="stored_manifest_package_schema_version_unsupported",
+        )
     included_files = [
         {
             "relative_path": entry["relative_path"],
@@ -887,11 +902,11 @@ def _package_checksum_from_stored_manifest(stored_manifest: dict[str, Any]) -> P
         if isinstance(entry, dict) and entry.get("role") != "manifest"
     ]
     checksum_material = {
-        "schema_version": stored_manifest.get("schema_version"),
+        "schema_version": stored_schema_version,
         "model_id": stored_manifest.get("model_id"),
         "version": stored_manifest.get("version"),
         "included_files": sorted(included_files, key=lambda item: (item["role"], item["relative_path"])),
-        "forcing": _forcing_checksum_material(stored_manifest.get("forcing")),
+        "forcing": _forcing_checksum_material(stored_manifest.get("forcing"), str(stored_schema_version)),
         "copy_forcing": bool(stored_manifest.get("forcing", {}).get("payload_copied", False))
         if isinstance(stored_manifest.get("forcing"), dict)
         else False,
@@ -968,18 +983,17 @@ def _infer_copied_root_relative_resolved_path(stored_manifest: dict[str, Any]) -
     return str(basin_slug)
 
 
-def _forcing_checksum_material(forcing: Any) -> Any:
+def _forcing_checksum_material(forcing: Any, schema_version: str) -> Any:
+    """Mirror of the packager material, keyed on the stored manifest's own generation.
+
+    Delegates to the packager so the two implementations cannot drift; the
+    non-dict passthrough is kept because a malformed stored manifest must
+    reconstruct to a mismatching checksum rather than raise here.
+    """
+
     if not isinstance(forcing, dict):
         return forcing
-    return {
-        "policy": forcing.get("policy"),
-        "csv_count": forcing.get("csv_count"),
-        "byte_count": forcing.get("byte_count"),
-        "aggregate_checksum": forcing.get("aggregate_checksum"),
-        "payload_copied": forcing.get("payload_copied"),
-        "copied_file_count": forcing.get("copied_file_count"),
-        "copied_byte_count": forcing.get("copied_byte_count"),
-    }
+    return forcing_checksum_material_for_schema_version(forcing, schema_version)
 
 
 def _deterministic_manifest_bytes(payload: dict[str, Any]) -> bytes:

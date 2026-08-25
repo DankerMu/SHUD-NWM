@@ -1,8 +1,5 @@
-# shud-model-package-publication Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change m9-basins-model-assets. Update Purpose after archive.
-## Requirements
 ### Requirement: Valid Basins models are published as immutable packages
 
 The system SHALL publish each validated Basins SHUD model into an immutable object-store package containing runtime input files, selected calibration metadata, GIS sidecars, and a package manifest with checksums.
@@ -77,100 +74,7 @@ The system SHALL record historical forcing CSV metadata separately from the runt
 - **THEN** forcing CSV files are written under a separate object-store prefix and the manifest records forcing payload URI, file count, and checksum evidence
 - **AND** copied forcing payloads SHALL be streamed to object storage without reading whole files into memory
 
-### Requirement: Production migration rejects symlink-only evidence
-
-The system SHALL provide a migration report command that distinguishes development symlinks from production data copies and rejects symlink-only production migration evidence.
-
-#### Scenario: Symlink target fails production migration evidence
-
-- **WHEN** production migration evidence is generated for `/volume/data/nwm/Basins`
-- **THEN** it states that target environments must contain actual copied data and fails if the target `Basins` path is a symlink
-- **AND** the failure payload uses stable error code `BASINS_MIGRATION_SYMLINK_TARGET`
-
-#### Scenario: Copied target passes production migration evidence
-
-- **WHEN** production migration evidence is generated for a real copied `Basins` directory
-- **THEN** it exits successfully and records file count, byte count, inventory checksum, source-to-target copy metadata, and `production_ready=true`
-
-#### Scenario: Migration command failure payload
-
-- **WHEN** `basins-migration-report` fails
-- **THEN** stderr contains JSON with `error_code`, `message`, and the relevant `path`
-- **AND** requested local report write failures SHALL use stable error code `BASINS_MIGRATION_REPORT_WRITE_FAILED`
-
-### Requirement: Package refusal payloads carry the model's cause keys
-
-The package publication refusal SHALL carry the refused model's health
-causes in its structured payload: when a model is refused as not
-publishable, the error payload includes the model's status and its
-missing, invalid, and unreadable required-file collections, copied from
-the inventory model record (empty when a caller-supplied inventory
-predates a key) — the first three key names match the scheduler registry
-publish channel, the fourth matches the discovery payload; no new
-aliases.
-The refusal predicate, error code, and message text stay byte-for-byte
-unchanged, and every pre-existing payload key keeps its value, so receipt
-consumers remain backward compatible; error instances raised without
-cause details keep their existing payload byte-for-byte.
-
-#### Scenario: a malformed-IC-header model's refusal names the file
-
-WHEN a model whose IC header failed the discovery shape gate is refused
-as not publishable
-THEN the refusal payload's invalid-required-files entry names the
-offending `*.cfg.ic` file alongside the model's status
-
-#### Scenario: an unreadable-required-file model's refusal names the file
-
-WHEN a model carrying an unreadable required file (partial status) is
-refused as not publishable
-THEN the refusal payload's unreadable-required-files entry names that
-file
-
-#### Scenario: pre-existing payload keys survive unchanged
-
-WHEN any package refusal is raised
-THEN error_code, message, model_id, version, and path keep their existing
-values, and refusals raised without details keep their payload
-byte-for-byte
-
-### Requirement: Published packages never rewrite calibrated values
-
-The system SHALL publish calibration files byte-identical to their source. No
-publication path may alter a calibrated parameter value on the grounds that it
-falls outside an operational bound.
-
-Publication MAY still repair a *missing* required file by supplying a template
-into a private staging copy, because that path adds an absent artifact rather
-than overriding a value a human chose. Any such repair SHALL be recorded in the
-publication receipt's `repairs` list. (The package manifest carries no repair
-field for either repair kind; `publish_basins_package` takes no repair argument.
-The receipt is the only recording seam that exists.)
-
-#### Scenario: A calibration multiplier outside any historical bound is published unchanged
-
-- **WHEN** a Basins model's `cfg.calib` declares `SOIL_ALPHA` or `GEOL_DMAC`
-  whose product with the corresponding `para.*` column maximum exceeds any
-  previously enforced operational bound
-- **THEN** the published package's `cfg.calib` SHALL be byte-identical to the
-  source `cfg.calib`
-- **AND** publication SHALL NOT refuse on the grounds of that bound
-- **AND** the publication receipt's `repairs` list SHALL contain no
-  calibration repair entry
-
-#### Scenario: Publication is a pure copy with respect to calibration
-
-- **WHEN** a Basins model is published twice from an unchanged source
-- **THEN** both packages' calibration files SHALL be byte-identical to the
-  source and to each other
-
-#### Scenario: A missing radiation template is still supplied and recorded
-
-- **WHEN** a Basins model is missing only `*.tsd.rl` and template repair is
-  requested
-- **THEN** the package SHALL contain the supplied template
-- **AND** the publication receipt's `repairs` list SHALL record the repair
-- **AND** the model's calibration files SHALL remain byte-identical to source
+## ADDED Requirements
 
 ### Requirement: Published package checksums stay reconstructable across schema generations
 
@@ -185,4 +89,3 @@ Any component that reconstructs `package_checksum` from a stored manifest SHALL 
 
 - **WHEN** the same validation runs against a manifest published after the migration
 - **THEN** the reconstruction uses the reduced forcing material and the checksum matches the stored value
-

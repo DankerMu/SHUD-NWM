@@ -27,7 +27,16 @@ from .basins_discovery import (
     _slug_id as _basins_slug_id,
 )
 
-BASINS_PACKAGE_SCHEMA_VERSION = "basins.package.v1"
+# #1813: forcing CSV payload evidence left package identity here.  The bump is
+# itself the named identity migration -- BASINS_PACKAGE_SCHEMA_VERSION is inside
+# the content material, so a republished package re-mints its identity under a
+# declared packaging schema change rather than under a silent content change.
+BASINS_PACKAGE_SCHEMA_VERSION_V1 = "basins.package.v1"
+BASINS_PACKAGE_SCHEMA_VERSION = "basins.package.v2"
+SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS: tuple[str, ...] = (
+    BASINS_PACKAGE_SCHEMA_VERSION_V1,
+    BASINS_PACKAGE_SCHEMA_VERSION,
+)
 BASINS_PACKAGE_SOURCE_IDENTITY_SCHEMA_VERSION = "basins.package.source_identity.v1"
 BASINS_MIGRATION_REPORT_SCHEMA_VERSION = "basins.migration.v1"
 FORCING_SAMPLE_FILE_LIMIT = 5
@@ -1161,19 +1170,33 @@ def _forcing_metadata(
             continue
         csv_count += 1
         relative_path = _normalize_relative_path(path.relative_to(forcing_dir).as_posix())
-        size_bytes, sha256 = _source_file_evidence(
-            path,
-            source_root,
-            model_id=model_id,
-            version=version,
-            manifest_uri=manifest_uri,
-        )
-        digest.update(relative_path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(size_bytes).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(sha256.encode("ascii"))
-        digest.update(b"\0")
+        if copy_forcing:
+            # Only the copied case still needs per-file payload digests: those
+            # payloads become `included_files` entries and are covered there too.
+            size_bytes, sha256 = _source_file_evidence(
+                path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+            digest.update(relative_path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(size_bytes).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(sha256.encode("ascii"))
+            digest.update(b"\0")
+        else:
+            # #1813: excluded forcing is not identity material, so the aggregate
+            # payload digest has no consumer.  Count and bytes survive on stat
+            # alone -- publication cost stops scaling with historical volume.
+            size_bytes = _source_file_size(
+                path,
+                source_root,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
         total_bytes += size_bytes
         if sampled_file_count < FORCING_SAMPLE_FILE_LIMIT:
             header, first_time, last_time, row_count = _csv_time_evidence(
@@ -1218,7 +1241,7 @@ def _forcing_metadata(
         "forcing_dir_original_name": model.get("forcing_dir_original_name"),
         "csv_count": csv_count,
         "byte_count": total_bytes,
-        "aggregate_checksum": digest.hexdigest() if csv_count else None,
+        "aggregate_checksum": digest.hexdigest() if (copy_forcing and csv_count) else None,
         "sample_headers": sample_headers,
         "sampled_file_count": sampled_file_count,
         "time_coverage": (
@@ -1291,7 +1314,6 @@ def _source_identity_from_plan(
         "basin_slug": model.get("basin_slug"),
         "shud_input_name": model.get("shud_input_name"),
         "root_relative_resolved_path": model.get("root_relative_resolved_path"),
-        "forcing_dir_original_name": model.get("forcing_dir_original_name"),
     }
     return (
         {
@@ -1352,6 +1374,36 @@ def _migration_source_file_evidence(path: Path, source_root: Path) -> tuple[int,
         read_error_code="BASINS_MIGRATION_EVIDENCE_READ_FAILED",
         read_error_message="Failed to read Basins migration evidence source file",
     )
+
+
+def _source_file_size(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> int:
+    """Size of a source file under the same symlink/regular-file guards as hashing, without reading it."""
+
+    try:
+        with _open_verified_source_file(
+            path,
+            source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as source:
+            return os.fstat(source.fileno()).st_size
+    except OSError as error:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_WRITE_FAILED",
+            f"Failed to read Basins package source file: {path}: {error}",
+            model_id=model_id,
+            version=version,
+            path=str(path),
+            manifest_uri=manifest_uri,
+        ) from error
 
 
 def _verified_source_file_evidence(
@@ -1463,16 +1515,45 @@ def _calibration_metadata(
     return metadata
 
 
-def _forcing_checksum_material(forcing: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "policy": forcing.get("policy"),
-        "csv_count": forcing.get("csv_count"),
-        "byte_count": forcing.get("byte_count"),
-        "aggregate_checksum": forcing.get("aggregate_checksum"),
-        "payload_copied": forcing.get("payload_copied"),
-        "copied_file_count": forcing.get("copied_file_count"),
-        "copied_byte_count": forcing.get("copied_byte_count"),
-    }
+def forcing_checksum_material_for_schema_version(
+    forcing: Mapping[str, Any],
+    schema_version: str,
+) -> dict[str, Any]:
+    """Return the forcing contribution to ``package_checksum`` for one package schema generation.
+
+    #1813: a package that declares ``forcing.policy = "excluded_by_default"``
+    must not fold forcing CSV payload evidence into its identity.  From
+    ``BASINS_PACKAGE_SCHEMA_VERSION`` on, the contribution is the declaration
+    itself -- for both policies, because copied payloads already enter identity
+    as ``included_files`` entries with ``role="forcing"``.
+
+    The pre-migration shape is retained (not deleted) because published
+    manifests are immutable evidence: anything reconstructing a stored
+    manifest's ``package_checksum`` must use the shape declared by that
+    manifest's own ``schema_version``.  Callers must reject unsupported
+    versions before calling.
+    """
+
+    if schema_version == BASINS_PACKAGE_SCHEMA_VERSION_V1:
+        return {
+            "policy": forcing.get("policy"),
+            "csv_count": forcing.get("csv_count"),
+            "byte_count": forcing.get("byte_count"),
+            "aggregate_checksum": forcing.get("aggregate_checksum"),
+            "payload_copied": forcing.get("payload_copied"),
+            "copied_file_count": forcing.get("copied_file_count"),
+            "copied_byte_count": forcing.get("copied_byte_count"),
+        }
+    if schema_version == BASINS_PACKAGE_SCHEMA_VERSION:
+        return {
+            "policy": forcing.get("policy"),
+            "payload_copied": forcing.get("payload_copied"),
+        }
+    raise ValueError(f"Unsupported Basins package schema_version: {schema_version!r}")
+
+
+def _forcing_checksum_material(forcing: Mapping[str, Any]) -> dict[str, Any]:
+    return forcing_checksum_material_for_schema_version(forcing, BASINS_PACKAGE_SCHEMA_VERSION)
 
 
 def _forcing_metadata_from_written_entries(
@@ -1641,12 +1722,27 @@ def _verify_existing_manifest_consistency(
         for entry in manifest.get("included_files", [])
         if isinstance(entry, dict) and entry.get("role") != "manifest"
     ]
+    stored_schema_version = manifest.get("schema_version")
+    if stored_schema_version not in SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS:
+        raise BasinsPackageError(
+            "BASINS_PACKAGE_MANIFEST_INVALID",
+            "Existing Basins package manifest declares an unsupported package schema version.",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+    stored_forcing = manifest.get("forcing")
     reconstructed_checksum_material = {
-        "schema_version": manifest.get("schema_version"),
+        "schema_version": stored_schema_version,
         "model_id": manifest.get("model_id"),
         "version": manifest.get("version"),
         "included_files": sorted(non_manifest_entries, key=lambda item: (item["role"], item["relative_path"])),
-        "forcing": _forcing_checksum_material(manifest.get("forcing", {})),
+        # The stored manifest's own generation decides the material shape;
+        # pre-migration manifests keep reconstructing with the old seven fields.
+        "forcing": forcing_checksum_material_for_schema_version(
+            stored_forcing if isinstance(stored_forcing, Mapping) else {},
+            str(stored_schema_version),
+        ),
         "copy_forcing": bool(manifest.get("forcing", {}).get("payload_copied", False))
         if isinstance(manifest.get("forcing"), dict)
         else False,
