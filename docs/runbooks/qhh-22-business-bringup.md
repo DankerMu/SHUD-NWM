@@ -1,3 +1,17 @@
+---
+status: historical baseline
+current_authority:
+  - path: docs/runbooks/current-production-ops.md
+    section: Current production operations
+    reason: current node-22/node-27 production authority
+  - path: scripts/diagnostic/qhh/README.md
+    section: Diagnostic classification authority
+    reason: current QHH diagnostic script classification
+status_since: 2026-08-24
+archive_scope: whole-document
+retained_for: historical bring-up and incident evidence
+---
+
 # QHH node-22 业务化运行流程与方法（首跑联调梳理）
 
 > 本文记录在 node-22 上把 QHH 全链路从"E2E 测试架"推向"真实 Slurm 生产运行"过程中**实测验证出的正确执行模型、配置与方法**，作为后续正式业务化的依据。

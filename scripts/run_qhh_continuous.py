@@ -9,9 +9,20 @@ this script does not. Do not wire this into the daemon; full retirement is track
 M24 §5 / #293. Retained only as a manual bring-up/triage lane and for the static
 reference test (``tests/test_qhh_scripts_static.py``).
 
-Smoke (manual debugging) — run a single pass and exit:
+This chain must run from a detached diagnostic worktree with its own virtualenv,
+never from the canonical active checkout (``/scratch/frd_muziyao/NWM``) — see
+``scripts/diagnostic/qhh/README.md`` for the authoritative boundary.
 
-    uv run python scripts/run_qhh_continuous.py --once --executor slurm
+Smoke (manual debugging) — run a single pass and exit from an explicit detached
+diagnostic root:
+
+    export QHH_DIAGNOSTIC_CHECKOUT=/path/to/detached/qhh-diagnostic-worktree
+    "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" \
+      "$QHH_DIAGNOSTIC_CHECKOUT/scripts/run_qhh_continuous.py" --once --executor slurm
+
+The interpreter must be the detached root's exact ``.venv/bin/python``; the chain is
+BLOCKED if the checkout is the canonical active root, and fails closed if that exact
+interpreter does not exist. Bare ``uv run`` never launches this chain.
 
 Minimal PASS condition: process exits 0 and the printed pass summary contains no failed
 candidate (``run_pass`` -> ``_has_failed`` is false), i.e. each discovered cycle reaches
@@ -43,6 +54,10 @@ from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_fol
 from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
+# Canonical active node-22 checkout. The diagnostic chain may only run from a
+# detached diagnostic worktree with its own virtualenv; this root must fail closed.
+CANONICAL_ACTIVE_ROOT = Path("/scratch/frd_muziyao/NWM").resolve()
+DETACHED_CHECKOUT_ENV_NAME = "QHH_DIAGNOSTIC_CHECKOUT"
 DEFAULT_RUN_ROOT = ROOT / ".nhms-runs" / "qhh-continuous"
 MODEL_ID = "basins_qhh_shud"
 TERMINAL_SUCCESS = {"parsed", "published", "already_done"}
@@ -125,7 +140,25 @@ class CandidateCycle:
         return f"fcst_{self.source_segment}_{self.token}_{MODEL_ID}"
 
 
+def _require_detached_diagnostic_checkout(root: Path = ROOT) -> None:
+    """Fail closed unless the chain runs from a detached diagnostic worktree.
+
+    The canonical active node-22 checkout must never execute the QHH diagnostic
+    chain (its shared ``.venv`` is owned by the online services). Only a detached
+    diagnostic worktree with its own virtualenv may run it.
+    """
+    resolved = Path(root).expanduser().resolve()
+    if resolved == CANONICAL_ACTIVE_ROOT:
+        raise SystemExit(
+            "BLOCKED: the QHH diagnostic chain cannot run from the canonical active checkout "
+            f"({resolved}). Run it from an explicit detached diagnostic worktree via "
+            f"{DETACHED_CHECKOUT_ENV_NAME} using that worktree's exact .venv/bin/python "
+            "interpreter. See scripts/diagnostic/qhh/README.md for the authoritative run boundary."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
+    _require_detached_diagnostic_checkout()
     parser = argparse.ArgumentParser(description="Run qhh full chain continuously for GFS and IFS cycles.")
     parser.add_argument("--once", action="store_true", default=_env_bool("QHH_CONTINUOUS_ONCE", True))
     parser.add_argument("--dry-run", action="store_true", default=_env_bool("QHH_CONTINUOUS_DRY_RUN", False))

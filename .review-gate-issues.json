@@ -2067,6 +2067,19 @@
           "rounds": 5
         }
       ]
+    },
+    "1571": {
+      "ceilingPrs": [
+        1822
+      ],
+      "gateEntries": 5,
+      "closed": [
+        {
+          "pr": 1822,
+          "outcome": "superseded-by-split",
+          "rounds": 5
+        }
+      ]
     }
   },
   "1736": {
