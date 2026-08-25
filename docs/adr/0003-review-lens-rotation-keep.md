@@ -1920,3 +1920,28 @@ because per-round lens lists were not persisted. Until 6.1-style persistence is
 routine, this audit's core/rotated split is measuring a shrinking fraction of
 the rounds it reports on, and any future cut decision would have to establish
 its sample quality first rather than reading the raw ratio.
+
+## Revisit (2026-08-25, issues #1652/#1630/#1629 / PR #1836)
+
+After appending PR #1836's accountability line, `loop_log_audit` returns
+DECIDABLE at **128 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated**. Recorded decision: **keep rotation**, unchanged.
+
+This is a no-information increment for the rotation question. Round 1 ran the
+six-lens comprehensive mix and found four independently confirmed items. Round
+2 intentionally narrowed to three lenses already present in Round 1
+(`correctness`, `test-evidence`, `integration`) to verify those fixes and the
+adjacent receipt/routing boundary; it returned no verified finding. No free-slot
+lens rotated in, and no later-round catch exists to attribute.
+
+The line is nevertheless a useful process-quality contrast with the preceding
+PR #1819 entry: both round lens lists and all catch attribution are persisted, so
+its zero is known to mean "follow-up recheck ran and found nothing", not
+"attribution data is missing". That establishes closure for this PR but says
+nothing about whether a rotated lens would have added recall. Reading the added
+denominator as evidence for either keep or cut would repeat the standing
+measurement error of treating a non-applied treatment as an observed result.
+
+The cumulative direction and the existing default-keep decision remain
+unchanged. No reviewer-set or rotation-policy change follows.
