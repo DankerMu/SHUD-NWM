@@ -214,6 +214,15 @@ uv run python scripts/publish_scheduler_file_registry.py \
 - `baseline-registry/` 目录 2026-08-22 前不存在，首次需 `mkdir -p`。
 - 缺 `PYTHONPATH` 会在 `_build_manual_cutover_gate` 处
   `ModuleNotFoundError: No module named 'scripts'`——门是默认开的，不是没跑。
+- **第二次及以后的上线，`--registry-manifest` 必须换成本次专属路径**，例如
+  `baseline-registry/<rollout>-<date>.json`。2026-08-22 #1699 是**首次**使用该目录，
+  属 bootstrap（无 previous manifest）所以不触发闸门；2026-08-25 黄河子流域复用
+  `manifest-last.json` 时当场被拒：publisher 把传入的 models **整体写出、不做合并**，
+  于是本次 7 行会**移除** #1699 留下的 7 行，#1080 cutover 闸门报
+  `registry_cutover_removal_refused` / `SCHEDULER_REGISTRY_REFRESH_PRECOMMIT_FAILED`
+  （包已发布，registry 未动，重跑幂等）。不要用 `--allow-uncovered-cutover` 绕——
+  那会真的把上一批 baseline 行删掉。hop 3 的 `--baseline-registry` 只是个路径参数，
+  指向本次专属文件即可；该文件须落在 NFS 上，因为 hop 3 在 node-27 跑。
 - **`--basins-root` 要指向持久路径，不要指向临时 staging 目录。** 包版本号是纯内容派生、
   与路径无关（实测同一批树从 scratch staging 和从 NFS Basins 发布，7 个版本号逐字相同，
   第二次全部 `already_done`），但 registry 行会把 `source_path` 钉死成发布时的路径。
@@ -295,6 +304,16 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 每流域恰好一条 gfs 一条 IFS、每行都带 `shud_input_name` 与 `model_package_uri`。
 备份 stamp 每次换新，否则脚本会因备份已存在而拒跑。
 
+**registry manifest 有字节上限，行数增长会撞。** `MAX_REGISTRY_MANIFEST_BYTES`
+（`services/orchestrator/scheduler_file_providers.py`）同时管**写入后回读**和
+**所有消费者的读取**。2026-08-25 合并到 62 行时实测 4,250,534 B，超过当时的 4 MiB
+上限 56,230 B：原子写入器写完、回读时 `capture_provider_preimage` 报
+`provider_destination_size_limit_exceeded`，于是**回滚并抛 `provider_restored_previous`**
+（canonical 完好无损，这是闸门在正常工作，不是数据损坏）。已提到 16 MiB（约 160 行）。
+再撞时的处置顺序是死的：**改常量 → CI → merge → 22 与 27 都 `git pull --ff-only` → 才能发布**。
+先发布后升级 = 旧代码的调度器读不动新 manifest，等于全量停摆。
+覆盖坪估算：大流域一行约 100 KB（`direct_grid_forcing.station_bindings` 内联就占 ~60 KB）。
+
 **发布后必须手动跑一趟 refresh 重建 readiness。** readiness 索引条目与 registry identity
 是**逐一相等**关系（`validate_readiness_registry_model_set`），48 行 registry 配 34 行 readiness
 会被拒。好在 refresh 是从当前 `registry_models` **现推**再自校验
@@ -304,15 +323,146 @@ PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_init
 refresh 的 `ExecCondition` 要求 `nhms-compute-scheduler.service` 非 active，
 而一趟 pass 可以跑一小时以上）。
 
+**hop 5 — 改了 `model_id` 的流域必须回补 forcing（重发场景专有；纯新增流域不触发）。**
+forcing 是**按 model 分目录**存的：`<object-store>/forcing/<source>/<cycle>/<basin_version_id>/<model_id>/`。
+包内容一变，`dg_*` 身份就变，于是所有**已产过 forcing 的 cycle** 只有旧 id 的产物，新 id 一份没有。
+而调度器判 forcing 完成度是**按 cycle** 的，它不会为这种 cycle 重进 forcing 阶段——
+forecast 照submit，1~2 秒死在 `ARTIFACT_NOT_FOUND`（#1816 重发 8 流域时实测，16 个 model 全中）。
+
+正确做法是**重放生产**，不是 `cp`。重发若没有移动测站（标定-only / 元数据-only 的常见情形），
+`station_bindings` 逐行物理相同、只差 `dg-<src>-<hex>::` 身份前缀，所以在新 id 下重跑 producer
+必然得到数值等价、且 id 与嵌套 checksum 自洽的包。拷贝旧目录则会把旧
+`model_input_package_id` / `binding_uri` / station id 焊进**每一个**成员文件，
+而 `met.met_station` 是按**新** binding 身份注册的。
+
+```bash
+.venv/bin/python scripts/node22_backfill_forcing_for_model_ids.py \
+  --previous-manifest <registry>/manifest-last.json.pre-<stamp> \
+  --current-manifest  <registry>/manifest-last.json \
+  --forcing-root /scratch/frd_muziyao/nhms-prod/object-store/forcing \
+  --cycle <只补调度器下一趟要跑的那个 cycle> --execute --output <receipts>/forcing-backfill.json
+```
+
+工具自带验收：`shud/*.csv`（SHUD 真正读的输入，不含任何身份串）必须**逐字节相同**，
+`forcing.tsd.forc` / `forcing_debug.csv` / `payloads/*.json` 在把身份串归一化后必须相同。
+三个 JSON manifest **不参与**比对——它们带成员 checksum，成员字节一变它们本就该变。
+测站真移动了（`station_bindings` 归一化后仍不等）时工具**拒绝回补**并把该行记进
+`rebound_models_skipped`：那是重新绑定，得走正常 provisioning，不是回补。
+默认 dry-run；不传 `--cycle` 会扫出**所有**历史 cycle，而历史预报不追溯——按需只补下一趟要跑的。
+`--jobs N` 并发跑（每个 item 写各自的 model 目录，互不争用；实战 `--jobs 5`，单个 model
+约 20 分钟，node-22 48 核，注意别顶满）。注意 forcing 路径的 source 段是
+`normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
+按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
+
+**receipt 里必须先看 `coverage`，再看 `work_item_count`。** `renamed_model_count: N,
+work_item_count: 0` 既是"全部已回补"的稳态，也是 `--forcing-root` 指错 / NFS 没挂 / 环境不对的
+样子——这两者用条目数分不开。所以 receipt 带一段 `coverage`：`source_dirs_probed`（探了哪些
+`<root>/<source>/` 路径）、`source_dirs_found`（其中真实存在的）、`previous_model_dirs_found`
+（扫到多少个旧 id 目录）。**一条 source 目录都不存在时工具直接拒绝**
+（`BACKFILL_FORCING_ROOT_UNCOVERED`，`--forcing-root` 本身不是目录则是
+`BACKFILL_FORCING_ROOT_ABSENT`），错误里就带上探过的路径，不会以 exit 0 冒充"没活可干"。
+部分漏覆盖不拒绝（`--cycle` 本来就会收窄扫描面），但在 `coverage` 里看得见：
+`source_dirs_found` 少于 `source_dirs_probed` 就该问为什么。
+
+**status 一览（除 `verified` / `dry_run` 之外都让命令 exit 非 0）**：
+
+| status | 含义 | 操作 |
+|---|---|---|
+| `verified` | 重放产物通过等价验收 | 无 |
+| `dry_run` | 缺省预览，没跑 producer | 核对后加 `--execute` |
+| `existing_target_unverified` | 新 id 目录**已存在但验收不过**——producer 是**按文件**原子写、不是按目录，中途被杀就会留下只有部分成员的目录 | 见下 |
+| `produce_failed` | producer 非 0 退出，残留目录**已成功隔离**（`detail.quarantine_path`；无残留时该键为 `null`） | 看 `detail.stderr_tail` |
+| `verification_failed` | 跑完了但与旧包不等价，产物**已成功隔离**（`detail.quarantine_path`） | 看 `detail.verification` |
+| `quarantine_failed` | **隔离动作本身失败**：`detail.unverified_artifact_live: true`，未通过验收的产物**仍然活在** `detail.live_target_dir` 上 | **最高优先级**，见下 |
+| `errored` | 该 item 处理时抛异常（成员不可读等），`detail.error` 里是异常 | 修掉底层故障后重跑该 cycle |
+| `pending` | 该 item 根本没被处理到——只会在 receipt 顶层出现 `loop_error` 时成片出现 | 看 `loop_error`，修掉后整条命令重跑 |
+
+`errored` 是**逐 item** 的：一个 item 出事不会吞掉整份 receipt，其余 item 的 status 照常落盘
+（`--output` 也照写），命令 exit 1。顶层 `loop_error` 则是 item 循环**外面**炸了（只在异常情况下
+出现）：receipt 照写、照 exit 1，但循环剩下的 item 停在 `pending`，它们的活一件没干。
+
+**`existing_target_unverified` 不会被跳过，但缺省也不会被动。** 老实现按
+`target_dir.is_dir()` 判"已完成"，于是半截目录在 receipt 里与"已正确回补"长得一模一样，且以后
+每一趟都继续跳过、永远修不到。现在这种目录会被**发现并报告**、命令 exit 非 0，产物**原样保留**
+——它不是本次跑出来的，删不删是运维的决定。确认要重做时加
+`--replace-unverified-target`（help 里写明是破坏性的）：它把该目录移到同级
+`_backfill_quarantine/` 下再重跑 producer。验收通过的已存在目录仍然照旧跳过。
+**只加 `--replace-unverified-target`、不加 `--execute` 的预览仍然报 `existing_target_unverified`、
+仍然 exit 非 0**（多一个 `detail.would_replace_target: true` 表明加 `--execute` 会替换它）——
+预览不该比它所预览的状态更绿，拿 dry-run 的 exit code 当放行闸的脚本要的就是这条。
+
+**验收不过 / producer 失败的产物一定不留在真实 model 路径上。** forecast 阶段是直接读
+`<basin_version_id>/<model_id>/` 的，留一份没通过验收的包在那儿就等于让 SHUD 静默吃下去。
+工具把它移到 `<basin_version_id>/_backfill_quarantine/quarantined-<model_id>.<status>.<UTC 时间戳>.pid<pid>/`，
+路径记在 receipt 的 `detail.quarantine_path` 里。
+目录名带前导下划线、条目名带 `quarantined-` 前缀，都不可能被当成合法的 `dg_*` model 目录。
+
+**下一步**：照 `detail.verification` / `detail.stderr_tail` 定位原因（原始输入被 retention 清了？
+盘满？成员不可读？），修掉之后重跑同一条命令——此时该 model 路径已经空了，会被当成正常的
+待回补项重新产出。隔离目录确认无用后手工删除，工具不自动清。
+
+**隔离也会失败，而失败时产物还站在活路径上——那是另一个 status，不是同一个。**
+`/scratch` 是 NFS 上的（ESTALE、权限漂移、`_backfill_quarantine` 父目录建不出来：配额 / ENOSPC /
+同名文件挡路），rename 就是会失败。此时 status 是 **`quarantine_failed`**，`detail.unverified_artifact_live: true`，
+`detail.live_target_dir` 是那条**仍然可被 forecast 读到**的路径，每次尝试的失败原因逐条记在
+`detail.quarantine_errors`（列表，两次尝试不会互相覆盖），`detail.quarantine_failed_after` 说明是哪一步
+（`produce_failed` / `verification_failed` / `replaced_unverified`）触发的隔离。**处置**：先手工把
+`detail.live_target_dir` 移走或删掉（**在下一趟 pass 跑到这个 cycle 之前**——留着它 SHUD 就会吃下去），
+再修存储故障，然后重跑同一条命令。带 `--replace-unverified-target` 时若隔离失败，工具**不会**去跑 producer：
+写是按文件原子的、不会先清目录，往还在的半截包里写等于把两份包搅在一起。
+
+**回补完不会自愈——已经跑失败的 run 必须单独放行。** `ARTIFACT_NOT_FOUND` 被分类器判为
+**永久失败**（`classify_failure` 给 `retryable=False, permanent=True`），与重试预算无关
+（实战 `submission_attempt=1`，limit 是 6）。所以产物补上之后，那些 run 仍然是
+`blocked` / `permanent_failure_guard`，下一趟 pass 照样不会重跑它们。
+
+正规通道是 `pipeline.retry_run` 的 manual-retry marker（`record_manual_repair`：
+policy 门 + cycle 写锁 + 冲突/缺失拒绝 + 证据留痕），`classify_failure(..., manual=True)`
+只对被标记的那个 run 把 `permanent` 翻成 `False`。**不要改 journal 行**——8.5 禁的是手改行，
+用这个带门的类型化 API 正是它指向的替代路径。
+
+```bash
+.venv/bin/python scripts/node22_manual_retry_failed_runs.py \
+  --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
+  --run-id fcst_<source>_<cycle>_<model_id> \
+  --reason "<为什么重启>" --requested-by "<操作者>" --execute
+```
+
+**先看 preview（缺省就是 preview，不写）**：forecast 阶段除了逐 run 行，还有一条覆盖该
+cycle 全部 model 的 **cohort master** 行，标错它会把整个 cohort 重跑。preview 会把要动的
+行 id 打出来——实战命中的是 `job_fcst_..._forecast_reconciled_34817_6`（逐 run），不是
+`job_cycle_..._forecast_cohort_...`。逐 run 逐个标，不做批量扫。
+
+标完跑一趟 bounded pass（`systemctl --user start nhms-compute-scheduler.service`，
+timer 全程保持关闭），验收判据不是候选变成 `selected`，而是 **forecast 真跑成、
+`state_save_qc` 在新 id 下写出下一个 `valid_time` 的 state**——那才是接回 warm chain 的东西。
+顺带核对没被标记的 run 仍是 `blocked`，以证明 marker 是逐 run 生效的。全部通过后再
+`systemctl --user enable --now nhms-compute-scheduler.timer`。
+
 **一条 provenance 备注**：publisher 曾对"越界"标定参数（`SOIL_ALPHA` 上界 20.0、
 `GEOL_DMAC` 上界 4.0）在隔离副本上静默改写后再打包（`basins.calibration_repair.v1`）。
-该 repair 已在 **#1816 中整体删除**——两个上界在仓库里没有任何出处，而被它改写的标定值
-是外部用户跑 SHUD 收敛得到的。现在 publisher 对标定文件是**纯拷贝**：包内的 `*.cfg.calib`
-与 Basins 树里的源文件逐字节相同，`cmp` 应当返回 0。
+该 repair 已在 **#1816 中整体删除**——它静默改写的是外部用户跑 SHUD 收敛得到的标定值。
+
+**两个上界的出处不同，且都不是仓库里 grep 得到的**（`SHUD/` 被 gitignore，见 `.gitignore:81`）：
+
+- `SOIL_ALPHA <= 20`：SHUD 里确有声明（`ModelConfigure.cpp:90`），但 `checkValue()` 调用
+  `checkRange()` 后**丢弃返回值**，而 `checkRange` 只 `fprintf` 一行——是**软告警，不是闸门**。
+  越界不会被拒，也不会崩。
+- `GEOL_DMAC <= 4`：**SHUD 里根本没有对应物**。源码声明的范围是 `[0, 10]`
+  （`ModelConfigure.cpp:109`），而源值 `GEOL_DMAC=5 × Dmac 列上限 1.0 = 5` 落在该范围内、
+  零告警、照样 NaN。4 是**实测稳定边界**（2×2 跨 gfs/IFS 两个独立源：4.5 跑通、4.75 NaN、
+  源值 5 两边都 NaN），任何源码里都不存在——所以它只能靠**显式声明**承载，见 #1832 的
+  `config/calibration_overrides.yaml`。
+
+publisher 对**未被声明**的标定文件是**纯拷贝**：包内的 `*.cfg.calib` 与 Basins 树里的
+源文件逐字节相同，`cmp` 应当返回 0。被声明覆盖的流域参数记在
+`manifest["calibration"]["overrides"]` 里——声明是唯一入口，没被点名的一律不动。
 2026-08-22 之前发布的包中有 8 个流域（含 `SHJ-2SHJ`、`hetianhe`）带着被改写的值，
 它们在 #1816 之后单独重发；重发前的历史预报不追溯、不重签。
 **仍在运行的 repair 只有缺失辐射模板那一条**（`basins.missing_tsd_rl_template_repair.v1`，
 staging 目录 `repaired-basins`）：它补的是缺失文件，不改任何标定值。
+（另有 staging 目录 `overridden-basins`，那是**声明式标定覆盖**的落点，不是 repair：
+它只对 `config/calibration_overrides.yaml` 点名的流域参数生效，且记进 manifest。）
 **它记在发布 receipt 的 `summary["repairs"]` 里，不在 package manifest 里**——
 `publish_basins_package` 不收 repair 参数，manifest 对任何 repair 都没有字段。
 而 receipt 只在显式传了 `--output` 时才落盘（`publish_scheduler_file_registry.py:396-397`），
@@ -678,6 +828,21 @@ canonical replace 前退出、非零：
   与实际不符、`effective_cycle_utc` 未对齐 00:00 或 12:00 UTC、超出 24h 过期 / 168h
   未来窗口、entry 里有 duplicate `model_id`、declaration 文件是 symlink/非常规文件、
   超过 256 KiB。
+
+第四个非 cutover 的 refusal 原因（#1832）：
+
+- `calibration_override_invalid`：`config/calibration_overrides.yaml`（或
+  `$NHMS_CALIBRATION_OVERRIDES_PATH` 指向的文件）里某条声明加载不了或应用不上。
+  receipt 的 `calibration_overrides.error` 带 `error_code` + `message` +
+  `entries`（`basin_slug`/`parameter`），直接点名是哪条：
+  `CALIBRATION_OVERRIDE_BASIN_NOT_IN_INVENTORY`（slug 打错或改名，discovery 里根本
+  没这个 basin）、`CALIBRATION_OVERRIDE_UNKNOWN_PARAMETER`（basin 的 `*.cfg.calib`
+  里没有这个参数）、`CALIBRATION_OVERRIDE_VALUE_UNPARSEABLE`、
+  `CALIBRATION_OVERRIDE_DECLARATION_UNREADABLE` / `_INVALID`。这条拒绝在 canonical
+  replace 之前退出，registry 保持上一代；timer 每 tick 都会复现，直到声明改对。
+  另外 `calibration_overrides.not_applied` 记录「声明了但这趟没发布」的 basin
+  （`reason_not_applied="basin_not_selected_for_this_run"`）——不是错误，但说明这条
+  override 本趟没生效。
 
 **分类 `mode`（#1140）**：`registry_classification` 还带一个 `mode` 字段，记录这次 refresh
 实际跑的分类分支。`id_only` 只来自 `dry_run`——prospective 行只有 `model_id`/`basin_id`、
@@ -1695,8 +1860,17 @@ provision M1′（node-27，写 core.model_instance）
   -> 最后才发布合并 manifest
 ```
 
-倒过来做的后果：`NHMS_REQUIRE_FORECAST_WARM_START=true` 下，manifest 先落地会让 `M1′`
-在 `t*` 没有 warm state 而 block——fail-safe，但白停一个 cycle。
+倒过来做的后果**比这段原文写的更重**（原文早于 #1164）：manifest 先落地时，`M1′`
+在任何 generation 都没有 state 行，走的是 first-cycle 分支
+（`services/orchestrator/scheduler_generation.py:1057`）；而生产 registry 行带
+`manifest_uri`，会产出一个**合格**的 packaged-IC 信号，于是该 run 被
+**放行**为 `PACKAGED_IC_BOOTSTRAP`（`scheduler_generation.py:1057-1078`），
+**不是 block**。也就是说代价不是"白停一个 cycle"，而是发出一份从包内 IC 起步、
+而非承接 warm state 的预报——生产水文过程线断一刀。
+只有 packaged IC 不可读或不合格时才落到
+`BLOCK_FIRST_CYCLE_INITIAL_STATE_UNDECIDED` 那条 fail-safe 上。
+**所以顺序不是"省一个 cycle"的优化，是正确性约束**；稳妥做法是整段 rollout 期间
+让 `nhms-compute-scheduler.timer` 处于 disabled，从结构上关掉这个放行窗口。
 
 **`t*` 怎么选**：pass evidence 的 `cycle_window` 实测 `cycle_lag_hours=16`、
 `end_time_utc = now − 16h`、cycle 步长 12h。所以 cycle `C` 进入调度窗口的时刻是 `C + 16h`，
@@ -1737,6 +1911,24 @@ provision M1′（node-27，写 core.model_instance）
 跑一趟 oneshot。`systemctl --user start` 返回 0 **不代表跑了**（condition 不满足会静默
 skip）。判据只有一个：`latest.json` 的 `started_at` 变新。**不要**用「receipt 文件数增加」
 判成功——`latest.json` 是原地覆写的，计数不变，照此写循环会无限重试、反复触发 refresh。
+
+**回补 forcing 时必须临时改指 registry，而不是提前发布 manifest。** forcing producer
+是从 **file model registry** 解析目标模型的（`Model instance '<model_id>' was not found
+in file model registry`），所以新 id 得先能被解析——这看着与"manifest 最后发"矛盾，
+其实不矛盾：顺序约束针对的是**调度器读的那份活 registry**。做法是只对这一次调用
+`export NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST=<workspace>/canonical-merged.json`，
+并在这一步前后各记一次活 canonical 的 sha，证明它没被动过。
+2026-08-24 hetianhe 实测：回补 `verified: 2`，活 canonical sha 前后逐字相同。
+
+**marker 不是每次切换都需要，先跑 preview 再下结论。** #1816 那次 8 个流域是
+`ARTIFACT_NOT_FOUND`（永久判死）且 id **留在** registry 里，所以要放行；hetianhe 是
+`SHUD_EXIT_10`（NaN 本身）而它的 id 被本次切换**退休**了。preview 的输出直接点破：
+唯一 `would_mark` 的是那个已退休的 gfs id，给它打 marker 等于去重启一个不在 registry
+里的模型。新 id 没有任何 journal 历史，本来就不需要放行。
+
+**5.1-5.7 每一步都要 detached 跑**（`{ setsid nohup ... & }`）。实测踩过：前台 producer
+熬过了 ssh 会话，父进程死了子进程还在写，随后补起的第二次调用与它并发写同一个目标目录。
+两个都按 PID 杀掉、目标目录核对干净才重跑的，但这个窗口是真的。
 
 **旧行标 `superseded` 必须等 M1′ 的首个 run 发布之后。** display 候选 SQL
 （`packages/common/forecast_store.py` 的 `_QHH_LATEST_CANDIDATE_RUNS_SQL`）是
@@ -1920,7 +2112,77 @@ forecast 运行超 2 小时后由操作员决定取消），暂时退出业务�
 
 复活路径：恢复 manifest 备份（或重新 provision registry）＋ 27 侧
 `--force` 注册（其 register 步骤会把 `superseded` 翻回 active）＋
-移除 `AUTOPIPE_EXCLUDE_BASINS` 中的 `hhe`。
+移除 `AUTOPIPE_EXCLUDE_BASINS` 中的 `hhe`＋把 baseline `core.model_instance`
+行 `activate` 回来（见 §7.1.1，否则全国底图上没有这个流域的河网）。
+
+#### 7.1.1 2026-08-25 补漏：baseline `core.model_instance` 必须一并 deactivate
+
+上面 2026-08-07 的四步**漏了一步**，导致 hhe 退役 18 天后仍在公网底图上显示全部
+43799 条河网：`core.model_instance` 的 baseline 行 `basins_hhe_shud` 一直是
+`active_flag = t / lifecycle_state = active`（当时只处理了 registry 里的两条 `dg_*` 行）。
+全国 river-network MVT 的成员判据就是这一条
+（[`services/tiles/mvt.py:361`](../../services/tiles/mvt.py) 的
+`EXISTS (... model_instance mi WHERE mi.river_network_version_id = rnv.river_network_version_id AND mi.active_flag = true)`），
+且 `national_river_network_source_version`（同文件 `:1374`）的 digest 也只看 active 集合——
+所以这条行不翻，tile 内容和 ETag 都不会变。
+
+**退役流域时必须做的第 5 步**：把该流域的 baseline `basins_<slug>_shud` 行走
+lifecycle 通道 deactivate。
+
+- 通道：`POST /api/v1/models/{model_id}/lifecycle`，`operation=deactivate`，
+  `override_missing_active=true`（退役后该 basin_version 为零 active，属合法终态，
+  数据里已有先例），非空 `reason`，actor 角色需 `sys_admin`
+  （[`packages/common/model_registry.py:2925`](../../packages/common/model_registry.py)
+  的 `MISSING_ACTIVE_RISK` / `OVERRIDE_REQUIRES_SYS_ADMIN` 前置判据）。
+- node-27 的 `:8080` 是 display-readonly 部署（`nhms_display_ro` +
+  `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`），**不要**为了这一次操作放开写权限。
+  用仓库自身代码在 27 上以 owner DSN 进程内调用同一个 store 方法即可——
+  route 只是 `store.model_lifecycle_operation(...)` 的薄封装：
+
+  ```python
+  decision = trusted_internal_policy_decision(
+      "models.deactivate", target_type="model_instance",
+      target_id=MODEL_ID, actor_id="ops:<who>-<date>", roles=("sys_admin",))
+  store.preflight_model_operation(MODEL_ID, operation="deactivate",
+      policy_decision=decision, override_missing_active=True, reason=REASON)
+  # blockers 非空一律中止，不要改用 trusted_internal=True 硬闯
+  store.model_lifecycle_operation(...)   # 同参数
+  ```
+
+  跑之前 `env -u NHMS_AUTH_MODE -u AUTH_BACKEND`，只 source
+  `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
+  会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
+  manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义），
+  也不要动已经 inactive 的 `dg_*` 行。一行一操作。
+
+**验收 receipt（必须前后对照，只翻旗不算修好）**：
+
+| 项 | 2026-08-25 实测 |
+|---|---|
+| `/api/v1/layers` river-network `source_generation` | `…:34c95f183d39f2504658:25` → `…:5cd1a080b67a0da5d6ca:24` |
+| active `model_instance` / active river networks | 25 → 24，diff 只少 `basins_hhe_shud` 一行 |
+| tile `river-network-national/5/25/12.pbf` | 65023 B → 10443 B |
+| tile `…/6/50/24.pbf` | 14023 B → 467 B |
+| tile `…/4/12/6.pbf` | 67700 B → 31865 B |
+| 公网 `https://test.nwm.ac.cn` 同一 tile | 10443 B（与内网一致，nginx 无陈旧缓存） |
+| `ops.audit_log` | `log_id=14`，`models.deactivate` / `sys_admin` / `basins_hhe_shud` |
+
+tile 前后字节数不变 = 缓存问题，回去查 `source_version` 与 nginx，不要直接宣布完成。
+
+**不属于展示面、无需处理（2026-08-25 复核）**：
+
+- `apps/frontend/public/geo/national-basin-river.geojson`（45 MB，59702 features，
+  其中 43799 为 hhe）——前端**刻意不 fetch**，见
+  [`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
+  并有测试钉住。纯磁盘死重。
+- `apps/frontend/public/geo/national-basin-domain.geojson` 里的 `basins_hhe` 轮廓——
+  `withStaticBasinBoundaries()` 只对**服务端已返回的** basin 做 boundary 回填，
+  hhe 不在 `/api/v1/basins?has_display_product=true`（实测 24 个，无 hhe），
+  因此该 feature 永不渲染。
+- 裸 `/api/v1/basins`（不带 `has_display_product`）是 `core.basin` 原始目录，
+  含 hhe 属预期；前端走的是 `has_display_product=true`
+  （[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
 
 ## 8. 当前已知卡点
 

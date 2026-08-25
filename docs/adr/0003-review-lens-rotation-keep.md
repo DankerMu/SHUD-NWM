@@ -1847,3 +1847,135 @@ The cumulative 72/295 direction still supports keeping rotation, while the
 standing attribution caveats remain decisive against treating one no-catch,
 no-rotation PR as a cut signal. No reviewer-set or rotation-policy change
 follows.
+
+## Revisit (2026-08-24, issues #1832 / PR #1835 and #1825 / PR #1833)
+
+After appending both accountability lines, `loop_log_audit` returns DECIDABLE at
+**126 multi-round merged PRs, later-round catches core=74 / rotated=295**.
+Relative to the preceding sample these two PRs contribute **2 core** and **0
+rotated** later-round catches. Recorded decision: **keep rotation**, unchanged.
+
+Both later-round catches came from the pinned core, and both from
+`invariant-state` on PR #1833's round 2. That round is worth naming rather than
+counting: round 1 fixed "an unverified artifact must not be left live on the
+path the forecast stage reads", and the fix reintroduced exactly that failure —
+`quarantine_target` returned `None` on a failed rename, no call site checked it,
+and the resulting status was byte-identical to a successful quarantine while the
+runbook asserted the artifact had been moved. The second catch on the same round
+was an exit-code mask (a preview greener than the state it previewed).
+
+That is a *fix-regression* signal, not a rotation signal: the core lens is
+pinned into follow-up rounds precisely to re-check the invariant the previous
+round claimed to restore, and here it paid. Two core catches move the cumulative
+ratio a little toward the core arm without disturbing the direction, and the
+standing attribution caveats (the raw split mixes treatment, no-treatment,
+targeted rechecks, and workflow-role lenses) remain decisive against reading two
+PRs either way.
+
+PR #1835's rounds contribute nothing to attribution: its round 2 was clean.
+
+One process deviation is recorded on the #1825 line and repeated here because it
+bears on how these catches should be weighted: round 2 skipped the independent
+verifier gate. Both candidates were mechanically checkable by reading the diff
+(an unchecked return value; a status overwritten before a tally), and the tool
+was in live production use restoring a basin that was down. Recorded as a
+one-off deviation with its reason, not as a precedent — the round-3 review that
+followed was scoped explicitly to "did this close the hole or move it", which is
+the check the skipped gate would otherwise have supplied.
+
+No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-25, issue #1810 / PR #1819)
+
+After appending PR #1819's accountability line, `loop_log_audit` returns
+DECIDABLE at **127 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. This PR contributes **1 core** and **0 rotated**. Recorded
+decision: **keep rotation**, unchanged.
+
+This line is the weakest kind of evidence in the sample and should be read that
+way. Its round-1 and round-2 lens lists were never persisted and are not
+reconstructible from branch history, so they are recorded as `unknown` rather
+than guessed, and its two later-round catches are attributed to `unknown`
+lenses. The audit's core/rotated split therefore cannot actually place this PR's
+catches in either arm; the `+1 core` above reflects the arithmetic, not a
+measurement. That is precisely the failure task 6.1 exists to prevent, and it is
+recorded on the line itself so a later reader does not mistake it for signal.
+
+The substantive observation is orthogonal to rotation: round 1's catch was the
+PR's own growth law — the rescoped discovery still relisted the flat directory
+and replayed per candidate rather than per distinct cycle, i.e. the fix had
+relocated the unbounded term the PR exists to remove rather than removing it.
+Round 3 was scoped to re-derive the growth law from the code rather than accept
+the commit message, and it came back clean and mutation-tested. As with #1833's
+round 2, the value came from re-checking the invariant the previous round
+claimed to restore, which is a fix-regression property of pinning the core lens
+into follow-up rounds, not a rotation property.
+
+The cumulative direction is unchanged and the standing attribution caveats
+remain decisive. No reviewer-set or rotation-policy change follows.
+
+**Process debt named, not deferred silently**: three consecutive lines
+(#1802, #1819) have now been degraded or excluded from the rotation sample
+because per-round lens lists were not persisted. Until 6.1-style persistence is
+routine, this audit's core/rotated split is measuring a shrinking fraction of
+the rounds it reports on, and any future cut decision would have to establish
+its sample quality first rather than reading the raw ratio.
+
+## Revisit (2026-08-25, issues #1652/#1630/#1629 / PR #1836)
+
+After appending PR #1836's accountability line, `loop_log_audit` returns
+DECIDABLE at **128 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated**. Recorded decision: **keep rotation**, unchanged.
+
+This is a no-information increment for the rotation question. Round 1 ran the
+six-lens comprehensive mix and found four independently confirmed items. Round
+2 intentionally narrowed to three lenses already present in Round 1
+(`correctness`, `test-evidence`, `integration`) to verify those fixes and the
+adjacent receipt/routing boundary; it returned no verified finding. No free-slot
+lens rotated in, and no later-round catch exists to attribute.
+
+The line is nevertheless a useful process-quality contrast with the preceding
+PR #1819 entry: both round lens lists and all catch attribution are persisted, so
+its zero is known to mean "follow-up recheck ran and found nothing", not
+"attribution data is missing". That establishes closure for this PR but says
+nothing about whether a rotated lens would have added recall. Reading the added
+denominator as evidence for either keep or cut would repeat the standing
+measurement error of treating a non-applied treatment as an observed result.
+
+The cumulative direction and the existing default-keep decision remain
+unchanged. No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-25, issue #1826 / PR #1843)
+
+After appending PR #1843's accountability line, `loop_log_audit` returns
+DECIDABLE at **129 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated**. Recorded decision: **keep rotation**, unchanged.
+
+Another no-information increment for the rotation question, for the same reason
+as the PR #1836 entry: round 1 ran three lenses (`correctness`,
+`invariant-state`, `test-evidence`) and round 2 was the Phase 7 final review
+(`spec-compliance`, `test-evidence`, `integration`), which returned no verified
+finding. With no later-round catch there is nothing to attribute, and reading
+the added denominator as evidence either way would repeat the standing
+measurement error of treating a non-applied treatment as an observed result.
+
+This line does carry one observation that is orthogonal to rotation and worth
+recording precisely because the audit cannot see it: **both of this run's
+highest-value catches landed in round 0 — the read-only fixture review, before
+any implementation existed.** One was a P1 that would have shipped a
+fail-CLOSED regression (an `endswith`-shaped identity comparison that rejects a
+candidate's own forcing reference in two of the three shapes production
+actually records, blocking a healthy basin's forecast for a full 00/12 UTC
+cycle); the other redirected the change's three insertion points from payload
+constructors that lack the required arguments to the caller that owns them,
+avoiding a signature widening that would have broken five existing tests.
+
+The loop log's `catches[].round` field admits `0`, so these are recorded, but
+the rotation metric counts only *later-round* catches and therefore attributes
+neither. That is correct for the rotation question and misleading for any
+broader reading of where the review loop earns its cost on this repo. No
+reviewer-set or rotation-policy change follows; the note exists so a future
+keep/cut reader does not mistake a run with two P1/P2 pre-implementation catches
+for a run in which review found little.

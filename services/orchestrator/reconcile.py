@@ -1106,10 +1106,23 @@ def reconcile_inflight_jobs(
                 get_pipeline_job = getattr(store, "get_pipeline_job", None)
                 if accounting_complete and callable(get_pipeline_job):
                     durable_master = get_pipeline_job(job.job_id)
+                    # The operator receipt reports the terminal status READ BACK
+                    # from the durable master after projection, because the
+                    # projection may preserve an externally assigned terminal
+                    # truth it cannot derive (#1629).  ``cancelled`` is one such
+                    # sticky status: complete accounting projects it, the durable
+                    # master stays ``cancelled``, and the receipt must agree with
+                    # the durable/public master instead of reporting the
+                    # projection-derived value.  The readback stays NARROW: only
+                    # the three projection-derived statuses plus ``cancelled``;
+                    # ``submission_failed`` / ``reservation_lost`` never reach
+                    # this projection (their submit-outcome/inventory gates reject
+                    # them first), so they must not be admitted here either.
                     if isinstance(durable_master, Mapping) and durable_master.get("status") in {
                         "succeeded",
                         "partially_failed",
                         "failed",
+                        "cancelled",
                     }:
                         projected_status = str(durable_master["status"])
                 outcomes.append(

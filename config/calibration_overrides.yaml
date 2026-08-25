@@ -1,0 +1,43 @@
+# Declared calibration overrides (#1832).
+#
+# Publication is a pure byte copy of every calibration file UNLESS an entry
+# below names that basin AND that parameter.  A declared entry is applied on an
+# isolated staging copy (the Basins source tree is never written) and recorded
+# in the package manifest under `calibration.overrides`, so the record travels
+# with the bytes instead of living only in a publisher-workspace receipt.
+#
+# An override is a recorded EXCEPTION, not a platform routine: the durable fix
+# is a recalibration by the modeller.  Every entry needs a reason that states
+# the measurement, an approver, and a date.
+#
+# Anything that cannot be applied REFUSES the publish (#1832 design D3):
+# unknown basin, unknown parameter, unparseable value, or an entry that matched
+# no calibration file.  A silently unapplied entry would publish the ORIGINAL
+# value while this file claims otherwise.
+#
+# Consumed by `scripts/publish_scheduler_file_registry.py
+# --calibration-overrides config/calibration_overrides.yaml`
+# (or NHMS_CALIBRATION_OVERRIDES_PATH).
+
+calibration_overrides:
+  - basin_slug: hetianhe
+    parameter: GEOL_DMAC
+    value: 4
+    reason: >-
+      Empirical SHUD stability bound with no SHUD-side counterpart: SHUD only
+      declares checkRange(macD, 0., 10.) (ModelConfigure.cpp:109) and the Dmac
+      column maxes at 1.0, so the source value 5 is INSIDE the declared range,
+      emits no warning, and still produces NaN.  Measured on node-22 with an
+      8-day horizon and hetianhe's real warm state, varying only this
+      parameter: 5 (source) and 4.75 both fail with "ERROR: NAN error for
+      QeleSub[i][j] 5" / "EXIT with error code 10(NAN/INF VALUE)", while 4.5
+      and 4 both run clean on gfs and on IFS (rc=0).  The NaN cliff is
+      therefore between 4.5 and 4.75; 4 is chosen over 4.5 for margin (~11%
+      below the cliff versus ~5%) because neither value is the modeller's, so
+      "closer to source" buys nothing scientific while the margin is the only
+      protection against a future cycle whose forcing shifts the cliff.
+      SOIL_ALPHA is deliberately NOT overridden: its bound is a soft SHUD
+      warning (checkRange only prints; ModelConfigure.cpp:90) and hetianhe runs
+      to completion on the source value 8.19327372615961.
+    approver: danker
+    date: "2026-08-24"
