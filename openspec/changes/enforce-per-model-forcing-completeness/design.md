@@ -173,6 +173,18 @@ Two changes, one invariant:
    reference — the identity-derived sidecar tier runs — and the rejection is
    named in `forcing_provenance` rather than vanishing silently.
 
+   The comparison must first remove exactly two trailing shapes, and nothing
+   else: a trailing `/`, and a final segment equal to the package manifest
+   filename. Both are documented as occurring in production — the producer
+   records a directory uri while the handoff lane stores the same reference with
+   the slash stripped (`_needs_package_manifest_witness` docstring,
+   `scheduler_state_failure.py:1073-1100`), and a recorded reference may already
+   be the manifest FILE key, one segment deeper
+   (`_sidecar_manifest_probe_key`, `:1030-1051`). A bare `endswith` would reject
+   the candidate's OWN reference in either shape and block a healthy candidate —
+   the precise failure design.md's blast-radius note warns about. Prefix
+   normalisation stays forbidden: that is the hazard, not the fix.
+
 Alternatives considered and rejected:
 
 - **A new per-(cycle, model_id) completeness ledger.** node-22 runs DB-free;

@@ -15,12 +15,27 @@
 ## 2. Consult the witness at the strict-warm-start emitting points
 
 - [ ] 2.1 In `services/orchestrator/scheduler_candidates.py`, consult
-      `_missing_upstream_forecast_artifact_evidence` for every strict-warm-start
-      decision that carries `restart_stage: "forecast"`
-      (`_strict_warm_start_terminal_retry_evidence`,
-      `_strict_warm_start_run_manifest_retry_evidence`, and the run-manifest
-      mismatch leg at `:2485`), following the pattern already used at the six
-      emitting return points in `scheduler_state_decision.py`.
+      `_missing_upstream_forecast_artifact_evidence` at the three
+      **`build_candidates`** call sites that emit a strict-warm-start decision
+      carrying `restart_stage: "forecast"` — around `:541-548` (run-manifest
+      missing leg), `:570-574` (`_strict_warm_start_terminal_mismatch_decision`),
+      and `:616-619` (`_upgrade_retry_for_strict_warm_start_manifest`). Do NOT
+      edit the evidence builders `_strict_warm_start_terminal_retry_evidence`
+      (`:2436`), `_strict_warm_start_run_manifest_retry_evidence` (`:2459`), or
+      `_strict_warm_start_retry_run_manifest_evidence` (`:2479`): they are pure
+      `Mapping -> Mapping` payload constructors with neither `candidate` nor the
+      raw candidate `state` in scope. `build_candidates` owns all four guard
+      arguments, which is the same shape `scheduler_state_decision.py` uses at
+      its emitting return points.
+- [ ] 2.1a Do NOT widen `_upgrade_retry_for_strict_warm_start_manifest`'s 2-arg
+      signature: five existing tests call it by name
+      (`tests/test_production_scheduler.py:186, 225, 261, 294, 10963`). The
+      consultation belongs AFTER it returns, at `:616-619` — the pre-upgrade
+      decision may have been guard-checked at a different `restart_stage`, so the
+      guard must run again on the rewritten decision regardless.
+- [ ] 2.1b Return the guard's blocker payload **verbatim** rather than re-merging
+      it, so its self-tagged `classifier` / `artifact_guard.stable_classifier`
+      still land in `_decision_is_stable_missing_forcing_blocker` (`:1574-1594`).
 - [ ] 2.2 Record the provenance annotation through the same channel
       (`_record_forcing_provenance`) so it appears in pass evidence whether or
       not the decision blocked.
@@ -33,8 +48,16 @@
 - [ ] 3.1 In `services/orchestrator/scheduler_state_failure.py`, admit a
       recorded `forcing_package_uri` as this candidate's witness only when its
       key's trailing segments are this candidate's own
-      `<basin_version_id>/<model_id>`. Compare on the recorded reference's own
-      trailing segments; do NOT prefix-normalise it first.
+      `<basin_version_id>/<model_id>`. Before comparing, remove exactly two
+      trailing shapes and nothing else: (a) a trailing `/`, and (b) a final
+      segment equal to `_FORCING_PACKAGE_MANIFEST_FILENAME`. Both shapes are
+      documented as coexisting in production — see the `_needs_package_manifest_witness`
+      docstring (`:1073-1100`, producer directory uri vs handoff-lane stripped
+      copy) and `_sidecar_manifest_probe_key` (`:1030-1051`, manifest FILE key).
+      A naive `endswith` without these removals rejects the candidate's OWN
+      reference and blocks a healthy candidate. Do NOT prefix-normalise the
+      recorded reference; that is the actual documented hazard. Fewer than two
+      segments left after the removals means not bound.
 - [ ] 3.2 On rejection, fall through to `_forcing_sidecar_provenance` exactly as
       an absent reference does, and name the rejection in `forcing_provenance`.
 - [ ] 3.3 Leave every existing containment untouched: withheld placeholder
@@ -58,13 +81,15 @@
 - [ ] 5.2 `uv run pytest -q tests/test_orchestration_chain.py`
 - [ ] 5.3 `uv run ruff check .`
 - [ ] 5.4 `openspec validate enforce-per-model-forcing-completeness --strict --no-interactive`
-- [ ] 5.5 node-22 live receipt: the fix is scheduler decision logic, so it is
-      verified on node-22 per the profile's verification matrix. Run one bounded
-      scheduler pass from a throwaway clone (NEVER move
-      `/scratch/frd_muziyao/NWM` onto a feature branch) against a fixture whose
-      registry names a `model_id` with no forcing package for a completed cycle,
-      and capture the pass evidence showing the candidate `blocked` with a named
-      reason and a `forcing_provenance` annotation, with no forecast submission.
+- [ ] 5.5 node-22 corroboration (NOT the decisive oracle — 1.1/1.2 and 5.1/5.2
+      are). This is pure candidate-decision Python, deterministically exercised by
+      the regression fixtures; a live pass adds deployment corroboration, not
+      proof. Run one bounded scheduler pass from a throwaway clone (NEVER move
+      `/scratch/frd_muziyao/NWM` onto a feature branch, and never pause the
+      production timer without the stop-and-drain pattern) against a fixture
+      registry naming a `model_id` with no forcing package for a completed cycle;
+      capture the pass evidence showing the candidate `blocked` with a named
+      reason and a `forcing_provenance` annotation, and no forecast submission.
 
 ## 6. Write-back
 

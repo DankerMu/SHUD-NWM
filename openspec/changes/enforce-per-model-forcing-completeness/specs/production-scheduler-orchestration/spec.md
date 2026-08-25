@@ -12,9 +12,26 @@ identity-derived tier runs instead, and the rejection is named in the provenance
 annotation.
 
 The comparison MUST be made on the recorded reference's own trailing key
-segments. The recorded reference MUST NOT be prefix-normalised before the
-comparison, because a foreign object-store prefix makes normalisation raise and
-would be reported as a false absence.
+segments, after normalising only for the shapes the producer and the handoff lane
+are already known to record:
+
+1. a trailing `/` is removed (the producer records the package as a directory
+   uri; the handoff lane stores the same reference with the slash stripped, and
+   both shapes coexist);
+2. a final segment equal to the package manifest filename is removed (a recorded
+   reference may already be the manifest FILE key, one segment deeper than the
+   package prefix).
+
+After those two removals, the last two segments MUST equal this candidate's
+`basin_version_id` and `model_id` in that order.
+
+The recorded reference MUST NOT be prefix-normalised before the comparison,
+because a foreign object-store prefix makes normalisation raise and would be
+reported as a false absence. Only the two trailing-shape removals above are
+permitted.
+
+A reference with fewer than two segments after those removals MUST be treated as
+not bound, exactly like a foreign one.
 
 #### Scenario: A superseded model's package does not witness the successor
 
@@ -44,3 +61,21 @@ would be reported as a false absence.
 - **AND** a probe that cannot read its object still reports "cannot determine"
   rather than "package absent"
 - **AND** no probe fault escapes the decision path
+
+#### Scenario: The candidate's own reference is admitted in every shape the producer records
+
+- **GIVEN** a candidate whose recorded reference names its own
+  `basin_version_id` and `model_id`
+- **WHEN** that reference is the package directory uri with a trailing `/`, or
+  the same reference with the slash stripped, or the package manifest file key
+  one segment deeper
+- **THEN** each shape is admitted as this candidate's witness
+- **AND** none of them falls through to the identity-derived tier
+
+#### Scenario: A reference too short to carry the identity pair is not bound
+
+- **GIVEN** a recorded reference that has fewer than two key segments left after
+  the trailing-shape removals
+- **WHEN** the per-model forcing witness is consulted
+- **THEN** it is treated as not bound, exactly like a foreign reference
+- **AND** the identity-derived tier is consulted in its place
