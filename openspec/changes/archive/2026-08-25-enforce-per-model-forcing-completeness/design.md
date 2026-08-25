@@ -2,7 +2,7 @@
 
 ## Risk triage
 
-- **Fixture level**: standard. One seam in the scheduler's failure-classification
+- **Fixture level**: expanded. One seam in the scheduler's failure-classification
   layer, guarded by an existing hardened probe tier; no new persisted state, no
   schema change, no migration.
 - **Blast radius**: every candidate that reaches the warm-start retry path with

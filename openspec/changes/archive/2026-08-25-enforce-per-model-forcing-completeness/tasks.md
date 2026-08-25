@@ -81,7 +81,7 @@
 - [x] 5.2 `uv run pytest -q tests/test_orchestration_chain.py`
 - [x] 5.3 `uv run ruff check .`
 - [x] 5.4 `openspec validate enforce-per-model-forcing-completeness --strict --no-interactive`
-- [ ] 5.5 node-22 corroboration (NOT the decisive oracle — 1.1/1.2 and 5.1/5.2
+- [ ] 5.5 (未做，非决定性 oracle) node-22 corroboration (NOT the decisive oracle — 1.1/1.2 and 5.1/5.2
       are). This is pure candidate-decision Python, deterministically exercised by
       the regression fixtures; a live pass adds deployment corroboration, not
       proof. Run one bounded scheduler pass from a throwaway clone (NEVER move
@@ -93,7 +93,7 @@
 
 ## 5b. Round 1 review repairs
 
-- [ ] 5b.1 Pin BOTH halves of the identity pair. The three tests exercising
+- [x] 5b.1 Pin BOTH halves of the identity pair. The three tests exercising
       `_recorded_forcing_reference_binds_candidate` discriminate only on
       `model_id`; a regression narrowing the predicate to
       `segments[-1] == model_id` passes the entire suite (verified empirically:
@@ -104,19 +104,19 @@
 - [x] 5b.2 Add the matching spec scenario; the gap traced back to the acceptance
       criteria, which stated the requirement as a pair but named no
       `basin_version_id`-only mismatch in any scenario.
-- [ ] 5b.3 Correct the PR body's deviation ledger: the rewritten-reference group
+- [x] 5b.3 Correct the PR body's deviation ledger: the rewritten-reference group
       is 3 (not 4) in `tests/test_production_scheduler.py` plus 1 in
       `tests/test_orchestration_chain.py`, so the total is 21, not 22; and the
       shared helper has 39 in-file call sites (59 repo-wide), not 40.
 
 ## 6. Write-back
 
-- [ ] 6.1 Update issue #1826 with the measured scope correction (new-basin
+- [x] 6.1 Update issue #1826 with the measured scope correction (new-basin
       onboarding does NOT reproduce; re-identification does), the pass-date
       correction (the failing pass ran 2026-08-24T06:36:57Z, not 08-23), and the
       now-filled `Verification:` field.
-- [ ] 6.2 File the two reported-not-fixed seams
+- [x] 6.2 (#1845) File the two reported-not-fixed seams
       (`chain_forecast_cycle.py:490` unscoped cycle-wide job fallback,
       `:523` model-blind `job_matches_stage`) as a tracked issue.
-- [ ] 6.3 File the "auto re-enter the forcing stage instead of blocking"
+- [x] 6.3 (#1846) File the "auto re-enter the forcing stage instead of blocking"
       follow-up as a tracked issue, referencing this change's Decision section.
