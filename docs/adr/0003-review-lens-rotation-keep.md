@@ -1884,3 +1884,39 @@ followed was scoped explicitly to "did this close the hole or move it", which is
 the check the skipped gate would otherwise have supplied.
 
 No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-25, issue #1810 / PR #1819)
+
+After appending PR #1819's accountability line, `loop_log_audit` returns
+DECIDABLE at **127 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. This PR contributes **1 core** and **0 rotated**. Recorded
+decision: **keep rotation**, unchanged.
+
+This line is the weakest kind of evidence in the sample and should be read that
+way. Its round-1 and round-2 lens lists were never persisted and are not
+reconstructible from branch history, so they are recorded as `unknown` rather
+than guessed, and its two later-round catches are attributed to `unknown`
+lenses. The audit's core/rotated split therefore cannot actually place this PR's
+catches in either arm; the `+1 core` above reflects the arithmetic, not a
+measurement. That is precisely the failure task 6.1 exists to prevent, and it is
+recorded on the line itself so a later reader does not mistake it for signal.
+
+The substantive observation is orthogonal to rotation: round 1's catch was the
+PR's own growth law — the rescoped discovery still relisted the flat directory
+and replayed per candidate rather than per distinct cycle, i.e. the fix had
+relocated the unbounded term the PR exists to remove rather than removing it.
+Round 3 was scoped to re-derive the growth law from the code rather than accept
+the commit message, and it came back clean and mutation-tested. As with #1833's
+round 2, the value came from re-checking the invariant the previous round
+claimed to restore, which is a fix-regression property of pinning the core lens
+into follow-up rounds, not a rotation property.
+
+The cumulative direction is unchanged and the standing attribution caveats
+remain decisive. No reviewer-set or rotation-policy change follows.
+
+**Process debt named, not deferred silently**: three consecutive lines
+(#1802, #1819) have now been degraded or excluded from the rotation sample
+because per-round lens lists were not persisted. Until 6.1-style persistence is
+routine, this audit's core/rotated split is measuring a shrinking fraction of
+the rounds it reports on, and any future cut decision would have to establish
+its sample quality first rather than reading the raw ratio.
