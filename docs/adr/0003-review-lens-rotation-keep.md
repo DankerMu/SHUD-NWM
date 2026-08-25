@@ -2034,3 +2034,23 @@ and the safety came from refusing to move bytes until the timer's replay branch,
 the runtime forcing source, and the sole filesystem reader of `forcing_dir` were
 each proved. That is a third consecutive run whose leverage sat outside the
 rotated lenses.
+
+## Revisit 2026-08-25 (post #1701 / PR #1849) — keep, unchanged
+
+Metric bit-identical again (129 multi-round merged PRs; later-round catches
+core=75, rotated=295): both #1701 lines are zero-round, so neither moves it.
+
+Recorded to discharge the audit, but this run says something the previous two
+only hinted at. #1849 shipped with no review round and still had a real defect
+that reached production: querying `core.model_instance` by `model_id` silently
+omits every direct-grid variant row, so three active rows survived a retirement
+that every receipt I took said was complete. No lens in the rotation would have
+caught it — there was no diff to review, the mistake lived in an ad-hoc
+operational query. The owner caught it from the live map.
+
+The keep/cut question is still about review rounds, and the answer is still
+keep. But three consecutive runs now put the leverage outside the rotated
+lenses, and this one puts it outside review entirely: the operational lane has
+no equivalent of a fixture review, and its receipts can be sampled at a moment
+when they are transiently true. Whoever revisits this should weigh whether the
+loop log is measuring the right lane, not just the right lenses.
