@@ -185,10 +185,20 @@ def test_file_cohort_pre_outcome_restart_classifies_ambiguous_before_decision(
         now=lambda: started_at + timedelta(seconds=1),
     )[0]
 
-    assert outcome.reconciliation_decision == "absence_deferred"
+    # #1850 Fix 1: a pre-outcome row resolves the capability/runtime lane
+    # exactly like an already-timeout row. With runtime rows present the
+    # exact-comment absence path defers; without them the runtime mismatch
+    # takes the ordinary exact-comment streak lane (identity_mismatch_blocked)
+    # instead of being admitted past the runtime gate.
+    if with_runtime_rows:
+        assert outcome.reconciliation_decision == "absence_deferred"
+        expected_decision = "absence_deferred"
+    else:
+        assert outcome.reconciliation_decision == "identity_mismatch_blocked"
+        expected_decision = "identity_mismatch_blocked"
     persisted = repository.get_pipeline_job(job_id)
     assert persisted["submit_outcome"] == "submit_result_ambiguous"
-    assert persisted["reconciliation_decision"] == "absence_deferred"
+    assert persisted["reconciliation_decision"] == expected_decision
     reopened = FileOrchestrationJournalRepository(repository.root).get_pipeline_job(job_id)
     assert reopened == persisted
 

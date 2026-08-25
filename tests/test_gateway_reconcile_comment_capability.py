@@ -17,7 +17,10 @@ from typing import Any
 
 import pytest
 
-from tests.gateway_reconcile_helpers import _file_cohort_repository
+from tests.gateway_reconcile_helpers import (
+    _file_cohort_repository,
+    _versioned_master_reservation_record,
+)
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 
 
@@ -756,3 +759,133 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
     assert now_calls == [base_now]
     # base_now is 2026-07-22T12:00Z; UTC+8 renders it as the host's local wall clock.
     assert "--endtime=2026-07-22T20:00:00" in commands[0]
+
+
+# --- #1850 Phase 6b (Fix D): capability probing is lazy — an empty or
+# unversioned-only reserved-unbound inventory must never trigger the probe.
+
+
+def _counting_storage_probe(counter: list[int], proven: bool | None = False):
+    def _probe() -> bool | None:
+        counter[0] += 1
+        return proven
+
+    return _probe
+
+
+def test_capability_probe_not_called_with_zero_reserved_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: an empty reserved-unbound inventory must not probe capability.
+
+    ``reconcile_reserved_unbound_jobs`` on a journal with no reserved-unbound
+    rows performs zero storage probes and zero accounting queries."""
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.query_reserved_unbound_jobs() == []
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 0
+
+
+def test_capability_probe_not_called_with_unversioned_only_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: unversioned-only reserved rows must not trigger the probe.
+
+    A legacy/unversioned reserved-unbound row never needs the current-contract
+    lane selection, so capability stays unprobed and no fallback/accounting
+    query issues."""
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        created_at=datetime(2026, 7, 12, tzinfo=UTC),
+        member_count=1,
+        versioned=False,
+    )
+    repository.reserve_pipeline_job(record)
+    assert len(repository.query_reserved_unbound_jobs()) == 1
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 0
+
+
+def test_capability_probe_runs_once_for_two_current_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: two current-contract rows probe capability exactly once.
+
+    The verdict is computed once for the pass and reused for both rows, even
+    though each row needs lane selection."""
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.gateway_reconcile_helpers import (
+    _file_cohort_repository,
+    _versioned_master_reservation_record,
+)
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path / "gfs",
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    record = _versioned_master_reservation_record(
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        source_id="ifs",
+    )
+    repository.reserve_pipeline_job(record)
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 1

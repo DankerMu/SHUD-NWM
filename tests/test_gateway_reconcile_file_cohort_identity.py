@@ -1089,3 +1089,54 @@ def test_file_cohort_terminal_identity_reason_tokens_are_exact_and_zero_write(
     assert outcome.durable_write_count == 0
     assert repository.get_pipeline_job(job_id) == before
     assert len(repository.query_pipeline_jobs_by_cycle("gfs_2026071200")) == 1
+
+
+def test_terminal_genuine_runtime_mismatch_reason_without_monkeypatched_validator(
+    tmp_path: Any,
+) -> None:
+    """#1850: a genuine runtime identity mismatch surfaces through the real
+    runtime validator (no monkeypatched validator may be the sole token
+    oracle). A durable cohort whose per-model ``hydro_run`` rows are absent
+    reports ``runtime_identity_mismatch`` on the terminal lane, action
+    ``identity_mismatch_blocked``, zero durable writes."""
+    from services.orchestrator.reconcile import SacctRecord, reconcile_inflight_jobs
+
+    repository = _file_cohort_repository(
+        tmp_path,
+        member_count=1,
+        with_runtime_rows=False,
+        expected_user="scheduler-user",
+        expected_account="scheduler-account",
+    )
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    before = repository.get_pipeline_job(job_id)
+
+    tasks = (
+        SacctRecord(
+            "17667_0",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{key}",
+            array_task_id=0,
+        ),
+    )
+    record = SacctRecord(
+        "17667",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="scheduler-user",
+        account="scheduler-account",
+        array_member_job_ids=("17667_0",),
+        array_task_records=tasks,
+    )
+
+    outcome = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: record)[0]
+
+    assert outcome.action == "identity_mismatch_blocked"
+    assert outcome.status == "submitted"
+    assert outcome.reconciliation_reason_class == "runtime_identity_mismatch"
+    assert outcome.durable_write_count == 0
+    assert repository.get_pipeline_job(job_id) == before

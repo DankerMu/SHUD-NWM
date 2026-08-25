@@ -1092,6 +1092,113 @@ def test_fallback_out_of_window_and_foreign_rows_are_ineligible(
         assert outcome.match_count == 0
 
 
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_fallback_forcing_job_name_is_ineligible_not_identity_mismatch(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6j: a non-forecast JobName (``nhms_forcing``) must be ineligible
+    at the parser, so a query with ONLY such a row is ``fallback_no_match``
+    with count 0 — never a wrong ``identity_mismatch_blocked``/1.
+
+    The fallback is the FORECAST-family name window: forcing aliases,
+    batch/extern step names, and unrelated names are not forecast candidates.
+    With no other eligible rows the public outcome must be
+    ``fallback_no_match``/0, the held tuple stays reserved/unbound with streak
+    zero, and no bind occurs."""
+
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    query_end = anchor + timedelta(hours=2)
+    with _pinned_local_timezone("UTC"):
+        repository = _file_cohort_repository(
+            tmp_path,
+            created_at=anchor,
+            member_count=1,
+            expected_user="scheduler",
+            expected_account="account",
+        )
+        gfs_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+        rows = (
+            # Owned, in-window, well-shaped master id — but a FORCING job name.
+            _fallback_row("72001", submit="2026-07-12T01:00:00", job_name="nhms_forcing")
+        )
+        query, _ = _fallback_querier(monkeypatch, rows=rows, query_end=query_end)
+
+        outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=query,
+            now=lambda: query_end,
+        )[0]
+
+        assert outcome.job_id == gfs_job_id
+        assert outcome.action == "fallback_no_match"
+        assert outcome.match_count == 0
+        assert outcome.reconciliation_source == "slurm_exact_comment"
+        assert outcome.reconciliation_decision == "accounting_unavailable"
+        assert outcome.reconciliation_reason_class == "comment_accounting_unproven"
+        persisted = repository.get_pipeline_job(gfs_job_id)
+        assert persisted["status"] == "reserved"
+        assert persisted["slurm_job_id"] is None
+        assert persisted["identity_blocked_streak"] == 0
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_parse_fallback_sacct_rows_gates_forecast_family_job_name() -> None:
+    """Phase 6j parser gate: ``_parse_fallback_sacct_rows`` accepts only the
+    forecast family (``nhms_forecast`` and forecast stage aliases) and rejects
+    ``nhms_forcing``, forcing aliases, batch/extern step names, and unrelated
+    names — before owner/window classification, so a non-forecast row is
+    ineligible (never ``fallback_submit_unparsable``)."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    query_end = anchor + timedelta(hours=2)
+    base_line = "72001|{job_name}|COMPLETED|0:0||scheduler|account|2026-07-12T01:00:00\n"
+    with _pinned_local_timezone("UTC"):
+        # Forecast family accepted (dedup to one bare master).
+        records, parsable = reconcile_module._parse_fallback_sacct_rows(
+            base_line.format(job_name="nhms_forecast")
+            + base_line.format(job_name="forecast")
+            + base_line.format(job_name="run_shud_forecast")
+            + base_line.format(job_name="run_shud_forecast_array"),
+            expected_user="scheduler",
+            expected_account="account",
+            window_start=anchor,
+            window_end=query_end,
+        )
+        assert parsable is True
+        assert [record.slurm_job_id for record in records] == ["72001"]
+
+        # Forcing/unrelated/batch/extern job names rejected: zero candidates
+        # and Submit stays parsable (ineligible rows never become transient
+        # denial).
+        for job_name in (
+            "nhms_forcing",
+            "forcing",
+            "produce_forcing",
+            "forcing_package",
+            "batch",
+            "extern",
+            "unrelated",
+        ):
+            records, parsable = reconcile_module._parse_fallback_sacct_rows(
+                base_line.format(job_name=job_name),
+                expected_user="scheduler",
+                expected_account="account",
+                window_start=anchor,
+                window_end=query_end,
+            )
+            assert records == [], f"job_name={job_name} must be ineligible"
+            assert parsable is True, f"job_name={job_name} must not trigger submit_unparsable"
+
+
 def test_fallback_deduplicates_array_members_to_bare_master_and_retains_at_most_two(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -1473,3 +1580,264 @@ def test_fallback_held_row_remains_valid_for_guarded_operator_demotion(
     demoted = repository.get_accepted_submit_pipeline_job(pipeline_job_id)
     assert demoted["status"] == "reservation_lost"
     assert demoted["reconciliation_decision"] == "operator_verified_absence"
+
+
+# --- #1850 Phase 6: runtime identity disposition depends on the proven lane ---
+# An exact-comment/unknown-capability runtime mismatch keeps the durable
+# identity-blocked streak semantics; a unique candidate reached through the
+# explicitly comment-less fallback that fails runtime identity stays in the
+# held-tuple family with streak zero and never releases. The reserved gate is
+# reached through a genuine runtime validator (no monkeypatched validator).
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_fallback_genuine_runtime_mismatch_stays_held_with_streak_zero(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1850 D2: an explicitly comment-less query yields one exclusive candidate
+    but the reservation's genuine runtime identity is missing (no per-model
+    ``hydro_run`` rows). The candidate does not bind, pass evidence is
+    ``identity_mismatch_blocked``/1, the durable held tuple remains valid, and
+    repeated passes keep ``identity_blocked_streak=0`` without release."""
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    query_end = anchor + timedelta(hours=2)
+    with _pinned_local_timezone("UTC"):
+        repository = _file_cohort_repository(
+            tmp_path,
+            created_at=anchor,
+            member_count=1,
+            expected_user="scheduler",
+            expected_account="account",
+            with_runtime_rows=False,
+        )
+        pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+        rows = _fallback_row("72001", submit="2026-07-12T01:00:00")
+        query, _ = _fallback_querier(monkeypatch, rows=rows, query_end=query_end)
+
+        outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=query,
+            now=lambda: query_end,
+        )[0]
+
+        assert outcome.action == "identity_mismatch_blocked"
+        assert outcome.match_count == 1
+        assert outcome.reconciliation_decision == "accounting_unavailable"
+        assert outcome.reconciliation_reason_class == "comment_accounting_unproven"
+        assert outcome.identity_blocked_streak is None
+        persisted = repository.get_pipeline_job(pipeline_job_id)
+        assert persisted["status"] == "reserved"
+        assert persisted["slurm_job_id"] is None
+        assert persisted["reconciliation_source"] == "slurm_exact_comment"
+        assert persisted["reconciliation_decision"] == "accounting_unavailable"
+        assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+        assert persisted["identity_blocked_streak"] == 0
+
+        # Repeated passes with the release ladder enabled still never release.
+        for _ in range(3):
+            repeat = reconcile_module.reconcile_reserved_unbound_jobs(
+                repository,
+                comment_query=query,
+                accepted_submit_grace=timedelta(seconds=300),
+                identity_blocked_streak_limit=2,
+                now=lambda: query_end,
+            )[0]
+            assert repeat.action == "identity_mismatch_blocked"
+            assert repeat.identity_blocked_streak is None
+        held = repository.get_pipeline_job(pipeline_job_id)
+        assert held["identity_blocked_streak"] == 0
+        assert held["status"] == "reserved"
+        assert held["reconciliation_source"] == "slurm_exact_comment"
+        assert held["reconciliation_decision"] == "accounting_unavailable"
+        assert held["reconciliation_reason_class"] == "comment_accounting_unproven"
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_exact_comment_runtime_mismatch_retains_streak_and_release(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1850 D2: an exact-comment runtime mismatch keeps the durable
+    identity-blocked streak semantics and the release ladder. With runtime
+    identity missing on a comment-storing cluster, repeated passes increment
+    the durable streak (exact-comment source) and eventually release."""
+    from services.orchestrator import reconcile as reconcile_module
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        with_runtime_rows=False,
+    )
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    exact = SacctRecord(
+        "72001",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="scheduler",
+        account="account",
+    )
+
+    def run_pass(limit: int | None = 3) -> Any:
+        return reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=lambda _key: exact,
+            accepted_submit_grace=timedelta(seconds=300),
+            identity_blocked_streak_limit=limit,
+            now=lambda: anchor + timedelta(hours=1),
+        )[0]
+
+    first = run_pass()
+    assert first.action == "identity_mismatch_blocked"
+    assert first.reconciliation_source == "slurm_exact_comment"
+    assert first.reconciliation_decision == "identity_mismatch_blocked"
+    assert first.identity_blocked_streak == 1
+    assert repository.get_pipeline_job(pipeline_job_id)["identity_blocked_streak"] == 1
+
+    second = run_pass()
+    assert second.action == "identity_mismatch_blocked"
+    assert second.identity_blocked_streak == 2
+    assert repository.get_pipeline_job(pipeline_job_id)["status"] == "reserved"
+
+    released = run_pass()
+    assert released.action == "identity_mismatch_released"
+    assert released.status == "reservation_lost"
+    assert released.reconciliation_decision == "identity_mismatch_released"
+    assert released.identity_blocked_streak == 3
+    assert repository.get_pipeline_job(pipeline_job_id)["status"] == "reservation_lost"
+
+
+# --- #1850 Phase 6c: pre-outcome rows must use the same capability/runtime lane
+# as already-timeout rows (Fix 1). An identical runtime-invalid row with
+# submit_outcome=None must land in the same held/streak-zero family on an
+# explicitly comment-less cluster, and the same ordinary streak family when
+# capability is True/unknown.
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_fallback_pre_outcome_runtime_mismatch_matches_timeout_lane(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix 1: a pre-outcome (submit_outcome=None) runtime-invalid forecast row
+    on an explicitly comment-less cluster behaves identically to an
+    already-timeout row: held tuple, streak zero, never released."""
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    query_end = anchor + timedelta(hours=2)
+    with _pinned_local_timezone("UTC"):
+        # Pre-outcome row: no timeout transition written yet.
+        repository = _file_cohort_repository(
+            tmp_path,
+            created_at=anchor,
+            member_count=1,
+            expected_user="scheduler",
+            expected_account="account",
+            with_runtime_rows=False,
+            submit_outcome=None,
+        )
+        pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+        rows = _fallback_row("72001", submit="2026-07-12T01:00:00")
+        query, _ = _fallback_querier(monkeypatch, rows=rows, query_end=query_end)
+
+        outcome = reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=query,
+            now=lambda: query_end,
+        )[0]
+
+        assert outcome.action == "identity_mismatch_blocked"
+        assert outcome.match_count == 1
+        assert outcome.reconciliation_decision == "accounting_unavailable"
+        assert outcome.reconciliation_reason_class == "comment_accounting_unproven"
+        persisted = repository.get_pipeline_job(pipeline_job_id)
+        assert persisted["status"] == "reserved"
+        assert persisted["slurm_job_id"] is None
+        assert persisted["reconciliation_source"] == "slurm_exact_comment"
+        assert persisted["reconciliation_decision"] == "accounting_unavailable"
+        assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+        assert persisted["identity_blocked_streak"] == 0
+
+        # Repeated passes with the release ladder enabled still never release.
+        for _ in range(3):
+            repeat = reconcile_module.reconcile_reserved_unbound_jobs(
+                repository,
+                comment_query=query,
+                accepted_submit_grace=timedelta(seconds=300),
+                identity_blocked_streak_limit=2,
+                now=lambda: query_end,
+            )[0]
+            assert repeat.action == "identity_mismatch_blocked"
+            assert repeat.identity_blocked_streak is None
+        held = repository.get_pipeline_job(pipeline_job_id)
+        assert held["identity_blocked_streak"] == 0
+        assert held["status"] == "reserved"
+
+
+@pytest.mark.skipif(not hasattr(__import__("time"), "tzset"), reason="time.tzset() is POSIX-only")
+def test_pre_outcome_exact_comment_runtime_mismatch_matches_ordinary_streak(
+    tmp_path: Any,
+) -> None:
+    """Fix 1: a pre-outcome runtime-invalid forecast row on a comment-storing /
+    unknown-capability cluster keeps the ordinary exact-comment streak and
+    release ladder, exactly like an already-timeout row."""
+    from services.orchestrator import reconcile as reconcile_module
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path,
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        with_runtime_rows=False,
+        submit_outcome=None,
+    )
+    pipeline_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    exact = SacctRecord(
+        "72001",
+        "COMPLETED",
+        "nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        user="scheduler",
+        account="account",
+    )
+
+    def run_pass(limit: int | None = 3) -> Any:
+        return reconcile_module.reconcile_reserved_unbound_jobs(
+            repository,
+            comment_query=lambda _key: exact,
+            accepted_submit_grace=timedelta(seconds=300),
+            identity_blocked_streak_limit=limit,
+            now=lambda: anchor + timedelta(hours=1),
+        )[0]
+
+    first = run_pass()
+    assert first.action == "identity_mismatch_blocked"
+    assert first.reconciliation_source == "slurm_exact_comment"
+    assert first.reconciliation_decision == "identity_mismatch_blocked"
+    assert first.identity_blocked_streak == 1
+    assert repository.get_pipeline_job(pipeline_job_id)["identity_blocked_streak"] == 1
+
+    second = run_pass()
+    assert second.action == "identity_mismatch_blocked"
+    assert second.identity_blocked_streak == 2
+
+    released = run_pass()
+    assert released.action == "identity_mismatch_released"
+    assert released.status == "reservation_lost"
+    assert released.reconciliation_decision == "identity_mismatch_released"
+    assert released.identity_blocked_streak == 3
+    assert repository.get_pipeline_job(pipeline_job_id)["status"] == "reservation_lost"

@@ -513,3 +513,66 @@ def test_fallback_submit_unparsable_cannot_be_persisted_durably() -> None:
             }
         )
     assert error.value.field == "reconciliation_reason_class"
+
+
+# ---------------------------------------------------------------------------
+# #1850 (Phase 6): MODIFIED streak invariant — a pass-evidence-only
+# ``identity_mismatch_blocked`` never counts toward the release ladder. The
+# journal refuses a durable identity-blocked write whose expected status is a
+# held ``accounting_unavailable`` / ``comment_accounting_unproven`` row (the
+# fallback's durable held tuple), because such a write would be a pass-only
+# identity block masquerading as a durable exact-comment mismatch and would
+# move the counter. Direct-call oracles isolate the guard from every durable
+# entry point that raises first.
+# ---------------------------------------------------------------------------
+
+
+def test_held_tuple_reconciliation_write_never_increments_the_streak(
+    tmp_path: Any,
+) -> None:
+    """#1850: a fallback pass-only identity block keeps streak zero.
+
+    A row durably held at ``accounting_unavailable`` /
+    ``comment_accounting_unproven`` (the #1564 tuple) may only ever receive
+    the same held-tuple write again; a caller that asks the versioned
+    transition to record a durable exact-comment ``identity_mismatch_blocked``
+    on it must be refused, because that is exactly the pass-only-to-durable
+    masquerade the modified streak requirement forbids.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository = _file_cohort_repository(tmp_path / "held", member_count=1)
+    held = repository.get_pipeline_job(_INVARIANT_JOB_ID)
+    assert held["status"] == "reserved"
+    assert held["submit_outcome"] == "submit_result_ambiguous"
+
+    before_files = {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(ValueError, match="identity blocked streak belongs to identity-mismatch transitions"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "accounting_unavailable",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                reconciliation_reason_class="comment_accounting_unproven",
+                identity_blocked_streak=1,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+    assert {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    } == before_files
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) == held

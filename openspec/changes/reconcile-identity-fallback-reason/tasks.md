@@ -14,21 +14,25 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 
 - [x] 2.1 Make comment capability tri-state: explicit present-without-`job_comment` enables fallback; probe failure and missing config line remain query-free `query_unavailable` / `comment_accounting_unproven`, with distinct warnings.
 - [x] 2.2 Add one bounded attempt-window `nhms_forecast` accounting query: host-local bound rendering; shared byte/row/whole-query timeout budget; host-local-to-UTC Submit parsing; exact user/account and forecast family; bare-master deduplication; at most two masters.
-- [x] 2.3 Bind only one fully validated candidate, allow an empty comment at both reserved identity gates, keep present-but-different fatal, and persist `slurm_name_window_unique` only on successful `matched_bound`.
-- [x] 2.4 Pin unsuccessful pass evidence: zero -> `fallback_no_match`/0; ambiguity -> `ambiguous_fallback_match`/2; unique identity failure -> `identity_mismatch_blocked`/1; malformed Submit -> `query_unavailable`/`fallback_submit_unparsable`; no case binds, demotes, retries, or increments streak.
-- [x] 2.5 Preserve or first establish only the #1564 durable held tuple on every unsuccessful fallback, and prove guarded operator demotion still accepts it.
+- [x] 2.3 Bind only one fully validated candidate with exactly one durable claimant, allow an empty comment at both reserved identity gates, keep present-but-different fatal, and persist `slurm_name_window_unique` only on successful `matched_bound`.
+- [x] 2.4 Pin unsuccessful pass evidence: zero -> `fallback_no_match`/0; query or durable-claim ambiguity -> `ambiguous_fallback_match`/2; unique identity failure -> `identity_mismatch_blocked`/1; malformed Submit -> `query_unavailable`/`fallback_submit_unparsable`; no case binds, demotes, retries, or increments streak.
+- [x] 2.5 Preserve or first establish only the #1564 durable held tuple on every unsuccessful fallback, including repeated runtime/claimant/occupancy failures, and prove guarded operator demotion still accepts it.
 - [x] 2.6 Prove exact-comment clusters, legacy/unversioned rows, unsupported contracts, visibility ordering, process/byte/row/time bounds, and exact-comment absence behavior are unchanged.
+- [x] 2.7 Carry the parsed candidate Submit instant to the typed commit API; under journal-global cross-process serialization, reject an already-bound active Slurm id, the same settled accounting incarnation `(id, Submit)`, and any candidate whose instant falls in more than one current same-owner reserved forecast window; permit recycled ids with different canonical Submit instants.
+- [x] 2.8 Prove two overlapping GFS/IFS (or cross-cycle) claimants cannot bind one master, an already-bound active id cannot be reclaimed, row order/concurrent commit cannot change the result, and one exclusive claimant still binds, including stale/damaged/missing direct projections, terminal cleanup handoff, and first-migration crash-resume.
+- [x] 2.9 Prove the closed window upper boundary: Submit exactly at frozen query-end binds; Submit after query-end stays held/no-match under host-local-to-UTC conversion.
 
 ## 3. Terminal identity reason classes (#1795)
 
 - [x] 3.1 Split the folded cohort-valid/runtime check and return one stable reason class from every terminal file-cohort identity failure site.
 - [x] 3.2 Add optional `ReconcileOutcome.reconciliation_reason_class`, serialize it in `restart_reconcile.inflight.outcomes[]`, and preserve the original action, status, durable-write, pipeline-status, and pipeline-event values.
-- [x] 3.3 Cover every reason token, the unchanged zero-write block, scheduler evidence serialization, and a genuine runtime mismatch distinct from live accounting/task failures.
+- [x] 3.3 Cover every reason token, the unchanged zero-write block, scheduler evidence serialization, and a genuine runtime mismatch distinct from live accounting/task failures; no monkeypatched runtime validator may be the sole token oracle.
+- [x] 3.4 Modify the existing streak requirement in this delta so only durable exact-comment identity-mismatch transitions count; repeated fallback pass-only identity blocks keep streak zero and never release.
 
 ## 4. Operations and evidence
 
-- [x] 4.1 Update `docs/runbooks/failed-basin-retry.md`: automatic unique fallback, diagnostic outcomes, exact failure behavior, and the production-safe receipt rule.
-- [x] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation.
+- [x] 4.1 Update `docs/runbooks/failed-basin-retry.md`: automatic claimant-exclusive fallback, accounting-incarnation/locator handoff, diagnostic outcomes, exact failure behavior, and the production-safe receipt rule.
+- [x] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation on the post-review final head.
 - [ ] 4.3 On node-22, use live read-only `scontrol`/`sacct` and a scratch journal to demonstrate one unique bind and one ambiguity refusal without `sbatch`, `scancel`, service changes, or production-journal writes; if no natural accounting rows exist, record the runbook-authorized no-fixture outcome.
 
 ## Risk packs considered (core)
@@ -59,7 +63,7 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 ## Invariant Matrix
 
 - Governing invariant: a reserved cohort binds only one uniquely owned, attempt-window-bound Slurm master whose submission-stable identity matches; uncertainty remains fail-closed and names its failed clause.
-- Source-of-truth identity/contract: current accepted-submit master, immutable attempt anchor, expected Slurm user/account, cohort members, and live accounting master/task ids.
+- Source-of-truth identity/contract: current accepted-submit master, immutable attempt anchor, expected Slurm user/account, cohort members, parsed accounting Submit instant, live accounting master/task ids, single durable claimant, and active Slurm-id occupancy.
 - Producers: reservation/reclaim writers and frozen per-model `hydro_run` writers.
 - Validators/preflight: comment capability probe, fallback parser/classifier, runtime identity validator, terminal cohort identity validator, `AcceptedSubmitTransition`.
 - Storage/cache/query: file orchestration journal, bounded `sacct` subprocess/cache, accepted-submit transition tuple.
@@ -68,8 +72,9 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 - Failure paths/rollback/stale state: zero/ambiguous/foreign/malformed candidates, unknown capability, stale attempt snapshots, compare-and-swap loss.
 - Evidence/audit/readiness: restart-reconcile reserved/inflight outcomes, focused/full pytest, strict OpenSpec, node-22 scratch receipt.
 - Regression rows:
-  - explicit no-comment + one owned in-window candidate + valid identity -> bind once with fallback source.
-  - explicit no-comment + zero candidates -> `fallback_no_match`/0; two candidates -> `ambiguous_fallback_match`/2; wrong identity -> `identity_mismatch_blocked`/1; malformed Submit -> `query_unavailable`/`fallback_submit_unparsable`; all stay reserved/unbound with the held tuple preserved.
+  - explicit no-comment + one owned in-window candidate + one durable claimant + unoccupied active id + valid identity -> bind once with fallback source.
+  - one candidate admitted by two overlapping same-owner reserved attempts, or already occupied by another active accepted-submit master -> no claimant binds; every row stays under the held tuple with streak zero.
+  - explicit no-comment + zero candidates -> `fallback_no_match`/0; query or claimant ambiguity -> `ambiguous_fallback_match`/2; wrong identity -> `identity_mismatch_blocked`/1; malformed Submit -> `query_unavailable`/`fallback_submit_unparsable`; all stay reserved/unbound with the held tuple preserved.
   - attempt-2 master + attempt-1 immutable successful runtime rows -> identity passes; stable-field mismatch still blocks.
   - each terminal identity failure site -> unchanged `identity_mismatch_blocked` plus its unique reason and zero durable writes.
   - comment-storing and unversioned sibling paths -> existing exact-comment/legacy behavior unchanged.

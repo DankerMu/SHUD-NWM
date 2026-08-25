@@ -206,6 +206,11 @@ class SacctRecord:
     file_journal_identity: Mapping[str, Any] | None = None
     array_member_job_ids: tuple[str, ...] = ()
     array_task_records: tuple["SacctRecord", ...] = ()
+    # #1850: the parsed host-local-to-UTC Slurm ``Submit`` instant carried by a
+    # name-window fallback candidate so the typed commit can prove the attempt
+    # window is closed at both endpoints and the candidate is not claimed by a
+    # sibling reserved attempt. ``None`` when no Submit was requested/parsed.
+    submitted_at: datetime | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -477,12 +482,15 @@ def _parse_fallback_sacct_rows(
     Returns ``(records, submit_parsable)``. A row is eligible only when its
     normalized bare master id is well-shaped, its submit instant parses and
     falls inside the closed attempt window, its owner matches exactly, and its
-    job name belongs to the forecast family. ``submit_parsable`` is False when
-    at least one candidate row carried missing/unparsable Submit evidence
-    (transient denial per the pass-evidence contract); ineligible rows never
-    enter the candidate list. Deduplication is by bare master id and at most
-    ``MAX_FALLBACK_MASTERS`` masters are retained (zero/unique/ambiguous is
-    all that is required).
+    job name belongs to the FORECAST family (``nhms_forecast`` or a forecast
+    stage alias; forcing/batch/extern/unrelated names are ineligible). An
+    ineligible row never turns into ``fallback_submit_unparsable``: only an
+    otherwise-eligible forecast/owner row with missing/unparsable Submit
+    triggers the transient denial. ``submit_parsable`` is False when at least
+    one candidate row carried missing/unparsable Submit evidence (transient
+    denial per the pass-evidence contract). Deduplication is by bare master id
+    and at most ``MAX_FALLBACK_MASTERS`` masters are retained
+    (zero/unique/ambiguous is all that is required).
     """
 
     records: list[SacctRecord] = []
@@ -500,9 +508,16 @@ def _parse_fallback_sacct_rows(
         if expected_account and account != expected_account:
             continue
         job_name = fields[1].strip() if len(fields) > 1 else ""
-        if job_name not in _GENERIC_ARRAY_JOB_NAMES and not is_forecast_cohort_stage_name(
-            job_name.removeprefix("nhms_")
-        ):
+        # Phase 6j: the fallback is the FORECAST-family name window. A row is
+        # eligible only when its JobName is the canonical fallback name
+        # (``nhms_forecast``) or a forecast stage alias recognized by
+        # ``is_forecast_cohort_stage_name``. Deliberately NOT the broader
+        # inflight ``_GENERIC_ARRAY_JOB_NAMES`` (which includes ``nhms_forcing``):
+        # a non-forecast row must be ineligible, so a query with only such rows
+        # is ``fallback_no_match`` (count 0) rather than a wrong
+        # ``identity_mismatch_blocked``. Forcing aliases, batch/extern step
+        # names, and unrelated names never enter the candidate list.
+        if not is_forecast_cohort_stage_name(job_name.removeprefix("nhms_")):
             continue
         if len(fields) < 8:
             # Structurally sufficient owner/name/master row whose Submit field
@@ -527,6 +542,7 @@ def _parse_fallback_sacct_rows(
                 comment=fields[4].strip() or None,
                 user=user or None,
                 account=account or None,
+                submitted_at=submit,
             )
         )
         if len(records) >= MAX_FALLBACK_MASTERS:
@@ -589,6 +605,21 @@ def default_comment_sacct_querier(
             pages.append((start, end))
             end = start
         return tuple(pages)
+
+    def capability() -> bool | None:
+        """Tri-state comment-storage capability, probed at most once per instance.
+
+        ``True`` = accounting stores job comments (exact-comment lane),
+        ``False`` = explicitly comment-less (fallback lane), ``None`` =
+        unknown (no lane may issue). Cached after the first probe so the verdict
+        is stable for the whole scheduler/reconcile session (#1850 D2).
+        """
+
+        nonlocal comment_storage_proven, comment_storage_probed
+        if not comment_storage_probed:
+            comment_storage_proven = storage_probe()
+            comment_storage_probed = True
+        return comment_storage_proven
 
     # One querier instance is one scheduler/reconcile session. Freeze its full
     # time window once so every key and owner/global scope shares identical page
@@ -772,6 +803,10 @@ def default_comment_sacct_querier(
             fallback_submit_unparsable=not submit_parsable,
         )
 
+    # #1850 D2: expose the cached tri-state capability verdict as a typed
+    # attribute on the querier so the reconcile writer can choose the runtime
+    # lane without a second probe.
+    setattr(_query, "capability", capability)
     return _query
 
 
@@ -1748,7 +1783,24 @@ def reconcile_reserved_unbound_jobs(
     """
 
     outcomes: list[ReservationReconcileOutcome] = []
-    for job in store.query_reserved_unbound_jobs():
+    # #1850 D2 + Fix D: capability probing is LAZY. Snapshot the reserved rows
+    # first; the querier's cached tri-state verdict is computed at most once,
+    # only when the first current-contract forecast row that needs lane
+    # selection is processed. An empty or unversioned-only inventory never
+    # triggers the probe or any accounting query. One stable verdict serves
+    # the whole pass.
+    reserved_jobs = list(store.query_reserved_unbound_jobs())
+    comment_capability: bool | None = None
+    comment_capability_known = False
+
+    def _pass_comment_capability() -> bool | None:
+        nonlocal comment_capability, comment_capability_known
+        if not comment_capability_known:
+            comment_capability = _comment_query_capability(comment_query)
+            comment_capability_known = True
+        return comment_capability
+
+    for job in reserved_jobs:
         idempotency_key = job.idempotency_key
         if not idempotency_key:
             continue
@@ -1757,7 +1809,11 @@ def reconcile_reserved_unbound_jobs(
         # cycle abort resolution of every other reserved row and the pass.
         outcome_floor = len(outcomes)
         try:
-            accepted_submit_reconcile = _accepted_submit_reconcile_job(store, job)
+            accepted_submit_reconcile = _accepted_submit_reconcile_job(
+                store,
+                job,
+                comment_capability_provider=_pass_comment_capability,
+            )
             file_forecast_cohort = bool(
                 getattr(store, "supports_accepted_submit_reconcile", False)
                 and _accepted_submit_versioned_job(job)
@@ -2236,6 +2292,16 @@ def reconcile_reserved_unbound_jobs(
                         status="submitted",
                     ),
                 }
+                if (
+                    fallback_unique
+                    and record.submitted_at is not None
+                    and _callable_accepts_keyword(committer, "submitted_at")
+                ):
+                    # #1850: carry the parsed host-local-to-UTC Submit instant so
+                    # the typed commit can prove the attempt window is closed at
+                    # both endpoints and no sibling reserved attempt claims this
+                    # candidate (claimant exclusivity is enforced in the commit).
+                    commit_kwargs["submitted_at"] = record.submitted_at
                 if fallback_unique:
                     # #1565: a successful name-window bind persists its own
                     # source; every other decision remains exact-comment
@@ -2251,6 +2317,51 @@ def reconcile_reserved_unbound_jobs(
                     commit_kwargs["pipeline_job_id"] = job.job_id
                 commit_result = committer(str(idempotency_key), **commit_kwargs)
                 if not commit_result.committed:
+                    # #1850 + Fix A: the typed commit refuses distinct
+                    # non-committed outcomes for active-id occupancy
+                    # (internal ``active_slurm_id_occupied`` /
+                    # ``identity_mismatch_blocked``) vs multi-claimant
+                    # ambiguity vs the ordinary stale CAS. Every refusal stays
+                    # fail-closed under the held tuple with streak zero.
+                    # Fix 3: the PUBLIC outcome vocabulary stays within the
+                    # frozen spec — active occupancy maps to the specified
+                    # ``identity_mismatch_blocked`` / count 1 action, never to
+                    # the internal token.
+                    if fallback_unique and commit_result.outcome in {
+                        "ambiguous_fallback_match",
+                        "identity_mismatch_blocked",
+                        "active_slurm_id_occupied",
+                    }:
+                        internal = str(commit_result.outcome)
+                        if internal == "ambiguous_fallback_match":
+                            action = "ambiguous_fallback_match"
+                            match_count = 2
+                        else:
+                            action = "identity_mismatch_blocked"
+                            match_count = 1
+                        write_count = _record_file_reconciliation(
+                            store,
+                            job,
+                            "accounting_unavailable",
+                            reason_class="comment_accounting_unproven",
+                        )
+                        outcomes.append(
+                            ReservationReconcileOutcome(
+                                job_id=job.job_id,
+                                idempotency_key=str(idempotency_key),
+                                action=action,
+                                status=str(job.status),
+                                reconciliation_source="slurm_exact_comment",
+                                reconciliation_decision="accounting_unavailable",
+                                reconciliation_reason_class="comment_accounting_unproven",
+                                match_count=match_count,
+                                durable_write_kind=(
+                                    "pipeline_job_reconciliation" if write_count else None
+                                ),
+                                durable_write_count=write_count,
+                            )
+                        )
+                        continue
                     outcomes.append(
                         ReservationReconcileOutcome(
                             job_id=job.job_id,
@@ -2844,16 +2955,94 @@ def _reserved_record_identity_matches(
     return True
 
 
-def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
+def _accepted_submit_reconcile_job(
+    store: Any,
+    job: Any,
+    *,
+    comment_capability: bool | None = None,
+    comment_capability_provider: Callable[[], bool | None] | None = None,
+) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
-    pre_outcome_reservation = identity.get("submit_outcome") is None
     return bool(
         getattr(store, "supports_accepted_submit_reconcile", False)
         and _accepted_submit_versioned_job(job)
         and _is_forecast_cohort_job(job)
         and forecast_cohort_identity_is_valid(identity)
-        and (pre_outcome_reservation or _file_cohort_runtime_identity_matches(store, identity))
+        and (
+            # Fix 1: EVERY current-contract valid forecast row — pre-outcome
+            # (submit_outcome is None) included — resolves the pass capability
+            # lazily BEFORE the runtime lane is decided. An explicitly
+            # comment-less cluster permits the fallback lane and evaluates
+            # runtime later (held/streak-zero); True/unknown keeps the
+            # ordinary exact-comment streak behavior. A pre-outcome row must
+            # land in the same lane as an already-timeout row, so disposition
+            # never depends on whether the timeout was already persisted.
+            _accepted_submit_runtime_lane_eligible(
+                store,
+                identity,
+                comment_capability=comment_capability,
+                comment_capability_provider=comment_capability_provider,
+            )
+            is not False
+        )
     )
+
+
+def _accepted_submit_runtime_lane_eligible(
+    store: Any,
+    identity: Mapping[str, Any],
+    *,
+    comment_capability: bool | None = None,
+    comment_capability_provider: Callable[[], bool | None] | None = None,
+) -> bool | None:
+    """Tri-state runtime-lane capability: comment-storing/unknown vs fallback.
+
+    Returns ``True`` (the current-contract forecast reservation may proceed on
+    its accounting lane), ``False`` (its durable runtime identity does not
+    match on the exact-comment lane), or ``None`` (capability unknown: no lane
+    may issue and the row stays held). The verdict is driven by the querier's
+    typed capability verdict, which is the same source the name-window fallback
+    gate uses (#1850 D2):
+
+    - ``False`` (explicitly comment-less cluster): the fallback lane runs, so
+      a runtime failure is evaluated later inside the fallback path and stays
+      in the held-tuple family with streak zero.
+    - ``True`` or unknown: the exact-comment lane runs, and its runtime
+      identity gate stays the durable validator (pre-PR semantics).
+
+    The verdict is resolved lazily through ``comment_capability_provider`` when
+    the exact-comment validator would otherwise be consulted, so an empty or
+    unversioned-only reserved inventory never triggers the capability probe
+    (#1850 Fix D).
+    """
+
+    if comment_capability is None and callable(comment_capability_provider):
+        comment_capability = comment_capability_provider()
+    if comment_capability is False:
+        # Explicitly comment-less: the name-window fallback MAY run regardless
+        # of the durable runtime rows; a fallback runtime failure never enters
+        # the durable identity-blocked streak.
+        return True
+    return _file_cohort_runtime_identity_matches(store, identity)
+
+
+def _comment_query_capability(comment_query: Any) -> bool | None:
+    """Read the querier's typed tri-state comment-storage capability verdict.
+
+    The default querier exposes ``capability()`` returning ``True`` /
+    ``False`` / ``None`` (storing / explicitly comment-less / unknown), cached
+    after exactly one probe per querier instance. A querier without the typed
+    accessor is treated as unknown (None), which preserves the exact-comment
+    pre-PR runtime semantics for injected/legacy fakes.
+    """
+
+    capability = getattr(comment_query, "capability", None)
+    if not callable(capability):
+        return None
+    try:
+        return capability()
+    except Exception:  # noqa: BLE001 - a probe fault stays unknown, never raises.
+        return None
 
 
 def _accepted_submit_versioned_job(job: Any) -> bool:

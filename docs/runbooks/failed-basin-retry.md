@@ -248,9 +248,11 @@ reservation to `reservation_lost`, and the reclaim path then re-`sbatch`es the s
 — a silent double submission. The price of refusing is real and must be paid by hand: a
 `reserved` row is not terminal, so **every later pass of that cycle keeps failing with
 `PIPELINE_ALREADY_ACTIVE`** and records `submission_failed` with zero Slurm submissions
-until the row is disposed of. This outcome class has no automatic exit — it does not feed
-`identity_blocked_streak` (that counter only counts `identity_mismatch_blocked`) and never
-self-releases.
+until the row is disposed of. This durable outcome class has no automatic exit: only a
+durable exact-comment `reconciliation_decision=identity_mismatch_blocked` feeds
+`identity_blocked_streak`. An unsuccessful comment-less fallback may expose the same
+action name in pass evidence, but its durable row stays `accounting_unavailable` /
+`comment_accounting_unproven`, keeps streak zero, and never self-releases.
 
 ### Finding the held rows
 
@@ -265,17 +267,18 @@ self-releases.
   row below.
 - Journal: the same `reconciliation_reason_class` is persisted on the cohort master row,
   whose `status` is still `reserved` and whose `slurm_job_id` is still null.
-- Scheduler log, once per pass, tells the two unproven causes apart: `comment storage probe
-  could not execute: …` means `scontrol` failed or was unreachable (a deployment fault —
-  fix that first, the cluster may well store comments; while the fault persists, each
-  pass's `accounting_unavailable` write also resets any accumulated
-  `identity_blocked_streak`, so the § `identity_mismatch_released` ladder cannot fire
-  either). `accounting does not store job comments: AccountingStoreFlags lacks
-  job_comment` normally means the cluster is provably comment-less — but the same message
-  also fires when the config output has no `AccountingStoreFlags` line at all (for
-  example a pre-20.11 Slurm using the legacy `AccountingStoreJobComment` key, which the
-  probe deliberately does not read); when in doubt, run `scontrol show config | grep -i
-  AccountingStore` by hand before concluding the capability is absent.
+- Scheduler log, once per pass, tells all three capability verdicts apart:
+  `comment storage probe could not execute: …` means `scontrol` failed or was unreachable
+  (unknown; fix the deployment fault first because the cluster may store comments), while
+  `comment storage capability unknown: AccountingStoreFlags line is absent` means the
+  command ran but omitted the authoritative config line (also unknown; no fallback query
+  issues). Only `accounting does not store job comments: AccountingStoreFlags lacks
+  job_comment` proves the cluster explicitly comment-less and opens the conservative
+  fallback. While either unknown condition persists, each durable
+  `accounting_unavailable` transition resets any accumulated `identity_blocked_streak`, so
+  the § `identity_mismatch_released` ladder cannot fire. A legacy
+  `AccountingStoreJobComment` key does not substitute for `AccountingStoreFlags`; inspect
+  `scontrol show config | grep -i AccountingStore` before changing cluster configuration.
 
 ### Deciding whether the job is actually in flight
 
@@ -311,26 +314,40 @@ plus non-empty `expected_slurm_user`/`expected_slurm_account` may enter the
   `--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit`.
 - Both bounds are rendered as host-local wall-clock strings (same rule as the
   exact-comment query). A timezone-less `Submit` value is interpreted in the
-  host-local timezone and converted to UTC; a missing/unparsable or
-  out-of-window `Submit` makes the row ineligible.
-- Array/step rows normalize to their bare numeric master id; at most two
-  distinct masters are retained (zero / unique / ambiguous is all that is
-  needed).
+  host-local timezone and converted to UTC. Missing/unparsable `Submit` is
+  transient denial only for an otherwise eligible forecast/owner row; an
+  out-of-window row is ineligible.
+- Accepted forecast array/step ids normalize to their bare numeric master id;
+  at most two distinct masters are retained (zero / unique / ambiguous is all
+  that is needed). Forcing, batch/extern, and unrelated job names are discarded
+  before candidate classification, so they contribute to `fallback_no_match`,
+  not `identity_mismatch_blocked` or malformed-Submit evidence.
 - A candidate must have an in-window submit instant, exact user/account, and a
   forecast-family job name before it reaches the existing identity gates. A
-  unique candidate with an **empty** comment may pass both comment gates (the
-  cluster never stored it); a present-but-different comment remains fatal.
+  candidate with an **empty** comment may pass both comment gates (the cluster
+  never stored it); a present-but-different comment remains fatal.
 
-Only a unique, fully validated candidate binds — once, with
+“Unique” means more than one row from this `sacct` query. Exactly one durable
+reserved claimant must admit the candidate's Submit instant for that user/account,
+and no other current accepted-submit master may own the same accounting
+incarnation `(bare Slurm id, canonical Submit)`. An active same-id owner always
+blocks; a settled same-id row blocks only when its canonical Submit is identical,
+while a different Submit proves legitimate numeric-id reuse. Canonical cycle
+journal authority decides this check: stale, damaged, or missing flat projections
+cannot fabricate or hide an owner. Inventory cleanup and first migration preserve
+an anchor-to-flat locator handoff, so a projection crash or concurrent cleanup
+cannot create a temporary vacancy.
+
+Only that claimant-exclusive, fully validated candidate binds — once, with
 `reconciliation_source=slurm_name_window_unique` and
 `reconciliation_decision=matched_bound`. Every other outcome is fail-closed and
 **never** binds, demotes, retries, or increments the streak:
 
 | Outcome | Pass evidence | Row state |
 |---|---|---|
-| zero eligible masters | `action=fallback_no_match`, `match_count=0` | reserved/unbound |
-| two or more distinct masters | `action=ambiguous_fallback_match`, `match_count=2` | reserved/unbound |
-| unique candidate fails a remaining gate | `action=identity_mismatch_blocked`, `match_count=1` | reserved/unbound |
+| zero eligible masters (including only non-forecast names) | `action=fallback_no_match`, `match_count=0` | reserved/unbound |
+| two or more query masters, or more than one durable claimant | `action=ambiguous_fallback_match`, `match_count=2` | reserved/unbound |
+| one candidate fails identity or same-incarnation occupancy | `action=identity_mismatch_blocked`, `match_count=1` | reserved/unbound |
 | missing/unparsable `Submit` | `action=query_unavailable`, `reconciliation_reason_class=fallback_submit_unparsable` (pass-only) | reserved/unbound |
 | process/timeout/byte/row failure | `action=query_unavailable`, existing bounded-query reason | reserved/unbound |
 

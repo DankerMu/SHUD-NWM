@@ -47342,6 +47342,13 @@ def test_restart_reconcile_quarantines_a_journal_error_row_and_resolves_the_rest
     class _PoisonedCycleStore:
         supports_accepted_submit_reconcile = True
 
+        def forecast_cohort_runtime_identity_matches(self, identity: Any) -> bool:
+            # #1850 Fix 1: every current-contract forecast row (pre-outcome
+            # included) resolves the runtime lane; this fake models a
+            # runtime-valid cohort so the poisoned-write quarantine below stays
+            # the behavior under test.
+            return True
+
         def query_reserved_unbound_jobs(self) -> list[Any]:
             if bound_calls:
                 return []
