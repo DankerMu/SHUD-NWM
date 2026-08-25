@@ -1,27 +1,18 @@
 """Static contract: active node-22 entrypoints preserve the deferred .venv.
 
-Before the operator-approved maintenance cutover, nothing bound to
-``/scratch/frd_muziyao/NWM`` may create, update, replace, or synchronize the
-shared active ``.venv``. Allowed pre-window forms: a wrapper exec'ing the exact
-active ``.venv/bin/python``; that interpreter directly (``-m`` for console
-scripts); ``uv run --no-sync`` for read-only observation (not pin proof); a
-disposable detached worktree with its own synced environment (bounded
-pin-acceptance evidence only, never the e2e/grib oracle). Forbidden in the
-active checkout: bare/environment-updating ``uv run``, ``uv sync``,
-``--active``, and system Python (``python``/``python3``) as a substitute.
+Before the maintenance cutover, the active checkout may use only its exact
+interpreter/wrapper or ``uv run --no-sync`` observation; environment-updating
+uv, ``--active``, and system Python substitutes are forbidden. Detached
+worktrees remain bounded pin evidence, never the e2e/grib oracle.
 
-The e2e/grib oracle is **node-27** (``docs/runbooks/ci-test-routing.md``): after
-the interactive ``ssh``, the lane runs under ``set -euo pipefail`` so checkout
-failures and a non-3.11 environment abort before pytest; it asserts Python 3.11
-with an executable ``uv run --no-sync python -c "import sys; assert
-sys.version_info[:2] == (3, 11), sys.version"`` guard, then runs
-``uv run --no-sync pytest``.
+The e2e/grib oracle is node-27 under ``set -euo pipefail``: its executable 3.11
+guard precedes ``uv run --no-sync pytest | tee``. Every ``||`` or fail-fast
+disable turns the static seam red, preserving non-zero status through receipt
+piping.
 
-Explicit exclusions (not a broad ignore): unrelated node-27 surfaces; the
-isolated rollback-worktree ``(cd "$ROLLBACK_CHECKOUT" && uv sync ...)``; dated
-historical observation sections (heading-bounded "现场验证"/incident records)
-and whole-document-marked historical runbooks — observed records, not current
-executable guidance.
+Explicit exclusions are node-27-only surfaces, isolated rollback-worktree sync,
+and heading/whole-document-marked historical records; none is current node-22
+guidance.
 """
 
 from __future__ import annotations
@@ -95,23 +86,7 @@ def _command_lines(text: str) -> list[tuple[int, str]]:
 
 def test_current_production_ops_node22_active_uses_exact_venv() -> None:
     text = _read("docs/runbooks/current-production-ops.md")
-    bare_uv_node22 = []
-    for lineno, line in _command_lines(text):
-        # node-27 commands and the disposable rollback-worktree sync stay unchanged.
-        if NODE27_PY in line or "nwm@210.77.77.27" in line or "node-27" in line:
-            continue
-        if "/home/nwm/" in line:  # node-27 geo etc.
-            continue
-        if "ROLLBACK_CHECKOUT" in line and "uv sync" in line:
-            continue
-        bare_uv_node22.append((lineno, line.strip()))
-    assert bare_uv_node22 == [], f"node-22 active bare uv in current-production-ops: {bare_uv_node22}"
-
-
-def test_current_production_ops_keeps_node27_and_rollback_isolated() -> None:
-    text = _read("docs/runbooks/current-production-ops.md")
-    assert NODE27_PY in text  # node-27 exact-venv commands preserved
-    assert '(cd "$ROLLBACK_CHECKOUT" && uv sync --all-extras --dev)' in text
+    # node-27 commands and the disposable rollback-worktree sync stay unchanged.
     remaining = [
         (lineno, line)
         for lineno, line in _command_lines(text)
@@ -124,7 +99,10 @@ def test_current_production_ops_keeps_node27_and_rollback_isolated() -> None:
         )
     ]
     # Every node-22 active executable command now uses the exact venv.
-    assert remaining == [], f"node-22 active uv commands remain: {remaining}"
+    assert remaining == [], f"node-22 active bare uv in current-production-ops: {remaining}"
+    # node-27 exact-venv commands and the rollback worktree sync stay preserved.
+    assert NODE27_PY in text
+    assert '(cd "$ROLLBACK_CHECKOUT" && uv sync --all-extras --dev)' in text
 
 
 # --- 3. failed-basin demotion and placeholder repair use exact venv ---------
@@ -178,6 +156,69 @@ def test_ci_test_routing_uses_node27_oracle() -> None:
     assert "tee artifacts/ci-routing/e2e-grib" in text
 
 
+# --- 4c. node-27 governed-lane status-swallowing classifier ------------------
+
+
+def _fence_logical(fence_lines: list[str]) -> list[str]:
+    """Rebuild backslash continuations in the fence into complete commands."""
+    out: list[str] = []
+    buf: list[str] = []
+    for line in fence_lines:
+        buf.append(line.rstrip().rstrip("\\").rstrip())
+        if line.rstrip().endswith("\\"):
+            continue
+        out.append(" ".join(part.strip() for part in buf))
+        buf = []
+    if buf:
+        out.append(" ".join(part.strip() for part in buf))
+    return out
+
+
+def _fence_tokens(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    return [tok for tok in tokens if not tok.startswith("#")]
+
+
+# ``set +euo`` / ``set +o errexit`` disable fail-fast; the authoritative lane
+# has no ``||`` at all, so every one is a potential status swallow.
+_SET_DISABLE_RE = re.compile(r"\+[euo]+")
+_SET_DISABLE_OPTS = frozenset({"errexit", "nounset", "pipefail"})
+
+
+def _node27_lane_swallow_violations(fence_lines: list[str]) -> list[tuple[str, str]]:
+    """Classify the governed lane for status-swallowing.
+
+    Every logical command runs under fail-fast, so a failed guard or
+    pytest/tee pipeline must abort the lane (Evidence Floor 5.7). Returns
+    ``(command, reason)`` for (a) any ``||`` — each one can swallow a failure,
+    whatever the right side — and (b) any ``set +euo`` / ``set +o errexit``
+    disable. Scanning the full logical command, not its tail, means a trailing
+    safe token can never hide an earlier swallow.
+    """
+    violations: list[tuple[str, str]] = []
+    for command in _fence_logical(fence_lines):
+        tokens = _fence_tokens(command)
+        if not tokens:
+            continue
+        if tokens[0] == "set":
+            for j, tok in enumerate(tokens[1:], 1):
+                # `+e`/`+u`/`+euo` disable fail-fast; lone `+o` only disables
+                # the option it names (`set +o pipefail`).
+                if _SET_DISABLE_RE.fullmatch(tok) and tok != "+o":
+                    violations.append((command, f"fail-fast disabled by set {tok}"))
+                elif tok == "+o" and j + 1 < len(tokens) and tokens[j + 1] in _SET_DISABLE_OPTS:
+                    violations.append(
+                        (command, f"fail-fast disabled by set +o {tokens[j + 1]}")
+                    )
+        for tok in tokens:
+            if tok == "||" or tok.startswith("||"):  # `||`, `||true`, `||:`
+                violations.append((command, f"{tok} swallows failure"))
+    return violations
+
+
 def test_ci_routing_fence_failfast_ordering() -> None:
     """Fail-fast, ordered lane: ssh < set -euo pipefail < cd < guard < pytest."""
     lines = _node27_bash_fence(_read("docs/runbooks/ci-test-routing.md"))
@@ -202,20 +243,74 @@ def test_ci_routing_fence_failfast_ordering() -> None:
     assert i_set < i_cd < i_pull, "set -euo pipefail must precede cd / git pull"
     assert i_set < i_guard < i_pytest, "set -euo pipefail then 3.11 guard must precede pytest"
 
-    # The guard is the abort gate; it must not be silenced with || true.
-    guard = lines[i_guard].strip()
-    assert "|| true" not in guard, f"3.11 guard must not be silenced with || true: {guard}"
-
-    # pytest still pipes into the tee receipt (logical line joins the `\`).
-    logical = lines[i_pytest]
-    for line in lines[i_pytest + 1:]:
-        logical += line
-        if not line.rstrip().endswith("\\"):
-            break
-    assert "tee artifacts/ci-routing/e2e-grib" in logical, "pytest must still be piped to tee"
+    # pytest still pipes into the tee receipt (the `\` joins one logical command).
+    commands = _fence_logical(lines)
+    pytest_logical = next(cmd for cmd in commands if "uv run --no-sync pytest" in cmd)
+    assert "tee artifacts/ci-routing/e2e-grib" in pytest_logical, "pytest must still be piped to tee"
 
     # The whole lane must stay synchronization-free.
     assert "uv sync" not in "\n".join(lines)
+
+    # Status-swallowing is a lane-wide property: a `|| true` on the guard or
+    # pytest/tee, or a fail-fast disable, would let a failed lane exit 0.
+    violations = _node27_lane_swallow_violations(lines)
+    assert violations == [], f"node-27 governed lane swallows status: {violations}"
+
+
+def test_ci_routing_lane_rejects_status_swallowing_mutations() -> None:
+    """Table-driven red proof: each mutation is classified, authoritative green.
+
+    The runbook is byte-clean; every row mutates the fence in memory and the
+    shared lane validator must flag it. Covers the Phase-6.2 guard regression,
+    the Round-3 pytest/tee regression, every ``||`` shape, and fail-fast
+    disables whose trailing safe token would otherwise mask the earlier
+    swallow.
+    """
+    lines = _node27_bash_fence(_read("docs/runbooks/ci-test-routing.md"))
+    fence = "\n".join(lines)
+    assert _node27_lane_swallow_violations(lines) == [], "authoritative fence must be green"
+
+    guard = 'uv run --no-sync python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"'
+    tee = "| tee artifacts/ci-routing/e2e-grib-$(date +%F).log"
+    set_failfast = "set -euo pipefail"
+    mutations = [
+        ("guard || true", [(guard, guard + " || true")], ["sys.version", "|| true"]),
+        ("pytest/tee || true", [(tee, tee + " || true")], ["tee artifacts/ci-routing", "|| true"]),
+        ("set +e after fail-fast set", [(set_failfast, set_failfast + "\nset +e")], ["set +e"]),
+        (
+            "set +o pipefail after fail-fast set",
+            [(set_failfast, set_failfast + "\nset +o pipefail")],
+            ["set +o pipefail"],
+        ),
+        ("pytest/tee || echo", [(tee, tee + " || echo receipt")], ["tee artifacts/ci-routing", "|| echo"]),
+        (
+            "set +e then pytest/tee || true (masking)",
+            [(set_failfast, set_failfast + "\nset +e"), (tee, tee + " || true")],
+            ["set +e", "|| true"],
+        ),
+        (
+            "set +euo pipefail (multi-letter disable)",
+            [(set_failfast, set_failfast + "\nset +euo pipefail")],
+            ["set +euo"],
+        ),
+        (
+            "pytest/tee || exit 0 (propagator fake)",
+            [(tee, tee + " || exit 0")],
+            ["tee artifacts/ci-routing", "|| exit 0"],
+        ),
+    ]
+    for name, edits, expected in mutations:
+        mutated = fence
+        for anchor, replacement in edits:
+            assert anchor in mutated, f"{name}: anchor not found: {anchor!r}"
+            mutated = mutated.replace(anchor, replacement, 1)
+        flagged = _node27_lane_swallow_violations(mutated.splitlines())
+        assert flagged, f"{name}: mutation must be red, validator reported nothing"
+        flagged_cmds = [cmd for cmd, _ in flagged]
+        for exp in expected:
+            assert any(exp in cmd for cmd in flagged_cmds), (
+                f"{name}: expected {exp!r} among flagged commands, got: {flagged}"
+            )
 
 
 def test_conftest_skip_guidance_points_to_runbook() -> None:
@@ -465,26 +560,13 @@ def test_node22_current_key_entry_and_history_separate() -> None:
 
 
 def test_node22_active_surfaces_have_no_bare_system_python() -> None:
-    r"""A bare `python`/`python3` on a node-22 active surface is forbidden.
+    """Every governed node-22 surface is scanned for substituted python.
 
-    The exact interpreter must be named explicitly; a bare `python -m
-    services.slurm_gateway` or `python scripts/...` would resolve to whatever
-    system/active python is on PATH.
-
-    Classification is by the *executable token*, not whole-line substrings:
-    leading ``NAME=value`` assignments are stripped first, then the first token
-    decides. Only ``_NODE22_ALLOWED_PYTHON_EXECUTABLES`` (absolute or in-repo
-    relative active interpreter) is allowed; a ``.venv/bin/python`` at any
-    other root and bare ``python``/``python3`` are forbidden. This neither
-    skips a whole ``PYTHONPATH=...`` line nor lets a ``.venv/bin/python``
-    elsewhere on the line mask a ``python3`` executable, nor accepts a root by
-    suffix.
-
-    Historical handling is a line-by-line state machine evaluated BEFORE the
-    python check: a line whose stripped text exactly matches a dated
-    observation heading (``20\d\d-\d\d-\d\d 现场验证``) enters the historical
-    section; the next Markdown heading leaves it. Only lines inside that
-    bounded range are exempt — no broad bullets/prose ignore.
+    Delegates to ``_scan_for_substituted_python`` (the same classifier the
+    mutation tests drive): no bare `python`/`python3` anywhere on a governed
+    surface — only the exact deferred-venv interpreter is acceptable, with
+    dated historical observation sections exempted as records, never broad
+    prose/bullet ignores.
     """
     surfaces = [
         "docs/runbooks/current-production-ops.md",
@@ -495,49 +577,7 @@ def test_node22_active_surfaces_have_no_bare_system_python() -> None:
     ]
     bad = []
     for relative in surfaces:
-        text = _read(relative)
-        in_historical = False
-        for lineno, line in _logical_lines(text):
-            stripped = line.strip()
-            # Section structure first: enter on a dated-observation heading,
-            # leave on the next Markdown heading; then the python check.
-            if _DATED_OBSERVATION.fullmatch(stripped):
-                in_historical = True
-            if in_historical and line.startswith("#"):
-                in_historical = False
-            if "python" not in line:
-                continue
-            # node-27 / rollback / non-command surfaces are out of scope.
-            if "node-27" in line or "/home/nwm/" in line or "nwm@210.77.77.27" in line:
-                continue
-            if "ROLLBACK_CHECKOUT" in line:
-                continue
-            if "uv run --no-sync python" in line:
-                continue  # observation-only, allowed
-            if "python3 -m json.tool" in line or "python -m json.tool" in line:
-                continue  # node-27 receipt inspection idiom
-            if in_historical:
-                continue  # dated observation record, not current guidance
-            if line.strip().startswith("#!"):
-                continue  # shebang line, not a command invocation
-            # Command classification: executable token after assignments. An
-            # unresolvable env launcher (unknown option) on a python-mentioning
-            # line must be reported, never skipped.
-            exe, resolved = _command_executable(line)
-            if not resolved:
-                bad.append(f"{relative}:{lineno}: {line}")
-                continue
-            if exe is None:
-                continue  # assignment/prose-only, no executable
-            # Only a real python interpreter executable can be a violation;
-            # backtick prose tokens and field identifiers are never reported.
-            if not _is_python_executable_token(exe):
-                continue
-            if _allowed_python_executable(exe):
-                continue  # exact bounded interpreter, allowed
-            # Any other python executable — bare python/python3, a wrong-root
-            # ``/wrong/.venv/bin/python``, a stray template path — is a
-            # substituted interpreter on a node-22 active surface.
+        for lineno, line in _scan_for_substituted_python(_read(relative)):
             bad.append(f"{relative}:{lineno}: {line}")
     assert bad == [], "node-22 bound substituted python:\n" + "\n".join(bad)
 
