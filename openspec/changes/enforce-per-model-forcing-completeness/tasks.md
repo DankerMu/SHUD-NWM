@@ -2,19 +2,19 @@
 
 ## 1. Red first
 
-- [ ] 1.1 Add a regression test reproducing the #1816 shape: a strict-warm-start
+- [x] 1.1 Add a regression test reproducing the #1816 shape: a strict-warm-start
       terminal reconcile whose completed stage evidence belongs to a different
       `model_id` on the same `(basin_id, cycle_time, source_id)`, and no forcing
       package under the candidate's own `model_id`. Assert the current code emits
       `restart_stage: "forecast"` with no `forcing_provenance` — i.e. the test
       fails against `master`.
-- [ ] 1.2 Add a regression test for the recorded-reference tier: a candidate
+- [x] 1.2 Add a regression test for the recorded-reference tier: a candidate
       whose inherited state records a `forcing_package_uri` under a foreign
       `model_id` that EXISTS on disk. Assert the witness must not accept it.
 
 ## 2. Consult the witness at the strict-warm-start emitting points
 
-- [ ] 2.1 In `services/orchestrator/scheduler_candidates.py`, consult
+- [x] 2.1 In `services/orchestrator/scheduler_candidates.py`, consult
       `_missing_upstream_forecast_artifact_evidence` at the three
       **`build_candidates`** call sites that emit a strict-warm-start decision
       carrying `restart_stage: "forecast"` — around `:541-548` (run-manifest
@@ -27,25 +27,25 @@
       raw candidate `state` in scope. `build_candidates` owns all four guard
       arguments, which is the same shape `scheduler_state_decision.py` uses at
       its emitting return points.
-- [ ] 2.1a Do NOT widen `_upgrade_retry_for_strict_warm_start_manifest`'s 2-arg
+- [x] 2.1a Do NOT widen `_upgrade_retry_for_strict_warm_start_manifest`'s 2-arg
       signature: five existing tests call it by name
       (`tests/test_production_scheduler.py:186, 225, 261, 294, 10963`). The
       consultation belongs AFTER it returns, at `:616-619` — the pre-upgrade
       decision may have been guard-checked at a different `restart_stage`, so the
       guard must run again on the rewritten decision regardless.
-- [ ] 2.1b Return the guard's blocker payload **verbatim** rather than re-merging
+- [x] 2.1b Return the guard's blocker payload **verbatim** rather than re-merging
       it, so its self-tagged `classifier` / `artifact_guard.stable_classifier`
       still land in `_decision_is_stable_missing_forcing_blocker` (`:1574-1594`).
-- [ ] 2.2 Record the provenance annotation through the same channel
+- [x] 2.2 Record the provenance annotation through the same channel
       (`_record_forcing_provenance`) so it appears in pass evidence whether or
       not the decision blocked.
-- [ ] 2.3 Return the blocker decision instead of the retry when the witness
+- [x] 2.3 Return the blocker decision instead of the retry when the witness
       reports the package absent, preserving the witness's own reason and error
       code (`missing_forcing_package_uri` / `forcing_version_row_absent`).
 
 ## 3. Bind the recorded reference to the candidate's identity
 
-- [ ] 3.1 In `services/orchestrator/scheduler_state_failure.py`, admit a
+- [x] 3.1 In `services/orchestrator/scheduler_state_failure.py`, admit a
       recorded `forcing_package_uri` as this candidate's witness only when its
       key's trailing segments are this candidate's own
       `<basin_version_id>/<model_id>`. Before comparing, remove exactly two
@@ -58,9 +58,9 @@
       reference and blocks a healthy candidate. Do NOT prefix-normalise the
       recorded reference; that is the actual documented hazard. Fewer than two
       segments left after the removals means not bound.
-- [ ] 3.2 On rejection, fall through to `_forcing_sidecar_provenance` exactly as
+- [x] 3.2 On rejection, fall through to `_forcing_sidecar_provenance` exactly as
       an absent reference does, and name the rejection in `forcing_provenance`.
-- [ ] 3.3 Leave every existing containment untouched: withheld placeholder
+- [x] 3.3 Leave every existing containment untouched: withheld placeholder
       recovery path (#1203 round-1 C1), probe-error "cannot determine" routing to
       `forcing_version_row_absent` (#1203 round-2 V5-C2), no probe fault escaping
       the pass (#1365 round-1), single manifest-key derivation through
@@ -68,19 +68,19 @@
 
 ## 4. Green invariants
 
-- [ ] 4.1 A strict-warm-start restart whose own forcing package exists emits the
+- [x] 4.1 A strict-warm-start restart whose own forcing package exists emits the
       same decision and `restart_stage` as before.
-- [ ] 4.2 A recorded reference naming the candidate's own model is probed
+- [x] 4.2 A recorded reference naming the candidate's own model is probed
       unchanged.
-- [ ] 4.3 Existing `strict-warm-start` and `production-scheduler-orchestration`
+- [x] 4.3 Existing `strict-warm-start` and `production-scheduler-orchestration`
       tests still pass.
 
 ## 5. Evidence Floor
 
-- [ ] 5.1 `uv run pytest -q tests/test_production_scheduler.py`
-- [ ] 5.2 `uv run pytest -q tests/test_orchestration_chain.py`
-- [ ] 5.3 `uv run ruff check .`
-- [ ] 5.4 `openspec validate enforce-per-model-forcing-completeness --strict --no-interactive`
+- [x] 5.1 `uv run pytest -q tests/test_production_scheduler.py`
+- [x] 5.2 `uv run pytest -q tests/test_orchestration_chain.py`
+- [x] 5.3 `uv run ruff check .`
+- [x] 5.4 `openspec validate enforce-per-model-forcing-completeness --strict --no-interactive`
 - [ ] 5.5 node-22 corroboration (NOT the decisive oracle — 1.1/1.2 and 5.1/5.2
       are). This is pure candidate-decision Python, deterministically exercised by
       the regression fixtures; a live pass adds deployment corroboration, not

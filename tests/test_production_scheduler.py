@@ -11391,7 +11391,10 @@ def test_missing_forcing_package_blocks_forecast_resume_before_submission(
         "candidate_id": candidate.candidate_id,
         "hydro_status": "created",
         "pipeline_status": "succeeded",
-        "forcing_package_uri": "forcing/gfs/2026052106/model_a/package.json",
+        # Identity-bound to THIS candidate, in the manifest FILE-key shape the
+        # producer records (#1826): a reference naming another model is treated as
+        # absent and never probed.
+        "forcing_package_uri": "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json",
         "completed_stage_evidence": {
             "stage": "forcing",
             "status": "succeeded",
@@ -11496,17 +11499,14 @@ def test_failed_forecast_with_recorded_missing_forcing_blocks_instead_of_retryin
     object_store_root.mkdir()
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     candidate = _scheduler_candidate_fixture()
-    state = _forecast_failure_state(
-        candidate,
-        forcing_package_uri="forcing/gfs/2026052106/model_a/package.json",
-    )
+    # Identity-bound to THIS candidate (#1826); a foreign reference is treated as
+    # absent and routed to the identity-derived tier instead of being probed.
+    recorded_uri = "forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    state = _forecast_failure_state(candidate, forcing_package_uri=recorded_uri)
 
     decision = scheduler_module._candidate_state_decision(candidate, state)
 
-    _assert_stable_missing_forcing_blocker(
-        decision,
-        artifact_uri="forcing/gfs/2026052106/model_a/package.json",
-    )
+    _assert_stable_missing_forcing_blocker(decision, artifact_uri=recorded_uri)
 
     orchestrator = FakeProductionOrchestrator()
     scheduler = ProductionScheduler(
@@ -12157,6 +12157,135 @@ def test_journal_tier_absent_directory_package_blocks_as_determined_absent(
         "probe_key": expected_probe_key,
         "forcing_version_id": candidate.forcing_version_id,
     }
+
+
+def _foreign_model_package_uri(candidate: Any, *, object_store_prefix: str = "") -> str:
+    """The SUPERSEDED model's package uri, in the producer's own recorded shape.
+
+    Same ``(source, cycle, basin_version_id)`` as the candidate, different
+    content-derived ``model_id`` -- exactly the #1816 republish geometry.
+    """
+
+    from workers.forcing_producer.producer import _directory_uri, _object_source_segment
+
+    store = LocalObjectStore(Path(os.environ["OBJECT_STORE_ROOT"]), object_store_prefix)
+    prefix = (
+        f"forcing/{_object_source_segment(candidate.source_id)}"
+        f"/{format_cycle_time(candidate.cycle_time_utc)}"
+        f"/{candidate.basin_version_id}/dg_0883c7e9c1006c6fd347df500315e9df"
+    )
+    return _directory_uri(store, prefix)
+
+
+def test_recorded_forcing_reference_of_a_foreign_model_never_witnesses_this_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#1826 red 1.2: a superseded model's PRESENT package must not stand in.
+
+    ``model_id`` is content-derived, so a republish leaves the inherited state
+    naming the predecessor's ``forcing_package_uri``.  That package physically
+    exists, so the recorded-reference tier probes it, finds it, and lets the
+    successor restart at ``forecast`` with no forcing of its own -- the #1816
+    ``ARTIFACT_NOT_FOUND`` burn.  The reference must be rejected as foreign, the
+    identity-derived tier consulted in its place, and the rejection named.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "")
+    candidate = _scheduler_candidate_fixture()
+    foreign_uri = _foreign_model_package_uri(candidate)
+    store = LocalObjectStore(object_store_root, "")
+    foreign_manifest_key = f"{store.normalize_key(foreign_uri).strip('/')}/forcing_package.json"
+    store.write_bytes_atomic(foreign_manifest_key, b'{"schema_version": "nhms.forcing_package.v1"}')
+    # Independent oracle: the FOREIGN package is genuinely present, and it is the
+    # candidate's own model that has nothing.
+    assert (object_store_root / foreign_manifest_key).is_file()
+    assert candidate.model_id not in foreign_uri
+    assert scheduler_state_failure_module._artifact_uri_missing_status(candidate, foreign_manifest_key) == (
+        False,
+        None,
+    )
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, foreign_uri),
+    )
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert decision.reason == "forcing_version_row_absent"
+    assert decision.evidence["forcing_provenance"] == {
+        "source": "absent",
+        "tier_status": "sidecar_absent",
+        "recorded_reference_rejected": {
+            "reason": "foreign_candidate_identity",
+            "recorded_uri": foreign_uri,
+            "expected_identity": f"{candidate.basin_version_id}/{candidate.model_id}",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "recorded_shape",
+    ["directory_uri", "slash_stripped", "manifest_file_key"],
+)
+def test_recorded_reference_naming_this_candidate_is_admitted_in_every_recorded_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    recorded_shape: str,
+) -> None:
+    """#1826 green 4.2: the binding check must not reject the candidate's OWN reference.
+
+    All three shapes are recorded in production -- the producer's directory uri,
+    the handoff lane's slash-stripped copy of the same reference, and the manifest
+    FILE key one segment deeper.  A bare ``endswith`` on
+    ``<basin_version_id>/<model_id>`` rejects two of the three and blocks a healthy
+    candidate.
+    """
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("OBJECT_STORE_PREFIX", "")
+    candidate = _scheduler_candidate_fixture()
+    package = _producer_forcing_sidecar(object_store_root, candidate=candidate)
+    package["store"].write_bytes_atomic(package["manifest_key"], b'{"schema_version": "nhms.forcing_package.v1"}')
+    recorded = {
+        "directory_uri": package["package_uri"],
+        "slash_stripped": package["package_uri"].rstrip("/"),
+        "manifest_file_key": package["manifest_uri"],
+    }[recorded_shape]
+
+    assert scheduler_state_failure_module._recorded_forcing_reference_binds_candidate(candidate, recorded) is True
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _journal_tier_directory_package_state(candidate, recorded),
+    )
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason not in {"missing_forcing_package_uri", "forcing_version_row_absent"}
+    provenance = decision.evidence["forcing_provenance"]
+    assert provenance["source"] == "journal"
+    assert "recorded_reference_rejected" not in provenance
+    assert provenance["probe_key"] == package["manifest_key"]
+
+
+def test_recorded_reference_too_short_to_carry_the_identity_pair_is_not_bound() -> None:
+    """#1826: fewer than two segments after the two removals is "not bound"."""
+
+    candidate = _scheduler_candidate_fixture()
+    binds = scheduler_state_failure_module._recorded_forcing_reference_binds_candidate
+    assert binds(candidate, "forcing_package.json") is False
+    assert binds(candidate, f"{candidate.model_id}/") is False
+    assert binds(candidate, f"{candidate.basin_version_id}/{candidate.model_id}") is True
+    # Prefix normalisation is forbidden, so a foreign PREFIX over the candidate's
+    # own identity pair still binds -- trailing segments are the whole judgement.
+    assert binds(candidate, f"s3://elsewhere/x/{candidate.basin_version_id}/{candidate.model_id}/") is True
 
 
 @pytest.mark.parametrize("manifest_present", [True, False])
@@ -16505,7 +16634,11 @@ def test_forcing_local_artifact_root_unresolvable_is_refused_by_the_repair_chann
     }
     # A LOCAL recorded forcing package reference, so the guard takes the local leg
     # (the witness derivation explicitly excludes local paths).
-    package_path = tmp_path / "forcing-elsewhere" / "forcing_package.json"
+    # ... and identity-bound to this candidate (#1826), so the local leg is the
+    # thing under test rather than the new foreign-reference rejection.
+    package_path = (
+        tmp_path / "forcing-elsewhere" / candidate.basin_version_id / candidate.model_id / "forcing_package.json"
+    )
     package_path.parent.mkdir(parents=True)
     package_path.write_bytes(b'{"schema_version": "nhms.forcing_package.v1"}')
     state = _missing_forcing_retry_state(
@@ -27181,7 +27314,12 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS: dict[str, frozenset[str]] = {
     "_DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES": frozenset({"_missing_forecast_output_recompute_evidence"}),
     "_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES": frozenset({"_missing_forecast_output_recompute_evidence"}),
     "_FORCING_SIDECAR_FILENAME": frozenset({"_forcing_sidecar_provenance"}),
-    "_FORCING_PACKAGE_MANIFEST_FILENAME": frozenset({"_package_manifest_probe_uri"}),
+    # ``_recorded_forcing_reference_binds_candidate`` (#1826) REMOVES a trailing
+    # manifest segment before comparing identities; it never joins a probe key, so
+    # the single witness-object derivation stays ``_package_manifest_probe_uri``.
+    "_FORCING_PACKAGE_MANIFEST_FILENAME": frozenset(
+        {"_package_manifest_probe_uri", "_recorded_forcing_reference_binds_candidate"}
+    ),
     "_FORCING_SIDECAR_MAX_BYTES": frozenset({"_forcing_sidecar_provenance"}),
     "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS": frozenset({"_downstream_failure_restartable"}),
 }
@@ -35287,6 +35425,7 @@ def _write_db_free_file_provider_fixtures(
     policy_identity: Mapping[str, Any] | None = None,
     source_object_identity: Mapping[str, Any] | None = None,
     model: Mapping[str, Any] | None = None,
+    seed_forcing_package: bool = True,
 ) -> dict[str, Any]:
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms")
     generated_at = generated_at or _dt("2026-06-27T00:00:00Z")
@@ -35342,6 +35481,30 @@ def _write_db_free_file_provider_fixtures(
     state_index_path = Path(paths["NHMS_SCHEDULER_STATE_INDEX"])
     if not state_index_path.exists() or state_index_path.read_text(encoding="utf-8").strip() in ("", "{}"):
         _publish_empty_state_index(roots, paths, generated_at=generated_at)
+    if seed_forcing_package:
+        # The forcing producer's per-model witness for THIS model
+        # (``forcing/<source>/<cycle>/<basin_version_id>/<model_id>/``).  Since
+        # #1826 a candidate restarted at ``forecast`` must have one -- the restart
+        # SKIPS the forcing stage -- so a DB-free fixture that models a cycle whose
+        # forcing already completed has to carry it, exactly as node-22 does.
+        # ``seed_forcing_package=False`` is the incident geometry (republished
+        # ``model_id``, no package of its own).
+        _seed_producer_forcing_sidecar(
+            roots["object_store_root"],
+            candidate=scheduler_module._candidate_for(
+                discovery=CycleDiscovery(
+                    cycle_id=f"gfs_{format_cycle_time(cycle_time)}",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    cycle_hour=cycle_time.hour,
+                    available=True,
+                    status="discovered",
+                ),
+                model=scheduler_module._coerce_registered_model(model_row),
+                horizon={},
+            ),
+            object_store_prefix="s3://nhms",
+        )
     return {
         "model": model_row,
         "package_checksum": package_checksum,
@@ -39402,6 +39565,167 @@ def test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision(
     assert evidence["candidate_state"]["init_state_id"] == selected_state_id
 
 
+def _db_free_strict_warm_start_forecast_restart_pass(
+    monkeypatch: Any,
+    tmp_path: Path,
+    *,
+    seed_own_forcing_package: bool,
+) -> tuple[list[Any], list[Any], list[dict[str, Any]]]:
+    """Run one DB-free ``_build_candidates`` pass on the #1816 republish geometry.
+
+    Same ladder as ``test_db_free_id_only_terminal_row_keeps_the_budgeted_mismatch_decision``:
+    a terminal row that completed this ``(basin_id, cycle, source)`` but records
+    only ``init_state_id``, so the strict warm-start reconcile mints
+    ``strict_warm_start_terminal_init_state_mismatch`` with
+    ``restart_stage: "forecast"`` -- a restart that SKIPS the forcing stage.  The
+    only knob is whether a forcing package exists under the candidate's OWN
+    content-derived ``model_id``.
+    """
+
+    roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path / "db-free-local-root")
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    generated_at = _dt("2026-05-21T12:00:00Z")
+    fixture = _write_db_free_file_provider_fixtures(
+        monkeypatch,
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        forecast_hours=_gfs_default_forecast_hours(),
+        generated_at=generated_at,
+        seed_forcing_package=seed_own_forcing_package,
+    )
+    state_fixture = _write_db_free_state_index_fixture(
+        roots,
+        paths,
+        cycle_time=cycle_time,
+        package_checksum=fixture["package_checksum"],
+        generated_at=generated_at,
+    )
+    selected_state_id = str(state_fixture["entries"][0]["state_id"])
+    model = {
+        **fixture["model"],
+        "resource_profile": {
+            **dict(fixture["model"]["resource_profile"]),
+            "package_checksum": fixture["package_checksum"],
+        },
+    }
+    discovery = CycleDiscovery(
+        cycle_id="gfs_2026052106",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_hour=6,
+        available=True,
+        status="discovered",
+    )
+    registered = scheduler_module._coerce_registered_model(model)
+
+    class CompletedLegacyRepository(FakeCandidateStateRepository):
+        def has_completed_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    run_id = "fcst_gfs_2026052106_model_a"
+    repository = CompletedLegacyRepository(
+        {
+            "hydro_status": "published",
+            "hydro_run": {
+                "run_id": run_id,
+                "status": "published",
+                "init_state_id": selected_state_id,
+                "output_uri": f"s3://nhms/runs/{run_id}/output/",
+            },
+        }
+    )
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(now=generated_at),
+        registry=FakeRegistry([model]),
+        adapters={},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: pytest.fail("candidate construction must not build orchestrator"),
+    )
+
+    candidates, blocked, skipped, _duplicate_exclusions, _slurm_sync = scheduler._build_candidates(
+        models=[registered],
+        cycles=[scheduler_module.SchedulerSourceCycle(discovery=discovery, horizon={})],
+    )
+    assert skipped == []
+    return candidates, blocked, skipped
+
+
+def test_strict_warm_start_forecast_restart_blocks_when_own_model_has_no_forcing(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1826 red 1.1: the #1816 incident shape must not reach a forecast submission.
+
+    A republish mints a new content-derived ``model_id`` while the cycle's chain
+    still holds the SUPERSEDED model's terminal job.  The strict warm-start
+    reconcile restarts at ``forecast``, which skips forcing entirely, and the
+    forecast dies in ~1 s with ``ARTIFACT_NOT_FOUND``.  The per-model witness must
+    be consulted at the emitting point and turn the retry into the stable named
+    block the #1825 backfill drains.
+    """
+
+    candidates, blocked, _skipped = _db_free_strict_warm_start_forecast_restart_pass(
+        monkeypatch,
+        tmp_path,
+        seed_own_forcing_package=False,
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    evidence = blocked[0].state_evidence
+    assert blocked[0].reason == "forcing_version_row_absent"
+    assert evidence["classifier"] == "missing_upstream_artifact"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+    assert evidence["artifact_guard"]["artifact_type"] == "forcing_package_uri"
+    assert evidence["artifact_guard"]["artifact_exists"] is False
+    # The retry the guard displaced stays readable, so an operator can tell which
+    # decision was about to submit the forecast.
+    assert evidence["artifact_guard"]["planned_retry_reason"] == (
+        "strict_warm_start_terminal_init_state_mismatch"
+    )
+    assert evidence["forcing_provenance"] == {"source": "absent", "tier_status": "sidecar_absent"}
+    # The blocker payload reaches the stable-blocker channel VERBATIM (#1825).
+    assert (
+        scheduler_candidates_module._decision_is_stable_missing_forcing_blocker(
+            scheduler_module.CandidateStateDecision("blocked", blocked[0].reason, evidence),
+        )
+        is True
+    )
+
+
+def test_strict_warm_start_forecast_restart_with_own_forcing_package_is_unaffected(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    """#1826 green 4.1: the same ladder with the candidate's OWN package present.
+
+    Identical geometry, one difference: the forcing producer's sidecar and package
+    manifest exist under this candidate's own ``model_id``.  The decision, its
+    reason and its ``restart_stage`` must be exactly what they were before the
+    guard was wired in, and the witnessing tier must be named in the evidence.
+    """
+
+    candidates, blocked, _skipped = _db_free_strict_warm_start_forecast_restart_pass(
+        monkeypatch,
+        tmp_path,
+        seed_own_forcing_package=True,
+    )
+
+    assert blocked == []
+    assert len(candidates) == 1
+    evidence = candidates[0].state_evidence
+    assert evidence["reason"] == "strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["decision"] == "retry_strict_warm_start_terminal_init_state_mismatch"
+    assert evidence["restart_stage"] == "forecast"
+    assert evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert evidence["forcing_provenance"]["probe"] == "manifest"
+    assert evidence["forcing_provenance"]["artifact_exists"] is True
+
+
 _ID_ONLY_LADDER_UNSET = object()
 
 
@@ -40912,6 +41236,9 @@ def test_db_free_file_journal_missing_forcing_package_blocks_forecast_resume_bef
         cycle_time=cycle_time,
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=generated_at,
+        # This lane's SUBJECT is the missing-forcing blocker, so the candidate must
+        # have no package of its own (#1826).
+        seed_forcing_package=False,
     )
     model = {
         **fixture["model"],
@@ -41765,6 +42092,9 @@ def _db_free_missing_forcing_repair_scheduler(
         forecast_hours=_gfs_default_forecast_hours(),
         generated_at=cycle_time,
         model=direct_grid_model,
+        # This lane's SUBJECT is the missing-forcing blocker, so the candidate must
+        # have no package of its own (#1826).
+        seed_forcing_package=False,
     )
     if raw_case != "missing":
         entries = None

@@ -40,6 +40,9 @@ from services.orchestrator.scheduler_state import (
     _state_retry_attempt,
     _state_retry_limit,
 )
+from services.orchestrator.scheduler_state_failure import (
+    _missing_upstream_forecast_artifact_evidence,
+)
 from services.orchestrator.source_cycle_raw_manifest import (
     NFS_RAW_MANIFEST_READY_SOURCE,
     nfs_raw_manifest_readiness,
@@ -546,6 +549,13 @@ def build_candidates(
                                     strict_warm_start,
                                 ),
                             )
+                            # Emitting point for a ``forecast`` restart: consult
+                            # the per-model forcing witness before it leaves (#1826).
+                            state_decision = _strict_warm_start_forcing_witness_decision(
+                                candidate,
+                                raw_candidate_state,
+                                state_decision,
+                            )
                         elif successor_state is not None and not bool(successor_state.get("ready")):
                             state_decision = CandidateStateDecision(
                                 "retry",
@@ -571,6 +581,14 @@ def build_candidates(
                             state_decision.evidence,
                             strict_warm_start,
                             raw_candidate_state,
+                        )
+                        # Same emitting point ruling as the run-manifest leg above
+                        # (#1826).  The budget-exhausted ``blocked`` leg of this
+                        # decision is left alone by the guard helper itself.
+                        state_decision = _strict_warm_start_forcing_witness_decision(
+                            candidate,
+                            raw_candidate_state,
+                            state_decision,
                         )
                 elif (
                     successor_state is not None
@@ -617,6 +635,23 @@ def build_candidates(
                 state_decision,
                 strict_warm_start,
             )
+            if strict_warm_start is not None:
+                # The upgrade REWRITES the decision, so the guard must run again on
+                # the rewritten one even when a leg above already consulted it: the
+                # pre-upgrade decision may have carried a different ``restart_stage``
+                # (#1826).  The upgrade helper's own 2-arg signature stays untouched
+                # -- five existing tests call it by name -- so the consultation sits
+                # here, after it returns.
+                #
+                # Scoped to the strict warm-start lane, exactly like the upgrade it
+                # follows (that helper is a no-op when ``strict_evidence is None``):
+                # every other retry reaching this line was already consulted by
+                # ``scheduler_state_decision`` at its own emitting return point.
+                state_decision = _strict_warm_start_forcing_witness_decision(
+                    candidate,
+                    raw_candidate_state,
+                    state_decision,
+                )
             if strict_warm_start is not None:
                 candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
@@ -2128,6 +2163,69 @@ def _warm_state_record_matches(selected: Mapping[str, Any], observed: Mapping[st
         if str(actual or "") != str(expected):
             return False
     return True
+
+
+def _strict_warm_start_forcing_witness_decision(
+    candidate: SchedulerCandidateLike,
+    raw_candidate_state: Mapping[str, Any] | None,
+    state_decision: CandidateStateDecision | None,
+) -> CandidateStateDecision | None:
+    """Consult the per-model forcing witness before a ``forecast`` restart is emitted (#1826).
+
+    Restarting at ``forecast`` SKIPS the forcing stage, so the candidate's own
+    ``forcing/<source>/<cycle>/<basin_version_id>/<model_id>/`` package must
+    already exist.  ``model_id`` is content-derived, so a republish mints a new
+    identity while the cycle's chain still holds the SUPERSEDED model's terminal
+    ``forcing`` job; the strict warm-start reconcile then restarts at ``forecast``
+    against a package that was never produced, and the forecast dies in ~1 s with
+    ``ARTIFACT_NOT_FOUND`` (#1816).
+
+    Same pattern ``scheduler_state_decision`` already applies at its six emitting
+    return points: hand the decision to the existing hardened guard as the planned
+    retry and return the blocker it hands back.  The blocker is returned VERBATIM,
+    never re-merged, so its self-tagged ``classifier`` and
+    ``artifact_guard.stable_classifier`` still satisfy
+    ``_decision_is_stable_missing_forcing_blocker`` and the candidate lands in the
+    stable ``blocked`` state the #1825 backfill drains.
+
+    Only ``retry`` decisions are consulted: a decision that is already ``blocked``
+    submits no forecast, and overwriting it would erase the reason it was blocked
+    for (the ``strict_warm_start_retry_budget_exhausted`` budget verdict, which
+    also carries ``restart_stage: "forecast"``).
+
+    The RAW projected state is passed, not the identity-filtered decision state:
+    the guard's own identity binding decides which recorded reference may witness
+    this candidate, and narrowing the state first would hide the superseded
+    reference from that judgement rather than reject it.
+    """
+
+    if state_decision is None or state_decision.action != "retry":
+        return state_decision
+    evidence = state_decision.evidence
+    if str(evidence.get("restart_stage") or evidence.get("restart_from_stage") or "") != "forecast":
+        return state_decision
+    blocker, provenance = _missing_upstream_forecast_artifact_evidence(
+        candidate,
+        raw_candidate_state if isinstance(raw_candidate_state, Mapping) else {},
+        evidence,
+        evidence,
+    )
+    if blocker is not None:
+        return CandidateStateDecision(
+            "blocked",
+            str(blocker.get("reason") or "missing_upstream_artifact"),
+            blocker,
+        )
+    if not provenance:
+        return state_decision
+    # The annotation is recorded whether or not the guard blocked (#1203 AC-4), and
+    # it OVERWRITES any earlier one: an annotation carried in from a consultation
+    # at a different ``restart_stage`` does not describe this decision.
+    return CandidateStateDecision(
+        state_decision.action,
+        state_decision.reason,
+        {**dict(evidence), "forcing_provenance": dict(provenance)},
+    )
 
 
 def _upgrade_retry_for_strict_warm_start_manifest(
