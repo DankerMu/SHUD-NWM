@@ -43,6 +43,19 @@ not bound, exactly like a foreign one.
 - **AND** the identity-derived tier is consulted in its place
 - **AND** the provenance annotation names the rejection
 
+#### Scenario: A package under a different basin does not witness this candidate
+
+- **GIVEN** a candidate whose inherited state records a reference whose last two
+  segments are a DIFFERENT `basin_version_id` followed by this candidate's own
+  `model_id`
+- **WHEN** the per-model forcing witness is consulted
+- **THEN** the recorded reference is rejected as foreign
+- **AND** the identity-derived tier is consulted in its place
+
+Both halves of the identity pair are load-bearing: a reference is bound only when
+the `basin_version_id` segment AND the `model_id` segment both match. Checking
+either alone re-opens the fail-open this requirement exists to close.
+
 #### Scenario: A reference naming the candidate's own model is probed as before
 
 - **GIVEN** a candidate whose inherited state records a `forcing_package_uri`

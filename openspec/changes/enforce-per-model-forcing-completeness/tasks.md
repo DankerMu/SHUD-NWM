@@ -91,6 +91,24 @@
       capture the pass evidence showing the candidate `blocked` with a named
       reason and a `forcing_provenance` annotation, and no forecast submission.
 
+## 5b. Round 1 review repairs
+
+- [ ] 5b.1 Pin BOTH halves of the identity pair. The three tests exercising
+      `_recorded_forcing_reference_binds_candidate` discriminate only on
+      `model_id`; a regression narrowing the predicate to
+      `segments[-1] == model_id` passes the entire suite (verified empirically:
+      88 predicate invocations across 3057 tests, 0 divergences between the
+      shipped predicate and the weakened one). Add the missing case — two
+      segments present, `basin_version_id` WRONG, `model_id` RIGHT — and assert
+      it does not bind.
+- [x] 5b.2 Add the matching spec scenario; the gap traced back to the acceptance
+      criteria, which stated the requirement as a pair but named no
+      `basin_version_id`-only mismatch in any scenario.
+- [ ] 5b.3 Correct the PR body's deviation ledger: the rewritten-reference group
+      is 3 (not 4) in `tests/test_production_scheduler.py` plus 1 in
+      `tests/test_orchestration_chain.py`, so the total is 21, not 22; and the
+      shared helper has 39 in-file call sites (59 repo-wide), not 40.
+
 ## 6. Write-back
 
 - [ ] 6.1 Update issue #1826 with the measured scope correction (new-basin
