@@ -213,6 +213,11 @@ RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
 
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    # #1825: the node-22 manual-retry marker suite top-level-imports the journal
+    # repository and pins the marker contract (per-run row vs cohort master) the
+    # operator channel depends on. It runs in well under a second, so a rule is
+    # the right disposition rather than a rule-gap exclusion.
+    "tests/test_node22_manual_retry_failed_runs.py",
     "tests/test_orchestrator_demote_cli_security.py",
     "tests/test_orchestrator_demote_core_cas.py",
     "tests/test_orchestrator_demote_projection_faults.py",
@@ -677,6 +682,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_model_registry_basin_versions.py",
             "tests/test_model_registry_list_basins.py",
             "tests/test_basins_discovery.py",
+            # #1832: `tests/test_basins_package.py` top-level-imports
+            # `basins_discovery` (and `basins_calibration_overrides`), and is
+            # the suite that owns the packaging contract those modules feed.
+            # It rides the directory list for the same reason as the rest.
+            "tests/test_basins_package.py",
             "tests/test_basins_package_publication.py",
             "tests/test_basins_registry_import.py",
             "tests/test_basins_reingest.py",

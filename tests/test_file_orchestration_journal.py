@@ -11056,7 +11056,7 @@ def _succeeded_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
 
 
 def _cancelled_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
-    """One master persisted as ``cancelled``.
+    """One master persisted as ``cancelled`` with NO candidate projections yet.
 
     ``cancelled`` is a legal persisted master status
     (``ACCEPTED_SUBMIT_MASTER_STATUSES``) that no current typed API produces —
@@ -11064,12 +11064,18 @@ def _cancelled_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
     task accounting decide.  The row is therefore written through the journal's
     own write sequence (same outgoing validator as production writes), so an
     impossible shape would fail here rather than fake a passing test.
+
+    The seed deliberately starts from a bound ``submitted`` master with empty
+    ``candidate_projections`` (``_reserved_cohort_master`` + ``_bind_cohort_master``
+    only, no projection) before appending the ``cancelled`` status.  Starting
+    from a projected ``failed`` master would hide the #1629 gap: its candidate
+    rows already exist and complete, so reprojection skips re-creating them and
+    ``latest/`` never proves that a cancelled master's projection still performs
+    the per-model side effects it is responsible for.
     """
 
-    repository, record = _terminally_failed_cohort_master(
-        tmp_path,
-        error_code="SLURM_JOB_CANCELLED",
-    )
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
     job_id = str(record["job_id"])
     source_id = journal_module._source_id_from_job(record)
     cycle_time = journal_module._cycle_time_from_job(record)
@@ -11079,6 +11085,8 @@ def _cancelled_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
             source_id=source_id,
             cycle_time=cycle_time,
         )
+        assert existing is not None
+        assert not existing.get("candidate_projections")
         row = {**existing, "status": "cancelled"}
         journal_record = journal_module._journal_record_for_write(
             "pipeline_job",
@@ -11101,6 +11109,7 @@ def _cancelled_cohort_master(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
             records=[journal_record],
         )
         repository._write_pipeline_job_direct_unlocked(row, journal_record)
+    assert repository.get_pipeline_job(job_id)["status"] == "cancelled"
     return repository, record
 
 
@@ -12768,32 +12777,59 @@ def test_permanently_failed_master_still_refreshes_observational_evidence(tmp_pa
 # --- J8: stickiness does not spread to the derived terminal statuses -----
 
 
-@pytest.mark.parametrize("status", ["succeeded", "partially_failed", "failed"])
-def test_derived_terminal_masters_still_take_the_reprojected_error_code(
+@pytest.mark.parametrize(
+    ("seeded_status", "outcomes", "expected_status", "expected_error_code"),
+    [
+        ("succeeded", ["failed", "failed"], "failed", "SLURM_TIMEOUT"),
+        ("partially_failed", ["failed", "failed"], "failed", "SLURM_TIMEOUT"),
+        ("failed", ["succeeded", "succeeded"], "succeeded", None),
+    ],
+)
+def test_derived_terminal_masters_take_the_reprojected_status_and_error_family(
     tmp_path: Path,
-    status: str,
+    seeded_status: str,
+    outcomes: list[str],
+    expected_status: str,
+    expected_error_code: str | None,
 ) -> None:
-    """#1589 J8 (design D5): the reverse nail on the trigger condition.
+    """#1589 J8 (design D5): genuine transitions stay projection-owned.
 
     ``succeeded`` / ``partially_failed`` / ``failed`` are exactly the values the
-    projection derives for itself.  Making them sticky would pin the first
-    pass's conclusion forever, i.e. disable the projection rather than protect
-    it.  All three arms are parametrized so widening the trigger to
-    ``in TERMINAL_PIPELINE_STATUSES`` turns the whole set red.
+    projection derives for itself, so a later pass with a DIFFERENT task outcome
+    must overwrite both the status and the error family, not pin the first
+    pass's conclusion forever.  Each arm seeds one derived status and reprojects
+    with a genuinely different outcome: ``succeeded`` and ``partially_failed``
+    both fall to all-failed, and ``failed`` rises to all-succeeded (the
+    non-vacuous arm -- asserting only ``failed``->``failed`` would pass a
+    sticky predicate that never moves).  A sticky-all-terminal predicate leaves
+    the seeded status and stale error code in place, turning every arm red.
 
-    This does NOT catch a narrow widening to ``{permanently_failed, cancelled}``
-    — there is no ``cancelled`` arm and by design D5 we do not want one
-    (``cancelled`` has no status stickiness at all today; that pre-existing gap
-    is tracked separately).
+    The projection derives ``projected_master_status`` from the task outcomes
+    (``project_forecast_cohort_tasks`` deletes the caller-supplied
+    ``master_status``/``master_error_code``), so the expected status/error
+    family is exactly what the current pass's accounting produces.  Status and
+    error code/message are asserted on both durable surfaces (jsonl payload and
+    direct row) because both are independently materialized.
     """
 
-    repository, record = _cohort_master_in_status(tmp_path, status)
+    repository, record = _cohort_master_in_status(tmp_path, seeded_status)
 
-    _reproject_cohort(repository, record, error_code="NODE_FAILURE")
+    _reproject_cohort(
+        repository,
+        record,
+        error_code="SLURM_TIMEOUT",
+        outcomes=outcomes,
+        master_error_message="a later accounting pass derived a different cause",
+    )
 
     durable = _durable_master_payload(repository, record)
-    assert durable["error_code"] == "NODE_FAILURE"
-    assert _direct_row_payload(repository, str(record["job_id"]))["error_code"] == "NODE_FAILURE"
+    assert durable["status"] == expected_status
+    assert durable["error_code"] == expected_error_code
+    assert durable["error_message"] == "a later accounting pass derived a different cause"
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert direct["status"] == expected_status
+    assert direct["error_code"] == expected_error_code
+    assert direct["error_message"] == "a later accounting pass derived a different cause"
 
 
 # --- J9: stickiness must not manufacture an empty write ------------------
@@ -12819,6 +12855,497 @@ def test_stickiness_suppressing_the_only_change_writes_no_record(tmp_path: Path)
     assert counts == {"total": 0, "pipeline_status": 0, "pipeline_event": 0}
     assert len(_durable_pipeline_job_payloads(repository.root, str(record["job_id"]))) == payloads_before
     assert _master_events(repository, record) == events_before
+
+
+# --- #1652: durable hydro-run read base ----------------------------------
+#
+# ``_hydro_run_for`` is the private lookup every production hydro merge bases
+# on, so it must return the exact durable row.  The DURABLE jsonl payload is the
+# oracle for these assertions; the public return/query surface must stay
+# redacted.
+# --------------------------------------------------------------------------
+
+
+def _create_seeded_hydro_run(tmp_path: Path, *, error_message: str) -> tuple[Any, str]:
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    repository.create_hydro_run_from_basin(
+        {"source_id": "gfs"},
+        {
+            "run_id": "fcst_gfs_2026062800_model_a",
+            "run_type": "forecast",
+            "scenario_id": "scenario_a",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "start_time": cycle_time.isoformat(),
+            "end_time": cycle_time.isoformat(),
+            "model": {"model_id": "model_a", "basin_version_id": "basin_version_a"},
+            "forcing": {"forcing_version_id": "forc_gfs_2026062800_model_a"},
+        },
+    )
+    repository.update_hydro_run_status(
+        "fcst_gfs_2026062800_model_a",
+        "failed",
+        error_code="SHUD_ABORTED",
+        error_message=error_message,
+    )
+    return repository, "fcst_gfs_2026062800_model_a"
+
+
+def _durable_hydro_run_payloads(repository: Any, run_id: str) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for path in sorted((repository.root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record.get("record_type") != "hydro_run":
+                continue
+            payload = record.get("payload") or {}
+            if payload.get("run_id") == run_id:
+                payloads.append(payload)
+    return payloads
+
+
+def _latest_hydro_run_payload(repository: Any, run_id: str) -> dict[str, Any]:
+    """The full ``hydro_run`` row in the model's ``latest/`` view.
+
+    The latest materialization is a durable surface too (tasks 1.1 requires
+    JSONL/latest preservation), and the model view is keyed by ``model_id``
+    under ``latest/<source>/<cycle>/``.  Returning the WHOLE hydro payload --
+    not just ``error_message`` -- lets the non-clearing tests assert the full
+    error family (``error_code`` AND ``error_message``) against the exact
+    durable value, never a redacted projection.
+    """
+
+    latest_path = repository.root / "latest" / "gfs" / "2026062800" / "model_a.json"
+    payload = json.loads(latest_path.read_text(encoding="utf-8"))
+    hydro_run = payload.get("hydro_run")
+    assert isinstance(hydro_run, dict), "expected a hydro_run in the model's latest view"
+    assert hydro_run["run_id"] == run_id
+    return hydro_run
+
+
+@pytest.mark.parametrize("status", ["staged", "submitted", "running", "failed"])
+def test_non_clearing_hydro_status_update_preserves_whole_object_uri(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    """#1652: a bare non-clearing update must not strip the durable URI or code.
+
+    The old read path rendered the PUBLIC row before the merge, so the
+    URI-valued message arrived as ``[object-uri]`` and the write boundary
+    erased it on the next non-clearing status update.  The source writes the
+    error CODE and MESSAGE independently, so a fix that preserves only one of
+    them must go red: both stay exact on the durable jsonl and the latest
+    materialization, while the public return stays the redacted projection.
+    """
+
+    whole_uri = "s3://nhms/logs/run.log"
+    repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=whole_uri)
+    seeded = _durable_hydro_run_payloads(repository, run_id)[-1]
+    assert seeded["error_message"] == whole_uri
+    assert seeded["error_code"] == "SHUD_ABORTED"
+
+    updated = repository.update_hydro_run_status(run_id, status)
+
+    durable = _durable_hydro_run_payloads(repository, run_id)[-1]
+    assert durable["error_message"] == whole_uri
+    assert durable["error_code"] == "SHUD_ABORTED"
+    # The ``latest/`` materialization is a durable surface too: after EACH
+    # non-clearing update it must carry the exact whole URI and error code,
+    # never a redaction placeholder.
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_message"] == whole_uri
+    assert latest["error_code"] == "SHUD_ABORTED"
+    assert updated["error_message"] == "[object-uri]"
+    assert updated["error_code"] == "SHUD_ABORTED"
+
+
+def test_non_clearing_hydro_status_update_preserves_embedded_uri_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """#1652: no ``[object-uri]`` substring may enter durable state.
+
+    The embedded-URI message public-renders to ``SHUD aborted; see
+    ``[object-uri]`` for detail``; the old base round-tripped that rendering
+    and the strip turned the whole message into a redacted fragment.  The
+    durable message must survive byte-for-byte.
+    """
+
+    embedded = "SHUD aborted; see s3://nhms/logs/run.log for detail"
+    repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=embedded)
+    seeded = _durable_hydro_run_payloads(repository, run_id)[-1]
+    assert seeded["error_message"] == embedded
+    assert seeded["error_code"] == "SHUD_ABORTED"
+
+    updated = repository.update_hydro_run_status(run_id, "running")
+
+    durable = _durable_hydro_run_payloads(repository, run_id)[-1]
+    assert durable["error_message"] == embedded
+    assert durable["error_code"] == "SHUD_ABORTED"
+    assert "[object-uri]" not in durable["error_message"]
+    # The latest view must preserve the embedded message byte-for-byte with no
+    # ``[object-uri]`` substring, and keep the error code exact.
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_message"] == embedded
+    assert latest["error_code"] == "SHUD_ABORTED"
+    assert "[object-uri]" not in latest["error_message"]
+    assert updated["error_message"] == "SHUD aborted; see [object-uri] for detail"
+    assert updated["error_code"] == "SHUD_ABORTED"
+
+
+def test_succeeded_hydro_status_still_clears_durable_errors(tmp_path: Path) -> None:
+    """#1652 (reverse lock): successful-state clearing stays intact.
+
+    ``succeeded`` with omitted error arguments is in the clearing set, so both
+    durable fields must be written ``None`` even though the base row carried a
+    URI-valued message.
+    """
+
+    repository, run_id = _create_seeded_hydro_run(tmp_path, error_message="s3://nhms/logs/run.log")
+    assert _durable_hydro_run_payloads(repository, run_id)[-1]["error_message"] == "s3://nhms/logs/run.log"
+
+    repository.update_hydro_run_status(run_id, "succeeded")
+
+    durable = _durable_hydro_run_payloads(repository, run_id)[-1]
+    assert durable["error_code"] is None
+    assert durable["error_message"] is None
+    # The latest view clears the durable error family in lockstep with JSONL.
+    latest = _latest_hydro_run_payload(repository, run_id)
+    assert latest["error_code"] is None
+    assert latest["error_message"] is None
+
+
+def test_private_hydro_lookup_returns_the_durable_row_copy(tmp_path: Path) -> None:
+    """#1652: the private reader is the durable base, and returns a copy.
+
+    ``_hydro_run_for`` must hand back the exact durable message so internal
+    merges never see display placeholders, and the returned dict must be a
+    copy (mutating it must not poison the cached row).
+    """
+
+    whole_uri = "s3://nhms/logs/run.log"
+    repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=whole_uri)
+
+    private = repository._hydro_run_for(run_id)
+    assert private is not None
+    assert private["error_message"] == whole_uri
+    assert private["error_message"] != "[object-uri]"
+    private["error_message"] = "mutated probe"
+    assert repository._hydro_run_for(run_id)["error_message"] == whole_uri
+    assert _durable_hydro_run_payloads(repository, run_id)[-1]["error_message"] == whole_uri
+
+
+def test_hydro_public_query_surface_stays_redacted(tmp_path: Path) -> None:
+    """#1652: public queries still render the URI as a display placeholder.
+
+    The public projection is the only boundary that may replace the URI; the
+    private read and the durable payload must keep the raw value.
+    """
+
+    whole_uri = "s3://nhms/logs/run.log"
+    repository, run_id = _create_seeded_hydro_run(tmp_path, error_message=whole_uri)
+
+    public = repository._hydro_run_for(run_id)
+    assert public is not None and public["error_message"] == whole_uri
+    # The existing candidate-state / read path renders through the public
+    # projection; the hydro run's own row is readable via the private reader
+    # only (there is no public single-row hydro getter), so this asserts the
+    # return value of ``update_hydro_run_status`` stays redacted instead.
+    assert repository.update_hydro_run_status(run_id, "staged")["error_message"] == "[object-uri]"
+
+
+# --- #1630: permanent-failure message round trip -------------------------
+#
+# ``_mark_master_permanently_failed`` receives two PUBLIC snapshots.  A source
+# message identical to the freshly read current public message is round-trip
+# evidence and must not be fed back into durable state; a distinct non-empty
+# source message remains an explicit override.
+# --------------------------------------------------------------------------
+
+
+def _rich_failure_message() -> str:
+    return "model crashed; see /scratch/nwm/run.log or s3://nhms/logs/run.log for detail"
+
+
+def _markable_failed_master_with_rich_message(
+    tmp_path: Path,
+    *,
+    rich_message: str,
+) -> tuple[Any, dict[str, Any]]:
+    """A schema-valid durable ``failed`` master carrying a rich URI-bearing message.
+
+    The durable row must be markable (``failed`` is in
+    ``PERMANENT_FAILURE_SOURCE_STATUSES``) for the typed transition to APPLY,
+    so the rich message cannot be seeded through
+    ``mark_pipeline_job_permanently_failed`` -- that would flip the durable
+    status to ``permanently_failed`` and the later service call would return on
+    the idempotent branch before ever reaching the round-trip guard.  The row
+    is therefore written through the journal's own outgoing-record/direct-row
+    seam (the same validator production writes use), starting from a fully
+    bound ``failed`` master and appending a ``failed`` row that carries the
+    rich message exactly.  ``_journal_record_for_write`` durably sanitizes the
+    payload, and the rich message survives it because the durable sanitizer
+    never invents redaction for embedded path/URI text.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    job_id = str(record["job_id"])
+    source_id = journal_module._source_id_from_job(record)
+    cycle_time = journal_module._cycle_time_from_job(record)
+    with repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+        existing = repository._accepted_submit_job_for_id_unlocked(
+            job_id,
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
+        assert existing is not None
+        row = {**existing, "error_message": rich_message}
+        journal_record = journal_module._journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=repository._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time),
+        )
+        repository._validate_outgoing_record(
+            journal_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=None,
+        )
+        repository._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=[journal_record],
+        )
+        repository._write_pipeline_job_direct_unlocked(row, journal_record)
+    assert repository.get_pipeline_job(job_id)["status"] == "failed"
+    return repository, record
+
+
+def test_public_snapshot_cannot_overwrite_richer_durable_failure_message(
+    tmp_path: Path,
+) -> None:
+    """#1630: a round-tripped public message must not displace the durable one.
+
+    The durable row carries a message with a local path plus an object URI and
+    is still ``failed`` (markable).  The service receives the public projection
+    of that same message; feeding it back would replace the richer durable text
+    with ``[local-path]`` / ``[object-uri]``.  The typed transition must apply
+    (one ``permanently_failed`` event), the durable message must survive exactly
+    in the jsonl payload and the direct row, and the public output stays
+    sanitized.
+    """
+
+    rich_message = _rich_failure_message()
+    repository, record = _markable_failed_master_with_rich_message(
+        tmp_path,
+        rich_message=rich_message,
+    )
+    job_id = str(record["job_id"])
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    # The public projection of the durable message -- the exact round-trip a
+    # production decline passes the service.  Status stays ``failed`` so the
+    # typed transition is reached (not the idempotent return).
+    failed_snapshot = {
+        **journal_module._file_retry_job_record(repository.get_pipeline_job(job_id)),
+        "status": "failed",
+    }
+    assert "[local-path]" in failed_snapshot["error_message"]
+    assert "[object-uri]" in failed_snapshot["error_message"]
+
+    result = service.mark_permanently_failed(failed_snapshot)
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["status"] == "permanently_failed"
+    assert durable["error_message"] == rich_message
+    assert _direct_row_payload(repository, job_id)["error_message"] == rich_message
+    assert result.status == "permanently_failed"
+    # The service return is a public row, still sanitized.
+    assert result.error_message not in (None, "")
+    assert "[local-path]" in result.error_message and "[object-uri]" in result.error_message
+    assert result.error_message != rich_message
+    assert len(_permanently_failed_events(repository, record)) == 1
+
+
+def test_permanent_failure_distinct_source_message_still_overrides(
+    tmp_path: Path,
+) -> None:
+    """#1630 (reverse lock): genuinely new caller text still persists.
+
+    A source message that differs from the current public message is explicit
+    new evidence and must be durably sanitized onto the row, while status,
+    error code, finished_at, event details and the idempotent second mark stay
+    byte-for-byte compatible.
+    """
+
+    repository, record = _terminally_failed_cohort_master(tmp_path)
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    snapshot = repository.get_pipeline_job(str(record["job_id"]))
+    assert snapshot["status"] == "failed"
+
+    new_message = "operator decline recorded a fresh cause: /scratch/nwm/new.log"
+    result = service.mark_permanently_failed(
+        {
+            **snapshot,
+            "error_message": new_message,
+        }
+    )
+
+    durable = _durable_master_payload(repository, record)
+    assert durable["status"] == "permanently_failed"
+    # The mark service forwards the snapshot's own error code as ``last_error``,
+    # exactly as before #1630 (``_mark_master_permanently_failed`` read
+    # ``source.get("error_code")`` with a durable fallback) -- only the message
+    # round-trip guard is new, so the code is ``OUT_OF_MEMORY`` from the seed.
+    assert durable["error_code"] == "OUT_OF_MEMORY"
+    # Durable state keeps the real path (the durable sanitizer only strips
+    # redaction placeholders, it never invents redaction); the PUBLIC return
+    # renders it as ``[local-path]``.
+    assert durable["error_message"] == new_message
+    assert _direct_row_payload(repository, str(record["job_id"]))["error_message"] == new_message
+    assert result.status == "permanently_failed"
+    assert result.error_message == "operator decline recorded a fresh cause: [local-path]"
+    events = _permanently_failed_events(repository, record)
+    assert len(events) == 1
+    assert events[0]["details"]["automatic_retry_stopped"] is True
+    assert events[0]["status_from"] == "failed"
+
+    # Stale / idempotent outcomes are unchanged: a second mark on the now
+    # permanently-failed row cannot overwrite the fresh cause either.
+    stale = repository.mark_pipeline_job_permanently_failed(str(record["job_id"]), error_message="late override")
+    assert stale.outcome == "idempotent"
+    assert stale.row is not None and stale.row["status"] == "permanently_failed"
+    assert _durable_master_payload(repository, record)["error_message"] == new_message
+
+
+# --- #1629: cancelled / permanently_failed status stickiness -------------
+
+
+def _cancelled_projection_projections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return _cohort_task_projections(record, error_code="SLURM_JOB_CANCELLED")
+
+
+def _reproject_cancelled_master(repository: Any, record: Mapping[str, Any]) -> dict[str, int]:
+    return repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cancelled_projection_projections(record),
+        complete=True,
+        master_status="failed",
+        master_error_code="SLURM_JOB_CANCELLED",
+        reconciliation_decision="matched_bound",
+        finished_at=_dt("2026-07-21T03:00:00Z"),
+        exit_code=130,
+        master_error_message="terminal array tasks were cancelled",
+        log_uri=_REAL_MASTER_LOG_URI,
+    )
+
+
+def test_cancelled_master_keeps_cancellation_while_evidence_refreshes(
+    tmp_path: Path,
+) -> None:
+    """#1629: a persisted ``cancelled`` master survives complete task projection.
+
+    The projection owns only ``succeeded``/``partially_failed``/``failed``;
+    ``cancelled`` is an externally assigned terminal truth that must not be
+    rewritten as ``failed``.  Status sticks, but the task projections, derived
+    error family, finished_at, exit_code and the real log URI all refresh.
+    The public query reports ``status="cancelled"`` with ``log_uri`` redacted.
+    """
+
+    repository, record = _cancelled_cohort_master(tmp_path)
+    assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "cancelled"
+
+    counts = _reproject_cancelled_master(repository, record)
+
+    # First projection pass: two per-model candidate pipeline_jobs + two
+    # array_task_reconciled events + the master pipeline_job + one status_change
+    # pipeline_event (the same write shape as any complete matched-bound
+    # projection over a master with no candidate projections yet).
+    assert counts == {"total": 6, "pipeline_status": 3, "pipeline_event": 3}
+    durable = _durable_master_payload(repository, record)
+    assert durable["status"] == "cancelled"
+    expected_candidates = [
+        {
+            **{key: item[key] for key in ("array_task_id", "candidate_id", "run_id", "model_id")},
+            "array_task_outcome": "failed",
+            "restart_stage": "forecast",
+            "native_shud_resubmitted": False,
+        }
+        for item in _cancelled_projection_projections(record)
+    ]
+    assert durable["candidate_projections"] == expected_candidates
+    assert durable["error_code"] == "SLURM_JOB_CANCELLED"
+    assert durable["error_message"] == "terminal array tasks were cancelled"
+    expected_finished_at = journal_module._format_utc(_dt("2026-07-21T03:00:00Z"))
+    assert durable["finished_at"] == expected_finished_at
+    assert durable["exit_code"] == 130
+    assert durable["log_uri"] == _REAL_MASTER_LOG_URI
+    assert _REAL_MASTER_LOG_URI in _raw_journal_text(repository)
+
+    # Direct-row parity (#1629 tasks 1.4): the direct master row is a
+    # separately materialized durable surface, so it must equal the JSONL
+    # payload exactly -- status, candidate projections, error family, finished
+    # timestamp, exit code and log URI.  A fix that refreshes only the jsonl
+    # (or only the direct row) must go red here.
+    direct = _direct_row_payload(repository, str(record["job_id"]))
+    assert direct["status"] == "cancelled"
+    assert direct["candidate_projections"] == expected_candidates
+    assert direct["error_code"] == "SLURM_JOB_CANCELLED"
+    assert direct["error_message"] == "terminal array tasks were cancelled"
+    assert direct["finished_at"] == expected_finished_at
+    assert direct["exit_code"] == 130
+    assert direct["log_uri"] == _REAL_MASTER_LOG_URI
+
+    public = repository.get_pipeline_job(str(record["job_id"]))
+    assert public["status"] == "cancelled"
+    assert public["log_uri"] == _LAUNDERED_URI
+
+    # The seed carried NO candidate projections (a bound ``submitted`` master),
+    # so this pass is the projection's FIRST -- it must newly create each
+    # per-model reconciled candidate row (direct row + latest view), exactly
+    # the per-model side effect a cancelled master is still responsible for.
+    # ``latest/`` intentionally excludes cohort masters
+    # (_materialize_latest_unlocked filters ``accepted_submit_row_kind(job) !=
+    # "master"``), so the master's exact values are asserted in JSONL + direct
+    # row only.  The task hydro rows were already terminal ``failed`` (not
+    # retryable), so the projection leaves them untouched and ``hydro_run``
+    # stays null -- no per-model hydro refresh.
+    latest_entries = sorted(
+        (repository.root / "latest").rglob("*.json"),
+        key=lambda path: str(path),
+    )
+    assert latest_entries, "expected per-model latest views after the projection"
+    assert len(latest_entries) == len(record["cohort_members"])
+    expected_candidates = {
+        str(item["model_id"]): _cancelled_projection_projections(record)[index]
+        for index, item in enumerate(record["cohort_members"])
+    }
+    for latest_path in latest_entries:
+        latest_payload = json.loads(latest_path.read_text(encoding="utf-8"))
+        assert latest_payload.get("hydro_run") is None
+        candidate_jobs = latest_payload.get("pipeline_jobs") or []
+        # No master copy: the master itself is excluded from latest by kind.
+        assert all(
+            item.get("job_id") != str(record["job_id"])
+            for item in candidate_jobs
+        )
+        assert len(candidate_jobs) == 1  # one task projection per model view
+        candidate = candidate_jobs[0]
+        projection = expected_candidates[candidate["model_id"]]
+        assert candidate["job_id"] == (
+            f"job_{projection['run_id']}_forecast_reconciled_"
+            f"{_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID}_{projection['array_task_id']}"
+        )
+        assert candidate["array_task_id"] == projection["array_task_id"]
+        assert candidate["status"] == "failed"
+        assert candidate["submit_outcome"] == "accepted"
+        assert candidate["error_code"] == projection.get("error_code")
+        assert candidate["restart_stage"] == "forecast"
+        assert candidate["native_shud_resubmitted"] is False
 
 
 # --- J10: the manual-retry round-trip residue ----------------------------
@@ -15675,6 +16202,386 @@ def test_recovery_cli_attests_a_wedged_row_and_is_idempotent(
     # operator.
     _, after = _run_recovery_cli(entrypoint, ["--journal-root", str(repository.root)], capsys)
     assert after["wedged"][0]["operator_recovery_attested_at"] == payload["operator_recovery_attested_at"]
+
+def _pad_journal_cycles_with_unrelated_records(
+    journal_root: Path, *, cycles: tuple[datetime, ...], records_per_cycle: int
+) -> int:
+    """Grow retained history in OTHER cycles, the way production actually grew.
+
+    ``journal/`` is append-only, so the whole-tree replay's aggregate budget is
+    a function of history, not of the cycle under inspection (#1810).  Padding
+    with unrelated cycles reproduces that growth law in a fixture.
+    """
+
+    for cycle_time in cycles:
+        _write_jsonl(
+            journal_root / f"journal/gfs/{format_cycle_time(cycle_time)}.jsonl",
+            [
+                _journal_record(
+                    record_type="pipeline_job",
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    payload=_active_job(cycle_time),
+                    sequence=sequence,
+                )
+                for sequence in range(1, records_per_cycle + 1)
+            ],
+        )
+    return len(cycles) * records_per_cycle
+
+
+def test_released_identity_blocked_listing_survives_a_whole_tree_budget(tmp_path: Path) -> None:
+    """#1810 task 1.1: discovery is bounded by ONE cycle, not by history.
+
+    The shipped query replayed the whole tree, so its aggregate
+    ``_RecordBudget`` counted every retained ``journal/`` line in every cycle.
+    On node-22 that is 71,213 records against a 100,000 cap that history had
+    already crossed, and the operator-facing FIND half returned
+    ``file_journal_record_limit_exceeded`` instead of the wedge.
+
+    The oracle shape is deliberate (design D7).  ``max_records=1`` would redden
+    the FIXED code too -- the cycle-scoped replay consumes the same budget per
+    call -- and could only be "fixed" by exempting the scoped path, which is an
+    oracle weakening.  The discriminating shape is N cycles x M records with
+    M < max_records < N*M: three cycles of four records each under a budget of
+    six.  The two ``query_pipeline_jobs_by_cycle`` probes below assert that
+    shape in-test, so the pin cannot silently degrade into a tautology if the
+    fixtures grow a record.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    released_cycle_time = _dt("2026-07-20T00:00:00Z")
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+
+    # The released cycle costs 3 journal lines + 1 flat direct record = 4.
+    budgeted = FileOrchestrationJournalRepository(repository.root, max_records=6)
+
+    # Oracle self-check, half 1: the whole tree is OVER the budget. An
+    # underivable cycle id falls open to the full scan (#1734 D4), which is the
+    # public way to reach it.
+    assert journal_module._cycle_scope_from_cycle_id("unknown-source_2026072000") is None
+    blocked = budgeted.query_pipeline_jobs_by_cycle("unknown-source_2026072000")
+    assert blocked[0]["error_code"] == "file_journal_record_limit_exceeded"
+    assert blocked[0]["file_journal"]["field"] == "pipeline_job_records"
+
+    # Oracle self-check, half 2: one cycle is UNDER it.
+    narrowed = budgeted.query_pipeline_jobs_by_cycle(cycle_id_for("gfs", released_cycle_time))
+    assert [job["job_id"] for job in narrowed] == [job_id]
+    # A released row carries its own ``error_code`` (SLURM_RESERVATION_LOST), so
+    # the blocked-read marker is ``file_journal``, not the presence of a code.
+    assert "file_journal" not in narrowed[0]
+
+    # The pin. Not "no exception escaped" -- a silently empty listing would
+    # satisfy that and would be the fail-open this change exists to avoid.
+    listed = budgeted.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    assert listed[0]["identity_blocked_streak"] == 3
+    assert listed[0]["reconciliation_decision"] == "identity_mismatch_released"
+
+
+def test_released_identity_blocked_scope_is_derived_from_row_content(tmp_path: Path) -> None:
+    """#1810 task 1.3: the scope is the WRITER's, read back off row content.
+
+    The fixture asked for an end-to-end pin: a flat ``pipeline-jobs/`` row whose
+    job_id does not match ``_ACCEPTED_SUBMIT_MASTER_JOB_ID_RE`` but whose content
+    is a current-contract master.  **That row cannot exist**, and this test pins
+    why rather than asserting the fixture's premise.  A current-contract master
+    must satisfy ``forecast_cohort_identity_is_valid``, which forces
+    ``run_id == cycle_{source}_{cycle}[_cohort]`` and
+    ``job_id == job_{run_id}_forecast[_suffix]``; no storage source id contains
+    ``_``; so every such job_id necessarily matches that regex.  The flat reader
+    validates every file it yields, so a synthetic counter-example is REJECTED by
+    ``_validated_direct_pipeline_job_record`` instead of being discovered.
+
+    What is therefore pinned is the property the fixture wanted: discovery never
+    consults the job_id string at all.  ``_released_candidate_cycle_scope`` reads
+    the same two content fields ``_write_pipeline_job_direct_unlocked`` and
+    ``_write_pipeline_job_unlocked`` used to place the row, so reader and writer
+    agree by construction and an unparsable name is a non-event.
+    """
+
+    from services.orchestrator.accepted_submit_identity import forecast_cohort_digest
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    parsable_job_id = str(record["job_id"])
+    released_record = json.loads(
+        (repository.root / "pipeline-jobs" / f"{parsable_job_id}.json").read_text(encoding="utf-8")
+    )
+    released_row = released_record["payload"]
+    assert journal_module._released_identity_blocked_row(released_row)
+
+    residue_job_id = "legacy-master.cycle_gfs_2026072000_forecast"
+    assert journal_module._ACCEPTED_SUBMIT_MASTER_JOB_ID_RE.fullmatch(residue_job_id) is None
+    assert journal_module._cycle_scope_from_job_id(residue_job_id) is None
+    residue_row = {**released_row, "job_id": residue_job_id}
+    residue_row["cohort_digest"] = forecast_cohort_digest(residue_row)
+
+    # The property: an unparsable name still yields the writer's exact scope.
+    scope = journal_module._released_candidate_cycle_scope(residue_row)
+    assert scope == (
+        journal_module._source_id_from_job(released_row),
+        journal_module._cycle_time_from_job(released_row),
+    )
+    assert scope == ("gfs", _dt("2026-07-20T00:00:00Z"))
+
+    # And the reason the end-to-end shape is unconstructible, asserted rather
+    # than asserted-about: the flat reader refuses the row.
+    with pytest.raises(FileOrchestrationJournalError) as rejected:
+        repository._validated_direct_pipeline_job_record(
+            {**released_record, "job_id": residue_job_id, "payload": residue_row},
+            expected_job_id=residue_job_id,
+        )
+    assert rejected.value.reason == "file_journal_evidence_invariant_invalid"
+    assert rejected.value.field == "cohort_digest"
+
+
+def test_released_identity_blocked_listing_falls_open_when_scope_is_underivable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 1.4: an underivable scope widens the read, never shortens it.
+
+    #1734's D4 contract is that an underivable key costs the OLD expensive read
+    and never a false "not found".  Like task 1.3's shape, this precondition is
+    unreachable from data -- every row the flat reader yields carries a
+    round-tripping ``cycle_id``, so ``_released_candidate_cycle_scope`` cannot
+    return ``None`` -- so the precondition is injected at that one seam.  The
+    branch would otherwise be unpinned and freely regressable, and deleting it
+    would be a silent deviation from the spec requirement.
+
+    Read attribution is the oracle, not just the returned row: a fall-open that
+    quietly dropped the candidate would also return nothing, and a fall-open
+    that never happened would tag no ``full_tree_replay``.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    job_id = str(record["job_id"])
+    monkeypatch.setattr(journal_module, "_released_candidate_cycle_scope", lambda job: None)
+    journal_module.reset_journal_read_counters()
+
+    listed = repository.query_released_identity_blocked_jobs()
+
+    assert [job["job_id"] for job in listed] == [job_id]
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|full_tree_replay" in tags, sorted(tags)
+
+
+def test_released_identity_blocked_listing_never_replays_the_whole_tree(tmp_path: Path) -> None:
+    """#1810 tasks 2.1/2.2: flat scan as candidate filter, cycle-scoped confirm.
+
+    The budget pin above proves the read fits; this proves it is the SHAPE the
+    design chose and not an accident of fixture size.  D9 recorded that the
+    obvious alternative -- one cycle-scoped replay per distinct cycle -- did not
+    finish in 40 minutes against the real node-22 journal, so the lane split is
+    load-bearing: enumerate the flat directory ONCE, confirm per candidate.
+    """
+
+    repository, record = _released_identity_blocked_master(tmp_path)
+    _pad_journal_cycles_with_unrelated_records(
+        repository.root,
+        cycles=(_dt("2026-07-20T12:00:00Z"), _dt("2026-07-21T00:00:00Z")),
+        records_per_cycle=4,
+    )
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    journal_module.reset_journal_read_counters()
+
+    assert [job["job_id"] for job in reader.query_released_identity_blocked_jobs()] == [
+        str(record["job_id"])
+    ]
+
+    tags = {str(row["tag"]) for row in journal_module.journal_read_attribution()["tags"]}
+    assert "query_released_identity_blocked_jobs|direct_flat_scan" in tags, sorted(tags)
+    assert "query_released_identity_blocked_jobs|cycle_replay" in tags, sorted(tags)
+    assert not [tag for tag in tags if tag.endswith("|full_tree_replay")], sorted(tags)
+
+def _released_identity_blocked_wedge(
+    tmp_path: Path, *, cycle_times: tuple[datetime, ...], per_cycle: int
+) -> tuple[Any, list[str]]:
+    """A mass-release wedge: ``per_cycle`` released masters in each cycle.
+
+    Built through the production transitions (reserve -> identity-blocked
+    release) in ONE repository, so every row is a real member of the shape
+    ``_released_identity_blocked_row`` admits.
+    """
+
+    from packages.common.source_identity import normalize_source_id
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        forecast_cohort_digest,
+    )
+    from services.orchestrator.chain_config import scenario_for_source
+
+    canonical_source_id = normalize_source_id("gfs")
+    scenario_id = scenario_for_source(canonical_source_id)
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    job_ids: list[str] = []
+    for cycle_time in cycle_times:
+        stamp = format_cycle_time(cycle_time)
+        cycle_iso = cycle_time.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        for cohort in range(per_cycle):
+            run_id = f"cycle_{canonical_source_id.lower()}_{stamp}_c{cohort}"
+            job_id = f"job_{run_id}_forecast"
+            record: dict[str, Any] = {
+                "accepted_submit_contract_version": ACCEPTED_SUBMIT_CONTRACT_VERSION,
+                "job_id": job_id,
+                "run_id": run_id,
+                "source_id": canonical_source_id,
+                "cycle_id": cycle_id_for(canonical_source_id, cycle_time),
+                "job_type": "run_shud_forecast_array",
+                "model_id": None,
+                "stage": "forecast",
+                "idempotency_key": f"{run_id}:forecast",
+                "slurm_comment": f"nhms_idem:{run_id}:forecast",
+                "submit_outcome": None,
+                "restart_stage": "forecast",
+                "cohort_members": [
+                    {
+                        "array_task_id": index,
+                        "candidate_id": f"{canonical_source_id}:{cycle_iso}:model_c{cohort}_{index}:{scenario_id}",
+                        "run_id": f"fcst_{canonical_source_id.lower()}_{stamp}_model_c{cohort}_{index}",
+                        "model_id": f"model_c{cohort}_{index}",
+                        "basin_id": f"basin_c{cohort}_{index}",
+                        "scenario_id": scenario_id,
+                        "restart_stage": "forecast",
+                    }
+                    for index in range(2)
+                ],
+                "submission_attempt": 1,
+                "submission_attempt_started_at": cycle_time,
+                "expected_slurm_user": None,
+                "expected_slurm_account": None,
+                "slurm_ownership_required": False,
+                "created_at": cycle_time,
+                "updated_at": cycle_time,
+            }
+            record["cohort_digest"] = forecast_cohort_digest(record)
+            assert repository.reserve_pipeline_job(dict(record)) is not None
+            reserved = repository.get_pipeline_job(job_id)
+            assert (
+                repository.release_identity_blocked_reservation(
+                    job_id,
+                    accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+                    expected_submission_attempt=int(reserved["submission_attempt"]),
+                    expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+                    identity_blocked_streak=3,
+                )
+                == 1
+            )
+            job_ids.append(job_id)
+    return repository, job_ids
+
+
+def test_released_identity_blocked_confirm_does_not_relist_the_flat_directory_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 task 3.1: the confirm half must not be O(candidates x flat dir).
+
+    The scoped confirm reaches ``_flat_direct_pipeline_job_paths_for_cycle``,
+    which lists the ENTIRE unpartitioned ``pipeline-jobs/`` directory (4,557
+    files on node-22) and only then filters by file name.  Called once per
+    candidate, that is the same O(N x flat-directory) growth law design D9
+    measured at ">40 minutes for 230 cycles" and rejected.  N is not bounded by
+    anything: the admitted shape (reservation_lost + identity_mismatch_released
+    + no slurm id) is exactly what a mass release or a SLURM outage produces in
+    bulk, which is the incident this operator command exists to serve.
+
+    The oracle is a direct COUNT of flat-directory listings, not wall time, so
+    it is independent of fixture size: after the fix the directory is listed
+    exactly twice per query -- once by the candidate scan
+    (``_iter_direct_pipeline_job_records``, which does not route through the
+    per-cycle helper) and once when the per-query memo fills.  A constant, not
+    ``<= M`` or ``<= K``, is what proves the growth law is gone.
+    """
+
+    cycle_times = (_dt("2026-07-20T00:00:00Z"), _dt("2026-07-20T12:00:00Z"))
+    per_cycle = 3
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+    flat_directory = repository.root / "pipeline-jobs"
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = journal_module._iter_regular_json_files
+    listings: list[Path] = []
+
+    def counting_iter_regular_json_files(directory: Path, **kwargs: Any) -> Any:
+        if directory == flat_directory:
+            listings.append(directory)
+        return original(directory, **kwargs)
+
+    monkeypatch.setattr(journal_module, "_iter_regular_json_files", counting_iter_regular_json_files)
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned. A memo keyed by
+    # the wrong thing would shrink this to one cycle's rows.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle
+    # Half 2: the growth law. Two listings, independent of M and of K.
+    assert len(listings) == 2, len(listings)
+
+
+def test_released_identity_blocked_confirm_replays_once_per_cycle_not_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1810 design D14: the confirm half is grouped BY CYCLE, not per candidate.
+
+    The pin above counts flat-directory LISTINGS, and the per-query memo alone
+    holds that count at two even if the grouping is reverted to a per-candidate
+    loop -- so it does not discriminate the two halves of the fix.  This one
+    counts the scoped REPLAYS themselves, which the memo does not deduplicate:
+    a per-candidate loop costs one cycle replay per candidate, and a mass
+    release puts an unbounded number of rows into a handful of cycles.
+
+    The oracle is a constant times K, with the fixture built so C > K in-test
+    (12 candidates over 3 cycles), so the bound cannot silently degrade into a
+    tautology.  The recorded scopes are compared as a SET too: a count alone
+    would also be satisfied by three replays of the wrong cycle, and a
+    ``None`` scope would mean the fall-open whole-tree replay, not grouping.
+    """
+
+    cycle_times = (
+        _dt("2026-07-20T00:00:00Z"),
+        _dt("2026-07-20T12:00:00Z"),
+        _dt("2026-07-21T00:00:00Z"),
+    )
+    per_cycle = 4
+    repository, job_ids = _released_identity_blocked_wedge(
+        tmp_path, cycle_times=cycle_times, per_cycle=per_cycle
+    )
+
+    # A FRESH instance: the writer left every file in its byte cache.
+    reader = FileOrchestrationJournalRepository(repository.root)
+    original = reader._iter_pipeline_job_records_scoped
+    replayed: list[tuple[str, datetime] | None] = []
+
+    def counting_iter_pipeline_job_records_scoped(
+        cycle_scope: tuple[str, datetime] | None, **kwargs: Any
+    ) -> Any:
+        replayed.append(cycle_scope)
+        return original(cycle_scope, **kwargs)
+
+    monkeypatch.setattr(
+        reader, "_iter_pipeline_job_records_scoped", counting_iter_pipeline_job_records_scoped
+    )
+
+    listed = reader.query_released_identity_blocked_jobs()
+
+    # Half 1: every candidate in every scope is still returned, and the fixture
+    # really is C > K -- 12 candidates spread over 3 cycles.
+    assert [job["job_id"] for job in listed] == sorted(job_ids)
+    assert len(job_ids) == len(cycle_times) * per_cycle == 12
+    # Half 2: the growth law. One replay per DISTINCT cycle, exactly, and each
+    # one for a cycle a candidate actually lives in.
+    assert len(replayed) == len(cycle_times), replayed
+    assert set(replayed) == {("gfs", cycle_time) for cycle_time in cycle_times}
 
 
 @pytest.mark.parametrize("entrypoint", ["click", "argparse"])

@@ -25,6 +25,126 @@ from tests.gateway_reconcile_helpers import (
 )
 
 
+def _seed_cancelled_master(repository: Any, job_id: str) -> None:
+    """Append a schema-valid ``cancelled`` status through the journal write seam.
+
+    No current typed API produces a ``cancelled`` master (the cancellation flow
+    parks masters on ``reconcile_unverified`` and lets task accounting decide),
+    but ``cancelled`` is a legal persisted status a historical accepted-submit
+    master may carry.  The row is written through the journal's own outgoing
+    validator + direct-row seam, so an impossible shape fails here rather than
+    faking a passing test.  The seed starts from a bound ``submitted`` master
+    with NO candidate projections, so the restart reconcile is responsible for
+    the whole first complete projection.
+    """
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+
+    source_id = journal_module._source_id_from_job(repository.get_pipeline_job(job_id))
+    cycle_time = journal_module._cycle_time_from_job(repository.get_pipeline_job(job_id))
+    with repository._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
+        existing = repository._accepted_submit_job_for_id_unlocked(
+            job_id,
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
+        assert existing is not None
+        assert not existing.get("candidate_projections")
+        row = {**existing, "status": "cancelled"}
+        journal_record = journal_module._journal_record_for_write(
+            "pipeline_job",
+            row,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            model_id=None,
+            sequence=repository._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time),
+        )
+        repository._validate_outgoing_record(
+            journal_record,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            record_type="pipeline_job",
+            model_id=None,
+        )
+        repository._append_journal_records_unlocked(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            records=[journal_record],
+        )
+        repository._write_pipeline_job_direct_unlocked(row, journal_record)
+    assert repository.get_pipeline_job(job_id)["status"] == "cancelled"
+
+
+def test_restart_reconcile_receipt_reports_durable_cancelled_without_resubmit(
+    tmp_path: Any,
+) -> None:
+    """#1629 receipt closure: complete restart accounting reports ``cancelled``.
+
+    A historical accepted-submit master persisted as ``cancelled`` (with
+    incomplete task projections) is admitted to restart reconcile, and complete
+    sacct accounting projects it.  The projection preserves the sticky
+    ``cancelled`` status while refreshing task/observational evidence, so the
+    operator receipt's status -- which reports the terminal status READ BACK
+    from the durable master -- must say ``cancelled`` too, not the
+    projection-derived value.  The durable master stays ``cancelled`` and the
+    job leaves the inflight inventory (no resubmission / re-reservation).
+    """
+
+    repository = _file_cohort_repository(tmp_path, member_count=2)
+    key = "cycle_gfs_2026071200_forecast_fixture:forecast"
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    _bind_current_file_cohort(repository, key, slurm_job_id="17667")
+    _seed_cancelled_master(repository, job_id)
+    assert [job.job_id for job in repository.query_inflight_jobs()] == [job_id]
+
+    task_records = (
+        SacctRecord("17667_0", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=0),
+        SacctRecord("17667_1", "COMPLETED", "nhms_forecast", exit_code="0:0", array_task_id=1),
+    )
+    master = SacctRecord(
+        slurm_job_id="17667",
+        raw_state="COMPLETED",
+        job_name="nhms_forecast",
+        comment=f"nhms_idem:{key}",
+        array_member_job_ids=("17667_0", "17667_1"),
+        array_task_records=task_records,
+    )
+
+    outcomes = reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master)
+
+    # Complete accounting over the sticky cancelled master: the receipt must
+    # report the durable truth, not the projection-derived ``succeeded``.
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert outcome.action == "terminal"
+    assert outcome.status == "cancelled"
+    assert outcome.durable_write_kind == "forecast_cohort_projection"
+    # First complete projection over a bound cancelled master with no candidate
+    # projections: 2 candidate pipeline_jobs + 2 succeeded hydro refreshes +
+    # the master pipeline_job = 5 pipeline_status writes, plus 2
+    # array_task_reconciled events + 1 status_change event.
+    assert outcome.durable_write_count == 8
+    assert outcome.pipeline_status_write_count == 5
+    assert outcome.pipeline_event_write_count == 3
+
+    # Durable/public master and the outcome agree on ``cancelled``.
+    master_row = repository.get_pipeline_job(job_id)
+    assert master_row is not None and master_row["status"] == "cancelled"
+    # The task projection still refreshed the observational evidence and the
+    # candidate rows, exactly as for any complete matched-bound projection.
+    assert len(master_row["candidate_projections"]) == 2
+    assert all(
+        projection["array_task_outcome"] == "succeeded"
+        for projection in master_row["candidate_projections"]
+    )
+
+    # Terminal + projections complete => no longer needs restart reconcile and
+    # the bound row is not reserved-unbound, so a later pass resubmits nothing.
+    assert repository.query_inflight_jobs() == []
+    assert repository.query_reserved_unbound_jobs() == []
+    assert reconcile_inflight_jobs(repository, sacct_query=lambda _job_id: master) == []
+
+
 def test_file_cohort_terminal_tasks_project_exact_success_failure_and_restart(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,

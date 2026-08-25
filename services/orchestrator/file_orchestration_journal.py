@@ -202,6 +202,37 @@ _journal_read_lane: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+_flat_direct_job_listing_memo: contextvars.ContextVar[dict[str, list[Path]] | None] = contextvars.ContextVar(
+    "nhms_flat_direct_job_listing_memo",
+    default=None,
+)
+
+
+@contextmanager
+def _flat_direct_job_listing_memo_scope() -> Iterable[None]:
+    """Memoize the flat ``pipeline-jobs/`` LISTING for one read-only call.
+
+    Scope is deliberately narrow (#1810 design D14). The listing is
+    point-in-time on a live journal, which is only safe because the mutating
+    paths re-read under ``_locked_cycle_write`` and compare there; a memo that
+    outlived one query, or that any write path entered, would turn "at most a
+    refused invocation" into a bad write. So this is a ``ContextVar`` bound to
+    one call frame, never an instance cache, and it is entered from exactly one
+    read-only caller.
+
+    Only the raw, unfiltered directory listing is memoized — the per-cycle
+    filename filter still runs per call, so
+    ``_flat_direct_pipeline_job_paths_for_cycle`` stays the ONE definition of
+    that filter.
+    """
+
+    token = _flat_direct_job_listing_memo.set({})
+    try:
+        yield
+    finally:
+        _flat_direct_job_listing_memo.reset(token)
+
+
 @contextmanager
 def journal_read_lane(lane: str) -> Iterable[None]:
     """Tag every journal read made in this context with its reader lane.
@@ -492,6 +523,23 @@ TERMINAL_PIPELINE_STATUSES = {
     "reservation_lost",
     "permanently_failed",
 }
+#: Exactly the master statuses the cohort task projection can DERIVE from task
+#: outcomes.  A persisted status inside this set is projection-owned and keeps
+#: being overwritten by the current pass; a persisted status outside it cannot
+#: be derived here, so the projection preserves it (status stickiness).  Under
+#: the routed domain that means ``permanently_failed`` and ``cancelled``.
+#: ``submission_failed`` and ``reservation_lost`` never reach this projection:
+#: their submit-outcome/inventory gates reject them before the accounting
+#: tuple could be rewritten as ``matched_bound``, so they are deliberately NOT
+#: listed here -- the derived-domain predicate must not be widened to accept
+#: an accounting tuple this function cannot legally write.
+PROJECTION_DERIVED_MASTER_STATUSES = frozenset(
+    {
+        "succeeded",
+        "partially_failed",
+        "failed",
+    }
+)
 #: The persisted master statuses a permanent-failure mark may transition FROM
 #: (#1312).  A live row (``reserved``/``running``/...) is a stale caller, never
 #: an error: the retry decline that owns the mark runs off its own snapshot and
@@ -1575,23 +1623,77 @@ class FileOrchestrationJournalRepository:
         ACTIONABLE -- the recovery API demands CAS values a human otherwise has
         no supported way to read.  The filter mirrors that API's own admission
         shape so a row listed here is one it will actually consider.
+
+        The constraint that binds is NOT wall time (#1810).  An earlier version
+        of this docstring defended a whole-tree replay as "acceptable because
+        this is an operator command run by hand on a wedge"; what actually
+        fired on node-22 was the fail-closed aggregate ``_RecordBudget`` the
+        replay opens, because ``journal/`` is append-only history that had
+        already crossed ``MAX_FILE_JOURNAL_RECORDS``.  No amount of operator
+        patience gets past a budget, and raising it only moves the cliff.  So
+        the read cost here is bounded by ONE cycle's records instead:
+
+        1. Enumerate the flat ``pipeline-jobs/`` directory ONCE as a CANDIDATE
+           filter.  That surface is guarded by ``max_files``, not by a record
+           budget, and every row in this shape is on it by construction --
+           ``_write_pipeline_job_direct_unlocked`` sends a current-contract
+           *candidate* to ``by-cycle/`` and everything else, cohort masters
+           included, to the flat file, and no pruning path unlinks it.
+        2. Confirm through the cycle-scoped replay, which is what the returned
+           row is built from.  The flat record is not treated as authoritative:
+           a stale one can only produce a candidate that confirmation drops.
+           Candidates are GROUPED by cycle first, so the cost is one replay per
+           distinct cycle rather than one per candidate (#1810 design D14).
+
+        The reconcile inventory is NOT usable as the enumeration surface: it
+        prunes its anchor the moment a row stops needing restart reconcile,
+        which is exactly what the release does, so a released row is by
+        definition absent from it.
+
+        The listing is point-in-time on a live journal, exactly as the
+        whole-tree replay was.  That is safe because the recovery action
+        re-reads under ``_locked_cycle_write`` and compares there, so a stale
+        listing costs at most a refused invocation, never a bad write.
         """
 
-        # Whole-tree replay, deliberately: the reconcile inventory prunes its
-        # anchor the moment a row stops needing restart reconcile, which is
-        # exactly what the release does -- ``_iter_reconcile_pipeline_job_records``
-        # returns nothing here.  The cost is acceptable because this is an
-        # operator command run by hand on a wedge, never a scheduler pass.
-        jobs = [
-            _public_scheduler_row(job)
-            for job in self._iter_pipeline_job_records()
-            if accepted_submit_contract_is_current(job)
-            and accepted_submit_row_kind(job) == "master"
-            and str(job.get("status") or "") == "reservation_lost"
-            and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
-            and job.get("slurm_job_id") in (None, "")
-            and job.get("matched_slurm_job_id") in (None, "")
-        ]
+        candidates: dict[str, dict[str, Any]] = {}
+        # Eagerly consumed inside the lane, never across a ``yield`` of this
+        # frame: #1734 D11's rule for tagging a generator's reads.
+        with journal_read_lane("direct_flat_scan"):
+            for job in self._iter_direct_pipeline_job_records():
+                if _released_identity_blocked_row(job):
+                    candidates[_required_safe_identity(job, "job_id")] = job
+
+        confirmed: dict[str, dict[str, Any]] = {}
+        unscoped: set[str] = set()
+        scoped: dict[tuple[str, datetime], set[str]] = {}
+        for job_id, candidate in candidates.items():
+            cycle_scope = _released_candidate_cycle_scope(candidate)
+            if cycle_scope is None:
+                unscoped.add(job_id)
+                continue
+            scoped.setdefault(cycle_scope, set()).add(job_id)
+        # Confirm ONCE PER CYCLE, not once per candidate, and list the flat
+        # directory once for the whole call (#1810 design D14). Candidate count
+        # is unbounded by construction -- the admitted shape is what a mass
+        # release puts many rows into at once -- so a per-candidate replay of a
+        # 4,557-file listing is D9's rejected growth law, re-entered.
+        with _flat_direct_job_listing_memo_scope():
+            for cycle_scope, scope_job_ids in scoped.items():
+                for job in self._iter_pipeline_job_records_scoped(cycle_scope):
+                    job_id = str(job.get("job_id") or "")
+                    if job_id in scope_job_ids and _released_identity_blocked_row(job):
+                        confirmed[job_id] = job
+        if unscoped:
+            # #1734 D4, kept verbatim: an underivable scope costs the old
+            # expensive read, never a false "not found".  ONE pass serves every
+            # fallen-open candidate -- each call re-replays the whole tree.
+            for job in self._iter_pipeline_job_records():
+                job_id = str(job.get("job_id") or "")
+                if job_id in unscoped and _released_identity_blocked_row(job):
+                    confirmed[job_id] = job
+
+        jobs = [_public_scheduler_row(job) for job in confirmed.values()]
         jobs.sort(key=lambda job: str(job.get("job_id") or ""))
         return jobs
 
@@ -2075,29 +2177,29 @@ class FileOrchestrationJournalRepository:
             existing = self._hydro_run_for(run_id)
             if existing is None:
                 raise OrchestratorError("HYDRO_RUN_NOT_FOUND", f"hydro_run not found: {run_id}")
+            # The base row is the exact durable read (``_hydro_run_for``), so a
+            # non-clearing update that omits the error family keeps the durable
+            # value; only the clearing set writes the provided values, including
+            # ``None``.  Caller-supplied placeholders would be stripped by the
+            # write boundary, so they are resolved against the durable base the
+            # same way as the pipeline-job legs: a withheld value is not an
+            # overwrite instruction.
             row = dict(existing)
-            # #1589 (design D3): deliberately NOT resolved here, and the reason is
-            # not "benign".  ``_hydro_run_for`` returns ``_public_scheduler_row``,
-            # so ``existing`` is already the PUBLIC projection: a URI-valued
-            # ``error_message`` arrives as ``[object-uri]`` and the write boundary
-            # strips it, so even a bare ``update_hydro_run_status(run_id,
-            # "failed")`` that supplies no error at all drops the durable value.
-            # That is a read-path defect, not a caller-evidence one -- resolving
-            # the two parameters below would be a pure no-op against it, so this
-            # leg is deliberately left alone.  Fixing it means giving this leg a
-            # durable read, which is out of #1589's scope.
-            safe_error_message = _durable_error_message(error_message)
+            safe_error_message = _durable_error_message(
+                _resolved_caller_evidence(error_message, durable=existing.get("error_message"))
+            )
             row.update({"status": status, "updated_at": _format_utc(_utcnow())})
             for key, value in (("slurm_job_id", slurm_job_id),):
                 if value is not None:
                     row[key] = value
+            resolved_error_code = _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
             if status in {"pending", "created", "succeeded", "complete", "parsed", "published"}:
-                row["error_code"] = error_code
+                row["error_code"] = resolved_error_code
                 row["error_message"] = safe_error_message
             else:
-                if error_code is not None:
-                    row["error_code"] = error_code
-                if error_message is not None:
+                if resolved_error_code is not None:
+                    row["error_code"] = resolved_error_code
+                if safe_error_message is not None:
                     row["error_message"] = safe_error_message
             model_id = _required_safe_identity(row, "model_id")
             self._append_validated_record_unlocked(
@@ -4439,35 +4541,46 @@ class FileOrchestrationJournalRepository:
                     payloads.append(("hydro_run", hydro_row, model_id))
                 touched_models.add(model_id)
 
-            # Terminal stickiness (#1312, widened by #1589): a master already
-            # marked ``permanently_failed`` keeps that status AND the
-            # attribution family (``error_code``/``error_message``) it already
-            # carries, while the observational family (``finished_at`` /
-            # ``exit_code`` / ``log_uri``) still refreshes.  Without this, every
-            # later pass rewrote the derived
-            # ``{succeeded, partially_failed, failed}`` projection over the mark
-            # and oscillated; #1589 is the same disease one level down -- a row
+            # Terminal stickiness (#1312, widened by #1589/#1629): a master
+            # whose persisted status the projection cannot derive keeps that
+            # status, because the projection owns exactly
+            # ``PROJECTION_DERIVED_MASTER_STATUSES`` and must not overwrite a
+            # terminal truth it has no authority to produce.  Under the routed
+            # domain that means ``permanently_failed`` and ``cancelled``.  The
+            # attribution family sticks ONLY for ``permanently_failed``: a row
             # saying "permanently failed" while its error code is recomputed by
-            # the current pass is self-contradictory attribution.  Refreshing
-            # observational evidence under the mark is the intended behaviour
-            # and contradicts nothing, so it is deliberately NOT frozen (the
-            # defer path's whole-row short circuit is the rejected alternative).
+            # every pass is self-contradictory.  A ``cancelled`` row gets status
+            # stickiness only -- it still takes the current task-derived error
+            # family and refreshes ``candidate_projections`` plus the
+            # observational family (``finished_at`` / ``exit_code`` /
+            # ``log_uri``), because status preservation must not become a
+            # whole-row freeze.  Refreshing observational evidence under the
+            # mark is intended behaviour and contradicts nothing, so it is
+            # deliberately NOT frozen (the defer path's whole-row short circuit
+            # is the rejected alternative).
             #
-            # The trigger stays a literal ``permanently_failed`` comparison
-            # rather than ``in TERMINAL_PIPELINE_STATUSES``.  The criterion is a
-            # conjunction: the status must be externally applied -- not
-            # derivable by this projection, which yields only
-            # ``succeeded``/``partially_failed``/``failed`` -- AND already
-            # protected from status overwrite today.  ``permanently_failed`` is
-            # currently the only status meeting both; widening to the derived
-            # values would pin the first pass's conclusion forever, i.e. disable
-            # the projection.  ``cancelled`` meets the first condition but not
-            # the second (it has no status stickiness at all today); that is a
-            # pre-existing gap tracked separately, not something to fix here.
-            master_is_permanently_failed = str(existing.get("status") or "") == "permanently_failed"
-            sticky_master_status = (
-                "permanently_failed" if master_is_permanently_failed else projected_master_status
+            # The trigger is "terminal status outside the derived domain":
+            # widening to the derived values would pin the first pass's
+            # conclusion forever, i.e. disable the projection, and widening to
+            # every non-derived status (including live ``reserved``/``submitted``
+            # rows) would freeze a bound master before the projection could ever
+            # derive its terminal outcome.  ``submission_failed`` and
+            # ``reservation_lost`` are terminal yet still rejected before this
+            # projection by their submit-outcome/inventory gates, so they are
+            # never rewritten through a ``matched_bound`` accounting tuple; the
+            # terminal-membership predicate never sees them as ``existing``.
+            persisted_status = str(existing.get("status") or "")
+            # The derived domain is the *only* set this projection can overwrite:
+            # sticky means "the projection cannot derive this status", and the
+            # projection owns no non-terminal status (a ``reserved``/``submitted``
+            # bound master still derives its terminal outcome here).  Requiring
+            # terminal membership keeps the predicate from pinning a live row.
+            master_is_sticky = (
+                persisted_status in TERMINAL_PIPELINE_STATUSES
+                and persisted_status not in PROJECTION_DERIVED_MASTER_STATUSES
             )
+            master_is_permanently_failed = persisted_status == "permanently_failed"
+            sticky_master_status = persisted_status if master_is_sticky else projected_master_status
             cohort_row = apply_accepted_submit_transition(
                 existing,
                 AcceptedSubmitTransition.accounting(
@@ -5802,6 +5915,34 @@ class FileOrchestrationJournalRepository:
             if payload is not None:
                 yield self._validated_direct_pipeline_job_record(payload, expected_job_id=_safe_segment(path.stem))
 
+    def _flat_direct_pipeline_job_paths(self) -> list[Path]:
+        """The whole flat ``pipeline-jobs/`` listing, memoized per read call.
+
+        Unmemoized by default: a listing that outlived its call would make a
+        live journal look frozen. ``_flat_direct_job_listing_memo_scope``
+        activates it for the duration of ONE read-only query, which is what
+        keeps the confirm half of ``query_released_identity_blocked_jobs`` from
+        re-listing 4,557 files once per candidate (#1810 design D14).
+        """
+
+        memo = _flat_direct_job_listing_memo.get()
+        cache_key = str(self.root)
+        if memo is not None:
+            memoized = memo.get(cache_key)
+            if memoized is not None:
+                return list(memoized)
+        paths = sorted(
+            _iter_regular_json_files(
+                self.root / "pipeline-jobs",
+                root=self.root,
+                max_files=self.max_files,
+                max_depth=self.max_depth,
+            )
+        )
+        if memo is not None:
+            memo[cache_key] = list(paths)
+        return paths
+
     def _flat_direct_pipeline_job_paths_for_cycle(
         self,
         *,
@@ -5837,14 +5978,7 @@ class FileOrchestrationJournalRepository:
         except FileOrchestrationJournalError:
             canonical_source_id = None
         cycle_segment = format_cycle_time(cycle_time)
-        paths = sorted(
-            _iter_regular_json_files(
-                self.root / "pipeline-jobs",
-                root=self.root,
-                max_files=self.max_files,
-                max_depth=self.max_depth,
-            )
-        )
+        paths = self._flat_direct_pipeline_job_paths()
         if canonical_source_id is None:
             return paths
         selected: list[Path] = []
@@ -7680,6 +7814,18 @@ class FileOrchestrationJournalRepository:
             return _public_scheduler_row(row)
 
     def _hydro_run_for(self, run_id: str) -> dict[str, Any] | None:
+        """Return the exact durable hydro row, never a public projection.
+
+        Every production caller of this private lookup uses it as the base of
+        a durable merge or read, so rendering ``_public_scheduler_row`` here
+        would hand placeholders back into the write path and erase real
+        attribution on a non-clearing update.  Public redaction belongs only
+        at the explicit return/query boundaries (``update_hydro_run_status``,
+        ``create_hydro_run_from_basin``, ``append_historical_hydro_run``), which
+        render through ``_public_scheduler_row`` themselves.  The returned row
+        is a copy; callers that mutate it must write it back under the same
+        cycle lock this read is performed under.
+        """
         safe_run_id = _safe_identity_text(str(run_id), field="run_id")
         match = _FORECAST_RUN_ID_RE.fullmatch(safe_run_id)
         model_id = _model_id_from_file_run_id(safe_run_id)
@@ -7692,7 +7838,7 @@ class FileOrchestrationJournalRepository:
         cycle_time = parse_cycle_time(run_cycle)
         rows = self._cycle_rows(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         if rows.hydro_run is not None and str(rows.hydro_run.get("run_id") or "") == safe_run_id:
-            return _public_scheduler_row(rows.hydro_run)
+            return dict(rows.hydro_run)
         return None
 
     def _pipeline_job_row(
@@ -8988,17 +9134,35 @@ class FileJournalRetryService:
         current: Mapping[str, Any],
         source: Mapping[str, Any],
     ) -> SimpleNamespace:
-        """Route one master row through its typed permanent-failure transition."""
+        """Route one master row through its typed permanent-failure transition.
+
+        ``current`` is the freshly read PUBLIC row and ``source`` is the
+        caller's public snapshot, so both messages are display projections:
+        neither can carry authoritative text a durable value lacks.  A non-empty
+        source message that DIFFERS from the current public message is
+        caller-provided new text and SHALL be forwarded (the typed transition
+        sanitizes it durably).  A source message identical to the current public
+        message is round-tripped display evidence -- the same projection of the
+        same durable value -- so passing it back would feed ``[local-path]`` /
+        ``[object-uri]`` placeholders into durable state.  ``None`` is passed
+        instead and the typed transition preserves the durable value.
+        """
 
         last_error = source.get("error_code")
         if last_error in (None, ""):
             last_error = current.get("error_code")
         retry_count = int(source.get("retry_count") or current.get("retry_count") or 0)
         auto_retry_skipped = auto_retry_skipped_details(last_error)
+        source_message = source.get("error_message")
+        forwarded_message = (
+            source_message
+            if source_message not in (None, "") and source_message != current.get("error_message")
+            else None
+        )
         result = self.repository.mark_pipeline_job_permanently_failed(
             str(current["job_id"]),
             error_code=str(last_error) if last_error not in (None, "") else None,
-            error_message=source.get("error_message") or current.get("error_message"),
+            error_message=forwarded_message,
             finished_at=_utcnow(),
             event_details={
                 "final_retry_count": retry_count,
@@ -10661,6 +10825,47 @@ def _cycle_scope_from_job_id(job_id: Any) -> tuple[str, datetime] | None:
         return None
 
 
+def _released_identity_blocked_row(job: Mapping[str, Any]) -> bool:
+    """The ONE admission predicate for the released identity-blocked wedge.
+
+    Shared by ``query_released_identity_blocked_jobs``'s candidate filter and
+    by its authoritative confirmation, so "the same six clauses" is true by
+    construction rather than by two hand-kept copies (#1810).
+    """
+
+    return (
+        accepted_submit_contract_is_current(job)
+        and accepted_submit_row_kind(job) == "master"
+        and str(job.get("status") or "") == "reservation_lost"
+        and job.get("reconciliation_decision") == IDENTITY_MISMATCH_RELEASED_DECISION
+        and job.get("slurm_job_id") in (None, "")
+        and job.get("matched_slurm_job_id") in (None, "")
+    )
+
+
+def _released_candidate_cycle_scope(job: Mapping[str, Any]) -> tuple[str, datetime] | None:
+    """Scope a flat candidate the way its WRITER scoped it, or fall open.
+
+    ``_write_pipeline_job_direct_unlocked`` derives ``(source_id, cycle_time)``
+    from row CONTENT with these exact two functions, and
+    ``_write_pipeline_job_unlocked`` appends the journal record under the same
+    pair, so reading with them is the byte-exact inverse of the write. Deriving
+    from the job_id string instead would be a second, weaker predicate: it
+    judges a name where the writer judged content (#1810 design D3).
+
+    Both helpers RAISE rather than returning ``None``; the ``None`` here is the
+    #1734 D4 fall-open signal, never "row not found". It is unreachable from
+    the flat surface today -- ``_validated_direct_pipeline_job_record`` requires
+    a round-tripping ``cycle_id`` on every row it yields -- and is kept because
+    an underivable scope must cost the old expensive read, not a silent drop.
+    """
+
+    try:
+        return _source_id_from_job(job), _cycle_time_from_job(job)
+    except FileOrchestrationJournalError:
+        return None
+
+
 def _cycle_scope_from_idempotency_key(idempotency_key: Any) -> tuple[str, datetime] | None:
     """Derive ``(source_id, cycle_time)`` from ``run_id:stage[:suffix]``.
 
@@ -10957,15 +11162,15 @@ def _resolved_caller_evidence(value: Any, *, durable: Any = None) -> Any:
     * anything else -> unchanged (non-string evidence included).
 
     The "every write leg" above is the RULE, not a claim that every leg obeys it
-    today.  Four legs deliberately still write a caller error family unresolved:
+    today.  Two legs deliberately still write a caller error family unresolved:
     ``update_forecast_cycle_status`` builds a fresh row and never reads the
     persisted one, so it has nothing to resolve against;
     ``reject_pipeline_job_submit_attempt`` writes the rejection's own required
     error as the attempt's authoritative outcome and its idempotent branch never
-    compares the error fields, so neither displacement nor append growth bites;
-    ``update_hydro_run_status`` reads the PUBLIC projection as its base row, so
-    resolving its parameters would not save the value that read already lost;
-    ``mark_pipeline_job_permanently_failed`` is a real open gap tracked as #1630.
+    compares the error fields, so neither displacement nor append growth bites.
+    The hydro-run and retry-permanent-failure legs resolve against the durable
+    base/current row (their placeholders are withheld values), so they are NOT
+    exempt.
     """
 
     stripped = _strip_redaction_placeholders(value)
