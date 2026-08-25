@@ -40,7 +40,16 @@ from workers.forcing_producer.direct_grid_contract import (
 REGISTRY_MANIFEST_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
 CANONICAL_READINESS_INDEX_SCHEMA_VERSION = "nhms.scheduler.canonical_readiness_index.v1"
 CANONICAL_PRODUCT_CATALOG_SCHEMA_VERSION = "nhms.canonical.product_catalog.v1"
-MAX_REGISTRY_MANIFEST_BYTES = 4 * 1024 * 1024
+# 2026-08-25: 4 MiB was ~40 rows of headroom at ~100 KB/row (a large-coverage
+# basin's inlined ``direct_grid_forcing.station_bindings`` alone is ~60 KB).
+# Onboarding the 7 Yellow-River sub-basins took the canonical manifest to 62
+# rows / 4,250,534 B -- 56,230 B over the old cap, which the atomic writer
+# caught on post-read and rolled back (``provider_restored_previous``). Raised
+# to the 16 MiB tier already used by the readiness index and product catalog
+# (~160 rows). ``MAX_REGISTRY_MODELS = 500`` stays the row-count bound; at
+# ~100 KB/row the byte cap is what binds first, by design -- the reader holds
+# the whole manifest in memory.
+MAX_REGISTRY_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_MODEL_PACKAGE_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_READINESS_INDEX_BYTES = 16 * 1024 * 1024
 MAX_CANONICAL_PRODUCT_CATALOG_BYTES = 16 * 1024 * 1024
