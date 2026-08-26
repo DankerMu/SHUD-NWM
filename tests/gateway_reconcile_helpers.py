@@ -282,6 +282,48 @@ def _bind_current_file_cohort(
     assert result.committed
 
 
+def _commit_name_window_fallback_bind(
+    repository: Any,
+    idempotency_key: str,
+    *,
+    slurm_job_id: str,
+    canonical_submit: Any,
+    pipeline_job_id: str | None = None,
+    expected_submission_attempt: int = 1,
+) -> Any:
+    """Bind one current master through the typed name-window fallback commit.
+
+    #1850 Fix A (round 2): the fallback bind REQUIRES the canonical
+    ``slurm_accounting_submitted_at`` (the ONE incarnation/window authority)
+    and persists both immutable binding provenance fields; the legacy
+    ``submitted_at`` is deliberately NOT passed, so it falls back to the
+    commit-now default and never participates in recycle proof. Shared by every
+    branch test that drives the fallback bind directly so no test can forget
+    the canonical evidence and silently keep the old non-canonical shape.
+    """
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+
+    if pipeline_job_id is None:
+        current = repository.query_candidate_state(idempotency_key)
+        assert current is not None
+        pipeline_job_id = str(current["job_id"])
+    return repository.commit_pipeline_job_submit_attempt(
+        idempotency_key,
+        pipeline_job_id=pipeline_job_id,
+        expected_submission_attempt=expected_submission_attempt,
+        slurm_job_id=slurm_job_id,
+        slurm_accounting_submitted_at=canonical_submit,
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id=slurm_job_id,
+            status="submitted",
+            reconciliation_source="slurm_name_window_unique",
+        ),
+    )
+
+
 def _append_cohort_placeholders(
     repository: Any,
     count: int = 18,

@@ -855,6 +855,7 @@ def test_migration_handoff_anchor_preserves_locator_for_settled_master_with_miss
         expected_submission_attempt=1,
         slurm_job_id="72001",
         submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
         transition=AcceptedSubmitTransition.accounting(
             "matched_bound",
             submit_outcome="accepted",
@@ -951,6 +952,7 @@ def test_migration_handoff_anchor_preserves_locator_for_settled_master_with_miss
         expected_submission_attempt=1,
         slurm_job_id="72001",
         submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
         transition=AcceptedSubmitTransition.accounting(
             "matched_bound",
             submit_outcome="accepted",
@@ -1022,6 +1024,7 @@ def test_migration_healthy_terminal_master_with_direct_leaves_no_anchor(
         expected_submission_attempt=1,
         slurm_job_id="72001",
         submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
         transition=AcceptedSubmitTransition.accounting(
             "matched_bound",
             submit_outcome="accepted",

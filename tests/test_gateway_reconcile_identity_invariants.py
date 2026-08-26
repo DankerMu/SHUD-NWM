@@ -434,12 +434,33 @@ def test_name_window_unique_source_is_legal_only_for_matched_bound() -> None:
             **_versioned_master_reservation_record(member_count=1),
             "status": "reserved",
             "submit_outcome": "submit_result_ambiguous",
+            "slurm_job_id": "72001",
+            "slurm_binding_source": "slurm_name_window_unique",
+            "slurm_accounting_submitted_at": "2026-07-12T01:00:00Z",
         },
         valid,
     )
     assert row["reconciliation_source"] == "slurm_name_window_unique"
     assert row["reconciliation_decision"] == "matched_bound"
     assert normalize_accepted_submit_evidence(row)["reconciliation_source"] == "slurm_name_window_unique"
+    # A matched_bound row claiming name-window current source WITHOUT name-window
+    # binding provenance is corrupt evidence (design D3): the current source
+    # must be the legal restoration of the immutable binding provenance.
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitEvidenceError
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            {
+                **_versioned_master_reservation_record(member_count=1),
+                "status": "submitted",
+                "submit_outcome": "accepted",
+                "slurm_job_id": "72001",
+                "reconciliation_source": "slurm_name_window_unique",
+                "reconciliation_decision": "matched_bound",
+                "matched_slurm_job_id": "72001",
+            }
+        )
+    assert error.value.field == "reconciliation_source"
 
     for decision in (
         "accounting_unavailable",

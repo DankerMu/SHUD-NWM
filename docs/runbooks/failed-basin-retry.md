@@ -338,6 +338,21 @@ cannot fabricate or hide an owner. Inventory cleanup and first migration preserv
 an anchor-to-flat locator handoff, so a projection crash or concurrent cleanup
 cannot create a temporary vacancy.
 
+**Two distinct timestamps, never conflated.** The durable `submitted_at` on a
+normal/exact-comment bind is the **gateway acceptance/commit time**; it is never
+canonical Slurm accounting `Submit` evidence and therefore cannot prove numeric-id
+recycling. Only the attempt-scoped `slurm_accounting_submitted_at` — populated
+exclusively from the parsed sacct `Submit` of a successful name-window fallback
+bind — is incarnation proof. A settled same-id sibling blocks fail-closed when its
+canonical accounting Submit is absent, malformed, gateway-sourced, or
+exact-comment-sourced without a canonical Submit, even if the legacy `submitted_at`
+differs (including microsecond-only differences). The `slurm_binding_source`
+(`gateway_submit` / `slurm_exact_comment` / `slurm_name_window_unique`) and
+`slurm_accounting_submitted_at` are immutable for one bound attempt, survive every
+defer and terminal projection (which restore the legal current
+`reconciliation_source` from binding provenance on `matched_bound`), and clear
+only when reclaim starts a new attempt.
+
 Only that claimant-exclusive, fully validated candidate binds — once, with
 `reconciliation_source=slurm_name_window_unique` and
 `reconciliation_decision=matched_bound`. Every other outcome is fail-closed and

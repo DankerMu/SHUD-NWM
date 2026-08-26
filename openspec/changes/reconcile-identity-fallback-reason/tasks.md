@@ -14,12 +14,12 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 
 - [x] 2.1 Make comment capability tri-state: explicit present-without-`job_comment` enables fallback; probe failure and missing config line remain query-free `query_unavailable` / `comment_accounting_unproven`, with distinct warnings.
 - [x] 2.2 Add one bounded attempt-window `nhms_forecast` accounting query: host-local bound rendering; shared byte/row/whole-query timeout budget; host-local-to-UTC Submit parsing; exact user/account and forecast family; bare-master deduplication; at most two masters.
-- [x] 2.3 Bind only one fully validated candidate with exactly one durable claimant, allow an empty comment at both reserved identity gates, keep present-but-different fatal, and persist `slurm_name_window_unique` only on successful `matched_bound`.
+- [x] 2.3 Bind only one fully validated candidate with exactly one durable claimant, allow an empty comment at both reserved identity gates, keep present-but-different fatal, and persist immutable `slurm_binding_source=slurm_name_window_unique` plus canonical `slurm_accounting_submitted_at`; later defer/terminal projection must preserve that binding provenance and restore the legal current source only on `matched_bound`.
 - [x] 2.4 Pin unsuccessful pass evidence: zero -> `fallback_no_match`/0; query or durable-claim ambiguity -> `ambiguous_fallback_match`/2; unique identity failure -> `identity_mismatch_blocked`/1; malformed Submit -> `query_unavailable`/`fallback_submit_unparsable`; no case binds, demotes, retries, or increments streak.
 - [x] 2.5 Preserve or first establish only the #1564 durable held tuple on every unsuccessful fallback, including repeated runtime/claimant/occupancy failures, and prove guarded operator demotion still accepts it.
 - [x] 2.6 Prove exact-comment clusters, legacy/unversioned rows, unsupported contracts, visibility ordering, process/byte/row/time bounds, and exact-comment absence behavior are unchanged.
-- [x] 2.7 Carry the parsed candidate Submit instant to the typed commit API; under journal-global cross-process serialization, reject an already-bound active Slurm id, the same settled accounting incarnation `(id, Submit)`, and any candidate whose instant falls in more than one current same-owner reserved forecast window; permit recycled ids with different canonical Submit instants.
-- [x] 2.8 Prove two overlapping GFS/IFS (or cross-cycle) claimants cannot bind one master, an already-bound active id cannot be reclaimed, row order/concurrent commit cannot change the result, and one exclusive claimant still binds, including stale/damaged/missing direct projections, terminal cleanup handoff, and first-migration crash-resume.
+- [x] 2.7 Carry parsed candidate Submit to the typed commit as canonical `slurm_accounting_submitted_at`; under journal-global serialization reject active owner, overlapping claimant, equal canonical settled incarnation, and every same-id settled row whose canonical accounting Submit is absent or provenance-incompatible; permit recycle only when provenance-compatible canonical instants differ. Existing gateway `submitted_at` remains non-canonical.
+- [x] 2.8 Prove two overlapping GFS/IFS (or cross-cycle) claimants cannot bind one master, an active id cannot be reclaimed, row order/concurrent commit cannot change the result, and one exclusive claimant still binds. Cover normal/exact-comment/fallback binding provenance, complete/defer terminal transitions, mixed timestamp provenance, valid wrong-kind/stale/damaged/missing direct projections, terminal cleanup handoff, and first-migration crash-resume.
 - [x] 2.9 Prove the closed window upper boundary: Submit exactly at frozen query-end binds; Submit after query-end stays held/no-match under host-local-to-UTC conversion.
 
 ## 3. Terminal identity reason classes (#1795)
@@ -32,7 +32,7 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 ## 4. Operations and evidence
 
 - [x] 4.1 Update `docs/runbooks/failed-basin-retry.md`: automatic claimant-exclusive fallback, accounting-incarnation/locator handoff, diagnostic outcomes, exact failure behavior, and the production-safe receipt rule.
-- [x] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation on the post-review final head.
+- [ ] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation on the post-review final head.
 - [ ] 4.3 On node-22, use live read-only `scontrol`/`sacct` and a scratch journal to demonstrate one unique bind and one ambiguity refusal without `sbatch`, `scancel`, service changes, or production-journal writes; if no natural accounting rows exist, record the runbook-authorized no-fixture outcome.
 
 ## Risk packs considered (core)

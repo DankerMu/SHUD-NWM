@@ -2295,17 +2295,21 @@ def reconcile_reserved_unbound_jobs(
                 if (
                     fallback_unique
                     and record.submitted_at is not None
-                    and _callable_accepts_keyword(committer, "submitted_at")
+                    and _callable_accepts_keyword(committer, "slurm_accounting_submitted_at")
                 ):
-                    # #1850: carry the parsed host-local-to-UTC Submit instant so
-                    # the typed commit can prove the attempt window is closed at
-                    # both endpoints and no sibling reserved attempt claims this
-                    # candidate (claimant exclusivity is enforced in the commit).
-                    commit_kwargs["submitted_at"] = record.submitted_at
+                    # #1850 Fix A (round 2): the parsed sacct ``Submit`` is the
+                    # ONLY canonical accounting input. It is carried as
+                    # ``slurm_accounting_submitted_at`` (the single incarnation/
+                    # window authority) and is NEVER duplicated into the legacy
+                    # ``submitted_at`` slot, which remains gateway/commit time
+                    # and never participates in recycle/claimant proof.
+                    commit_kwargs["slurm_accounting_submitted_at"] = record.submitted_at
                 if fallback_unique:
-                    # #1565: a successful name-window bind persists its own
-                    # source; every other decision remains exact-comment
-                    # sourced (AcceptedSubmitTransition enforces this).
+                    # #1565 + Fix A: a successful name-window bind persists its
+                    # own source AND its attempt-scoped immutable binding
+                    # provenance; the typed commit derives the provenance from
+                    # the transition shape + the canonical accounting keyword
+                    # (no duplicate authority lives on the transition).
                     commit_kwargs["transition"] = AcceptedSubmitTransition.accounting(
                         "matched_bound",
                         submit_outcome="accepted",

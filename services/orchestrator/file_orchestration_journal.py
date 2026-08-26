@@ -41,6 +41,8 @@ from services.orchestrator.accepted_submit_identity import (
     MAX_FORECAST_COHORT_MEMBERS,
     OPERATOR_VERIFIED_ABSENCE_DECISION,
     QUARANTINE_RERUN_PROVENANCE_FIELD,
+    SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+    SLURM_BINDING_SOURCE_FIELD,
     AcceptedSubmitCommitResult,
     AcceptedSubmitEvidenceError,
     AcceptedSubmitTransition,
@@ -51,13 +53,17 @@ from services.orchestrator.accepted_submit_identity import (
     accepted_submit_master_ordinary_upsert_state,
     accepted_submit_row_kind,
     apply_accepted_submit_transition,
+    bind_replay_is_idempotent,
+    binding_source_for_transition,
     init_state_identity_for_task,
     is_forecast_cohort_stage_name,
+    matched_bound_reconciliation_source,
     normalize_accepted_submit_attempt_anchor,
     normalize_accepted_submit_evidence,
     normalize_candidate_projections,
     normalize_init_state_identities,
     normalize_quarantine_rerun_model_ids,
+    normalize_slurm_accounting_submitted_at,
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
@@ -485,6 +491,11 @@ _PIPELINE_JOB_UPSERT_MUTABLE_FIELDS = (
     "candidate_projections",
     "cancellation_receipt_recorded",
     "identity_blocked_streak",
+    # #1850 Fix A: merged like the other closed master state so a divergent
+    # incoming binding-provenance value actually REACHES the frozen ordinary-
+    # upsert check and is rejected, never silently kept/dropped.
+    SLURM_BINDING_SOURCE_FIELD,
+    SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
     "native_shud_resubmitted",
 )
 _RUNTIME_ROOT_EVENT_CANDIDATE_PATHS = (
@@ -2385,6 +2396,11 @@ class FileOrchestrationJournalRepository:
                     "reconciliation_decision",
                     "reconciliation_reason_class",
                     "matched_slurm_job_id",
+                    # #1850 Fix A: a clean reservation may never carry binding
+                    # provenance in -- it is minted only by a typed bind and
+                    # cleared only by a reclaim/new attempt.
+                    SLURM_BINDING_SOURCE_FIELD,
+                    SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
                     # #1748: a fresh reservation may never carry an operator
                     # attestation in -- the marker is settable only by the typed
                     # recovery API, on an already-released row.
@@ -2422,6 +2438,10 @@ class FileOrchestrationJournalRepository:
                 "error_code": None,
                 "error_message": None,
                 "log_uri": None,
+                # #1850 Fix A: a fresh reservation opens without binding
+                # provenance; a typed bind mints it and a reclaim clears it.
+                SLURM_BINDING_SOURCE_FIELD: None,
+                SLURM_ACCOUNTING_SUBMITTED_AT_FIELD: None,
             }
         )
         source_id = _source_id_from_job(row)
@@ -2559,6 +2579,11 @@ class FileOrchestrationJournalRepository:
                     "error_message": None,
                     "cancellation_receipt_recorded": False,
                     "idempotency_key": idempotency_key,
+                    # #1850 Fix A: a reclaim opens a NEW attempt, so the
+                    # previous attempt's binding provenance is cleared here,
+                    # never inherited across attempts.
+                    SLURM_BINDING_SOURCE_FIELD: None,
+                    SLURM_ACCOUNTING_SUBMITTED_AT_FIELD: None,
                     "updated_at": _format_utc(_utcnow()),
                 }
             )
@@ -2689,6 +2714,7 @@ class FileOrchestrationJournalRepository:
         transition: AcceptedSubmitTransition,
         array_task_id: int | None = None,
         submitted_at: datetime | None = None,
+        slurm_accounting_submitted_at: datetime | str | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
         exit_code: int | None = None,
@@ -2763,41 +2789,93 @@ class FileOrchestrationJournalRepository:
             current_attempt = max(int(existing.get("submission_attempt") or 1), 1)
             if current_attempt != max(int(expected_submission_attempt), 1):
                 return AcceptedSubmitCommitResult("stale", dict(existing))
+            # #1850 round 3 (Fix A): canonical normalization and derived bind
+            # provenance are computed BEFORE the idempotent early-return. A
+            # replay is idempotent ONLY when the full bind shape it WOULD write
+            # -- the transition bind lane, the attempt-scoped derived binding
+            # source, and (for the fallback) the canonical accounting Submit --
+            # matches the durable bind exactly. A different canonical Submit on
+            # the same tuple is a conflicting replay: non-committed, zero-write,
+            # never reported as ``idempotent``/``bound``.
+            fallback_unique = (
+                transition.reconciliation_source == "slurm_name_window_unique"
+                and transition.reconciliation_decision == "matched_bound"
+            )
+            # Canonical sacct ``Submit`` is the ONE authority for the fallback.
+            # The candidate instant that drives the claimant/occupancy scan
+            # comes ONLY from the explicit canonical accounting input, never
+            # from the legacy gateway/commit ``submitted_at`` (which remains
+            # acceptance/commit time and is never incarnation or window proof).
+            # The fallback bind REQUIRES a strict canonical instant; every
+            # non-fallback lane may not carry one.
+            canonical_accounting_submit = normalize_slurm_accounting_submitted_at(
+                slurm_accounting_submitted_at
+            )
+            if fallback_unique and canonical_accounting_submit is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_submit_instant_required",
+                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+                )
+            if not fallback_unique and slurm_accounting_submitted_at not in (None, ""):
+                raise FileOrchestrationJournalError(
+                    "file_journal_evidence_invariant_invalid",
+                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+                )
+            candidate_submit = _strict_utc_datetime(canonical_accounting_submit)
+            if fallback_unique and candidate_submit is None:
+                raise FileOrchestrationJournalError(
+                    "file_journal_submit_instant_required",
+                    field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+                )
+            # The bind provenance this commit WOULD persist, derived centrally
+            # from the transition shape (never from caller-forgeable fields).
+            derived_binding_source = binding_source_for_transition(
+                submit_outcome=str(transition.submit_outcome or ""),
+                reconciliation_decision=transition.reconciliation_decision,
+                reconciliation_source=str(transition.reconciliation_source or ""),
+            )
+            if derived_binding_source is None:
+                # #1850 round 4 (Fix A): the typed commit accepts ONLY the three
+                # legal bind shapes (ordinary accepted -> gateway_submit,
+                # exact-comment matched -> slurm_exact_comment, name-window
+                # matched -> slurm_name_window_unique). A transition that mints
+                # no binding provenance (accepted + a held/defer/blocked
+                # accounting decision, rejected, timeout, pre-outcome) is not a
+                # bind and is refused with a stable error BEFORE any mutation or
+                # occupancy scan -- otherwise a closed-world bind could be
+                # forged with ``binding_source=None``.
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="transition",
+                )
             if current_id:
                 if current_id != requested_id:
                     return AcceptedSubmitCommitResult("collision", dict(existing))
-                if (
+                same_lane = (
                     existing.get("submit_outcome") == transition.submit_outcome
                     and existing.get("reconciliation_source") == transition.reconciliation_source
                     and existing.get("reconciliation_decision") == transition.reconciliation_decision
                     and existing.get("matched_slurm_job_id") == transition.matched_slurm_job_id
+                )
+                # #1850 round 4 (Fix C): replay-equality is decided by ONE
+                # centralized helper.  It keeps the pre-change v1 read
+                # compatibility (a legacy row missing BOTH additive provenance
+                # fields stays idempotent for an ordinary/exact-comment same-lane
+                # replay, zero-write, never backfilled), while every new
+                # provenance-carrying row still requires the exact derived
+                # binding source and canonical accounting Submit.  Partial,
+                # contradictory, or name-window-on-missing-fields shapes are
+                # never idempotent and fall through to ``stale``.
+                if bind_replay_is_idempotent(
+                    existing,
+                    derived_binding_source=derived_binding_source,
+                    canonical_accounting_submit=canonical_accounting_submit,
+                    same_lane=same_lane,
                 ):
                     return AcceptedSubmitCommitResult("idempotent", dict(existing))
                 return AcceptedSubmitCommitResult("stale", dict(existing))
             if str(existing.get("status") or "") != "reserved":
                 return AcceptedSubmitCommitResult("stale", dict(existing))
-            # #1850 + Fix A: EVERY typed accepted-submit commit honors the
-            # journal-global active-id occupancy lock. Under the inventory lock
-            # (cycle lock -> inventory lock order), reject a requested id
-            # already owned by another ACTIVE current accepted-submit master in
-            # any source/cycle; then, for the name-window fallback producer
-            # only, additionally run the multi-claimant same-owner/window check
-            # with the candidate Submit instant. The bind write happens inside
-            # the same lock, so no concurrent source/cycle writer (normal stage
-            # submit, exact-comment commit, fallback commit) can enter the
-            # scan-bind window or bind the id between the scan and the commit
-            # point. Settled terminal history absent from the inventory is
-            # never treated as occupying a Slurm id.
-            fallback_unique = (
-                transition.reconciliation_source == "slurm_name_window_unique"
-                and transition.reconciliation_decision == "matched_bound"
-            )
-            candidate_submit = _strict_utc_datetime(submitted_at)
-            if fallback_unique and candidate_submit is None:
-                raise FileOrchestrationJournalError(
-                    "file_journal_submit_instant_required",
-                    field="submitted_at",
-                )
             with self._reconcile_inventory_file_lock_unlocked():
                 entry_names = self._reconcile_inventory_entry_names_unlocked()
                 other_masters, ambiguous = self._reconcile_inventory_jobs_matching_unlocked(
@@ -2832,6 +2910,28 @@ class FileOrchestrationJournalRepository:
                 # scan-bind window or bind this id between the scan and the
                 # commit point (cycle lock -> inventory lock order).
                 row = apply_accepted_submit_transition(existing, transition)
+                # #1850 Fix A (round 2): every successful typed bind records its
+                # attempt-scoped binding provenance exactly once, derived
+                # centrally from the transition SHAPE -- never from
+                # caller-forgeable transition fields (removed) and never from
+                # the legacy ``submitted_at``. The name-window fallback
+                # persists the single canonical accounting Submit keyword; the
+                # ordinary gateway submit and exact-comment matched recovery
+                # persist no canonical evidence. ``binding_source_for_transition``
+                # returns ``None`` for every non-bind shape, so a held/defer/
+                # release/reject/timeout transition never mints provenance.
+                derived_binding_source = binding_source_for_transition(
+                    submit_outcome=str(transition.submit_outcome or ""),
+                    reconciliation_decision=transition.reconciliation_decision,
+                    reconciliation_source=str(transition.reconciliation_source or ""),
+                )
+                if derived_binding_source is not None:
+                    row[SLURM_BINDING_SOURCE_FIELD] = derived_binding_source
+                    row[SLURM_ACCOUNTING_SUBMITTED_AT_FIELD] = (
+                        canonical_accounting_submit
+                        if derived_binding_source == "slurm_name_window_unique"
+                        else None
+                    )
                 # #1589 (design D3): unconditional writes of caller evidence,
                 # so withheld resolves against the persisted row rather than
                 # erasing it.  These ``durable=`` arguments are LOAD BEARING,
@@ -4663,6 +4763,17 @@ class FileOrchestrationJournalRepository:
                     submit_outcome="accepted",
                     matched_slurm_job_id=master_slurm_job_id,
                     status=sticky_master_status,
+                    # #1850 Fix B: a complete matched-bound terminal projection
+                    # derives the legal current source from immutable binding
+                    # provenance instead of the exact-comment factory default,
+                    # so a name-window fallback-bound row keeps/restores its
+                    # name-window source. Binding provenance itself is carried
+                    # by ``apply_accepted_submit_transition`` (the transition
+                    # carries no new binding fields, so the prior values
+                    # survive).
+                    reconciliation_source=matched_bound_reconciliation_source(
+                        existing.get(SLURM_BINDING_SOURCE_FIELD)
+                    ),
                 ),
             )
             cohort_row.update(
@@ -4875,6 +4986,12 @@ class FileOrchestrationJournalRepository:
                 submit_outcome="accepted",
                 reconciliation_reason_class=reconciliation_reason_class,
                 status="reconcile_unverified",
+                # #1850 Fix B: a defer/incomplete-projection transition reasserts
+                # the held tuple with the EXACT-COMMENT current source and no
+                # matched id, but must retain the attempt's immutable binding
+                # provenance. ``apply_accepted_submit_transition`` carries the
+                # prior binding fields through because this transition sets none.
+                reconciliation_source="slurm_exact_comment",
             ),
         )
         # #1589 (design D3): same rule as the batched projection leg -- a
@@ -7416,17 +7533,19 @@ class FileOrchestrationJournalRepository:
                 and str(canonical.get("job_id") or "") != include_job_id
                 and not _job_blocks_rollback_quiescence(canonical)
             ):
-                canonical_submit = _strict_utc_datetime(canonical.get("submitted_at"))
-                if canonical_submit is not None and candidate_submit is not None:
-                    if _format_utc(canonical_submit) == _format_utc(candidate_submit):
-                        # Same incarnation: the exact accounting row the
-                        # fallback query returned, settled or not. The stale
-                        # anchor must not let the fallback reuse the same
-                        # accounting incarnation.
-                        matching.append(canonical)
-                    continue
-                # Settled but no comparable durable Submit instant: treated as
-                # free (a recycled id has no incarnation to match).
+                # #1850 Fix C: only a provenance-compatible canonical
+                # ``slurm_accounting_submitted_at`` may prove recycle. Missing/
+                # malformed canonical Submit, gateway-only provenance,
+                # exact-comment-without-Submit, and legacy pre-change rows all
+                # block fail-closed even when the legacy ``submitted_at``
+                # differs; the gateway acceptance/commit timestamp is never
+                # incarnation proof.
+                if _settled_incarnation_matches_candidate(canonical, candidate_submit):
+                    # Same accounting incarnation (or unprovable recycle): the
+                    # exact accounting row the fallback query returned, settled
+                    # or not. The stale anchor must not let the fallback reuse
+                    # it.
+                    matching.append(canonical)
                 continue
             if not _job_blocks_rollback_quiescence(canonical):
                 # Settled terminal history: never occupies a Slurm id.
@@ -7544,11 +7663,22 @@ class FileOrchestrationJournalRepository:
                     continue
                 if stem == include_job_id:
                     continue
+                # #1850 Fix D: source/cycle discovery comes UNCONDITIONALLY
+                # from the safe master filename, BEFORE any payload decode or
+                # row-kind/stage check. A decoded payload may assist only the
+                # no-lineage compatibility branch below; it must never
+                # suppress canonical replay. This is what keeps a
+                # validator-accepted wrong-kind payload (a valid legacy or
+                # candidate row planted under the settled master's filename)
+                # from hiding the canonical owner.
+                flat_cycles.setdefault((source_id, cycle_time), []).append(stem)
                 # Lenient decode: a flat file that fails to decode or validate
                 # as a pipeline-job record still names its cycle (the damaged
                 # projection cannot hide the canonical owner). The decoded
-                # row is used only to narrow the no-lineage direct probe.
-                direct_job_id = stem
+                # row is used only to narrow the no-lineage direct probe; a
+                # decoded payload that is NOT a current forecast master (a
+                # valid wrong-kind legacy/candidate row) narrows nothing, but
+                # the filename-derived cycle above is already retained.
                 try:
                     payload = self._read_optional_json(direct_path)
                     if payload is not None:
@@ -7556,19 +7686,19 @@ class FileOrchestrationJournalRepository:
                             payload,
                             expected_job_id=_safe_segment(direct_path.stem),
                         )
-                        direct_job_id = str(direct.get("job_id") or stem)
+                        if (
+                            _reconcile_inventory_row_kind(direct) != "current_master"
+                            or not is_forecast_cohort_stage_name(
+                                str(direct.get("stage") or ""),
+                                str(direct.get("job_type") or ""),
+                            )
+                        ):
+                            # Wrong-kind decoded payload: keep the no-lineage
+                            # probe on the safe filename identity, never on the
+                            # decoded row.
+                            direct = None
                 except FileOrchestrationJournalError:
                     direct = None
-                if direct is not None:
-                    row_kind = _reconcile_inventory_row_kind(direct)
-                    if row_kind != "current_master":
-                        continue
-                    if not is_forecast_cohort_stage_name(
-                        str(direct.get("stage") or ""),
-                        str(direct.get("job_type") or ""),
-                    ):
-                        continue
-                flat_cycles.setdefault((source_id, cycle_time), []).append(direct_job_id)
             for (source_id, cycle_time), candidate_job_ids in sorted(
                 flat_cycles.items()
             ):
@@ -7642,17 +7772,15 @@ class FileOrchestrationJournalRepository:
                         # occupancy from this cycle.
                         continue
                     if str(canonical.get("status") or "") in TERMINAL_PIPELINE_STATUSES:
-                        canonical_submit = _strict_utc_datetime(canonical.get("submitted_at"))
-                        if canonical_submit is not None and candidate_submit is not None:
-                            if _format_utc(canonical_submit) == _format_utc(candidate_submit):
-                                # Same incarnation: the exact accounting row
-                                # the fallback query returned, settled or
-                                # not.
-                                matching.append(canonical)
-                            continue
-                        # Settled but no comparable durable Submit instant:
-                        # treated as free (a recycled id has no incarnation to
-                        # match).
+                        # #1850 Fix C: the SAME centralized incarnation
+                        # adjudication as the anchor surface, so the two can
+                        # never drift. Missing/malformed canonical Submit and
+                        # every non-name-window provenance block fail-closed.
+                        if _settled_incarnation_matches_candidate(canonical, candidate_submit):
+                            # Same accounting incarnation (or unprovable
+                            # recycle): the exact accounting row the fallback
+                            # query returned, settled or not.
+                            matching.append(canonical)
                         continue
                     # Active same-id row, submitted_at available or not: fail
                     # closed.
@@ -8463,6 +8591,14 @@ class FileOrchestrationJournalRepository:
             "reconciliation_decision": record.get("reconciliation_decision"),
             "reconciliation_reason_class": record.get("reconciliation_reason_class"),
             "matched_slurm_job_id": record.get("matched_slurm_job_id"),
+            # #1850 Fix A: attempt-scoped binding provenance rides the closed
+            # constructor like every other durable master field, so it survives
+            # replay and is never silently dropped by a write boundary.
+            SLURM_BINDING_SOURCE_FIELD: record.get(SLURM_BINDING_SOURCE_FIELD),
+            SLURM_ACCOUNTING_SUBMITTED_AT_FIELD: _optional_format_datetime(
+                record.get(SLURM_ACCOUNTING_SUBMITTED_AT_FIELD),
+                field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            ),
             "candidate_projections": _bounded_candidate_projections(record.get("candidate_projections")),
             "cancellation_receipt_recorded": record.get("cancellation_receipt_recorded", False),
             "identity_blocked_streak": record.get("identity_blocked_streak", 0),
@@ -11277,6 +11413,41 @@ def _reconcile_inventory_row_kind(job: Mapping[str, Any]) -> str | None:
     if accepted_submit_contract_is_current(job):
         return "current_master" if accepted_submit_row_kind(job) == "master" else None
     return "legacy"
+
+
+def _settled_incarnation_matches_candidate(
+    canonical: Mapping[str, Any],
+    candidate_submit: datetime,
+) -> bool:
+    """Return whether a settled same-id sibling owns the candidate's accounting incarnation.
+
+    #1850 Fix C (centralized): ONLY strict canonical ``slurm_accounting_submitted_at``
+    from a provenance-compatible accounting bind may prove recycle. The legacy
+    ``submitted_at`` is gateway/commit time and is NEVER incarnation proof. A
+    same-id settled row blocks (returns True, "same incarnation") when its
+    canonical accounting Submit equals the candidate; a different canonical
+    instant permits recycle (returns False); and every absent / malformed /
+    gateway-only / exact-comment-without-Submit / legacy-missing provenance
+    blocks fail-closed (returns True) even when the legacy ``submitted_at``
+    differs. Used identically by the reconcile-inventory anchor surface and the
+    flat-replay surface so the two can never drift.
+    """
+
+    canonical_submit = normalize_slurm_accounting_submitted_at(
+        canonical.get(SLURM_ACCOUNTING_SUBMITTED_AT_FIELD)
+    )
+    if canonical_submit is None:
+        # Missing/malformed canonical accounting Submit, or the row predates
+        # the additive fields (or was bound gateway/exact-comment without
+        # canonical evidence): uncertainty is fail-closed, never recycle.
+        return True
+    binding_source = canonical.get(SLURM_BINDING_SOURCE_FIELD)
+    if binding_source != "slurm_name_window_unique":
+        # Canonical Submit only ever rides the name-window lane (enforced by
+        # typed validation), but a hand-forged/mixed row must still fail
+        # closed rather than be read as a different incarnation.
+        return True
+    return _format_utc(_strict_utc_datetime(canonical_submit)) == _format_utc(candidate_submit)
 
 
 def _job_needs_restart_reconcile(job: Mapping[str, Any]) -> bool:

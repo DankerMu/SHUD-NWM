@@ -1730,6 +1730,10 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
         "reconciliation_decision": values.get("reconciliation_decision"),
         "reconciliation_reason_class": values.get("reconciliation_reason_class"),
         "matched_slurm_job_id": values.get("matched_slurm_job_id"),
+        # #1850 Fix A: attempt-scoped binding provenance, additive evidence
+        # alongside the existing keys (all prior keys/values unchanged).
+        "slurm_binding_source": values.get("slurm_binding_source"),
+        "slurm_accounting_submitted_at": values.get("slurm_accounting_submitted_at"),
         "restart_stage": values.get("restart_stage"),
         "native_shud_resubmitted": bool(values.get("native_shud_resubmitted", False)),
         "candidate_summary": candidate_summary,

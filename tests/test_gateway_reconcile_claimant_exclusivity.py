@@ -290,6 +290,7 @@ def test_already_bound_active_master_cannot_be_claimed_again(tmp_path: Any, monk
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(minutes=30),
+            slurm_accounting_submitted_at=anchor + timedelta(minutes=30),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -372,6 +373,7 @@ def test_settled_terminal_history_does_not_occupy_a_recycled_slurm_number(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(minutes=30),
+            slurm_accounting_submitted_at=anchor + timedelta(minutes=30),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -1046,6 +1048,7 @@ def test_orphan_inventory_anchor_fails_closed_no_bind(
                 expected_submission_attempt=1,
                 slurm_job_id="72001",
                 submitted_at=anchor + timedelta(hours=1),
+                slurm_accounting_submitted_at=anchor + timedelta(hours=1),
                 transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
@@ -1096,6 +1099,7 @@ def test_incarnation_scan_terminal_sibling_same_submit_blocks_recycle(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -1176,6 +1180,7 @@ def test_incarnation_scan_terminal_sibling_different_submit_permits_recycle(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -1428,6 +1433,7 @@ def test_valid_json_invalid_anchor_schema_fails_closed(
                 expected_submission_attempt=1,
                 slurm_job_id="72001",
                 submitted_at=anchor + timedelta(hours=1),
+                slurm_accounting_submitted_at=anchor + timedelta(hours=1),
                 transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
@@ -1599,6 +1605,7 @@ def test_stale_direct_same_id_but_canonical_authority_different_does_not_block(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -1630,6 +1637,12 @@ def test_stale_direct_same_id_but_canonical_authority_different_does_not_block(
         )
         payload = stale.get("payload", stale)
         payload["slurm_job_id"] = "72002"
+        # The forged row must stay self-consistent under the closed-world bound
+        # identity (Fix B): a matched_bound row's matched id must equal the id
+        # it claims to own. The point of the scenario is that the stale direct
+        # CLAIMS a different id than the canonical authority -- not that it
+        # contradicts itself.
+        payload["matched_slurm_job_id"] = "72002"
         payload["submitted_at"] = "2026-07-12T01:30:00Z"
         (repository.root / "pipeline-jobs" / f"{ifs_job_id}.json").write_text(
             json.dumps(stale), encoding="utf-8"
@@ -1731,6 +1744,7 @@ def test_stale_direct_same_id_but_canonical_authority_different_does_not_block(
                 expected_submission_attempt=1,
                 slurm_job_id="72001",
                 submitted_at=anchor + timedelta(hours=1),
+                slurm_accounting_submitted_at=anchor + timedelta(hours=1),
                 transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
@@ -1904,6 +1918,7 @@ def test_stale_direct_cannot_hide_the_same_incarnation_owner(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2042,6 +2057,7 @@ def test_stale_direct_hidden_owner_blocks_via_public_reconcile_and_exact_commit(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2093,6 +2109,7 @@ def test_stale_direct_hidden_owner_blocks_via_public_reconcile_and_exact_commit(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2306,6 +2323,7 @@ def test_damaged_flat_projection_cannot_hide_the_same_incarnation_owner(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2471,6 +2489,7 @@ def test_damaged_flat_projection_fails_closed_when_no_valid_cycle_authority(
                 expected_submission_attempt=1,
                 slurm_job_id="72001",
                 submitted_at=anchor + timedelta(hours=1),
+                slurm_accounting_submitted_at=anchor + timedelta(hours=1),
                 transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
@@ -2543,6 +2562,7 @@ def test_replayed_candidate_rows_never_occupy_a_master_id(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2685,6 +2705,7 @@ def test_stale_anchor_terminal_canonical_blocks_same_incarnation_fallback_bind(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2778,6 +2799,7 @@ def test_stale_anchor_terminal_canonical_blocks_same_incarnation_fallback_bind(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -2872,6 +2894,7 @@ def test_public_reconcile_refuses_same_incarnation_when_master_direct_failed(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -3017,6 +3040,7 @@ def test_anchor_not_pruned_when_derived_direct_restore_fails(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -3122,6 +3146,7 @@ def test_handoff_race_with_fallback_commit_never_binds_same_incarnation(
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
@@ -3189,6 +3214,7 @@ def test_handoff_race_with_fallback_commit_never_binds_same_incarnation(
                 expected_submission_attempt=1,
                 slurm_job_id="72001",
                 submitted_at=anchor + timedelta(hours=1),
+                slurm_accounting_submitted_at=anchor + timedelta(hours=1),
                 transition=AcceptedSubmitTransition.accounting(
                     "matched_bound",
                     submit_outcome="accepted",
@@ -3271,6 +3297,7 @@ def test_marker_absent_first_migration_public_reconcile_refuses_same_incarnation
             expected_submission_attempt=1,
             slurm_job_id="72001",
             submitted_at=anchor + timedelta(hours=1),
+            slurm_accounting_submitted_at=anchor + timedelta(hours=1),
             transition=AcceptedSubmitTransition.accounting(
                 "matched_bound",
                 submit_outcome="accepted",
