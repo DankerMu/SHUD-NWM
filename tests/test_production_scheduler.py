@@ -347,6 +347,43 @@ def test_terminal_pipeline_state_same_id_with_repaired_checksum_is_not_current()
     )
 
 
+def test_packaged_ic_terminal_success_matches_its_manifest_checksum() -> None:
+    checksum = "a" * 64
+    strict = {
+        "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+        "packaged_ic_checksum": checksum,
+    }
+    terminal = {
+        "terminal_source": "hydro_run",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "status": "succeeded",
+            "quality": "packaged_calibrated_state",
+            "init_state_id": None,
+        },
+        "run_manifest_initial_state": {
+            "quality": "packaged_calibrated_state",
+            "state_id": None,
+            "packaged_ic_checksum": checksum,
+        },
+    }
+
+    assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal, strict
+    )
+    assert scheduler_candidates_module._terminal_decision_run_manifest_matches_strict_warm_start(
+        terminal, strict
+    )
+
+    terminal["run_manifest_initial_state"]["packaged_ic_checksum"] = "b" * 64
+    assert not scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal, strict
+    )
+    assert not scheduler_candidates_module._terminal_decision_run_manifest_matches_strict_warm_start(
+        terminal, strict
+    )
+
+
 class _NoopReconcileStore:
     def query_reserved_unbound_jobs(self) -> list[Any]:
         return []
@@ -11767,6 +11804,30 @@ def test_sidecar_tier_recovers_forcing_provenance_and_does_not_block_present_pac
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 1
     assert orchestrator.calls
+
+
+def test_sidecar_tier_falls_back_to_copyback_after_local_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "copyback"
+    object_store_root.mkdir()
+    copyback_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    candidate = _scheduler_candidate_fixture()
+    _seed_producer_forcing_sidecar(copyback_root, candidate=candidate)
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _forecast_failure_state(candidate),
+    )
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
 
 
 @pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
