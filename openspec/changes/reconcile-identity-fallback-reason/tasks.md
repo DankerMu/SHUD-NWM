@@ -32,8 +32,8 @@ Minimal mergeable slice: one accepted-submit reconciliation boundary; #1565 depe
 ## 4. Operations and evidence
 
 - [x] 4.1 Update `docs/runbooks/failed-basin-retry.md`: automatic claimant-exclusive fallback, accounting-incarnation/locator handoff, diagnostic outcomes, exact failure behavior, and the production-safe receipt rule.
-- [ ] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation on the post-review final head.
-- [ ] 4.3 On node-22, use live read-only `scontrol`/`sacct` and a scratch journal to demonstrate one unique bind and one ambiguity refusal without `sbatch`, `scancel`, service changes, or production-journal writes; if no natural accounting rows exist, record the runbook-authorized no-fixture outcome.
+- [x] 4.2 Run the focused gateway-reconcile suites, scheduler evidence tests, full `uv run pytest -q`, `uv run ruff check .`, and strict OpenSpec validation on the post-review final head.
+- [x] 4.3 On node-22, use live read-only `scontrol`/`sacct` and a scratch journal to demonstrate one unique bind and one ambiguity refusal without `sbatch`, `scancel`, service changes, or production-journal writes; if no natural accounting rows exist, record the runbook-authorized no-fixture outcome.
 
 ## Risk packs considered (core)
 
