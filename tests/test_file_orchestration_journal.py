@@ -8179,6 +8179,36 @@ def test_full_identity_accessor_masks_foreign_self_bound_row_even_when_foreign_i
     )
 
 
+def test_run_manifest_initial_state_falls_back_to_copyback_after_local_retention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator.chain_repository_state import _run_manifest_initial_state_for_run
+
+    run_id = "fcst_gfs_2026081112_model_a"
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "copyback"
+    object_root.mkdir()
+    _write_json(
+        copyback_root / f"runs/{run_id}/input/manifest.json",
+        {
+            "initial_state": {
+                "quality": "packaged_calibrated_state",
+                "state_id": None,
+                "packaged_ic_checksum": "a" * 64,
+            }
+        },
+    )
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+
+    assert _run_manifest_initial_state_for_run(run_id) == {
+        "quality": "packaged_calibrated_state",
+        "state_id": None,
+        "packaged_ic_checksum": "a" * 64,
+    }
+
+
 def test_full_identity_accessor_ignores_run_manifest_only_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

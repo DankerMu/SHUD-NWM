@@ -2323,6 +2323,23 @@ _SOURCE_CALIB_TEXT = "GEOL_KSATH\t0.00977999747288218\nGEOL_DMAC\t5\nSOIL_ALPHA\
 _OVERRIDE_REASON = "GEOL_DMAC 5 and 4.75 both NaN/EXIT 10; 4.5 and 4 run clean on gfs and IFS."
 
 
+def _replace_calibration_parameter(text: str, parameter: str, value: str) -> str:
+    """Rewrite exactly one ``<parameter><TAB><value>`` line, preserving the rest.
+
+    Refuses a declaration that names no fixture parameter: the expected text
+    would otherwise silently equal the source, making the byte comparison
+    vacuous for that declaration.
+    """
+    lines = text.splitlines(keepends=True)
+    matched = [index for index, line in enumerate(lines) if line.startswith(f"{parameter}\t")]
+    assert len(matched) == 1, (
+        f"fixture calibration must contain exactly one '{parameter}' line, found {len(matched)}"
+    )
+    index = matched[0]
+    lines[index] = f"{parameter}\t{value}\n"
+    return "".join(lines)
+
+
 def _write_declaration(path: Path, entries: list[dict[str, Any]]) -> Path:
     import yaml
 
@@ -2626,13 +2643,23 @@ def test_declared_basin_filtered_out_of_this_run_is_reported_not_refused(tmp_pat
 def test_checked_in_declaration_loads_without_anyone_naming_it(tmp_path: Path) -> None:
     """#1832 §1.3: no opt-in.  Both lanes load `config/calibration_overrides.yaml`.
 
-    Nothing here names a declaration path.  Round 2 (C2) strengthened this: the
-    tree now CONTAINS `hetianhe`, so default loading is proven by the override
-    actually landing in the published package, not merely by the run tolerating
-    a declared basin it does not have.
+    Nothing here names a declaration path.  The fixture derives every basin the
+    checked-in declaration names (via `load_calibration_overrides`) and asserts
+    every declared parameter lands in that basin's published bytes, so a
+    legitimate declaration addition cannot stale this fixture the way the six
+    HHe entries did.
     """
+    declared = basins_calibration_overrides.load_calibration_overrides(
+        basins_calibration_overrides.DEFAULT_CALIBRATION_OVERRIDES_PATH
+    )
+    declared_by_basin: dict[str, list[Any]] = {}
+    for override in declared:
+        declared_by_basin.setdefault(override.basin_slug, []).append(override)
+    assert declared_by_basin, "checked-in declaration must name at least one basin"
+
     basins_root = _write_override_fixture(tmp_path)
-    _write_basin_with_source_calibration(basins_root, "hetianhe")
+    for slug in declared_by_basin:
+        _write_basin_with_source_calibration(basins_root, slug)
 
     work_dir = tmp_path / "default" / "work"
     object_root = tmp_path / "default" / "objects"
@@ -2649,13 +2676,20 @@ def test_checked_in_declaration_loads_without_anyone_naming_it(tmp_path: Path) -
         basins_calibration_overrides.DEFAULT_CALIBRATION_OVERRIDES_PATH
     )
     assert summary["calibration_overrides_not_applied"] == []
-    assert [(item["basin_slug"], item["parameter"], item["value"]) for item in summary["calibration_overrides"]] == [
-        ("hetianhe", "GEOL_DMAC", "4")
-    ]
-    published = _published_calibration_bytes(
-        work_dir=work_dir, object_root=object_root, model_id="basins_hetianhe_shud"
-    ).decode("utf-8")
-    assert published == _SOURCE_CALIB_TEXT.replace("GEOL_DMAC\t5", "GEOL_DMAC\t4")
+    # Every declared entry was applied; summary covers all declared basins.
+    assert len(summary["calibration_overrides"]) == len(declared)
+    assert {(item["basin_slug"], item["parameter"]) for item in summary["calibration_overrides"]} == {
+        (override.basin_slug, override.parameter) for override in declared
+    }
+    for slug, basin_overrides in declared_by_basin.items():
+        model_id = registry_script._slug_id(slug)
+        published = _published_calibration_bytes(
+            work_dir=work_dir, object_root=object_root, model_id=f"basins_{model_id}_shud"
+        ).decode("utf-8")
+        expected = _SOURCE_CALIB_TEXT
+        for override in basin_overrides:
+            expected = _replace_calibration_parameter(expected, override.parameter, override.value)
+        assert published == expected, slug
     # Nothing undeclared moved.
     for model_id in ("basins_alpha_shud", "basins_bravo_shud"):
         assert (
@@ -2715,21 +2749,34 @@ def test_declared_entry_that_matches_no_calibration_file_refuses(tmp_path: Path)
     assert excinfo.value.details["calibration_file_count"] == 0
 
 
-def test_checked_in_declaration_seeds_exactly_the_hetianhe_geol_dmac_entry() -> None:
-    """#1832 §3.1/§3.2: the first entry, and the one deliberately NOT declared."""
+def test_checked_in_declaration_seeds_exactly_seven_entries() -> None:
+    """#1832 §3.1: the current checked-in declaration is exactly these seven.
+
+    hetianhe's GEOL_DMAC=4 is the first entry; the six HHe sub-basins each
+    declare GEOL_KSATH=2.0.  This exact tuple is the deliberate review gate for
+    declaration-content changes: the default-load fixture above derives its
+    basins/expected bytes from `load_calibration_overrides`, so an accidental
+    slug or value change cannot hide behind a fixture that builds itself.
+    """
     overrides = basins_calibration_overrides.load_calibration_overrides(
         Path(__file__).resolve().parents[1] / "config" / "calibration_overrides.yaml"
     )
 
     assert [(item.basin_slug, item.parameter, item.value) for item in overrides] == [
-        ("hetianhe", "GEOL_DMAC", "4")
+        ("hetianhe", "GEOL_DMAC", "4"),
+        ("hekouzhen_zhi_longmen", "GEOL_KSATH", "2.0"),
+        ("longyangxia_yishang", "GEOL_KSATH", "2.0"),
+        ("sanmenxia_zhi_huayuankou", "GEOL_KSATH", "2.0"),
+        ("longmen_zhi_sanmenxia", "GEOL_KSATH", "2.0"),
+        ("longyangxia_zhi_lanzhou", "GEOL_KSATH", "2.0"),
+        ("lanzhou_zhi_hekouzhen", "GEOL_KSATH", "2.0"),
     ]
     # §3.2: SOIL_ALPHA is not declared for ANY basin; the source value stands.
     assert all(item.parameter != "SOIL_ALPHA" for item in overrides)
-    reason = overrides[0].reason
-    # The reason has to carry the measurement, not just an assertion.
+    # The hetianhe reason has to carry the measurement, not just an assertion.
+    hetianhe = next(item for item in overrides if item.basin_slug == "hetianhe")
     for measured in ("4.75", "4.5", "NAN", "gfs", "IFS"):
-        assert measured in reason, reason
+        assert measured in hetianhe.reason, hetianhe.reason
 
 
 def test_refresh_lane_applies_the_same_declaration_as_the_manual_publisher(

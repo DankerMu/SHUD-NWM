@@ -347,6 +347,43 @@ def test_terminal_pipeline_state_same_id_with_repaired_checksum_is_not_current()
     )
 
 
+def test_packaged_ic_terminal_success_matches_its_manifest_checksum() -> None:
+    checksum = "a" * 64
+    strict = {
+        "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+        "packaged_ic_checksum": checksum,
+    }
+    terminal = {
+        "terminal_source": "hydro_run",
+        "terminal_status": "succeeded",
+        "hydro_run": {
+            "status": "succeeded",
+            "quality": "packaged_calibrated_state",
+            "init_state_id": None,
+        },
+        "run_manifest_initial_state": {
+            "quality": "packaged_calibrated_state",
+            "state_id": None,
+            "packaged_ic_checksum": checksum,
+        },
+    }
+
+    assert scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal, strict
+    )
+    assert scheduler_candidates_module._terminal_decision_run_manifest_matches_strict_warm_start(
+        terminal, strict
+    )
+
+    terminal["run_manifest_initial_state"]["packaged_ic_checksum"] = "b" * 64
+    assert not scheduler_candidates_module._terminal_decision_matches_strict_warm_start(
+        terminal, strict
+    )
+    assert not scheduler_candidates_module._terminal_decision_run_manifest_matches_strict_warm_start(
+        terminal, strict
+    )
+
+
 class _NoopReconcileStore:
     def query_reserved_unbound_jobs(self) -> list[Any]:
         return []
@@ -11767,6 +11804,30 @@ def test_sidecar_tier_recovers_forcing_provenance_and_does_not_block_present_pac
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 1
     assert orchestrator.calls
+
+
+def test_sidecar_tier_falls_back_to_copyback_after_local_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "copyback"
+    object_store_root.mkdir()
+    copyback_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    candidate = _scheduler_candidate_fixture()
+    _seed_producer_forcing_sidecar(copyback_root, candidate=candidate)
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        _forecast_failure_state(candidate),
+    )
+
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "retry_failed_candidate")
+    assert decision.evidence["forcing_provenance"]["source"] == "object_store_sidecar"
+    assert decision.evidence["forcing_provenance"]["artifact_exists"] is True
 
 
 @pytest.mark.parametrize("object_store_prefix", ["", "s3://nhms"])
@@ -38133,6 +38194,7 @@ def _absence_tolerance_scheduler(
     repository_factory: Any | None = None,
     strict_evidence: dict[str, Any] | None = None,
     hydro_status: str = "published",
+    run_manifest_initial_state: dict[str, Any] | None = None,
 ) -> tuple[Any, CycleDiscovery, list[Any]]:
     """Cycle-completion verdict seam with the strict/successor providers pinned.
 
@@ -38149,6 +38211,7 @@ def _absence_tolerance_scheduler(
         {
             "hydro_status": hydro_status,
             "hydro_run": hydro_run,
+            "run_manifest_initial_state": run_manifest_initial_state,
         }
     )
     scheduler = ProductionScheduler(
@@ -38211,6 +38274,50 @@ def test_cycle_completion_verdict_tolerates_absent_init_state_record_with_ready_
     )
 
     assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+def test_cycle_completion_verdict_advances_after_packaged_ic_terminal_success(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    checksum = "a" * 64
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "quality": "packaged_calibrated_state",
+            "init_state_id": None,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026072000_model_a/output/",
+        },
+        successor_state=None,
+        strict_evidence={
+            "status": "ready",
+            "ready": True,
+            "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+            "packaged_ic_checksum": checksum,
+        },
+        run_manifest_initial_state={
+            "quality": "packaged_calibrated_state",
+            "state_id": None,
+            "packaged_ic_checksum": checksum,
+        },
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+            "packaged_ic_checksum": "b" * 64,
+        },
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
 
 
 _ABSENT_INIT_STATE_HYDRO_RUN = {

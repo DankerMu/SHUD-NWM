@@ -76,6 +76,11 @@ jobs:
               - 'instructions/agents/shared.md'
               - 'scripts/run_qhh_cycle.sbatch'
               - 'scripts/diagnostic/qhh/README.md'
+              # #1860: the checked-in calibration declaration is a non-Python
+              # producer whose package/publication consumers and selector
+              # meta-guard must run on a declaration-only PR. Exact literal
+              # only; other config files have different consumers.
+              - 'config/calibration_overrides.yaml'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'
