@@ -2174,3 +2174,15 @@ an autonomous cut, while this sample reinforces the standing prerequisite for
 any future reversal: separate pinned fix-depth catches, rotated comprehensive
 lenses, and Phase 7/fixture/other round-role detectors before treating the
 ratio as causal evidence.
+
+## Revisit 2026-08-26 (post #1860 / PR #1864) — keep; single-round sample leaves attribution unchanged
+
+`loop_log_audit.py` again reports **132** multi-round merged PRs and later-round
+catches **core=81 / rotated=296**, exactly the previous revisit’s values. PR
+number 1864 had one clean comprehensive round, zero candidates, and a clean Phase 7
+Gap Sweep. No follow-up comprehensive round ran, so lens rotation was not
+applied and this line cannot inform its value in either direction.
+
+**Keep rotation** unchanged. This is a bookkeeping revisit required by the
+repeated DECIDABLE signal, not new evidence; the attribution caveats and the
+maintainer-only reversal rule above remain in force.
