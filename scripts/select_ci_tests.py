@@ -796,6 +796,12 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_quiescence.py",
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_gateway_reconcile_writer_rollforward.py",
+            # #1850: the binding-provenance and claimant-exclusivity suites
+            # top-level-import this helper at file level and are sub-second
+            # beside the partitions above, so they join the exact rule rather
+            # than riding the closure guard as a rule-gap exclusion.
+            "tests/test_gateway_reconcile_binding_provenance.py",
+            "tests/test_gateway_reconcile_claimant_exclusivity.py",
             # The five ultimate consumers via the demote helper (see above).
             "tests/test_orchestrator_demote_cli_security.py",
             "tests/test_orchestrator_demote_core_cas.py",
@@ -1111,6 +1117,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py",
             "tests/test_scheduler_backfill.py",
             "tests/test_warm_start_chaining.py",
+            # #1850: the accepted-submit-identity binding-provenance and
+            # claimant-exclusivity suites top-level-import
+            # services/orchestrator/accepted_submit_identity.py and are
+            # sub-second fixtures beside the gateway-reconcile lane they join.
+            "tests/test_gateway_reconcile_binding_provenance.py",
+            "tests/test_gateway_reconcile_claimant_exclusivity.py",
             "tests/test_cli_cleanup_frontier.py",
             "tests/test_cli_publish_qdown.py",
             "tests/test_orchestrator_demote_cli_security.py",

@@ -17,7 +17,10 @@ from typing import Any
 
 import pytest
 
-from tests.gateway_reconcile_helpers import _file_cohort_repository
+from tests.gateway_reconcile_helpers import (
+    _file_cohort_repository,
+    _versioned_master_reservation_record,
+)
 from tests.test_real_slurm_gateway import _pinned_local_timezone
 
 
@@ -262,22 +265,25 @@ def _reconcile_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("flags_line", "expected"),
+    ("flags_line", "expected", "warning_token"),
     [
         # node-22 renders the production value with padded spaces around "=".
-        ("AccountingStoreFlags    = (null)", False),
-        ("AccountingStoreFlags    = job_comment", True),
-        ("AccountingStoreFlags    = job_comment,job_extra", True),
-        ("AccountingStoreFlags    = job_extra", False),
-        ("AccountingStoreFlags    = ", False),
-        (None, False),
+        # Tri-state (#1565): a present line lacking job_comment is explicit
+        # False; a missing line is unknown None; a probe failure is None.
+        ("AccountingStoreFlags    = (null)", False, "does not store job comments"),
+        ("AccountingStoreFlags    = job_comment", True, None),
+        ("AccountingStoreFlags    = job_comment,job_extra", True, None),
+        ("AccountingStoreFlags    = job_extra", False, "does not store job comments"),
+        ("AccountingStoreFlags    = ", False, "does not store job comments"),
+        (None, None, "capability unknown"),
     ],
 )
 def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     flags_line: str | None,
-    expected: bool,
+    expected: bool | None,
+    warning_token: str | None,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
@@ -293,10 +299,10 @@ def test_comment_storage_probe_requires_job_comment_in_accounting_store_flags(
         assert reconcile_module.default_comment_storage_probe("/opt/slurm/bin")() is expected
     assert commands == [["/opt/slurm/bin/scontrol", "show", "config"]]
     warnings = _reconcile_warnings(caplog)
-    if expected:
+    if warning_token is None:
         assert warnings == []
     else:
-        assert any("accounting does not store job comments" in message for message in warnings)
+        assert any(warning_token in message for message in warnings)
         assert not any("could not execute" in message for message in warnings)
 
 
@@ -314,11 +320,12 @@ def test_comment_storage_probe_swallows_an_unrunnable_probe_with_a_distinct_warn
 
     monkeypatch.setattr(reconcile_module, "_bounded_visibility_stdout", run)
     with caplog.at_level(logging.WARNING, logger=_RECONCILE_MODULE_LOGGER):
-        assert reconcile_module.default_comment_storage_probe()() is False
+        assert reconcile_module.default_comment_storage_probe()() is None
     assert commands == [["scontrol", "show", "config"]]
     warnings = _reconcile_warnings(caplog)
     assert any("comment storage probe could not execute" in message for message in warnings)
     assert not any("accounting does not store job comments" in message for message in warnings)
+    assert not any("capability unknown" in message for message in warnings)
 
 
 @pytest.mark.parametrize(
@@ -360,10 +367,10 @@ def test_comment_sacct_refuses_every_scope_when_comment_storage_is_unproven(
     assert calls == []
 
 
-@pytest.mark.parametrize("proven", [True, False])
+@pytest.mark.parametrize("proven", [True, False, None])
 def test_comment_storage_probe_runs_once_per_querier_instance(
     monkeypatch: pytest.MonkeyPatch,
-    proven: bool,
+    proven: bool | None,
 ) -> None:
     from services.orchestrator import reconcile as reconcile_module
 
@@ -375,7 +382,7 @@ def test_comment_storage_probe_runs_once_per_querier_instance(
     )
     probes = 0
 
-    def storage_probe() -> bool:
+    def storage_probe() -> bool | None:
         nonlocal probes
         probes += 1
         return proven
@@ -387,13 +394,15 @@ def test_comment_storage_probe_runs_once_per_querier_instance(
     page_count = (reconcile_module.COMMENT_SACCT_LOOKBACK_DAYS * 24) // reconcile_module.COMMENT_SACCT_PAGE_HOURS
 
     for key in ("key-a", "key-b"):
-        if proven:
+        if proven is True:
             assert tuple(query(key)) == ()
         else:
+            # Explicit False and unknown None both refuse query-free; the probe
+            # still runs exactly once for the querier instance (#1565 D1).
             with pytest.raises(reconcile_module.ReconcileQueryUnavailable):
                 query(key)
     assert probes == 1
-    assert len(calls) == (page_count if proven else 0)
+    assert len(calls) == (page_count if proven is True else 0)
 
 
 def test_comment_storage_gate_outranks_visibility_but_not_the_contract_version_check(
@@ -750,3 +759,133 @@ def test_comment_sacct_session_freezes_advancing_clock_window_for_all_keys_and_s
     assert now_calls == [base_now]
     # base_now is 2026-07-22T12:00Z; UTC+8 renders it as the host's local wall clock.
     assert "--endtime=2026-07-22T20:00:00" in commands[0]
+
+
+# --- #1850 Phase 6b (Fix D): capability probing is lazy — an empty or
+# unversioned-only reserved-unbound inventory must never trigger the probe.
+
+
+def _counting_storage_probe(counter: list[int], proven: bool | None = False):
+    def _probe() -> bool | None:
+        counter[0] += 1
+        return proven
+
+    return _probe
+
+
+def test_capability_probe_not_called_with_zero_reserved_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: an empty reserved-unbound inventory must not probe capability.
+
+    ``reconcile_reserved_unbound_jobs`` on a journal with no reserved-unbound
+    rows performs zero storage probes and zero accounting queries."""
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    assert repository.query_reserved_unbound_jobs() == []
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 0
+
+
+def test_capability_probe_not_called_with_unversioned_only_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: unversioned-only reserved rows must not trigger the probe.
+
+    A legacy/unversioned reserved-unbound row never needs the current-contract
+    lane selection, so capability stays unprobed and no fallback/accounting
+    query issues."""
+    from services.orchestrator import reconcile as reconcile_module
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        created_at=datetime(2026, 7, 12, tzinfo=UTC),
+        member_count=1,
+        versioned=False,
+    )
+    repository.reserve_pipeline_job(record)
+    assert len(repository.query_reserved_unbound_jobs()) == 1
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 0
+
+
+def test_capability_probe_runs_once_for_two_current_rows(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix D: two current-contract rows probe capability exactly once.
+
+    The verdict is computed once for the pass and reused for both rows, even
+    though each row needs lane selection."""
+    from services.orchestrator import reconcile as reconcile_module
+    from tests.gateway_reconcile_helpers import (
+    _file_cohort_repository,
+    _versioned_master_reservation_record,
+)
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path / "gfs",
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    record = _versioned_master_reservation_record(
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        source_id="ifs",
+    )
+    repository.reserve_pipeline_job(record)
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    probes: list[int] = [0]
+    query = reconcile_module.default_comment_sacct_querier(
+        global_visibility_probe=lambda: True,
+        comment_storage_probe=_counting_storage_probe(probes),
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    reconcile_module.reconcile_reserved_unbound_jobs(
+        repository,
+        comment_query=query,
+        now=lambda: datetime(2026, 7, 12, 2, tzinfo=UTC),
+    )
+    assert probes[0] == 1

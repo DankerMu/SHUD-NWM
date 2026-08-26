@@ -2186,3 +2186,21 @@ applied and this line cannot inform its value in either direction.
 **Keep rotation** unchanged. This is a bookkeeping revisit required by the
 repeated DECIDABLE signal, not new evidence; the attribution caveats and the
 maintainer-only reversal rule above remain in force.
+
+## Revisit 2026-08-26 (post #1795/#1792/#1565 / PR #1850) — keep; pinned-depth loop, no rotation applied
+
+`loop_log_audit.py` now reports **133** multi-round merged PRs and later-round
+catches **core=85 / rotated=296**, a delta of `+1 / +4 / +0` from the previous
+revisit. The four new core catches are three Round 2 canonical-authority defects
+and one Round 4 runbook wording defect. All came from lenses already present in
+Round 1; every comprehensive round intentionally reused the same six-lens mix
+while one accepted-submit invariant was redesigned and then re-integrated with
+moving master.
+
+This is pinned fix-depth and integration verification, not a failed free-slot
+rotation experiment: no new lens was rotated in. The five-round loop converged
+cleanly after the depth retro, and Phase 7 was also clean. **Keep rotation**
+unchanged. As recorded throughout this ADR, a future reversal must first
+separate rounds where rotation was actually applied from pinned-depth,
+fix-verification, fixture, and final-review roles, then receive maintainer
+review.

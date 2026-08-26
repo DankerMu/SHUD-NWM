@@ -234,10 +234,14 @@ returns nothing; fall back to `sacct -a --name nhms_forecast` narrowed to the re
 
 Since #1116 the comment querier probes `scontrol show config` once per reconcile pass and
 refuses every comment query — owner-scoped, global and legacy — unless
-`AccountingStoreFlags` contains the `job_comment` flag. **This cluster does not store it**
-(`AccountingStoreFlags = (null)`, Slurm 23.11.4, measured on node-22 2026-08-18), so each
-reserved-unbound cohort master is recorded `accounting_unavailable` /
-`comment_accounting_unproven` and **stays `reserved`** instead of being demoted.
+`AccountingStoreFlags` contains the `job_comment` flag. Since #1565 the probe is tri-state
+(present-with-`job_comment` / present-without / unknown): a probe failure or a missing
+`AccountingStoreFlags` line is **unknown** and stays query-free, while an explicitly
+comment-less cluster may enter the § automatic unique fallback below. **This cluster does
+not store it** (`AccountingStoreFlags = (null)`, Slurm 23.11.4, measured on node-22
+2026-08-18), so each reserved-unbound cohort master that the fallback cannot uniquely prove
+is recorded `accounting_unavailable` / `comment_accounting_unproven` and **stays
+`reserved`** instead of being demoted.
 
 The refusal is deliberate: a comment search on a cluster that never stored the comment can
 only ever answer "not found", so reading that answer as a confirmed absence demotes a live
@@ -245,9 +249,11 @@ reservation to `reservation_lost`, and the reclaim path then re-`sbatch`es the s
 — a silent double submission. The price of refusing is real and must be paid by hand: a
 `reserved` row is not terminal, so **every later pass of that cycle keeps failing with
 `PIPELINE_ALREADY_ACTIVE`** and records `submission_failed` with zero Slurm submissions
-until the row is disposed of. This outcome class has no automatic exit — it does not feed
-`identity_blocked_streak` (that counter only counts `identity_mismatch_blocked`) and never
-self-releases.
+until the row is disposed of. This durable outcome class has no automatic exit: only a
+durable exact-comment `reconciliation_decision=identity_mismatch_blocked` feeds
+`identity_blocked_streak`. An unsuccessful comment-less fallback may expose the same
+action name in pass evidence, but its durable row stays `accounting_unavailable` /
+`comment_accounting_unproven`, keeps streak zero, and never self-releases.
 
 ### Finding the held rows
 
@@ -262,17 +268,18 @@ self-releases.
   row below.
 - Journal: the same `reconciliation_reason_class` is persisted on the cohort master row,
   whose `status` is still `reserved` and whose `slurm_job_id` is still null.
-- Scheduler log, once per pass, tells the two unproven causes apart: `comment storage probe
-  could not execute: …` means `scontrol` failed or was unreachable (a deployment fault —
-  fix that first, the cluster may well store comments; while the fault persists, each
-  pass's `accounting_unavailable` write also resets any accumulated
-  `identity_blocked_streak`, so the § `identity_mismatch_released` ladder cannot fire
-  either). `accounting does not store job comments: AccountingStoreFlags lacks
-  job_comment` normally means the cluster is provably comment-less — but the same message
-  also fires when the config output has no `AccountingStoreFlags` line at all (for
-  example a pre-20.11 Slurm using the legacy `AccountingStoreJobComment` key, which the
-  probe deliberately does not read); when in doubt, run `scontrol show config | grep -i
-  AccountingStore` by hand before concluding the capability is absent.
+- Scheduler log, once per pass, tells all three capability verdicts apart:
+  `comment storage probe could not execute: …` means `scontrol` failed or was unreachable
+  (unknown; fix the deployment fault first because the cluster may store comments), while
+  `comment storage capability unknown: AccountingStoreFlags line is absent` means the
+  command ran but omitted the authoritative config line (also unknown; no fallback query
+  issues). Only `accounting does not store job comments: AccountingStoreFlags lacks
+  job_comment` proves the cluster explicitly comment-less and opens the conservative
+  fallback. While either unknown condition persists, each durable
+  `accounting_unavailable` transition resets any accumulated `identity_blocked_streak`, so
+  the § `identity_mismatch_released` ladder cannot fire. A legacy
+  `AccountingStoreJobComment` key does not substitute for `AccountingStoreFlags`; inspect
+  `scontrol show config | grep -i AccountingStore` before changing cluster configuration.
 
 ### Deciding whether the job is actually in flight
 
@@ -290,6 +297,103 @@ squeue -a --name nhms_forecast
 Match by submit time inside the reservation's attempt window and by user/account (the row's
 `expected_slurm_user` / `expected_slurm_account`, when `slurm_ownership_required` is set).
 `squeue` covers the still-queued/running half without the accounting propagation lag.
+
+### Automatic unique fallback on an explicitly comment-less cluster (#1565)
+
+Since #1565 the comment capability probe is **tri-state**: a present
+`AccountingStoreFlags` line containing `job_comment` is comment-storing;
+a present line explicitly lacking it — including `(null)` — is explicitly
+comment-less; a probe failure or an absent `AccountingStoreFlags` line is
+**unknown**. Only an explicitly comment-less cluster and a current
+accepted-submit forecast cohort with a strict UTC `submission_attempt_started_at`
+plus non-empty `expected_slurm_user`/`expected_slurm_account` may enter the
+**conservative name-window fallback**:
+
+- One bounded `sacct --name nhms_forecast` query per reservation, from the
+  immutable attempt anchor through the querier's frozen `now`, with
+  `--user=<expected_slurm_user> --accounts=<expected_slurm_account>` and
+  `--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit`.
+- Both bounds are rendered as host-local wall-clock strings (same rule as the
+  exact-comment query). A timezone-less `Submit` value is interpreted in the
+  host-local timezone and converted to UTC. Missing/unparsable `Submit` is
+  transient denial only for an otherwise eligible forecast/owner row; an
+  out-of-window row is ineligible.
+- Accepted forecast array/step ids normalize to their bare numeric master id;
+  at most two distinct masters are retained (zero / unique / ambiguous is all
+  that is needed). Forcing, batch/extern, and unrelated job names are discarded
+  before candidate classification, so they contribute to `fallback_no_match`,
+  not `identity_mismatch_blocked` or malformed-Submit evidence.
+- A candidate must have an in-window submit instant, exact user/account, and a
+  forecast-family job name before it reaches the existing identity gates. A
+  candidate with an **empty** comment may pass both comment gates (the cluster
+  never stored it); a present-but-different comment remains fatal.
+
+“Unique” means more than one row from this `sacct` query. Exactly one durable
+reserved claimant must admit the candidate's Submit instant for that user/account,
+and no other current accepted-submit master may own the same accounting
+incarnation `(bare Slurm id, canonical Submit)`. An active same-id owner always
+blocks; a settled same-id row blocks only when its canonical Submit is identical,
+while a different Submit proves legitimate numeric-id reuse. Canonical cycle
+journal authority decides this check: stale, damaged, or missing flat projections
+cannot fabricate or hide an owner. Inventory cleanup and first migration preserve
+an anchor-to-flat locator handoff, so a projection crash or concurrent cleanup
+cannot create a temporary vacancy.
+
+**Two distinct timestamps, never conflated.** The durable `submitted_at` on a
+normal/exact-comment bind is the **gateway acceptance/commit time**; it is never
+canonical Slurm accounting `Submit` evidence and therefore cannot prove numeric-id
+recycling. Only the attempt-scoped `slurm_accounting_submitted_at` — populated
+exclusively from the parsed sacct `Submit` of a successful name-window fallback
+bind — is incarnation proof. A settled same-id sibling blocks fail-closed when its
+canonical accounting Submit is absent, malformed, gateway-sourced, or
+exact-comment-sourced without a canonical Submit, even if the legacy `submitted_at`
+differs (including microsecond-only differences). The `slurm_binding_source`
+(`gateway_submit` / `slurm_exact_comment` / `slurm_name_window_unique`) and
+`slurm_accounting_submitted_at` are immutable for one bound attempt, survive every
+defer and terminal projection (which restore the legal current
+`reconciliation_source` from binding provenance on `matched_bound`), and clear
+only when reclaim starts a new attempt.
+
+Only that claimant-exclusive, fully validated candidate binds — once, with
+`reconciliation_source=slurm_name_window_unique` and
+`reconciliation_decision=matched_bound`. Every other outcome is fail-closed and
+**never** binds, demotes, retries, or increments the streak:
+
+| Outcome | Pass evidence | Row state |
+|---|---|---|
+| zero eligible masters (including only non-forecast names) | `action=fallback_no_match`, `match_count=0` | reserved/unbound |
+| two or more query masters, or more than one durable claimant | `action=ambiguous_fallback_match`, `match_count=2` | reserved/unbound |
+| one candidate fails identity or same-incarnation occupancy | `action=identity_mismatch_blocked`, `match_count=1` | reserved/unbound |
+| missing/unparsable `Submit` | `action=query_unavailable`, `reconciliation_reason_class=fallback_submit_unparsable` (pass-only) | reserved/unbound |
+| process/timeout/byte/row failure | `action=query_unavailable`, existing bounded-query reason | reserved/unbound |
+
+Every unsuccessful fallback preserves the durable #1564 held tuple byte-for-byte:
+`status=reserved`, no `slurm_job_id`, `reconciliation_source=slurm_exact_comment`,
+`reconciliation_decision=accounting_unavailable`, and
+`reconciliation_reason_class=comment_accounting_unproven`. If that tuple is not
+yet present on the first pass, establishing it is the only permitted durable
+write. The guarded `nhms-pipeline demote-reserved-job` CAS therefore stays valid
+on every fallback-failed row. Fallback failures never enter the
+`identity_blocked_streak` release ladder and never create an automatic
+absence/release exit.
+
+Zero candidates is **not** an absence proof, and ambiguity never changes
+disposal authority: on a comment-less cluster only a uniquely proven live job
+binds; row-scoped confirmed-dead disposal remains the documented guarded
+operator action.
+
+Terminal inflight identity blocks additionally carry an additive
+`reconciliation_reason_class` in
+`restart_reconcile.inflight.outcomes[]` (#1795) — one stable clause token
+(`cohort_identity_invalid`, `runtime_identity_mismatch`, `master_id_mismatch`,
+`comment_mismatch`, `stage_family_mismatch`, `ownership_unproven`,
+`ownership_user_mismatch`, `ownership_account_mismatch`,
+`cohort_members_unparsable`, `task_identity_values_mismatch`,
+`task_identity_values_unparsable`, `task_id_unparsable`, `task_mapping_mismatch`,
+`task_job_name_mismatch`, `task_comment_mismatch`) with `action` unchanged as
+`identity_mismatch_blocked` and zero durable/status/event writes. The token is
+pass evidence only — it is never written to the accepted-submit durable
+accounting tuple by the inflight leg.
 
 ### Production-safe validation rule
 
@@ -310,6 +414,16 @@ first step that is not satisfied:
 4. **Natural accidents proceed normally.** When a held row does appear naturally, run
    Disposition case 3 below in full — `sacct`/`squeue` proof, typed CAS, receipt, and
    next-pass verification — and keep the complete receipt.
+
+**#1565 node-22 receipt rule.** The automatic-fallback validation on node-22 is
+**read-only live accounting plus scratch journal only**: prove the live
+capability is explicit `False` (`scontrol show config | grep -i
+AccountingStoreFlags`), query historical `nhms_forecast` accounting rows over a
+narrow frozen interval to produce one unique result and a wider interval to
+produce ambiguity, and exercise the bind only against a **scratch** file journal.
+Never `sbatch`, never `scancel`, never change a service, and never write to the
+production journal. If no suitable historical rows exist, deterministic tests
+stand in instead of manufacturing a held row.
 
 ### Disposition — confirmed dead rows: the guarded operator demotion
 

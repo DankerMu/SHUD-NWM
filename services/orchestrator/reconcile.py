@@ -58,6 +58,17 @@ LOGGER = logging.getLogger(__name__)
 COMMENT_SACCT_LOOKBACK_DAYS = 7
 COMMENT_SACCT_PAGE_HOURS = 12
 
+# #1565: the bounded name-window fallback. One query per reservation from the
+# immutable attempt anchor through the querier's frozen now, scoped to the
+# ``nhms_forecast`` family and the reservation's exact owner/account. Only
+# zero / unique / ambiguous classification is needed, so at most two distinct
+# bare masters are retained.
+FALLBACK_JOB_NAME = "nhms_forecast"
+MAX_FALLBACK_MASTERS = 2
+# A timezone-less Slurm ``Submit`` value is rendered in host-local wall clock;
+# ``%Y-%m-%dT%H:%M:%S`` is Slurm's own field format for ``Submit``.
+_FALLBACK_SUBMIT_FORMATS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S.%f")
+
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
 # A reservation whose sbatch was never confirmed by accounting: sbatch did not
 # take, so the candidate may be safely re-submitted on a later pass. We mark it
@@ -150,6 +161,29 @@ class ReconcileQuerySaturated(ReconcileQueryUnavailable):
         )
 
 
+class _ReconcileFallbackQueryUnavailable(ReconcileQueryUnavailable):
+    """A transient query failure raised by the name-window fallback (#1565).
+
+    The reason class on the exception stays the applicable existing transient
+    reason (``process_unavailable`` / ``bounded_output_*``) for PASS evidence,
+    but its origin is marked so the reconcile writer persists the durable held
+    tuple reason ``comment_accounting_unproven`` instead of the transient one.
+    Exact-comment query failures are unmarked and keep their historical durable
+    reason behavior.
+    """
+
+
+class _ReconcileFallbackQuerySaturated(ReconcileQuerySaturated, _ReconcileFallbackQueryUnavailable):
+    """A bounded-query saturation raised by the name-window fallback.
+
+    ``ReconcileQuerySaturated.__init__`` already sets ``reason_class`` to the
+    applicable ``bounded_output_*_saturated`` value; the multiple inheritance
+    only marks the fallback origin.
+    """
+
+    pass
+
+
 @dataclass(frozen=True)
 class SacctRecord:
     """Minimal authoritative accounting view of a Slurm job for reconcile."""
@@ -172,6 +206,11 @@ class SacctRecord:
     file_journal_identity: Mapping[str, Any] | None = None
     array_member_job_ids: tuple[str, ...] = ()
     array_task_records: tuple["SacctRecord", ...] = ()
+    # #1850: the parsed host-local-to-UTC Slurm ``Submit`` instant carried by a
+    # name-window fallback candidate so the typed commit can prove the attempt
+    # window is closed at both endpoints and the candidate is not claimed by a
+    # sibling reserved attempt. ``None`` when no Submit was requested/parsed.
+    submitted_at: datetime | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -314,52 +353,222 @@ def _private_data_allows_global_jobs(stdout: str) -> bool:
     return found
 
 
-def default_comment_storage_probe(slurm_bin_path: str = "") -> Callable[[], bool]:
-    """Prove accounting actually stores the sbatch ``--comment``.
+def default_comment_storage_probe(slurm_bin_path: str = "") -> Callable[[], bool | None]:
+    """Classify one querier instance's comment-storage capability (tri-state).
 
-    On a cluster whose ``AccountingStoreFlags`` omits ``job_comment`` the comment
-    search can never find a genuinely in-flight job, so its empty answer is not an
-    absence proof. Every unproven case — probe failure, missing line, ``(null)``,
-    a flag list without ``job_comment`` — returns False (fail closed).
+    Returns ``True`` when ``AccountingStoreFlags`` contains ``job_comment``
+    (comment-storing: exact-comment recovery stays authoritative), ``False`` when
+    a present line explicitly lacks the token — including ``(null)`` —
+    (explicitly comment-less: the name-window fallback MAY run), and ``None``
+    when the probe could not execute or the output omits the
+    ``AccountingStoreFlags`` line (unknown: no accounting query may issue).
     """
 
     scontrol = f"{slurm_bin_path.rstrip('/')}/scontrol" if slurm_bin_path else "scontrol"
 
-    def _probe() -> bool:
+    def _probe() -> bool | None:
         try:
             stdout = _bounded_visibility_stdout([scontrol, "show", "config"])
         except ReconcileQueryUnavailable as error:
             LOGGER.warning("comment storage probe could not execute: %s", error)
-            return False
-        if not _accounting_store_flags_allow_comment(stdout):
+            return None
+        verdict = _accounting_store_flags_classify(stdout)
+        if verdict is False:
             LOGGER.warning(
                 "accounting does not store job comments: AccountingStoreFlags lacks job_comment"
             )
-            return False
-        return True
+        elif verdict is None:
+            LOGGER.warning(
+                "comment storage capability unknown: AccountingStoreFlags line is absent"
+            )
+        return verdict
 
     return _probe
 
 
 def _accounting_store_flags_allow_comment(stdout: str) -> bool:
+    return _accounting_store_flags_classify(stdout) is True
+
+
+def _accounting_store_flags_classify(stdout: str) -> bool | None:
+    """Tri-state classification of ``AccountingStoreFlags`` in ``scontrol`` output.
+
+    ``True``: a present line contains ``job_comment``. ``False``: a present line
+    explicitly lacks it (including the literal ``(null)``). ``None``: no line at
+    all (unknown — never a claim that comments are absent).
+    """
+
+    found = False
     for line in stdout.splitlines():
         key, separator, value = line.partition("=")
-        if separator and key.strip().lower() == "accountingstoreflags":
-            flags = {
-                token.strip().lower()
-                for token in value.replace(",", " ").split()
-                if token.strip()
-            }
-            if "job_comment" in flags:
-                return True
+        if not separator or key.strip().lower() != "accountingstoreflags":
+            continue
+        found = True
+        flags = {
+            token.strip().lower()
+            for token in value.replace(",", " ").split()
+            if token.strip()
+        }
+        if "job_comment" in flags:
+            return True
+        return False
+    if not found:
+        return None
     return False
+
+
+def _parse_fallback_submit_instant(value: str | None) -> datetime | None:
+    """Parse a timezone-less Slurm ``Submit`` value as host-local wall clock.
+
+    Slurm renders ``Submit`` without a timezone; sacct already interpreted the
+    raw timestamp in the host's local timezone, so the value is attached to the
+    same local zone before converting to UTC. ``None`` (unparseable) is the
+    caller's transient-denial signal.
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return None
+    # Slurm may render fractional seconds; only the whole-second form is
+    # guaranteed, so try the longest match last.
+    for fmt in _FALLBACK_SUBMIT_FORMATS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        try:
+            local = parsed.astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+        if local.utcoffset() is None:
+            return None
+        return local.astimezone(UTC)
+    return None
+
+
+def _fallback_candidate_in_window(submit: datetime | None, *, anchor: datetime, end: datetime) -> bool:
+    """A fallback master is eligible only inside the closed attempt window."""
+
+    if submit is None:
+        return False
+    return anchor <= submit <= end
+
+
+def _fallback_master_id(raw_job_id: str) -> str | None:
+    """Normalize an array/step row to its bare numeric master id, or None.
+
+    Strips the ``.<step>`` suffix first, then the ``_<task>`` array suffix,
+    and validates the remaining bare numeric master id. A malformed JobID
+    (non-numeric after normalization) yields None.
+    """
+
+    without_step = raw_job_id.split(".", 1)[0]
+    master_id = without_step.split("_", 1)[0]
+    if not SLURM_JOB_ID_RE.fullmatch(master_id):
+        return None
+    return master_id
+
+
+def _parse_fallback_sacct_rows(
+    stdout: str,
+    *,
+    expected_user: str,
+    expected_account: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> tuple[list[SacctRecord], bool]:
+    """Classify the name-window fallback output into eligible masters.
+
+    Returns ``(records, submit_parsable)``. A row is eligible only when its
+    normalized bare master id is well-shaped, its submit instant parses and
+    falls inside the closed attempt window, its owner matches exactly, and its
+    job name belongs to the FORECAST family (``nhms_forecast`` or a forecast
+    stage alias; forcing/batch/extern/unrelated names are ineligible). An
+    ineligible row never turns into ``fallback_submit_unparsable``: only an
+    otherwise-eligible forecast/owner row with missing/unparsable Submit
+    triggers the transient denial. ``submit_parsable`` is False when at least
+    one candidate row carried missing/unparsable Submit evidence (transient
+    denial per the pass-evidence contract). Deduplication is by bare master id
+    and at most ``MAX_FALLBACK_MASTERS`` masters are retained
+    (zero/unique/ambiguous is all that is required).
+    """
+
+    records: list[SacctRecord] = []
+    seen_master_ids: set[str] = set()
+    submit_parsable = True
+    for line in stdout.splitlines()[:MAX_COMMENT_SACCT_ROWS]:
+        fields = line.strip().split("|")
+        master_id = _fallback_master_id(fields[0]) if fields else None
+        if master_id is None:
+            continue
+        user = fields[5].strip() if len(fields) > 5 else ""
+        account = fields[6].strip() if len(fields) > 6 else ""
+        if expected_user and user != expected_user:
+            continue
+        if expected_account and account != expected_account:
+            continue
+        job_name = fields[1].strip() if len(fields) > 1 else ""
+        # Phase 6j: the fallback is the FORECAST-family name window. A row is
+        # eligible only when its JobName is the canonical fallback name
+        # (``nhms_forecast``) or a forecast stage alias recognized by
+        # ``is_forecast_cohort_stage_name``. Deliberately NOT the broader
+        # inflight ``_GENERIC_ARRAY_JOB_NAMES`` (which includes ``nhms_forcing``):
+        # a non-forecast row must be ineligible, so a query with only such rows
+        # is ``fallback_no_match`` (count 0) rather than a wrong
+        # ``identity_mismatch_blocked``. Forcing aliases, batch/extern step
+        # names, and unrelated names never enter the candidate list.
+        if not is_forecast_cohort_stage_name(job_name.removeprefix("nhms_")):
+            continue
+        if len(fields) < 8:
+            # Structurally sufficient owner/name/master row whose Submit field
+            # is missing entirely: malformed evidence, transient denial (#1565).
+            submit_parsable = False
+            continue
+        submit = _parse_fallback_submit_instant(fields[7])
+        if submit is None:
+            submit_parsable = False
+            continue
+        if not _fallback_candidate_in_window(submit, anchor=window_start, end=window_end):
+            continue
+        if master_id in seen_master_ids:
+            continue
+        seen_master_ids.add(master_id)
+        records.append(
+            SacctRecord(
+                slurm_job_id=master_id,
+                job_name=job_name,
+                raw_state=fields[2].strip(),
+                exit_code=fields[3].strip() or None,
+                comment=fields[4].strip() or None,
+                user=user or None,
+                account=account or None,
+                submitted_at=submit,
+            )
+        )
+        if len(records) >= MAX_FALLBACK_MASTERS:
+            break
+    return records, submit_parsable
+
+
+def _fallback_eligibility(
+    *,
+    expected_user: str,
+    expected_account: str,
+    submission_attempt_started_at: Any,
+) -> bool:
+    """A current accepted-submit cohort MAY enter fallback only with a strict
+    UTC attempt anchor and non-empty expected user/account."""
+
+    if not expected_user or not expected_account:
+        return False
+    return _strict_utc_datetime(submission_attempt_started_at) is not None
 
 
 def default_comment_sacct_querier(
     slurm_bin_path: str = "",
     *,
     global_visibility_probe: Callable[[], bool] | None = None,
-    comment_storage_probe: Callable[[], bool] | None = None,
+    comment_storage_probe: Callable[[], bool | None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> CommentSacctQuerier:
     """Build a comment querier: idempotency_key -> the job sbatch recorded.
@@ -381,6 +590,10 @@ def default_comment_sacct_querier(
     visibility_proven: bool | None = None
     storage_probe = comment_storage_probe or default_comment_storage_probe(slurm_bin_path)
     comment_storage_proven: bool | None = None
+    # Distinguish "not yet probed" from "probed and unknown (None)" so the
+    # tri-state verdict True/False/None is each cached after exactly one probe
+    # call per querier instance (#1565 D1).
+    comment_storage_probed = False
 
     def _pages() -> tuple[tuple[datetime, datetime], ...]:
         end = now().astimezone(UTC).replace(microsecond=0)
@@ -392,6 +605,21 @@ def default_comment_sacct_querier(
             pages.append((start, end))
             end = start
         return tuple(pages)
+
+    def capability() -> bool | None:
+        """Tri-state comment-storage capability, probed at most once per instance.
+
+        ``True`` = accounting stores job comments (exact-comment lane),
+        ``False`` = explicitly comment-less (fallback lane), ``None`` =
+        unknown (no lane may issue). Cached after the first probe so the verdict
+        is stable for the whole scheduler/reconcile session (#1850 D2).
+        """
+
+        nonlocal comment_storage_proven, comment_storage_probed
+        if not comment_storage_probed:
+            comment_storage_proven = storage_probe()
+            comment_storage_probed = True
+        return comment_storage_proven
 
     # One querier instance is one scheduler/reconcile session. Freeze its full
     # time window once so every key and owner/global scope shares identical page
@@ -405,21 +633,45 @@ def default_comment_sacct_querier(
         expected_account: str | None = None,
         accepted_submit_contract_version: str | None = None,
         submission_attempt_started_at: datetime | None = None,
-    ) -> tuple[SacctRecord, ...]:
-        target_comment = slurm_comment_for(idempotency_key)
+    ) -> CommentAccountingResult:
         owner_scope = (str(expected_user or ""), str(expected_account or ""))
-        nonlocal visibility_proven, comment_storage_proven
+        target_comment = slurm_comment_for(idempotency_key)
+        nonlocal visibility_proven, comment_storage_proven, comment_storage_probed
         if accepted_submit_contract_version not in (None, ACCEPTED_SUBMIT_CONTRACT_VERSION):
             raise ReconcileQueryUnavailable("accepted-submit contract version is unsupported")
         # Ahead of the visibility gate so every scope — owner, global and legacy —
         # is covered: without stored comments no scope's empty answer proves absence.
+        if not comment_storage_probed:
+            comment_storage_proven = storage_probe()
+            comment_storage_probed = True
         if comment_storage_proven is None:
-            comment_storage_proven = bool(storage_probe())
-        if not comment_storage_proven:
+            # Probe failed or omitted AccountingStoreFlags: capability unknown.
+            # No comment query and no fallback may issue — a failure here must
+            # not be mistaken for an explicit no-comment cluster (#1565 D1).
+            raise ReconcileQueryUnavailable(
+                "comment storage capability is unknown",
+                reason_class="comment_accounting_unproven",
+            )
+        if comment_storage_proven is False:
+            # Explicitly comment-less (including (null)): exact-comment search
+            # is provably useless, so refuse it — but a current accepted-submit
+            # forecast cohort with strict anchor and exact ownership MAY enter
+            # the bounded name-window fallback (#1565).
+            if accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION and _fallback_eligibility(
+                expected_user=owner_scope[0],
+                expected_account=owner_scope[1],
+                submission_attempt_started_at=submission_attempt_started_at,
+            ):
+                return _query_name_window_fallback(
+                    owner_scope,
+                    submission_attempt_started_at=submission_attempt_started_at,
+                )
             raise ReconcileQueryUnavailable(
                 "accounting does not store job comments",
                 reason_class="comment_accounting_unproven",
             )
+        # Comment-storing cluster: exact-comment owner/global queries page
+        # ``sacct`` exactly as before.
         if not any(owner_scope) and accepted_submit_contract_version == ACCEPTED_SUBMIT_CONTRACT_VERSION:
             if visibility_proven is None:
                 visibility_proven = bool(visibility_probe())
@@ -481,6 +733,80 @@ def default_comment_sacct_querier(
             coverage_complete=coverage_complete,
         )
 
+    def _query_name_window_fallback(
+        owner_scope: tuple[str, str],
+        *,
+        submission_attempt_started_at: datetime | None,
+    ) -> CommentAccountingResult:
+        """One bounded name-scoped query from the frozen attempt anchor to now.
+
+        Returns the eligible masters as an ``owner``-scoped result whose
+        ``records`` hold at most ``MAX_FALLBACK_MASTERS`` distinct bare master
+        ids, carrying ``fallback_submit_unparsable`` as a pass-only reason when
+        an otherwise-eligible row had missing/unparsable Submit evidence.
+        """
+
+        attempt_anchor = _strict_utc_datetime(submission_attempt_started_at)
+        if attempt_anchor is None:
+            raise ReconcileQueryUnavailable(
+                "accounting does not store job comments",
+                reason_class="comment_accounting_unproven",
+            )
+        query_end = pages[0][1]
+        if attempt_anchor > query_end:
+            raise ReconcileQueryUnavailable(
+                "accounting does not store job comments",
+                reason_class="comment_accounting_unproven",
+            )
+        start_time = attempt_anchor.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        end_time = query_end.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        command = [
+            sacct,
+            "--parsable2",
+            "--noheader",
+            "--format=JobID,JobName,State,ExitCode,Comment,User,Account,Submit",
+            f"--name={FALLBACK_JOB_NAME}",
+            f"--user={owner_scope[0]}",
+            f"--accounts={owner_scope[1]}",
+            f"--starttime={start_time}",
+            f"--endtime={end_time}",
+        ]
+        try:
+            stdout = _bounded_sacct_page(command, scan_budget)
+        except _ReconcileFallbackQueryUnavailable:
+            raise
+        except ReconcileQuerySaturated as error:
+            # Re-raise as the fallback-origin saturated marker so the reconcile
+            # writer keeps the durable held tuple reason ``comment_accounting_unproven``
+            # while pass evidence carries the applicable bounded reason.
+            raise _ReconcileFallbackQuerySaturated(error.boundary) from error
+        except ReconcileQueryUnavailable as error:
+            # Same for a process/timeout failure: pass reason ``process_unavailable``,
+            # durable held tuple reason ``comment_accounting_unproven``.
+            raise _ReconcileFallbackQueryUnavailable(
+                str(error), reason_class=error.reason_class
+            ) from error
+        records, submit_parsable = _parse_fallback_sacct_rows(
+            stdout,
+            expected_user=owner_scope[0],
+            expected_account=owner_scope[1],
+            window_start=attempt_anchor,
+            window_end=query_end,
+        )
+        return CommentAccountingResult(
+            tuple(records),
+            scope="owner",
+            coverage_start=attempt_anchor,
+            coverage_end=query_end,
+            coverage_complete=submit_parsable,
+            fallback_name_window=True,
+            fallback_submit_unparsable=not submit_parsable,
+        )
+
+    # #1850 D2: expose the cached tri-state capability verdict as a typed
+    # attribute on the querier so the reconcile writer can choose the runtime
+    # lane without a second probe.
+    setattr(_query, "capability", capability)
     return _query
 
 
@@ -825,6 +1151,10 @@ class ReconcileOutcome:
     durable_write_count: int = 0
     pipeline_status_write_count: int = 0
     pipeline_event_write_count: int = 0
+    # #1795: optional stable clause-level reason for terminal file-cohort
+    # identity blocks. Pass evidence only — never written to durable
+    # accepted-submit state by the inflight leg.
+    reconciliation_reason_class: str | None = None
 
 
 def _expected_job_name_token(stage: str | None, job_type: str | None) -> str | None:
@@ -1073,18 +1403,21 @@ def reconcile_inflight_jobs(
             )
             continue
 
-        if file_cohort and not _terminal_file_cohort_identity_matches(store, record, job):
-            outcomes.append(
-                ReconcileOutcome(
-                    job_id=job.job_id,
-                    slurm_job_id=str(slurm_job_id),
-                    action="identity_mismatch_blocked",
-                    status=str(job.status),
-                    durable_write_kind=None,
-                    durable_write_count=0,
+        if file_cohort:
+            identity_verdict, identity_reason = _terminal_file_cohort_identity_matches(store, record, job)
+            if not identity_verdict:
+                outcomes.append(
+                    ReconcileOutcome(
+                        job_id=job.job_id,
+                        slurm_job_id=str(slurm_job_id),
+                        action="identity_mismatch_blocked",
+                        status=str(job.status),
+                        durable_write_kind=None,
+                        durable_write_count=0,
+                        reconciliation_reason_class=identity_reason,
+                    )
                 )
-            )
-            continue
+                continue
 
         slurm_status = slurm_status or SlurmJobStatus.FAILED
 
@@ -1188,13 +1521,23 @@ def _file_cohort_runtime_identity_matches(store: Any, identity: Mapping[str, Any
     return callable(validator) and bool(validator(identity))
 
 
-def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job: Any) -> bool:
+def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job: Any) -> tuple[bool, str | None]:
+    """One terminal file-cohort identity verdict plus its stable failure reason.
+
+    The match verdict is False exactly when one clause failed; the reason token
+    names the failed clause (#1795 D5). The folded cohort-valid/runtime
+    predicate is split so ``cohort_identity_invalid`` and
+    ``runtime_identity_mismatch`` are distinct.
+    """
+
     identity = vars(job) if hasattr(job, "__dict__") else {}
-    if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
-        return False
+    if not forecast_cohort_identity_is_valid(identity):
+        return False, "cohort_identity_invalid"
+    if not _file_cohort_runtime_identity_matches(store, identity):
+        return False, "runtime_identity_mismatch"
     expected_master = str(getattr(job, "slurm_job_id", None) or "")
     if not expected_master or record.slurm_job_id != expected_master:
-        return False
+        return False, "master_id_mismatch"
     # Clusters without ``AccountingStoreFlags=job_comment`` never persist the
     # sbatch comment into accounting, so an empty record comment is "not
     # stored", not "different job". Identity then rests on the remaining
@@ -1203,26 +1546,26 @@ def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job:
     # against cohort_members. A present-but-different comment stays fatal.
     record_comment = str(record.comment or "")
     if record_comment and record_comment != str(getattr(job, "slurm_comment", None) or ""):
-        return False
+        return False, "comment_mismatch"
     if record.stage not in (None, "") and not is_forecast_cohort_stage_name(record.stage):
-        return False
+        return False, "stage_family_mismatch"
     expected_user = str(getattr(job, "expected_slurm_user", None) or "")
     expected_account = str(getattr(job, "expected_slurm_account", None) or "")
     if bool(getattr(job, "slurm_ownership_required", False)) and (
         not expected_user or not expected_account or not record.user or not record.account
     ):
-        return False
+        return False, "ownership_unproven"
     if expected_user and record.user != expected_user:
-        return False
+        return False, "ownership_user_mismatch"
     if expected_account and record.account != expected_account:
-        return False
+        return False, "ownership_account_mismatch"
     try:
         member_ids = {
             int(member["array_task_id"])
             for member in ordered_cohort_members(getattr(job, "cohort_members", ()))
         }
     except (AcceptedSubmitEvidenceError, KeyError, TypeError, ValueError):
-        return False
+        return False, "cohort_members_unparsable"
     observed_task_ids: set[int] = set()
     observed_slurm_ids: set[str] = set()
     for task in record.array_task_records:
@@ -1231,14 +1574,14 @@ def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job:
         if raw_array_task_id not in (None, "") and raw_task_id not in (None, ""):
             try:
                 if int(raw_array_task_id) != int(raw_task_id):
-                    return False
+                    return False, "task_identity_values_mismatch"
             except (TypeError, ValueError):
-                return False
+                return False, "task_identity_values_unparsable"
         raw_id = raw_array_task_id if raw_array_task_id not in (None, "") else raw_task_id
         try:
             task_id = int(raw_id)
         except (TypeError, ValueError):
-            return False
+            return False, "task_id_unparsable"
         task_slurm_job_id = str(task.slurm_job_id or "")
         if (
             task_id not in member_ids
@@ -1246,16 +1589,16 @@ def _terminal_file_cohort_identity_matches(store: Any, record: SacctRecord, job:
             or task_slurm_job_id in observed_slurm_ids
             or task_slurm_job_id != f"{expected_master}_{task_id}"
         ):
-            return False
+            return False, "task_mapping_mismatch"
         observed_task_ids.add(task_id)
         observed_slurm_ids.add(task_slurm_job_id)
         if task.job_name.strip() not in _GENERIC_ARRAY_JOB_NAMES and not is_forecast_cohort_stage_name(
             task.job_name.removeprefix("nhms_")
         ):
-            return False
+            return False, "task_job_name_mismatch"
         if task.comment not in (None, "", getattr(job, "slurm_comment", None)):
-            return False
-    return True
+            return False, "task_comment_mismatch"
+    return True, None
 
 
 def _file_cohort_task_projections(job: Any, record: SacctRecord) -> tuple[list[dict[str, Any]], bool]:
@@ -1325,6 +1668,11 @@ class CommentAccountingResult(Sequence[SacctRecord]):
     coverage_start: datetime | None = None
     coverage_end: datetime | None = None
     coverage_complete: bool = False
+    # #1565: pass-evidence-only markers set by the name-window fallback. The
+    # fallback result is a complete owner-exact proof by itself — it must never
+    # run through the exact-comment global-visibility round. Never durable.
+    fallback_name_window: bool = False
+    fallback_submit_unparsable: bool = False
 
     def __getitem__(self, index: int) -> SacctRecord:
         return self.records[index]
@@ -1435,7 +1783,24 @@ def reconcile_reserved_unbound_jobs(
     """
 
     outcomes: list[ReservationReconcileOutcome] = []
-    for job in store.query_reserved_unbound_jobs():
+    # #1850 D2 + Fix D: capability probing is LAZY. Snapshot the reserved rows
+    # first; the querier's cached tri-state verdict is computed at most once,
+    # only when the first current-contract forecast row that needs lane
+    # selection is processed. An empty or unversioned-only inventory never
+    # triggers the probe or any accounting query. One stable verdict serves
+    # the whole pass.
+    reserved_jobs = list(store.query_reserved_unbound_jobs())
+    comment_capability: bool | None = None
+    comment_capability_known = False
+
+    def _pass_comment_capability() -> bool | None:
+        nonlocal comment_capability, comment_capability_known
+        if not comment_capability_known:
+            comment_capability = _comment_query_capability(comment_query)
+            comment_capability_known = True
+        return comment_capability
+
+    for job in reserved_jobs:
         idempotency_key = job.idempotency_key
         if not idempotency_key:
             continue
@@ -1444,7 +1809,11 @@ def reconcile_reserved_unbound_jobs(
         # cycle abort resolution of every other reserved row and the pass.
         outcome_floor = len(outcomes)
         try:
-            accepted_submit_reconcile = _accepted_submit_reconcile_job(store, job)
+            accepted_submit_reconcile = _accepted_submit_reconcile_job(
+                store,
+                job,
+                comment_capability_provider=_pass_comment_capability,
+            )
             file_forecast_cohort = bool(
                 getattr(store, "supports_accepted_submit_reconcile", False)
                 and _accepted_submit_versioned_job(job)
@@ -1516,12 +1885,21 @@ def reconcile_reserved_unbound_jobs(
                     idempotency_key,
                     error,
                 )
+                fallback_origin = isinstance(error, _ReconcileFallbackQueryUnavailable)
+                # Pass evidence keeps the applicable transient reason; the
+                # durable held tuple reason stays ``comment_accounting_unproven``
+                # for fallback-origin failures so the #1564 demotion CAS remains
+                # valid, while exact-comment failures keep their historical
+                # durable reason behavior.
+                durable_reason_class = (
+                    "comment_accounting_unproven" if fallback_origin else error.reason_class
+                )
                 write_count = (
                     _record_file_reconciliation(
                         store,
                         job,
                         "accounting_unavailable",
-                        reason_class=error.reason_class,
+                        reason_class=durable_reason_class,
                     )
                     if accepted_submit_reconcile
                     else 0
@@ -1595,16 +1973,126 @@ def reconcile_reserved_unbound_jobs(
                     )
                 )
                 continue
+            if accepted_submit_reconcile and proof.kind == "fallback_submit_unparsable":
+                # #1565: malformed/missing Submit evidence on an otherwise
+                # eligible name-window row is transient denial. Pass evidence
+                # reports ``query_unavailable`` / ``fallback_submit_unparsable``
+                # (pass-only); the durable held tuple stays reserved/unbound
+                # under ``comment_accounting_unproven`` and is only established
+                # on the first pass.
+                write_count = _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class="comment_accounting_unproven",
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="query_unavailable",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision="accounting_unavailable",
+                        reconciliation_reason_class="fallback_submit_unparsable",
+                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                        durable_write_count=write_count,
+                    )
+                )
+                continue
+            if accepted_submit_reconcile and proof.kind == "fallback_no_match":
+                # #1565: zero eligible name-window masters is NOT an absence
+                # proof. The row stays reserved and unbound; no retry
+                # permission and no identity-mismatch transition is written.
+                write_count = _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class="comment_accounting_unproven",
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="fallback_no_match",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision="accounting_unavailable",
+                        reconciliation_reason_class="comment_accounting_unproven",
+                        match_count=0,
+                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                        durable_write_count=write_count,
+                    )
+                )
+                continue
+            if accepted_submit_reconcile and proof.kind == "fallback_ambiguous":
+                # #1565: two or more distinct owned in-window masters never
+                # bind and never change disposal authority.
+                write_count = _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class="comment_accounting_unproven",
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="ambiguous_fallback_match",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision="accounting_unavailable",
+                        reconciliation_reason_class="comment_accounting_unproven",
+                        match_count=len(proof.records),
+                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                        durable_write_count=write_count,
+                    )
+                )
+                continue
             record = (
                 proof.records[0]
-                if proof.records and (proof.kind == "owned_match" or not accepted_submit_reconcile)
+                if proof.records
+                and (proof.kind in {"owned_match", "fallback_unique"} or not accepted_submit_reconcile)
                 else None
             )
+            fallback_unique = accepted_submit_reconcile and proof.kind == "fallback_unique"
             if (
                 accepted_submit_reconcile
                 and record is not None
-                and not _reserved_record_identity_matches(store, record, job, str(idempotency_key))
+                and not _reserved_record_identity_matches(
+                    store,
+                    record,
+                    job,
+                    str(idempotency_key),
+                    fallback_unique=fallback_unique,
+                )
             ):
+                # A unique name-window candidate that fails a remaining gate is
+                # ``identity_mismatch_blocked`` with count 1 and NO
+                # identity-mismatch durable transition: fallback failures never
+                # enter the identity-blocked release ladder (#1565 D3).
+                if fallback_unique:
+                    write_count = _record_file_reconciliation(
+                        store,
+                        job,
+                        "accounting_unavailable",
+                        reason_class="comment_accounting_unproven",
+                    )
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action="identity_mismatch_blocked",
+                            status=str(job.status),
+                            reconciliation_source="slurm_exact_comment",
+                            reconciliation_decision="accounting_unavailable",
+                            reconciliation_reason_class="comment_accounting_unproven",
+                            match_count=1,
+                            durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                            durable_write_count=write_count,
+                        )
+                    )
+                    continue
                 outcomes.append(
                     _identity_blocked_outcome(
                         store,
@@ -1622,11 +2110,41 @@ def reconcile_reserved_unbound_jobs(
             # that its slurm_job_id has a valid Slurm shape (``\d+`` or ``\d+_\d+``)
             # before binding — symmetric with the identity guard in
             # reconcile_inflight_jobs, guarding against a malformed/garbage JobID
-            # being durably bound onto the reservation.
+            # being durably bound onto the reservation. On the name-window
+            # fallback an empty comment is expected (the cluster does not store
+            # it) and the comment gate was already applied by the reserved
+            # identity check; only a present-but-different comment is fatal.
+            if record is None or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
+                if fallback_unique:
+                    write_count = _record_file_reconciliation(
+                        store,
+                        job,
+                        "accounting_unavailable",
+                        reason_class="comment_accounting_unproven",
+                    )
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action="fallback_no_match",
+                            status=str(job.status),
+                            reconciliation_source="slurm_exact_comment",
+                            reconciliation_decision="accounting_unavailable",
+                            reconciliation_reason_class="comment_accounting_unproven",
+                            match_count=0,
+                            durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                            durable_write_count=write_count,
+                        )
+                    )
+                    continue
+                # Fall through to the confirmed-absent handling below.
             if (
-                record is None
-                or idempotency_key_from_comment(record.comment) != idempotency_key
-                or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
+                not fallback_unique
+                and (
+                    record is None
+                    or idempotency_key_from_comment(record.comment) != idempotency_key
+                    or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
+                )
             ):
                 # Confirmed-absent BUT possibly just slurmdbd propagation lag: if the
                 # reservation's immutable current-attempt anchor is younger than
@@ -1729,6 +2247,37 @@ def reconcile_reserved_unbound_jobs(
                 )
                 continue
 
+            # Independent final comment guard (#1565 Fix 3): the reserved
+            # identity gate above is one check, but the fallback bind must
+            # refuse a present-but-different comment on its own even if that
+            # earlier gate changes or is bypassed. The exact-comment path's
+            # exact-key gate lives in the confirmed-absent guard above; the
+            # fallback path allows empty or the same idempotency comment.
+            if fallback_unique and not _fallback_comment_allowed(
+                record.comment, getattr(job, "slurm_comment", None)
+            ):
+                write_count = _record_file_reconciliation(
+                    store,
+                    job,
+                    "accounting_unavailable",
+                    reason_class="comment_accounting_unproven",
+                )
+                outcomes.append(
+                    ReservationReconcileOutcome(
+                        job_id=job.job_id,
+                        idempotency_key=str(idempotency_key),
+                        action="identity_mismatch_blocked",
+                        status=str(job.status),
+                        reconciliation_source="slurm_exact_comment",
+                        reconciliation_decision="accounting_unavailable",
+                        reconciliation_reason_class="comment_accounting_unproven",
+                        match_count=1,
+                        durable_write_kind="pipeline_job_reconciliation" if write_count else None,
+                        durable_write_count=write_count,
+                    )
+                )
+                continue
+
             if accepted_submit_reconcile:
                 committer = getattr(store, "commit_pipeline_job_submit_attempt", None)
                 if not callable(committer):
@@ -1743,17 +2292,89 @@ def reconcile_reserved_unbound_jobs(
                         status="submitted",
                     ),
                 }
+                if (
+                    fallback_unique
+                    and record.submitted_at is not None
+                    and _callable_accepts_keyword(committer, "slurm_accounting_submitted_at")
+                ):
+                    # #1850 Fix A (round 2): the parsed sacct ``Submit`` is the
+                    # ONLY canonical accounting input. It is carried as
+                    # ``slurm_accounting_submitted_at`` (the single incarnation/
+                    # window authority) and is NEVER duplicated into the legacy
+                    # ``submitted_at`` slot, which remains gateway/commit time
+                    # and never participates in recycle/claimant proof.
+                    commit_kwargs["slurm_accounting_submitted_at"] = record.submitted_at
+                if fallback_unique:
+                    # #1565 + Fix A: a successful name-window bind persists its
+                    # own source AND its attempt-scoped immutable binding
+                    # provenance; the typed commit derives the provenance from
+                    # the transition shape + the canonical accounting keyword
+                    # (no duplicate authority lives on the transition).
+                    commit_kwargs["transition"] = AcceptedSubmitTransition.accounting(
+                        "matched_bound",
+                        submit_outcome="accepted",
+                        matched_slurm_job_id=record.slurm_job_id,
+                        status="submitted",
+                        reconciliation_source="slurm_name_window_unique",
+                    )
                 if _callable_accepts_keyword(committer, "pipeline_job_id"):
                     commit_kwargs["pipeline_job_id"] = job.job_id
                 commit_result = committer(str(idempotency_key), **commit_kwargs)
                 if not commit_result.committed:
+                    # #1850 + Fix A: the typed commit refuses distinct
+                    # non-committed outcomes for active-id occupancy
+                    # (internal ``active_slurm_id_occupied`` /
+                    # ``identity_mismatch_blocked``) vs multi-claimant
+                    # ambiguity vs the ordinary stale CAS. Every refusal stays
+                    # fail-closed under the held tuple with streak zero.
+                    # Fix 3: the PUBLIC outcome vocabulary stays within the
+                    # frozen spec — active occupancy maps to the specified
+                    # ``identity_mismatch_blocked`` / count 1 action, never to
+                    # the internal token.
+                    if fallback_unique and commit_result.outcome in {
+                        "ambiguous_fallback_match",
+                        "identity_mismatch_blocked",
+                        "active_slurm_id_occupied",
+                    }:
+                        internal = str(commit_result.outcome)
+                        if internal == "ambiguous_fallback_match":
+                            action = "ambiguous_fallback_match"
+                            match_count = 2
+                        else:
+                            action = "identity_mismatch_blocked"
+                            match_count = 1
+                        write_count = _record_file_reconciliation(
+                            store,
+                            job,
+                            "accounting_unavailable",
+                            reason_class="comment_accounting_unproven",
+                        )
+                        outcomes.append(
+                            ReservationReconcileOutcome(
+                                job_id=job.job_id,
+                                idempotency_key=str(idempotency_key),
+                                action=action,
+                                status=str(job.status),
+                                reconciliation_source="slurm_exact_comment",
+                                reconciliation_decision="accounting_unavailable",
+                                reconciliation_reason_class="comment_accounting_unproven",
+                                match_count=match_count,
+                                durable_write_kind=(
+                                    "pipeline_job_reconciliation" if write_count else None
+                                ),
+                                durable_write_count=write_count,
+                            )
+                        )
+                        continue
                     outcomes.append(
                         ReservationReconcileOutcome(
                             job_id=job.job_id,
                             idempotency_key=str(idempotency_key),
                             action="stale_attempt_blocked",
                             status=str(job.status),
-                            reconciliation_source="slurm_exact_comment",
+                            reconciliation_source=(
+                                "slurm_name_window_unique" if fallback_unique else "slurm_exact_comment"
+                            ),
                             reconciliation_decision=None,
                             match_count=1,
                         )
@@ -1776,7 +2397,11 @@ def reconcile_reserved_unbound_jobs(
                     action="bound",
                     status=bound_status,
                     slurm_job_id=record.slurm_job_id,
-                    reconciliation_source="slurm_exact_comment" if accepted_submit_reconcile else None,
+                    reconciliation_source=(
+                        "slurm_name_window_unique" if fallback_unique else "slurm_exact_comment"
+                    )
+                    if accepted_submit_reconcile
+                    else None,
                     reconciliation_decision="matched_bound" if accepted_submit_reconcile else None,
                     matched_slurm_job_id=record.slurm_job_id if accepted_submit_reconcile else None,
                     match_count=1 if accepted_submit_reconcile else None,
@@ -1932,6 +2557,42 @@ def _query_comment_accounting_proof(
             expected_user=expected_user,
             expected_account=expected_account,
             coverage_complete=owner_value.coverage_complete,
+            coverage_start=owner_value.coverage_start,
+            coverage_end=owner_value.coverage_end,
+        )
+    if isinstance(owner_value, CommentAccountingResult) and owner_value.fallback_name_window:
+        # #1565: the name-window fallback result is a complete owner-exact
+        # proof by itself — the query was name-scoped and already filtered by
+        # exact user/account and submit window, so no exact-comment global
+        # visibility round follows it.
+        if owner_value.fallback_submit_unparsable:
+            # An otherwise-eligible name-window row carried missing or
+            # unparsable Submit evidence. Transient denial: the caller reports
+            # ``query_unavailable`` with the pass-only
+            # ``fallback_submit_unparsable`` reason.
+            return _CommentAccountingProof(
+                "fallback_submit_unparsable",
+                owner_records,
+                coverage_complete=False,
+                coverage_start=owner_value.coverage_start,
+                coverage_end=owner_value.coverage_end,
+            )
+        if not owner_records:
+            return _CommentAccountingProof(
+                "fallback_no_match",
+                coverage_start=owner_value.coverage_start,
+                coverage_end=owner_value.coverage_end,
+            )
+        if len(owner_records) >= MAX_FALLBACK_MASTERS:
+            return _CommentAccountingProof(
+                "fallback_ambiguous",
+                owner_records,
+                coverage_start=owner_value.coverage_start,
+                coverage_end=owner_value.coverage_end,
+            )
+        return _CommentAccountingProof(
+            "fallback_unique",
+            owner_records,
             coverage_start=owner_value.coverage_start,
             coverage_end=owner_value.coverage_end,
         )
@@ -2237,11 +2898,40 @@ def _transition_file_runtime_status(store: Any, job: Any, status: str) -> int:
     return int(getattr(result, "wrote", False))
 
 
-def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any, idempotency_key: str) -> bool:
+def _fallback_comment_allowed(record_comment: str | None, reservation_comment: str | None) -> bool:
+    """One named final-gate predicate for the name-window fallback comment.
+
+    On the comment-less fallback an empty (not stored) comment is allowed and a
+    present comment equal to the reservation's idempotency comment is allowed;
+    any other present value is fatal. Shared by the reserved identity gate and
+    the final bind guard so the two gates cannot drift apart (#1565 Fix 3).
+    """
+
+    comment = str(record_comment or "")
+    if not comment:
+        return True
+    return comment == str(reservation_comment or "")
+
+
+def _reserved_record_identity_matches(
+    store: Any,
+    record: SacctRecord,
+    job: Any,
+    idempotency_key: str,
+    *,
+    fallback_unique: bool = False,
+) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
     if not forecast_cohort_identity_is_valid(identity) or not _file_cohort_runtime_identity_matches(store, identity):
         return False
-    if idempotency_key_from_comment(record.comment) != idempotency_key:
+    if fallback_unique:
+        # #1565: on the name-window fallback the accounting Comment was not
+        # stored (explicitly comment-less cluster), so an empty comment is "not
+        # stored", not "different job". A present-but-different comment stays
+        # fatal exactly as on the exact-comment path.
+        if not _fallback_comment_allowed(record.comment, getattr(job, "slurm_comment", None)):
+            return False
+    elif idempotency_key_from_comment(record.comment) != idempotency_key:
         return False
     if not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id)):
         return False
@@ -2269,16 +2959,94 @@ def _reserved_record_identity_matches(store: Any, record: SacctRecord, job: Any,
     return True
 
 
-def _accepted_submit_reconcile_job(store: Any, job: Any) -> bool:
+def _accepted_submit_reconcile_job(
+    store: Any,
+    job: Any,
+    *,
+    comment_capability: bool | None = None,
+    comment_capability_provider: Callable[[], bool | None] | None = None,
+) -> bool:
     identity = vars(job) if hasattr(job, "__dict__") else {}
-    pre_outcome_reservation = identity.get("submit_outcome") is None
     return bool(
         getattr(store, "supports_accepted_submit_reconcile", False)
         and _accepted_submit_versioned_job(job)
         and _is_forecast_cohort_job(job)
         and forecast_cohort_identity_is_valid(identity)
-        and (pre_outcome_reservation or _file_cohort_runtime_identity_matches(store, identity))
+        and (
+            # Fix 1: EVERY current-contract valid forecast row — pre-outcome
+            # (submit_outcome is None) included — resolves the pass capability
+            # lazily BEFORE the runtime lane is decided. An explicitly
+            # comment-less cluster permits the fallback lane and evaluates
+            # runtime later (held/streak-zero); True/unknown keeps the
+            # ordinary exact-comment streak behavior. A pre-outcome row must
+            # land in the same lane as an already-timeout row, so disposition
+            # never depends on whether the timeout was already persisted.
+            _accepted_submit_runtime_lane_eligible(
+                store,
+                identity,
+                comment_capability=comment_capability,
+                comment_capability_provider=comment_capability_provider,
+            )
+            is not False
+        )
     )
+
+
+def _accepted_submit_runtime_lane_eligible(
+    store: Any,
+    identity: Mapping[str, Any],
+    *,
+    comment_capability: bool | None = None,
+    comment_capability_provider: Callable[[], bool | None] | None = None,
+) -> bool | None:
+    """Tri-state runtime-lane capability: comment-storing/unknown vs fallback.
+
+    Returns ``True`` (the current-contract forecast reservation may proceed on
+    its accounting lane), ``False`` (its durable runtime identity does not
+    match on the exact-comment lane), or ``None`` (capability unknown: no lane
+    may issue and the row stays held). The verdict is driven by the querier's
+    typed capability verdict, which is the same source the name-window fallback
+    gate uses (#1850 D2):
+
+    - ``False`` (explicitly comment-less cluster): the fallback lane runs, so
+      a runtime failure is evaluated later inside the fallback path and stays
+      in the held-tuple family with streak zero.
+    - ``True`` or unknown: the exact-comment lane runs, and its runtime
+      identity gate stays the durable validator (pre-PR semantics).
+
+    The verdict is resolved lazily through ``comment_capability_provider`` when
+    the exact-comment validator would otherwise be consulted, so an empty or
+    unversioned-only reserved inventory never triggers the capability probe
+    (#1850 Fix D).
+    """
+
+    if comment_capability is None and callable(comment_capability_provider):
+        comment_capability = comment_capability_provider()
+    if comment_capability is False:
+        # Explicitly comment-less: the name-window fallback MAY run regardless
+        # of the durable runtime rows; a fallback runtime failure never enters
+        # the durable identity-blocked streak.
+        return True
+    return _file_cohort_runtime_identity_matches(store, identity)
+
+
+def _comment_query_capability(comment_query: Any) -> bool | None:
+    """Read the querier's typed tri-state comment-storage capability verdict.
+
+    The default querier exposes ``capability()`` returning ``True`` /
+    ``False`` / ``None`` (storing / explicitly comment-less / unknown), cached
+    after exactly one probe per querier instance. A querier without the typed
+    accessor is treated as unknown (None), which preserves the exact-comment
+    pre-PR runtime semantics for injected/legacy fakes.
+    """
+
+    capability = getattr(comment_query, "capability", None)
+    if not callable(capability):
+        return None
+    try:
+        return capability()
+    except Exception:  # noqa: BLE001 - a probe fault stays unknown, never raises.
+        return None
 
 
 def _accepted_submit_versioned_job(job: Any) -> bool:
