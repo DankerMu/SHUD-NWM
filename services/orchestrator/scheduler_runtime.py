@@ -1570,31 +1570,7 @@ def _run_restart_reconcile(
             ),
             "accepted_submit_absence_window_seconds": self.config.restart_reconcile_absence_seconds,
             "legacy_absence_window_seconds": int(RESERVATION_ABSENCE_GRACE.total_seconds()),
-            "outcomes": [
-                {
-                    "job_id": o.job_id,
-                    "idempotency_key": o.idempotency_key,
-                    "action": o.action,
-                    "status": o.status,
-                    "slurm_job_id": o.slurm_job_id,
-                    "reconciliation_source": o.reconciliation_source,
-                    "reconciliation_decision": o.reconciliation_decision,
-                    "matched_slurm_job_id": o.matched_slurm_job_id,
-                    "match_count": o.match_count,
-                    "reconciliation_reason_class": o.reconciliation_reason_class,
-                    "identity_blocked_streak": o.identity_blocked_streak,
-                    "durable_write_kind": o.durable_write_kind,
-                    "durable_write_count": o.durable_write_count,
-                    "quarantine_reason": o.quarantine_reason,
-                    "quarantine_field": (
-                        _restart_reconcile_error_token(o.quarantine_field)
-                        if o.quarantine_field
-                        else o.quarantine_field
-                    ),
-                    **_restart_reconcile_attempt_evidence(store, o.job_id),
-                }
-                for o in reserved
-            ],
+            "outcomes": [_serialize_reserved_unbound_outcome(store, o) for o in reserved],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
@@ -1611,20 +1587,7 @@ def _run_restart_reconcile(
         inflight = reconcile_inflight_jobs(store, sacct_query=sacct_query)
         evidence["inflight"] = {
             "count": len(inflight),
-            "outcomes": [
-                {
-                    "job_id": o.job_id,
-                    "slurm_job_id": o.slurm_job_id,
-                    "action": o.action,
-                    "status": o.status,
-                    "durable_write_kind": o.durable_write_kind,
-                    "durable_write_count": o.durable_write_count,
-                    "pipeline_status_write_count": o.pipeline_status_write_count,
-                    "pipeline_event_write_count": o.pipeline_event_write_count,
-                    **_restart_reconcile_attempt_evidence(store, o.job_id),
-                }
-                for o in inflight
-            ],
+            "outcomes": [_serialize_inflight_outcome(store, o) for o in inflight],
         }
     except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
         evidence["status"] = "error"
@@ -1635,6 +1598,80 @@ def _run_restart_reconcile(
             inflight_delta_ms = (time.monotonic_ns() - inflight_call_start_ns) / 1_000_000.0
             sacct_wait_sink(inflight_delta_ms)
     return evidence
+
+
+def _apply_pass_reason_over_durable(serialized: dict[str, Any], pass_reason: str | None) -> None:
+    """Override ``reconciliation_reason_class`` only when a non-None pass reason
+    exists, keeping the durable reason otherwise (#1795, additive-only)."""
+
+    if pass_reason is not None:
+        serialized["reconciliation_reason_class"] = pass_reason
+
+
+def _serialize_inflight_outcome(store: Any, outcome: Any) -> dict[str, Any]:
+    """Serialize one inflight outcome, preserving pre-existing evidence values.
+
+    ``reconciliation_reason_class`` is an ADDITIVE key (#1795): its value comes
+    from the durable attempt evidence unless the outcome carries a non-None
+    terminal pass reason (a #1795 identity block), which overrides it. A
+    non-blocked outcome must NOT force the durable reason to ``None``.
+    """
+
+    serialized: dict[str, Any] = _restart_reconcile_attempt_evidence(store, outcome.job_id)
+    serialized.update(
+        {
+            "job_id": outcome.job_id,
+            "slurm_job_id": outcome.slurm_job_id,
+            "action": outcome.action,
+            "status": outcome.status,
+            "durable_write_kind": outcome.durable_write_kind,
+            "durable_write_count": outcome.durable_write_count,
+            "pipeline_status_write_count": outcome.pipeline_status_write_count,
+            "pipeline_event_write_count": outcome.pipeline_event_write_count,
+        }
+    )
+    _apply_pass_reason_over_durable(serialized, outcome.reconciliation_reason_class)
+    return serialized
+
+
+def _serialize_reserved_unbound_outcome(store: Any, outcome: Any) -> dict[str, Any]:
+    """Serialize one reserved-unbound outcome, preserving pre-existing merge
+    semantics.
+
+    The outcome fields are authoritative; the durable attempt evidence is then
+    overlaid (keeping durable ``reconciliation_source`` / ``reconciliation_decision``
+    / ``matched_slurm_job_id`` / reason on ordinary outcomes exactly as before
+    this PR), and finally a non-None pass reason overrides only the
+    ``reconciliation_reason_class`` key. This keeps the fallback's pass-only
+    reasons (``fallback_submit_unparsable``, ``bounded_output_*``,
+    ``process_unavailable``) visible in evidence while the durable held tuple
+    reason stays ``comment_accounting_unproven`` (#1565).
+    """
+
+    serialized: dict[str, Any] = {
+        "job_id": outcome.job_id,
+        "idempotency_key": outcome.idempotency_key,
+        "action": outcome.action,
+        "status": outcome.status,
+        "slurm_job_id": outcome.slurm_job_id,
+        "reconciliation_source": outcome.reconciliation_source,
+        "reconciliation_decision": outcome.reconciliation_decision,
+        "matched_slurm_job_id": outcome.matched_slurm_job_id,
+        "match_count": outcome.match_count,
+        "reconciliation_reason_class": outcome.reconciliation_reason_class,
+        "identity_blocked_streak": outcome.identity_blocked_streak,
+        "durable_write_kind": outcome.durable_write_kind,
+        "durable_write_count": outcome.durable_write_count,
+        "quarantine_reason": outcome.quarantine_reason,
+        "quarantine_field": (
+            _restart_reconcile_error_token(outcome.quarantine_field)
+            if outcome.quarantine_field
+            else outcome.quarantine_field
+        ),
+    }
+    serialized.update(_restart_reconcile_attempt_evidence(store, outcome.job_id))
+    _apply_pass_reason_over_durable(serialized, outcome.reconciliation_reason_class)
+    return serialized
 
 
 def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, Any]:
@@ -1693,6 +1730,10 @@ def _restart_reconcile_attempt_evidence(store: Any, job_id: str) -> dict[str, An
         "reconciliation_decision": values.get("reconciliation_decision"),
         "reconciliation_reason_class": values.get("reconciliation_reason_class"),
         "matched_slurm_job_id": values.get("matched_slurm_job_id"),
+        # #1850 Fix A: attempt-scoped binding provenance, additive evidence
+        # alongside the existing keys (all prior keys/values unchanged).
+        "slurm_binding_source": values.get("slurm_binding_source"),
+        "slurm_accounting_submitted_at": values.get("slurm_accounting_submitted_at"),
         "restart_stage": values.get("restart_stage"),
         "native_shud_resubmitted": bool(values.get("native_shud_resubmitted", False)),
         "candidate_summary": candidate_summary,

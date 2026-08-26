@@ -476,6 +476,12 @@ def test_bound_master_generic_retry_forgery_is_zero_write_and_typed_retry_stays_
         "reconciliation_decision": "absence_retry_permitted",
         "reconciliation_reason_class": None,
         "matched_slurm_job_id": None,
+        # Binding provenance is impossible without a numeric Slurm id (minted
+        # only by a successful bind); the forged retry-permission row drops it
+        # so the ordinary-upsert guard is the one under test, not the
+        # provenance/slurm-id closure.
+        "slurm_binding_source": None,
+        "slurm_accounting_submitted_at": None,
     }
 
     with pytest.raises(FileOrchestrationJournalError) as error:

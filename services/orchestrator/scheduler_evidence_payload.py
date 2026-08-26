@@ -53,6 +53,11 @@ _BOUNDED_RESTART_RECONCILE_OUTCOME_KEYS = (
     "identity_blocked_streak",
     "quarantine_reason",
     "quarantine_field",
+    # #1850 Fix A: attempt-scoped binding provenance rides the bounded evidence
+    # projection like the other accepted-submit attempt evidence keys; it is
+    # additive and never changes an existing key/value.
+    "slurm_binding_source",
+    "slurm_accounting_submitted_at",
 )
 
 

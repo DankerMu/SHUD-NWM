@@ -47795,6 +47795,13 @@ def test_restart_reconcile_quarantines_a_journal_error_row_and_resolves_the_rest
     class _PoisonedCycleStore:
         supports_accepted_submit_reconcile = True
 
+        def forecast_cohort_runtime_identity_matches(self, identity: Any) -> bool:
+            # #1850 Fix 1: every current-contract forecast row (pre-outcome
+            # included) resolves the runtime lane; this fake models a
+            # runtime-valid cohort so the poisoned-write quarantine below stays
+            # the behavior under test.
+            return True
+
         def query_reserved_unbound_jobs(self) -> list[Any]:
             if bound_calls:
                 return []
@@ -53828,3 +53835,508 @@ def test_discovery_evidence_structural_split_module_exists_and_owner_delegates()
     assert scheduler_discovery_module.SOURCE_DISCOVERY_SENSITIVE_TEXT_RE is (
         evidence_module.SOURCE_DISCOVERY_SENSITIVE_TEXT_RE
     )
+
+
+def test_restart_reconcile_inflight_serializes_terminal_identity_reason(
+    tmp_path: Path,
+) -> None:
+    """#1795: the inflight lane serializes ``reconciliation_reason_class`` on a
+    terminal file-cohort identity block, preserving action/status and zero
+    durable writes. The reason is pass evidence only — the accepted-submit
+    durable tuple is untouched."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.reconcile import SacctRecord
+    from tests.gateway_reconcile_helpers import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        member_count=2,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    repository.reserve_pipeline_job(dict(record))
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, 2)
+    repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=record["job_id"],
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    before = repository.get_pipeline_job(record["job_id"])
+
+    def sacct_query(_job_id: str) -> SacctRecord:
+        # A terminal master with a foreign account: terminal identity gate
+        # fails with ``ownership_account_mismatch``.
+        return SacctRecord(
+            "17667",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{record['idempotency_key']}",
+            user="scheduler",
+            account="foreign-account",
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=repository,
+        reconcile_comment_query=_noop_reconcile_comment_query,
+        reconcile_sacct_query=sacct_query,
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    inflight = evidence["inflight"]["outcomes"][0]
+    assert inflight["action"] == "identity_mismatch_blocked"
+    assert inflight["status"] == "submitted"
+    assert inflight["reconciliation_reason_class"] == "ownership_account_mismatch"
+    assert inflight["durable_write_count"] == 0
+    assert inflight["pipeline_status_write_count"] == 0
+    assert inflight["pipeline_event_write_count"] == 0
+    # Pass evidence only: the accepted-submit durable tuple is unchanged.
+    after = repository.get_pipeline_job(record["job_id"])
+    assert after == before
+    assert after["reconciliation_reason_class"] is None
+
+
+def test_restart_reconcile_inflight_blocked_reason_overrides_durable_reason(
+    tmp_path: Path,
+) -> None:
+    """#1795 Fix 4(a): a blocked inflight outcome with a pre-existing durable
+    reason exposes the NEW terminal pass reason (the #1795 clause token), while
+    every other key keeps its pre-existing value."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.reconcile import SacctRecord
+    from tests.gateway_reconcile_helpers import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        member_count=2,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    repository.reserve_pipeline_job(dict(record))
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, 2)
+    repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=record["job_id"],
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+    # Give the durable row a prior accounting-unavailable reason through a
+    # delegating store (the journal's versioned CAS cannot rewrite a bound
+    # row's accounting tuple), which the attempt-evidence projection normally
+    # surfaces.
+    from types import SimpleNamespace
+
+    class _DurableReasonStore:
+        def __init__(self, inner: Any, reason_class: str) -> None:
+            self._inner = inner
+            self._reason_class = reason_class
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def get_pipeline_job(self, job_id: str) -> Any:
+            row = self._inner.get_pipeline_job(job_id)
+            if row is not None and str(row.get("job_id") or "") == str(record["job_id"]):
+                row = {**row, "reconciliation_reason_class": self._reason_class}
+            return row
+
+        def get_job(self, job_id: str) -> Any:
+            return self.get_pipeline_job(job_id)
+
+    store = _DurableReasonStore(repository, "comment_accounting_unproven")
+    assert store.get_pipeline_job(record["job_id"])["reconciliation_reason_class"] == (
+        "comment_accounting_unproven"
+    )
+
+    def sacct_query(_job_id: str) -> SacctRecord:
+        return SacctRecord(
+            "17667",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{record['idempotency_key']}",
+            user="scheduler",
+            account="foreign-account",
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=store,
+        reconcile_comment_query=_noop_reconcile_comment_query,
+        reconcile_sacct_query=sacct_query,
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    inflight = evidence["inflight"]["outcomes"][0]
+    assert inflight["action"] == "identity_mismatch_blocked"
+    assert inflight["reconciliation_reason_class"] == "ownership_account_mismatch"
+    assert inflight["durable_write_count"] == 0
+    del SimpleNamespace
+
+
+def test_restart_reconcile_inflight_success_preserves_durable_reason(
+    tmp_path: Path,
+) -> None:
+    """#1795 Fix 4(b): a non-blocked inflight outcome with a durable reason
+    preserves that prior reason (NOT ``None``) — the new field is additive only,
+    never a silent overwrite on success."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from services.orchestrator.reconcile import SacctRecord
+    from tests.gateway_reconcile_helpers import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        member_count=2,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    repository.reserve_pipeline_job(dict(record))
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, 2)
+    repository.commit_pipeline_job_submit_attempt(
+        str(record["idempotency_key"]),
+        pipeline_job_id=record["job_id"],
+        expected_submission_attempt=1,
+        slurm_job_id="17667",
+        transition=AcceptedSubmitTransition.accepted(status="submitted"),
+    )
+
+    class _DurableReasonStore:
+        def __init__(self, inner: Any, reason_class: str) -> None:
+            self._inner = inner
+            self._reason_class = reason_class
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def get_pipeline_job(self, job_id: str) -> Any:
+            row = self._inner.get_pipeline_job(job_id)
+            if row is not None and str(row.get("job_id") or "") == str(record["job_id"]):
+                row = {**row, "reconciliation_reason_class": self._reason_class}
+            return row
+
+        def get_job(self, job_id: str) -> Any:
+            return self.get_pipeline_job(job_id)
+
+    store = _DurableReasonStore(repository, "comment_accounting_unproven")
+
+    def sacct_query(_job_id: str) -> SacctRecord:
+        # A fully valid terminal master: the inflight outcome is a successful
+        # projection, not a blocked one.
+        tasks = tuple(
+            SacctRecord(f"17667_{index}", "COMPLETED", "nhms_forecast", array_task_id=index)
+            for index in range(2)
+        )
+        return SacctRecord(
+            "17667",
+            "COMPLETED",
+            "nhms_forecast",
+            comment=f"nhms_idem:{record['idempotency_key']}",
+            user="scheduler",
+            account="account",
+            array_member_job_ids=tuple(task.slurm_job_id for task in tasks),
+            array_task_records=tasks,
+        )
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=store,
+        reconcile_comment_query=_noop_reconcile_comment_query,
+        reconcile_sacct_query=sacct_query,
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    inflight = evidence["inflight"]["outcomes"][0]
+    assert inflight["action"] == "terminal"
+    # The durable reason survives on a non-blocked outcome; the additive field
+    # must not force it to None.
+    assert inflight["reconciliation_reason_class"] == "comment_accounting_unproven"
+
+
+def _reserved_unbound_scheduler_for_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+    *,
+    rows: str,
+) -> Any:
+    """Build a real scheduler whose comment querier runs the name-window fallback
+    against the given mock sacct rows on an explicitly comment-less cluster."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+    from tests.gateway_reconcile_helpers import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    repository.reserve_pipeline_job(dict(record))
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, 1)
+
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: rows,
+    )
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=repository,
+        reconcile_comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: False,
+            now=lambda: _dt("2026-07-12T02:00:00Z"),
+        ),
+        reconcile_sacct_query=_noop_reconcile_sacct_query,
+    )
+    return scheduler, repository, record["job_id"]
+
+
+def test_reserved_unbound_fallback_pass_reason_survives_scheduler_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1565 Fix (scheduler lane): a fallback malformed-Submit result carries
+    ``fallback_submit_unparsable`` as PASS evidence in
+    ``restart_reconcile.reserved_unbound.outcomes[]`` even though the durable
+    journal row reason stays ``comment_accounting_unproven``."""
+    scheduler, repository, job_id = _reserved_unbound_scheduler_for_fallback(
+        tmp_path,
+        monkeypatch,
+        # Malformed Submit on an otherwise eligible owned in-window row.
+        rows="72001|nhms_forecast|COMPLETED|0:0||scheduler|account|not-a-timestamp\n",
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    outcome = evidence["reserved_unbound"]["outcomes"][0]
+    assert outcome["action"] == "query_unavailable"
+    # Pass evidence keeps the fallback transient reason...
+    assert outcome["reconciliation_reason_class"] == "fallback_submit_unparsable"
+    # ...while the durable journal row keeps the held-tuple reason.
+    persisted = repository.get_pipeline_job(job_id)
+    assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+    assert persisted["reconciliation_source"] == "slurm_exact_comment"
+    assert persisted["reconciliation_decision"] == "accounting_unavailable"
+    assert persisted["status"] == "reserved"
+    assert persisted["slurm_job_id"] is None
+
+
+def test_reserved_unbound_fallback_bounded_pass_reason_survives_scheduler_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1565 Fix (scheduler lane): a fallback byte-budget failure surfaces
+    ``bounded_output_bytes_saturated`` as PASS evidence while the durable held
+    reason stays ``comment_accounting_unproven``."""
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "MAX_COMMENT_SACCT_BYTES", 8)
+    scheduler, repository, job_id = _reserved_unbound_scheduler_for_fallback(
+        tmp_path,
+        monkeypatch,
+        rows="123456789",
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    outcome = evidence["reserved_unbound"]["outcomes"][0]
+    assert outcome["action"] == "query_unavailable"
+    assert outcome["reconciliation_reason_class"] == "bounded_output_bytes_saturated"
+    persisted = repository.get_pipeline_job(job_id)
+    assert persisted["reconciliation_reason_class"] == "comment_accounting_unproven"
+    assert persisted["reconciliation_source"] == "slurm_exact_comment"
+    assert persisted["reconciliation_decision"] == "accounting_unavailable"
+
+
+def test_reserved_unbound_ordinary_outcome_keeps_durable_reason_when_pass_is_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1565 Fix (scheduler lane, reverse regression): an ordinary reserved
+    outcome whose outcome reason is None must NOT blank the durable reason —
+    the attempt-evidence merge keeps the durable value."""
+    from tests.test_real_slurm_gateway import _pinned_local_timezone
+
+    with _pinned_local_timezone("UTC"):
+        _assert_reserved_unbound_ordinary_keeps_durable_reason(tmp_path, monkeypatch)
+
+
+def _assert_reserved_unbound_ordinary_keeps_durable_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitCommitResult,
+        AcceptedSubmitTransition,
+    )
+    from tests.gateway_reconcile_helpers import (
+        _append_cohort_placeholders,
+        _versioned_master_reservation_record,
+    )
+
+    repository = scheduler_module.FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _versioned_master_reservation_record(
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+    )
+    repository.reserve_pipeline_job(dict(record))
+    repository.transition_pipeline_job_submit_evidence(
+        record["job_id"],
+        AcceptedSubmitTransition.timeout(),
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_statuses=("reserved",),
+        require_unbound=True,
+    )
+    _append_cohort_placeholders(repository, 1)
+    pipeline_job_id = str(record["job_id"])
+
+    class _DurableReasonStore:
+        """Delegating store that injects a durable held reason so the
+        attempt-evidence projection has a value to preserve."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def get_pipeline_job(self, job_id: str) -> Any:
+            row = self._inner.get_pipeline_job(job_id)
+            if row is not None and str(row.get("job_id") or "") == pipeline_job_id:
+                row = {**row, "reconciliation_reason_class": "comment_accounting_unproven"}
+            return row
+
+        def get_job(self, job_id: str) -> Any:
+            return self.get_pipeline_job(job_id)
+
+        def commit_pipeline_job_submit_attempt(self, *args: Any, **kwargs: Any) -> Any:
+            # A concurrently advanced attempt loses the CAS: the outcome is
+            # ``stale_attempt_blocked`` with outcome reason None.
+            return AcceptedSubmitCommitResult("stale", dict(self._inner.get_pipeline_job(pipeline_job_id)))
+
+    store = _DurableReasonStore(repository)
+
+    from services.orchestrator import reconcile as reconcile_module
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "_bounded_sacct_stdout",
+        lambda _command: (
+            "72001|nhms_forecast|COMPLETED|0:0||scheduler|account|2026-07-12T01:00:00\n"
+        ),
+    )
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, dry_run=False, scheduler_journal_backend="file"),
+        registry=FakeRegistry([]),
+        adapters={},
+        active_repository=repository,
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=store,
+        reconcile_comment_query=reconcile_module.default_comment_sacct_querier(
+            global_visibility_probe=lambda: True,
+            comment_storage_probe=lambda: False,
+            now=lambda: _dt("2026-07-12T02:00:00Z"),
+        ),
+        reconcile_sacct_query=_noop_reconcile_sacct_query,
+    )
+
+    evidence = scheduler._run_restart_reconcile()
+
+    assert evidence is not None
+    assert evidence["status"] == "completed"
+    outcome = evidence["reserved_unbound"]["outcomes"][0]
+    assert outcome["action"] == "stale_attempt_blocked"
+    # Outcome reason is None; the durable reason must survive the merge rather
+    # than being blanked.
+    assert outcome["reconciliation_reason_class"] == "comment_accounting_unproven"

@@ -822,3 +822,247 @@ def test_round11_migration_disappearance_fails_without_marker_and_reopens_after_
     repaired = FileOrchestrationJournalRepository(root)
     assert [job.job_id for job in repaired.query_reserved_unbound_jobs()] == [job_id]
     assert marker.is_file()
+
+
+def test_migration_handoff_anchor_preserves_locator_for_settled_master_with_missing_direct(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 6i migration-lane handoff: a settled current forecast master with
+    a MISSING flat derived direct must leave a handoff anchor (not prune the
+    only locator), the migration marker must complete with an UNCHANGED
+    authority fingerprint, and the steady-state iterator must then restore the
+    direct and prune the anchor. Crash/resume before the marker must stay
+    idempotent. Healthy terminal rows (direct present) must still prune."""
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path / "ifs-seed",
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        source_id="ifs",
+    )
+    ifs_job_id = "job_cycle_ifs_2026071200_forecast_fixture_forecast"
+    ifs_key = "cycle_ifs_2026071200_forecast_fixture:forecast"
+    bound = repository.commit_pipeline_job_submit_attempt(
+        ifs_key,
+        pipeline_job_id=ifs_job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="72001",
+        submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id="72001",
+            status="submitted",
+            reconciliation_source="slurm_name_window_unique",
+        ),
+    )
+    assert bound.committed
+    assert not (repository.root / "reconcile-inventory-migration-v1.json").exists()
+    projections = [
+        {
+            "candidate_id": repository.get_pipeline_job(ifs_job_id)["cohort_members"][0][
+                "candidate_id"
+            ],
+            "run_id": repository.get_pipeline_job(ifs_job_id)["cohort_members"][0]["run_id"],
+            "model_id": repository.get_pipeline_job(ifs_job_id)["cohort_members"][0]["model_id"],
+            "array_task_id": repository.get_pipeline_job(ifs_job_id)["cohort_members"][0][
+                "array_task_id"
+            ],
+            "array_task_outcome": "succeeded",
+            "task_slurm_job_id": "72001_0",
+            "error_code": None,
+            "restart_stage": "state_save_qc",
+            "native_shud_resubmitted": False,
+        }
+    ]
+    (repository.root / "pipeline-jobs" / f"{ifs_job_id}.json").unlink()
+    real_direct = repository._write_pipeline_job_direct_unlocked
+
+    def failing_direct(row: Any, record: Any) -> None:
+        job_id = str((row or {}).get("job_id") or "")
+        if job_id == ifs_job_id:
+            raise OSError("simulated terminal master direct failure")
+        return real_direct(row, record)
+
+    repository._write_pipeline_job_direct_unlocked = failing_direct
+    try:
+        repository.project_forecast_cohort_tasks(
+            ifs_job_id,
+            master_slurm_job_id="72001",
+            projections=projections,
+            complete=True,
+            master_status="succeeded",
+            master_error_code=None,
+            reconciliation_decision="matched_bound",
+        )
+    except Exception:
+        pass
+    finally:
+        repository._write_pipeline_job_direct_unlocked = real_direct
+
+    # Crash state: settled canonical, stale anchor, missing direct, no marker.
+    assert not (repository.root / "pipeline-jobs" / f"{ifs_job_id}.json").exists()
+    assert (repository.root / "reconcile-inventory" / f"{ifs_job_id}.json").exists()
+    assert not (repository.root / "reconcile-inventory-migration-v1.json").exists()
+
+    # Run the stable backfill: fingerprint unchanged, handoff anchor retained.
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    before = fresh._reconcile_authority_fingerprint_unlocked()
+    fingerprint = fresh._stable_backfill_reconcile_inventory_unlocked()
+    assert fingerprint == before, "authority fingerprint must be byte-identical"
+    assert (
+        repository.root / "reconcile-inventory" / f"{ifs_job_id}.json"
+    ).exists(), "migration must retain the handoff anchor for a missing-direct settled master"
+    assert not (
+        repository.root / "pipeline-jobs" / f"{ifs_job_id}.json"
+    ).exists(), "backfill alone must not restore the direct"
+
+    # Steady-state iterator: restore direct then prune anchor.
+    rows = list(fresh._iter_reconcile_inventory_records())
+    assert rows == []
+    assert (
+        repository.root / "pipeline-jobs" / f"{ifs_job_id}.json"
+    ).exists(), "steady-state handoff must restore the derived direct"
+    assert not (
+        repository.root / "reconcile-inventory" / f"{ifs_job_id}.json"
+    ).exists(), "handoff anchor must be pruned after the direct is restored"
+
+    # Crash/resume before the marker: idempotent. Recreate the crash state
+    # (missing direct + stale anchor) on a fresh root, then run the migration
+    # twice; the second run is a no-op with the same final state.
+    repository2 = _file_cohort_repository(
+        tmp_path / "ifs-seed2",
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        source_id="ifs",
+    )
+    bound2 = repository2.commit_pipeline_job_submit_attempt(
+        ifs_key,
+        pipeline_job_id=ifs_job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="72001",
+        submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id="72001",
+            status="submitted",
+            reconciliation_source="slurm_name_window_unique",
+        ),
+    )
+    assert bound2.committed
+    (repository2.root / "pipeline-jobs" / f"{ifs_job_id}.json").unlink()
+    real_direct2 = repository2._write_pipeline_job_direct_unlocked
+
+    def failing_direct2(row: Any, record: Any) -> None:
+        if str((row or {}).get("job_id") or "") == ifs_job_id:
+            raise OSError("simulated terminal master direct failure")
+        return real_direct2(row, record)
+
+    repository2._write_pipeline_job_direct_unlocked = failing_direct2
+    try:
+        repository2.project_forecast_cohort_tasks(
+            ifs_job_id,
+            master_slurm_job_id="72001",
+            projections=projections,
+            complete=True,
+            master_status="succeeded",
+            master_error_code=None,
+            reconciliation_decision="matched_bound",
+        )
+    except Exception:
+        pass
+    finally:
+        repository2._write_pipeline_job_direct_unlocked = real_direct2
+
+    fresh2 = FileOrchestrationJournalRepository(repository2.root)
+    _ = fresh2._stable_backfill_reconcile_inventory_unlocked()
+    assert (repository2.root / "reconcile-inventory" / f"{ifs_job_id}.json").exists()
+    _ = fresh2._stable_backfill_reconcile_inventory_unlocked()
+    assert (repository2.root / "reconcile-inventory" / f"{ifs_job_id}.json").exists()
+    list(fresh2._iter_reconcile_inventory_records())
+    assert (repository2.root / "pipeline-jobs" / f"{ifs_job_id}.json").exists()
+    assert not (repository2.root / "reconcile-inventory" / f"{ifs_job_id}.json").exists()
+
+
+def test_migration_healthy_terminal_master_with_direct_leaves_no_anchor(
+    tmp_path: Any,
+) -> None:
+    """Phase 6i: terminal current forecast masters WITH healthy flat directs
+    must NOT leave handoff anchors — the migration preserves the ordinary prune
+    so steady state stays bounded (e.g. 1,460 terminal histories leave no
+    anchors)."""
+
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitTransition
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+
+    anchor = datetime(2026, 7, 12, tzinfo=UTC)
+    repository = _file_cohort_repository(
+        tmp_path / "ifs-seed",
+        created_at=anchor,
+        member_count=1,
+        expected_user="scheduler",
+        expected_account="account",
+        source_id="ifs",
+    )
+    ifs_job_id = "job_cycle_ifs_2026071200_forecast_fixture_forecast"
+    ifs_key = "cycle_ifs_2026071200_forecast_fixture:forecast"
+    bound = repository.commit_pipeline_job_submit_attempt(
+        ifs_key,
+        pipeline_job_id=ifs_job_id,
+        expected_submission_attempt=1,
+        slurm_job_id="72001",
+        submitted_at=anchor + timedelta(hours=1),
+        slurm_accounting_submitted_at=anchor + timedelta(hours=1),
+        transition=AcceptedSubmitTransition.accounting(
+            "matched_bound",
+            submit_outcome="accepted",
+            matched_slurm_job_id="72001",
+            status="submitted",
+            reconciliation_source="slurm_name_window_unique",
+        ),
+    )
+    assert bound.committed
+    # Healthy terminal: direct present (projection succeeds).
+    member = repository.get_pipeline_job(ifs_job_id)["cohort_members"][0]
+    result = repository.project_forecast_cohort_tasks(
+        ifs_job_id,
+        master_slurm_job_id="72001",
+        projections=[
+            {
+                **member,
+                "array_task_outcome": "succeeded",
+                "task_slurm_job_id": "72001_0",
+                "restart_stage": "state_save_qc",
+                "native_shud_resubmitted": False,
+            }
+        ],
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+    assert result["total"] > 0
+    assert (repository.root / "pipeline-jobs" / f"{ifs_job_id}.json").exists()
+    assert not (repository.root / "reconcile-inventory-migration-v1.json").exists()
+
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    before = fresh._reconcile_authority_fingerprint_unlocked()
+    fingerprint = fresh._stable_backfill_reconcile_inventory_unlocked()
+    assert fingerprint == before
+    # Healthy terminal with direct present: anchor pruned, no handoff anchor.
+    assert not (
+        repository.root / "reconcile-inventory" / f"{ifs_job_id}.json"
+    ).exists(), "healthy terminal master must not leave a handoff anchor"
+    assert list(fresh._iter_reconcile_inventory_records()) == []

@@ -404,3 +404,196 @@ def test_normalization_isolates_the_foreign_decision_streak_invariant() -> None:
 
     assert error.value.reason == "file_journal_evidence_invariant_invalid"
     assert error.value.field == "identity_blocked_streak"
+
+
+# ---------------------------------------------------------------------------
+# #1565: the name-window fallback source is legal only for matched_bound.
+# ---------------------------------------------------------------------------
+
+
+def test_name_window_unique_source_is_legal_only_for_matched_bound() -> None:
+    """#1565 D3: ``slurm_name_window_unique`` may only ride ``matched_bound``;
+    every other accounting decision stays ``slurm_exact_comment`` sourced."""
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitTransition,
+        apply_accepted_submit_transition,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    valid = AcceptedSubmitTransition.accounting(
+        "matched_bound",
+        submit_outcome="accepted",
+        matched_slurm_job_id="72001",
+        status="submitted",
+        reconciliation_source="slurm_name_window_unique",
+    )
+    assert valid.reconciliation_source == "slurm_name_window_unique"
+    row = apply_accepted_submit_transition(
+        {
+            **_versioned_master_reservation_record(member_count=1),
+            "status": "reserved",
+            "submit_outcome": "submit_result_ambiguous",
+            "slurm_job_id": "72001",
+            "slurm_binding_source": "slurm_name_window_unique",
+            "slurm_accounting_submitted_at": "2026-07-12T01:00:00Z",
+        },
+        valid,
+    )
+    assert row["reconciliation_source"] == "slurm_name_window_unique"
+    assert row["reconciliation_decision"] == "matched_bound"
+    assert normalize_accepted_submit_evidence(row)["reconciliation_source"] == "slurm_name_window_unique"
+    # A matched_bound row claiming name-window current source WITHOUT name-window
+    # binding provenance is corrupt evidence (design D3): the current source
+    # must be the legal restoration of the immutable binding provenance.
+    from services.orchestrator.accepted_submit_identity import AcceptedSubmitEvidenceError
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            {
+                **_versioned_master_reservation_record(member_count=1),
+                "status": "submitted",
+                "submit_outcome": "accepted",
+                "slurm_job_id": "72001",
+                "reconciliation_source": "slurm_name_window_unique",
+                "reconciliation_decision": "matched_bound",
+                "matched_slurm_job_id": "72001",
+            }
+        )
+    assert error.value.field == "reconciliation_source"
+
+    for decision in (
+        "accounting_unavailable",
+        "identity_mismatch_blocked",
+        "multiple_matches_blocked",
+        "absence_deferred",
+        "absence_retry_permitted",
+    ):
+        with pytest.raises(ValueError, match="name-window fallback source requires matched_bound"):
+            AcceptedSubmitTransition.accounting(
+                decision,
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                reconciliation_source="slurm_name_window_unique",
+            )
+
+
+def test_name_window_unique_normalization_rejects_non_matched_bound() -> None:
+    """#1565: the durable normalization boundary refuses the fallback source
+    on any decision other than ``matched_bound``."""
+    from services.orchestrator.accepted_submit_identity import (
+        AcceptedSubmitEvidenceError,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    payload = {
+        **_versioned_master_reservation_record(member_count=1),
+        "status": "reserved",
+        "submit_outcome": "submit_result_ambiguous",
+        "reconciliation_source": "slurm_name_window_unique",
+        "reconciliation_decision": "accounting_unavailable",
+        "reconciliation_reason_class": "comment_accounting_unproven",
+    }
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(payload)
+    assert error.value.field == "reconciliation_source"
+
+
+def test_fallback_submit_unparsable_cannot_be_persisted_durably() -> None:
+    """#1565 Fix 2: ``fallback_submit_unparsable`` is pass-evidence only. It is
+    absent from the durable reason-class whitelist, so no accepted-submit
+    transition (or normalization) can ever persist it."""
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_RECONCILIATION_REASON_CLASSES,
+        AcceptedSubmitEvidenceError,
+        AcceptedSubmitTransition,
+        normalize_accepted_submit_evidence,
+    )
+    from tests.gateway_reconcile_helpers import _versioned_master_reservation_record
+
+    assert "fallback_submit_unparsable" not in ACCEPTED_RECONCILIATION_REASON_CLASSES
+
+    with pytest.raises(ValueError, match="invalid accepted-submit accounting reason class"):
+        AcceptedSubmitTransition.accounting(
+            "accounting_unavailable",
+            submit_outcome="submit_result_ambiguous",
+            status="reserved",
+            reconciliation_reason_class="fallback_submit_unparsable",
+        )
+
+    with pytest.raises(AcceptedSubmitEvidenceError) as error:
+        normalize_accepted_submit_evidence(
+            {
+                **_versioned_master_reservation_record(member_count=1),
+                "status": "reserved",
+                "submit_outcome": "submit_result_ambiguous",
+                "reconciliation_source": "slurm_exact_comment",
+                "reconciliation_decision": "accounting_unavailable",
+                "reconciliation_reason_class": "fallback_submit_unparsable",
+            }
+        )
+    assert error.value.field == "reconciliation_reason_class"
+
+
+# ---------------------------------------------------------------------------
+# #1850 (Phase 6): MODIFIED streak invariant — a pass-evidence-only
+# ``identity_mismatch_blocked`` never counts toward the release ladder. The
+# journal refuses a durable identity-blocked write whose expected status is a
+# held ``accounting_unavailable`` / ``comment_accounting_unproven`` row (the
+# fallback's durable held tuple), because such a write would be a pass-only
+# identity block masquerading as a durable exact-comment mismatch and would
+# move the counter. Direct-call oracles isolate the guard from every durable
+# entry point that raises first.
+# ---------------------------------------------------------------------------
+
+
+def test_held_tuple_reconciliation_write_never_increments_the_streak(
+    tmp_path: Any,
+) -> None:
+    """#1850: a fallback pass-only identity block keeps streak zero.
+
+    A row durably held at ``accounting_unavailable`` /
+    ``comment_accounting_unproven`` (the #1564 tuple) may only ever receive
+    the same held-tuple write again; a caller that asks the versioned
+    transition to record a durable exact-comment ``identity_mismatch_blocked``
+    on it must be refused, because that is exactly the pass-only-to-durable
+    masquerade the modified streak requirement forbids.
+    """
+
+    from services.orchestrator.accepted_submit_identity import (
+        ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        AcceptedSubmitTransition,
+    )
+
+    repository = _file_cohort_repository(tmp_path / "held", member_count=1)
+    held = repository.get_pipeline_job(_INVARIANT_JOB_ID)
+    assert held["status"] == "reserved"
+    assert held["submit_outcome"] == "submit_result_ambiguous"
+
+    before_files = {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(ValueError, match="identity blocked streak belongs to identity-mismatch transitions"):
+        repository.transition_pipeline_job_submit_evidence(
+            _INVARIANT_JOB_ID,
+            AcceptedSubmitTransition.accounting(
+                "accounting_unavailable",
+                submit_outcome="submit_result_ambiguous",
+                status="reserved",
+                reconciliation_reason_class="comment_accounting_unproven",
+                identity_blocked_streak=1,
+            ),
+            accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+            expected_submission_attempt=1,
+            expected_statuses=("reserved",),
+            require_unbound=True,
+        )
+    assert {
+        str(path.relative_to(repository.root)): path.read_bytes()
+        for path in repository.root.rglob("*")
+        if path.is_file()
+    } == before_files
+    assert repository.get_pipeline_job(_INVARIANT_JOB_ID) == held

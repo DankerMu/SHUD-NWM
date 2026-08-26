@@ -23,6 +23,128 @@ MAX_ACCEPTED_SUBMIT_TEXT_LENGTH = 256
 ACCEPTED_SUBMIT_CONTRACT_VERSION = "nhms.accepted_submit.v1"
 ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD = "accepted_submit_contract_version"
 
+#: Attempt-scoped immutable binding provenance (#1850 round 2 / Fix A). Every
+#: successful typed accepted-submit bind records exactly one legal source and,
+#: for accounting-evidenced binds, a strict aware-UTC canonical sacct ``Submit``.
+#: These are immutable for ONE bound attempt but are NOT cross-attempt identity:
+#: a clean reservation and a reclaim/new attempt clear both, and they are never
+#: cross-submission equality identity.
+SLURM_BINDING_SOURCE_FIELD = "slurm_binding_source"
+SLURM_ACCOUNTING_SUBMITTED_AT_FIELD = "slurm_accounting_submitted_at"
+SLURM_BINDING_SOURCES = frozenset(
+    {
+        "gateway_submit",
+        "slurm_exact_comment",
+        "slurm_name_window_unique",
+    }
+)
+#: The current accepted-submit reconciliation source that a later
+#: ``matched_bound`` transition must derive from immutable binding provenance
+#: instead of a factory default. The name-window fallback is the only lane that
+#: restores ``slurm_name_window_unique``; every other bind lane (ordinary
+#: gateway submit, exact-comment recovery, and pre-change rows that carry no
+#: binding provenance) keeps the exact-comment current source.
+SLURM_BINDING_SOURCE_TO_CURRENT_SOURCE = {
+    "gateway_submit": "slurm_exact_comment",
+    "slurm_exact_comment": "slurm_exact_comment",
+    "slurm_name_window_unique": "slurm_name_window_unique",
+}
+
+
+def matched_bound_reconciliation_source(binding_source: str | None) -> str:
+    """Map immutable binding provenance to the legal current ``matched_bound`` source.
+
+    Centralized (Fix B) so the real terminal projection, the defer/restore
+    path, and every ``AcceptedSubmitTransition.accounting("matched_bound", ...)``
+    producer derive the current source from the SAME mapping. ``None`` /
+    missing legacy provenance maps to exact-comment, matching the factory
+    default for pre-change rows that never recorded binding provenance.
+    """
+
+    if binding_source in SLURM_BINDING_SOURCE_TO_CURRENT_SOURCE:
+        return SLURM_BINDING_SOURCE_TO_CURRENT_SOURCE[binding_source]
+    return "slurm_exact_comment"
+
+
+def bind_replay_is_idempotent(
+    durable_row: Mapping[str, Any],
+    *,
+    derived_binding_source: str,
+    canonical_accounting_submit: str | None,
+    same_lane: bool,
+) -> bool:
+    """Return whether a typed bind commit replay equals the durable bind.
+
+    Centralized (round 4 / Fix C) so the commit's idempotent decision has ONE
+    definition and never scatters compatibility special cases:
+
+    - A NEW durable row carries both binding-provenance fields, so the replay
+      is idempotent only when the derived binding source AND the canonical
+      accounting Submit (for the fallback) match the durable values exactly, on
+      top of the same reconciliation tuple lane.
+    - A LEGACY v1 row missing BOTH additive fields stays read-compatible: an
+      ordinary or exact-comment same-lane replay remains idempotent and
+      zero-write, and is NEVER backfilled/minted with provenance by the replay.
+      A name-window replay on a missing-fields row is never idempotent (the
+      name-window source is this PR's addition; a missing-fields row cannot be
+      a legal fallback bind), and any single-field/partial/contradictory
+      provenance or canonical conflict is never idempotent.
+    """
+
+    if not same_lane:
+        return False
+    # Key-absence must be distinguished from an explicit ``None`` value: a
+    # post-change bind ALWAYS carries BOTH keys (the canonical is None-valued
+    # for the gateway/exact-comment lanes, never missing), while a pre-change
+    # v1 row carries NEITHER key. A row with exactly one key present is a
+    # partial/corrupt shape and is never idempotent.
+    missing = object()
+    expected_binding_source = durable_row.get(SLURM_BINDING_SOURCE_FIELD, missing)
+    expected_canonical = durable_row.get(SLURM_ACCOUNTING_SUBMITTED_AT_FIELD, missing)
+    if expected_binding_source is missing and expected_canonical is missing:
+        # Pre-change v1 row: both additive fields absent. Read-compatible for
+        # the two lanes that existed before this PR; a name-window replay can
+        # never be idempotent on a missing-fields row (the name-window source
+        # is this PR's addition and such a row cannot be a legal fallback bind).
+        return derived_binding_source in {"gateway_submit", "slurm_exact_comment"}
+    if expected_binding_source is missing or expected_canonical is missing:
+        # Single-field-only partial shape: never idempotent.
+        return False
+    return (
+        expected_binding_source == derived_binding_source
+        and expected_canonical == canonical_accounting_submit
+    )
+
+
+def binding_source_for_transition(
+    *,
+    submit_outcome: str,
+    reconciliation_decision: str | None,
+    reconciliation_source: str,
+) -> str | None:
+    """Return the one legal attempt-scoped binding source for a typed bind shape.
+
+    Centralized (Fix A, round 2): the typed commit derives binding provenance
+    from the transition shape, never from caller-forgeable transition fields
+    (which were removed). The lanes are:
+      - ordinary accepted submit (decision ``None``) -> ``gateway_submit``;
+      - exact-comment ``matched_bound`` -> ``slurm_exact_comment``;
+      - name-window ``matched_bound`` -> ``slurm_name_window_unique``.
+    Every other shape (pre-outcome, rejected, timeout, held/defer/release)
+    yields ``None`` — such transitions never mint binding provenance.
+
+    Returns ``None`` for shapes that must NOT mint provenance, so callers can
+    distinguish "no provenance for this transition" from an invalid shape.
+    """
+
+    if submit_outcome == "accepted" and reconciliation_decision is None:
+        return "gateway_submit"
+    if submit_outcome == "accepted" and reconciliation_decision == "matched_bound":
+        if reconciliation_source == "slurm_name_window_unique":
+            return "slurm_name_window_unique"
+        return "slurm_exact_comment"
+    return None
+
 ACCEPTED_SUBMIT_OUTCOMES = frozenset({"accepted", "submit_result_ambiguous", "rejected"})
 ACCEPTED_RECONCILIATION_DECISIONS = frozenset(
     {
@@ -165,6 +287,13 @@ ACCEPTED_SUBMIT_MASTER_ORDINARY_UPSERT_FIELDS = (
     "candidate_projections",
     "cancellation_receipt_recorded",
     "identity_blocked_streak",
+    # Attempt-scoped binding provenance (#1850 Fix A). Immutable for one bound
+    # attempt but NOT cross-attempt identity, so they are deliberately NOT in
+    # ``ACCEPTED_SUBMIT_MASTER_IMMUTABLE_FIELDS``; including them here lets the
+    # ordinary upsert's frozen-state check refuse any mutation/drop on an
+    # existing bound row, exactly like the rest of the closed master state.
+    SLURM_BINDING_SOURCE_FIELD,
+    SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
     # Captured once at reservation time and never rewritten afterwards
     # (#1183), so the frozen ordinary-upsert table owns it like the rest of
     # the master's durable authority state.
@@ -226,6 +355,13 @@ class AcceptedSubmitTransition:
     reconciliation_reason_class: str | None = None
     status: str | None = None
     identity_blocked_streak: int = 0
+    # NOTE (#1850 round 2): binding provenance is NOT a transition field. The
+    # typed commit owns the attempt-scoped immutable binding provenance
+    # (`slurm_binding_source` / `slurm_accounting_submitted_at` on the durable
+    # row) and derives it centrally from the transition shape plus the single
+    # canonical accounting Submit keyword. Keeping it out of the transition
+    # eliminates the duplicate-authority hole where a forged transition could
+    # contradict the commit's canonical input.
 
     def __post_init__(self) -> None:
         if type(self.identity_blocked_streak) is not int or self.identity_blocked_streak < 0:
@@ -254,7 +390,13 @@ class AcceptedSubmitTransition:
             return
         if decision not in ACCEPTED_RECONCILIATION_DECISIONS:
             raise ValueError("invalid accepted-submit accounting decision")
-        if self.reconciliation_source != "slurm_exact_comment":
+        if self.reconciliation_source == "slurm_name_window_unique":
+            # The comment-less name-window fallback (#1565) is the only
+            # producer of this source, and it may only ever bind: every other
+            # accounting decision stays exact-comment sourced.
+            if decision != "matched_bound":
+                raise ValueError("name-window fallback source requires matched_bound")
+        elif self.reconciliation_source != "slurm_exact_comment":
             raise ValueError("accounting transition requires exact-comment source")
         if decision == "matched_bound":
             if not isinstance(self.matched_slurm_job_id, str) or not self.matched_slurm_job_id.isdigit():
@@ -298,10 +440,11 @@ class AcceptedSubmitTransition:
         reconciliation_reason_class: str | None = None,
         status: str | None = None,
         identity_blocked_streak: int = 0,
+        reconciliation_source: str = "slurm_exact_comment",
     ) -> AcceptedSubmitTransition:
         return cls(
             submit_outcome=submit_outcome,
-            reconciliation_source="slurm_exact_comment",
+            reconciliation_source=reconciliation_source,
             reconciliation_decision=decision,
             matched_slurm_job_id=matched_slurm_job_id,
             reconciliation_reason_class=reconciliation_reason_class,
@@ -326,6 +469,13 @@ def apply_accepted_submit_transition(
             "identity_blocked_streak": transition.identity_blocked_streak,
         }
     )
+    # #1850 Fix A/B: binding provenance is NOT a transition field, so every
+    # accounting transition (submit-evidence, defer, runtime, terminal,
+    # cancellation, demotion, projection) PRESERVES the prior attempt's
+    # binding provenance by default. Only a clean reservation / reclaim (which
+    # null the fields directly on the row) clears it; only the typed commit
+    # mints it. A later transition that reasserts ``matched_bound`` restores
+    # the legal current source from the centralized mapping at the caller.
     if transition.status is not None:
         transitioned["status"] = transition.status
     return transitioned
@@ -498,6 +648,43 @@ def normalize_accepted_submit_attempt_anchor(value: Any) -> str:
         ) from error
 
 
+def normalize_slurm_accounting_submitted_at(value: Any) -> str | None:
+    """Return one strict aware-UTC canonical accounting ``Submit`` string, or None.
+
+    Canonical accounting provenance (#1850 Fix A) is populated ONLY from sacct
+    ``Submit`` evidence. Accepts an aware ``datetime`` or an ISO-8601 string
+    (the durable ``...Z`` shape) and returns the canonical UTC ``...Z`` form;
+    ``None``/absent input yields ``None``; any naive/non-ISO/malformed value is
+    not canonical and fails closed (returns ``None``), so it can never be
+    mistaken for incarnation-proof evidence.
+    """
+
+    if value in (None, ""):
+        return None
+    parsed: datetime | None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    try:
+        offset = parsed.utcoffset()
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if offset is None:
+        return None
+    try:
+        return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
 def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize and validate the one durable accepted-submit master contract.
 
@@ -593,6 +780,69 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
     normalized["submission_attempt_started_at"] = normalize_accepted_submit_attempt_anchor(
         normalized.get("submission_attempt_started_at")
     )
+    # #1850 Fix A: attempt-scoped binding provenance validation. A present
+    # binding source must be one of the closed enum values; a present canonical
+    # accounting Submit must normalize to a strict aware-UTC instant. A row
+    # predating these additive fields (both absent) remains readable; missing
+    # provenance never proves recycle.
+    binding_source = normalized.get(SLURM_BINDING_SOURCE_FIELD)
+    if binding_source is not None and binding_source not in SLURM_BINDING_SOURCES:
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_enum_invalid", field=SLURM_BINDING_SOURCE_FIELD
+        )
+    accounting_submit = normalize_slurm_accounting_submitted_at(
+        normalized.get(SLURM_ACCOUNTING_SUBMITTED_AT_FIELD)
+    )
+    if accounting_submit is None and normalized.get(SLURM_ACCOUNTING_SUBMITTED_AT_FIELD) not in (None, ""):
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid", field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD
+        )
+    normalized[SLURM_BINDING_SOURCE_FIELD] = binding_source
+    normalized[SLURM_ACCOUNTING_SUBMITTED_AT_FIELD] = accounting_submit
+    if binding_source is not None or accounting_submit is not None:
+        # #1850 round 3/4: binding provenance is minted ONLY by a successful
+        # typed BIND: submit_outcome=accepted AND a numeric Slurm id. Every
+        # legal writer that clears the Slurm id or moves the row off accepted
+        # (reclaim, reject, permit-retry, operator demotion, release, timeout)
+        # also clears provenance -- reject/permit/demote/release only ever run
+        # on unbound reserved rows that never had provenance, and reclaim nulls
+        # the fields directly. A row with explicit provenance under any other
+        # outcome (rejected, submit_result_ambiguous) or without a numeric
+        # Slurm id is therefore a durable impossible shape that no legal
+        # lifecycle produces; closing it cannot break cancellation, defer,
+        # terminal projection (all keep the numeric id and accepted outcome) or
+        # reclaim.
+        slurm_job_id = normalized.get("slurm_job_id")
+        if not isinstance(slurm_job_id, str) or not slurm_job_id.isdigit():
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field="slurm_job_id"
+            )
+        if normalized.get("submit_outcome") != "accepted":
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field="submit_outcome"
+            )
+    if accounting_submit is not None:
+        # Only the name-window fallback lane records canonical accounting
+        # Submit evidence (#1850 Fix A/C): a row carrying it under any other
+        # binding provenance is an impossible combination.
+        if binding_source != "slurm_name_window_unique":
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid", field=SLURM_BINDING_SOURCE_FIELD
+            )
+        if normalized.get("reconciliation_decision") is None:
+            raise AcceptedSubmitEvidenceError(
+                "file_journal_evidence_invariant_invalid",
+                field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD,
+            )
+    elif binding_source == "slurm_name_window_unique":
+        # #1850 round 2 (issue 3): an EXPLICIT name-window binding source is
+        # only legal with a strict canonical accounting Submit. A row that
+        # predates the additive fields carries neither; a row that explicitly
+        # claims name-window provenance without canonical evidence is not a
+        # legal fallback bind and cannot be read as recycle-eligible either.
+        raise AcceptedSubmitEvidenceError(
+            "file_journal_evidence_invariant_invalid", field=SLURM_ACCOUNTING_SUBMITTED_AT_FIELD
+        )
 
     normalized["candidate_projections"] = normalize_candidate_projections(
         normalized.get("candidate_projections"),
@@ -627,7 +877,14 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_enum_invalid", field="reconciliation_decision"
             )
-        if source != "slurm_exact_comment":
+        if source == "slurm_name_window_unique":
+            # #1565: the comment-less name-window fallback binds with its own
+            # source, legal only for the one decision it can produce.
+            if decision != "matched_bound":
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_enum_invalid", field="reconciliation_source"
+                )
+        elif source != "slurm_exact_comment":
             raise AcceptedSubmitEvidenceError(
                 "file_journal_evidence_enum_invalid", field="reconciliation_source"
             )
@@ -635,6 +892,35 @@ def normalize_accepted_submit_evidence(row: Mapping[str, Any]) -> dict[str, Any]
             if not isinstance(matched_id, str) or not matched_id.isdigit():
                 raise AcceptedSubmitEvidenceError(
                     "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+                )
+            # #1850 round 4 (Fix B): a ``matched_bound`` row's matched Slurm id
+            # must equal the bound numeric ``slurm_job_id`` -- a matched id that
+            # contradicts the owned id is corrupt evidence. A matched-bound row
+            # is always bound (the typed commit only mints matched_bound with a
+            # numeric id), so this cannot break legal lifecycle.
+            if matched_id != normalized.get("slurm_job_id"):
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_invariant_invalid", field="matched_slurm_job_id"
+                )
+            # #1850 design D3 (round 3 / Fix B): a ``matched_bound`` row's
+            # current reconciliation source MUST be the legal restoration of
+            # its immutable binding provenance (``matched_bound_reconciliation_source``),
+            # never a contradictory pairing. A fallback-bound row reasserting
+            # ``matched_bound`` must show current source ``slurm_name_window_unique``;
+            # an exact-comment/gateway-bound row must show ``slurm_exact_comment``.
+            # Legacy rows missing both additive fields map through the helper to
+            # exact-comment, so a pre-change exact-comment matched row stays
+            # readable. The converse is NOT closed here: an ``accounting_unavailable``
+            # defer/held row on a fallback-bound attempt keeps current source
+            # ``slurm_exact_comment`` with immutable binding source
+            # ``slurm_name_window_unique`` (legal lifecycle), and only a later
+            # ``matched_bound`` reassertion must restore name-window.
+            legal_matched_source = matched_bound_reconciliation_source(
+                normalized.get(SLURM_BINDING_SOURCE_FIELD)
+            )
+            if source != legal_matched_source:
+                raise AcceptedSubmitEvidenceError(
+                    "file_journal_evidence_invariant_invalid", field="reconciliation_source"
                 )
         elif matched_id is not None:
             raise AcceptedSubmitEvidenceError(
@@ -974,7 +1260,13 @@ __all__ = (
     "MAX_FORECAST_COHORT_MEMBERS",
     "OPERATOR_VERIFIED_ABSENCE_DECISION",
     "QUARANTINE_RERUN_PROVENANCE_FIELD",
+    "SLURM_ACCOUNTING_SUBMITTED_AT_FIELD",
+    "SLURM_BINDING_SOURCE_FIELD",
+    "SLURM_BINDING_SOURCES",
+    "SLURM_BINDING_SOURCE_TO_CURRENT_SOURCE",
     "accepted_submit_pipeline_job_model_id",
+    "binding_source_for_transition",
+    "matched_bound_reconciliation_source",
     "accepted_submit_candidate_immutable_evidence",
     "accepted_submit_contract_is_current",
     "accepted_submit_master_identity_is_structural",
@@ -992,6 +1284,7 @@ __all__ = (
     "is_forecast_cohort_stage_name",
     "normalize_accepted_submit_attempt_anchor",
     "normalize_accepted_submit_evidence",
+    "normalize_slurm_accounting_submitted_at",
     "normalize_candidate_projections",
     "normalize_init_state_identities",
     "normalize_quarantine_rerun_model_ids",
