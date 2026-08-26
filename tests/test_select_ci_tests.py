@@ -23,6 +23,7 @@ import yaml
 import scripts.select_ci_tests as _prod_module
 from scripts.select_ci_tests import (
     BACKEND_PYTHON_SOURCE_PREFIXES,
+    CALIBRATION_OVERRIDES_PATH,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
     CHANGED_TEST_SUITE_BASENAME_PATTERNS,
@@ -955,6 +956,86 @@ def test_node22_repair_script_keeps_core_smoke_and_timescale_with_the_owner() ->
     assert set(CORE_SMOKE_TESTS) <= selected, "repair script lost its core-smoke selection"
     assert TIMESCALE_WRITE_GUARD_INVARIANT_TEST in selected, "repair script lost its #1656 timescale rider"
     assert NODE22_ENTRYPOINT_INVARIANT_TEST in selected
+
+
+def test_calibration_declaration_selects_exactly_its_three_consumers() -> None:
+    # #1860 selector leg: a declaration-only diff must select the package,
+    # publisher and selector-meta suites — exactly, with no core-smoke fallback
+    # and no collect-only collapse. Exact set: the rule's targets are the whole
+    # selection, and the path is not a backend Python path, so no same-name or
+    # supplemental routing can join it.
+    selected = select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_basins_package.py",
+        "tests/test_publish_scheduler_file_registry.py",
+        "tests/test_select_ci_tests.py",
+    ]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_calibration_declaration_backend_filter_entry_is_block_scoped() -> None:
+    # #1860 backend-filter leg, positive: the exact declaration path must sit
+    # inside the ci.yml `backend:` block, so a declaration-only PR starts the
+    # targeted Unit Tests job. A mention under another filter opens no job, and
+    # a broad `config/**` glob would drag unrelated config files into the lane.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = "              - 'config/calibration_overrides.yaml'\n"
+    assert literal in _backend_filter_block(workflow), "declaration path missing from ci.yml backend filter"
+
+    entries = _filter_entries(_backend_filter_block(workflow))
+    assert not any(fnmatch.fnmatch(CALIBRATION_OVERRIDES_PATH, pattern) and pattern != CALIBRATION_OVERRIDES_PATH
+                   for pattern in entries), "backend filter must not use a broad config glob"
+
+
+def test_calibration_declaration_backend_filter_entry_reds_when_removed_or_moved() -> None:
+    # #1860 backend-filter leg, red (constructed workflow text; tracked ci.yml
+    # untouched): deleting the exact entry, or moving it under another filter,
+    # must fail the same block-scoped assertion the positive row pins.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = "              - 'config/calibration_overrides.yaml'\n"
+    assert literal in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(literal, "")
+    assert literal not in _backend_filter_block(deleted)
+
+    moved_to_frontend = deleted.replace("            frontend:\n", "            frontend:\n" + literal)
+    assert literal in moved_to_frontend
+    assert literal not in _backend_filter_block(moved_to_frontend)
+
+
+def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1860 selector leg, red (constructed rule table; tracked selector
+    # untouched): deleting the declaration rule drops the whole selection, and
+    # removing either non-meta consumer from the rule's targets drops that
+    # target — the same selector assertions the green rows use, not a
+    # tautological read of the rule under test.
+    from scripts import select_ci_tests
+
+    # Leg 1: the rule itself deleted.
+    stripped = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != CALIBRATION_OVERRIDES_PATH)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", stripped)
+    assert select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path(".")) == []
+
+    # Leg 2: the rule kept but a consumer removed from its targets.
+    for removed in ("tests/test_basins_package.py", "tests/test_publish_scheduler_file_registry.py"):
+        patched = tuple(
+            PathTestRule(
+                rule.pattern,
+                tuple(t for t in rule.tests if t != removed),
+                rule.stop_on_match,
+                rule.only_when_any_changed,
+            )
+            if rule.pattern == CALIBRATION_OVERRIDES_PATH
+            else rule
+            for rule in PATH_TEST_RULES
+        )
+        monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+        selected = select_tests([CALIBRATION_OVERRIDES_PATH], repo_root=Path("."))
+        assert removed not in selected, removed
+        assert "tests/test_select_ci_tests.py" in selected
 
 
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
