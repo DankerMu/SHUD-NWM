@@ -38194,6 +38194,7 @@ def _absence_tolerance_scheduler(
     repository_factory: Any | None = None,
     strict_evidence: dict[str, Any] | None = None,
     hydro_status: str = "published",
+    run_manifest_initial_state: dict[str, Any] | None = None,
 ) -> tuple[Any, CycleDiscovery, list[Any]]:
     """Cycle-completion verdict seam with the strict/successor providers pinned.
 
@@ -38210,6 +38211,7 @@ def _absence_tolerance_scheduler(
         {
             "hydro_status": hydro_status,
             "hydro_run": hydro_run,
+            "run_manifest_initial_state": run_manifest_initial_state,
         }
     )
     scheduler = ProductionScheduler(
@@ -38272,6 +38274,50 @@ def test_cycle_completion_verdict_tolerates_absent_init_state_record_with_ready_
     )
 
     assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+
+def test_cycle_completion_verdict_advances_after_packaged_ic_terminal_success(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    checksum = "a" * 64
+    scheduler, discovery, models = _absence_tolerance_scheduler(
+        monkeypatch,
+        tmp_path,
+        hydro_run={
+            "run_id": "fcst_gfs_2026072000_model_a",
+            "status": "published",
+            "quality": "packaged_calibrated_state",
+            "init_state_id": None,
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026072000_model_a/output/",
+        },
+        successor_state=None,
+        strict_evidence={
+            "status": "ready",
+            "ready": True,
+            "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+            "packaged_ic_checksum": checksum,
+        },
+        run_manifest_initial_state={
+            "quality": "packaged_calibrated_state",
+            "state_id": None,
+            "packaged_ic_checksum": checksum,
+        },
+    )
+
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "complete"
+
+    monkeypatch.setattr(
+        scheduler,
+        "_strict_warm_start_for_candidate",
+        lambda _candidate, _cycle: {
+            "status": "ready",
+            "ready": True,
+            "mode": scheduler_generation_module.PACKAGED_IC_BOOTSTRAP_MODE,
+            "packaged_ic_checksum": "b" * 64,
+        },
+    )
+    assert scheduler._cycle_completion_status(discovery, models, horizon={}) == "gap"
 
 
 _ABSENT_INIT_STATE_HYDRO_RUN = {
