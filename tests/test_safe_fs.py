@@ -282,14 +282,10 @@ def test_met_evidence_lane_reports_a_structured_evidence_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Escape surface B, spot check.  HONEST LIMIT: this pins the lane contract
-    # (a PRODUCTION_MET_EVIDENCE_* code, never a bare RuntimeError) but does NOT
-    # exercise the `_expand_path` fix -- `EvidenceWriter.prepare()` refuses the
-    # value at its own containment gate before any safe_fs primitive is reached,
-    # and the lane's own bare `expanduser()` in
-    # `met_validation._safe_resolved_evidence_root` still throws bare on the
-    # `from_env` / `validate_met` route.  That site is outside this change's
-    # allowlist and is tracked separately.
+    # Escape surface B, spot check.  The end-to-end closure of #1622 is covered
+    # by tests/test_production_met_validation.py, which exercises
+    # `ProductionMetConfig.from_env` and `validate_met` directly; this spot
+    # check pins the writer's own containment-gate refusal.
     from services.production_closure.met_validation import (
         EvidenceWriter,
         ProductionMetValidationError,

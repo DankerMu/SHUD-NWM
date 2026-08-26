@@ -485,7 +485,25 @@ def _published_artifact_root_configured() -> bool:
 
 
 def _absolute_configured_path(path: Path) -> Path:
-    expanded = Path(path).expanduser()
+    """Expand a leading ``~`` and anchor relative paths at the current directory.
+
+    An errno-less ``Path.expanduser()`` ``RuntimeError`` (undeterminable home,
+    e.g. ``~<unknown user>``, or no passwd entry with HOME unset) is narrowed
+    into the shared write-side structured refusal ``SafeFilesystemError(
+    kind="unsafe")``: the literal ``~`` component must never be retained,
+    because the write-side consumers would create a path the operator never
+    named (#1621).
+    """
+
+    try:
+        expanded = Path(path).expanduser()
+    except RuntimeError as error:
+        from packages.common.safe_fs import SafeFilesystemError
+
+        raise SafeFilesystemError(
+            f"Cannot determine the home directory for path: {path}",
+            kind="unsafe",
+        ) from error
     return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 

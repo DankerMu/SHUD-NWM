@@ -307,6 +307,68 @@ def test_validate_met_rejects_primary_evidence_root_under_existing_symlink(
     assert not (target_root / suffix).exists()
 
 
+def test_met_config_from_env_rejects_undeterminable_home_with_structured_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1622: `Path.expanduser()` throws a bare, errno-less RuntimeError for a
+    # leading `~<unknown user>`.  The evidence root is write-side input, so
+    # `ProductionMetConfig.from_env` must translate that throw into its own
+    # structured PRODUCTION_MET_EVIDENCE_PATH_UNSAFE code -- never a bare
+    # RuntimeError, and never a literal `~` path that a later write could target.
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ProductionMetValidationError) as excinfo:
+        ProductionMetConfig.from_env(evidence_root=Path("~nosuchuser_zz") / "evidence", run_id="safe")
+
+    assert excinfo.value.error_code == "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
+
+
+def test_met_config_from_env_keeps_a_valid_absolute_root_unchanged(tmp_path: Path) -> None:
+    # #1622 regression fence: only the failure lane changes; a valid absolute
+    # root resolves to the same product as before.
+    config = ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="valid")
+
+    assert config.evidence_root == (tmp_path / "artifacts").resolve()
+
+
+def test_validate_met_rejects_undeterminable_home_with_structured_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1622: `validate_met` revalidates the equivalent config and must report
+    # the same structured code as `from_env`, with no literal `~` side effect.
+    monkeypatch.chdir(tmp_path)
+    config = ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="safe")
+
+    with pytest.raises(ProductionMetValidationError) as excinfo:
+        validate_met(
+            ProductionMetConfig(
+                evidence_root=Path("~nosuchuser_zz") / "evidence",
+                run_id="safe",
+                enabled_sources=config.enabled_sources,
+                cycle_start=config.cycle_start,
+                cycle_end=config.cycle_end,
+                forecast_hours=config.forecast_hours,
+                configured_object_prefix=config.configured_object_prefix,
+                object_prefix=config.object_prefix,
+                access_mode=config.access_mode,
+                cached_fallback_policy=config.cached_fallback_policy,
+                model_id=config.model_id,
+                model_version=config.model_version,
+                cldas_restricted_reason=config.cldas_restricted_reason,
+                bounds=config.bounds,
+                force=False,
+            )
+        )
+
+    assert excinfo.value.error_code == "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE"
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
+
+
 @pytest.mark.grib
 def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     tmp_path: Path,

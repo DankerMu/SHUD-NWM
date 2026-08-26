@@ -17405,15 +17405,16 @@ def test_final_segment_symlink_reached_through_a_file_keeps_its_acceptance(tmp_p
     assert scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir") is None
 
 
-def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(tmp_path: Path) -> None:
+def test_final_segment_symlink_under_an_unreadable_parent_fails_closed_identically_on_every_interpreter(
+    tmp_path: Path,
+) -> None:
     # Strict real-path fails with EACCES here -- a third non-loop errno the
-    # fallback has to carry.  HONEST LIMIT: the FINAL verdict on this geometry
-    # is not interpreter-independent, and that predates this change and lies
-    # outside it: `Path.exists()` swallows EACCES from 3.12 on but propagates
-    # PermissionError on 3.11, so master already accepts this on 3.14 and raises
-    # PermissionError on 3.11 at that later gate (tracked as #1623).  What this
-    # change owns is the real-path step, which must not turn EACCES into the
-    # loop refusal, and must not let it escape either.
+    # fallback has to carry.  The pre-change FINAL verdict was
+    # interpreter-dependent (`Path.exists()` swallowed EACCES from 3.12 on but
+    # propagated PermissionError on 3.11); #1623 makes the classification
+    # errno-aware so every supported CPython reaches the same structured
+    # `ValueError` safety refusal: never a raw PermissionError, never silent
+    # acceptance as a missing target, and never the loop wording.
     workspace_root, _ = _guard_workspace(tmp_path)
     blocker = workspace_root / "unreadable"
     blocker.mkdir()
@@ -17422,27 +17423,43 @@ def test_final_segment_symlink_under_an_unreadable_parent_is_not_a_loop_refusal(
     link.symlink_to(blocker / "leaf", target_is_directory=True)
     blocker.chmod(0o600)
     try:
-        if sys.version_info >= (3, 12):
-            # The CI interpreter gets NO tolerance: a blanket `except
-            # PermissionError` here would also swallow EACCES escaping the
-            # strict real-path step this change owns, i.e. it would stay green
-            # under exactly the regression it exists to fence.
-            verdict = scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
-        else:
-            # 3.11 alone keeps the tolerance, for the later `Path.exists()`
-            # gate named above -- a divergence this change does not own.
-            try:
-                verdict = scheduler_module._require_safe_directory_final_component(
-                    link,
-                    workspace_root,
-                    "evidence_dir",
-                )
-            except PermissionError:
-                verdict = None
+        with pytest.raises(ValueError) as excinfo:
+            scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
     finally:
         blocker.chmod(0o755)
 
-    assert verdict is None
+    refusal = str(excinfo.value)
+    assert refusal.startswith("production scheduler evidence_dir must be a safe directory")
+    assert "traversal is denied" in refusal
+    assert "symlink loop" not in refusal
+
+
+def test_final_segment_target_metadata_denied_by_an_ancestor_fails_closed_with_a_structured_value_error(
+    tmp_path: Path,
+) -> None:
+    # The containment/realpath side of the guard completes (link inside the
+    # workspace, no loop), then the final target CLASSIFICATION itself is
+    # denied traversal.  This is the #1623 verdict: the guard cannot prove the
+    # configured target is a directory, so it must fail closed with the
+    # structured ValueError family -- not accept the target as absent, not leak
+    # a raw PermissionError, and not misattribute the refusal to a loop.
+    workspace_root, _ = _guard_workspace(tmp_path)
+    blocker = workspace_root / "blocked"
+    blocker.mkdir()
+    (blocker / "leaf").mkdir()
+    link = workspace_root / "target-link"
+    link.symlink_to(blocker / "leaf", target_is_directory=True)
+    blocker.chmod(0o600)
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            scheduler_module._require_safe_directory_final_component(link, workspace_root, "evidence_dir")
+    finally:
+        blocker.chmod(0o755)
+
+    refusal = str(excinfo.value)
+    assert refusal.startswith("production scheduler evidence_dir must be a safe directory")
+    assert "cannot verify" in refusal
+    assert "traversal is denied" in refusal
 
 
 def test_final_segment_loop_refuses_on_the_database_backed_construction_route(

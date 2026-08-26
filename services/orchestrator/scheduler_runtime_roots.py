@@ -843,16 +843,60 @@ def _require_safe_directory_final_component(path: Path, workspace_root: Path, fi
                     f"the symlink loop is at {error.filename or path}",
                 ) from error
             # Every other strict failure falls back to the non-strict product
-            # this arm has always used, so only the loop changes verdict.  The
-            # fallback is load-bearing and wider than ENOENT alone: a dangling
-            # link raises ENOENT, a target reached through a file raises
-            # ENOTDIR, and a target under an unreadable directory raises EACCES
-            # -- all three are accepted today, and refusing them here would
-            # silently break configurations that work.
+            # this arm has always used, so only the loop changes verdict at the
+            # resolution step.  The fallback is load-bearing and wider than
+            # ENOENT alone: a dangling link raises ENOENT, a target reached
+            # through a file raises ENOTDIR, and a target under an unreadable
+            # directory raises EACCES -- the fallback reproduces the old
+            # product for all three, and the final verdict is then decided by
+            # the errno-aware classification below, which fail-closes EACCES
+            # (#1623).
             resolved = Path(os.path.realpath(path))
         _scheduler._require_under_workspace(resolved, workspace_root, field_name)
-        if resolved.exists() and not resolved.is_dir():
-            raise ValueError(f"production scheduler {field_name} must be a directory")
+        _classify_resolved_directory_target(resolved, field_name)
         return
     if not stat.S_ISDIR(path_stat.st_mode):
+        raise ValueError(f"production scheduler {field_name} must be a directory")
+
+
+def _classify_resolved_directory_target(target: Path, field_name: str) -> None:
+    """Classify a contained, realpath-resolved final target by explicit metadata.
+
+    The pre-change gate read ``Path.exists() and not Path.is_dir()``, which
+    swallows different ``OSError`` sets on different CPython versions: EACCES on
+    a denied traversal is ``False`` from 3.12 on but raises ``PermissionError``
+    on 3.11, so the two interpreters reached opposite verdicts on the same
+    geometry (#1623).  Every verdict here comes from one errno-aware metadata
+    lookup instead:
+
+    - ``ENOENT``/``ENOTDIR``: provably absent -- accepted as before.
+    - directory: accepted.
+    - non-directory: keeps ``must be a directory``.
+    - ``EACCES``/``EPERM``: the traversal is denied, so the guard cannot prove
+      the configured target is a directory -- fail closed with the guard's
+      structured ``ValueError`` family, never a raw ``PermissionError`` and
+      never silent acceptance as a missing target.
+    - any other metadata failure: keep the directory-verdict wording, which is
+      what the pre-change ``is_dir()`` produced for every non-EACCES swallow.
+    """
+
+    try:
+        mode = target.stat().st_mode
+    except FileNotFoundError:
+        return
+    except NotADirectoryError:
+        return
+    except PermissionError as error:
+        raise ValueError(
+            f"production scheduler {field_name} must be a safe directory: "
+            f"cannot verify {target} is a directory because traversal is denied"
+        ) from error
+    except OSError as error:
+        if error.errno in (EACCES, EPERM):
+            raise ValueError(
+                f"production scheduler {field_name} must be a safe directory: "
+                f"cannot verify {target} is a directory because traversal is denied"
+            ) from error
+        raise ValueError(f"production scheduler {field_name} must be a directory") from error
+    if not stat.S_ISDIR(mode):
         raise ValueError(f"production scheduler {field_name} must be a directory")

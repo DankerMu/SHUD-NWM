@@ -1923,7 +1923,19 @@ def _safe_run_id(run_id: str) -> str:
 
 
 def _safe_resolved_evidence_root(evidence_root: Path) -> Path:
-    root = evidence_root.expanduser()
+    try:
+        root = evidence_root.expanduser()
+    except RuntimeError as error:
+        # ``Path.expanduser()`` throws a bare, errno-less RuntimeError when no
+        # home directory can be determined.  Both entrypoints that own this
+        # helper (``ProductionMetConfig.from_env`` and ``validate_met``) feed
+        # writes, so keeping a literal ``~`` component could target a path the
+        # operator did not name; report the module's structured evidence code
+        # instead (#1622).
+        raise ProductionMetValidationError(
+            "PRODUCTION_MET_EVIDENCE_PATH_UNSAFE",
+            f"Cannot determine the home directory for evidence root: {evidence_root}",
+        ) from error
     _refuse_symlink_components_to_deepest_existing(root)
     return root.resolve(strict=False)
 
