@@ -282,6 +282,57 @@ def test_runbook_has_no_bare_or_environment_updating_python_in_executable_fences
                 pytest.fail(f"fence {opening} masks a repo python with a bare entry: {logical!r}")
 
 
+# --- numbered deployment step 1: active-root rebuild qualifier -----------------
+# phase62/round-1 (#1856): step 1 is the natural first deployment action and
+# instructs BOTH nodes to rebuild host dependencies. It must qualify that the
+# node-22 canonical active checkout (`/scratch/frd_muziyao/NWM`) must NOT rebuild
+# or `uv sync` its shared `.venv` before #1831, while node-27 and non-active
+# checkouts may. The fence-only scanner cannot see this numbered prose, so this
+# prose-level seam is required.
+
+
+def _numbered_deployment_step_one(text: str) -> str:
+    """Return the numbered step 1 text under the ``## 5. 部署顺序`` section."""
+    section = text[text.index("## 5. 部署顺序") :]
+    match = re.search(r"(?:^|\n)1\. (.+?)(?=\n2\. |\n\n## )", section, flags=re.DOTALL)
+    assert match, "numbered deployment step 1 must exist under ## 5. 部署顺序"
+    return match.group(1)
+
+
+def _assert_numbered_step_one_active_root_qualifier(step_one: str) -> None:
+    """Step 1 must say the node-27/non-active checkouts may rebuild, and the
+    node-22 canonical active checkout must not rebuild/sync `.venv` before #1831."""
+    assert "node-27" in step_one, "step 1 must mention node-27"
+    assert "重建本机依赖" in step_one, "step 1 must keep the rebuild instruction"
+    assert "canonical active checkout" in step_one, "step 1 must name the canonical active checkout"
+    assert "/scratch/frd_muziyao/NWM" in step_one, "step 1 must name the active-root path"
+    assert "不得" in step_one, "step 1 must forbid active-root rebuild/sync before #1831"
+    assert "uv sync" in step_one, "step 1 must name `uv sync` as forbidden on the active root"
+    assert "#1831" in step_one, "step 1 must defer the active-root rebuild to #1831"
+
+
+def test_runbook_numbered_step_one_qualifies_active_root_rebuild_boundary() -> None:
+    text = _read()
+    step_one = _numbered_deployment_step_one(text)
+    _assert_numbered_step_one_active_root_qualifier(step_one)
+
+
+def test_mutation_numbered_step_one_removed_active_root_qualifier_goes_red() -> None:
+    """Deleting the active-root/#1831 qualifier while leaving every bash fence
+    intact must turn the prose-level seam red (fence-only validation would stay
+    green, which is exactly the gap this seam closes)."""
+    text = _read()
+    step_one = _numbered_deployment_step_one(text)
+    qualifier = "**node-22 的 canonical active checkout"
+    assert qualifier in step_one, "active-root qualifier anchor missing from step 1"
+    # Cut step 1 right before the active-root qualifier so the mutation only
+    # removes prose; the fenced bash bodies must remain byte-identical.
+    mutated = text.replace(step_one, step_one.split(qualifier)[0], 1)
+    assert [body for _, body in _bash_fences(mutated)] == [body for _, body in _bash_fences(text)]
+    with pytest.raises(AssertionError):
+        _assert_numbered_step_one_active_root_qualifier(_numbered_deployment_step_one(mutated))
+
+
 def test_runbook_no_bare_system_python_json_tool() -> None:
     text = _read()
     assert "python -m json.tool" not in text, "bare `python -m json.tool` must be converted"
