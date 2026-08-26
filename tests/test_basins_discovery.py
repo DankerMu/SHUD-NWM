@@ -111,8 +111,6 @@ def test_glob_non_sidecar_files_root_permission_denial_is_an_unreadable_skip(
     make_valid_model(root / "basin-a", "alias-a")
     real_realpath = os.path.realpath
 
-    real_realpath = os.path.realpath
-
     def denied_realpath(path: str, *, strict: bool = False) -> str:
         if strict and str(path) == str(root):
             raise PermissionError(errno.EACCES, "simulated denied traversal")
@@ -514,8 +512,6 @@ def test_required_file_resolution_permission_denial_is_unreadable_third_state(
     unreadable_name = "alias-a.tsd.lai"
     real_realpath = os.path.realpath
 
-    real_realpath = os.path.realpath
-
     def denied_realpath(path: str, *, strict: bool = False) -> str:
         if strict and str(path).endswith(unreadable_name):
             raise PermissionError(errno.EACCES, "simulated denied traversal")
@@ -547,8 +543,6 @@ def test_required_file_resolution_permission_denial_is_never_a_symlink_verdict(
     root = tmp_path / "basins"
     make_valid_model(root / "basin-a", "alias-a")
     unreadable_name = "alias-a.tsd.lai"
-    real_realpath = os.path.realpath
-
     real_realpath = os.path.realpath
 
     def denied_realpath(path: str, *, strict: bool = False) -> str:
@@ -679,6 +673,67 @@ def test_nested_model_required_input_final_stat_eaccess_is_hard_refusal_with_val
 
     assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
     assert exc_info.value.path == str(input_path)
+
+
+def test_nested_alias_required_input_strict_resolve_eaccess_is_hard_refusal_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # phase 6.2 audit 2 (depth retro): the deepest required-directory layer is
+    # `zhaochen/WEM/input/WEM` (the shud_input_name alias).  Strict-resolution
+    # EACCES exactly at the alias must hard-refuse with the alias path -- never
+    # be silently dropped by a RESOLVED-only enumeration into a misleading
+    # missing_input_dir partial inventory.
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "zhaochen" / "WEM", "WEM")
+    alias_path = root / "zhaochen" / "WEM" / "input" / "WEM"
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path) == str(alias_path):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(alias_path)
+
+
+def test_nested_alias_required_input_final_stat_eaccess_is_hard_refusal_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # phase 6.2 audit 2 final-stat twin: realpath of the alias succeeds but the
+    # final follow-stat raises EACCES; the deepest required-directory OWNER must
+    # hard-refuse with the same exact code and alias path.  The message pins the
+    # owner: the old path hard-refused later through _ensure_readable_directory
+    # ("cannot be stat'ed"), which diverged from the strict-resolve refusal.
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "zhaochen" / "WEM", "WEM")
+    alias_path = root / "zhaochen" / "WEM" / "input" / "WEM"
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == alias_path:
+            raise PermissionError(errno.EACCES, "simulated final-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(alias_path)
+    assert "alias directory is not readable" in str(exc_info.value)
+    assert "cannot be stat'ed" not in str(exc_info.value)
 
 
 def test_outside_denied_parent_symlink_candidate_is_blocking_outside_root(

@@ -198,34 +198,29 @@ def _find_model_dirs(
     for entry in _iter_child_dirs(root, budget=budget, depth=1):
         if _is_ignored_path(entry):
             continue
-        resolved_entry = _safe_resolve_under_root(entry, resolved_root, warnings)
-        if resolved_entry.state is _ResolveState.UNREADABLE:
-            # An unreadable model directory must not be silently omitted while
-            # a valid sibling keeps the inventory importable (cand-r1-01).
-            raise BasinsDiscoveryError(
-                "BASINS_DIRECTORY_UNREADABLE",
-                f"Basins model directory is not readable: {entry}",
-                path=str(entry),
-            )
-        if resolved_entry.state is not _ResolveState.RESOLVED:
+        # Required model-candidate depth: unreadable at either permission
+        # moment is a hard refusal, never a silent omission that lets a valid
+        # sibling keep the inventory importable (cand-r1-01, depth retro).
+        if not _require_readable_directory(
+            entry,
+            resolved_root,
+            warnings,
+            label="Basins model",
+        ):
             continue
-        _ensure_readable_directory(entry, "BASINS_DIRECTORY_UNREADABLE")
         if _has_child_dir(entry, "input", resolved_root, warnings):
             candidates.append(entry)
             continue
         for nested in _iter_child_dirs(entry, budget=budget, depth=2):
             if _is_ignored_path(nested):
                 continue
-            resolved_nested = _safe_resolve_under_root(nested, resolved_root, warnings)
-            if resolved_nested.state is _ResolveState.UNREADABLE:
-                raise BasinsDiscoveryError(
-                    "BASINS_DIRECTORY_UNREADABLE",
-                    f"Basins model directory is not readable: {nested}",
-                    path=str(nested),
-                )
-            if resolved_nested.state is not _ResolveState.RESOLVED:
+            if not _require_readable_directory(
+                nested,
+                resolved_root,
+                warnings,
+                label="Basins model",
+            ):
                 continue
-            _ensure_readable_directory(nested, "BASINS_DIRECTORY_UNREADABLE")
             if _has_child_dir(nested, "input", resolved_root, warnings):
                 candidates.append(nested)
     return sorted(candidates, key=lambda path: path.relative_to(root).as_posix().lower())
@@ -248,29 +243,34 @@ def _inventory_for_model(
         quirks.append("generated_sidecars_ignored")
 
     input_parent = model_dir / "input"
-    input_parent_resolution = _safe_resolve_under_root(input_parent, resolved_root, warnings)
-    if input_parent_resolution.state is _ResolveState.UNREADABLE:
-        # A required ``input/`` directory denied by an ancestor is a hard
-        # refusal, not an omitted model with a valid sibling (cand-r1-01).
-        raise BasinsDiscoveryError(
-            "BASINS_DIRECTORY_UNREADABLE",
-            f"Basins model input directory is not readable: {input_parent}",
-            path=str(input_parent),
-        )
-    if input_parent_resolution.state is not _ResolveState.RESOLVED:
+    # TOCTOU defense: the parent required-input layer is re-verified here
+    # (depth retro) through the same centralized owner as discovery.
+    if not _require_readable_directory(
+        input_parent,
+        resolved_root,
+        warnings,
+        label="Basins model input",
+    ):
         input_dirs = []
     else:
-        input_dirs = sorted(
-            (
-                path
-                for path in _iter_child_dirs(
-                    input_parent, budget=budget, depth=_relative_depth(root, input_parent) + 1
-                )
-                if not _is_ignored_path(path)
-                and _safe_resolve_under_root(path, resolved_root, warnings).state is _ResolveState.RESOLVED
-            ),
-            key=lambda path: path.name.lower(),
-        )
+        input_dirs = []
+        for path in _iter_child_dirs(
+            input_parent, budget=budget, depth=_relative_depth(root, input_parent) + 1
+        ):
+            if _is_ignored_path(path):
+                continue
+            # The deepest required alias depth (`input/<shud_input_name>`): the
+            # owner inspects each child result explicitly -- an UNREADABLE alias
+            # is a hard refusal, never a generator predicate that silently drops
+            # it into missing_input_dir (phase 6.2 audit 2).
+            if _require_readable_directory(
+                path,
+                resolved_root,
+                warnings,
+                label="Basins model input alias",
+            ):
+                input_dirs.append(path)
+        input_dirs = sorted(input_dirs, key=lambda path: path.name.lower())
     if not input_dirs:
         shud_input_name = ""
         input_dir = input_parent
@@ -280,7 +280,6 @@ def _inventory_for_model(
             quirks.append("multiple_input_dirs")
         input_dir = input_dirs[0]
         shud_input_name = input_dir.name
-    _ensure_readable_directory(input_dir, "BASINS_DIRECTORY_UNREADABLE")
 
     gis_dir = input_dir / "gis"
     required_files, missing_required_files = _match_required_files(input_dir, gis_dir, resolved_root, warnings)
@@ -750,38 +749,83 @@ def _iter_child_dirs(root: Path, *, budget: DiscoveryBudget | None = None, depth
         ) from error
 
 
-def _has_child_dir(root: Path, name: str, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
-    """True when ``root/name`` is a required ``input/`` directory.
+def _require_readable_directory(
+    path: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+    *,
+    label: str,
+) -> bool:
+    """Centralized required-directory owner for every required-depth layer.
 
-    This is the required-input owner: an unreadable required ``input/`` is a
-    hard refusal, never a silent optional-skip (phase 6.2: the real nested
-    layout ``zhaochen/WEM/input`` reached here and was omitted while a valid
-    sibling kept the inventory importable).  Missing/non-directory is False;
-    OUTSIDE/UNRESOLVABLE is False with the resolver's already-recorded blocking
-    warning.
+    One mapping for model candidates, required ``input/`` parents, and the
+    required ``input/<shud_input_name>`` alias children (depth retro): the two
+    permission moments must converge, so both strict-resolution UNREADABLE and
+    final-follow-stat UNREADABLE raise the same exact
+    ``BASINS_DIRECTORY_UNREADABLE``.  MISSING or non-directory is False under
+    the established missing semantics; OUTSIDE/UNRESOLVABLE is False with the
+    resolver's already-recorded blocking warning (never hard-mapped to a
+    permission refusal).  A RESOLVED directory additionally keeps the
+    mode-bit readable/searchable enforcement.
     """
 
-    child = root / name
-    resolution = _safe_resolve_under_root(child, resolved_root, warnings)
+    resolution = _safe_resolve_under_root(path, resolved_root, warnings)
     if resolution.state is _ResolveState.UNREADABLE:
         raise BasinsDiscoveryError(
             "BASINS_DIRECTORY_UNREADABLE",
-            f"Basins model input directory is not readable: {child}",
-            path=str(child),
+            f"{label} directory is not readable: {path}",
+            path=str(path),
         )
     if resolution.state is not _ResolveState.RESOLVED:
         return False
-    kind = _classify_directory_kind(child)
+    kind = _classify_directory_kind(path)
     if kind is _FileKind.UNREADABLE:
-        # The strict realpath succeeded but the final follow-stat is denied;
-        # the required-input owner hard-refuses with the same structured code
-        # (phase 6.2).
         raise BasinsDiscoveryError(
             "BASINS_DIRECTORY_UNREADABLE",
-            f"Basins model input directory is not readable: {child}",
-            path=str(child),
+            f"{label} directory is not readable: {path}",
+            path=str(path),
         )
-    return kind is _FileKind.REGULAR
+    if kind is not _FileKind.REGULAR:
+        return False
+    # Mode-bit readable/searchable enforcement, mirroring the old
+    # _ensure_readable_directory gate for a present required directory.
+    try:
+        mode = path.stat().st_mode
+    except OSError as error:
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"{label} directory cannot be stat'ed: {path}",
+            path=str(path),
+        ) from error
+    if not mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"{label} directory is not readable: {path}",
+            path=str(path),
+        )
+    if not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"{label} directory is not searchable: {path}",
+            path=str(path),
+        )
+    return True
+
+
+def _has_child_dir(root: Path, name: str, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
+    """True when ``root/name`` is a required ``input/`` directory.
+
+    Delegates the required-directory verdict to the centralized owner; a
+    required ``input/`` that is unreadable at either permission moment is a
+    hard refusal, never a silent optional-skip (phase 6.2, depth retro).
+    """
+
+    return _require_readable_directory(
+        root / name,
+        resolved_root,
+        warnings,
+        label="Basins model input",
+    )
 
 
 def _is_safe_directory(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
