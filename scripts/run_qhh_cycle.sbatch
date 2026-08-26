@@ -24,6 +24,15 @@ fi
 
 ROOT_DIR="${QHH_REPO_ROOT:-/scratch/frd_muziyao/NWM}"
 cd "$ROOT_DIR"
+ROOT_DIR="$(pwd -P)"
+
+if [[ "$ROOT_DIR" == "/scratch/frd_muziyao/NWM" ]]; then
+  printf 'BLOCKED: the QHH diagnostic chain cannot run from the canonical active checkout (%s).\n' "$ROOT_DIR" >&2
+  printf 'Run it from an explicit detached diagnostic worktree via QHH_DIAGNOSTIC_CHECKOUT using\n' >&2
+  printf "that worktree's exact .venv/bin/python interpreter. See scripts/diagnostic/qhh/README.md\n" >&2
+  printf 'for the authoritative run boundary.\n' >&2
+  exit 2
+fi
 
 mkdir -p "${QHH_RUN_ROOT:-$ROOT_DIR/.nhms-runs/qhh-continuous}/slurm-logs"
 
