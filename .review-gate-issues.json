@@ -2122,7 +2122,13 @@
     "1621": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1859,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     },
     "1860": {
       "ceilingPrs": [],

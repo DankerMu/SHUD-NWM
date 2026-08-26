@@ -154,7 +154,9 @@ The two arms SHALL produce byte-identical products for the same such input, so t
 
 The safe-directory final-component guard SHALL decide a final-segment symlink by strict real-path resolution and SHALL refuse a resolution loop with the module's structured configuration error on every supported CPython, because non-strict resolution raises an errno-less `RuntimeError` on CPython 3.11 and 3.12 and silently adopts the loop as the field's value on 3.13 and later.
 
-Every strict real-path failure other than a loop SHALL fall back to non-strict real-path resolution rather than being refused, because the guard accepts all of them today — a target that does not exist, a target whose parent denies traversal, and a target reached through a regular file are each accepted on the current code — and refusing any of them would silently turn acceptance into rejection. The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer, because that number differs between the development platform and the deployment platform. The guard's separate metadata-lookup failure handler SHALL instead keep its existing refusal for every error number other than a loop, so that the non-loop geometries already pinned against that handler stay green verbatim.
+Every strict real-path failure other than a loop SHALL first fall back to non-strict real-path resolution, preserving the established resolution product for a target that does not exist, a target whose parent denies traversal, or a target reached through a regular file. The fallback SHALL NOT itself be treated as proof that the target is absent or a directory: the subsequent final-target classification SHALL distinguish absence, directory, non-directory, and metadata denial without relying on the interpreter-dependent exception swallowing of `Path.exists()` or `Path.is_dir()`. `EACCES` or `EPERM` at that classification boundary SHALL fail closed with the guard's structured `ValueError` safety contract, never leak a raw permission exception and never be accepted as a missing target.
+
+The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer. The guard's separate metadata-lookup failure handler SHALL keep its existing refusal for every error number other than a loop, so that the non-loop geometries already pinned against that handler stay green verbatim.
 
 #### Scenario: A final-segment loop inside the workspace is refused identically on both interpreter arms
 
@@ -176,11 +178,19 @@ Every strict real-path failure other than a loop SHALL fall back to non-strict r
 - **WHEN** the guard runs
 - **THEN** it returns without raising, exactly as before this change
 
-#### Scenario: The other non-loop strict-resolution failures are still accepted
+#### Scenario: A final-segment target denied by an ancestor is refused identically
 
-- **GIVEN** in turn a final-segment symlink whose target sits under a parent that denies traversal, and one whose path is reached through a regular file
+- **GIVEN** a final-segment symlink whose resolved target lies under a parent that denies traversal
+- **WHEN** the guard classifies the resolved target on any supported CPython
+- **THEN** it raises the guard's structured `ValueError` safety refusal
+- **AND** it neither leaks a raw `PermissionError` nor accepts the target as absent
+- **AND** the refusal is not misattributed to a symlink loop
+
+#### Scenario: A target path reached through a regular file keeps its compatibility verdict
+
+- **GIVEN** a final-segment symlink whose target path is reached through a regular file
 - **WHEN** the guard runs
-- **THEN** each returns without raising, exactly as before this change
+- **THEN** it preserves the pre-change non-loop fallback verdict rather than treating the strict-resolution `ENOTDIR` as a symlink loop
 
 #### Scenario: A dangling final-segment symlink pointing outside the workspace is still refused
 
