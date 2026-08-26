@@ -10,8 +10,7 @@ resource_profiles:
     # so a per-basin override cannot protect a slow member: this default is the
     # effective ceiling for every member. HHe's SHUD wall-clock swings with forcing
     # intensity (7 min .. >5h50m observed) and 06:00:00 killed IFS 2026071012
-    # (job 24081_1, FAILED at 05:50:38). SHUD gains nothing from extra threads, so
-    # wall-clock is the only lever. Registry already declares walltime_minutes=720
+    # (job 24081_1, FAILED at 05:50:38). Registry already declares walltime_minutes=720
     # for these basins; 14h keeps margin above that.
     walltime: "14:00:00"
     max_concurrent: 32

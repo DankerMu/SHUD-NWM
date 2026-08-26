@@ -630,6 +630,7 @@ class SHUDRuntime:
                     "BINARY_OUTPUT": "0",
                     "DT_QR_DOWN": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
                     "SCR_INTV": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
+                    "NUM_OPENMP": str(_shud_threads(manifest)),
                 }
             )
             update_ic_step = _update_ic_step_minutes(manifest)
@@ -3029,8 +3030,11 @@ def _runtime_command(
 ) -> list[str]:
     executable = str(shud_executable)
     if _is_shud_project_mode(manifest or {}, command_style):
-        runtime = (manifest or {}).get("runtime") or {}
-        threads = int(runtime.get("threads") or runtime.get("num_threads") or 1)
+        # SHUD's ``-n`` is parsed into n_lambda (CMA-ES), not the thread count
+        # (SHUD src/classes/CommandIn.cpp). Threads come from cfg.para NUM_OPENMP
+        # and OMP_NUM_THREADS; ``-n`` is kept only to preserve the existing
+        # command shape.
+        threads = _shud_threads(manifest or {})
         args = ["-o", str(output_dir or cfg_path.parent), "-n", str(threads), _project_name(manifest or {})]
     else:
         args = [str(cfg_path)]
@@ -4060,6 +4064,20 @@ def _output_interval_minutes(manifest: dict[str, Any], default_interval_minutes:
         or default_interval_minutes
     )
     return int(value)
+
+
+def _shud_threads(manifest: dict[str, Any]) -> int:
+    """OpenMP thread count for this run, clamped to >= 1.
+
+    Single source of truth for both the ``NUM_OPENMP`` written into cfg.para and
+    the ``-n`` command argument. Published model packages carry inconsistent
+    ``NUM_OPENMP`` values (1, 4, and 40 have all been observed against a 4-core
+    allocation), so the pipeline overrides the template unconditionally rather
+    than trusting whatever the modeller shipped.
+    """
+    runtime = manifest.get("runtime") or {}
+    value = runtime.get("threads") or runtime.get("num_threads") or 1
+    return max(1, int(value))
 
 
 def _update_ic_step_minutes(manifest: dict[str, Any]) -> int | None:
