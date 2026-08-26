@@ -294,7 +294,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # joins), and to 31 in #1405 (the canonical run-id suite, 20 tests in
     # 0.03s), and to 32 in #1735 (the lineage resolver suite, 24 tests in
     # 0.09s — the route that closes `services/orchestrator/__init__.py`'s
-    # importer gap), and to 34 in #1850 (the two accepted-submit-identity
+    # importer gap), and to 36 in #1564 (the four split-demote suites,
+    # added at ea0780fa), and to 38 in #1850 (the two accepted-submit-identity
     # gateway-reconcile suites, both sub-second beside the lane they join),
     # and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
