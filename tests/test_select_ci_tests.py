@@ -294,7 +294,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # joins), and to 31 in #1405 (the canonical run-id suite, 20 tests in
     # 0.03s), and to 32 in #1735 (the lineage resolver suite, 24 tests in
     # 0.09s — the route that closes `services/orchestrator/__init__.py`'s
-    # importer gap), and stays FROZEN here as a
+    # importer gap), and to 34 in #1850 (the two accepted-submit-identity
+    # gateway-reconcile suites, both sub-second beside the lane they join),
+    # and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -310,6 +312,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_journal.py",
         "tests/test_file_orchestration_journal_read_cache.py",
         "tests/test_file_orchestration_migration.py",
+        "tests/test_gateway_reconcile_binding_provenance.py",
+        "tests/test_gateway_reconcile_claimant_exclusivity.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
         "tests/test_orchestration_chain.py",
@@ -4644,6 +4648,10 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
     # operator-recovery chain suite at function scope, so the derived AST scan
     # sees none of them). They join the 22 partitions in the gateway-helper-only
     # exact selection.
+    #
+    # #1850: the two accepted-submit-identity suites are derived importers of
+    # the gateway helper and join the exact selection with it; the support
+    # module itself and the 1870-test scheduler suite stay out.
     selected_helpers = set(
         select_tests(["tests/gateway_reconcile_helpers.py"], repo_root=Path("."))
     )
@@ -4651,6 +4659,14 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         partition
         for partition in GATEWAY_RECONCILE_PARTITIONS
         if partition != "tests/test_gateway_reconcile_store_reset.py"
+    } | {
+        # #1850: the two accepted-submit-identity suites are direct top-level
+        # importers of this helper, but they are NOT members of the frozen
+        # GATEWAY_RECONCILE_PARTITIONS authority (that tuple is the 23-partition
+        # reconcile/persistence disposition authority), so they are listed
+        # explicitly here.
+        "tests/test_gateway_reconcile_binding_provenance.py",
+        "tests/test_gateway_reconcile_claimant_exclusivity.py",
     } | {
         "tests/test_orchestrator_demote_cli_security.py",
         "tests/test_orchestrator_demote_core_cas.py",
