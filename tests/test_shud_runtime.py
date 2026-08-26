@@ -8519,3 +8519,87 @@ def test_quarantined_residue_final_ic_is_unpublishable_by_the_state_gate(tmp_pat
     residue = tmp_path / "workspace" / "runs" / run_id / "output_residue" / "previous"
     assert (residue / "demo.cfg.ic.update").read_text(encoding="utf-8") == _STALE_ATTEMPT_FINAL_IC
     assert not (tmp_path / "workspace" / "runs" / run_id / "output" / "demo.cfg.ic.update").exists()
+
+
+def _cfg_value(cfg_text: str, key: str) -> str:
+    for line in cfg_text.splitlines():
+        parts = line.split(maxsplit=1)
+        if parts and parts[0] == key:
+            return parts[1].strip()
+    raise AssertionError(f"{key} missing from cfg.para:\n{cfg_text}")
+
+
+def test_cfg_para_overrides_published_num_openmp_with_allocated_threads(tmp_path: Path) -> None:
+    """A published NUM_OPENMP must never survive into the run.
+
+    Delivered packages disagree with each other (1, 4 and 40 have all shipped
+    against a 4-core allocation). 40 threads on 4 allocated cores oversubscribes
+    the node, which measurably starves the job under the OpenMP build.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "alias-a.cfg.para").write_text(
+        "START\t0\nEND\t3\nNUM_OPENMP\t40\nOUTPUT_DIR\t.\n", encoding="utf-8"
+    )
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["runtime"]["threads"] = 4
+
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    runtime.prepare_workspace(manifest, input_dir)
+
+    cfg = runtime.generate_cfg_para(manifest, input_dir, output_dir).read_text(encoding="utf-8")
+
+    assert _cfg_value(cfg, "NUM_OPENMP") == "4"
+    assert "40" not in _cfg_value(cfg, "NUM_OPENMP")
+
+
+def test_cfg_para_appends_num_openmp_when_template_omits_it(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "alias-a.cfg.para").write_text("START\t0\nEND\t3\nOUTPUT_DIR\t.\n", encoding="utf-8")
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["runtime"]["threads"] = 4
+
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    runtime.prepare_workspace(manifest, input_dir)
+
+    cfg = runtime.generate_cfg_para(manifest, input_dir, output_dir).read_text(encoding="utf-8")
+
+    assert _cfg_value(cfg, "NUM_OPENMP") == "4"
+
+
+def test_cfg_para_num_openmp_defaults_to_single_thread_when_manifest_is_silent(
+    tmp_path: Path,
+) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    package = object_root / "models" / "basins_basin_a_shud" / "vbasins-test" / "package"
+    (package / "alias-a.cfg.para").write_text(
+        "START\t0\nEND\t3\nNUM_OPENMP\t40\nOUTPUT_DIR\t.\n", encoding="utf-8"
+    )
+    checksums = _write_standard_shud_forcing(object_root)
+    runtime = _runtime(tmp_path, FakeHydroRunRepository())
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["runtime"].pop("threads", None)
+
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    runtime.prepare_workspace(manifest, input_dir)
+
+    cfg = runtime.generate_cfg_para(manifest, input_dir, output_dir).read_text(encoding="utf-8")
+
+    assert _cfg_value(cfg, "NUM_OPENMP") == "1"
