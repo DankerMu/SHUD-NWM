@@ -5,7 +5,7 @@
 > 历史证据说明：本文记录 2026-05-26 QHH smoke 的现场结果，其中“发现 13 个
 > 模型目录”只描述该次复测，不是当前生产 registry authority。当前模型清单与
 > 数量见 [`current-production-ops.md`](current-production-ops.md)。
-
+>
 > 执行边界（DIAGNOSTIC-ONLY）：本文件的可执行 recipe 只适用于 **detached
 > diagnostic worktree**，禁止在 canonical active checkout（node-22
 > `/scratch/frd_muziyao/NWM`）里执行——它共享的 `.venv` 归在线服务所有，任何
