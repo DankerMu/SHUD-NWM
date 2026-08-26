@@ -19,6 +19,7 @@ from services.orchestrator.scheduler_discovery_evidence import (  # noqa: F401
 from services.orchestrator.scheduler_init_state_match import (
     TERMINAL_INIT_STATE_ABSENT,
     TERMINAL_INIT_STATE_CONFLICT,
+    TERMINAL_INIT_STATE_MATCH,
     init_state_field,
     terminal_init_state_match,
 )
@@ -625,6 +626,25 @@ def _terminal_init_state_verdict(
         Unchanged — the verdict path bypasses the shared helper and keeps
         today's gap, which ``conflict`` expresses here.
     """
+
+    if strict_evidence.get("mode") == _scheduler_generation.PACKAGED_IC_BOOTSTRAP_MODE:
+        hydro_run = terminal_evidence.get("hydro_run")
+        run_manifest_initial_state = terminal_evidence.get("run_manifest_initial_state")
+        expected_checksum = str(strict_evidence.get("packaged_ic_checksum") or "")
+        if (
+            terminal_evidence.get("terminal_source") == "hydro_run"
+            and isinstance(hydro_run, Mapping)
+            and hydro_run.get("quality") == "packaged_calibrated_state"
+            and init_state_field(hydro_run, "state_id") in (None, "")
+            and expected_checksum
+            and isinstance(run_manifest_initial_state, Mapping)
+            and run_manifest_initial_state.get("quality") == "packaged_calibrated_state"
+            and init_state_field(run_manifest_initial_state, "state_id") in (None, "")
+            and str(run_manifest_initial_state.get("packaged_ic_checksum") or "")
+            == expected_checksum
+        ):
+            return TERMINAL_INIT_STATE_MATCH
+        return TERMINAL_INIT_STATE_CONFLICT
 
     if not bool(strict_evidence.get("ready")):
         not_ready_reason = str(strict_evidence.get("reason") or "")

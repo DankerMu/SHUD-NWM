@@ -987,8 +987,8 @@ class _ForcingSidecarProvenance:
     package_uri: str | None = None
     #: The manifest uri the record itself recorded -- EVIDENCE ONLY, never probed.
     manifest_uri: str | None = None
-    #: The manifest object key derived from this candidate's own sidecar key
-    #: directory: the only thing the existence probe is ever given.
+    #: The manifest probe derived from this candidate's own sidecar directory:
+    #: an object key in primary storage or a contained local path in copyback.
     manifest_probe_key: str | None = None
     forcing_version_id: str | None = None
 
@@ -999,8 +999,21 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
     if not basin_version_id or not model_id:
         return _ForcingSidecarProvenance(False, "identity_incomplete")
     resource_profile = candidate.resource_profile if isinstance(candidate.resource_profile, Mapping) else {}
-    object_root = resource_profile.get("object_store_root") or os.getenv("OBJECT_STORE_ROOT")
-    if object_root in (None, ""):
+    primary_root = resource_profile.get("object_store_root") or os.getenv("OBJECT_STORE_ROOT")
+    copyback_root = (
+        resource_profile.get("object_store_copyback_root")
+        or resource_profile.get("copyback_root")
+        or os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")
+    )
+    roots: list[tuple[str, str]] = []
+    seen_roots: set[str] = set()
+    for role, value in (("primary", primary_root), ("copyback", copyback_root)):
+        root_text = str(value or "").strip()
+        if not root_text or root_text in seen_roots:
+            continue
+        seen_roots.add(root_text)
+        roots.append((role, root_text))
+    if not roots:
         # NOT the ``_object_manifest_is_missing`` fail-open quirk: an unconfigured
         # store means this tier cannot witness anything, not that the package exists.
         return _ForcingSidecarProvenance(False, "store_unconfigured")
@@ -1014,21 +1027,31 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
     except (TypeError, ValueError):
         return _ForcingSidecarProvenance(False, "identity_incomplete")
     key = f"{key_dir}/{_FORCING_SIDECAR_FILENAME}"
-    try:
-        store = LocalObjectStore(str(object_root), object_store_prefix=prefix)
-        if not store.exists(key):
-            return _ForcingSidecarProvenance(False, "sidecar_absent")
-        if store.size(key) > _FORCING_SIDECAR_MAX_BYTES:
-            # Size pre-check so an anomalously large record is distinguishable
-            # from a permission/IO read denial (#1203 round-2 V5-C1): the two
-            # have completely different operator handling, and the runbook
-            # routing table routes them differently.  ``store.size`` raising
-            # ``ObjectStoreError`` on a stat fault is caught below and degrades
-            # to ``sidecar_unreadable`` -- never escapes.
-            return _ForcingSidecarProvenance(False, "sidecar_oversized")
-        content = store.read_bytes_limited(key, max_bytes=_FORCING_SIDECAR_MAX_BYTES)
-    except (ObjectStoreError, OSError, ValueError):
-        return _ForcingSidecarProvenance(False, "sidecar_unreadable")
+    content: bytes | None = None
+    manifest_probe_key: str | None = None
+    for role, object_root in roots:
+        try:
+            store = LocalObjectStore(object_root, object_store_prefix=prefix)
+            if not store.exists(key):
+                continue
+            if store.size(key) > _FORCING_SIDECAR_MAX_BYTES:
+                # Size pre-check so an anomalously large record is distinguishable
+                # from a permission/IO read denial (#1203 round-2 V5-C1): the two
+                # have completely different operator handling, and the runbook
+                # routing table routes them differently.  ``store.size`` raising
+                # ``ObjectStoreError`` on a stat fault is caught below and degrades
+                # to ``sidecar_unreadable`` -- never escapes.
+                return _ForcingSidecarProvenance(False, "sidecar_oversized")
+            content = store.read_bytes_limited(key, max_bytes=_FORCING_SIDECAR_MAX_BYTES)
+            manifest_key = _sidecar_manifest_probe_key(key_dir)
+            manifest_probe_key = (
+                str(store.resolve_path(manifest_key)) if role == "copyback" else manifest_key
+            )
+            break
+        except (ObjectStoreError, OSError, ValueError):
+            return _ForcingSidecarProvenance(False, "sidecar_unreadable")
+    if content is None or manifest_probe_key is None:
+        return _ForcingSidecarProvenance(False, "sidecar_absent")
     try:
         record = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
@@ -1052,7 +1075,7 @@ def _forcing_sidecar_provenance(candidate: SchedulerCandidateLike) -> _ForcingSi
         "sidecar_witness",
         package_uri=package_uri or None,
         manifest_uri=recorded_manifest_uri,
-        manifest_probe_key=_sidecar_manifest_probe_key(key_dir),
+        manifest_probe_key=manifest_probe_key,
         forcing_version_id=str(record.get("forcing_version_id") or "") or None,
     )
 

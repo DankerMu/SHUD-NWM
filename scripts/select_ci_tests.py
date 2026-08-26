@@ -350,6 +350,20 @@ NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
 NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
 
+# #1860: the checked-in calibration declaration is a non-Python producer with no
+# mechanically derivable import closure, so the route must be explicit and test
+# its own continued existence. The three consumers are the package-manifest
+# suite (owns `basins_calibration_overrides`' packaging contract), the
+# scheduler-registry publisher suite (owns the declaration's default-load and
+# exact-content oracles), and the selector meta-guard (holds the route pins).
+# Exact set: no core-smoke fallback, no collect-only collapse.
+CALIBRATION_OVERRIDES_PATH = "config/calibration_overrides.yaml"
+CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
+    "tests/test_basins_package.py",
+    "tests/test_publish_scheduler_file_registry.py",
+    SELECTOR_META_GUARD_TEST,
+)
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -1741,6 +1755,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ".github/workflows/ci.yml",
         (SELECTOR_META_GUARD_TEST,),
+    ),
+    PathTestRule(
+        # #1860: the calibration declaration's assertion-level consumers. The
+        # exact backend filter entry starts the targeted gate; this rule
+        # converts that lane into real assertions — never the core-smoke
+        # fallback or a zero-assertion collect-only run.
+        CALIBRATION_OVERRIDES_PATH,
+        CALIBRATION_OVERRIDES_CONSUMER_TESTS,
     ),
     PathTestRule(
         # #1646: a pytest-config change must re-prove the thread-exception

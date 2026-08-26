@@ -2123,6 +2123,17 @@
       "ceilingPrs": [],
       "gateEntries": 1,
       "closed": []
+    },
+    "1860": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1864,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
     }
   },
   "1736": {
