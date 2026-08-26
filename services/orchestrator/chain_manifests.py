@@ -943,6 +943,11 @@ def build_model_run_assembly(
             basin.get("shud_threads")
             or _nested_mapping(basin.get("resource_profile")).get("shud_threads")
             or _nested_mapping(basin.get("runtime")).get("threads")
+            # job-array-orchestration spec: shud_threads defaults to cpus_per_task.
+            # Every core.model_instance row carries cpus_per_task but none carries
+            # shud_threads, so falling straight to 1 pinned production to a single
+            # thread and silently forfeited the OpenMP build's cores.
+            or _nested_mapping(basin.get("resource_profile")).get("cpus_per_task")
             or 1
         ),
         "mode": "native_shud_project",
