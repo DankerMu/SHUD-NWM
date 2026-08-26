@@ -12,15 +12,28 @@ set -euo pipefail
 # only as a manual bring-up/triage lane and for the static reference test
 # (tests/test_qhh_scripts_static.py).
 #
+# This chain may only run from a detached diagnostic worktree with its own
+# virtualenv; the canonical active checkout (/scratch/frd_muziyao/NWM) must fail
+# closed. Run boundary: scripts/diagnostic/qhh/README.md.
 # Smoke (manual debugging) — single cycle via the diagnostic continuous runner:
-#   uv run python scripts/run_qhh_continuous.py --once --executor slurm
+#   "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" "$QHH_DIAGNOSTIC_CHECKOUT/scripts/run_qhh_continuous.py" --once --executor slurm
 # Minimal PASS condition: exits 0 and the cycle reaches the `published` status —
 # i.e. this script writes its terminal state file with status="published" after
-# create_qhh_shud_manifest -> SHUD runtime -> parse -> publish complete. See
-# docs/runbooks/qhh-22-business-bringup.md §3 for the documented bring-up invocation.
+# create_qhh_shud_manifest -> SHUD runtime -> parse -> publish complete. Current
+# invocation authority is scripts/diagnostic/qhh/README.md (Run Boundary); the
+# historical bring-up baseline (docs/runbooks/qhh-22-business-bringup.md §3) is
+# retained evidence only and is not current invocation guidance.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
+
+if [[ "$ROOT_DIR" == "/scratch/frd_muziyao/NWM" ]]; then
+  printf '[qhh-cycle] BLOCKED: the QHH diagnostic chain cannot run from the canonical active checkout (%s).\n' "$ROOT_DIR"
+  printf '[qhh-cycle] Run it from an explicit detached diagnostic worktree via QHH_DIAGNOSTIC_CHECKOUT using\n'
+  printf "[qhh-cycle] that worktree's exact .venv/bin/python interpreter. See scripts/diagnostic/qhh/README.md\n"
+  printf '[qhh-cycle] for the authoritative run boundary.\n'
+  exit 2
+fi
 
 RUN_ROOT="${QHH_RUN_ROOT:-$ROOT_DIR/.nhms-runs/qhh-continuous}"
 OBJECT_ROOT="${OBJECT_STORE_ROOT:-$RUN_ROOT}"

@@ -1,8 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# DIAGNOSTIC-ONLY: standalone qhh GFS backend-smoke reproduction entrypoint.
+#
+# This script is a developer diagnostic / reproduction fallback and is NOT the
+# production path. The supported production path is the generic continuous daemon
+# (`nhms-pipeline plan-production --continuous` -> services/orchestrator/scheduler.py
+# `run_continuous`), which submits through the standalone Slurm gateway and carries
+# multi-basin concurrency + cross-cycle warm-start that this script does not. Do not
+# wire this into the daemon. Retained only as a manual bring-up/triage/reproduction
+# lane and for the static reference test (tests/test_qhh_scripts_static.py).
+#
+# This chain may only run from a detached diagnostic worktree with its own
+# virtualenv; the canonical active checkout (/scratch/frd_muziyao/NWM) must fail
+# closed. Run boundary: scripts/diagnostic/qhh/README.md.
+# All direct Python snippets/scripts/modules run through this detached worktree's
+# exact `"$ROOT_DIR/.venv/bin/python"` interpreter; `uv run nhms-*` / dynamic
+# forcing CLIs are reachable only after the detached + exact-interpreter guard.
+# Bare `uv run python` / system `python` never launch this chain.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
+
+if [[ "$ROOT_DIR" == "/scratch/frd_muziyao/NWM" ]]; then
+  printf '[qhh-smoke] BLOCKED: the QHH diagnostic chain cannot run from the canonical active checkout (%s).\n' "$ROOT_DIR" >&2
+  printf '[qhh-smoke] Run it from an explicit detached diagnostic worktree via QHH_DIAGNOSTIC_CHECKOUT using\n' >&2
+  printf "[qhh-smoke] that worktree's exact venv interpreter. See scripts/diagnostic/qhh/README.md\n" >&2
+  printf '[qhh-smoke] for the authoritative run boundary.\n' >&2
+  exit 2
+fi
+
+PYTHON="$ROOT_DIR/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  printf '[qhh-smoke] BLOCKED: detached worktree has no exact .venv/bin/python interpreter (%s).\n' "$PYTHON" >&2
+  printf '[qhh-smoke] The backend smoke chain refuses to start without its own virtualenv; see scripts/diagnostic/qhh/README.md.\n' >&2
+  exit 2
+fi
 
 RUN_ROOT="${QHH_RUN_ROOT:-$ROOT_DIR/.nhms-runs/qhh-smoke}"
 OBJECT_ROOT="${OBJECT_STORE_ROOT:-$RUN_ROOT}"
@@ -26,7 +59,7 @@ write_json_status() {
   local status="$2"
   local reason="$3"
   mkdir -p "$(dirname "$path")"
-  python - "$path" "$status" "$reason" <<'PY'
+  "$PYTHON" - "$path" "$status" "$reason" <<'PY'
 import json
 import sys
 from datetime import UTC, datetime
@@ -50,7 +83,7 @@ require_database() {
     return 1
   fi
 
-  if ! uv run python - <<'PY'
+  if ! "$PYTHON" - <<'PY'
 import os
 import psycopg2
 
@@ -118,15 +151,15 @@ fi
 
 if [[ "${QHH_USE_SMOKE_MIGRATIONS:-1}" == "1" ]]; then
   log "applying smoke database migrations without TimescaleDB"
-  uv run python scripts/apply_smoke_migrations.py | tee "$RUN_ROOT/migrate.log"
+  "$PYTHON" scripts/apply_smoke_migrations.py | tee "$RUN_ROOT/migrate.log"
 else
   log "applying production database migrations"
-  uv run python -m packages.common.migrate | tee "$RUN_ROOT/migrate.log"
+  "$PYTHON" -m packages.common.migrate | tee "$RUN_ROOT/migrate.log"
 fi
 
 if [[ "${QHH_RESET_SMOKE_DB:-0}" == "1" ]]; then
   log "resetting qhh smoke database rows for repeatable full-chain runs"
-  uv run python scripts/reset_qhh_smoke_db.py | tee "$RUN_ROOT/reset-qhh-smoke-db.stdout.json"
+  "$PYTHON" scripts/reset_qhh_smoke_db.py | tee "$RUN_ROOT/reset-qhh-smoke-db.stdout.json"
 fi
 
 log "importing qhh registry records"
@@ -138,10 +171,10 @@ uv run nhms-model import-basins-registry \
   --auth-role "$AUTH_ROLE" | tee "$RUN_ROOT/import-basins-registry.stdout.json"
 
 log "seeding qhh standard forcing stations from qhh.tsd.forc"
-uv run python scripts/seed_qhh_forcing_stations.py | tee "$RUN_ROOT/seed-qhh-forcing-stations.stdout.json"
+"$PYTHON" scripts/seed_qhh_forcing_stations.py | tee "$RUN_ROOT/seed-qhh-forcing-stations.stdout.json"
 
 log "seeding qhh SHUD output river identities"
-uv run python scripts/seed_qhh_shud_output_segments.py | tee "$RUN_ROOT/seed-qhh-shud-output-segments.stdout.json"
+"$PYTHON" scripts/seed_qhh_shud_output_segments.py | tee "$RUN_ROOT/seed-qhh-shud-output-segments.stdout.json"
 
 if ! require_cycle_time; then
   exit 0
@@ -166,8 +199,8 @@ fi
 
 log "creating qhh SHUD runtime manifest"
 export QHH_RUN_ID="${QHH_RUN_ID:-qhh_gfs_${QHH_CYCLE_TIME}_smoke}"
-uv run python scripts/create_qhh_shud_manifest.py | tee "$RUN_ROOT/create-qhh-shud-manifest.stdout.json"
-RUN_ID="$(python - "$RUN_ROOT/create-qhh-shud-manifest.stdout.json" <<'PY'
+"$PYTHON" scripts/create_qhh_shud_manifest.py | tee "$RUN_ROOT/create-qhh-shud-manifest.stdout.json"
+RUN_ID="$("$PYTHON" - "$RUN_ROOT/create-qhh-shud-manifest.stdout.json" <<'PY'
 import json
 import sys
 print(json.loads(open(sys.argv[1], encoding="utf-8").read())["run_id"])
@@ -183,7 +216,7 @@ log "parsing SHUD output for $RUN_ID"
 uv run nhms-parse shud-output --run-id "$RUN_ID" | tee "$RUN_ROOT/parse-shud-output.stdout.json"
 
 log "summarizing qhh smoke results"
-uv run python scripts/summarize_qhh_smoke_results.py | tee "$RUN_ROOT/qhh-result-summary.stdout.json"
+"$PYTHON" scripts/summarize_qhh_smoke_results.py | tee "$RUN_ROOT/qhh-result-summary.stdout.json"
 
 log "publishing qhh display products for API/frontend consumption"
 uv run nhms-orchestrator publish-qdown --cycle-id "gfs_${QHH_CYCLE_TIME}" \

@@ -2137,3 +2137,40 @@ recall, while rotated lenses remain available for blind-spot recall. It does
 not support removing either. The aggregate remains overwhelmingly rotated
 (`295` versus `80`), so **keep rotation** unchanged; the attribution caveats and
 maintainer-only reversal rule above continue to apply.
+
+## Revisit 2026-08-26 (post #1571/#1634/#1619 split, PRs #1853/#1854/#1856) — keep; one real core catch, one final-review attribution artifact
+
+After recording the terminal parent and all three split children,
+`loop_log_audit.py` reports **132 multi-round merged PRs**, with later-round
+catches **core=81 / rotated=296** (previously 131 / 80 / 295). The decision
+remains **keep**, but the symmetric `+1 / +1` delta is not a symmetric
+core-versus-rotation experiment.
+
+The `core +1` is real pinned-depth recall. PR #1856 Round 2 kept the Round 1
+`integration` lens and found that the dedicated environment oracles added by
+the preceding fix existed but were unreachable from producer-only PRs: some
+producers selected older suites and four did not start the backend lane at all.
+That repeat correctly triggered a same-invariant depth Retro; the next round
+was clean after the producer → selector → CI-lane matrix was made explicit.
+
+The `rotated +1` is the already-recorded **round-role attribution artifact**,
+not evidence about a rotated comprehensive-review slot. It came from Phase 7's
+`gap-sweep`, which found six additional current producers that did not route the
+997-line node-22 owner. Phase 7 is structurally independent of the comprehensive
+round lens mix, but `rotation_attribution()` classifies any later catch whose
+lens name is absent from Round 1 as rotated. This is exactly the contamination
+recorded in the earlier PR #1624/#1636/#1643 revisits. The catch supports keeping
+an independent final sweep; it does not estimate free-slot rotation's effect.
+
+The terminal parent adds a separate governance result. PR #1822 hit the
+five-round ceiling and stopped; the user-selected split then converged in one,
+one, and three rounds for #1853/#1854/#1856. That supports the hard ceiling and
+breadth split as an economic backstop, not either side of the lens-rotation
+ratio. These issues were not born from `stage-change-pipeline`, so the new
+terminal log line does not create an upstream sizing-retro owner.
+
+**Keep rotation** unchanged. The aggregate direction still gives no basis for
+an autonomous cut, while this sample reinforces the standing prerequisite for
+any future reversal: separate pinned fix-depth catches, rotated comprehensive
+lenses, and Phase 7/fixture/other round-role detectors before treating the
+ratio as causal evidence.

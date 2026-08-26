@@ -207,7 +207,10 @@ STRUCTURAL_TOKEN_HASH_HEX_CHARS = 16
 COMPLETE_ARCHIVE_STATUS_ALLOWLIST_REASON = (
     "complete archive status marker declares preserved non-current evidence"
 )
-ARCHIVE_STATUS_REQUIRED_FIELDS = frozenset(
+# Fields the marker parser recognizes as archive-status keys. "Recognized" is
+# deliberately broader than "required": a marker may name an optional field
+# (for example superseded_by) without weakening any required-field check.
+ARCHIVE_STATUS_RECOGNIZED_FIELDS = frozenset(
     {
         "status",
         "current_authority",
@@ -217,6 +220,24 @@ ARCHIVE_STATUS_REQUIRED_FIELDS = frozenset(
         "retained_for",
     }
 )
+# Per-status required fields, mirroring docs/governance/DOC_STATUS.md:
+# current_authority/status/status_since/archive_scope/retained_for are always
+# required; historical baseline does not require superseded_by, while
+# superseded and archived still do (with "none" accepted for that field).
+ARCHIVE_STATUS_REQUIRED_FIELDS = frozenset(
+    {
+        "status",
+        "current_authority",
+        "status_since",
+        "archive_scope",
+        "retained_for",
+    }
+)
+ARCHIVE_STATUS_REQUIRED_FIELDS_BY_STATUS: dict[str, frozenset[str]] = {
+    "historical baseline": ARCHIVE_STATUS_REQUIRED_FIELDS,
+    "superseded": ARCHIVE_STATUS_REQUIRED_FIELDS | frozenset({"superseded_by"}),
+    "archived": ARCHIVE_STATUS_REQUIRED_FIELDS | frozenset({"superseded_by"}),
+}
 ARCHIVE_STATUS_NON_CURRENT_VALUES = frozenset({"historical baseline", "superseded", "archived"})
 ARCHIVE_STATUS_FRONT_MATTER_MAX_LINES = 200
 LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
@@ -1392,6 +1413,7 @@ def _line_has_display_env_section(lines: list[str], line_no: int) -> bool:
 
 def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
     findings: list[FindingSpec] = []
+    declared_authorities = _topology_declared_current_authorities(root)
     for path in _production_topology_scan_files(root):
         rel = _rel(root, path)
         if _topology_path_is_archive_or_generated(rel):
@@ -1400,7 +1422,7 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
         if not text:
             continue
         lines = text.splitlines()
-        if _topology_document_is_non_current(rel, lines):
+        if _topology_document_is_non_current(rel, lines, declared_authorities=declared_authorities):
             continue
         display_env_facts = _topology_display_env_facts(lines)
         emitted_writer_claims: set[str] = set()
@@ -1558,7 +1580,12 @@ def _topology_path_is_archive_or_generated(relative_path: str) -> bool:
     return relative_path.startswith("scripts/governance/")
 
 
-def _topology_document_is_non_current(relative_path: str, lines: list[str]) -> bool:
+def _topology_document_is_non_current(
+    relative_path: str,
+    lines: list[str],
+    *,
+    declared_authorities: frozenset[str] = frozenset(),
+) -> bool:
     if relative_path in {
         "AGENTS.md",
         "CLAUDE.md",
@@ -1567,6 +1594,17 @@ def _topology_document_is_non_current(relative_path: str, lines: list[str]) -> b
         "openspec/project-profile.md",
     }:
         return False
+    # A file that a complete whole-document marker names as the current
+    # authority is itself a current production surface, so it cannot use its
+    # own complete non-current marker to skip drift scanning.
+    if relative_path in declared_authorities:
+        return False
+    # A complete whole-document archive-status marker is the authoritative
+    # non-current declaration; it may legitimately coexist with a
+    # current-production title elsewhere in the top region (for example a
+    # preserved runbook that points at the current entrypoint).
+    if _whole_document_archive_status_marker_range(lines) is not None:
+        return True
     top_context = _topology_normalized("\n".join(lines[:80]))
     if "current production operations" in top_context or "当前生产值守" in top_context:
         return False
@@ -1574,6 +1612,121 @@ def _topology_document_is_non_current(relative_path: str, lines: list[str]) -> b
     if _topology_top_context_declares_whole_document_non_current(top_context, top_lines):
         return True
     return False
+
+
+def _topology_declared_current_authorities(root: Path) -> frozenset[str]:
+    """Repo-relative paths named as current authority by complete whole-document markers.
+
+    Only a complete whole-document marker may grant authority: an incomplete
+    marker cannot make preserved text safe to ignore, so it must not be able to
+    turn another file into a current surface either. Paths that do not parse as
+    well-formed repo-relative paths (absolute, backslash, parent escapes,
+    tilde, empty, or malformed) are dropped so arbitrary strings cannot become
+    authority. Returned values are normalized to the same repo-relative POSIX
+    spelling that ``_rel`` produces so the set can be compared exactly.
+    """
+    declared: set[str] = set()
+    for path in _production_topology_scan_files(root):
+        rel = _rel(root, path)
+        if _topology_path_is_archive_or_generated(rel):
+            continue
+        lines = _read_repo_text(root, path).splitlines()
+        if _whole_document_archive_status_marker_range(lines) is None:
+            continue
+        closing_line = _archive_status_front_matter_closing_line(lines)
+        if closing_line is None:
+            continue
+        for authority in _topology_authority_paths(lines[1:closing_line]):
+            normalized = _topology_authority_path_normalize(authority)
+            if normalized is not None:
+                declared.add(normalized)
+    return frozenset(declared)
+
+
+def _archive_status_front_matter_closing_line(lines: list[str]) -> int | None:
+    if not lines or lines[0].strip() != "---":
+        return None
+    max_index = min(len(lines), ARCHIVE_STATUS_FRONT_MATTER_MAX_LINES + 1)
+    for index in range(1, max_index):
+        if lines[index].strip() == "---":
+            return index
+    return None
+
+
+def _topology_authority_paths(front_matter_lines: list[str]) -> tuple[str, ...]:
+    """Extract ``- path: <value>`` list items from the current_authority block.
+
+    Parses raw front-matter lines structurally: only top-level list items
+    under the ``current_authority:`` key grant authority. The block ends at
+    the next top-level (column-0) key. A path value is the first token of the
+    list-item line after ``- path:`` (with optional single/double quotes).
+    Section and reason text never grant authority because they are indented
+    continuation lines, not ``- path:`` list items — even when their prose
+    contains the literal ``- path:`` marker. A scalar ``current_authority:``
+    value with no list shape grants nothing.
+    """
+    paths: list[str] = []
+    in_authority_block = False
+    for line in front_matter_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indented = line[:1] in {" ", "\t"}
+        if indented or stripped.startswith("-"):
+            if not in_authority_block:
+                continue
+            if stripped.startswith("- path:"):
+                path_value = _topology_authority_list_item_path(stripped[len("- path:"):])
+                if path_value:
+                    paths.append(path_value)
+            continue
+        key, separator, _value = stripped.partition(":")
+        if not separator:
+            in_authority_block = False
+            continue
+        if key.strip().lower().replace("-", "_") == "current_authority":
+            in_authority_block = True
+            continue
+        in_authority_block = False
+    return tuple(paths)
+
+
+def _topology_authority_list_item_path(value: str) -> str:
+    value = value.strip()
+    if value[:1] in {"'", '"'}:
+        closing = value.find(value[0], 1)
+        if closing == -1:
+            return ""
+        return value[1:closing].strip()
+    token, _, _rest = value.partition(" ")
+    return token.strip()
+
+
+def _topology_authority_path_normalize(authority_path: str) -> str | None:
+    """Normalize to repo-relative POSIX spelling, or None when not a valid path.
+
+    Rejects empty, absolute, backslash, drive-letter, parent-escape, and
+    tilde paths; collapses ``.`` segments and duplicate slashes so the value
+    compares exactly with ``_rel`` output.
+    """
+    if not authority_path:
+        return None
+    if authority_path.startswith(("/", "\\", "~")):
+        return None
+    if re.match(r"^[A-Za-z]:[\\/]", authority_path):
+        return None
+    if "\\" in authority_path:
+        return None
+    parts: list[str] = []
+    for part in authority_path.split("/"):
+        if not part or part == ".":
+            continue
+        if part == ".." or part.startswith("~"):
+            return None
+        parts.append(part)
+    if not parts:
+        return None
+    return "/".join(parts)
 
 
 def _topology_top_context_declares_whole_document_non_current(
@@ -8512,7 +8665,7 @@ def _archive_status_front_matter_fields(lines: list[str]) -> dict[str, str]:
             continue
         if line[:1] not in {" ", "\t"} and not stripped.startswith("-"):
             parsed = _archive_status_key_value(stripped)
-            if parsed is None or parsed[0] not in ARCHIVE_STATUS_REQUIRED_FIELDS:
+            if parsed is None or parsed[0] not in ARCHIVE_STATUS_RECOGNIZED_FIELDS:
                 current_key = None
                 continue
             current_key, value = parsed
@@ -8532,7 +8685,7 @@ def _archive_status_section_block_fields(lines: list[str]) -> dict[str, str]:
             continue
         entry = stripped[1:].strip() if stripped.startswith("-") else stripped
         parsed = _archive_status_key_value(entry)
-        if parsed is not None and parsed[0] in ARCHIVE_STATUS_REQUIRED_FIELDS:
+        if parsed is not None and parsed[0] in ARCHIVE_STATUS_RECOGNIZED_FIELDS:
             current_key, value = parsed
             fields[current_key] = _archive_status_join_value(fields.get(current_key, ""), value)
             continue
@@ -8561,17 +8714,18 @@ def _archive_status_fields_are_complete(
     *,
     expected_scope: Literal["whole-document", "section"],
 ) -> bool:
-    if not ARCHIVE_STATUS_REQUIRED_FIELDS <= fields.keys():
-        return False
-    status = _archive_status_scalar(fields["status"])
+    status = _archive_status_scalar(fields.get("status", ""))
     if status not in ARCHIVE_STATUS_NON_CURRENT_VALUES:
+        return False
+    required_fields = ARCHIVE_STATUS_REQUIRED_FIELDS_BY_STATUS[status]
+    if not required_fields <= fields.keys():
         return False
     scope = _archive_status_scope(fields["archive_scope"])
     if scope != expected_scope:
         return False
     return all(
         _archive_status_field_has_required_value(field, fields[field])
-        for field in ARCHIVE_STATUS_REQUIRED_FIELDS
+        for field in required_fields
     )
 
 
