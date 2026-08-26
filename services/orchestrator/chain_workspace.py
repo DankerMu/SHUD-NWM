@@ -189,6 +189,15 @@ def persist_gateway_logs(
             "Failed to publish gateway logs.",
             {"log_uri": log_uri},
         ) from exc
+    except (OSError, safe_filesystem_error_cls) as exc:
+        # The root expansion itself is write-side prelude (#1621): an
+        # undeterminable ``~`` user must refuse before any directory or file is
+        # created, under the same contract as the write failure below.
+        raise OrchestratorError(
+            "PUBLISHED_LOG_WRITE_FAILED",
+            "Failed to publish gateway logs.",
+            {"log_uri": log_uri},
+        ) from exc
 
 
 def write_local_stage_log(
@@ -207,16 +216,25 @@ def write_local_stage_log(
     if published_path is None:
         orchestrator.object_store.write_bytes_atomic(log_uri, content)
         return log_uri
-    published_root = absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
     try:
-        ensure_directory(published_root)
-        atomic_write_bytes(
-            published_path,
-            content,
-            containment_root=published_root,
-            temp_suffix="part",
-        )
+        published_root = absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
+        try:
+            ensure_directory(published_root)
+            atomic_write_bytes(
+                published_path,
+                content,
+                containment_root=published_root,
+                temp_suffix="part",
+            )
+        except (OSError, safe_filesystem_error_cls) as exc:
+            raise OrchestratorError(
+                "PUBLISHED_LOG_WRITE_FAILED",
+                "Failed to publish local stage logs.",
+                {"log_uri": log_uri},
+            ) from exc
     except (OSError, safe_filesystem_error_cls) as exc:
+        # The root expansion is write-side prelude (#1621); refuse under the
+        # same contract before any directory or file is created.
         raise OrchestratorError(
             "PUBLISHED_LOG_WRITE_FAILED",
             "Failed to publish local stage logs.",
@@ -263,7 +281,16 @@ def published_log_path(
     if not log_uri.startswith(prefix):
         return None
     relative = published_log_relative_path_fn(log_uri, uri_prefix=prefix)
-    root = absolute_configured_path(Path(published_root))
+    try:
+        root = absolute_configured_path(Path(published_root))
+    except (OSError, SafeFilesystemError) as exc:
+        # The root expansion is the same write-side prelude the two writers
+        # translate; give this seam the equivalent boundary (#1621).
+        raise OrchestratorError(
+            "PUBLISHED_LOG_WRITE_FAILED",
+            "Failed to publish gateway logs.",
+            {"log_uri": log_uri},
+        ) from exc
     return root / relative
 
 

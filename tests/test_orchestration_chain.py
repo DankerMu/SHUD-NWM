@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.safe_fs import SafeFilesystemError
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator import chain_runtime_utils
 from services.orchestrator.chain import (
@@ -4255,6 +4256,143 @@ def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_adver
         for event in repository.events
     )
     assert repository.cycle_statuses[-1] == "failed_convert"
+
+
+# --- Undeterminable published-artifact root (#1621) ---------------------------
+#
+# `Path.expanduser()` throws a bare, errno-less RuntimeError for a leading
+# `~<unknown user>`.  All three chain log-publication seams consume the root
+# through `_absolute_configured_path`, whose write-side prelude must translate
+# that throw into `SafeFilesystemError(kind="unsafe")` and then into the
+# existing PUBLISHED_LOG_WRITE_FAILED boundary -- before any directory or file
+# is created, and with no literal `~` entry anywhere under the working
+# directory.  The env value is real at each public seam (no fake failing
+# helper injected).
+
+_UNKNOWN_PUBLISH_ROOT = "~nosuchuser_zz"
+
+
+def test_publish_root_unknown_user_is_published_log_write_failed_at_gateway_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", f"{_UNKNOWN_PUBLISH_ROOT}/artifacts")
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    submitted = client.submit_job(
+        {
+            "job_type": "cycle",
+            "run_id": "cycle_gfs_2026050100",
+            "model_id": "model_0",
+            "manifest": {"stage": "convert", "run_id": "cycle_gfs_2026050100", "model_id": "model_0"},
+        }
+    )
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+    log_uri = "published://logs/gfs/2026050100/cycle_gfs_2026050100/job_cycle_gfs_2026050100_convert.out"
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._persist_gateway_logs(submitted["job_id"], log_uri)
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": log_uri}
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
+
+
+def test_publish_root_unknown_user_is_published_log_write_failed_at_local_stage_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", f"{_UNKNOWN_PUBLISH_ROOT}/artifacts")
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+    payload = {"status": "ok", "stage": "convert"}
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._write_local_stage_log("published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out", payload)
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": "published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out"}
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
+
+
+def test_publish_root_unknown_user_is_published_log_write_failed_at_published_log_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", f"{_UNKNOWN_PUBLISH_ROOT}/artifacts")
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._published_log_path("published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out")
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": "published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out"}
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
+
+
+def test_publish_root_unknown_user_is_refused_at_the_full_orchestration_cycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", f"{_UNKNOWN_PUBLISH_ROOT}/artifacts")
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=0,
+        job_timeout_seconds=5,
+    )
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    # The facade converts any persistence exception, so the error code alone
+    # does not discriminate #1621: the boundary-translated refusal must be the
+    # one carried, with its structured write-side cause chained -- never the
+    # facade's fresh conversion of a bare expanduser() RuntimeError.
+    assert exc_info.value.details == {
+        "log_uri": "published://logs/gfs/2026050100/cycle_gfs_2026050100/job_cycle_gfs_2026050100_convert.out"
+    }
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, SafeFilesystemError)
+    assert cause.kind == "unsafe"
+    assert not list(tmp_path.glob("~*"))
+    assert not list(tmp_path.glob("*~*"))
 
 
 def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:

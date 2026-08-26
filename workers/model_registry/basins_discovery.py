@@ -7,7 +7,7 @@ import re
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
-from errno import ENOENT
+from errno import EACCES, ENOENT, EPERM
 from pathlib import Path
 from typing import Any
 
@@ -120,10 +120,7 @@ def resolve_basins_root(cli_root: str | None) -> Path:
 
 def discover_basins_inventory(basins_root: str | Path, *, budget: DiscoveryBudget | None = None) -> dict[str, Any]:
     root = Path(basins_root).expanduser()
-    if not root.exists():
-        raise BasinsDiscoveryError("BASINS_ROOT_NOT_FOUND", f"Basins root does not exist: {root}", path=str(root))
-    if not root.is_dir():
-        raise BasinsDiscoveryError("BASINS_ROOT_NOT_FOUND", f"Basins root is not a directory: {root}", path=str(root))
+    root_is_symlink = _classify_basins_root_metadata(root, error_prefix="BASINS_ROOT")
     _ensure_readable_directory(root, "BASINS_ROOT_UNREADABLE")
 
     resolved_root = root.resolve()
@@ -143,7 +140,7 @@ def discover_basins_inventory(basins_root: str | Path, *, budget: DiscoveryBudge
         "schema_version": BASINS_DISCOVERY_SCHEMA_VERSION,
         "root": str(root),
         "resolved_root": str(resolved_root),
-        "source_is_symlink": root.is_symlink(),
+        "source_is_symlink": root_is_symlink,
         "models": models,
         "model_count": len(models),
         "warnings": [warning.as_dict() for warning in warnings],
@@ -276,6 +273,10 @@ def _inventory_for_model(
         "basin_slug": basin_slug,
         "source_path": str(model_dir),
         "resolved_source_path": str(model_dir.resolve()),
+        # Guarded bare probe: a candidate only reaches _inventory_for_model
+        # after _safe_resolve_under_root succeeded and _ensure_readable_directory
+        # stat'ed it, so the lstat-based is_symlink() here has no pending EACCES
+        # to leak on any CPython (#1554).
         "source_is_symlink": model_dir.is_symlink(),
         "shud_input_name": shud_input_name,
         "input_dir": str(input_dir),
@@ -315,11 +316,23 @@ def _match_required_files(
             missing.append(pattern)
     for role, file_name in GIS_REQUIRED_FILES:
         path = gis_dir / file_name
-        if (
-            not _is_ignored_path(path)
-            and _safe_resolve_under_root(path, resolved_root, warnings) is not None
-            and path.is_file()
-        ):
+        if _is_ignored_path(path):
+            required[role] = []
+            missing.append(f"gis/{file_name}")
+            continue
+        resolution = _safe_resolve_under_root(path, resolved_root, warnings)
+        if resolution is None:
+            if any(
+                warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path) for warning in warnings
+            ):
+                # Permission denial is a matched-but-unreadable verdict, not a
+                # missing-file verdict (#1554); the checksum walk records it.
+                required[role] = [str(path.relative_to(input_dir))]
+            else:
+                required[role] = []
+                missing.append(f"gis/{file_name}")
+            continue
+        if path.is_file():
             required[role] = [str(path.relative_to(input_dir))]
         else:
             required[role] = []
@@ -451,7 +464,25 @@ def _checksums_for_required_files(
     for matches in required_files.values():
         for relative_name in matches:
             path = input_dir / relative_name
-            if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+            resolution = _safe_resolve_under_root(path, resolved_root, warnings)
+            if resolution is None:
+                if any(
+                    warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path)
+                    for warning in warnings
+                ):
+                    # The strict walk proved permission denial, not a symlink
+                    # defect and not absence: this matched required file is
+                    # unreadable (#1554).  It lands in the existing third state
+                    # and never in missing_required_files or a SYMLINK_* arm.
+                    unreadable.append(f"{relative_name}: required file could not be read for checksum")
+                    _append_warning_once(
+                        warnings,
+                        DiscoveryWarning(
+                            "BASINS_REQUIRED_FILE_UNREADABLE",
+                            "Required file was matched but could not be read for checksum.",
+                            path=str(path),
+                        ),
+                    )
                 continue
             try:
                 if path.stat().st_size <= CHECKSUM_LIMIT_BYTES:
@@ -507,15 +538,42 @@ def _glob_non_sidecar_files(
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
 ) -> list[Path]:
-    if not root.exists():
+    # The old ``root.exists()`` guard swallowed a different OSError set per
+    # CPython (EACCES raises on 3.11 but returns False from 3.12 on), so it
+    # could leak a raw PermissionError exactly where #1554 says a bare
+    # predicate must not be probed unguarded.  The guarded resolution below
+    # classifies by errno instead: ENOENT on the root means no matches, while
+    # a permission-denied root reports the non-symlink unreadability warning.
+    if _safe_resolve_under_root(root, resolved_root, warnings) is None:
+        if any(warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(root) for warning in warnings):
+            _append_warning_once(
+                warnings,
+                DiscoveryWarning(
+                    "BASINS_PATH_UNREADABLE",
+                    "Basins directory cannot be read and was not classified as a symlink defect.",
+                    path=str(root),
+                ),
+            )
         return []
     matches: list[Path] = []
     for path in root.glob(pattern):
-        if (
-            not _is_ignored_path(path)
-            and _safe_resolve_under_root(path, resolved_root, warnings) is not None
-            and path.is_file()
-        ):
+        if _is_ignored_path(path):
+            continue
+        resolution = _safe_resolve_under_root(path, resolved_root, warnings)
+        if resolution is None:
+            if any(
+                warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path) for warning in warnings
+            ):
+                # The strict walk proved permission denial, not absence and not
+                # a symlink defect (#1554): the file IS matched by discovery
+                # and must not be mislabelled missing.  The checksum walk later
+                # routes it into the unreadable-required-file third state.
+                matches.append(path)
+            continue
+        # Guarded bare probe: reached only after the strict realpath above
+        # proved every ancestor traversable, so the follow-stat is_file() here
+        # has no pending EACCES (#1554).
+        if path.is_file():
             matches.append(path)
     return sorted(matches, key=lambda path: path.name.lower())
 
@@ -627,11 +685,36 @@ def _has_child_dir(root: Path, name: str, resolved_root: Path, warnings: list[Di
 
 
 def _is_safe_directory(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
-    return (
-        not _is_ignored_path(path)
-        and _safe_resolve_under_root(path, resolved_root, warnings) is not None
-        and path.is_dir()
-    )
+    if _is_ignored_path(path):
+        return False
+    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+        return False
+    # The follow-stat below is reached only after the strict realpath above
+    # traversed every ancestor (no pending EACCES) and the path stayed under
+    # the resolved root.  A bare ``path.is_dir()`` here would still leak EACCES
+    # on 3.11 when the FINAL component denies read, so the directory-kind probe
+    # runs inside an errno-aware boundary instead: missing (ENOENT/ENOTDIR,
+    # including a dangling final symlink) stays a silent skip exactly like the
+    # old ``is_dir()`` False, while permission denial and any other unreadable
+    # metadata failure is a non-symlink unreadability skip, never a raw
+    # PermissionError and never misreported as "not a directory" (#1554).
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return False
+    except NotADirectoryError:
+        return False
+    except OSError:
+        _append_warning_once(
+            warnings,
+            DiscoveryWarning(
+                "BASINS_PATH_UNREADABLE",
+                "Basins directory cannot be read and was not classified as a symlink defect.",
+                path=str(path),
+            ),
+        )
+        return False
+    return stat.S_ISDIR(mode)
 
 
 def _safe_resolve_under_root(
@@ -648,7 +731,33 @@ def _safe_resolve_under_root(
     try:
         resolved = Path(os.path.realpath(path, strict=True))
     except OSError as error:
-        if getattr(error, "errno", None) != ENOENT:
+        errno_value = getattr(error, "errno", None)
+        if errno_value == ENOENT:
+            # The strict walk proved the failure is a missing component, not a
+            # loop; keep the pre-change nonexistence semantics (containment is
+            # still checked, and the caller's is_dir() filter skips it silently).
+            # os.path.realpath() non-strict never raises on 3.11-3.14;
+            # Path.resolve() must not be used here because on <=3.12 it raises an
+            # errno-less RuntimeError when the `..`-collapsed tail meets a symlink
+            # loop behind the missing component (e.g. `gone/../loopdir`).
+            resolved = Path(os.path.realpath(path))
+        elif errno_value in (EACCES, EPERM):
+            # Permission denial is NOT a symlink verdict and NOT nonexistence
+            # (#1554): keep the lexical path on a non-symlink unreadability
+            # channel so a matched required file can still reach the
+            # stat/hash lane (BASINS_REQUIRED_FILE_UNREADABLE).  Containment
+            # is not weakened -- the caller still admits the path only if it
+            # stays under the resolved root.
+            _append_warning_once(
+                warnings,
+                DiscoveryWarning(
+                    "BASINS_PATH_UNREADABLE",
+                    "Basins descendant cannot be read and was not classified as a symlink defect.",
+                    path=str(path),
+                ),
+            )
+            return None
+        else:
             _append_warning_once(
                 warnings,
                 DiscoveryWarning(
@@ -658,14 +767,6 @@ def _safe_resolve_under_root(
                 ),
             )
             return None
-        # The strict walk proved the failure is a missing component, not a
-        # loop; keep the pre-change nonexistence semantics (containment is
-        # still checked, and the caller's is_dir() filter skips it silently).
-        # os.path.realpath() non-strict never raises on 3.11-3.14;
-        # Path.resolve() must not be used here because on <=3.12 it raises an
-        # errno-less RuntimeError when the `..`-collapsed tail meets a symlink
-        # loop behind the missing component (e.g. `gone/../loopdir`).
-        resolved = Path(os.path.realpath(path))
     try:
         resolved.relative_to(resolved_root)
     except ValueError:
@@ -688,16 +789,104 @@ def _append_warning_once(warnings: list[DiscoveryWarning], warning: DiscoveryWar
 
 
 def _ensure_readable_directory(path: Path, error_code: str) -> None:
-    if not path.is_dir():
-        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
     try:
         mode = path.stat().st_mode
+    except FileNotFoundError:
+        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
+    except NotADirectoryError:
+        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
     except OSError as error:
+        # One structured boundary for the kind/stat probes (#1554): the old
+        # ``is_dir()`` pre-check swallowed a different OSError set per CPython
+        # (EACCES on 3.11 raised, on 3.12+ returned False and was then
+        # misreported as missing).  Permission denial stays on the caller's
+        # unreadable code, never leaks as a bare PermissionError and never
+        # becomes a NOT_FOUND mislabel.
         raise BasinsDiscoveryError(error_code, f"Basins directory cannot be stat'ed: {path}", path=str(path)) from error
+    if not stat.S_ISDIR(mode):
+        raise BasinsDiscoveryError(error_code, f"Basins directory does not exist: {path}", path=str(path))
     if not mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
         raise BasinsDiscoveryError(error_code, f"Basins directory is not readable: {path}", path=str(path))
     if not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
         raise BasinsDiscoveryError(error_code, f"Basins directory is not searchable: {path}", path=str(path))
+
+
+def _classify_basins_root_metadata(root: Path, *, error_prefix: str = "BASINS_ROOT") -> bool:
+    """Classify the explicit root's metadata once, by errno; return source-symlink identity.
+
+    ``Path.exists()`` / ``is_dir()`` swallow different ``OSError`` sets on
+    different CPython versions (EACCES on a denied ancestor raises on 3.11 but
+    returns False from 3.12 on), so they cannot decide root classification.
+    One no-follow ``lstat`` probe identifies a source symlink and one
+    follow-target ``stat`` probe confirms the directory this classifier
+    admits.  Missing (``ENOENT``/``ENOTDIR``) is the ``*_NOT_FOUND`` verdict,
+    permission denial (``EACCES``/``EPERM``) and any other unreadable metadata
+    failure is the ``*_UNREADABLE`` verdict, and no raw ``PermissionError``
+    escapes.  Callers consume the returned symlink identity instead of
+    re-probing the root with a bare ``Path.is_symlink()`` after this
+    classifier has run (#1554).
+    """
+
+    try:
+        lstat_mode = root.lstat().st_mode
+    except FileNotFoundError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_NOT_FOUND",
+            f"Basins root does not exist: {root}",
+            path=str(root),
+        )
+    except NotADirectoryError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_NOT_FOUND",
+            f"Basins root does not exist: {root}",
+            path=str(root),
+        )
+    except PermissionError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_UNREADABLE",
+            f"Basins root is not readable: {root}",
+            path=str(root),
+        )
+    except OSError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_UNREADABLE",
+            f"Basins root cannot be inspected: {root}",
+            path=str(root),
+        )
+    is_symlink = stat.S_ISLNK(lstat_mode)
+    try:
+        mode = root.stat().st_mode
+    except FileNotFoundError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_NOT_FOUND",
+            f"Basins root does not exist: {root}",
+            path=str(root),
+        )
+    except NotADirectoryError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_NOT_FOUND",
+            f"Basins root does not exist: {root}",
+            path=str(root),
+        )
+    except PermissionError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_UNREADABLE",
+            f"Basins root is not readable: {root}",
+            path=str(root),
+        )
+    except OSError:
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_UNREADABLE",
+            f"Basins root cannot be inspected: {root}",
+            path=str(root),
+        )
+    if not stat.S_ISDIR(mode):
+        raise BasinsDiscoveryError(
+            f"{error_prefix}_NOT_FOUND",
+            f"Basins root is not a directory: {root}",
+            path=str(root),
+        )
+    return is_symlink
 
 
 def _is_sidecar_name(name: str) -> bool:

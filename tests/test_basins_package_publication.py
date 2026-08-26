@@ -2609,6 +2609,75 @@ def test_publish_basins_object_verification_streams_without_store_checksum(
     )
 
 
+def test_basins_migration_report_root_denied_by_an_ancestor_is_basins_root_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # #1554: the migration-report entrypoint classifies the root with the same
+    # errno-aware probe as discovery.  EACCES on a denied ancestor is
+    # BASINS_ROOT_UNREADABLE through BasinsPackageError -- never a bare
+    # PermissionError, never a misleading BASINS_ROOT_NOT_FOUND.
+    root = tmp_path / "basins"
+    root.mkdir()
+    _make_valid_model(root / "basin-a", "alias-a")
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == root:
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        exit_code = _argparse_main(
+            [
+                "basins-migration-report",
+                "--basins-root",
+                str(root),
+                "--output",
+                str(tmp_path / "report.json"),
+            ]
+        )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_ROOT_UNREADABLE"
+    assert error["path"] == str(root)
+    assert not (tmp_path / "report.json").exists()
+
+
+def test_basins_migration_report_root_denied_never_becomes_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The directionality pin: EACCES must not degrade into the missing-root
+    # verdict on the migration-report entrypoint either.
+    root = tmp_path / "basins"
+    root.mkdir()
+    _make_valid_model(root / "basin-a", "alias-a")
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        raise PermissionError(errno.EACCES, "simulated denied traversal")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        exit_code = _argparse_main(
+            [
+                "basins-migration-report",
+                "--basins-root",
+                str(root),
+                "--output",
+                str(tmp_path / "report.json"),
+            ]
+        )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] != "BASINS_ROOT_NOT_FOUND"
+
+
 def test_basins_migration_report_rejects_symlink_target(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2634,6 +2703,40 @@ def test_basins_migration_report_rejects_symlink_target(
     assert error["error_code"] == "BASINS_MIGRATION_SYMLINK_TARGET"
     assert error["path"] == str(linked_root)
     assert not output.exists()
+
+
+def test_basins_migration_report_refuses_symlink_from_classifier_identity_without_a_second_root_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1554: the migration report consumes the classifier-produced source-symlink
+    # identity for its production symlink refusal.  It must NOT re-probe the root
+    # with a bare `Path.is_symlink()`; a second root probe would fail this
+    # injection, while the refusal still fires from the classifier's verdict.
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    linked_root = tmp_path / "linked-basins"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    real_is_symlink = Path.is_symlink
+
+    def root_is_symlink_denied(self: Path) -> bool:
+        if self == linked_root:
+            raise PermissionError(errno.EACCES, "second root is_symlink probe must not happen")
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", root_is_symlink_denied)
+
+    with pytest.raises(basins_package.BasinsPackageError) as exc_info:
+        basins_package.write_basins_migration_report(
+            basins_root=linked_root,
+            source_uri=DEFAULT_BASINS_MIGRATION_SOURCE_URI,
+            output_path=tmp_path / "report.json",
+        )
+
+    payload = exc_info.value.to_payload()
+    assert payload["error_code"] == "BASINS_MIGRATION_SYMLINK_TARGET"
+    assert payload["path"] == str(linked_root)
+    assert not (tmp_path / "report.json").exists()
 
 
 def test_click_basins_migration_report_rejects_symlink_target_without_source_uri(

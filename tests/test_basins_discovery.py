@@ -65,6 +65,68 @@ def test_symlink_root_records_source_fields(tmp_path: Path) -> None:
     assert model["resolved_source_path"] == str((real_root / "qhh").resolve())
 
 
+def test_discovery_consumes_classifier_symlink_identity_without_reprobing_the_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1554: the root classifier (one no-follow lstat) is the single source of
+    # truth for the root's source-symlink identity.  Discovery must consume
+    # that verdict and must NOT call `Path.is_symlink()` on the root again.  A
+    # second root probe would fail this injection; the model-dir is_symlink()
+    # probes (on non-root paths) still work, so the real symlink semantics stay
+    # observable.
+    real_root = tmp_path / "real-basins"
+    make_valid_model(real_root / "qhh", "qhh")
+    linked_root = tmp_path / "linked-basins"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    real_is_symlink = Path.is_symlink
+
+    def root_is_symlink_denied(self: Path) -> bool:
+        if self == linked_root:
+            raise PermissionError(errno.EACCES, "second root is_symlink probe must not happen")
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", root_is_symlink_denied)
+
+    inventory = discover_basins_inventory(linked_root)
+
+    # The root identity comes from the classifier, not from a second probe;
+    # the model dir itself is not a symlink (only the root is).
+    assert inventory["source_is_symlink"] is True
+    model = one_model(inventory)
+    assert model["source_is_symlink"] is False
+    assert model["resolved_source_path"] == str((real_root / "qhh").resolve())
+
+
+def test_glob_non_sidecar_files_root_permission_denial_is_an_unreadable_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1554: the old `root.exists()` guard in _glob_non_sidecar_files leaked
+    # EACCES on 3.11 (raises) while returning False on 3.12+ (silent missing).
+    # The errno-aware guard must produce one deterministic verdict on every
+    # interpreter: no matches, a non-symlink BASINS_PATH_UNREADABLE warning,
+    # and never a raw PermissionError.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path) == str(root):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    warnings: list[basins_discovery.DiscoveryWarning] = []
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        matches = basins_discovery._glob_non_sidecar_files(root, "*.cfg.para", root.resolve(), warnings)
+
+    assert matches == []
+    assert [(warning.code, warning.path) for warning in warnings] == [
+        ("BASINS_PATH_UNREADABLE", str(root))
+    ]
+
+
 def test_valid_minimal_model_tree_inventory_fields(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     make_valid_model(root / "basin-a", "alias-a", calibration_count=1, forcing_count=1)
@@ -362,6 +424,140 @@ def test_walk_files_streams_paths_without_returning_list(tmp_path: Path) -> None
     assert not isinstance(traversal, list)
     assert iter(traversal) is traversal
     assert sorted(path.name for path in traversal) == ["a.csv", "b.txt"]
+
+
+def test_discovery_root_metadata_denied_by_an_ancestor_is_basins_root_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1554: `Path.exists()`/`is_dir()` swallow a different OSError set per
+    # CPython (EACCES on a denied ancestor raises on 3.11 but returns False
+    # from 3.12 on), so they cannot classify the root.  One errno-aware probe
+    # must report the same BASINS_ROOT_UNREADABLE on every interpreter --
+    # never a bare PermissionError, never a misleading BASINS_ROOT_NOT_FOUND.
+    root = tmp_path / "basins"
+    root.mkdir()
+    (root / "inner").mkdir()
+
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == root:
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_ROOT_UNREADABLE"
+    assert exc_info.value.path == str(root)
+
+
+def test_discovery_root_metadata_denied_never_becomes_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The directionality pin for #1554: EACCES must not degrade into the
+    # missing-root verdict, which would send an operator looking for a root
+    # that exists.
+    root = tmp_path / "basins"
+    root.mkdir()
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        raise PermissionError(errno.EACCES, "simulated denied traversal")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code != "BASINS_ROOT_NOT_FOUND"
+
+
+def test_discovery_root_metadata_other_oserror_is_basins_root_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "basins"
+    root.mkdir()
+    real_stat = Path.stat
+
+    def failing_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == root:
+            raise OSError(errno.EIO, "simulated metadata failure")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", failing_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_ROOT_UNREADABLE"
+
+
+def test_required_file_resolution_permission_denial_is_unreadable_third_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1554: a matched required file whose strict resolution is denied by an
+    # ancestor (EACCES) must land in the existing unreadable-required-file
+    # third state -- partial status with BASINS_REQUIRED_FILE_UNREADABLE --
+    # never missing, never a BASINS_SYMLINK_* verdict, and never a raw
+    # exception.  The injection is narrow: only the realpath of the one
+    # required file fails, so discovery reaches the checksum walk.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "alias-a.tsd.lai"
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith(unreadable_name):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        inventory = discover_basins_inventory(root)
+        model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert model["default_publish_eligible"] is False
+    assert unreadable_name not in model["missing_required_files"]
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [unreadable_name]
+    assert "unreadable_required_file" in model["quirks"]
+    assert "unsafe_symlink_outside_root" not in model["quirks"]
+    unreadable_path = str(root / "basin-a" / "input" / "alias-a" / unreadable_name)
+    assert [
+        warning["code"] for warning in inventory["warnings"] if warning["path"] == unreadable_path
+    ] == ["BASINS_PATH_UNREADABLE", "BASINS_REQUIRED_FILE_UNREADABLE"]
+    assert all(warning["code"] != "BASINS_SYMLINK_UNRESOLVABLE" for warning in inventory["warnings"])
+
+
+def test_required_file_resolution_permission_denial_is_never_a_symlink_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "alias-a.tsd.lai"
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith(unreadable_name):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        inventory = discover_basins_inventory(root)
+
+    warning_codes = [warning["code"] for warning in inventory["warnings"]]
+    assert "BASINS_SYMLINK_UNRESOLVABLE" not in warning_codes
+    assert "BASINS_SYMLINK_OUTSIDE_ROOT" not in warning_codes
+    assert "BASINS_PATH_UNREADABLE" in warning_codes
 
 
 def test_unreadable_root_and_subdir_when_permissions_enforced(tmp_path: Path) -> None:

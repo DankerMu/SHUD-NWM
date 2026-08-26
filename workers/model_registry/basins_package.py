@@ -21,6 +21,7 @@ from .basins_discovery import (
     GIS_REQUIRED_FILES,
     SHUD_REQUIRED_PATTERNS,
     BasinsDiscoveryError,
+    _classify_basins_root_metadata,
     discover_basins_inventory,
 )
 from .basins_discovery import (
@@ -457,9 +458,11 @@ def write_basins_migration_report(
     output_path: str | Path,
 ) -> dict[str, Any]:
     root = Path(basins_root).expanduser()
-    if not root.exists() or not root.is_dir():
-        raise BasinsPackageError("BASINS_ROOT_NOT_FOUND", f"Basins root does not exist: {root}", path=str(root))
-    if root.is_symlink():
+    try:
+        root_is_symlink = _classify_basins_root_metadata(root)
+    except BasinsDiscoveryError as error:
+        raise BasinsPackageError(error.error_code, str(error), path=error.path or str(root)) from error
+    if root_is_symlink:
         raise BasinsPackageError(
             "BASINS_MIGRATION_SYMLINK_TARGET",
             "Production migration evidence requires copied Basins data; symlink targets are not production-ready.",
