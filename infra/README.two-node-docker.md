@@ -175,7 +175,13 @@ DOCKER_HOST
 
 ## 5. 部署顺序
 
-1. 在 22 和 27 分别 checkout 同一 commit，并重建本机依赖。Linux 迁移时不要复用 macOS `.venv` 或 `node_modules`。
+> **Python 解释器约定（所有 repo Python 命令）**：本 runbook 中执行 repository Python
+> script/module 的命令一律直接使用当前 checkout 的精确解释器
+> `"$CHECKOUT_ROOT/.venv/bin/python"`（在 `cd "$CHECKOUT_ROOT"` 之后）。node-22 维护窗口前不会触发
+> `uv` 环境更新；missing interpreter 时这些命令自然 fail closed，cutover 由 #1831 跟踪。**禁止**
+> `uv run` / `uv sync` / bare `python` / `python3` 作为 repo Python 入口，包括此处之外任何拷贝/装饰。
+
+1. 在 22 和 27 分别 checkout 同一 commit，并重建本机依赖。node-27 和 node-22 的非活动/非 canonical checkout 可以重建 host 依赖（Linux 迁移时不要复用 macOS `.venv` 或 `node_modules`）；**node-22 的 canonical active checkout（`/scratch/frd_muziyao/NWM`）在 #1831 的 approved maintenance window 之前不得重建或 `uv sync` 其共享 `.venv`**（该环境是 3.12.7 且被在线服务占用）。
 2. 构建或拉取同一个 `nhms-app:<git-sha>` 镜像，记录 image digest 和 git sha。
 3. 在 22 准备 `infra/env/compute.env`，确认 writer DB、workspace、Basins/model assets、published artifact host root 都可访问。
 4. 在 27 准备 `infra/env/display.env`，确认 DB 是 readonly 账号，published artifact mount/credentials 是 readonly。
@@ -189,12 +195,16 @@ DOCKER_HOST
 任何 build、smoke 或长时间 compose 验证前先执行：
 
 ```bash
+set -euo pipefail
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+cd "$CHECKOUT_ROOT"
 export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
 mkdir -p "$EVIDENCE_ROOT/docker-preflight"
 export TMPDIR="$PWD/artifacts/tmp"
 mkdir -p "$TMPDIR"
-uv run python scripts/validate_two_node_docker_runtime.py preflight \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_runtime.py preflight \
   --evidence-run-id "$RUN_ID" \
   --evidence-root "$EVIDENCE_ROOT/docker-preflight"
 ```
@@ -226,7 +236,7 @@ elif [ ! -f "$CHECKOUT_ROOT/infra/env/compute.env" ]; then
   exit 1
 fi
 $EDITOR "$CHECKOUT_ROOT/infra/env/compute.env"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -250,7 +260,7 @@ elif [ ! -f "$CHECKOUT_ROOT/infra/env/display.env" ]; then
   exit 1
 fi
 $EDITOR "$CHECKOUT_ROOT/infra/env/display.env"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -298,7 +308,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -327,7 +337,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -345,7 +355,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -367,8 +377,12 @@ source-trust preflight；失败时本 lane 记为 `BLOCKED`，不得让 compose 
 静态验证：
 
 ```bash
+set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
-uv run python scripts/validate_two_node_docker_runtime.py static \
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+cd "$CHECKOUT_ROOT"
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_runtime.py static \
   --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
 ```
@@ -406,7 +420,7 @@ set -euo pipefail
 CHECKOUT_ROOT=/opt/SHUD-NWM
 TRUST_ROOT="${TRUST_ROOT:-/opt}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -420,7 +434,7 @@ sudo systemctl start nhms-compute-compose.service
 sudo systemctl status nhms-compute-compose.service
 sudo journalctl -u nhms-compute-compose.service -n 200 --no-pager
 sudo systemctl stop nhms-compute-compose.service
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -438,7 +452,7 @@ set -euo pipefail
 CHECKOUT_ROOT=/opt/SHUD-NWM
 TRUST_ROOT="${TRUST_ROOT:-/opt}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -452,7 +466,7 @@ sudo systemctl start nhms-display-compose.service
 sudo systemctl status nhms-display-compose.service
 sudo journalctl -u nhms-display-compose.service -n 200 --no-pager
 sudo systemctl stop nhms-display-compose.service
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -507,27 +521,27 @@ CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
-uv run python scripts/validate_two_node_docker_runtime.py static \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_runtime.py static \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
   --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
-uv run python scripts/validate_two_node_docker_runtime.py smoke \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_runtime.py smoke \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
   --evidence-root "$EVIDENCE_ROOT/docker-security"
-uv run python scripts/validate_two_node_docker_runtime.py security-summary \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_runtime.py security-summary \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
   --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-compute.json" \
   --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-display.json" \
@@ -542,7 +556,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -746,8 +760,17 @@ artifacts/
 }
 ```
 
-创建后先执行 `python -m json.tool "$EVIDENCE_ROOT/run.json" >/dev/null`。单 source 演练必须把 `declared_sources`
-缩成实际 source，并设置 `"reduced_scope": true`。
+创建后先校验 run.json 是合法 JSON：
+
+```bash
+set -euo pipefail
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+cd "$CHECKOUT_ROOT"
+"$CHECKOUT_ROOT/.venv/bin/python" -m json.tool "$EVIDENCE_ROOT/run.json" >/dev/null
+```
+
+单 source 演练必须把 `declared_sources` 缩成实际 source，并设置 `"reduced_scope": true`。
 
 ## 13. Docker Validation Matrix
 
@@ -779,7 +802,15 @@ bundle 无关的 stale source dir。source run ID 使用 `$EVIDENCE_RUN_ID-db-GF
 和 source provenance。
 
 ```bash
-uv run python scripts/validate_readonly_db_boundary.py \
+set -euo pipefail
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+cd "$CHECKOUT_ROOT"
+
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_readonly_db_boundary.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID-db-GFS" \
   --source GFS \
@@ -789,7 +820,7 @@ uv run python scripts/validate_readonly_db_boundary.py \
   --job-id '<gfs-job-id-with-published-log>' \
   --force
 
-uv run python scripts/validate_readonly_db_boundary.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_readonly_db_boundary.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID-db-IFS" \
   --source IFS \
@@ -799,7 +830,7 @@ uv run python scripts/validate_readonly_db_boundary.py \
   --job-id '<ifs-job-id-with-published-log>' \
   --force
 
-uv run python scripts/validate_readonly_db_boundary.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_readonly_db_boundary.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID" \
   --merge-declared-source GFS \
@@ -816,7 +847,10 @@ set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
 EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
 EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
-uv run python scripts/validate_two_node_e2e_evidence.py \
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+cd "$CHECKOUT_ROOT"
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_e2e_evidence.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID" \
   --source GFS \
@@ -841,7 +875,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -860,7 +894,7 @@ set -euo pipefail
 CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
 TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
@@ -881,7 +915,7 @@ TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 cd "$CHECKOUT_ROOT"
 $EDITOR "$CHECKOUT_ROOT/infra/env/compute.env"
 $EDITOR "$CHECKOUT_ROOT/infra/env/display.env"
-uv run python scripts/validate_two_node_docker_source_trust.py \
+"$CHECKOUT_ROOT/.venv/bin/python" scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \

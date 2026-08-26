@@ -1945,3 +1945,232 @@ measurement error of treating a non-applied treatment as an observed result.
 
 The cumulative direction and the existing default-keep decision remain
 unchanged. No reviewer-set or rotation-policy change follows.
+
+## Revisit (2026-08-25, issue #1826 / PR #1843)
+
+After appending PR #1843's accountability line, `loop_log_audit` returns
+DECIDABLE at **129 multi-round merged PRs, later-round catches core=75 /
+rotated=295**. Relative to the preceding sample, this PR contributes **0 core**
+and **0 rotated**. Recorded decision: **keep rotation**, unchanged.
+
+Another no-information increment for the rotation question, for the same reason
+as the PR #1836 entry: round 1 ran three lenses (`correctness`,
+`invariant-state`, `test-evidence`) and round 2 was the Phase 7 final review
+(`spec-compliance`, `test-evidence`, `integration`), which returned no verified
+finding. With no later-round catch there is nothing to attribute, and reading
+the added denominator as evidence either way would repeat the standing
+measurement error of treating a non-applied treatment as an observed result.
+
+This line does carry one observation that is orthogonal to rotation and worth
+recording precisely because the audit cannot see it: **both of this run's
+highest-value catches landed in round 0 — the read-only fixture review, before
+any implementation existed.** One was a P1 that would have shipped a
+fail-CLOSED regression (an `endswith`-shaped identity comparison that rejects a
+candidate's own forcing reference in two of the three shapes production
+actually records, blocking a healthy basin's forecast for a full 00/12 UTC
+cycle); the other redirected the change's three insertion points from payload
+constructors that lack the required arguments to the caller that owns them,
+avoiding a signature widening that would have broken five existing tests.
+
+The loop log's `catches[].round` field admits `0`, so these are recorded, but
+the rotation metric counts only *later-round* catches and therefore attributes
+neither. That is correct for the rotation question and misleading for any
+broader reading of where the review loop earns its cost on this repo. No
+reviewer-set or rotation-policy change follows; the note exists so a future
+keep/cut reader does not mistake a run with two P1/P2 pre-implementation catches
+for a run in which review found little.
+
+## Revisit 2026-08-25 (post #1813 / PR #1847) — keep, unchanged
+
+`loop_log_audit.py` reports the rotation attribution **verbatim unchanged** from
+the previous revisit: 129 multi-round merged PRs, later-round catches core=75 /
+rotated=295. That is not a coincidence to explain away — PR #1847 closed in a
+single comprehensive round, so it is not a multi-round PR and contributes
+0 to both buckets. The denominator did not move, the numerators did not move,
+and the standing **keep** therefore stands on exactly the evidence it stood on
+before. Nothing was re-derived and no new inference is drawn from a metric that
+received no new data.
+
+What this line does add is a **second consecutive run whose leverage sat in
+round 0**, which the rotation metric structurally cannot see. On #1847 the
+fixture review caught a P1 that every hand-built test fixture in the repo is
+blind to by construction: `basins_registry_import.py:202` hardcoded the string
+`"basins.package.v1"` on the path every fresh publish takes into the registry,
+so bumping the schema constant would have rejected every post-bump publish —
+and because the three manifest fixtures that exercise that path build their
+manifests by hand with the same literal, an implementer who bumped the constant
+and updated those literals would have shipped a green PR that breaks the very
+baseline-publish workflow the change exists to unblock.
+
+Round 1 then bought no fix pass at all: one P2 CONFIRMED-but-DISCARD and one P2
+REFUTED. The refuted one is worth recording, because acting on it would have
+made the change worse rather than merely wasting effort — it recommended
+telling operators to hand-pin `--version` after the migration, on the one
+publish path that derives its version from `content_sha256` and must stay
+content-addressed. The verifier gate is what kept that recommendation out of
+the runbook.
+
+Two runs is not a trend and no policy changes here. But the pattern now has a
+shape worth naming for whoever eventually revisits the keep/cut question: on
+this repo, contract-and-identity changes appear to concentrate their expensive
+defects *before* implementation, where the rotation metric does not look, while
+the later-round comprehensive rounds increasingly return REFUTED or
+DISCARD-grade findings. If a future reader wants to cut review cost, the
+evidence so far points at the later rounds, not at the fixture review — and
+would need the loop log's `catches[].round == 0` entries counted, which today
+no audit does.
+
+## Revisit 2026-08-25 (post #1702 / PR #1848) — keep, unchanged
+
+The rotation metric is bit-identical to the previous revisit (129 multi-round
+merged PRs; later-round catches core=75, rotated=295) because PR #1848 was a
+zero-round, fixture-tier-`none` docs PR and contributes nothing to it.
+
+Recorded only to discharge the audit's DECIDABLE obligation, not as new
+evidence. One observation worth keeping: #1848's whole risk sat in three
+pre-flight verifications on a production node, none of which any review lens
+would have covered — the review track was correctly recorded as "not required",
+and the safety came from refusing to move bytes until the timer's replay branch,
+the runtime forcing source, and the sole filesystem reader of `forcing_dir` were
+each proved. That is a third consecutive run whose leverage sat outside the
+rotated lenses.
+
+## Revisit 2026-08-25 (post #1701 / PR #1849) — keep, unchanged
+
+Metric bit-identical again (129 multi-round merged PRs; later-round catches
+core=75, rotated=295): both #1701 lines are zero-round, so neither moves it.
+
+Recorded to discharge the audit, but this run says something the previous two
+only hinted at. #1849 shipped with no review round and still had a real defect
+that reached production: querying `core.model_instance` by `model_id` silently
+omits every direct-grid variant row, so three active rows survived a retirement
+that every receipt I took said was complete. No lens in the rotation would have
+caught it — there was no diff to review, the mistake lived in an ad-hoc
+operational query. The owner caught it from the live map.
+
+The keep/cut question is still about review rounds, and the answer is still
+keep. But three consecutive runs now put the leverage outside the rotated
+lenses, and this one puts it outside review entirely: the operational lane has
+no equivalent of a fixture review, and its receipts can be sampled at a moment
+when they are transiently true. Whoever revisits this should weigh whether the
+loop log is measuring the right lane, not just the right lenses.
+
+## Revisit 2026-08-25 (post #1702 / PR #1851) — keep, unchanged
+
+Metric bit-identical for the third time today (129 multi-round merged PRs;
+later-round catches core=75, rotated=295) — PR #1851 is zero-round.
+
+Recorded to discharge the audit. It reinforces the previous entry rather than
+adding to it: #1851 exists only because a wrong judgement of mine survived a
+clean receipt and a merged PR, and the user caught it in one sentence. Just as
+with PR #1849, no review lens was positioned to catch it — the defect was a
+scoping call made against an issue body's stale prose, not a property of any
+diff.
+
+Two consecutive entries now say the same thing: the loop log measures review
+rounds over diffs, and this repo's recent expensive mistakes have been
+operational judgements made outside any diff. That is not an argument for
+cutting the rotation; it is an argument that the keep/cut question is being
+asked about the cheaper lane.
+
+## Revisit 2026-08-25 (post #1744 / PR #1834) — keep; pinned-depth sample, not rotation evidence
+
+`loop_log_audit.py` now reports 130 multi-round merged PRs and later-round
+catches `core=79 / rotated=295`, moving from the previous `129 / 75 / 295`.
+The decision remains **keep**, but this PR's `core +4 / rotated +0` must not be
+read as evidence against rotation.
+
+No free-slot rotation was applied in the catch-producing rounds. Round 1 used
+correctness, integration, security/performance, test-evidence, spec-compliance,
+and invariant-state. Rounds 2 and 3 deliberately retained the pinned
+`test-evidence`/`invariant-state` owners of one recurring CI-oracle invariant:
+a permanent self-oracle must prove effective execution and fail-closed behavior,
+not token presence or nominal job fields. Their four catches are exactly what a
+depth loop is supposed to produce: each found that the preceding fix had closed
+a named mutant but left the same invariant weak at a deeper semantic layer.
+Round 4 added security/performance only after the redesign and was clean;
+Round 5 rechecked the master-sync interaction and was clean.
+
+This sample therefore supports **pinned-core fix-regression recall** and the
+independent verifier split, not a core-versus-rotation comparison. The verifier
+was load-bearing twice: it retained both Round 3 findings as P1 after one
+originating reviewer graded the collection gap P2, and it rejected the tempting
+shortcut of treating current green jobs as proof that future step-level metadata
+could not skip or de-fang them. The corrective action then changed proof shape
+rather than adding another lexical patch: full-workflow effective metadata,
+independent audited command identity, finite trusted behavior variants,
+arbitrary-payload non-execution, and bounded process-group cleanup.
+
+So the aggregate direction still permits no autonomous cut, and this PR adds no
+causal evidence about rotating free slots because the treatment was not applied.
+**Keep rotation** unchanged. The attribution caveats already recorded in this
+ADR remain mandatory: distinguish pinned depth/fix-verification rounds from
+actual free-slot rotation before any future reversal, and require maintainer
+review for that reversal.
+
+## Revisit 2026-08-25 (post #1561 / PR #1855) — keep; another pinned-depth sample
+
+`loop_log_audit.py` now reports 131 multi-round merged PRs and later-round
+catches `core=80 / rotated=295`, moving from `130 / 79 / 295`. The decision
+remains **keep**. As with PR #1834, this PR's `core +1 / rotated +0` is not a
+controlled test of free-slot rotation: the one later-round catch came from the
+pinned `test-evidence` lens while following the same CI-oracle invariant deeper.
+
+Round 1 found two P1 evidence gaps: the live guard used a coarser conditional-
+redirect domain than production, and nested / `*_test.py` importer discovery
+had no biting recursive proof. Round 2's full-scope `test-evidence` reviewer
+then found that the attempted constructed proof still rebuilt the comparator
+and message locally instead of calling the live guard. That repeat triggered a
+same-invariant depth retro. Diagnosis first proved the failure shape in a
+disposable copy: corrupting importer derivation made the real live guard red
+while the constructed proof stayed green. The corrective action therefore
+changed proof ownership, not another named assertion — one shared offender
+helper now owns recursive owner discovery, dotted-module authority, effective
+redirect handling, comparison, and the named missing-importer message.
+
+The rotated slots did useful independent checking but produced no catch:
+`spec-compliance` in round 2 confirmed the fixture and implementation still
+agreed, and `invariant-compatibility` in round 3 adversarially mapped every
+helper branch to a mutation red before the round returned clean. This sample
+therefore supports the standing split: pinned lenses retain fix-regression
+recall, while rotated lenses remain available for blind-spot recall. It does
+not support removing either. The aggregate remains overwhelmingly rotated
+(`295` versus `80`), so **keep rotation** unchanged; the attribution caveats and
+maintainer-only reversal rule above continue to apply.
+
+## Revisit 2026-08-26 (post #1571/#1634/#1619 split, PRs #1853/#1854/#1856) — keep; one real core catch, one final-review attribution artifact
+
+After recording the terminal parent and all three split children,
+`loop_log_audit.py` reports **132 multi-round merged PRs**, with later-round
+catches **core=81 / rotated=296** (previously 131 / 80 / 295). The decision
+remains **keep**, but the symmetric `+1 / +1` delta is not a symmetric
+core-versus-rotation experiment.
+
+The `core +1` is real pinned-depth recall. PR #1856 Round 2 kept the Round 1
+`integration` lens and found that the dedicated environment oracles added by
+the preceding fix existed but were unreachable from producer-only PRs: some
+producers selected older suites and four did not start the backend lane at all.
+That repeat correctly triggered a same-invariant depth Retro; the next round
+was clean after the producer → selector → CI-lane matrix was made explicit.
+
+The `rotated +1` is the already-recorded **round-role attribution artifact**,
+not evidence about a rotated comprehensive-review slot. It came from Phase 7's
+`gap-sweep`, which found six additional current producers that did not route the
+997-line node-22 owner. Phase 7 is structurally independent of the comprehensive
+round lens mix, but `rotation_attribution()` classifies any later catch whose
+lens name is absent from Round 1 as rotated. This is exactly the contamination
+recorded in the earlier PR #1624/#1636/#1643 revisits. The catch supports keeping
+an independent final sweep; it does not estimate free-slot rotation's effect.
+
+The terminal parent adds a separate governance result. PR #1822 hit the
+five-round ceiling and stopped; the user-selected split then converged in one,
+one, and three rounds for #1853/#1854/#1856. That supports the hard ceiling and
+breadth split as an economic backstop, not either side of the lens-rotation
+ratio. These issues were not born from `stage-change-pipeline`, so the new
+terminal log line does not create an upstream sizing-retro owner.
+
+**Keep rotation** unchanged. The aggregate direction still gives no basis for
+an autonomous cut, while this sample reinforces the standing prerequisite for
+any future reversal: separate pinned fix-depth catches, rotated comprehensive
+lenses, and Phase 7/fixture/other round-role detectors before treating the
+ratio as causal evidence.

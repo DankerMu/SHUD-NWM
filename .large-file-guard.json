@@ -72,6 +72,8 @@
     ".review-gate-issues.json",
     "docs/adr/0003-review-lens-rotation-keep.md",
     "tests/test_migrations.py",
-    "tests/test_real_database_integration.py"
+    "tests/test_real_database_integration.py",
+    "scripts/governance/audit_repo_entropy.py",
+    "tests/test_entropy_audit_script.py"
   ]
 }

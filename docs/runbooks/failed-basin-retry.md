@@ -83,7 +83,8 @@ never verifiable must not be revived under the same key. A released row that has
 independently assessed by an operator now has a separate supported recovery door:
 
 ```bash
-uv run nhms-pipeline recover-released-identity-blocked-reservation \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli \
+  recover-released-identity-blocked-reservation \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --job-id "<released_master_job_id>" \
   --attest
@@ -481,8 +482,9 @@ stand in instead of manufacturing a held row.
    #    previous receipt carried warnings, verify against the journal replay
    #    before believing any flat file.
 
-   # 3. Demote (both entrypoints behave identically; missing --confirm exits 2 with no write):
-   uv run nhms-pipeline demote-reserved-job \
+   # 3. Demote (both entrypoints behave identically; missing --confirm exits 2 with no write).
+   #    node-22 active checkout: exact interpreter, not bare uv (pre-maintenance rule):
+   /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli demote-reserved-job \
      --journal-root <journal-root> \
      --job-id job_cycle_<source>_<cycle>_forecast[...] \
      --expected-attempt <attempt> \

@@ -618,7 +618,30 @@ def _missing_upstream_forecast_artifact_evidence(
                 "forcing_package_path",
             ),
         )
-        if forcing_uri in (None, "") or _is_withheld_uri_placeholder(forcing_uri):
+        recorded_reference_rejection: dict[str, Any] = {}
+        if (
+            forcing_uri not in (None, "")
+            and not _is_withheld_uri_placeholder(forcing_uri)
+            and not _recorded_forcing_reference_binds_candidate(candidate, str(forcing_uri))
+        ):
+            # The inherited state names SOMEONE ELSE's package (#1826): on a
+            # re-identification the superseded model's ``forcing_package_uri`` is
+            # still recorded, physically present, and would stand in as this
+            # candidate's witness.  A reference that is not identity-bound is
+            # treated EXACTLY like an absent one -- the identity-derived sidecar
+            # tier below runs instead -- and the rejection is named in
+            # ``forcing_provenance`` so it does not vanish silently.
+            recorded_reference_rejection = {
+                "recorded_reference_rejected": {
+                    "reason": "foreign_candidate_identity",
+                    "recorded_uri": _evidence_safe(forcing_uri),
+                    "expected_identity": (
+                        f"{str(getattr(candidate, 'basin_version_id', None) or '')}"
+                        f"/{str(getattr(candidate, 'model_id', None) or '')}"
+                    ),
+                }
+            }
+        if forcing_uri in (None, "") or _is_withheld_uri_placeholder(forcing_uri) or recorded_reference_rejection:
             # A redaction placeholder is a WITHHELD reference, not a package
             # reference: the public-read boundary rewrites every s3/published-shaped
             # ``*_uri`` the journal read materializes into ``[object-uri]``
@@ -634,7 +657,11 @@ def _missing_upstream_forecast_artifact_evidence(
                 # (object-store sidecar) all failed to witness provenance: this is
                 # "cannot determine", NOT "package determined absent".  Still
                 # fail-closed, but with a reason an operator can act on.
-                forcing_provenance = {"source": "absent", "tier_status": sidecar.status}
+                forcing_provenance = {
+                    "source": "absent",
+                    "tier_status": sidecar.status,
+                    **recorded_reference_rejection,
+                }
                 return (
                     _artifact_blocker_evidence(
                         candidate,
@@ -661,6 +688,7 @@ def _missing_upstream_forecast_artifact_evidence(
             forcing_provenance = {
                 "source": "object_store_sidecar",
                 "probe": "manifest",
+                **recorded_reference_rejection,
                 "package_uri": _evidence_safe(sidecar.package_uri),
                 "manifest_uri": _evidence_safe(sidecar.manifest_uri),
                 "probe_key": _evidence_safe(sidecar.manifest_probe_key),
@@ -689,6 +717,7 @@ def _missing_upstream_forecast_artifact_evidence(
                 forcing_provenance = {
                     "source": "absent",
                     "tier_status": "sidecar_manifest_probe_error",
+                    **recorded_reference_rejection,
                 }
                 return (
                     _artifact_blocker_evidence(
@@ -1068,6 +1097,54 @@ def _package_manifest_probe_uri(package_uri: str) -> str:
     """
 
     return f"{package_uri.strip().rstrip('/')}/{_FORCING_PACKAGE_MANIFEST_FILENAME}"
+
+
+def _recorded_forcing_reference_binds_candidate(candidate: SchedulerCandidateLike, value: str) -> bool:
+    """True when a recorded forcing reference names THIS candidate's own package (#1826).
+
+    Forcing packages are stored per model
+    (``forcing/<source>/<cycle>/<basin_version_id>/<model_id>/``) and ``model_id``
+    is content-derived, so a republish mints a NEW identity while the inherited
+    state still carries the SUPERSEDED model's ``forcing_package_uri``.  Probing
+    that reference finds the predecessor's package present and lets it stand in as
+    this candidate's witness -- the fail-open #1203 round-1 V2-C2 already ruled out
+    for the sidecar tier (``_sidecar_manifest_probe_key``) and that the recorded
+    tier never got.
+
+    The comparison is made on the reference's OWN trailing key segments, after
+    removing exactly two trailing shapes and nothing else:
+
+    * a trailing ``/`` -- the producer records the package as a directory uri
+      (``producer._directory_uri``) while the handoff lane stores the same
+      reference with the slash stripped, and both shapes coexist (see
+      ``_needs_package_manifest_witness``);
+    * a final ``forcing_package.json`` segment -- a recorded reference may already
+      be the manifest FILE key, one segment deeper than the package prefix.
+
+    Both shapes are the candidate's OWN reference in production, so a bare
+    ``endswith`` on ``<basin_version_id>/<model_id>`` would reject them and block a
+    healthy candidate.
+
+    The reference is deliberately NOT prefix-normalised first: a foreign
+    object-store prefix makes ``normalize_object_key`` raise, which the probe
+    swallows into a false "missing".  Trailing segments need no prefix knowledge,
+    so this check has no such leg.  Fewer than two segments left means the
+    reference cannot carry the identity pair at all -- not bound, exactly like a
+    foreign one.
+    """
+
+    basin_version_id = str(getattr(candidate, "basin_version_id", None) or "").strip()
+    model_id = str(getattr(candidate, "model_id", None) or "").strip()
+    if not basin_version_id or not model_id:
+        # An incomplete candidate identity cannot bind anything; the
+        # identity-derived tier declines on the same shape (``identity_incomplete``).
+        return False
+    segments = value.strip().rstrip("/").split("/")
+    if segments and segments[-1] == _FORCING_PACKAGE_MANIFEST_FILENAME:
+        segments = segments[:-1]
+    if len(segments) < 2:
+        return False
+    return segments[-2] == basin_version_id and segments[-1] == model_id
 
 
 def _needs_package_manifest_witness(candidate: SchedulerCandidateLike, value: str) -> bool:

@@ -7472,7 +7472,12 @@ def test_candidate_state_manual_forcing_retry_success_resumes_forecast_stage(tmp
     retry_job_id = "cycle_gfs_2026050100_forcing_model_b_retry_2"
     cycle_time = _dt("2026-05-01T00:00:00Z")
     object_store_root = tmp_path / "object-store"
-    forcing_package = object_store_root / "forcing" / "gfs" / "2026050100" / "basin_b" / "model_b" / "package.json"
+    # The production per-model key shape, identity-bound to this candidate
+    # (#1826): ``<basin_version_id>/<model_id>/forcing_package.json``.  A reference
+    # naming anything else is treated as absent and never probed.
+    forcing_package = (
+        object_store_root / "forcing" / "gfs" / "2026050100" / "basin_v1" / "model_b" / "forcing_package.json"
+    )
     forcing_package.parent.mkdir(parents=True)
     forcing_package.write_text("{}", encoding="utf-8")
     state = candidate_state_from_rows(
@@ -17506,3 +17511,44 @@ def test_display_log_publication_withholds_a_sanitized_placeholder_pointer(tmp_p
     # The candidate is the placeholder itself, which is inert only because
     # nothing may persist under it.
     assert publication.candidate_uri == "[object-uri]"
+
+
+def _threads_for_resource_profile(tmp_path: Path, resource_profile: dict[str, Any]) -> int:
+    """runtime.threads that production would stamp for a given registry profile."""
+    assembly = build_model_run_assembly(
+        {
+            "model_id": "dg_test",
+            "basin_version_id": "basin_v1",
+            "river_network_version_id": "river_v1",
+            "cycle_time": "2026-05-01T00:00:00Z",
+            "resource_profile": resource_profile,
+        },
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path,
+        object_store=LocalObjectStore(tmp_path / "object-store"),
+        default_forecast_horizon_hours=168,
+    )
+    return assembly.runtime["threads"]
+
+
+def test_runtime_threads_defaults_to_cpus_per_task_when_profile_omits_shud_threads(
+    tmp_path: Path,
+) -> None:
+    """job-array-orchestration spec: shud_threads defaults to cpus_per_task.
+
+    Every core.model_instance row in production carries cpus_per_task but none
+    carries shud_threads, so a literal 1 fallback pinned every basin to a single
+    thread regardless of its allocation.
+    """
+    assert _threads_for_resource_profile(tmp_path, {"cpus_per_task": 4}) == 4
+
+
+def test_runtime_threads_prefers_explicit_shud_threads_over_cpus_per_task(tmp_path: Path) -> None:
+    assert _threads_for_resource_profile(tmp_path, {"cpus_per_task": 4, "shud_threads": 2}) == 2
+
+
+def test_runtime_threads_falls_back_to_one_without_any_allocation_hint(tmp_path: Path) -> None:
+    assert _threads_for_resource_profile(tmp_path, {}) == 1

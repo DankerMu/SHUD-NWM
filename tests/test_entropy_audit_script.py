@@ -5291,6 +5291,459 @@ def test_entropy_audit_topology_guardrails_allow_chinese_superseded_runbook_bann
     assert topology_findings == []
 
 
+def test_entropy_audit_topology_guardrails_allow_historical_baseline_whole_document_marker_without_superseded_by(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/node22-legacy-bringup.md",
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: current node-22/node-27 production authority
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # Node-22 legacy bring-up
+
+        > 当前生产与值守入口见 docs/runbooks/current-production-ops.md。
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    # The marker's own current_authority.section literal ("Current production
+    # operations") sits inside the top region; the whole-document marker must
+    # win over the current-production title heuristic, not the reverse.
+    assert audit_repo_entropy._topology_document_is_non_current(
+        "docs/runbooks/node22-legacy-bringup.md",
+        (tmp_path / "docs/runbooks/node22-legacy-bringup.md").read_text(encoding="utf-8").splitlines(),
+    ) is True
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert topology_findings == []
+
+
+def test_entropy_audit_topology_guardrails_reject_current_looking_text_with_incomplete_historical_baseline_marker(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/node22-legacy-bringup.md",
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: current node-22/node-27 production authority
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # Node-22 legacy bring-up
+
+        > 当前生产与值守入口见 docs/runbooks/current-production-ops.md。
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert [(finding["check_id"], finding["evidence_path"], finding["line"]) for finding in topology_findings] == [
+        (
+            "production-topology-node22-db-writer",
+            "docs/runbooks/node22-legacy-bringup.md",
+            15,
+        ),
+        (
+            "production-topology-node22-local-postgres",
+            "docs/runbooks/node22-legacy-bringup.md",
+            16,
+        ),
+    ]
+    for finding in topology_findings:
+        _assert_unallowlisted_budget_counted_gate_eligible_finding(finding)
+
+
+def test_entropy_audit_topology_guardrails_do_not_let_disguised_marker_hide_current_production_ops_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: current node-22/node-27 production authority
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # Current Production Operations Runbook
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert [(finding["check_id"], finding["evidence_path"], finding["line"]) for finding in topology_findings] == [
+        (
+            "production-topology-node22-db-writer",
+            "docs/runbooks/current-production-ops.md",
+            14,
+        ),
+        (
+            "production-topology-node22-local-postgres",
+            "docs/runbooks/current-production-ops.md",
+            15,
+        ),
+    ]
+    for finding in topology_findings:
+        _assert_unallowlisted_budget_counted_gate_eligible_finding(finding)
+
+
+def test_entropy_audit_topology_guardrails_dynamic_authority_cannot_self_exempt_with_complete_marker(
+    tmp_path: Path,
+) -> None:
+    authority = "scripts/diagnostic/qhh/README.md"
+    _write(
+        tmp_path / "docs/runbooks/qhh-22-business-bringup.md",
+        f"""
+        ---
+        status: historical baseline
+        current_authority:
+          - path: {authority}
+            section: Diagnostic classification authority
+            reason: current QHH diagnostic script classification
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # QHH node-22 business bring-up
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+    # The target's own complete marker points at the canonical current runbook,
+    # NOT at itself, so only the source marker's declaration can protect it.
+    _write(
+        tmp_path / authority,
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: current node-22/node-27 production authority
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # QHH Diagnostic Manifest
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    # The declared authority is not one of the five literal protected paths,
+    # so it must not be able to use its own complete non-current marker to hide
+    # current production topology drift.
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in topology_findings] == [
+        (authority, 14),
+        (authority, 15),
+    ]
+    for finding in topology_findings:
+        _assert_unallowlisted_budget_counted_gate_eligible_finding(finding)
+
+
+def test_entropy_audit_topology_guardrails_incomplete_source_marker_cannot_declare_authority(
+    tmp_path: Path,
+) -> None:
+    authority = "scripts/diagnostic/qhh/README.md"
+    _write(
+        tmp_path / "docs/runbooks/incomplete-source.md",
+        f"""
+        ---
+        status: historical baseline
+        current_authority:
+          - path: {authority}
+            section: Diagnostic classification authority
+            reason: current QHH diagnostic script classification
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # Incomplete source marker
+        """,
+    )
+    # The target's own complete marker points at the canonical current runbook,
+    # so it is only non-current via its own marker and gains no protection from
+    # the incomplete source.
+    _write(
+        tmp_path / authority,
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: current node-22/node-27 production authority
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical bring-up and incident evidence
+        ---
+
+        # QHH Diagnostic Manifest
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    # The source marker is missing status_since, so it is incomplete and must
+    # not grant the target any authority: the target stays non-current (its own
+    # complete marker is untouched) and its drift produces no finding. The
+    # target's own marker naming the canonical current runbook does not make
+    # the target itself a declared authority.
+    assert audit_repo_entropy._topology_declared_current_authorities(tmp_path) == frozenset(
+        {"docs/runbooks/current-production-ops.md"}
+    )
+    assert authority not in audit_repo_entropy._topology_declared_current_authorities(tmp_path)
+    assert audit_repo_entropy._topology_document_is_non_current(
+        authority,
+        (tmp_path / authority).read_text(encoding="utf-8").splitlines(),
+    ) is True
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+    assert topology_findings == []
+
+
+def test_entropy_audit_topology_authority_path_parser_rejects_malformed_and_escaping_paths() -> None:
+    # Only top-level `- path:` list items under current_authority grant
+    # authority; indented reason/section text never does, even when its prose
+    # contains the literal `- path:` marker.
+    assert audit_repo_entropy._topology_authority_paths(
+        [
+            "status: historical baseline",
+            "current_authority:",
+            "  - path: docs/runbooks/current-production-ops.md",
+            "    section: Current production operations",
+            "    reason: see - path: docs/evil.md for context",
+            "  - path: scripts/diagnostic/qhh/README.md",
+            "    reason: notes - path: /etc/passwd",
+            "status_since: 2026-08-24",
+        ]
+    ) == (
+        "docs/runbooks/current-production-ops.md",
+        "scripts/diagnostic/qhh/README.md",
+    )
+    # A scalar current_authority value (no list shape) grants nothing.
+    assert audit_repo_entropy._topology_authority_paths(
+        [
+            "current_authority: docs/governance/DOC_STATUS.md#conflict-resolution-order",
+            "status: historical baseline",
+        ]
+    ) == ()
+    # The block ends at the next top-level key.
+    assert audit_repo_entropy._topology_authority_paths(
+        [
+            "current_authority:",
+            "  - path: docs/runbooks/current-production-ops.md",
+            "    reason: first",
+            "status_since: 2026-08-24",
+            "  - path: docs/runbooks/evil.md",
+            "    reason: not under current_authority",
+        ]
+    ) == ("docs/runbooks/current-production-ops.md",)
+    # Reasonable single/double quotes are honored.
+    assert audit_repo_entropy._topology_authority_paths(
+        ["current_authority:", '  - path: "docs/a.md"', "    reason: q"]
+    ) == ("docs/a.md",)
+    assert audit_repo_entropy._topology_authority_paths(
+        ["current_authority:", "  - path: 'docs/b.md'", "    reason: q"]
+    ) == ("docs/b.md",)
+
+    for malformed in (
+        "",
+        "/etc/passwd",
+        "\\etc\\passwd",
+        "../escape.md",
+        "docs/../../escape.md",
+        "..\\escape.md",
+        "~/home.md",
+        "~user/home.md",
+        "C:\\windows\\x.md",
+        "C:/windows/x.md",
+        ".",
+        "..",
+    ):
+        assert (
+            audit_repo_entropy._topology_authority_path_normalize(malformed) is None
+        ), malformed
+
+    for valid in (
+        "docs/runbooks/current-production-ops.md",
+        "scripts/diagnostic/qhh/README.md",
+        "AGENTS.md",
+    ):
+        assert (
+            audit_repo_entropy._topology_authority_path_normalize(valid) == valid
+        ), valid
+
+    # Normalization collapses `.` segments and duplicate slashes so the value
+    # matches `_rel` spelling exactly.
+    assert audit_repo_entropy._topology_authority_path_normalize(
+        "docs/./runbooks//current-production-ops.md"
+    ) == "docs/runbooks/current-production-ops.md"
+
+
+def test_entropy_audit_topology_guardrails_malformed_declared_authority_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs/runbooks/source.md",
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: /etc/passwd
+            section: Not a repo path
+            reason: malformed escape attempt
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical evidence
+        ---
+
+        # Source marker
+        """,
+    )
+    _write(
+        tmp_path / "docs/runbooks/current-production-ops.md",
+        """
+        ---
+        status: historical baseline
+        current_authority:
+          - path: docs/runbooks/current-production-ops.md
+            section: Current production operations
+            reason: self
+        status_since: 2026-08-24
+        archive_scope: whole-document
+        retained_for: historical evidence
+        ---
+
+        Current NHMS production says node-22 is the active database writer.
+        Operators should connect to node-22 local PostgreSQL on :55433.
+        """,
+    )
+
+    # The malformed absolute authority path is dropped; the literal protected
+    # current path still declares itself and surfaces its drift, but the
+    # malformed path itself can never become a protected surface.
+    assert audit_repo_entropy._topology_declared_current_authorities(tmp_path) == frozenset(
+        {"docs/runbooks/current-production-ops.md"}
+    )
+
+    topology_findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(tmp_path, mode="hard-gate")["findings"]
+        if str(finding["check_id"]).startswith("production-topology-")
+    ]
+
+    assert [(finding["evidence_path"], finding["line"]) for finding in topology_findings] == [
+        ("docs/runbooks/current-production-ops.md", 12),
+        ("docs/runbooks/current-production-ops.md", 13),
+    ]
+    for finding in topology_findings:
+        _assert_unallowlisted_budget_counted_gate_eligible_finding(finding)
+
+
+def test_entropy_audit_archive_marker_parser_does_not_require_superseded_by_for_historical_baseline(
+    tmp_path: Path,
+) -> None:
+    def marker_lines(marker_text: str) -> list[str]:
+        return textwrap.dedent(marker_text).lstrip().splitlines()
+
+    complete = audit_repo_entropy._whole_document_archive_status_marker_range(
+        marker_lines(_complete_historical_baseline_front_matter())
+    )
+    assert complete is not None
+    assert complete.start_line == 1
+    assert complete.end_line == len(marker_lines(_complete_historical_baseline_front_matter()))
+
+    incomplete = audit_repo_entropy._whole_document_archive_status_marker_range(
+        marker_lines(
+            _complete_historical_baseline_front_matter().replace("status_since: 2026-08-24", "")
+        )
+    )
+    assert incomplete is None
+
+
+def test_entropy_audit_archive_marker_parser_keeps_superseded_by_required_for_superseded_and_archived(
+    tmp_path: Path,
+) -> None:
+    def marker_lines(marker_text: str) -> list[str]:
+        return textwrap.dedent(marker_text).lstrip().splitlines()
+
+    for status in ("superseded", "archived"):
+        marker = audit_repo_entropy._whole_document_archive_status_marker_range(
+            marker_lines(
+                _complete_archive_status_front_matter("").replace(
+                    "status: archived", f"status: {status}"
+                )
+            )
+        )
+        assert marker is not None, f"complete {status} marker without superseded_by must be recognized"
+
+    for status in ("superseded", "archived"):
+        marker = audit_repo_entropy._whole_document_archive_status_marker_range(
+            marker_lines(
+                _complete_archive_status_front_matter("")
+                .replace("status: archived", f"status: {status}")
+                .replace("superseded_by: none", "")
+            )
+        )
+        assert marker is None, f"{status} marker missing superseded_by must stay incomplete"
+
+
 def test_entropy_audit_topology_guardrails_scan_instruction_agent_sources(
     tmp_path: Path,
 ) -> None:
@@ -8946,6 +9399,22 @@ def _complete_archive_status_front_matter(body: str) -> str:
     status_since: 2026-06-24
     archive_scope: whole-document
     retained_for: audit evidence
+    ---
+    {body}
+    """
+
+
+def _complete_historical_baseline_front_matter(body: str = "") -> str:
+    return f"""
+    ---
+    status: historical baseline
+    current_authority:
+      - path: docs/runbooks/current-production-ops.md
+        section: Current production operations
+        reason: current node-22/node-27 production authority
+    status_since: 2026-08-24
+    archive_scope: whole-document
+    retained_for: historical bring-up and incident evidence
     ---
     {body}
     """

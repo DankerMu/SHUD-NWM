@@ -5,6 +5,13 @@
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
 
+> **node-22 维护窗口前执行说明**：node-22 活动 checkout 的共享 `.venv` 在
+> 运维批准的维护窗口前保持 Python 3.12.7，**禁止**在其中运行裸 `uv run` /
+> `uv sync`（会在 3.11 pin 下重建环境，已实测会打断成半拆状态）。本文中所有
+> node-22 活动操作一律使用精确活动解释器
+> `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m services.orchestrator.cli`）；
+> node-27 命令与孤立 rollback checkout 的 `uv sync` 不受此限。
+
 本文是当前生产值守手册。物理部署事实以
 [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"
 段为准；[`two-node-deployment-overview.md`](two-node-deployment-overview.md)
@@ -47,7 +54,7 @@
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
-| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `python -m services.slurm_gateway`, Slurm jobs |
+| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
 Node-22 historical PostgreSQL `:55433` was archived and stopped on 2026-06-29
@@ -201,7 +208,7 @@ require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror �
 
 ```bash
 PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
-uv run python scripts/publish_scheduler_file_registry.py \
+/scratch/frd_muziyao/NWM/.venv/bin/python scripts/publish_scheduler_file_registry.py \
   --basins-root /ghdc/data/nwm/Basins \
   --basin-slug <每个新流域重复> \
   --object-store-root /ghdc/data/nwm/object-store --object-store-prefix s3://nhms \
@@ -281,7 +288,7 @@ flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
 `{model_package_uri}{shud_input_name}.cfg.ic` 推出并在 **scratch 根**上解析。用现成工具，别手搓：
 
 ```bash
-PYTHONPATH=/scratch/frd_muziyao/NWM uv run python scripts/audit_first_cycle_initial_state.py \
+PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python scripts/audit_first_cycle_initial_state.py \
   --registry-manifest <candidate>.json \
   --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
   --object-store-prefix s3://nhms --workspace-root /scratch/frd_muziyao/nhms-prod/workspace \
@@ -552,7 +559,7 @@ test -x "$ROLLBACK_CHECKOUT/.venv/bin/python"
 test -z "$(git -C "$ROLLBACK_CHECKOUT" status --porcelain=v1 --untracked-files=all)"
 
 systemctl --user stop nhms-compute-scheduler.timer nhms-compute-scheduler.service
-uv run nhms-pipeline prepare-file-journal-rollback \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli prepare-file-journal-rollback \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --scheduler-lock-backend file \
@@ -576,7 +583,7 @@ controller 读取；不要在 gate 运行中执行 `uv sync`、切换 checkout �
 `--workspace-root`/`--lock-path` 覆盖，都会在 writer 零启动时拒绝：
 
 ```bash
-uv run nhms-pipeline launch-file-journal-rollback-writer \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli launch-file-journal-rollback-writer \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --receipt-id '<preparation-receipt-id>' \
@@ -619,7 +626,7 @@ file lease 后自动续成一个 `prepared` fence；不得人工删除 marker/re
 旧 writer 停止后，从当前版本执行前滚，成功消费 fence 后才能恢复 timer：
 
 ```bash
-uv run nhms-pipeline complete-file-journal-rollforward \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli complete-file-journal-rollforward \
   --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
   --workspace-root "$WORKSPACE_ROOT" \
   --scheduler-lock-backend file \
@@ -1295,6 +1302,13 @@ packaged IC 的规范路径 `<package>/<模型名>.cfg.ic`，写错就是 IC 探
 2026-08 出现过整棵树 20304 个文件对组只读、平台无法 staging 的情况。
 交付后自查：`find <你的目录> -not -writable | wc -l` 应为 0（以 `nwmuser` 组成员身份）。
 
+2026-08-25 复测：全树 **220** 个（不是历史峰值 20304），全部属 `st_zhanghx`、模式
+`-rw-r-----` / `drwxr-s---`，集中在 7 个黄河流域（`longmen_zhi_sanmenxia` 32、
+`lanzhou_zhi_hekouzhen` 32、`hekouzhen_zhi_longmen` 32、`sanmenxia_zhi_huayuankou` 31、
+`neiliuqu` 31、`longyangxia_zhi_lanzhou` 31、`longyangxia_yishang` 31）。
+**它复发在最新一批投递上**，即本条约束尚未被投递方执行；与 `forcing/` 零交集
+（`find ! -writable -path "*/forcing/*"` = 0），不阻塞 forcing 清理。
+
 本条即 #1702 长期方案的 (b) 支：**由投递者保证 `umask 002`**。另一支 (a)——把
 `Basins/` 的 owner 改成平台账号 `nwm`——尚未采纳，属 owner 决策；在它落地之前，
 (b) 是唯一在册的约束，一次性的 root `setfacl` 修复只是补救、不是机制。
@@ -1330,9 +1344,20 @@ receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
 - 旧目录**不要自删**。退役由平台 `mv` 到 `/volume/nwm/Basins-retired/issue-<N>-<slug>/`
   （同 xfs，rename 不拷贝），保留 90 天后由 owner 决定删除。自删会让还在引用该路径的
   注册行失去溯源根。
-- `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读。
-  2026-08-22 实测：`/volume/nwm/Basins` 总计 127 G，其中 18 个 `forcing/` 目录占
-  **126 G / 19078 文件**——整棵树几乎全是不再被读的代站 CSV。已有的由平台清理。
+- `forcing/` 子目录（IDW 代站 CSV）**不要再带**。direct-grid 已不读：62 行注册表的
+  `source_policy.forcing_source` 全部是 `node27_raw_handoff`，运行时 forcing 走
+  object store（`manifest["forcing"]["forcing_uri"]`），从不读 Basins 树里的 CSV。
+  2026-08-25 清理已执行（#1702 第 3 项）：**15 个目录全清**，共 **10040 个条目 / 62 G**
+  移到 `/volume/nwm/Basins-retired/forcing-cleanup-20260825/`，全树 **66 G → 544 M**。
+  清理**按 §5.5.1 的纪律**——清空目录、保留目录、不改名（含 `tailanhe/focing`
+  这个拼写错误）。
+
+  > `heihe/forcing`（12 G / 1711 文件）一度被错划进第 2 项「整目录退役」而缓做。
+  > **划错了**：`heihe` 是活的生产流域（注册表 2 行 `active`、`basins_heihe_shud`
+  > 的 `active_flag = t`、350 条 published run、在展示的流域集里），它 12 G 里的
+  > 模型本体只有 `input/heihe/` 9.3 M，其余全是上一版率定留下的旧代站 CSV。
+  > **流域是活的、forcing 是旧的**——属第 3 项，不属第 2 项。判一个目录该不该
+  > 整体退役，看注册表和 `core.model_instance`，不要看它的体积。
 
 ### 3.2 Slurm Gateway
 
@@ -1645,6 +1670,44 @@ ssh -p 32099 nwm@210.77.77.27 \
    find /home/ghdc/nwm/Basins -maxdepth 2 -type d | sort | head -40'
 ```
 
+#### 5.5.1 清理已注册流域的 `forcing/`：清空目录，不要删目录（#1813 / #1702 第 3 项）
+
+`forcing/` 下的 IDW 代站 CSV direct-grid 已不读，可以清理。但清理方式决定它是不是
+**真 no-op**，因为 basins 包身份对 `forcing/` 的依赖不是一刀切的（裁定见
+[ADR 0006](../adr/0006-forcing-csv-out-of-basins-package-identity.md)）：
+
+| 对已注册流域的操作 | 包身份 | 下次 baseline publish |
+|---|---|---|
+| 删除/修改 `forcing/*.csv`，**保留** `forcing/` 目录 | 不变 | 无 cutover |
+| 整个 `forcing/` 目录 `mv` 走或删除 | **变** | 需要逐流域 declared cutover |
+| 把 legacy `focing/` 改名成 `forcing/` | **变** | 需要 declared cutover |
+
+原因：CSV 载荷证据（数量、字节、聚合校验和）自 `basins.package.v2` 起已不进
+`content_sha256` / `package_checksum`，discovery 也不再把 `forcing_csv_count` 写进
+inventory；但 `forcing_dir` / `forcing_dir_original_name` 仍在 inventory 里（打包要靠
+它们定位源目录），它们随目录存在与否变化，进而改变
+`source_inventory_checksum`——而 cutover 门把该字段算作 model identity
+（`scripts/scheduler_file_provider_refresh.py:164`）。目录是结构事实，载荷不是。
+
+所以清理动作是：
+
+```bash
+# 已注册流域：搬走 CSV，留下空目录
+ssh -p 32099 nwm@210.77.77.27 \
+  'set -e
+   d=/home/ghdc/nwm/Basins/<basin>/forcing
+   dest=/home/ghdc/nwm/Basins-retired/forcing-csv-$(date +%Y%m%d)/<basin>
+   mkdir -p "$dest"
+   find "$d" -maxdepth 1 -type f -name "*.csv" -exec mv -t "$dest" {} +
+   ls -A "$d" | wc -l   # 期望 0；目录本身必须还在'
+```
+
+留一个空目录的代价是零，换来的是清理当天和往后每次 publish 都不触发 cutover。
+
+**新流域投递**则相反：新流域根本不带 `forcing/` 是对的——它没有历史身份要延续，
+首次 publish 不存在 `package_changed`。投递规范禁止再带 `forcing/`，只约束新投递，
+不要拿它去反推已注册流域可以直接删目录。
+
 ### 5.6 新增或恢复流域的运维入口
 
 后续增加新的 `Basins/` 流域时，当前生产入口固定为：
@@ -1759,7 +1822,7 @@ RECEIPT_DIR=/scratch/frd_muziyao/nhms-prod/workspace/recalibration
 RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，receipt 路径不得重复
 
 # 1) dry-run：跑完全部校验与八面门，但不写任何索引行
-uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_clone_direct_grid_cutover_states \
   --transfer-mode recalibration \
   --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
   --state-index "$CANONICAL" \
@@ -1770,7 +1833,7 @@ uv run python -m scripts.node22_clone_direct_grid_cutover_states \
   --receipt "$RECEIPT_DIR/$RUN_TAG-dry-run.json"
 
 # 2) 逐项核对 dry-run receipt 后再执行（--apply）
-uv run python -m scripts.node22_clone_direct_grid_cutover_states \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.node22_clone_direct_grid_cutover_states \
   ... 同上 ... --apply \
   --receipt "$RECEIPT_DIR/$RUN_TAG-apply.json"
 ```
@@ -2170,19 +2233,131 @@ lifecycle 通道 deactivate。
 
 tile 前后字节数不变 = 缓存问题，回去查 `source_version` 与 nginx，不要直接宣布完成。
 
-**不属于展示面、无需处理（2026-08-25 复核）**：
+**静态 geojson 的残留（2026-08-25 已清，#1701 一并处理）**：
 
-- `apps/frontend/public/geo/national-basin-river.geojson`（45 MB，59702 features，
-  其中 43799 为 hhe）——前端**刻意不 fetch**，见
-  [`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
-  并有测试钉住。纯磁盘死重。
-- `apps/frontend/public/geo/national-basin-domain.geojson` 里的 `basins_hhe` 轮廓——
-  `withStaticBasinBoundaries()` 只对**服务端已返回的** basin 做 boundary 回填，
-  hhe 不在 `/api/v1/basins?has_display_product=true`（实测 24 个，无 hhe），
-  因此该 feature 永不渲染。
-- 裸 `/api/v1/basins`（不带 `has_display_product`）是 `core.basin` 原始目录，
-  含 hhe 属预期；前端走的是 `has_display_product=true`
-  （[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
+两份 `apps/frontend/public/geo/*.geojson` 曾长期留着已退役流域的几何。它们确实
+**不会被渲染**（`withStaticBasinBoundaries()` 只对**服务端已返回的** basin 按
+basinId 查表回填，而 basinId 来自 `has_display_product=true`；river 那份前端
+**刻意不 fetch**，见
+[`useNationalBasinGeo.ts:37`](../../apps/frontend/src/pages/m11/useNationalBasinGeo.ts)
+并有测试钉住），但把退役流域的几何继续投递给浏览器没有道理，已清：
+
+| 文件 | before | after |
+|---|---|---|
+| `national-basin-river.geojson` | 45.0 MB / 59702 features（43799 为 hhe，5294 为 zhaochen） | **8.85 MB / 10609** |
+| `national-basin-domain.geojson` | 0.50 MB / 18 features | **0.34 MB / 14** |
+
+清理只过滤 `properties.basin_id`，不重建；退役新流域时照做一次即可。
+
+**`core.basin` 的退役行不要删**：`core.basin_version` 以 `NO ACTION` 外键引用
+`core.basin.basin_id`，每个退役流域各有 1 行 `basin_version`，硬删要连
+`basin_version` → `model_instance` → `hydro_run` 一起删，会毁掉血缘和上面的复活路径。
+裸 `/api/v1/basins`（不带 `has_display_product`）就是 `core.basin` 原始目录，
+含已退役流域**属预期**；前端走的是 `has_display_product=true`
+（[`stores/overviewData.ts:537`](../../apps/frontend/src/stores/overviewData.ts)）。
+
+### 7.2 2026-08-25：zhaochen 系列退出业务化（#1701，owner 裁定不建后继）
+
+`basins_zhaochen_{bst,mc,wem}` 三个流域整体退出生产。**owner 裁定「彻底退出，不建
+basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」整条路作废——没有目标
+包，就没有克隆对，`#1697` 的 `--transfer-mode recalibration` 不参与本次操作。
+
+地理位置与名字无关，别按名字找：`bst` 在新疆天山（83.0–88.3°E / 41.5–43.3°N，
+**9572 河段**），`mc` 在四川（103.8–104.0°E / 28.8–29.0°N，708 段），
+`wem` 在 102.0°E / 34.1°N（308 段）。验收挑 tile 时按这三个 bbox 挑，不要按名字猜。
+
+**本次五步全做了**（§7.1 的 hhe 退役漏了第 5 步，见 §7.1.1）：
+
+1. **注册表两份**（NFS + `/scratch/frd_muziyao/nhms-prod` 本地）各移除 6 条
+   `dg_*`（3 流域 × gfs/ifs），62 → 56。checksum **复用仓库自己的
+   `scheduler_file_provider_refresh._prospective_registry_content`** 重算，
+   不要手写 canonical 序列化；写入后立刻用 `_load_previous_canonical_registry`
+   原地回读校验（sha 相符 + 56 行）才算成功。备份
+   `manifest-last.json.bak-zhaochen-retire-20260825`。
+2. **node-27 `hydro.hydro_run`**：552 条 published（184 × 3）翻 `superseded`，
+   行级备份 `/home/nwm/zhaochen-published-runs-backup-20260825.csv`。
+3. **`infra/env/node27-ingest.env`**：`AUTOPIPE_EXCLUDE_BASINS` 追加
+   `zhaochen_bst,zhaochen_mc,zhaochen_wem`（保留原有 `zhaochen_hhy,hhe`），
+   备份同名 `.bak-zhaochen-retire-20260825`。
+4. **目录**：`zhaochen/` 两棵树各自 `mv` 到
+   `<root>/Basins-retired/issue-1701-20260825/`（各 4.2 G，同盘 rename），不删。
+5. **baseline `core.model_instance` deactivate ×3**：`basins_zhaochen_{bst,mc,wem}_shud`
+   走 §7.1.1 的进程内 lifecycle 通道，`override_missing_active=true`，一行一操作，
+   preflight `blockers` 非空一律中止（本次三个都是 `[]`，唯一 warning
+   `COPIED_ROOT_EVIDENCE_MISSING` 与 deactivate 无关）。
+
+**两个把这次退役做返工的坑（§7.1 / §7.1.1 的模板里没有，务必照做）**：
+
+1. **按 `basin_version_id` 查 `model_instance`，绝不要按 `model_id`。**
+   direct-grid 变体行的 `model_id` 是哈希（`dg_e8ced3a5…`），**不含流域名**，
+   `where model_id like '%<slug>%'` 会把它们全部漏掉，只查到 3 行 baseline
+   `_shud`。本次实际有 **9 行**（3 个 `_shud` + 6 个 `dg_*`，其中 3 个 `dg_*`
+   是 active）。只关 `_shud` 会出现一个骗人的中间态：`source_generation` 确实
+   从 `:31` 掉到 `:28`、tile 确实归零——因为那一刻 `dg_*` 恰好也没在 active 集里——
+   然后下一轮 autopipe 一跑，河网全回来了。正确查法：
+
+   ```sql
+   select model_id, basin_version_id, active_flag, lifecycle_state
+     from core.model_instance
+    where basin_version_id like '%<slug>%'
+    order by active_flag desc, model_id;
+   ```
+
+   §7.1.1 那句「不要动已经 inactive 的 `dg_*` 行」只在 hhe 的情形下成立
+   （hhe 的 dg 行本就全 inactive）；**active 的 `dg_*` 行必须一起 deactivate**。
+
+2. **先加 `AUTOPIPE_EXCLUDE_BASINS`，再 deactivate——顺序反了会被翻回来。**
+   `nhms-node27-autopipe.timer` 每 10 分钟一轮，
+   [`node27_autopipe_cron.sh:19/109`](../../scripts/node27_autopipe_cron.sh)
+   每轮重新 source `infra/env/node27-ingest.env`，其 register 步骤会把
+   `superseded` / `inactive` 翻回 active。本次 19:46:02 deactivate、19:48:47
+   autopipe 就把 3 个 `dg_*` 重新激活了，而排除项 19:48:50 才落盘——**差 3 秒**。
+   验收必须**跨至少一轮完整 autopipe** 再读数（本次 19:58:40 那轮跑完后
+   zhaochen active = 0、active 总数 28，才算数）。
+
+**不需要做的**（都核实过，别顺手做）：
+
+- **不需要 retirement declaration**。`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 让刷新走
+  [`scheduler_file_provider_refresh.py:896`](../../scripts/scheduler_file_provider_refresh.py)
+  的 replay 分支，`previous_models_snapshot` 由
+  `_load_previous_canonical_registry(registry_uri)` 直接读 manifest——手工删行之后
+  previous 本身就是 56，分类器看到的是 `56/56 unchanged`，**根本不产生 `removed`**，
+  `enforced` 门不会 refuse。`declared_retirements` 机制是给非 replay 路径用的。
+- **不需要 geo 重建**。前端 geojson 刻意不 fetch（§7.1.1 末尾），成员判据在 DB 侧，
+  正是第 5 步翻的那一行。
+- **不需要维护窗口**。删行只停未来调度；已发布的包仍在 object store。动手前确认
+  `squeue` 里没有这 6 个 `dg_*` 在飞即可（本次在跑的是 `dg_3264c89a`/gfs 与
+  `dg_30a94855`/ifs，无交集）。
+
+**验收 receipt（2026-08-25 实测）**：
+
+| 项 | before | after |
+|---|---|---|
+| 注册表 `entry_count`（4 个 provider 全部） | 62 | **56** |
+| 刷新分类 `refresh_20260825T114421Z_16c2c2f7df62` | — | `56/56 unchanged`，`removed 0`，`refused 0`，`package_changed 0` |
+| `generation` | `manifest-c76de906099f` | `manifest-c5d926ff02b8` |
+| active `core.model_instance` / active river networks | 31 / 31 | **28 / 28** |
+| `/api/v1/layers` river-network `source_generation` | `…:a4559c13156eb0ea8b29:31` | `…:2f80d8c240118084e6fa:28` |
+| `/api/v1/basins?has_display_product=true` | 24（含 3 个 zhaochen） | **21**（无 zhaochen） |
+| tile `6/47/23`、`7/94/47`、`8/188/94`（bst） | 有内容 | **0 B** |
+| tile `7/100/53`、`8/201/106`（mc） | 有内容 | **0 B** |
+| 仍有内容的 tile 里 `zhaochen` 字符串出现次数 | — | **0**（`5/23/11`、`8/200/102`、`9/401/204`、`4/12/6`） |
+| 公网 `test.nwm.ac.cn` 同 tile 字节 | — | 与内网一致（nginx 无陈旧缓存） |
+| `ops.audit_log` | — | `log_id` 15/16/17，`models.deactivate` / `sys_admin` |
+
+> **读 `source_generation` 有个坑**：deactivate 之后立刻读可能仍是旧值（显示 API 的
+> 连接池会话快照）。不要据此判定「没生效」——先用 SQL 直接数 digest 行数
+> （`JOIN core.model_instance ... WHERE mi.active_flag = true`），DB 是真值。
+>
+> **tile 字节不变不一定是缓存**。`cache_key` 含 `tile.source_version`
+> （[`services/tiles/mvt.py:139`](../../services/tiles/mvt.py)），source_version 一变缓存键必变，
+> 取到的就是新生成的 tile。字节不变要先确认挑的 tile **真的覆盖**该流域——
+> 本次第一轮就是按名字猜到 98°E/34°N，五个 tile 全部不覆盖，白测一遍。
+
+**复活路径**：恢复两份 manifest 备份（或重新 provision）＋ 目录从
+`Basins-retired/issue-1701-20260825/` 移回＋ 27 侧 `--force` 注册（会把
+`superseded` 翻回 active）＋ `AUTOPIPE_EXCLUDE_BASINS` 去掉三项＋ baseline
+`core.model_instance` 三行 `activate` 回来（少这一步 = 底图上没有河网）。
 
 ## 8. 当前已知卡点
 
@@ -2600,9 +2775,9 @@ cd /scratch/frd_muziyao/NWM
 JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
 grep -rlE 'OBJECT_STORE_COPYBACK_STATE_INDEX_(FAILED|COMMIT_UNCERTAIN)' "$JOURNAL" | tail -20
 # 两份 index 的 entry 数（shared 是调度器实际读的那份）
-uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+/scratch/frd_muziyao/NWM/.venv/bin/python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
   /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/index-last.json
-uv run python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
+/scratch/frd_muziyao/NWM/.venv/bin/python -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["entries"]))' \
   /ghdc/data/nwm/object-store/scheduler/state-index/index-last.json
 ```
 
@@ -2646,7 +2821,7 @@ set +a
 install -d -m 0700 "$NHMS_SCHEDULER_COPYBACK_REPLAY_RECEIPT_ROOT"
 
 # 1) 只读预览（默认 dry-run：不调用 merge、不改 index、不拷对象）
-uv run python -m scripts.scheduler_state_index_copyback_replay \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000
 
 # 2) 逐项核对 dry-run 输出后再执行：
@@ -2654,7 +2829,7 @@ uv run python -m scripts.scheduler_state_index_copyback_replay \
 #    - destination_entry_count_before 与共享 index 现有条数一致（当前 ~1645），而不是 0
 #      （0 = 根写错 / NFS 没挂，别 enforce）
 #    - destination_index_existed 为 true
-uv run python -m scripts.scheduler_state_index_copyback_replay \
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_copyback_replay \
   --cycle gfs_2026072000 --cycle ifs_2026072000 --enforce
 ```
 

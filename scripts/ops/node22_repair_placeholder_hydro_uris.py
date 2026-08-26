@@ -9,8 +9,8 @@ journal repository so journal + latest views stay consistent.
 
 Dry-run by default; pass --apply to write. Emits a JSON receipt either way.
 
-Usage (node-22):
-    uv run python scripts/ops/node22_repair_placeholder_hydro_uris.py \
+Usage (node-22, exact active interpreter — never bare uv before maintenance):
+    /scratch/frd_muziyao/NWM/.venv/bin/python scripts/ops/node22_repair_placeholder_hydro_uris.py \
         --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
         --object-store-root /ghdc/data/nwm/object-store \
         [--apply] [--receipt PATH]

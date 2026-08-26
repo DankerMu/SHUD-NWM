@@ -41,3 +41,84 @@ calibration_overrides:
       to completion on the source value 8.19327372615961.
     approver: danker
     date: "2026-08-24"
+
+  # --- HHe sub-basins: delivered calibration ensemble is computationally
+  # intractable (2026-08-26).  Six entries, one per basin, same parameter and
+  # value; they are listed separately because an override is per-basin.
+  - basin_slug: hekouzhen_zhi_longmen
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      The delivered calibration makes a 7-day forecast take 5-7 hours.  Measured
+      on node-22, one basin at a time, same forcing / mesh / initial state /
+      binary, varying only this parameter over a 1-day horizon: the solver cost
+      collapses across a sharp cliff whose location is basin-specific --
+      hekouzhen_zhi_longmen, longyangxia_yishang and sanmenxia_zhi_huayuankou at
+      0.7, longmen_zhi_sanmenxia at 0.9, longyangxia_zhi_lanzhou and
+      lanzhou_zhi_hekouzhen at 1.5.  For this basin 0.6 needs 23646 f-evals and
+      0.7 needs 550.  All 20 delivered CALIB candidates were tested on
+      sanmenxia_zhi_huayuankou (identical ensemble across all six basins): every
+      one lands on the slow side at 299968-478218 f-evals, versus 914 at
+      GEOL_KSATH=0.7 -- so selecting a different ensemble member cannot fix this,
+      the whole ensemble sits far from the cliff (delivered values span
+      0.001-0.041 while every cliff is >=0.7).  2.0 is chosen over each basin's
+      own cliff value because the cliff is 100-300x steep within one step, so
+      sitting on its edge is fragile against a heavier-rain cycle; 2.0 clears
+      every measured cliff and was verified fast on all six (375-1365 f-evals).
+      Minimising the deviation buys nothing scientific -- the value is not the
+      modeller's at any point on the range -- while the margin is the only
+      protection.  These runs are NOT hydrologically valid and exist to keep the
+      pipeline exercised; the durable fix is a recalibration carrying a
+      solver-cost constraint.
+    approver: danker
+    date: "2026-08-26"
+  - basin_slug: longyangxia_yishang
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      See hekouzhen_zhi_longmen (same measurement campaign, 2026-08-26).  This
+      basin's cliff is at 0.7: 0.6 needs 18136 f-evals, 0.7 needs 476.  Verified
+      at 2.0: 1015 f-evals over a 1-day horizon.
+    approver: danker
+    date: "2026-08-26"
+  - basin_slug: sanmenxia_zhi_huayuankou
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      See hekouzhen_zhi_longmen (same measurement campaign, 2026-08-26).  This
+      basin's cliff is at 0.7: 0.6 needs 215497 f-evals, 0.7 needs 914.  It is
+      also the basin on which all 20 delivered CALIB candidates were tested.
+      Verified at 2.0: 843 f-evals over a 1-day horizon.
+    approver: danker
+    date: "2026-08-26"
+  - basin_slug: longmen_zhi_sanmenxia
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      See hekouzhen_zhi_longmen (same measurement campaign, 2026-08-26).  This
+      basin's cliff is at 0.9: 0.8 needs 109297 f-evals, 0.9 needs 1128, and 0.5
+      / 0.6 did not finish inside a 120-minute limit.  Verified at 2.0: 1365
+      f-evals over a 1-day horizon.
+    approver: danker
+    date: "2026-08-26"
+  - basin_slug: longyangxia_zhi_lanzhou
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      See hekouzhen_zhi_longmen (same measurement campaign, 2026-08-26).  This
+      basin's cliff is at 1.5, above the range the other basins needed: 0.9
+      needs 291133 f-evals, 1.0 needs 287495, 1.2 needs 32023, 1.5 needs 905.
+      Verified at 2.0: 782 f-evals over a 1-day horizon.
+    approver: danker
+    date: "2026-08-26"
+  - basin_slug: lanzhou_zhi_hekouzhen
+    parameter: GEOL_KSATH
+    value: 2.0
+    reason: >-
+      See hekouzhen_zhi_longmen (same measurement campaign, 2026-08-26).  This
+      basin's cliff is at 1.5 and its response below the cliff is non-monotone
+      (0.5 needs 170714 f-evals, 0.7 needs 232600, 0.9 needs 255869, 1.2 needs
+      138262), which is why a per-basin cliff value would be especially fragile
+      here; 1.5 needs 395.  Verified at 2.0: 375 f-evals over a 1-day horizon.
+    approver: danker
+    date: "2026-08-26"
