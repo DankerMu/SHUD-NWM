@@ -33,6 +33,7 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_SURFACE_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+    NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
@@ -748,39 +749,85 @@ QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.p
 PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
 TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
 
+# --------------------------------------------------------------------------
+# #1571 local-repair 1 (phase7-cand-01): node-22 entrypoint invariant routing.
+#
+# The 997-line node-22 entrypoint owner uniquely asserts the exact-interpreter
+# contracts of the two systemd units (retention ExecStart and the gateway unit's
+# deferred-venv interpreter), the repair script's usage string, the QHH
+# diagnostic README's Production Replacement lines, the shared instruction
+# source's node-22 deferred-environment clause, and tests/conftest.py's
+# skip-guidance pointer. Those exact producers previously selected nothing
+# (systemd units) or suites that assert none of the node-22 semantics (repair
+# script, README, shared source) — leaving CI on collect-only or unrelated
+# assertions for the very diff class that can implicitly rebuild the active
+# node-22 .venv. Each rule below routes the producer to this owner additively.
+# --------------------------------------------------------------------------
+NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
+NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
+NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
+
 
 @pytest.mark.parametrize(
-    "producer, owner",
+    "producer, owner, smoke_allowed",
     [
-        pytest.param(".python-version", PYTHON_ENV_TRUTH_TEST, id="python-version-pin"),
-        pytest.param("instructions/agents/shared.md", PYTHON_ENV_TRUTH_TEST, id="instruction-source"),
-        pytest.param("infra/README.two-node-docker.md", TWO_NODE_DOCKER_ENV_TEST, id="two-node-docker-runbook"),
-        pytest.param(QHH_CYCLE_SBATCH, QHH_STATIC_TEST, id="qhh-cycle-sbatch"),
-        pytest.param(QHH_DIAGNOSTIC_README, QHH_STATIC_TEST, id="qhh-diagnostic-readme"),
-        pytest.param(QHH_CYCLE_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, id="qhh-cycle-shell"),
-        pytest.param(QHH_CONTINUOUS_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, id="qhh-continuous-python"),
+        pytest.param(".python-version", PYTHON_ENV_TRUTH_TEST, False, id="python-version-pin"),
+        pytest.param("instructions/agents/shared.md", PYTHON_ENV_TRUTH_TEST, False, id="instruction-source"),
+        pytest.param("infra/README.two-node-docker.md", TWO_NODE_DOCKER_ENV_TEST, False, id="two-node-docker-runbook"),
+        pytest.param(QHH_CYCLE_SBATCH, QHH_STATIC_TEST, False, id="qhh-cycle-sbatch"),
+        pytest.param(QHH_DIAGNOSTIC_README, QHH_STATIC_TEST, False, id="qhh-diagnostic-readme"),
+        pytest.param(QHH_CYCLE_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, False, id="qhh-cycle-shell"),
+        pytest.param(QHH_CONTINUOUS_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, False, id="qhh-continuous-python"),
+        # #1571 local-repair 1 rows (phase7-cand-01): the two systemd units
+        # previously selected nothing and degraded to collect-only; the repair
+        # script selected CORE_SMOKE + the #1656 timescale rider, none of which
+        # assert its exact-interpreter usage string. The repair script is the
+        # one row where core smoke is ALLOWED: an explicit rule suppresses the
+        # unknown-backend fallback, so its pre-existing core-smoke selection is
+        # preserved EXPLICITLY in the rule targets rather than arriving via the
+        # fallback. The other nine rows keep the no-core-smoke pin.
+        pytest.param(
+            NODE22_SLURM_GATEWAY_UNIT,
+            NODE22_ENTRYPOINT_INVARIANT_TEST,
+            False,
+            id="node22-slurm-gateway-unit",
+        ),
+        pytest.param(
+            NODE22_RETENTION_UNIT,
+            NODE22_ENTRYPOINT_INVARIANT_TEST,
+            False,
+            id="node22-retention-unit",
+        ),
+        pytest.param(NODE22_REPAIR_SCRIPT, NODE22_ENTRYPOINT_INVARIANT_TEST, True, id="node22-repair-script"),
     ],
 )
-def test_environment_producer_selects_its_dedicated_owner(producer: str, owner: str) -> None:
+def test_environment_producer_selects_its_dedicated_owner(producer: str, owner: str, smoke_allowed: bool) -> None:
     # Round-2 invariant, selector leg: a producer-only diff must reach the
-    # dedicated environment oracle. The dedicated owner must be present and no
+    # dedicated environment oracle. The dedicated owner must be present, and —
+    # except for the one row that legitimately carries core smoke — no
     # core-smoke fallback may arm (each row is a known mapping, so the
     # unknown-path fallback must stay silent).
     selected = set(select_tests([producer], repo_root=Path(".")))
 
     assert owner in selected, f"{producer}: dedicated owner {owner} not selected (got {sorted(selected)})"
-    assert not set(CORE_SMOKE_TESTS) & selected, (
-        f"{producer}: core-smoke fallback armed for a known mapping ({sorted(set(CORE_SMOKE_TESTS) & selected)})"
-    )
+    if not smoke_allowed:
+        assert not set(CORE_SMOKE_TESTS) & selected, (
+            f"{producer}: core-smoke fallback armed for a known mapping ({sorted(set(CORE_SMOKE_TESTS) & selected)})"
+        )
 
 
 def test_environment_producer_reds_when_its_rule_is_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Round-2 invariant, red leg (in-memory, tracked selector untouched): the
-    # source table without any of the seven exact rules must drop every
+    # source table without any of the ten exact rules must drop every
     # dedicated owner from the selection — the same assertion seam the green
-    # rows above use. Table-driven so the red-proof covers all seven rows.
+    # rows above use. Table-driven so the red-proof covers all ten rows. The
+    # three #1571 local-repair rows ride the same removal: without the exact
+    # rules, the systemd units select nothing (collect-only) and the repair
+    # script drops the node-22 owner while keeping its core-smoke/timescale
+    # selections. The conftest leg is red elsewhere (its owner rides the
+    # support-module rule, not a PATH row).
     removed_patterns = {
         ".python-version",
         "instructions/agents/shared.md",
@@ -789,6 +836,9 @@ def test_environment_producer_reds_when_its_rule_is_removed(
         QHH_DIAGNOSTIC_README,
         QHH_CYCLE_SCRIPT,
         QHH_CONTINUOUS_SCRIPT,
+        NODE22_SLURM_GATEWAY_UNIT,
+        NODE22_RETENTION_UNIT,
+        NODE22_REPAIR_SCRIPT,
     }
     mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in removed_patterns)
     assert len(mutant) == len(PATH_TEST_RULES) - len(removed_patterns)
@@ -802,6 +852,9 @@ def test_environment_producer_reds_when_its_rule_is_removed(
         QHH_DIAGNOSTIC_README: QHH_STATIC_TEST,
         QHH_CYCLE_SCRIPT: QHH_ENTRYPOINT_AUTHORITY_TEST,
         QHH_CONTINUOUS_SCRIPT: QHH_ENTRYPOINT_AUTHORITY_TEST,
+        NODE22_SLURM_GATEWAY_UNIT: NODE22_ENTRYPOINT_INVARIANT_TEST,
+        NODE22_RETENTION_UNIT: NODE22_ENTRYPOINT_INVARIANT_TEST,
+        NODE22_REPAIR_SCRIPT: NODE22_ENTRYPOINT_INVARIANT_TEST,
     }
     for producer, owner in owners.items():
         selected = select_tests([producer], repo_root=Path("."))
@@ -848,6 +901,88 @@ def test_qhh_backend_smoke_control_stays_exact_and_unchanged() -> None:
     # routing (it is a `scripts/**/*.sh` producer with a rule).
     selected = set(select_tests([QHH_BACKEND_SMOKE_SCRIPT], repo_root=Path(".")))
     assert selected == {QHH_STATIC_TEST}
+
+
+def test_node22_path_rules_red_when_only_the_owner_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Phase 7 local-repair red proof at the additive edge itself. Removing whole
+    # rules proves exact producers need routing, but for the two Round-2 rules it
+    # would also remove their older owners and would not prove the newly added
+    # node-22 leg is load-bearing. Strip only this owner from all five PATH rows;
+    # old QHH/Python/core-smoke targets stay while the node-22 oracle disappears.
+    from scripts import select_ci_tests
+
+    producers = {
+        NODE22_SLURM_GATEWAY_UNIT,
+        NODE22_RETENTION_UNIT,
+        NODE22_REPAIR_SCRIPT,
+        QHH_DIAGNOSTIC_README,
+        "instructions/agents/shared.md",
+    }
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if target != NODE22_ENTRYPOINT_INVARIANT_TEST),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern in producers
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert sum(rule.pattern in producers for rule in patched) == len(producers)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    for producer in producers:
+        assert NODE22_ENTRYPOINT_INVARIANT_TEST not in select_tests([producer], repo_root=Path("."))
+
+    assert QHH_STATIC_TEST in select_tests([QHH_DIAGNOSTIC_README], repo_root=Path("."))
+    assert PYTHON_ENV_TRUTH_TEST in select_tests(["instructions/agents/shared.md"], repo_root=Path("."))
+    repair_selected = set(select_tests([NODE22_REPAIR_SCRIPT], repo_root=Path(".")))
+    assert set(CORE_SMOKE_TESTS) <= repair_selected
+    assert TIMESCALE_WRITE_GUARD_INVARIANT_TEST in repair_selected
+
+
+def test_node22_repair_script_keeps_core_smoke_and_timescale_with_the_owner() -> None:
+    # #1571 local-repair additive contract: the repair script is a backend
+    # Python path (scripts/**) with an explicit rule, so its current CORE_SMOKE
+    # and #1656 timescale selections must survive alongside the node-22 owner —
+    # never replaced by it. Membership, not an exact set: supplemental routing
+    # is intentional and an exact-set pin would block future supplemental legs.
+    selected = set(select_tests([NODE22_REPAIR_SCRIPT], repo_root=Path(".")))
+
+    assert set(CORE_SMOKE_TESTS) <= selected, "repair script lost its core-smoke selection"
+    assert TIMESCALE_WRITE_GUARD_INVARIANT_TEST in selected, "repair script lost its #1656 timescale rider"
+    assert NODE22_ENTRYPOINT_INVARIANT_TEST in selected
+
+
+def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
+    # #1571 local-repair: before the exact rules the two systemd units matched
+    # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing
+    # at all, degrading targeted CI to the zero-assertion collect-only smoke.
+    # Each must now select the node-22 owner — real assertions, never empty.
+    for unit in (NODE22_SLURM_GATEWAY_UNIT, NODE22_RETENTION_UNIT):
+        selected = set(select_tests([unit], repo_root=Path(".")))
+
+        assert NODE22_ENTRYPOINT_INVARIANT_TEST in selected, f"{unit} did not select the node-22 owner"
+        assert selected, f"{unit} selected an empty test set (collect-only)"
+
+
+def test_diagnostic_readme_and_shared_source_keep_round2_owners_with_node22_owner() -> None:
+    # #1571 local-repair additive contract for the two producers extended from
+    # the Round-2 depth fix: the QHH diagnostic README keeps its QHH-static
+    # owner, and the shared instruction source keeps its Python-environment
+    # truth owner — both gaining the node-22 owner for their node-22-specific
+    # clauses (Production Replacement lines; the deferred-environment contract).
+    for producer in (QHH_DIAGNOSTIC_README,):
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert QHH_STATIC_TEST in selected, f"{producer} lost its QHH-static owner"
+        assert NODE22_ENTRYPOINT_INVARIANT_TEST in selected, f"{producer} did not select the node-22 owner"
+
+    shared_selected = set(select_tests(["instructions/agents/shared.md"], repo_root=Path(".")))
+    assert PYTHON_ENV_TRUTH_TEST in shared_selected, "shared source lost its Python-environment owner"
+    assert NODE22_ENTRYPOINT_INVARIANT_TEST in shared_selected, "shared source did not select the node-22 owner"
 
 
 def test_environment_producers_select_empty_without_the_ci_backend_lane() -> None:
@@ -3154,7 +3289,7 @@ def _bump_stat(path: Path) -> None:
 
 @pytest.mark.parametrize(
     "changed_path",
-    ["tests/conftest.py", "tests/integration_helpers.py"],
+    ["tests/integration_helpers.py"],
 )
 def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str) -> None:
     # The changed-test branch condition is wider than `tests/test_*.py`; the
@@ -3164,6 +3299,10 @@ def test_meta_guard_accumulation_is_scoped_to_test_file_names(changed_path: str)
     # misleading, zero-assertion red (#1453). It now maps to the meta-guard
     # suite. The pin's original intent survives unchanged: a support-file change
     # still spills nothing — no whole suite, no core smoke, exactly one target.
+    # tests/conftest.py left this parametrize when #1571's local-repair routed
+    # it through SUPPORT_MODULE_TEST_RULES (see
+    # test_conftest_support_module_selects_its_importer_suites_plus_node22_owner);
+    # integration_helpers.py keeps the collapse.
     assert Path(changed_path).is_file()
 
     assert select_tests([changed_path], repo_root=Path(".")) == [SELECTOR_META_GUARD_TEST]
@@ -3188,22 +3327,80 @@ def _tracked_tests_support_modules() -> list[str]:
 
 
 # Support modules #1487 deliberately leaves on the collapse route even though
-# they DO derive non-gated importer suites. Issue #1487 excludes both by name, so
+# they DO derive non-gated importer suites. Issue #1487 excludes them by name, so
 # this is an inherited scope boundary, not a coverage claim. The factual
-# predicate it cites: ci.yml's `database` paths-filter lists both paths and
+# predicate it cites: ci.yml's `database` paths-filter lists each path and
 # starts `real-db-integration`, which runs `pytest -q -m integration` — measured
-# coverage of their importers' tests is 75 of 245 (integration_helpers) and 0 of
-# 19 (conftest), because the non-gated derivation and `-m integration` select
-# near-disjoint sets by construction. PARTIAL, not full compensation. The
-# closure guard pins each path inside that filter block, so if the filter drops
-# one the carve-out reds and has to be re-decided rather than rotting into a
-# silent hole. Full routing for these two is a candidate follow-up.
+# coverage of integration_helpers' importers' tests is 75 of 245, because the
+# non-gated derivation and `-m integration` select near-disjoint sets by
+# construction. PARTIAL, not full compensation. The closure guard pins each path
+# inside that filter block, so if the filter drops one the carve-out reds and has
+# to be re-decided rather than rotting into a silent hole.
+#
+# #1571 local-repair: tests/conftest.py LEFT this carve-out and now routes
+# through a SUPPORT_MODULE_TEST_RULES entry (its two file-level non-gated
+# importer suites, plus the node-22 entrypoint owner that asserts conftest's
+# exact skip-guidance clause). tests/integration_helpers.py remains the only
+# carve-out member. The `database:`-filter pin below still guards the surviving
+# member; the conftest filter entry itself stays in place (unrelated to this
+# routing) and its own pin is unchanged.
 ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES = frozenset(
     {
         "tests/integration_helpers.py",
-        "tests/conftest.py",
     }
 )
+
+
+def test_conftest_support_module_selects_its_importer_suites_plus_node22_owner() -> None:
+    # #1487 support-module routing, conftest leg. tests/conftest.py is a
+    # non-collectible tests/ support module, so without a SUPPORT_MODULE_TEST_
+    # RULES entry it collapses to the meta-guard suite only. It has two
+    # file-level non-gated importer suites (tests/test_integration_gate.py and
+    # tests/test_grid_stability_verification.py) that a fixture edit breaks, and
+    # — since #1571's node-22 entrypoint owner asserts its exact skip-guidance
+    # clause (test_conftest_skip_guidance_points_to_runbook) — the node-22 owner
+    # rides the same rule. The selection must be exactly the meta-guard rider
+    # plus the node-22 owner plus every current derived importer suite: the
+    # meta-guard because a routed support-module PR can invalidate the
+    # tree-derived guards that govern this very rule, and the derived set is
+    # recomputed from the tracked tree rather than frozen.
+    required = _derived_support_module_importers(["tests/conftest.py"])["tests/conftest.py"]
+    assert required, "tests/conftest.py derives no non-gated importer suites — the routing premise changed"
+
+    selected = set(select_tests(["tests/conftest.py"], repo_root=Path(".")))
+
+    assert required <= selected
+    assert SELECTOR_META_GUARD_TEST in selected
+    assert NODE22_ENTRYPOINT_INVARIANT_TEST in selected
+
+
+def test_conftest_support_module_reds_when_its_node22_owner_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # In-memory red proof for the conftest leg, on the same production selector
+    # seam as every other red test here: with the exact conftest support-module
+    # rule rebuilt WITHOUT the node-22 owner, a conftest-only PR selects its
+    # importer suites and the meta-guard but not the node-22 owner — the exact
+    # gap phase7-cand-01 closed.
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != NODE22_ENTRYPOINT_INVARIANT_TEST),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == CONFTEST_PATH
+        else rule
+        for rule in SUPPORT_MODULE_TEST_RULES
+    )
+    assert any(rule.pattern == CONFTEST_PATH for rule in patched), "conftest support-module rule not found"
+    monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", patched)
+
+    selected = select_tests([CONFTEST_PATH], repo_root=Path("."))
+
+    assert NODE22_ENTRYPOINT_INVARIANT_TEST not in selected
 
 
 def test_unrouted_tests_support_modules_select_only_the_meta_guard_suite() -> None:
@@ -3995,7 +4192,12 @@ def test_github_output_flags_the_deleted_test_file_meta_guard_collapse(tmp_path:
 
 
 def test_github_output_flags_the_support_module_collapse(tmp_path: Path) -> None:
-    fields = _github_output_fields(tmp_path, ["tests/conftest.py"], repo_root=Path("."))
+    # The surviving #1487 carve-out member keeps the collapse shape
+    # (meta_guard_only + collection_smoke_required both true). tests/conftest.py
+    # is now ROUTED (it selects importer suites + the node-22 owner + the
+    # meta-guard), so it is no longer a collapse — asserted by the dedicated
+    # conftest routing test instead.
+    fields = _github_output_fields(tmp_path, ["tests/integration_helpers.py"], repo_root=Path("."))
 
     assert fields["tests"] == SELECTOR_META_GUARD_TEST
     assert fields["meta_guard_only"] == "true"
@@ -7326,6 +7528,12 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
 # stay plausible while a half-blanked derivation empties one module's set, and
 # then the rule for it is unfalsifiable.
 SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
+    # #1571 local-repair: tests/conftest.py now routes through a
+    # SUPPORT_MODULE_TEST_RULES entry (it previously sat in the #1487 carve-out
+    # collapse). Its derived importer set anchors on the integration-gate suite,
+    # whose module-scope `from tests import conftest` is what the derivation
+    # sees.
+    ("tests/conftest.py", "tests/test_integration_gate.py"),
     (
         "tests/fixtures/mapping_builder/in_memory_grid_snapshot.py",
         "tests/test_mapping_builder_algorithm.py",
@@ -7804,10 +8012,12 @@ def test_support_module_closure_guard_reds_on_a_gratuitous_zero_importer_selecti
 
 
 def test_support_module_carveout_is_load_bearing_not_decorative() -> None:
-    # Honest labelling of the carve-out: with the allowlist emptied, both entries
-    # red immediately — they have real derived importers that nothing selects.
-    # The exemption is a recorded scope decision with PARTIAL external coverage
+    # Honest labelling of the carve-out: with the allowlist emptied, the member
+    # reds immediately — it has real derived importers that nothing selects. The
+    # exemption is a recorded scope decision with PARTIAL external coverage
     # (see the allowlist comment), not a statement that the gap is closed.
+    # tests/conftest.py left the carve-out when #1571's local-repair routed it;
+    # the surviving member is tests/integration_helpers.py.
     modules = sorted(ISSUE_1487_SCOPE_CARVEOUT_SUPPORT_MODULES)
     derived = _derived_support_module_importers(modules)
 
@@ -7834,20 +8044,26 @@ def test_carveout_filter_pin_reds_when_a_path_leaves_the_database_block() -> Non
     # Constructed workflow text, so the tracked ci.yml is untouched. Two shapes:
     # the entry deleted outright, and the entry moved under ANOTHER filter — the
     # second is why the pin slices the block instead of grepping the file, since
-    # `tests/conftest.py` under `backend:` starts no database job.
+    # a carve-out path under `backend:` starts no database job.
+    #
+    # #1571 local-repair: the surviving carve-out member is
+    # tests/integration_helpers.py (conftest left the carve-out and now routes
+    # through SUPPORT_MODULE_TEST_RULES). The conftest `database:` filter entry
+    # itself stays in ci.yml but is no longer a carve-out pin; this test's red
+    # arms now target the surviving member.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    entry = "              - 'tests/conftest.py'\n"
+    entry = "              - 'tests/integration_helpers.py'\n"
     assert entry in _database_filter_block(workflow)
 
     deleted = workflow.replace(entry, "")
     assert _carveout_filter_pin_offenders(workflow=deleted) == [
-        "tests/conftest.py: carve-out is not listed in the ci.yml `database:` filter block"
+        "tests/integration_helpers.py: carve-out is not listed in the ci.yml `database:` filter block"
     ]
 
     moved_to_backend = deleted.replace("            backend:\n", "            backend:\n" + entry)
     assert entry in moved_to_backend
     assert _carveout_filter_pin_offenders(workflow=moved_to_backend) == [
-        "tests/conftest.py: carve-out is not listed in the ci.yml `database:` filter block"
+        "tests/integration_helpers.py: carve-out is not listed in the ci.yml `database:` filter block"
     ]
 
 

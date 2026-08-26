@@ -337,6 +337,18 @@ TWO_NODE_DOCKER_RUNBOOK_ENV_TEST = "tests/test_two_node_docker_runbook_environme
 # same owner via the same additive (non-stop) rule shape.
 QHH_DIAGNOSTIC_README = "scripts/diagnostic/qhh/README.md"
 QHH_CYCLE_SBATCH = "scripts/run_qhh_cycle.sbatch"
+# #1571 local-repair 1 (phase7-cand-01): the 997-line node-22 entrypoint owner
+# uniquely asserts the exact-interpreter contracts of the two systemd units, the
+# repair script's usage string, the QHH diagnostic README's Production
+# Replacement lines, the shared instruction source's node-22 deferred-environment
+# clause, and tests/conftest.py's skip-guidance pointer. The first five producers
+# route through exact PATH_TEST_RULES (non-stop, additive); tests/conftest.py
+# rides the SUPPORT_MODULE_TEST_RULES entry instead, because the `tests/**` branch
+# handles conftest before PATH_TEST_RULES and a PATH row there would be dead.
+NODE22_ENTRYPOINT_INVARIANT_TEST = "tests/test_node22_entrypoint_invariant.py"
+NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
+NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
+NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
 
 
 @dataclass(frozen=True)
@@ -568,12 +580,13 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
 # — import/syntax only, zero assertions (#1453/#1454). For a support module that
 # real suites import at file level, that lane is blind to exactly the breakage a
 # fixture edit causes, so #1487 routes such a module to its non-gated top-level
-# importer suites instead. Exact paths, no globs: five entries, and
-# tests/test_select_ci_tests.py DERIVES the required sets from the tracked tree
-# (never freezes them), so a new importer suite reddens the closure guard naming
-# the module and the missing suite. `tests/integration_helpers.py` and
-# `tests/conftest.py` are deliberately absent — an issue-#1487 scope carve-out
-# recorded with its measured partial coverage in that suite's allowlist.
+# importer suites instead. Exact paths, no globs: the rule table is closed
+# against the tracked importer tree by tests/test_select_ci_tests.py (required
+# sets are derived, never frozen), so a new importer suite reddens naming the
+# module and missing suite. `tests/integration_helpers.py` remains deliberately
+# absent under issue #1487's measured partial-coverage carve-out;
+# `tests/conftest.py` left that carve-out in #1571 because its skip-guidance
+# contract also requires the node-22 invariant owner.
 # #1442 note: `tests/integration_helpers.py` also owns a statement registered in
 # tests/test_river_ts_text_identity_cleanup.py, so a diff to it should ideally
 # select that oracle. It does not, because of the carve-out above: the file maps
@@ -582,6 +595,26 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
 # rule runs it on a helper diff, and it self-selects on its own diff. Closing the
 # gap belongs to #1487's carve-out, not here.
 SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        # #1571 local-repair: tests/conftest.py is a non-collectible support
+        # module, so without a SUPPORT_MODULE_TEST_RULES entry it collapses to
+        # the meta-guard only. It has two file-level non-gated importer suites
+        # (tests/test_integration_gate.py, tests/test_grid_stability_verification.py)
+        # a fixture edit breaks, and the #1487 carve-out's exact skip-guidance
+        # clause is asserted by the node-22 owner (test_conftest_skip_guidance_
+        # points_to_runbook). This rule is reached through the `tests/**`
+        # changed-test branch — BEFORE PATH_TEST_RULES — so it preserves the
+        # selector meta-guard rider and adds the node-22 owner. Deliberately
+        # NOT a PATH_TEST_RULES row: the `tests/**` branch handles conftest and
+        # a PATH row would be dead. The `database:`-filter carve-out remains
+        # recorded and pinned elsewhere; this routing is additive to it.
+        "tests/conftest.py",
+        (
+            "tests/test_grid_stability_verification.py",
+            "tests/test_integration_gate.py",
+            NODE22_ENTRYPOINT_INVARIANT_TEST,
+        ),
+    ),
     PathTestRule(
         "tests/fixtures/mapping_builder/in_memory_grid_snapshot.py",
         (
@@ -1621,8 +1654,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # AGENTS.md projection too; a source-only diff must reach the oracle
         # that pins both semantic clauses. Non-stop: `docs/**`-style generated
         # roots themselves remain unrouted by design.
+        # #1571 local-repair: the shared source's node-22 deferred-environment
+        # clause is asserted by the node-22 owner, so it joins additively
+        # alongside the existing Python-environment owner.
         "instructions/agents/shared.md",
-        (PYTHON_ENVIRONMENT_TRUTH_TEST,),
+        (PYTHON_ENVIRONMENT_TRUTH_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
         # #1571: the two-node Docker runbook is `infra/**`, which already opens
@@ -1638,11 +1674,41 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         QHH_DIAGNOSTIC_README,
-        ("tests/test_qhh_scripts_static.py",),
+        # #1571 local-repair: the Production Replacement lines carry node-22
+        # exact-interpreter semantics that QHH-static does not assert, so the
+        # node-22 owner joins additively alongside the existing QHH-static
+        # target. Extended AT THE RULE SITE, non-stop: the README keeps both
+        # owners and no other producer's selection moves.
+        ("tests/test_qhh_scripts_static.py", NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
         "scripts/local_pg.sh",
         ("tests/test_qhh_scripts_static.py",),
+    ),
+    PathTestRule(
+        # #1571: the gateway unit's deferred-venv ExecStart is uniquely asserted
+        # by the node-22 owner. infra/** already starts the backend lane, so
+        # without this rule a unit-only PR selected nothing and CI degraded to
+        # collect-only; the exact rule converts that lane into real assertions.
+        NODE22_SLURM_GATEWAY_UNIT,
+        (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+    ),
+    PathTestRule(
+        # #1571: the retention unit's single exact ExecStart (deferred-venv
+        # interpreter + absolute script) is uniquely asserted by the node-22
+        # owner. Same collect-only conversion as the gateway unit.
+        NODE22_RETENTION_UNIT,
+        (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+    ),
+    PathTestRule(
+        # #1571: the repair script's usage string is uniquely asserted by the
+        # node-22 owner. A rule suppresses the unknown-backend core-smoke
+        # fallback (matched=True), so the script's CURRENT CORE_SMOKE selection
+        # is preserved EXPLICITLY here — without these targets an exact rule
+        # would silently drop them. scripts/** adds the #1656 timescale rider
+        # supplementally. Owner joins additively, never replacing core smoke.
+        NODE22_REPAIR_SCRIPT,
+        (*CORE_SMOKE_TESTS, NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
         "scripts/ops/node22-run-cycle-once.sh",
