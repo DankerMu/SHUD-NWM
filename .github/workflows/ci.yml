@@ -65,6 +65,17 @@ jobs:
               - 'scripts/**/*.sh'
               - '.github/workflows/ci.yml'
               - 'openapi/**'
+              # #1571: exact no-lane producers whose environment oracles must
+              # start the targeted backend gate on producer-only PRs. The pin
+              # is a bare version file, the instruction source and QHH sbatch
+              # are markdown/shell, and the diagnostic README is docs-adjacent —
+              # none matched any backend pattern, so producer-only diffs did not
+              # start the targeted backend job. Exact literals only; `docs/**`
+              # stays excluded.
+              - '.python-version'
+              - 'instructions/agents/shared.md'
+              - 'scripts/run_qhh_cycle.sbatch'
+              - 'scripts/diagnostic/qhh/README.md'
             database:
               - 'db/**'
               - 'packages/common/migrate.py'

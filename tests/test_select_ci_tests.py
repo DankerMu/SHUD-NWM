@@ -36,11 +36,14 @@ from scripts.select_ci_tests import (
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
+    QHH_CYCLE_SBATCH,
+    QHH_DIAGNOSTIC_README,
     RELEASED_RESERVATION_RECOVERY_TESTS,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
     SUPPORT_MODULE_TEST_RULES,
     THREAD_EXCEPTION_POLICY_TESTS,
+    TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
     PathTestRule,
     is_test_suite_path,
     main,
@@ -721,6 +724,205 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     # #1656: scripts/** is a scanned invariant root.
     assert selected == ["tests/test_readonly_db_validation.py", INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+# --------------------------------------------------------------------------
+# #1571 environment-oracle producer matrix (round-2 selector closure)
+# --------------------------------------------------------------------------
+
+# The seven exact producer rows of the round-2 invariant. Each maps to its
+# dedicated environment oracle through an exact PATH_TEST_RULES entry; the
+# two existing QHH tuples are extended additively (see per-row assertions).
+# Derived from the selector's own constants so the table cannot drift from the
+# rule sites.
+# The seven rows are exact producers. The owner lists use membership (not an
+# exact set) because supplemental selection is intentional: `scripts/**` Python
+# roots add the #1656 timescale rider, and `scripts/**/*.sh`-class producers add
+# none — the round-2 contract is the dedicated owner is REACHED, plus the old
+# targets survive for the two extended tuples.
+QHH_CYCLE_SCRIPT = "scripts/run_qhh_cycle.sh"
+QHH_CONTINUOUS_SCRIPT = "scripts/run_qhh_continuous.py"
+QHH_BACKEND_SMOKE_SCRIPT = "scripts/run_qhh_backend_smoke.sh"
+QHH_STATIC_TEST = "tests/test_qhh_scripts_static.py"
+QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.py"
+PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
+TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
+
+
+@pytest.mark.parametrize(
+    "producer, owner",
+    [
+        pytest.param(".python-version", PYTHON_ENV_TRUTH_TEST, id="python-version-pin"),
+        pytest.param("instructions/agents/shared.md", PYTHON_ENV_TRUTH_TEST, id="instruction-source"),
+        pytest.param("infra/README.two-node-docker.md", TWO_NODE_DOCKER_ENV_TEST, id="two-node-docker-runbook"),
+        pytest.param(QHH_CYCLE_SBATCH, QHH_STATIC_TEST, id="qhh-cycle-sbatch"),
+        pytest.param(QHH_DIAGNOSTIC_README, QHH_STATIC_TEST, id="qhh-diagnostic-readme"),
+        pytest.param(QHH_CYCLE_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, id="qhh-cycle-shell"),
+        pytest.param(QHH_CONTINUOUS_SCRIPT, QHH_ENTRYPOINT_AUTHORITY_TEST, id="qhh-continuous-python"),
+    ],
+)
+def test_environment_producer_selects_its_dedicated_owner(producer: str, owner: str) -> None:
+    # Round-2 invariant, selector leg: a producer-only diff must reach the
+    # dedicated environment oracle. The dedicated owner must be present and no
+    # core-smoke fallback may arm (each row is a known mapping, so the
+    # unknown-path fallback must stay silent).
+    selected = set(select_tests([producer], repo_root=Path(".")))
+
+    assert owner in selected, f"{producer}: dedicated owner {owner} not selected (got {sorted(selected)})"
+    assert not set(CORE_SMOKE_TESTS) & selected, (
+        f"{producer}: core-smoke fallback armed for a known mapping ({sorted(set(CORE_SMOKE_TESTS) & selected)})"
+    )
+
+
+def test_environment_producer_reds_when_its_rule_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round-2 invariant, red leg (in-memory, tracked selector untouched): the
+    # source table without any of the seven exact rules must drop every
+    # dedicated owner from the selection — the same assertion seam the green
+    # rows above use. Table-driven so the red-proof covers all seven rows.
+    removed_patterns = {
+        ".python-version",
+        "instructions/agents/shared.md",
+        "infra/README.two-node-docker.md",
+        QHH_CYCLE_SBATCH,
+        QHH_DIAGNOSTIC_README,
+        QHH_CYCLE_SCRIPT,
+        QHH_CONTINUOUS_SCRIPT,
+    }
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in removed_patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(removed_patterns)
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    owners = {
+        ".python-version": PYTHON_ENV_TRUTH_TEST,
+        "instructions/agents/shared.md": PYTHON_ENV_TRUTH_TEST,
+        "infra/README.two-node-docker.md": TWO_NODE_DOCKER_ENV_TEST,
+        QHH_CYCLE_SBATCH: QHH_STATIC_TEST,
+        QHH_DIAGNOSTIC_README: QHH_STATIC_TEST,
+        QHH_CYCLE_SCRIPT: QHH_ENTRYPOINT_AUTHORITY_TEST,
+        QHH_CONTINUOUS_SCRIPT: QHH_ENTRYPOINT_AUTHORITY_TEST,
+    }
+    for producer, owner in owners.items():
+        selected = select_tests([producer], repo_root=Path("."))
+        assert owner not in selected, (
+            f"mutant table without {producer}'s rule still selects {owner}"
+        )
+
+
+def test_qhh_cycle_shell_keeps_its_existing_targets_with_the_authority_owner() -> None:
+    # Round-2 additive contract: the cycle.sh tuple keeps ALL of its pre-existing
+    # targets (explicit suite, role-boundary static, qhh static) AND gains the
+    # authority owner. Membership, not an exact set — supplemental routing is
+    # intentional (the wrapper is `scripts/**/*.sh`, which adds no rider, but
+    # future supplemental routing must not be blocked by an exact-set pin).
+    for target in (
+        "tests/test_run_qhh_continuous.py",
+        "tests/test_role_boundary_static.py",
+        QHH_STATIC_TEST,
+        QHH_ENTRYPOINT_AUTHORITY_TEST,
+    ):
+        assert target in select_tests([QHH_CYCLE_SCRIPT], repo_root=Path("."))
+
+
+def test_qhh_continuous_python_keeps_its_existing_targets_with_the_authority_owner() -> None:
+    # Round-2 additive contract for the Python continuous entrypoint: its
+    # explicit suite, the same-name selector meta-suite (it IS a backend Python
+    # path with tests/test_run_qhh_continuous.py present) and the #1656
+    # timescale rider all survive alongside the new authority owner. Membership,
+    # not an exact set — supplemental selection is intentional.
+    selected = set(select_tests([QHH_CONTINUOUS_SCRIPT], repo_root=Path(".")))
+    for target in (
+        "tests/test_run_qhh_continuous.py",
+        SELECTOR_META_GUARD_TEST,
+        TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
+        QHH_ENTRYPOINT_AUTHORITY_TEST,
+    ):
+        assert target in selected
+
+
+def test_qhh_backend_smoke_control_stays_exact_and_unchanged() -> None:
+    # Round-2 control: the backend-smoke script keeps its exact one-target
+    # mapping (no authority owner joins it), and its explicit set must not be a
+    # subset-superset of the other producers. Exact set — it has no supplemental
+    # routing (it is a `scripts/**/*.sh` producer with a rule).
+    selected = set(select_tests([QHH_BACKEND_SMOKE_SCRIPT], repo_root=Path(".")))
+    assert selected == {QHH_STATIC_TEST}
+
+
+def test_environment_producers_select_empty_without_the_ci_backend_lane() -> None:
+    # Round-2 invariant, CI leg: these producers only start the targeted backend
+    # gate because of the exact ci.yml `backend:` filter paths added in #1571.
+    # If each exact path left the backend block (or was deleted), the gate would
+    # not start for the producer. The backend-filter positive rows pin the
+    # exact literals in place; these four are the no-lane producers that needed
+    # them. The selector itself is lane-agnostic — this is a workflow seam.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    for entry in (
+        ".python-version",
+        "instructions/agents/shared.md",
+        QHH_CYCLE_SBATCH,
+        QHH_DIAGNOSTIC_README,
+    ):
+        literal = f"              - '{entry}'\n"
+        assert literal in _backend_filter_block(workflow), f"{entry} missing from ci.yml backend filter"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(".python-version", id="python-version-pin"),
+        pytest.param("instructions/agents/shared.md", id="instruction-source"),
+        pytest.param(QHH_CYCLE_SBATCH, id="qhh-cycle-sbatch"),
+        pytest.param(QHH_DIAGNOSTIC_README, id="qhh-diagnostic-readme"),
+    ],
+)
+def test_environment_backend_filter_entry_reds_when_removed_or_moved_out(entry: str) -> None:
+    # In-memory red proof (constructed workflow text; tracked ci.yml untouched):
+    # deleting each exact backend entry, or moving it under ANOTHER filter, must
+    # red the same assertion seam the positive rows pin. A path under
+    # `docs:`/`frontend:` starts no targeted Unit Tests job, so the block-scoped
+    # slice is what makes "moved out" red.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    literal = f"              - '{entry}'\n"
+    assert literal in _backend_filter_block(workflow)
+
+    deleted = workflow.replace(literal, "")
+    assert literal not in _backend_filter_block(deleted)
+
+    moved_to_frontend = deleted.replace("            frontend:\n", "            frontend:\n" + literal)
+    assert literal in moved_to_frontend
+    assert literal not in _backend_filter_block(moved_to_frontend)
+
+
+def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
+    # Round-2 negatives: the generated `CLAUDE.md`/`AGENTS.md` roots are governed
+    # by the instruction source plus byte-exact projection (never a direct
+    # selector rule), and the derived QHH runbook, current-production-ops and
+    # unrelated docs must remain selector-empty and non-exact backend entries.
+    # `docs/**` is deliberately excluded from the backend filter (#1571 scope).
+    for path in (
+        "CLAUDE.md",
+        "AGENTS.md",
+        "docs/runbooks/qhh-backend-smoke.md",
+        "docs/runbooks/current-production-ops.md",
+        "docs/runbooks/failed-basin-retry.md",
+    ):
+        assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
+
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    for path in (
+        "CLAUDE.md",
+        "AGENTS.md",
+        "docs/runbooks/qhh-backend-smoke.md",
+        "docs/runbooks/current-production-ops.md",
+    ):
+        literal = f"              - '{path}'\n"
+        assert literal not in _backend_filter_block(workflow), f"{path} must not be an exact backend filter entry"
+    assert not any(
+        fnmatch.fnmatch("docs/x.md", pattern)
+        for pattern in _filter_entries(_backend_filter_block(workflow))
+    )
 
 
 def test_select_tests_same_name_derivation_covers_all_backend_prefixes() -> None:

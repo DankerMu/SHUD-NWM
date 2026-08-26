@@ -315,6 +315,29 @@ NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_recalibration_cli.py",
 )
 
+# #1571: the repository default Python pin and its instruction source are the
+# producer pair for the Python-environment truth oracle. Neither is a backend
+# Python path (the pin is a bare version file, shared.md a markdown instruction
+# source), so without these rules a pin/instruction-only PR would never run the
+# suite that locks 3.11 (the ci.yml backend filter does start the lane, but the
+# selector would yield an empty list and CI would fall to collect-only with
+# zero assertions).
+PYTHON_ENVIRONMENT_TRUTH_TEST = "tests/test_python_environment_truth.py"
+# #1571: the two-node Docker runbook is the current deployment-docs entry whose
+# repo-Python commands must use the exact checkout interpreter; its suite is
+# not same-name derivable. The producer is `infra/**`, which opens the backend
+# lane, but without a rule a runbook-only PR would select nothing and drop to
+# collect-only.
+TWO_NODE_DOCKER_RUNBOOK_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
+# #1571: the QHH diagnostic README and its Slurm sbatch wrapper are two current
+# producers that previously neither started the backend lane nor selected their
+# QHH-static owner. Exact ci.yml paths now start the lane; these rules attach
+# its assertions. The existing `scripts/run_qhh_backend_smoke.sh` rule routes to
+# tests/test_qhh_scripts_static.py, so these two exact producers share the
+# same owner via the same additive (non-stop) rule shape.
+QHH_DIAGNOSTIC_README = "scripts/diagnostic/qhh/README.md"
+QHH_CYCLE_SBATCH = "scripts/run_qhh_cycle.sbatch"
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -1478,8 +1501,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_readonly_db_validation.py",),
     ),
     PathTestRule(
+        # #1571: the continuous entrypoint's dedicated current-authority owner
+        # joins its explicit suite, same-name selector meta-suite and #1656
+        # timescale rider — extended AT THE RULE SITE so the old target and the
+        # supplemental routing above stay exactly as they were. The owner is
+        # asserted additively (membership), never as an exact set, because
+        # supplemental selection is intentional.
         "scripts/run_qhh_continuous.py",
-        ("tests/test_run_qhh_continuous.py",),
+        ("tests/test_run_qhh_continuous.py", "tests/test_qhh_entrypoint_authority_invariant.py"),
     ),
     PathTestRule(
         # #1442 (group E). Both qhh smoke scripts own a registered
@@ -1568,12 +1597,48 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_qhh_scripts_static.py",),
     ),
     PathTestRule(
+        # #1571: the cycle wrapper's dedicated current-authority owner joins the
+        # three pre-existing targets additively (asserted by membership, never
+        # as an exact set — supplemental selection is intentional).
         "scripts/run_qhh_cycle.sh",
         (
             "tests/test_run_qhh_continuous.py",
             "tests/test_role_boundary_static.py",
             "tests/test_qhh_scripts_static.py",
+            "tests/test_qhh_entrypoint_authority_invariant.py",
         ),
+    ),
+    PathTestRule(
+        # #1571: `.python-version` is the single producer for the repository
+        # default-Python oracle. Not a backend Python path, so without this rule
+        # a pin-only PR selects nothing and CI degrades to collect-only.
+        ".python-version",
+        (PYTHON_ENVIRONMENT_TRUTH_TEST,),
+    ),
+    PathTestRule(
+        # #1571: the generated-root instruction SOURCE (instructions/agents/
+        # shared.md) is the producer that governs the byte-exact CLAUDE.md /
+        # AGENTS.md projection too; a source-only diff must reach the oracle
+        # that pins both semantic clauses. Non-stop: `docs/**`-style generated
+        # roots themselves remain unrouted by design.
+        "instructions/agents/shared.md",
+        (PYTHON_ENVIRONMENT_TRUTH_TEST,),
+    ),
+    PathTestRule(
+        # #1571: the two-node Docker runbook is `infra/**`, which already opens
+        # the backend lane; the rule converts that collect-only lane into real
+        # assertions. Exact path, deliberately NOT a glob over infra markdown —
+        # other runbooks must not start the backend lane (inventory scope).
+        "infra/README.two-node-docker.md",
+        (TWO_NODE_DOCKER_RUNBOOK_ENV_TEST,),
+    ),
+    PathTestRule(
+        QHH_CYCLE_SBATCH,
+        ("tests/test_qhh_scripts_static.py",),
+    ),
+    PathTestRule(
+        QHH_DIAGNOSTIC_README,
+        ("tests/test_qhh_scripts_static.py",),
     ),
     PathTestRule(
         "scripts/local_pg.sh",
