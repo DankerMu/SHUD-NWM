@@ -1713,7 +1713,7 @@ def test_stale_direct_same_id_but_canonical_authority_different_does_not_block(
         (repository2.root / "pipeline-jobs" / f"{ifs_job_id}.json").write_text(
             json.dumps(valid_direct), encoding="utf-8"
         )
-        ifs_journal_dir = repository2.root / "journal" / "ifs"
+        ifs_journal_dir = repository2.root / "journal" / "IFS"
         ifs_journal_dir.mkdir(parents=True, exist_ok=True)
         segment_zero = ifs_journal_dir / "2026071200.jsonl"
         segment_zero.write_text("", encoding="utf-8")
