@@ -2045,7 +2045,11 @@ def _terminal_decision_matches_strict_warm_start(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
 ) -> bool:
-    """Candidate-side admission check: two special branches, then strict compare.
+    """Candidate-side admission check: bootstrap/special branches, then strict compare.
+
+    A packaged-IC bootstrap has no state id by contract.  Its completed run is
+    current only when the hydro row records packaged calibrated-state success
+    and the run manifest binds the exact packaged-IC checksum selected now.
 
     The ``candidate_state`` terminal-source branch and the
     ``COLD_START_QUARANTINED`` escape prove currency from evidence other than
@@ -2081,6 +2085,23 @@ def _terminal_decision_matches_strict_warm_start(
     keeps its deterministic ``state_id`` while its checksum changes, and the
     manifest's ``checksum`` is what preserves that protection (``3b587c55``).
     """
+
+    if strict_evidence.get("mode") == _scheduler_generation.PACKAGED_IC_BOOTSTRAP_MODE:
+        hydro_run = terminal_evidence.get("hydro_run")
+        if not isinstance(hydro_run, Mapping):
+            return False
+        terminal_status = str(terminal_evidence.get("terminal_status") or "")
+        return bool(
+            terminal_evidence.get("terminal_source") == "hydro_run"
+            and terminal_status
+            and terminal_status == str(hydro_run.get("status") or "")
+            and hydro_run.get("quality") == "packaged_calibrated_state"
+            and _state_field(hydro_run, "state_id") in (None, "")
+            and _terminal_decision_run_manifest_matches_strict_warm_start(
+                terminal_evidence,
+                strict_evidence,
+            )
+        )
 
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or _state_field(selected, "state_id") in (None, ""):
@@ -2125,6 +2146,18 @@ def _terminal_decision_run_manifest_matches_strict_warm_start(
     terminal_evidence: Mapping[str, Any],
     strict_evidence: Mapping[str, Any],
 ) -> bool:
+    if strict_evidence.get("mode") == _scheduler_generation.PACKAGED_IC_BOOTSTRAP_MODE:
+        expected_checksum = str(strict_evidence.get("packaged_ic_checksum") or "")
+        run_manifest_initial_state = terminal_evidence.get("run_manifest_initial_state")
+        return bool(
+            expected_checksum
+            and isinstance(run_manifest_initial_state, Mapping)
+            and run_manifest_initial_state.get("quality") == "packaged_calibrated_state"
+            and _state_field(run_manifest_initial_state, "state_id") in (None, "")
+            and str(run_manifest_initial_state.get("packaged_ic_checksum") or "")
+            == expected_checksum
+        )
+
     selected = strict_evidence.get("candidate_state")
     if not isinstance(selected, Mapping) or _state_field(selected, "state_id") in (None, ""):
         return False

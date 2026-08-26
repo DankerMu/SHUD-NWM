@@ -313,23 +313,31 @@ def _has_terminal_completion_stage_success(jobs: list[dict[str, Any]]) -> bool:
 def _run_manifest_initial_state_for_run(run_id: str) -> dict[str, Any] | None:
     if not run_id or "/" in run_id or "\\" in run_id:
         return None
-    root_value = os.getenv("OBJECT_STORE_ROOT") or os.getenv("NHMS_OBJECT_STORE_ROOT")
-    if root_value in (None, ""):
-        return None
-    root = Path(str(root_value)).expanduser()
-    try:
-        root_resolved = root.resolve()
-        manifest_path = (root_resolved / "runs" / run_id / "input" / "manifest.json").resolve()
-        manifest_path.relative_to(root_resolved)
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-    initial_state = payload.get("initial_state")
-    if not isinstance(initial_state, Mapping):
-        return None
-    return dict(initial_state)
+    primary_root = os.getenv("OBJECT_STORE_ROOT") or os.getenv("NHMS_OBJECT_STORE_ROOT")
+    roots = (primary_root, os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"))
+    seen: set[str] = set()
+    for root_value in roots:
+        root_text = str(root_value or "").strip()
+        if not root_text or root_text in seen:
+            continue
+        seen.add(root_text)
+        root = Path(root_text).expanduser()
+        try:
+            root_resolved = root.resolve()
+            manifest_path = (root_resolved / "runs" / run_id / "input" / "manifest.json").resolve()
+            manifest_path.relative_to(root_resolved)
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        initial_state = payload.get("initial_state")
+        if not isinstance(initial_state, Mapping):
+            return None
+        return dict(initial_state)
+    return None
 
 
 def _candidate_manual_stage_repair_state(
