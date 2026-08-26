@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import json
 import os
@@ -37,6 +38,198 @@ def is_test_suite_path(path: str) -> bool:
     """
     name = PurePosixPath(path).name
     return any(fnmatch.fnmatch(name, pattern) for pattern in CHANGED_TEST_SUITE_BASENAME_PATTERNS)
+
+
+# #1561: the only auto-skip marker names pytest collection treats as file-level
+# gates. A suite carrying a file-level `pytestmark` of either marker skips in the
+# pull-request lane (tests/conftest.py's pytest_collection_modifyitems), so an
+# importer suite so marked must not join the ordinary importer closure — the
+# closure is for suites that RUN their assertions on the PR. Function-level
+# marks do not gate the whole file and never appear here: the marker is read
+# from a module-level `pytestmark` assignment only.
+SUITE_FILE_GATING_MARKERS: frozenset[str] = frozenset({"integration", "e2e"})
+
+
+def _test_module_name(path: str) -> str:
+    """Dotted module a repo-relative ``tests/`` suite is imported under.
+
+    ``tests/test_real_slurm_gateway.py`` -> ``tests.test_real_slurm_gateway``,
+    and a package ``__init__.py`` is imported as the package itself (a
+    ``tests/pkg/__init__.py`` is ``tests.pkg``, never ``tests.pkg.__init__``),
+    so a suite that re-exports helpers through a package initializer is still
+    matched by the names other suites actually import.
+    """
+    dotted = str(PurePosixPath(path).with_suffix("")).replace("/", ".")
+    return dotted.removesuffix(".__init__")
+
+
+def _top_level_imported_module_names(path: str, tree: ast.Module) -> set[str]:
+    """Dotted module names imported by ``path``'s module-level statements only.
+
+    Deliberately NOT ``ast.walk``: a function-body import runs when that one
+    test runs, not at collection, so it does not make the file an importer
+    suite of the imported module for selector-coverage purposes (#1561 keeps
+    function-local imports out of the ordinary closure).
+    """
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = _import_from_base(path, node)
+            if base is None:
+                continue
+            names.add(base)
+            names.update(f"{base}.{alias.name}" for alias in node.names)
+    return names
+
+
+def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
+    """Dotted prefix an ``ImportFrom`` in ``path`` resolves against, or ``None``.
+
+    Absolute imports (``level == 0``) keep their own module. Relative ones
+    resolve against the importer's package derived from the repo-relative POSIX
+    path — never the process CWD: ``tests/pkg/test_x.py`` with
+    ``from . import helper`` sits in ``tests.pkg``. A level deeper than the
+    path allows contributes nothing rather than raising, so the walk over the
+    repository tree cannot crash on a malformed relative depth.
+    """
+    if node.level == 0:
+        return node.module or None
+    package_parts = list(PurePosixPath(path).parent.parts)
+    strip = node.level - 1
+    if strip > len(package_parts):
+        return None
+    parts = package_parts[: len(package_parts) - strip]
+    if node.module:
+        parts.append(node.module)
+    return ".".join(parts) or None
+
+
+def _file_level_gating_markers(tree: ast.Module) -> frozenset[str]:
+    """File-level gating marker names a module-level ``pytestmark`` applies.
+
+    Read from the AST, not the file text: a ``@pytest.mark.integration``
+    decorator on one function gates that function, not the file, and a
+    substring scan cannot tell the two apart. Scalar, list and tuple
+    ``pytestmark`` spellings all collapse here, and a
+    ``pytest.mark.X(...)`` call contributes ``X``.
+    """
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            value: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if value is None:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
+            continue
+        for element in ast.walk(value):
+            if (
+                isinstance(element, ast.Attribute)
+                and isinstance(element.value, ast.Attribute)
+                and element.value.attr == "mark"
+            ):
+                names.add(element.attr)
+    return frozenset(names & SUITE_FILE_GATING_MARKERS)
+
+
+# #1561: cross-invocation reuse for unchanged suite trees. The index builder
+# walks and stats every suite file on each build (so added/deleted files are
+# discovered), but the per-file derivation is cached by absolute path plus
+# strong stat identity (mtime_ns + size, plus ctime_ns where the platform
+# provides it) plus the repo-relative path (relative-import resolution depends
+# on it), so repeated selection against an unchanged tree costs one stat per
+# suite, not a reparse of ~1,600 files. Values are IMMUTABLE — a gating flag
+# and a frozenset of dotted names, never the mutable ``ast.Module`` — so a
+# parse shared across invocations cannot be corrupted by a consumer.
+_SUITE_IMPORTER_PARSE_CACHE: dict[tuple[str, int, int, int, str], tuple[bool, frozenset[str]]] = {}
+
+# Test seam: how many suite files the #1561 closure actually parsed, for the
+# reuse/rewrite pins. Read and reset by tests; production never branches on it.
+_SUITE_IMPORTER_PARSE_STATS: dict[str, int] = {"parses": 0}
+
+
+def _suite_import_derivation(repo_root: Path, rel_path: str) -> tuple[bool, frozenset[str]]:
+    """``(file-level-gated?, module-scope imported dotted names)`` for a suite.
+
+    Reads through ``repo_root``, never the process CWD (the public CLI runs
+    from any directory with ``--repo-root``). A cache hit on absolute path +
+    stat identity skips the parse entirely; a rewrite changes mtime_ns/size
+    (and ctime_ns where the filesystem reports it), so the same filename with
+    new content is re-derived, while an identical file is never re-parsed.
+    """
+    abs_path = str((repo_root / rel_path).resolve())
+    stat = os.stat(abs_path)
+    ctime_ns = getattr(stat, "st_ctime_ns", 0)
+    key = (abs_path, stat.st_mtime_ns, stat.st_size, ctime_ns, rel_path)
+    cached = _SUITE_IMPORTER_PARSE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    tree = ast.parse((repo_root / rel_path).read_text(encoding="utf-8"), filename=rel_path)
+    _SUITE_IMPORTER_PARSE_STATS["parses"] += 1
+    result = (
+        bool(_file_level_gating_markers(tree)),
+        frozenset(_top_level_imported_module_names(rel_path, tree)),
+    )
+    _SUITE_IMPORTER_PARSE_CACHE[key] = result
+    return result
+
+
+def _build_suite_importer_index(repo_root: Path) -> dict[str, set[str]]:
+    """Reverse index: dotted suite module -> its direct non-gated importer suites.
+
+    Mechanically derived from the supplied ``repo_root`` filesystem — never
+    the process CWD and never a Git call, so the selector keeps working from
+    any directory against a bare checkout or a synthetic fixture tree. The
+    domain is RECURSIVE: every ``tests/**/*.py`` file pytest would collect as a
+    suite (``is_test_suite_path``, basename patterns, both ``test_*.py`` and
+    ``*_test.py`` names, nested or top-level) is walked via ``os.walk``; the
+    file-level ``integration``/``e2e`` suites are excluded (they skip in the PR
+    lane), and each remaining suite's module-scope import edges are inverted
+    into
+    ``imported_dotted_module -> {importer_suite}``. ``from tests import X``
+    contributes the package base ``tests`` as well as ``tests.X`` (the dotted
+    names actually importable); the owner lookup only ever queries keys the
+    tree genuinely produced, so the surplus key is inert. Self-import edges
+    (a suite importing its own module) never enter the index.
+
+    A malformed discovered suite propagates its ``SyntaxError`` here — the
+    closure is built before any selection can proceed, so the shared selector
+    fails loudly instead of silently returning a partial importer index. The
+    CALLER decides when this runs: the ordinary changed-suite branch builds it
+    lazily, at most once per ``select_tests`` invocation, so a
+    production-only/support-module-only/redirect selection never parses the
+    suite tree at all.
+    """
+    index: dict[str, set[str]] = {}
+    tests_root = repo_root / "tests"
+    if not tests_root.is_dir():
+        return index
+    for dirpath, dirnames, filenames in os.walk(tests_root):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            if not filename.endswith(".py"):
+                continue
+            rel_path = os.path.relpath(os.path.join(dirpath, filename), repo_root)
+            if not is_test_suite_path(rel_path):
+                continue
+            gated, imported_names = _suite_import_derivation(repo_root, rel_path)
+            if gated:
+                continue
+            my_module = _test_module_name(rel_path)
+            for imported in imported_names:
+                if imported == my_module:
+                    # #1561: a suite importing its own module is not an
+                    # importer edge; keep the closure free of self edges.
+                    continue
+                index.setdefault(imported, set()).add(rel_path)
+    return index
 
 
 CORE_SMOKE_TESTS: tuple[str, ...] = (
@@ -1469,13 +1662,25 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     selected: set[str] = set()
     changed = normalize_changed_paths(changed_paths)
     unknown_backend_path = False
+    # #1561: built LAZILY — a production-only/support-module-only/redirect
+    # selection never parses the suite tree. The first ordinary changed suite
+    # that actually reaches self-selection builds it (failing loudly on a
+    # malformed discovered suite at that point), and later ordinary changed
+    # suites reuse the same index within this invocation.
+    suite_importer_index: dict[str, set[str]] | None = None
+
+    def importer_index() -> dict[str, set[str]]:
+        nonlocal suite_importer_index
+        if suite_importer_index is None:
+            suite_importer_index = _build_suite_importer_index(repo_root)
+        return suite_importer_index
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
             is_test_suite = is_test_suite_path(path)
             matched_changed_test = False
             for rule in CHANGED_TEST_FILE_RULES:
-                if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
+                if not _rule_activated(rule, path, changed):
                     continue
                 if fnmatch.fnmatch(path, rule.pattern):
                     selected.update(rule.tests)
@@ -1503,17 +1708,30 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
                             selected.add(SELECTOR_META_GUARD_TEST)
                             matched_support_module = True
                 if not matched_support_module:
-                    # A `tests/` Python file that `is_test_suite_path` does not
-                    # call a suite (conftest.py, integration_helpers.py, a
-                    # fixtures/ builder) is not collectible: `pytest -q <it>`
-                    # returns NO_TESTS_COLLECTED (exit 5), which ci.yml's
-                    # `check=True` renders as a misleading red carrying zero
-                    # assertion information (#1453). Such a path maps to the
-                    # meta-guard suite instead, so every emitted target is a
-                    # collectible test file; the meta-guard-only collapse then
-                    # arms ci.yml's full-tree collect-only smoke (#1454) over the
-                    # import surface such a support module can break.
-                    selected.add(path if is_test_suite else SELECTOR_META_GUARD_TEST)
+                    # #1561: the ordinary changed-suite branch — the ONLY place
+                    # the importer closure applies. A suite that changed reaches
+                    # self-selection plus every direct non-gated importer suite
+                    # that imports its dotted module at module scope (renaming
+                    # or removing a top-level helper then breaks the importer
+                    # during PR-lane collection, not after merge). Redirects
+                    # matched above never arrive here, so their focused target
+                    # sets are untouched by the closure.
+                    if is_test_suite:
+                        selected.add(path)
+                        selected.update(importer_index().get(_test_module_name(path), set()))
+                    else:
+                        # A `tests/` Python file that `is_test_suite_path` does
+                        # not call a suite (conftest.py, integration_helpers.py,
+                        # a fixtures/ builder) is not collectible: `pytest -q
+                        # <it>` returns NO_TESTS_COLLECTED (exit 5), which
+                        # ci.yml's `check=True` renders as a misleading red
+                        # carrying zero assertion information (#1453). Such a
+                        # path maps to the meta-guard suite instead, so every
+                        # emitted target is a collectible test file; the
+                        # meta-guard-only collapse then arms ci.yml's full-tree
+                        # collect-only smoke (#1454) over the import surface
+                        # such a support module can break.
+                        selected.add(SELECTOR_META_GUARD_TEST)
             # Unconditional, redirect or not: a redirect fires exactly when a
             # changed test file is swapped for focused nodes, which is also when
             # the meta-guards most need to run.
@@ -1665,6 +1883,24 @@ def _same_name_backend_python_test(path: str) -> str | None:
     if not _is_backend_python_path(path):
         return None
     return f"tests/test_{PurePosixPath(path).stem}.py"
+
+
+def _rule_activated(rule: PathTestRule, path: str, changed: Sequence[str]) -> bool:
+    """Pure activation predicate for a ``CHANGED_TEST_FILE_RULES`` rule.
+
+    A single source of truth for whether ``rule`` may fire for changed file
+    ``path`` given the whole ``changed`` set: a rule with a non-empty
+    ``only_when_any_changed`` surface fires only when at least one changed path
+    matches that surface. No match against ``rule.pattern`` is attempted here —
+    the caller keeps the exact existing ordering, ``stop_on_match``, and
+    first-match semantics. Production and tests both call this predicate, so the
+    live-tree ordinary-domain classification in
+    tests/test_select_ci_tests.py (which must skip only an ACTUALLY active
+    redirect) cannot drift from the loop that applies the redirects.
+    """
+    if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
+        return False
+    return True
 
 
 def _any_path_matches(paths: Sequence[str], patterns: Sequence[str]) -> bool:
