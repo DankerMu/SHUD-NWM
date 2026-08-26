@@ -2204,3 +2204,29 @@ unchanged. As recorded throughout this ADR, a future reversal must first
 separate rounds where rotation was actually applied from pinned-depth,
 fix-verification, fixture, and final-review roles, then receive maintainer
 review.
+
+## Revisit 2026-08-26 (post #1621/#1622/#1623/#1554 / PR #1859) — keep; multi-round denominator only
+
+`loop_log_audit.py` now reports **134** multi-round merged PRs and later-round
+catches **core=85 / rotated=296**, moving from `133 / 85 / 296` after PR #1850.
+PR #1859 therefore contributes one multi-round sample and **zero** to either
+later-round numerator.
+
+That zero is not evidence that rotation failed. Round 1 produced all six verified
+catches. Round 2 was the required post-fix closure pass after a same-invariant
+depth retro; Rounds 3 and 4 were conservative re-certifications forced by two
+semantic master advances (#1863 and #1850), and both reviewed a PR-relative
+feature patch proven equivalent to the prior clean patch. No later-round defect
+existed for either a pinned or rotated lens to attribute. The independent Phase 7
+Gap Sweep was also clean at the frozen head.
+
+This sample reinforces an existing instrumentation caveat: the denominator counts
+every multi-round PR, including rounds whose purpose is base-sync revalidation,
+while the numerators move only when a finding exists. A clean revalidation is
+valuable merge safety, but it cannot distinguish "rotation added no recall" from
+"there was no remaining defect to find." Reading the unchanged ratio as evidence
+for a cut would therefore confuse treatment outcome with defect prevalence.
+
+**Keep rotation** unchanged. The aggregate still gives no basis for an autonomous
+cut, and any reversal continues to require the previously recorded attribution
+schema/round-role fixes plus maintainer review.

@@ -40,13 +40,18 @@ The refusal SHALL reuse the existing `unsafe` classification rather than introdu
 - **THEN** the lane reports its existing structured configuration rejection
 - **AND** no bare `RuntimeError` escapes to the operator as a traceback
 
-The evidence-root lane's own separate expansion, which sits outside the shared module, is not covered by this requirement and continues to throw bare; it is tracked on its own.
-
 #### Scenario: An evidence-root preparation lane converts the refusal into its own structured code
 
 - **GIVEN** an evidence root whose configured value has an undeterminable home directory
 - **WHEN** the lane prepares its evidence directories
 - **THEN** it reports its existing structured evidence error code rather than aborting with a bare `RuntimeError`
+
+#### Scenario: An evidence-root configuration and validation lane converts the refusal into its own structured code
+
+- **GIVEN** an evidence root whose configured value has an undeterminable home directory
+- **WHEN** `ProductionMetConfig.from_env` resolves the root, and when `validate_met` revalidates an equivalent config
+- **THEN** each entrypoint reports `PRODUCTION_MET_EVIDENCE_PATH_UNSAFE` rather than aborting with a bare `RuntimeError`
+- **AND** neither creates a literal `~`-prefixed entry under the working directory
 
 ### Requirement: The mid-open inode-identity refusal SHALL carry its own structured discriminator, and its documented meaning SHALL match what it actually detects
 
@@ -66,4 +71,22 @@ The no-follow file open compares the target's identity before and after opening 
 
 - **WHEN** the identity comparison fails
 - **THEN** the primitive raises immediately, leaving any retry decision to the caller
+
+### Requirement: Write-side configured-path wrappers SHALL preserve their owning structured error contracts
+
+A production wrapper that expands a configured path before invoking shared write-side filesystem primitives SHALL translate an undeterminable-home failure into its existing owning-module error contract before any filesystem access. It SHALL NOT leak an errno-less `RuntimeError`, retain a literal `~` component, or add a new public error code where an existing path/write refusal already represents the failure.
+
+#### Scenario: Published log paths reject an undeterminable artifact root at every public chain seam
+
+- **GIVEN** `NHMS_PUBLISHED_ARTIFACT_ROOT` names a user whose home directory cannot be determined
+- **WHEN** gateway-log persistence, local-stage-log writing, or published-log path derivation consumes that root
+- **THEN** each seam raises the orchestrator's existing `PUBLISHED_LOG_WRITE_FAILED` error
+- **AND** no bare `RuntimeError` escapes
+- **AND** no literal `~`-prefixed path is created under the working directory
+
+#### Scenario: Valid configured roots retain their existing products
+
+- **GIVEN** an existing absolute published-artifact root and an existing absolute production-met evidence root
+- **WHEN** their respective wrappers resolve and use those roots
+- **THEN** the resulting paths and successful write behavior are unchanged from before this change
 
