@@ -111,6 +111,8 @@ def test_glob_non_sidecar_files_root_permission_denial_is_an_unreadable_skip(
     make_valid_model(root / "basin-a", "alias-a")
     real_realpath = os.path.realpath
 
+    real_realpath = os.path.realpath
+
     def denied_realpath(path: str, *, strict: bool = False) -> str:
         if strict and str(path) == str(root):
             raise PermissionError(errno.EACCES, "simulated denied traversal")
@@ -512,6 +514,8 @@ def test_required_file_resolution_permission_denial_is_unreadable_third_state(
     unreadable_name = "alias-a.tsd.lai"
     real_realpath = os.path.realpath
 
+    real_realpath = os.path.realpath
+
     def denied_realpath(path: str, *, strict: bool = False) -> str:
         if strict and str(path).endswith(unreadable_name):
             raise PermissionError(errno.EACCES, "simulated denied traversal")
@@ -545,6 +549,8 @@ def test_required_file_resolution_permission_denial_is_never_a_symlink_verdict(
     unreadable_name = "alias-a.tsd.lai"
     real_realpath = os.path.realpath
 
+    real_realpath = os.path.realpath
+
     def denied_realpath(path: str, *, strict: bool = False) -> str:
         if strict and str(path).endswith(unreadable_name):
             raise PermissionError(errno.EACCES, "simulated denied traversal")
@@ -558,6 +564,386 @@ def test_required_file_resolution_permission_denial_is_never_a_symlink_verdict(
     assert "BASINS_SYMLINK_UNRESOLVABLE" not in warning_codes
     assert "BASINS_SYMLINK_OUTSIDE_ROOT" not in warning_codes
     assert "BASINS_PATH_UNREADABLE" in warning_codes
+
+
+# --- Round 1 closure: first-class per-call resolve state (cand-r1-01..06) ----
+#
+# EACCES is neither nonexistence nor a symlink verdict; containment stays
+# fail-closed; an unreadable model/input directory is a hard refusal even when
+# a valid sibling exists; required-file EACCES alone uses the nonblocking third
+# state; the shared warning list is output only, never control-flow truth.
+
+
+def test_in_root_model_directory_eaccess_is_hard_refusal_even_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1-01: an unreadable model directory must not be silently omitted
+    # while a valid sibling keeps the inventory importable.
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "locked", "locked")
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith("/locked"):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(root / "locked")
+
+
+def test_in_root_model_input_directory_eaccess_is_hard_refusal_even_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "locked", "locked")
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith("/locked/input"):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(root / "locked" / "input")
+
+
+def test_nested_model_required_input_strict_resolve_eaccess_is_hard_refusal_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # phase 6.2: the REAL nested layout `root/zhaochen/WEM/input` is only ever
+    # reached through _has_child_dir (the required-input owner).  Previously it
+    # delegated to the optional _is_safe_directory, returned False, omitted WEM,
+    # and left `good/` importable.  Strict-resolution EACCES on the required
+    # input must be a hard refusal with the input's path.
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "zhaochen" / "WEM", "WEM")
+    input_path = root / "zhaochen" / "WEM" / "input"
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path) == str(input_path):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(input_path)
+
+
+def test_nested_model_required_input_final_stat_eaccess_is_hard_refusal_with_valid_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # phase 6.2 final-stat twin: realpath succeeds but the final follow-stat of
+    # `zhaochen/WEM/input` raises EACCES; the required-input owner must still
+    # hard-refuse with the same structured code and path.
+    root = tmp_path / "basins"
+    make_valid_model(root / "good", "good")
+    make_valid_model(root / "zhaochen" / "WEM", "WEM")
+    input_path = root / "zhaochen" / "WEM" / "input"
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == input_path:
+            raise PermissionError(errno.EACCES, "simulated final-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(root)
+
+    assert exc_info.value.error_code == "BASINS_DIRECTORY_UNREADABLE"
+    assert exc_info.value.path == str(input_path)
+
+
+def test_outside_denied_parent_symlink_candidate_is_blocking_outside_root(
+    tmp_path: Path,
+) -> None:
+    # cand-r1-01/security-perf: an escaping symlink whose target parent denies
+    # traversal must still be classified OUTSIDE (blocking), never a nonblocking
+    # PATH_UNREADABLE skip that lets a valid sibling stay importable.  The
+    # denied traversal is a REAL chmod so the kernel raises EACCES during the
+    # strict walk (an os.path.realpath patch cannot reproduce the kernel's
+    # component walk).
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "basin-a")
+    outside = tmp_path / "outside" / "blocked" / "leaf"
+    outside.parent.mkdir(parents=True)
+    escape = root / "escape"
+    escape.symlink_to(outside, target_is_directory=True)
+    blocked = outside.parent
+    blocked.chmod(0)
+    try:
+        inventory = discover_basins_inventory(root)
+    finally:
+        blocked.chmod(0o755)
+
+    warning_codes = [warning["code"] for warning in inventory["warnings"]]
+    assert "BASINS_SYMLINK_OUTSIDE_ROOT" in warning_codes
+    assert "BASINS_PATH_UNREADABLE" not in warning_codes
+    assert "BASINS_SYMLINK_UNRESOLVABLE" not in warning_codes
+    assert inventory["importable"] is False
+    # The valid sibling model still registered but the inventory is not importable.
+    assert [model["basin_slug"] for model in inventory["models"]] == ["basin-a"]
+
+
+def test_outside_denied_parent_optional_forcing_symlink_is_blocking_outside_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "basins"
+    model_dir = root / "basin-a"
+    make_valid_model(model_dir, "basin-a")
+    outside = tmp_path / "outside" / "blocked" / "forcing"
+    outside.parent.mkdir(parents=True)
+    (model_dir / "forcing").symlink_to(outside, target_is_directory=True)
+    blocked = outside.parent
+    blocked.chmod(0)
+    try:
+        inventory = discover_basins_inventory(root)
+    finally:
+        blocked.chmod(0o755)
+
+    warning_codes = [warning["code"] for warning in inventory["warnings"]]
+    assert "BASINS_SYMLINK_OUTSIDE_ROOT" in warning_codes
+    assert "BASINS_PATH_UNREADABLE" not in warning_codes
+    assert inventory["importable"] is False
+    model = one_model(inventory)
+    assert model["status"] == "partial"
+    assert "unsafe_symlink_outside_root" in model["quirks"]
+
+
+def test_symlink_root_follow_stat_eaccess_is_basins_root_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1-03: lstat succeeds (root is a symlink), follow-stat raises EACCES.
+    # The earlier unconditional Path.stat patches failed at lstat first; this
+    # injects only the follow-target stat so the follow-stat handler runs.
+    real_root = tmp_path / "real-basins"
+    make_valid_model(real_root / "basin-a", "alias-a")
+    linked_root = tmp_path / "linked-basins"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    real_stat = Path.stat
+
+    def denied_follow_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == linked_root and kwargs.get("follow_symlinks", True) is True:
+            raise PermissionError(errno.EACCES, "simulated follow-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_follow_stat)
+        with pytest.raises(BasinsDiscoveryError) as exc_info:
+            discover_basins_inventory(linked_root)
+
+    assert exc_info.value.error_code == "BASINS_ROOT_UNREADABLE"
+    assert exc_info.value.path == str(linked_root)
+
+
+def test_gis_domain_shp_strict_resolve_eaccess_is_unreadable_third_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1-04: GIS required-file permission denial maps to the unreadable
+    # collection, never missing / SYMLINK / invalid.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "domain.shp"
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith(f"gis/{unreadable_name}"):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        inventory = discover_basins_inventory(root)
+        model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert model["default_publish_eligible"] is False
+    assert f"gis/{unreadable_name}" not in model["missing_required_files"]
+    assert model["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [f"gis/{unreadable_name}"]
+    assert "unreadable_required_file" in model["quirks"]
+    assert "invalid_required_file_content" not in model["quirks"]
+    assert "unsafe_symlink_outside_root" not in model["quirks"]
+    gis_path = str(root / "basin-a" / "input" / "alias-a" / "gis" / unreadable_name)
+    assert [
+        warning["code"] for warning in inventory["warnings"] if warning["path"] == gis_path
+    ] == ["BASINS_PATH_UNREADABLE", "BASINS_REQUIRED_FILE_UNREADABLE"]
+    assert all(warning["code"] != "BASINS_SYMLINK_UNRESOLVABLE" for warning in inventory["warnings"])
+
+
+def test_gis_final_stat_eaccess_is_unreadable_third_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1-06: after realpath succeeds, the final follow-stat for a GIS file
+    # raises EACCES; the errno-aware file-kind classifier must converge on
+    # current and 3.11 (bare Path.is_file() splits 3.11-13 vs 3.14).
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "domain.shp"
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.name == unreadable_name:
+            raise PermissionError(errno.EACCES, "simulated final-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        inventory = discover_basins_inventory(root)
+        model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert f"gis/{unreadable_name}" not in model["missing_required_files"]
+    assert model["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [f"gis/{unreadable_name}"]
+    assert "unreadable_required_file" in model["quirks"]
+
+
+def test_shud_glob_final_stat_eaccess_is_unreadable_third_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1-06: SHUD glob final follow-stat EACCES after realpath success.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    unreadable_name = "alias-a.tsd.lai"
+    real_stat = Path.stat
+
+    def denied_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self.name == unreadable_name:
+            raise PermissionError(errno.EACCES, "simulated final-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_stat)
+        inventory = discover_basins_inventory(root)
+        model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert unreadable_name not in model["missing_required_files"]
+    assert model["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [unreadable_name]
+    assert "unreadable_required_file" in model["quirks"]
+
+
+@pytest.mark.parametrize(
+    "unreadable_name",
+    ["alias-a.cfg.ic", "alias-a.sp.mesh"],
+)
+def test_cfg_ic_and_sp_mesh_strict_resolve_eaccess_are_unreadable_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreadable_name: str,
+) -> None:
+    # cand-r1-05: permission-denied cfg.ic/sp.mesh matches must NOT enter
+    # _invalid_required_files / invalid_required_file_content; they land only
+    # in unreadable_required_files / unreadable_required_file with sibling
+    # checksums intact.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith(unreadable_name):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        inventory = discover_basins_inventory(root)
+        model = one_model(inventory)
+
+    assert model["status"] == "partial"
+    assert model["default_import_eligible"] is False
+    assert model["default_publish_eligible"] is False
+    assert unreadable_name not in model["missing_required_files"]
+    assert model["invalid_required_files"] == []
+    assert "invalid_required_file_content" not in model["quirks"]
+    assert [reason.split(":")[0] for reason in model["unreadable_required_files"]] == [unreadable_name]
+    assert "unreadable_required_file" in model["quirks"]
+    # Sibling readable checksums are intact: every OTHER matched required file
+    # still has its checksum, and the unreadable one does not.
+    assert unreadable_name not in model["checksums"]
+    assert model["checksums"]
+
+
+def test_two_model_warning_isolation_never_reuses_another_paths_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # cand-r1 (state isolation): a BASINS_PATH_UNREADABLE warning recorded for
+    # model A's path must never make an equal-or-different path in model B
+    # matched or unreadable.  The warning list spans models; only each call's
+    # own result may drive its state.
+    root = tmp_path / "basins"
+    make_valid_model(root / "basin-a", "alias-a")
+    make_valid_model(root / "basin-b", "alias-b")
+    unreadable_a = "alias-a.tsd.lai"
+
+    real_realpath = os.path.realpath
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if strict and str(path).endswith(unreadable_a):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return real_realpath(path, strict=strict)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(basins_discovery.os.path, "realpath", denied_realpath)
+        inventory = discover_basins_inventory(root)
+
+    by_slug = {model["basin_slug"]: model for model in inventory["models"]}
+    model_a = by_slug["basin-a"]
+    model_b = by_slug["basin-b"]
+    # Only A is unreadable; B stays fully valid with all checksums.
+    assert [reason.split(":")[0] for reason in model_a["unreadable_required_files"]] == [unreadable_a]
+    assert model_b["status"] == "valid"
+    assert model_b["unreadable_required_files"] == []
+    assert model_b["missing_required_files"] == []
+    assert model_b["invalid_required_files"] == []
+    assert "unreadable_required_file" not in model_b["quirks"]
+    # B's checksums cover every one of its matched required files -- A's
+    # unreadable warning did not perturb B's matching.
+    assert model_b["checksums"]
+    input_dir_b = root / "basin-b" / "input" / "alias-b"
+    expected_b = {
+        relative_name: hashlib.sha256((input_dir_b / relative_name).read_bytes()).hexdigest()
+        for matches in model_b["required_files"].values()
+        for relative_name in matches
+    }
+    assert model_b["checksums"] == expected_b
 
 
 def test_unreadable_root_and_subdir_when_permissions_enforced(tmp_path: Path) -> None:
@@ -706,6 +1092,11 @@ def test_unparseable_sp_mesh_header_rejects_the_model_naming_the_mesh_file(tmp_p
 def test_unreadable_ic_blocks_registration_with_a_reason_distinct_from_a_shape_violation(
     tmp_path: Path,
 ) -> None:
+    # cand-r1-05: a permission-denied cfg.ic is matched-but-unreadable and must
+    # land ONLY in the unreadable third state -- never invalid_required_files,
+    # never a content-shape verdict.  The two refusal channels stay distinct:
+    # the shape channel keeps its numeric-token wording, the unreadable channel
+    # its permission wording.
     shaped_root = tmp_path / "shaped"
     make_valid_model(shaped_root / "basin-a", "alias-a", ic_header=INCIDENT_IC_HEADER)
     shape_reason = one_model(discover_basins_inventory(shaped_root))["invalid_required_files"][0]
@@ -722,11 +1113,13 @@ def test_unreadable_ic_blocks_registration_with_a_reason_distinct_from_a_shape_v
     assert model["status"] == "partial"
     # Matched by glob, so it is NOT missing -- it is unreadable.
     assert model["missing_required_files"] == []
-    unreadable_reason = model["invalid_required_files"][0]
+    assert model["invalid_required_files"] == []
+    assert "invalid_required_file_content" not in model["quirks"]
+    unreadable_reason = model["unreadable_required_files"][0]
     assert unreadable_reason.startswith("alias-a.cfg.ic:")
     assert "could not be read" in unreadable_reason
+    assert "unreadable_required_file" in model["quirks"]
     # AC-4: the two refusal channels must not be reported as one another.
-    assert unreadable_reason != shape_reason
     assert "numeric token(s)" not in unreadable_reason
     assert "could not be read" not in shape_reason
 

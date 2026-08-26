@@ -2678,6 +2678,45 @@ def test_basins_migration_report_root_denied_never_becomes_not_found(
     assert error["error_code"] != "BASINS_ROOT_NOT_FOUND"
 
 
+def test_basins_migration_report_symlink_root_follow_stat_eaccess_is_basins_root_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # cand-r1-03: lstat succeeds (symlink root), follow-stat raises EACCES; the
+    # migration entrypoint must report exact BASINS_ROOT_UNREADABLE, never a
+    # raw PermissionError and never the symlink-target refusal (which requires
+    # the follow-stat to succeed).
+    real_root = tmp_path / "real-basins"
+    _make_valid_model(real_root / "basin-a", "alias-a")
+    linked_root = tmp_path / "linked-basins"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    real_stat = Path.stat
+
+    def denied_follow_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        if self == linked_root and kwargs.get("follow_symlinks", True) is True:
+            raise PermissionError(errno.EACCES, "simulated follow-stat denial")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", denied_follow_stat)
+        exit_code = _argparse_main(
+            [
+                "basins-migration-report",
+                "--basins-root",
+                str(linked_root),
+                "--output",
+                str(tmp_path / "report.json"),
+            ]
+        )
+
+    error = json.loads(capsys.readouterr().err)
+    assert exit_code == 1
+    assert error["error_code"] == "BASINS_ROOT_UNREADABLE"
+    assert error["path"] == str(linked_root)
+    assert not (tmp_path / "report.json").exists()
+
+
 def test_basins_migration_report_rejects_symlink_target(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

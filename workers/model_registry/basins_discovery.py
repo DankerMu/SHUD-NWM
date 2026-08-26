@@ -7,6 +7,7 @@ import re
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import Enum
 from errno import EACCES, ENOENT, EPERM
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,36 @@ class DiscoveryWarning:
         if self.path is not None:
             payload["path"] = self.path
         return payload
+
+
+class _ResolveState(Enum):
+    """First-class per-call verdict for a path under the Basins root.
+
+    Owners map the state -- never a shared-warning scan -- to their lane
+    semantics: hard directory refusal, matched-file unreadable third state,
+    optional skip, or blocking outside-root/unresolvable refusal.
+    """
+
+    RESOLVED = "resolved"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    OUTSIDE = "outside"
+    UNRESOLVABLE = "unresolvable"
+
+
+@dataclass(frozen=True)
+class _ResolvedPath:
+    state: _ResolveState
+    path: Path | None = None
+
+
+class _FileKind(Enum):
+    """Errno-aware final-file metadata verdict after containment passes."""
+
+    REGULAR = "regular"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    OTHER = "other"
 
 
 @dataclass
@@ -168,7 +199,15 @@ def _find_model_dirs(
         if _is_ignored_path(entry):
             continue
         resolved_entry = _safe_resolve_under_root(entry, resolved_root, warnings)
-        if resolved_entry is None:
+        if resolved_entry.state is _ResolveState.UNREADABLE:
+            # An unreadable model directory must not be silently omitted while
+            # a valid sibling keeps the inventory importable (cand-r1-01).
+            raise BasinsDiscoveryError(
+                "BASINS_DIRECTORY_UNREADABLE",
+                f"Basins model directory is not readable: {entry}",
+                path=str(entry),
+            )
+        if resolved_entry.state is not _ResolveState.RESOLVED:
             continue
         _ensure_readable_directory(entry, "BASINS_DIRECTORY_UNREADABLE")
         if _has_child_dir(entry, "input", resolved_root, warnings):
@@ -178,7 +217,13 @@ def _find_model_dirs(
             if _is_ignored_path(nested):
                 continue
             resolved_nested = _safe_resolve_under_root(nested, resolved_root, warnings)
-            if resolved_nested is None:
+            if resolved_nested.state is _ResolveState.UNREADABLE:
+                raise BasinsDiscoveryError(
+                    "BASINS_DIRECTORY_UNREADABLE",
+                    f"Basins model directory is not readable: {nested}",
+                    path=str(nested),
+                )
+            if resolved_nested.state is not _ResolveState.RESOLVED:
                 continue
             _ensure_readable_directory(nested, "BASINS_DIRECTORY_UNREADABLE")
             if _has_child_dir(nested, "input", resolved_root, warnings):
@@ -203,16 +248,29 @@ def _inventory_for_model(
         quirks.append("generated_sidecars_ignored")
 
     input_parent = model_dir / "input"
-    _safe_resolve_under_root(input_parent, resolved_root, warnings)
-    _ensure_readable_directory(input_parent, "BASINS_DIRECTORY_UNREADABLE")
-    input_dirs = sorted(
-        (
-            path
-            for path in _iter_child_dirs(input_parent, budget=budget, depth=_relative_depth(root, input_parent) + 1)
-            if not _is_ignored_path(path) and _safe_resolve_under_root(path, resolved_root, warnings) is not None
-        ),
-        key=lambda path: path.name.lower(),
-    )
+    input_parent_resolution = _safe_resolve_under_root(input_parent, resolved_root, warnings)
+    if input_parent_resolution.state is _ResolveState.UNREADABLE:
+        # A required ``input/`` directory denied by an ancestor is a hard
+        # refusal, not an omitted model with a valid sibling (cand-r1-01).
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"Basins model input directory is not readable: {input_parent}",
+            path=str(input_parent),
+        )
+    if input_parent_resolution.state is not _ResolveState.RESOLVED:
+        input_dirs = []
+    else:
+        input_dirs = sorted(
+            (
+                path
+                for path in _iter_child_dirs(
+                    input_parent, budget=budget, depth=_relative_depth(root, input_parent) + 1
+                )
+                if not _is_ignored_path(path)
+                and _safe_resolve_under_root(path, resolved_root, warnings).state is _ResolveState.RESOLVED
+            ),
+            key=lambda path: path.name.lower(),
+        )
     if not input_dirs:
         shud_input_name = ""
         input_dir = input_parent
@@ -321,18 +379,17 @@ def _match_required_files(
             missing.append(f"gis/{file_name}")
             continue
         resolution = _safe_resolve_under_root(path, resolved_root, warnings)
-        if resolution is None:
-            if any(
-                warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path) for warning in warnings
-            ):
-                # Permission denial is a matched-but-unreadable verdict, not a
-                # missing-file verdict (#1554); the checksum walk records it.
-                required[role] = [str(path.relative_to(input_dir))]
-            else:
-                required[role] = []
-                missing.append(f"gis/{file_name}")
+        if resolution.state is _ResolveState.UNREADABLE:
+            # Permission denial is a matched-but-unreadable verdict, not a
+            # missing-file verdict (#1554); the checksum walk records it.
+            required[role] = [str(path.relative_to(input_dir))]
             continue
-        if path.is_file():
+        if resolution.state is not _ResolveState.RESOLVED:
+            required[role] = []
+            missing.append(f"gis/{file_name}")
+            continue
+        file_kind = _classify_regular_file(path)
+        if file_kind is _FileKind.REGULAR or file_kind is _FileKind.UNREADABLE:
             required[role] = [str(path.relative_to(input_dir))]
         else:
             required[role] = []
@@ -383,18 +440,26 @@ def _invalid_required_files(
         )
     elif len(mesh_matches) == 1:
         mesh_relative = mesh_matches[0]
-        mesh_line = _read_header_line(input_dir / mesh_relative, resolved_root, warnings)
-        if mesh_line is None:
+        mesh_kind = _read_header_line(input_dir / mesh_relative, resolved_root, warnings)
+        if mesh_kind.unreadable:
+            # Permission-denied matches land only in unreadable_required_files
+            # (cand-r1-05); the checksum walk records them, never content shape.
+            expected_mesh_count = None
+        elif mesh_kind.line is None:
             invalid.append(f"{mesh_relative}: mesh header line could not be read")
         else:
-            expected_mesh_count = _leading_int_token(mesh_line)
+            expected_mesh_count = _leading_int_token(mesh_kind.line)
             if expected_mesh_count is None:
                 invalid.append(
                     f"{mesh_relative}: mesh header line declares no leading integer element count"
                 )
 
     for ic_relative in ic_matches:
-        header_line = _read_header_line(input_dir / ic_relative, resolved_root, warnings)
+        header_kind = _read_header_line(input_dir / ic_relative, resolved_root, warnings)
+        if header_kind.unreadable:
+            # Same as the mesh arm: unreadable-only, never invalid content.
+            continue
+        header_line = header_kind.line
         if header_line is None:
             invalid.append(f"{ic_relative}: IC header line could not be read")
             continue
@@ -404,27 +469,42 @@ def _invalid_required_files(
     return invalid
 
 
-def _read_header_line(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> str | None:
-    """Return the bounded first line of ``path``, or None when it cannot be read.
+@dataclass(frozen=True)
+class _HeaderRead:
+    line: str | None
+    unreadable: bool = False
 
-    None is the "could not be read" verdict only -- an empty or whitespace-only
-    first line is returned as-is so the caller reports it as a shape violation
-    (zero numeric tokens) rather than conflating it with unreadability.
+
+def _read_header_line(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> _HeaderRead:
+    """Return the bounded first line of ``path`` with an unreadable flag.
+
+    ``unreadable=True`` means permission denial at resolution/stat/open: the
+    matched file belongs only to the unreadable third state and must never be
+    reported as a content-shape violation (cand-r1-05).  ``line is None`` with
+    ``unreadable=False`` is the "could not be read" verdict -- an empty or
+    whitespace-only first line is returned as-is so the caller reports it as a
+    shape violation (zero numeric tokens) rather than conflating it with
+    unreadability.
     """
 
-    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
-        return None
+    resolution = _safe_resolve_under_root(path, resolved_root, warnings)
+    if resolution.state is _ResolveState.UNREADABLE:
+        return _HeaderRead(line=None, unreadable=True)
+    if resolution.state is not _ResolveState.RESOLVED:
+        return _HeaderRead(line=None)
     try:
         with path.open("rb") as handle:
             chunk = handle.read(HEADER_LINE_LIMIT_BYTES)
+    except PermissionError:
+        return _HeaderRead(line=None, unreadable=True)
     except OSError:
-        return None
+        return _HeaderRead(line=None)
     try:
-        return chunk.split(b"\n", 1)[0].decode("utf-8")
+        return _HeaderRead(line=chunk.split(b"\n", 1)[0].decode("utf-8"))
     except UnicodeDecodeError:
         # Not a text header at all: unreadable for header purposes, and reported
         # through the unreadable channel rather than as a token-count verdict.
-        return None
+        return _HeaderRead(line=None)
 
 
 def _leading_int_token(line: str) -> int | None:
@@ -465,24 +545,22 @@ def _checksums_for_required_files(
         for relative_name in matches:
             path = input_dir / relative_name
             resolution = _safe_resolve_under_root(path, resolved_root, warnings)
-            if resolution is None:
-                if any(
-                    warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path)
-                    for warning in warnings
-                ):
-                    # The strict walk proved permission denial, not a symlink
-                    # defect and not absence: this matched required file is
-                    # unreadable (#1554).  It lands in the existing third state
-                    # and never in missing_required_files or a SYMLINK_* arm.
-                    unreadable.append(f"{relative_name}: required file could not be read for checksum")
-                    _append_warning_once(
-                        warnings,
-                        DiscoveryWarning(
-                            "BASINS_REQUIRED_FILE_UNREADABLE",
-                            "Required file was matched but could not be read for checksum.",
-                            path=str(path),
-                        ),
-                    )
+            if resolution.state is _ResolveState.UNREADABLE:
+                # The strict walk proved permission denial, not a symlink
+                # defect and not absence: this matched required file is
+                # unreadable (#1554).  It lands in the existing third state and
+                # never in missing_required_files or a SYMLINK_* arm.
+                unreadable.append(f"{relative_name}: required file could not be read for checksum")
+                _append_warning_once(
+                    warnings,
+                    DiscoveryWarning(
+                        "BASINS_REQUIRED_FILE_UNREADABLE",
+                        "Required file was matched but could not be read for checksum.",
+                        path=str(path),
+                    ),
+                )
+                continue
+            if resolution.state is not _ResolveState.RESOLVED:
                 continue
             try:
                 if path.stat().st_size <= CHECKSUM_LIMIT_BYTES:
@@ -541,39 +619,32 @@ def _glob_non_sidecar_files(
     # The old ``root.exists()`` guard swallowed a different OSError set per
     # CPython (EACCES raises on 3.11 but returns False from 3.12 on), so it
     # could leak a raw PermissionError exactly where #1554 says a bare
-    # predicate must not be probed unguarded.  The guarded resolution below
-    # classifies by errno instead: ENOENT on the root means no matches, while
-    # a permission-denied root reports the non-symlink unreadability warning.
-    if _safe_resolve_under_root(root, resolved_root, warnings) is None:
-        if any(warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(root) for warning in warnings):
-            _append_warning_once(
-                warnings,
-                DiscoveryWarning(
-                    "BASINS_PATH_UNREADABLE",
-                    "Basins directory cannot be read and was not classified as a symlink defect.",
-                    path=str(root),
-                ),
-            )
+    # predicate must not be probed unguarded.  The first-class resolution
+    # classifies by errno instead: MISSING on the root means no matches, while
+    # a permission-denied root is an unreadable skip (not a missing label).
+    root_resolution = _safe_resolve_under_root(root, resolved_root, warnings)
+    if root_resolution.state in (_ResolveState.MISSING, _ResolveState.UNREADABLE, _ResolveState.OUTSIDE):
+        return []
+    if root_resolution.state is not _ResolveState.RESOLVED:
         return []
     matches: list[Path] = []
     for path in root.glob(pattern):
         if _is_ignored_path(path):
             continue
         resolution = _safe_resolve_under_root(path, resolved_root, warnings)
-        if resolution is None:
-            if any(
-                warning.code == "BASINS_PATH_UNREADABLE" and warning.path == str(path) for warning in warnings
-            ):
-                # The strict walk proved permission denial, not absence and not
-                # a symlink defect (#1554): the file IS matched by discovery
-                # and must not be mislabelled missing.  The checksum walk later
-                # routes it into the unreadable-required-file third state.
-                matches.append(path)
+        if resolution.state is _ResolveState.UNREADABLE:
+            # The strict walk proved permission denial, not absence and not a
+            # symlink defect (#1554): the file IS matched by discovery and must
+            # not be mislabelled missing.  The checksum walk later routes it
+            # into the unreadable-required-file third state.
+            matches.append(path)
             continue
-        # Guarded bare probe: reached only after the strict realpath above
-        # proved every ancestor traversable, so the follow-stat is_file() here
-        # has no pending EACCES (#1554).
-        if path.is_file():
+        if resolution.state is not _ResolveState.RESOLVED:
+            continue
+        file_kind = _classify_regular_file(path)
+        if file_kind is _FileKind.REGULAR or file_kind is _FileKind.UNREADABLE:
+            # A permission-denied final follow-stat is a matched-but-unreadable
+            # verdict (cand-r1-06), not missing; the checksum walk records it.
             matches.append(path)
     return sorted(matches, key=lambda path: path.name.lower())
 
@@ -629,7 +700,7 @@ def _walk_files(
         directory, depth = stack.pop()
         if budget is not None:
             budget.enter(directory, depth=depth)
-        if _safe_resolve_under_root(directory, resolved_root, warnings) is None:
+        if _safe_resolve_under_root(directory, resolved_root, warnings).state is not _ResolveState.RESOLVED:
             continue
         _ensure_readable_directory(directory, "BASINS_DIRECTORY_UNREADABLE")
         try:
@@ -640,7 +711,7 @@ def _walk_files(
                         budget.enter(path, depth=depth + 1)
                     if _is_sidecar_name(entry.name):
                         continue
-                    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+                    if _safe_resolve_under_root(path, resolved_root, warnings).state is not _ResolveState.RESOLVED:
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         stack.append((path, depth + 1))
@@ -680,31 +751,56 @@ def _iter_child_dirs(root: Path, *, budget: DiscoveryBudget | None = None, depth
 
 
 def _has_child_dir(root: Path, name: str, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
+    """True when ``root/name`` is a required ``input/`` directory.
+
+    This is the required-input owner: an unreadable required ``input/`` is a
+    hard refusal, never a silent optional-skip (phase 6.2: the real nested
+    layout ``zhaochen/WEM/input`` reached here and was omitted while a valid
+    sibling kept the inventory importable).  Missing/non-directory is False;
+    OUTSIDE/UNRESOLVABLE is False with the resolver's already-recorded blocking
+    warning.
+    """
+
     child = root / name
-    return _is_safe_directory(child, resolved_root, warnings)
+    resolution = _safe_resolve_under_root(child, resolved_root, warnings)
+    if resolution.state is _ResolveState.UNREADABLE:
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"Basins model input directory is not readable: {child}",
+            path=str(child),
+        )
+    if resolution.state is not _ResolveState.RESOLVED:
+        return False
+    kind = _classify_directory_kind(child)
+    if kind is _FileKind.UNREADABLE:
+        # The strict realpath succeeded but the final follow-stat is denied;
+        # the required-input owner hard-refuses with the same structured code
+        # (phase 6.2).
+        raise BasinsDiscoveryError(
+            "BASINS_DIRECTORY_UNREADABLE",
+            f"Basins model input directory is not readable: {child}",
+            path=str(child),
+        )
+    return kind is _FileKind.REGULAR
 
 
 def _is_safe_directory(path: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> bool:
+    """Optional-directory predicate: unreadable metadata is a warning/skip.
+
+    Used for forcing/focing/CALIB and model-enumeration candidates only --
+    never for a required ``input/`` (see ``_has_child_dir``).  OUTSIDE and
+    UNRESOLVABLE skip here with the resolver's already-recorded blocking
+    warning; a contained unreadable optional directory is a non-symlink
+    unreadability skip, never a raw PermissionError.
+    """
+
     if _is_ignored_path(path):
         return False
-    if _safe_resolve_under_root(path, resolved_root, warnings) is None:
+    resolution = _safe_resolve_under_root(path, resolved_root, warnings)
+    if resolution.state is not _ResolveState.RESOLVED:
         return False
-    # The follow-stat below is reached only after the strict realpath above
-    # traversed every ancestor (no pending EACCES) and the path stayed under
-    # the resolved root.  A bare ``path.is_dir()`` here would still leak EACCES
-    # on 3.11 when the FINAL component denies read, so the directory-kind probe
-    # runs inside an errno-aware boundary instead: missing (ENOENT/ENOTDIR,
-    # including a dangling final symlink) stays a silent skip exactly like the
-    # old ``is_dir()`` False, while permission denial and any other unreadable
-    # metadata failure is a non-symlink unreadability skip, never a raw
-    # PermissionError and never misreported as "not a directory" (#1554).
-    try:
-        mode = path.stat().st_mode
-    except FileNotFoundError:
-        return False
-    except NotADirectoryError:
-        return False
-    except OSError:
+    kind = _classify_directory_kind(path)
+    if kind is _FileKind.UNREADABLE:
         _append_warning_once(
             warnings,
             DiscoveryWarning(
@@ -714,59 +810,32 @@ def _is_safe_directory(path: Path, resolved_root: Path, warnings: list[Discovery
             ),
         )
         return False
-    return stat.S_ISDIR(mode)
+    return kind is _FileKind.REGULAR
 
 
 def _safe_resolve_under_root(
     path: Path,
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
-) -> Path | None:
-    # Resolve strictly and classify by errno instead of relying on
-    # "non-strict resolution raises on a symlink loop": CPython 3.13+
-    # delegates Path.resolve() to os.path.realpath(), which returns loops
-    # unraised. os.path.realpath(strict=True) raises OSError(ELOOP)
-    # uniformly on 3.11-3.14 (Path.resolve(strict=True) must not be used
-    # here: on <=3.12 it raises an errno-less RuntimeError for loops).
+) -> _ResolvedPath:
+    """Resolve ``path`` and classify containment/errno into a first-class result.
+
+    The shared ``warnings`` list is OUTPUT ONLY -- no caller may reconstruct a
+    verdict by scanning it.  Every failure arm below still runs containment on
+    a non-strict realpath product, so an EACCES that hides an escape cannot
+    weaken the fail-closed outside-root refusal (cand-r1-01/security-perf).
+    """
+
     try:
         resolved = Path(os.path.realpath(path, strict=True))
+        strict_errno = None
     except OSError as error:
-        errno_value = getattr(error, "errno", None)
-        if errno_value == ENOENT:
-            # The strict walk proved the failure is a missing component, not a
-            # loop; keep the pre-change nonexistence semantics (containment is
-            # still checked, and the caller's is_dir() filter skips it silently).
-            # os.path.realpath() non-strict never raises on 3.11-3.14;
-            # Path.resolve() must not be used here because on <=3.12 it raises an
-            # errno-less RuntimeError when the `..`-collapsed tail meets a symlink
-            # loop behind the missing component (e.g. `gone/../loopdir`).
-            resolved = Path(os.path.realpath(path))
-        elif errno_value in (EACCES, EPERM):
-            # Permission denial is NOT a symlink verdict and NOT nonexistence
-            # (#1554): keep the lexical path on a non-symlink unreadability
-            # channel so a matched required file can still reach the
-            # stat/hash lane (BASINS_REQUIRED_FILE_UNREADABLE).  Containment
-            # is not weakened -- the caller still admits the path only if it
-            # stays under the resolved root.
-            _append_warning_once(
-                warnings,
-                DiscoveryWarning(
-                    "BASINS_PATH_UNREADABLE",
-                    "Basins descendant cannot be read and was not classified as a symlink defect.",
-                    path=str(path),
-                ),
-            )
-            return None
-        else:
-            _append_warning_once(
-                warnings,
-                DiscoveryWarning(
-                    "BASINS_SYMLINK_UNRESOLVABLE",
-                    "Basins descendant cannot be resolved and was skipped.",
-                    path=str(path),
-                ),
-            )
-            return None
+        strict_errno = getattr(error, "errno", None)
+        # Non-strict os.path.realpath() never raises on 3.11-3.14; Path.resolve()
+        # must not be used because on <=3.12 it raises an errno-less RuntimeError
+        # when the `..`-collapsed tail meets a symlink loop behind a missing
+        # component (e.g. `gone/../loopdir`).
+        resolved = Path(os.path.realpath(path))
     try:
         resolved.relative_to(resolved_root)
     except ValueError:
@@ -778,8 +847,37 @@ def _safe_resolve_under_root(
                 path=str(path),
             ),
         )
-        return None
-    return resolved
+        return _ResolvedPath(state=_ResolveState.OUTSIDE)
+    if strict_errno is None:
+        return _ResolvedPath(state=_ResolveState.RESOLVED, path=resolved)
+    if strict_errno == ENOENT:
+        # The strict walk proved a missing component, not a loop; keep the
+        # pre-change nonexistence semantics (the caller filters silently).
+        return _ResolvedPath(state=_ResolveState.MISSING)
+    if strict_errno in (EACCES, EPERM):
+        # Permission denial is NOT a symlink verdict and NOT nonexistence
+        # (#1554).  Containment already passed above, so the path stays under
+        # the root: report the non-symlink unreadability state and let the
+        # owner decide (hard directory refusal, optional skip, or required-file
+        # third state).  Never return it as RESOLVED.
+        _append_warning_once(
+            warnings,
+            DiscoveryWarning(
+                "BASINS_PATH_UNREADABLE",
+                "Basins descendant cannot be read and was not classified as a symlink defect.",
+                path=str(path),
+            ),
+        )
+        return _ResolvedPath(state=_ResolveState.UNREADABLE)
+    _append_warning_once(
+        warnings,
+        DiscoveryWarning(
+            "BASINS_SYMLINK_UNRESOLVABLE",
+            "Basins descendant cannot be resolved and was skipped.",
+            path=str(path),
+        ),
+    )
+    return _ResolvedPath(state=_ResolveState.UNRESOLVABLE)
 
 
 def _append_warning_once(warnings: list[DiscoveryWarning], warning: DiscoveryWarning) -> None:
@@ -887,6 +985,62 @@ def _classify_basins_root_metadata(root: Path, *, error_prefix: str = "BASINS_RO
             path=str(root),
         )
     return is_symlink
+
+
+def _classify_entry_kind(path: Path) -> tuple[_FileKind, int | None]:
+    """Errno-aware single follow-stat verdict shared by file and directory owners.
+
+    ``Path.is_file()`` / ``is_dir()`` each swallow a different OSError set per
+    CPython (EACCES on the final follow-stat raises on 3.11-3.13 but returns
+    False on 3.14), so neither predicate can decide final metadata.  One
+    errno-aware stat yields a verdict every interpreter agrees on and returns
+    the raw mode for the caller's type-bit check: missing / not-a-directory ->
+    MISSING, permission denial -> UNREADABLE, any other metadata failure ->
+    OTHER, otherwise REGULAR with the mode.
+    """
+
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return _FileKind.MISSING, None
+    except NotADirectoryError:
+        return _FileKind.MISSING, None
+    except PermissionError:
+        return _FileKind.UNREADABLE, None
+    except OSError:
+        return _FileKind.OTHER, None
+    return _FileKind.REGULAR, mode
+
+
+def _classify_regular_file(path: Path) -> _FileKind:
+    """Errno-aware final-file metadata verdict.
+
+    ``Path.is_file()`` swallows a different OSError set per CPython: EACCES on
+    the final follow-stat raises on 3.11-3.13 but returns False on 3.14
+    (cand-r1-06).  This classifier yields one verdict on every interpreter:
+    missing/not-a-dir -> MISSING, permission denial -> UNREADABLE, other
+    metadata failure -> OTHER, regular file -> REGULAR.
+    """
+
+    kind, mode = _classify_entry_kind(path)
+    if kind is _FileKind.REGULAR:
+        return _FileKind.REGULAR if mode is not None and stat.S_ISREG(mode) else _FileKind.OTHER
+    return kind
+
+
+def _classify_directory_kind(path: Path) -> _FileKind:
+    """Errno-aware final-directory metadata verdict for required-input ownership.
+
+    Mirrors ``_classify_regular_file`` for directories: the final follow-stat
+    EACCES/EPERM is UNREADABLE on every interpreter, missing/not-a-dir is
+    MISSING, a regular file at the leaf is OTHER, and an actual directory is
+    REGULAR.
+    """
+
+    kind, mode = _classify_entry_kind(path)
+    if kind is _FileKind.REGULAR:
+        return _FileKind.REGULAR if mode is not None and stat.S_ISDIR(mode) else _FileKind.OTHER
+    return kind
 
 
 def _is_sidecar_name(name: str) -> bool:

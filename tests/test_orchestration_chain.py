@@ -4324,12 +4324,20 @@ def test_publish_root_unknown_user_is_published_log_write_failed_at_local_stage_
         job_timeout_seconds=5,
     )
     payload = {"status": "ok", "stage": "convert"}
+    log_uri = "published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out"
 
     with pytest.raises(OrchestratorError) as exc_info:
-        orchestrator._write_local_stage_log("published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out", payload)
+        orchestrator._write_local_stage_log(log_uri, payload)
 
+    # cand-r1-02: the local-stage owner keeps its own message, exact log_uri,
+    # and the direct SafeFilesystemError(kind="unsafe") cause -- never the
+    # gateway wording and never a lost/double-wrapped cause.
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
-    assert exc_info.value.details == {"log_uri": "published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out"}
+    assert str(exc_info.value) == "Failed to publish local stage logs."
+    assert exc_info.value.details == {"log_uri": log_uri}
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, SafeFilesystemError)
+    assert cause.kind == "unsafe"
     assert not list(tmp_path.glob("~*"))
     assert not list(tmp_path.glob("*~*"))
 

@@ -212,7 +212,20 @@ def write_local_stage_log(
     safe_filesystem_error_cls: type[Exception] = SafeFilesystemError,
 ) -> str:
     content = json.dumps(redact_payload_fn(dict(payload)), sort_keys=True).encode("utf-8")
-    published_path = orchestrator._published_log_path(log_uri)
+    try:
+        published_path = orchestrator._published_log_path(log_uri)
+    except OrchestratorError as exc:
+        if exc.error_code == "PUBLISHED_LOG_WRITE_FAILED" and exc.details.get("log_uri") == log_uri:
+            # `_published_log_path` may already translate the unknown-home
+            # refusal under the gateway wording; retranslate under the local
+            # owner's message while keeping its direct SafeFilesystemError
+            # cause (cand-r1-02).
+            raise OrchestratorError(
+                "PUBLISHED_LOG_WRITE_FAILED",
+                "Failed to publish local stage logs.",
+                {"log_uri": log_uri},
+            ) from exc.__cause__
+        raise
     if published_path is None:
         orchestrator.object_store.write_bytes_atomic(log_uri, content)
         return log_uri
