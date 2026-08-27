@@ -489,19 +489,23 @@ def _resolve_runs_only_roots(
     value is stripped first, because ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` reaches
     here as the bare environment string -- surrounding whitespace included.
 
-    Overlap (issue #1617): the resolved roots are rejected when they form an
-    unequal ancestor/descendant pair, not just when they are equal. The primary
-    root always wins; among additional roots the first accepted configured root
-    wins. The loser is omitted from the resolved list and recorded in
-    ``skipped`` with ``reason=root_overlap`` and ``conflicting_root=<winner>``.
-    Equal aliases (path / symlink / trailing-slash) resolve to the same
-    absolute path and remain the #1318 silent dedup.
+    Overlap (issue #1617 / design D2): a root is rejected only when its
+    POTENTIAL deletion target tree intersects an already-admitted root's --
+    ``runs/<canonical_run_id>`` on every root, plus
+    ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary. Directory
+    ancestry outside those lanes is admitted (a parent workspace with a nested
+    child object-store stays fully swept). The primary root always wins; among
+    additional roots the first accepted configured root wins. The loser is
+    omitted from the resolved list and recorded in ``skipped`` with
+    ``reason=root_overlap`` and ``conflicting_root=<winner>``. Equal aliases
+    (path / symlink / trailing-slash) resolve to the same absolute path and
+    remain the #1318 silent dedup.
     """
     resolved: list[Path] = []
     skipped: list[dict[str, Any]] = []
-    admitted: list[Path] = []
+    admitted: list[tuple[Path, bool]] = []
     if primary is not None:
-        admitted.append(primary)
+        admitted.append((primary, True))
     for value in values:
         raw, candidate, rejected = _sanitize_root_candidate(
             value,
@@ -522,9 +526,9 @@ def _resolve_runs_only_roots(
             continue
         if candidate is None:
             continue
-        if any(candidate == admitted_path for admitted_path in admitted):
+        if any(candidate == admitted_path for admitted_path, _is_primary in admitted):
             continue
-        conflicting = _find_conflicting_ancestor(candidate, admitted)
+        conflicting = _find_conflicting_root(candidate, admitted)
         if conflicting is not None:
             skipped.append(
                 {
@@ -535,31 +539,99 @@ def _resolve_runs_only_roots(
                 }
             )
             continue
-        admitted.append(candidate)
+        admitted.append((candidate, False))
         resolved.append(candidate)
     return resolved, skipped
 
 
-def _find_conflicting_ancestor(candidate: Path, admitted: Sequence[Path]) -> Path | None:
-    """Return the admitted root that overlaps ``candidate``, or None.
+def _find_conflicting_root(
+    candidate: Path,
+    admitted: Sequence[tuple[Path, bool]],
+) -> Path | None:
+    """Return the admitted root whose potential deletion tree intersects the
+    candidate's, or None.
 
-    "Overlap" is any resolved ancestor/descendant relationship in either
-    direction. The comparison is lexical against the already-resolved absolute
-    paths (both sides are produced by ``Path.resolve()``), so equal aliases
-    cannot reach here -- they were deduplicated by the equality check.
+    ``admitted`` is the list of already-accepted roots as ``(path, is_primary)``
+    pairs, in admission order (the primary first when configured). "Overlap"
+    means either root lies at or below the other root's POTENTIAL retention
+    deletion target -- the same canonical shapes the collectors can delete, so
+    admission cannot drift from the scan (issue #1617 / design D2):
+
+    - every root owns potential ``runs/<canonical_run_id>/**`` targets, and
+    - the primary additionally owns potential
+      ``raw|canonical|forcing/<source>/<valid_cycle>/**`` targets.
+
+    Directory ancestry outside those lanes is NOT overlap: a parent workspace
+    with a nested child object-store (``WORKSPACE_ROOT`` / ``OBJECT_STORE_ROOT``)
+    has disjoint ``runs/`` and cycle trees and both remain admitted. The
+    comparison is purely lexical on resolved absolute path components -- no
+    filesystem enumeration and no dependence on whether the target currently
+    exists or is within its window.
     """
-    for admitted_path in admitted:
-        try:
-            candidate.relative_to(admitted_path)
-            return admitted_path  # candidate lies beneath an admitted root
-        except ValueError:
-            pass
-        try:
-            admitted_path.relative_to(candidate)
-            return admitted_path  # admitted root lies beneath candidate
-        except ValueError:
-            pass
+    for admitted_path, admitted_is_primary in admitted:
+        if _potential_targets_intersect(
+            candidate,
+            is_primary=False,
+            other=admitted_path,
+            other_is_primary=admitted_is_primary,
+        ):
+            return admitted_path
     return None
+
+
+def _potential_targets_intersect(
+    path: Path,
+    *,
+    is_primary: bool,
+    other: Path,
+    other_is_primary: bool,
+) -> bool:
+    """True when two resolved roots' potential deletion target trees intersect.
+
+    Both containment directions are checked with the same lane predicate: the
+    contained root's relative components are classified against the container's
+    target lanes (``runs/<canonical>`` always; cycle prefixes only for the
+    primary), because the primary's cycle lane is not shared by additional
+    roots.
+    """
+    try:
+        relative = path.relative_to(other).parts
+        if _parts_lie_in_potential_target(relative, primary=other_is_primary):
+            return True
+    except ValueError:
+        pass
+    try:
+        relative = other.relative_to(path).parts
+        if _parts_lie_in_potential_target(relative, primary=is_primary):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def _parts_lie_in_potential_target(parts: tuple[str, ...], *, primary: bool) -> bool:
+    """Classify relative path components against a root's potential target lanes.
+
+    Mirrors the collectors exactly (no filesystem access):
+
+    - ``runs/<canonical_run_id>/...`` is a target on every root: ``parts[0]``
+      must be ``runs`` and ``parts[1]`` must parse as a canonical run id via the
+      shared ``_extract_run_cycle``. A root at ``A/runs`` or
+      ``A/runs/<not-a-canonical-id>`` is not inside a deletable run tree.
+    - ``raw|canonical|forcing/<source>/<valid_cycle>/...`` is a target on the
+      primary only: ``parts[0]`` must be a cycle-scoped prefix and ``parts[2]``
+      must parse as a ``%Y%m%d%H`` cycle via ``_parse_cycle_name`` (the source
+      segment is any directory name, matching ``_collect_cycle_targets``).
+      ``A/raw/gfs/not-a-cycle/...`` is not a deletable cycle tree, and the
+      static ``grid`` segment never parses as a cycle.
+    """
+    if len(parts) >= 2 and parts[0] == RUNS_PREFIX:
+        if _extract_run_cycle(parts[1]) is not None:
+            return True
+    if primary and len(parts) >= 3 and parts[0] in CYCLE_SCOPED_PREFIXES:
+        if _parse_cycle_name(parts[2]) is not None:
+            return True
+    return False
 
 
 def plan_retention(

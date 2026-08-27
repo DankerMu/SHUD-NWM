@@ -31,13 +31,20 @@ Thus no deletion surface can be derived from the process working directory or th
 scheduler workspace. A built-in default SHALL NOT become an additional deletion
 root, and the existing `extra_root_not_absolute` reason remains stable.
 
-The admitted resolved root set SHALL contain no duplicate or ancestor/descendant
-pair. The primary root SHALL take precedence over an overlapping additional root;
-among additional roots, the first accepted configured root SHALL take precedence.
-Equal aliases SHALL retain the existing silent single-sweep deduplication behavior,
-while an unequal overlapping root SHALL be rejected as `root_overlap` with a
-`conflicting_root` field naming the accepted winner. No rejected root SHALL
-contribute a plan entry or freed-byte count.
+The admitted resolved root set SHALL contain no duplicate or pair whose potential
+retention target trees intersect. Every root's potential targets include
+`runs/<canonical_run_id>/**`; the primary root's potential targets additionally
+include `raw|canonical|forcing/<source>/<valid_cycle>/**`. A root at or below one
+of another root's potential target trees SHALL conflict even when the target is
+not currently expired or present. Directory ancestry outside those lanes SHALL
+NOT conflict: a parent workspace and child object-store with disjoint `runs/` and
+cycle-prefix trees SHALL both be admitted. The primary root SHALL take precedence
+over a conflicting additional root; among additional roots, the first accepted
+configured root SHALL take precedence. Equal aliases SHALL retain the existing
+silent single-sweep deduplication behavior, while an unequal conflicting root
+SHALL be rejected as `root_overlap` with a `conflicting_root` field naming the
+accepted winner. No rejected root SHALL contribute a plan entry or freed-byte
+count.
 
 The retention receipt SHALL make every entry attributable: its schema version
 remains `nhms.production_scheduler.retention.v2`, each planned, deleted, skipped,
@@ -103,12 +110,20 @@ that cleanup never aborts scheduling SHALL all apply unchanged.
 - **THEN** each target appears exactly once
 - **AND** freed bytes count each completed removal once.
 
-#### Scenario: unequal overlapping roots are rejected deterministically
+#### Scenario: intersecting retention target trees are rejected deterministically
 
-- **WHEN** primary A and additional B, or two additional roots A and B in either configuration order, have an ancestor/descendant relationship, including `B=A/runs/<canonical_run_id>/nested`
+- **WHEN** primary A and additional B, or two additional roots A and B in either configuration order, place one root at or below another root's `runs/<canonical_run_id>` potential target tree
+- **OR** an additional root lies at or below primary A's `raw|canonical|forcing/<source>/<valid_cycle>` potential target tree
 - **THEN** the primary wins, or the first accepted additional wins when no primary is involved
 - **AND** the loser is omitted from scanning and records `root_overlap` with `conflicting_root` naming the winner
 - **AND** no loser target or duplicate freed-byte contribution is produced.
+
+#### Scenario: directory ancestry with disjoint retention lanes is admitted
+
+- **WHEN** a configured workspace root A is the parent of primary object-store `A/object-store`, or one additional root is an ordinary child of another outside every canonical run target
+- **AND** each root has an aged canonical workspace under its own `runs/` tree
+- **THEN** both roots are admitted and their targets are planned and removed independently exactly once
+- **AND** no `root_overlap` skip or duplicate freed-byte contribution is produced.
 
 #### Scenario: window attribution survives evidence compaction
 

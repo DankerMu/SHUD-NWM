@@ -9,7 +9,7 @@ Fixture triage: issue type `bugfix`; project profile `NHMS`; blast radius `high`
 **Goals:**
 
 - A blank, whitespace, or relative primary root never reaches `Path.resolve()` or a scan, and yields a readable no-op receipt record.
-- No pair among the resolved primary/additional roots has an ancestor/descendant relationship in the accepted set.
+- No accepted root lies inside another accepted root's potential canonical run target, or inside the primary root's potential cycle target; ordinary parent/child roots with disjoint deletion lanes remain admitted.
 - An aged additional-root run containing top-level and nested symlinks is reclaimed in one pass without touching link targets and is not selected on a second pass.
 - Existing cutoff, frontier, protected-path, runs-only, gate, and per-entry failure behavior remains intact.
 
@@ -29,11 +29,15 @@ Introduce one root-candidate sanitizer used before constructing/resolving both p
 
 Alternatives rejected: validating only inside the normalized config is too late because empty becomes `None` and relative values become workspace-absolute; reading `os.getenv` directly in the pass would cover the default factory but silently ignore programmatic config construction. The cleanup CLI already passes the raw environment value directly.
 
-### D2: Reject all resolved root overlap
+### D2: Reject intersecting potential deletion targets, not directory ancestry
 
-Treat equality and ancestor/descendant relationships as overlap. The primary root wins over every additional root. Among additional roots, the first configured accepted root wins; each later conflicting root is omitted from `extra_roots.roots` and contributes one receipt skip with a stable `root_overlap` reason and the conflicting accepted root. Equality remains a silent dedup to preserve #1318 behavior; unequal overlap is recorded because it is a misconfiguration.
+Equality remains a silent dedup to preserve #1318 behavior. For unequal roots, admission compares the same potential target shapes the collectors can delete: every root owns `runs/<canonical_run_id>/**`; the primary additionally owns `raw|canonical|forcing/<source>/<valid-cycle>/**`. A pair conflicts only when either root lies at or below one of the other root's potential target trees. The primary root wins over every conflicting additional root. Among additional roots, the first configured accepted root wins; each later conflicting root is omitted from `extra_roots.roots` and contributes one `root_overlap` skip with `conflicting_root` naming the winner.
 
-Alternative rejected: compute target-set intersections. A root nested below `A/runs/<run_id>` can be deleted as part of A's selected tree, so enumeration-order bookkeeping cannot make execution safe or freed-byte accounting trustworthy.
+Directory ancestry by itself is not overlap. A documented layout such as `WORKSPACE_ROOT=/work/nhms` and `OBJECT_STORE_ROOT=/work/nhms/object-store` has disjoint `workspace/runs` and `object-store/{runs,cycle-prefixes}` lanes and both roots remain admitted. Conversely, `B=A/runs/<canonical_run_id>/nested` conflicts even before the run ages because A may eventually delete the containing canonical run tree.
+
+Round-1 oracle correction: the initial fixture interpreted #1617's “ancestor/descendant roots” acceptance literally and rejected all ancestry. Independent verification constructed a regression against #1318's existing “every configured workspace/copyback run root” requirement and the repository's documented nested workspace/object-store layout. The issue's motivating failure and D5 analysis are specifically target-set intersection under `runs/<run_id>`, so this decision restores that contract rather than weakening the review oracle.
+
+Alternative rejected: compute only the current filesystem plan intersection. Admission must remain safe when a canonical run/cycle is currently within its window or absent but later becomes deletable; therefore it classifies relative path components with the canonical run/cycle parsers without enumerating the filesystem.
 
 ### D3: Selected additional-root run trees are disposable residue
 
@@ -71,7 +75,7 @@ Root-admission skips use the existing `skipped` list; no v3 schema is needed. De
 
 Governing invariant: retention deletes only a selected canonical target beneath exactly one admitted absolute root, never derives a root from CWD, never follows a symlink, and reports each completed deletion once.
 
-Source-of-truth identity/contract: ordered configured root values normalized to an overlap-free set; receipt identity remains `(root, key)` under `nhms.production_scheduler.retention.v2`.
+Source-of-truth identity/contract: ordered configured root values normalized to a set whose potential retention target trees are disjoint; receipt identity remains `(root, key)` under `nhms.production_scheduler.retention.v2`.
 
 Surfaces:
 
@@ -87,6 +91,8 @@ Regression rows:
 
 - Direct/pass/CLI raw primary input `{None, "", "  ", "relative/store"}` + CWD/workspace-derived old cycle/run -> `None` is a quiet no-op; each explicit invalid value produces `primary_root_blank` or `primary_root_not_absolute`, no plan/delete, and physical bytes survive.
 - Primary A plus additional B, and additional A plus additional B in both configuration orders, where B is beneath `A/runs/<canonical_run_id>/nested` -> primary or first accepted additional wins; loser records `root_overlap` with `conflicting_root=<winner>`; no loser plan or duplicate `freed_bytes`.
+- Parent workspace A plus child object-store `A/object-store`, and parent/child additional roots whose `runs/` lanes are disjoint -> both roots are admitted and their canonical runs are independently reclaimed once.
+- Additional root beneath primary `raw|canonical|forcing/<source>/<valid-cycle>` -> rejected because the primary may delete the containing cycle target.
 - Additional-root old run with top-level and nested links -> run removed; external targets byte-identical; second pass has no plan/failure for it.
 - Symlinked additional `runs/` root -> still skipped and external target untouched.
 - Unchanged primary absolute root / equal-root aliases / forcing prefix / frontier-protected run -> existing behavior and receipt v2 contract remain unchanged.
@@ -106,7 +112,7 @@ Regression rows:
 
 - [Path race remains on primary deletion] -> explicitly out of scope; no claim of primary containment hardening beyond configuration admission.
 - [Unlinking an internal link removes potential forensic evidence] -> receipt still identifies the expired run; targets survive; the production sample had no links, and permanent retention is worse than unlinking disposable workspace residue.
-- [Rejecting overlap may omit a previously scanned configured root] -> the receipt records the conflict and deterministic winner; this is fail-safe versus duplicate/ancestor deletion.
+- [Over-broad overlap rejection can reintroduce a workspace capacity leak] -> classify only canonical run/cycle target shapes and test the documented parent-workspace/child-object-store layout; true target intersections remain receipt-visible and deterministic.
 - [Two mandatory touched files predate the 1000-line guard threshold] -> add exact exclusions only for `services/orchestrator/scheduler_config.py` and `tests/test_retention.py`; keep the guard enabled at 1000 lines and track splitting both files plus removing the exclusions in #1872.
 
 ## Migration Plan

@@ -5,7 +5,7 @@ Retention has three related boundary defects left after #1318: a blank or relati
 ## What Changes
 
 - Apply one root-input hygiene path to the primary and additional roots while retaining lane-specific receipt reasons.
-- Reject resolved ancestor/descendant overlap deterministically, with the primary root and then the first additional root taking precedence.
+- Reject roots whose potential retention target trees intersect, with the primary root and then the first additional root taking precedence; admit ordinary parent/child layouts whose `runs/` and primary cycle lanes are disjoint.
 - Reclaim selected additional-root run trees by unlinking descendant symlinks without following them; retain the existing refusal for a symlinked `runs/` root.
 - Add two-pass, physical-disk regression coverage through direct retention, scheduler-pass, and cleanup-CLI seams.
 
