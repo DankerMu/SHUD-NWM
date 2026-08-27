@@ -2274,3 +2274,29 @@ free-slot rotation would have added recall. **Keep rotation** unchanged under th
 recorded autonomous default. This sample adds no evidence for either keep or cut;
 any reversal still requires the existing attribution schema/round-role repair
 plus maintainer review.
+
+## Revisit 2026-08-27 (post #1615/#1616/#1617 / PR #1873) — keep; pinned coverage catch, closure clean
+
+`loop_log_audit.py` now reports **137** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `136 / 85 / 296` after PR #1868.
+PR #1873 therefore contributes one multi-round sample and **core +1 / rotated
++0**.
+
+That attribution matches the actual review shape. Round 1's six-lens mix already
+included `test-evidence`; after its path-safety fix, the pinned evidence role in
+Round 2 found that the newly introduced lane classifier lacked exact-at,
+non-canonical-run, and additional-root cycle-role boundary tests. The defect did
+not exist before the Round 1 fix, so this is valuable fix-regression recall from
+the pinned core, not a rotated free-slot catch. The corrective added twelve
+public-seam cases and four mutation-bite proofs without changing production
+semantics. Round 3 then used three composite full/delta closure lenses and
+returned zero candidates; Phase 7 was also clean.
+
+This sample supports keeping the core pinned and running post-fix rounds, but adds
+no causal evidence for or against free-slot rotation. The cumulative aggregate
+still provides no basis for an autonomous cut, while the attribution caveats
+recorded throughout this ADR remain load-bearing: the counter does not encode
+round intent, distinguishes lens identity only by labels, and mixes pinned
+fix-verification with genuine exploration. **Keep rotation** unchanged under the
+recorded autonomous default; any reversal still requires the existing
+schema/round-role repair plus maintainer review.

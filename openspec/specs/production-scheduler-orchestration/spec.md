@@ -379,15 +379,39 @@ node-27 display API's live disk-only serving surface: its queryable window is
 exactly the set of cycle directories retained there, so reclaiming it on the
 scheduler's window would silently shrink the display's history.
 
-Roots that resolve to the same absolute path SHALL be swept exactly once, so a
-single-root deployment sees no plan drift and no double-counted freed bytes.
+Every configured retention root SHALL pass the same pre-resolution admission
+rules. An unset primary or additional root SHALL be a no-op. An explicitly empty
+or blank primary root SHALL be rejected as `primary_root_blank`, and a relative
+primary root SHALL be rejected as `primary_root_not_absolute`, before `Path`
+construction or resolution. The scheduler pass SHALL preserve and hand retention
+the constructor-time raw primary-root value before scheduler configuration
+normalizes it; the cleanup CLI SHALL hand retention the raw environment value.
+Thus no deletion surface can be derived from the process working directory or the
+scheduler workspace. A built-in default SHALL NOT become an additional deletion
+root, and the existing `extra_root_not_absolute` reason remains stable.
 
-The retention receipt SHALL make every entry attributable: its schema version is
-raised to `nhms.production_scheduler.retention.v2`, each planned, deleted,
-skipped, and failed entry carries the absolute root it belongs to, and the
-receipt carries a block naming the additional-root switch state, window, cutoff,
-and the resolved additional roots. Entry keys remain root-relative, so the root
-field is what disambiguates identically named runs across roots.
+The admitted resolved root set SHALL contain no duplicate or pair whose potential
+retention target trees intersect. Every root's potential targets include
+`runs/<canonical_run_id>/**`; the primary root's potential targets additionally
+include `raw|canonical|forcing/<source>/<valid_cycle>/**`. A root at or below one
+of another root's potential target trees SHALL conflict even when the target is
+not currently expired or present. Directory ancestry outside those lanes SHALL
+NOT conflict: a parent workspace and child object-store with disjoint `runs/` and
+cycle-prefix trees SHALL both be admitted. The primary root SHALL take precedence
+over a conflicting additional root; among additional roots, the first accepted
+configured root SHALL take precedence. Equal aliases SHALL retain the existing
+silent single-sweep deduplication behavior, while an unequal conflicting root
+SHALL be rejected as `root_overlap` with a `conflicting_root` field naming the
+accepted winner. No rejected root SHALL contribute a plan entry or freed-byte
+count.
+
+The retention receipt SHALL make every entry attributable: its schema version
+remains `nhms.production_scheduler.retention.v2`, each planned, deleted, skipped,
+and failed entry carries the absolute root it belongs to, and the receipt carries
+a block naming the additional-root switch state, window, cutoff, and admitted
+resolved additional roots. Entry keys remain root-relative, so the root field disambiguates
+identically named runs across roots. Root-admission failures SHALL be represented
+in the existing skipped evidence without weakening the v2 contract.
 
 The additional-root block SHALL survive scheduler evidence size compaction, so a
 pass large enough to have its per-entry retention detail stripped still discloses
@@ -395,30 +419,23 @@ which window governed the additional roots. Deletion failures on an additional
 root SHALL be recorded per entry and SHALL NOT abort the sweep or the pass,
 including failures raised as safe-filesystem errors rather than OS errors.
 
-An additional root SHALL be an explicitly configured absolute path. A root that
-is unset, empty, or blank SHALL be discarded before any path resolution, and a
-root whose configured value is relative SHALL be discarded with a recorded
-reason rather than resolved — so that no additional root can resolve against the
-process working directory. A root SHALL NOT be forwarded when its value comes
-from a built-in default rather than from explicit configuration, even where that
-default has already been anchored to an absolute path upstream.
-
 Deletion on an additional root SHALL stay inside that root. An additional root
 whose `runs/` entry is a symbolic link SHALL be skipped with a recorded reason
-rather than followed, and removal of a selected run workspace SHALL NOT follow
-symbolic links out of the resolved root.
+rather than followed. Once an ordinary directory `runs/<canonical_run_id>` has
+been selected as expired, retention SHALL remove the whole workspace, unlinking
+any descendant symbolic-link entries without following them. Symbolic-link
+targets SHALL remain untouched. A completed removal SHALL leave no workspace to
+be selected or failed again on the next pass; an actual removal error SHALL retain
+the existing per-entry failed semantics and count no freed bytes for that entry.
 
 The adjudication order, the pipeline-frontier exemption, the protected-prefix and
 static-segment protections, the published-artifact protection, and the contract
-that cleanup never aborts scheduling SHALL all apply to additional roots
-unchanged.
+that cleanup never aborts scheduling SHALL all apply unchanged.
 
 #### Scenario: additional root reclaims its aged run workspaces
 
-- **WHEN** additional-root coverage is enabled and the scheduler workspace root
-  differs from the object-store root
-- **AND** the workspace root holds `runs/<canonical_run_id>` whose cycle is older
-  than the additional-root cutoff and older than the active lower bound
+- **WHEN** additional-root coverage is enabled and the scheduler workspace root differs from the object-store root
+- **AND** the workspace root holds `runs/<canonical_run_id>` whose cycle is older than the additional-root cutoff and older than the active lower bound
 - **THEN** retention selects that run workspace for deletion, reclaiming its
   `input/`, `output/`, `logs/`, and `state_checkpoint_recovery/` contents
 - **AND** the receipt entry names the workspace root as its root.
@@ -448,12 +465,34 @@ unchanged.
   identical to the behaviour before this capability, key for key
 - **AND** no additional root is scanned.
 
+#### Scenario: invalid primary root never becomes a derived deletion root
+
+- **WHEN** the direct API, scheduler-pass constructor/environment, or cleanup-CLI environment supplies `OBJECT_STORE_ROOT` as `""`, whitespace, or `"relative/store"`
+- **AND** aged retention-shaped trees exist under CWD and under the location scheduler normalization would derive beneath the workspace
+- **THEN** blank values record `primary_root_blank` and the relative value records `primary_root_not_absolute`
+- **AND** neither location is scanned, planned, or removed and the physical trees remain intact.
+
 #### Scenario: coincident roots are swept once
 
 - **WHEN** additional-root coverage is enabled and every configured root resolves
   to the same absolute path
 - **THEN** each target appears exactly once in the plan
 - **AND** the freed byte total counts each reclaimed directory exactly once.
+
+#### Scenario: intersecting retention target trees are rejected deterministically
+
+- **WHEN** primary A and additional B, or two additional roots A and B in either configuration order, place one root at or below another root's `runs/<canonical_run_id>` potential target tree
+- **OR** an additional root lies at or below primary A's `raw|canonical|forcing/<source>/<valid_cycle>` potential target tree
+- **THEN** the primary wins, or the first accepted additional wins when no primary is involved
+- **AND** the loser is omitted from scanning and records `root_overlap` with `conflicting_root` naming the winner
+- **AND** no loser target or duplicate freed-byte contribution is produced.
+
+#### Scenario: directory ancestry with disjoint retention lanes is admitted
+
+- **WHEN** a configured workspace root A is the parent of primary object-store `A/object-store`, or one additional root is an ordinary child of another outside every canonical run target
+- **AND** each root has an aged canonical workspace under its own `runs/` tree
+- **THEN** both roots are admitted and their targets are planned and removed independently exactly once
+- **AND** no `root_overlap` skip or duplicate freed-byte contribution is produced.
 
 #### Scenario: window attribution survives evidence compaction
 
@@ -468,7 +507,8 @@ unchanged.
 - **WHEN** a scheduler pass runs its end-of-pass retention with additional-root
   coverage enabled, and both the scheduler workspace root and the object-store
   copyback root are explicitly configured
-- **THEN** both are among the resolved additional roots recorded in the receipt
+- **THEN** both non-conflicting roots are among the admitted resolved additional
+  roots recorded in the receipt
 - **AND** an aged run workspace under either of them is selected, attributed to
   the root it belongs to.
 
@@ -478,7 +518,8 @@ unchanged.
   value comes from the built-in default
 - **THEN** it is not forwarded as an additional root, and nothing beneath it is
   selected for deletion
-- **AND** the resolved additional roots recorded in the receipt do not include it.
+- **AND** the admitted resolved additional roots recorded in the receipt do not
+  include it.
 
 #### Scenario: a relative additional root is discarded, not resolved
 
@@ -491,7 +532,7 @@ unchanged.
 
 - **WHEN** an additional root is configured as unset, empty, or blank
 - **THEN** it is discarded before any path resolution and never appears among the
-  resolved additional roots
+  admitted resolved additional roots
 - **AND** no directory under the process working directory is selected for
   deletion.
 
@@ -510,10 +551,16 @@ unchanged.
 - **THEN** retention skips that root with a recorded reason and selects nothing
 - **AND** no path outside the resolved root appears in the plan or is removed.
 
+#### Scenario: descendant links are unlinked without following
+
+- **WHEN** a selected additional-root run workspace contains top-level and nested symbolic links to targets outside the root
+- **THEN** retention unlinks the links, removes the complete run workspace in that pass, and leaves every target byte-identical
+- **AND** a second pass neither plans nor fails that removed workspace.
+
 #### Scenario: a missing additional root is a silent no-op
 
-- **WHEN** additional-root coverage is enabled and a configured additional root
-  does not exist, or exists without a `runs/` directory
+- **WHEN** additional-root coverage is enabled and a configured admitted
+  additional root does not exist, or exists without a `runs/` directory
 - **THEN** retention records no targets for it and raises nothing
 - **AND** the scheduling pass completes normally.
 
