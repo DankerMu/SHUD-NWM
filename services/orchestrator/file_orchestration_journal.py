@@ -1142,12 +1142,21 @@ class FileOrchestrationJournalRepository:
         positive mismatch witnesses it — so only reruns are counted, and only
         those the journal can PROVE were quarantine reruns:
 
-        - the row must be a terminal-success cohort MASTER row
+        - the row must be a terminal cohort MASTER row
           (``accepted_submit_row_kind`` == ``"master"``); the per-model
           terminal rows that reconcile COPIES the identity onto carry distinct
           ``job_id`` values and would double-count one submission, so they are
           excluded — a submission's master row plus its per-model terminal row
           count as 1,
+        - the master must be a completed convergence attempt for THIS model:
+          aggregate terminal success (``succeeded``/``complete``/``published``)
+          always qualifies; a ``partially_failed`` cohort master qualifies for
+          the target model only when its bounded ``candidate_projections``
+          (kept by the journal at at most 256 entries) contains that exact
+          ``model_id`` with ``array_task_outcome == "succeeded"`` — a failed,
+          missing, malformed, truncated, or duplicate projection does not
+          count (fail toward liveness; if the target is not visible after the
+          256-entry bound the row undercounts to zero),
         - its ``init_state_identities`` map must record the token under an
           entry naming THIS ``model_id`` (a cohort master carries one entry per
           member; another model's entry is not this candidate's lineage),
@@ -1187,7 +1196,7 @@ class FileOrchestrationJournalRepository:
         occurrences = 0
         for job in _current_terminal_jobs(rows.pipeline_jobs.values()):
             try:
-                if not _job_is_terminal_success(job):
+                if not _job_is_breaker_terminal_success(job, model_id=model_id):
                     continue
                 if not _job_matches_candidate(
                     job,
@@ -12251,6 +12260,37 @@ def _job_is_unsubmitted_retry_placeholder(job: Mapping[str, Any], *, status: str
 
 def _job_is_terminal_success(job: Mapping[str, Any]) -> bool:
     return str(job.get("status") or "") in {"succeeded", "complete", "published"}
+
+
+def _job_is_breaker_terminal_success(job: Mapping[str, Any], *, model_id: str) -> bool:
+    """§8.7 breaker success gate: aggregate success or a proven per-model success.
+
+    Only the quarantine-breaker occurrence accessor uses this predicate; the
+    shared ``_job_is_terminal_success`` and its other call sites stay unchanged.
+    An aggregate terminal-success master always qualifies (legacy shapes carry
+    no projections at all).  A ``partially_failed`` cohort master counts for
+    the target ``model_id`` only when its bounded ``candidate_projections``
+    (at most 256 entries) contains that exact model with
+    ``array_task_outcome == "succeeded"``.  A failed, missing, malformed,
+    truncated, or duplicate projection never counts: the breaker fails toward
+    liveness, so a target that is not visible after the 256-entry bound
+    undercounts to zero and the quarantine retry stays engaged.
+    """
+
+    if _job_is_terminal_success(job):
+        return True
+    if str(job.get("status") or "") != "partially_failed":
+        return False
+    projections = job.get("candidate_projections")
+    if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
+        return False
+    for projection in projections[:MAX_FORECAST_COHORT_MEMBERS]:
+        if not isinstance(projection, Mapping):
+            continue
+        if str(projection.get("model_id") or "") != model_id:
+            continue
+        return str(projection.get("array_task_outcome") or "") == "succeeded"
+    return False
 
 
 _INIT_STATE_ALIAS_KEYS = ("init_state_id", "initial_state_id", "state_id")

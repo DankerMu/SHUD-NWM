@@ -9015,6 +9015,281 @@ def test_init_state_occurrences_is_not_capped_by_candidate_state_job_limit(
     assert _breaker_occurrences(repository, cycle_time) == 1
 
 
+# ---------------------------------------------------------------------------
+# #1562: per-model success inside a `partially_failed` cohort master.
+# An aggregate-success master still counts without projections; a
+# `partially_failed` master counts for the target model only when its bounded
+# candidate_projections carries that exact model with `array_task_outcome
+# == "succeeded"`.  Fail toward liveness: every other projection shape counts 0.
+# ---------------------------------------------------------------------------
+
+
+def _partial_cohort_master_job(
+    cycle_time: datetime,
+    *,
+    job_suffix: str = "",
+    projections: list[dict[str, Any]] | None = None,
+    quarantine_rerun_model_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """One ``partially_failed`` cohort master with a full member+projection map."""
+    job = _cohort_master_job(
+        cycle_time,
+        job_suffix=job_suffix,
+        status="partially_failed",
+        quarantine_rerun_model_ids=quarantine_rerun_model_ids,
+    )
+    job["cohort_members"] = [
+        {"array_task_id": 0, "candidate_id": "c0", "run_id": "r0", "model_id": "model_a"},
+        {"array_task_id": 1, "candidate_id": "c1", "run_id": "r1", "model_id": "model_b"},
+    ]
+    if projections is not None:
+        job["candidate_projections"] = projections
+    return job
+
+
+def _projection(model_id: str, outcome: str, *, array_task_id: int | None = None) -> dict[str, Any]:
+    if array_task_id is None:
+        array_task_id = 0 if model_id == "model_a" else 1
+    return {
+        "candidate_id": f"c{array_task_id}",
+        "run_id": f"r{array_task_id}",
+        "model_id": model_id,
+        "array_task_id": array_task_id,
+        "array_task_outcome": outcome,
+        "restart_stage": "state_save_qc" if outcome == "succeeded" else "forecast",
+        "native_shud_resubmitted": False,
+    }
+
+
+def test_init_state_occurrences_counts_partial_cohort_target_success(tmp_path: Path) -> None:
+    """#1562: a proven successful model task arms the breaker inside a partial cohort.
+
+    The cohort master is ``partially_failed`` (a sibling basin's task failed),
+    but this model's own bounded projection says ``succeeded`` — the quarantine
+    rerun DID converge for this model, so its submission is one completed
+    convergence attempt.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[_projection("model_a", "succeeded"), _projection("model_b", "failed")],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 1
+    # The failed sibling must NOT count: its own task did not succeed.
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
+def test_init_state_occurrences_partial_cohort_target_failed_counts_zero(tmp_path: Path) -> None:
+    """#1562: a failed target projection never arms the breaker.
+
+    The target model's own task failed inside the partial cohort, so its
+    submission was NOT a convergence success and must not count even though a
+    sibling succeeded.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[_projection("model_a", "failed"), _projection("model_b", "succeeded")],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    # The sibling's success does not qualify model_a's lineage either.
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
+@pytest.mark.parametrize(
+    "leg",
+    [
+        "no_projections_field",
+        "non_sequence_projections",
+        "empty_projections",
+        "target_absent",
+        "target_failed_outcome",
+        "non_mapping_entry",
+    ],
+)
+def test_init_state_occurrences_partial_cohort_uncountable_projection_counts_zero(
+    tmp_path: Path,
+    leg: str,
+) -> None:
+    """#1562: missing/malformed/truncated per-model evidence undercounts to zero.
+
+    Every shape that cannot PROVE the target model's task succeeded leaves the
+    breaker disengaged (fail toward liveness: one more rerun beats a wrong
+    fail-stop).
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    if leg == "no_projections_field":
+        job = _partial_cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"])
+    elif leg == "non_sequence_projections":
+        job = _partial_cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"])
+        job["candidate_projections"] = "not-a-list"
+    elif leg == "empty_projections":
+        job = _partial_cohort_master_job(
+            cycle_time, projections=[], quarantine_rerun_model_ids=["model_a"]
+        )
+    elif leg == "target_absent":
+        job = _partial_cohort_master_job(
+            cycle_time, projections=[_projection("model_b", "succeeded")], quarantine_rerun_model_ids=["model_a"]
+        )
+    elif leg == "target_failed_outcome":
+        job = _partial_cohort_master_job(
+            cycle_time, projections=[_projection("model_a", "failed")], quarantine_rerun_model_ids=["model_a"]
+        )
+    else:  # non_mapping_entry
+        job = _partial_cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"])
+        job["candidate_projections"] = ["not-a-mapping"]
+
+    repository = _breaker_journal(tmp_path, cycle_time, [job])
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+
+
+def test_init_state_occurrences_partial_target_beyond_256_entry_bound_undercounts(
+    tmp_path: Path,
+) -> None:
+    """#1562: a target pushed past the 256-entry projection bound counts 0.
+
+    ``_bounded_candidate_projections`` keeps at most 256 entries; if the exact
+    target model is not visible after that bound the accessor deliberately
+    undercounts to zero so the breaker stays fail-toward-liveness.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    # 256 filler projections push the target model's own success projection to
+    # position 256, which is past the 256-entry bound — the accessor's bounded
+    # read only sees the first 256, so the target is invisible and undercounts
+    # to zero (fail toward liveness).
+    projections = [_projection("model_b", "succeeded", array_task_id=index) for index in range(256)]
+    projections.append(_projection("model_a", "succeeded", array_task_id=256))
+    job = _partial_cohort_master_job(cycle_time, projections=projections, quarantine_rerun_model_ids=["model_a"])
+    repository = _breaker_journal(tmp_path, cycle_time, [job])
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+
+
+def test_init_state_occurrences_partial_master_plus_reconciled_terminal_counts_once(
+    tmp_path: Path,
+) -> None:
+    """#1562: partial-success master + its reconcile-copied terminal row = 1.
+
+    The distinctness rule is unchanged for partial masters: one submission's
+    master row plus the per-model terminal row it reconciled onto count as one.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[_projection("model_a", "succeeded"), _projection("model_b", "failed")],
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+            _reconciled_terminal_job(cycle_time),
+        ],
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 1
+
+
+def test_init_state_occurrences_aggregate_success_without_projections_counts(
+    tmp_path: Path,
+) -> None:
+    """#1562: aggregate terminal success remains countable with no projections.
+
+    Legacy and projection-free aggregate-success masters keep today's behavior:
+    no ``candidate_projections`` field is required for them to count.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _cohort_master_job(cycle_time, quarantine_rerun_model_ids=["model_a"]),
+            _partial_cohort_master_job(
+                cycle_time,
+                job_suffix="_retry_1",
+                projections=[_projection("model_a", "failed")],
+                quarantine_rerun_model_ids=["model_a"],
+            ),
+        ],
+    )
+
+    # The aggregate-success master counts (1); the partial master's failed
+    # target projection does not — so the total stays 1, not 2.
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 1
+
+
+def test_init_state_occurrences_failed_master_counts_zero_even_with_success_projection(
+    tmp_path: Path,
+) -> None:
+    """#1562: a failed master never counts even with a success-looking projection.
+
+    The aggregate ``failed`` status is terminal failure for the whole cohort;
+    a per-model success projection on a failed master is not a completed
+    convergence attempt (the projection itself is stale/untrusted), so the row
+    contributes 0.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    job = _cohort_master_job(cycle_time, status="failed", quarantine_rerun_model_ids=["model_a"])
+    job["cohort_members"] = [
+        {"array_task_id": 0, "candidate_id": "c0", "run_id": "r0", "model_id": "model_a"},
+    ]
+    job["candidate_projections"] = [_projection("model_a", "succeeded")]
+    repository = _breaker_journal(tmp_path, cycle_time, [job])
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+
+
+def test_init_state_occurrences_read_only_bytes_unchanged(tmp_path: Path) -> None:
+    """#1562: the model-aware breaker never mutates the journal.
+
+    The read-only invariant is unchanged for the new per-model path: the
+    accessor reads both the aggregate and the projection-bearing rows without
+    rewriting any journal bytes.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    for model_id in ("model_a", "model_b"):
+        latest = _latest_view(cycle_time=cycle_time, model_id=model_id, hydro_status="complete")
+        latest["hydro_run"]["init_state_id"] = _BREAKER_TOKEN
+        _write_json(
+            journal_root / "latest/gfs" / format_cycle_time(cycle_time) / f"{model_id}.json",
+            latest,
+        )
+    job = _partial_cohort_master_job(
+        cycle_time,
+        projections=[_projection("model_a", "succeeded"), _projection("model_b", "failed")],
+        quarantine_rerun_model_ids=["model_a"],
+    )
+    path = journal_root / "latest/gfs" / format_cycle_time(cycle_time) / "model_a.json"
+    view = json.loads(path.read_text(encoding="utf-8"))
+    view["pipeline_jobs"] = [job]
+    path.write_text(json.dumps(view, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 1
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+    assert path.read_bytes() == before
+
+
 def test_next_current_master_retry_identity_is_stable_after_helper_consolidation() -> None:
     from services.orchestrator.file_orchestration_journal import _next_current_master_retry_identity
 
