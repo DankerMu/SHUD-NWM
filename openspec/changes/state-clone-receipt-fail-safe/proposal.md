@@ -18,7 +18,7 @@ None.
 ### Modified Capabilities
 
 - `fingerprint-gated-state-clone`: make persistent clone evidence and abort-error precedence explicit for the file-index CLI routes.
-- `ci-contract-baseline`: after splitting the oversized recalibration CLI suite at its `§6.8 --pairs resolution` marker, route node-22 clone-script changes to all four owned suites and the base shared-fixture changes to all four direct consumers.
+- `ci-contract-baseline`: after splitting the oversized recalibration CLI suite at its `§6.8 --pairs resolution` marker, route node-22 clone-script changes to all four owned suites, base shared-fixture changes to all four direct consumers, and CLI-helper (`tests/state_clone_recalibration_cli_fixtures.py`) changes to exactly the two recalibration CLI modules (excluding the baseline suite).
 
 ## Impact
 

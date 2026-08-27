@@ -567,27 +567,46 @@ def test_baseline_first_item_failure_creates_no_abort_receipt(tmp_path: Path) ->
 
 
 def test_baseline_dry_run_failure_creates_no_abort_receipt(tmp_path: Path) -> None:
-    """Row 6: dry-run processes full decisions but persists no clone row."""
+    """Row 6: dry-run processes full decisions but persists no clone row.
+
+    Byte-equality oracle: the ENTIRE canonical index is snapshotted immediately
+    before the invocation and asserted byte-identical after the expected
+    fingerprint exception. A mutant that persists earlier passing dry-run units
+    -- any metadata, ordering, or content mutation -- reddens here even though
+    the no-abort-receipt and failed-target-absent checks would stay green.
+    """
 
     env, args, receipt_path = _apply_and_fail_env(tmp_path, dry_run=True)
+    canonical_index_path = Path(env["canonical_index"])
+    before_bytes = canonical_index_path.read_bytes()
 
     with pytest.raises(HydrologicCoreFingerprintMismatchError):
         dispatch(args)
 
     assert not receipt_path.exists()
-    # Nothing was written into the index either.
+    # Nothing was written into the index either -- byte-for-byte, not merely
+    # the failed target absent.
+    assert canonical_index_path.read_bytes() == before_bytes
     assert f"{BASIN_B}_dg_{IFS}" not in _index_model_ids(env)
 
 
 def test_baseline_dry_run_failure_no_receipt_flag_keeps_behavior(tmp_path: Path) -> None:
-    """Row 6: dry-run without ``--receipt`` still aborts with no artifact."""
+    """Row 6: dry-run without ``--receipt`` still aborts with no artifact.
+
+    Same byte-equality oracle as the receipt-path sibling: the whole canonical
+    index must be byte-identical after the abort, so a mutant that persists
+    earlier passing dry-run units reddens here too.
+    """
 
     env = _build_cli_environment(tmp_path, variant_b_bad=True)
     args = _cli_args(env)
+    canonical_index_path = Path(env["canonical_index"])
+    before_bytes = canonical_index_path.read_bytes()
 
     with pytest.raises(HydrologicCoreFingerprintMismatchError):
         dispatch(args)
 
+    assert canonical_index_path.read_bytes() == before_bytes
     assert f"{BASIN_B}_dg_{IFS}" not in _index_model_ids(env)
 
 
