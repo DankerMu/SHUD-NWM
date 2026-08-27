@@ -26,11 +26,14 @@ Safety posture (never-break-userspace):
   #1616/#1617): an explicitly blank primary is rejected as
   ``primary_root_blank`` and a relative one as ``primary_root_not_absolute``
   before any path resolution, so no deletion surface can derive from the
-  process working directory; resolved ancestor/descendant overlap is rejected
-  with ``root_overlap`` plus ``conflicting_root`` naming the winner. A
-  symlinked ``runs/`` root stays refused, while a selected additional-root run
-  workspace is removed by unlinking its descendant symlinks without following
-  them (issue #1615).
+  process working directory; a root whose POTENTIAL canonical target tree
+  intersects an already-admitted root's (``runs/<canonical_run_id>`` on every
+  root, plus ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary)
+  is rejected with ``root_overlap`` plus ``conflicting_root`` naming the
+  winner, while ordinary parent/child ancestry with disjoint lanes is
+  admitted. A symlinked ``runs/`` root stays refused, while a selected
+  additional-root run workspace is removed by unlinking its descendant
+  symlinks without following them (issue #1615).
 """
 
 from __future__ import annotations
@@ -99,11 +102,14 @@ PRIMARY_ROOT_BLANK_REASON = "primary_root_blank"
 # is a misconfiguration somebody has to see.
 PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
 
-# Skip reason for a root rejected because its resolved path is an unequal
-# ancestor/descendant of an already-admitted root (#1617). The equality-only
-# dedup of #1318 could not see ``A/runs/<run_id>`` beneath ``A``, so both
-# roots would scan and select the same subtree twice. The loser is recorded
-# with ``conflicting_root`` naming the accepted winner.
+# Skip reason for a root rejected because its potential canonical deletion
+# tree intersects an already-admitted root's (#1617). The equality-only dedup
+# of #1318 could not see ``A/runs/<canonical_run_id>`` beneath ``A``, so both
+# roots would scan and select the same subtree twice. Directory ancestry alone
+# is not overlap: only target-tree intersection (``runs/<canonical_run_id>``
+# everywhere, ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary)
+# rejects a root. The loser is recorded with ``conflicting_root`` naming the
+# accepted winner.
 ROOT_OVERLAP_REASON = "root_overlap"
 
 

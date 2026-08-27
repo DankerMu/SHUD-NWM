@@ -2457,6 +2457,152 @@ def test_primary_under_candidate_extra_run_target_rejects_extra(tmp_path: Path) 
     assert _entries_for(result.planned, primary) == {primary_key}
 
 
+# ---------------------------------------------------------------------------
+# Round-2 boundary fenceposts (cand-02): exact-at targets and role gating.
+# Every fixture seeds a real aged canonical run under the candidate root so a
+# wrong admission decision is observable at the public run_retention seam.
+# ---------------------------------------------------------------------------
+
+def test_exact_at_run_target_extra_is_rejected(tmp_path: Path) -> None:
+    """[3.3] Candidate extra root EXACTLY ``A/runs/<canonical_run_id>`` (no
+    ``/nested``): the run dir is the winner's deletable target itself, so the
+    loser is rejected with ``root_overlap`` + ``conflicting_root`` and no loser
+    plan -- even though the candidate holds its own aged inner run."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    outer = _run_id(NOW - timedelta(days=90))
+    exact = store / "runs" / outer
+    inner_key = _seed_run_workspace(exact, NOW - timedelta(days=80))
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=True),
+        runs_only_roots=(exact,),
+    )
+
+    assert str(exact.resolve()) not in result.to_dict()["extra_roots"]["roots"]
+    assert [
+        (entry["key"], entry["reason"], entry["conflicting_root"])
+        for entry in result.skipped
+        if entry["reason"] == ROOT_OVERLAP_REASON
+    ] == [("runs", ROOT_OVERLAP_REASON, str(store.resolve()))]
+    # the candidate's aged run would have been planned had it been admitted
+    assert _entries_for(result.planned, exact) == set()
+    assert inner_key not in _keys(result.planned)
+
+
+@pytest.mark.parametrize("prefix", ["raw", "canonical", "forcing"])
+def test_exact_at_primary_cycle_target_extra_is_rejected(
+    tmp_path: Path, prefix: str
+) -> None:
+    """[3.3] Candidate extra root EXACTLY
+    ``PRIMARY/<prefix>/<source>/<valid_cycle>`` (no ``/nested``): the cycle dir
+    is the primary's deletable target itself, so the loser is rejected with
+    ``root_overlap`` + ``conflicting_root`` and no loser plan."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    path_cycle = _cycle_name(NOW - timedelta(days=30))
+    exact = store / prefix / "gfs" / path_cycle
+    inner_key = _seed_run_workspace(exact, NOW - timedelta(days=80))
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=True),
+        runs_only_roots=(exact,),
+    )
+
+    assert str(exact.resolve()) not in result.to_dict()["extra_roots"]["roots"]
+    assert [
+        (entry["key"], entry["reason"], entry["conflicting_root"])
+        for entry in result.skipped
+        if entry["reason"] == ROOT_OVERLAP_REASON
+    ] == [("runs", ROOT_OVERLAP_REASON, str(store.resolve()))]
+    assert _entries_for(result.planned, exact) == set()
+    assert inner_key not in _keys(result.planned)
+
+
+def test_root_exactly_runs_is_admitted(tmp_path: Path) -> None:
+    """[3.3b] A candidate exactly at ``A/runs`` is ordinary ancestry -- ``runs``
+    alone is not a deletable run workspace, so parent and child are both
+    admitted and each aged run is planned once, no overlap."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    runs = store / "runs"
+    runs_key = _seed_run_workspace(runs, NOW - timedelta(days=90))
+    store_key = _seed_run_workspace(store, NOW - timedelta(days=80))
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=True),
+        runs_only_roots=(runs,),
+    )
+
+    assert not any(entry["reason"] == ROOT_OVERLAP_REASON for entry in result.skipped)
+    assert str(runs.resolve()) in result.to_dict()["extra_roots"]["roots"]
+    assert _entries_for(result.planned, runs) == {runs_key}
+    assert _entries_for(result.planned, store) == {store_key}
+
+
+def test_root_under_noncanonical_run_dir_is_admitted(tmp_path: Path) -> None:
+    """[3.3b] A candidate under ``A/runs/<not-a-run-id>`` is not inside a
+    deletable run workspace: both roots admit and the candidate's real aged
+    canonical run is planned, no overlap."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    nested = store / "runs" / "not-a-run-id" / "nested"
+    nested_key = _seed_run_workspace(nested, NOW - timedelta(days=90))
+    store_key = _seed_run_workspace(store, NOW - timedelta(days=80))
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=True),
+        runs_only_roots=(nested,),
+    )
+
+    assert not any(entry["reason"] == ROOT_OVERLAP_REASON for entry in result.skipped)
+    assert str(nested.resolve()) in result.to_dict()["extra_roots"]["roots"]
+    assert _entries_for(result.planned, nested) == {nested_key}
+    assert _entries_for(result.planned, store) == {store_key}
+
+
+@pytest.mark.parametrize("order", ["extra-first", "child-first"])
+@pytest.mark.parametrize("prefix", ["raw", "canonical", "forcing"])
+def test_cycle_shaped_ancestry_under_an_extra_is_admitted(
+    tmp_path: Path, order: str, prefix: str
+) -> None:
+    """[3.3b] Additional roots are runs-only: a valid cycle-shaped subtree under
+    extra A is NOT a potential target, so A and child B (both orders) are
+    admitted and each own aged run is planned once, no overlap. This pins the
+    ``primary`` role gate -- treating an extra as cycle-owning would reject B."""
+    store = tmp_path / "object-store"
+    store.mkdir()
+    extra_a = tmp_path / "extra-a"
+    path_cycle = _cycle_name(NOW - timedelta(days=30))
+    child_b = extra_a / prefix / "gfs" / path_cycle / "nested"
+    a_key = _seed_run_workspace(extra_a, NOW - timedelta(days=90))
+    b_key = _seed_run_workspace(child_b, NOW - timedelta(days=80))
+    roots = (extra_a, child_b) if order == "extra-first" else (child_b, extra_a)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=replace(EXTRA_CONFIG, dry_run=True),
+        runs_only_roots=roots,
+    )
+
+    assert not any(entry["reason"] == ROOT_OVERLAP_REASON for entry in result.skipped)
+    assert set(result.to_dict()["extra_roots"]["roots"]) == {
+        str(extra_a.resolve()),
+        str(child_b.resolve()),
+    }
+    assert _entries_for(result.planned, extra_a) == {a_key}
+    assert _entries_for(result.planned, child_b) == {b_key}
+
+
 # ===========================================================================
 # Issue #1615 -- contained additional-root deletion unlinks descendant links
 #
