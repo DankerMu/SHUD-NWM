@@ -447,7 +447,7 @@ exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submiss
 
 ### 含义
 
-#1199 引入的**有界 typed 收据**：当 terminal stage 的 forced-resubmit 判定是
+Issue #1199 引入的**有界 typed 收据**：当 terminal stage 的 forced-resubmit 判定是
 **混合 cohort**（至少一个 basin 的 decision + canonical restart stage 满足
 forced-resubmit 条件，且至少一个不满足）时，gate 照旧返回 `False`（合取判定
 **逐字不变**，白名单 `_FORCE_TERMINAL_RESUBMIT_DECISIONS` / canonical stage

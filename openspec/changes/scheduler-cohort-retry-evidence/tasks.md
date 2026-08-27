@@ -47,8 +47,8 @@
 - [x] 5.2 Run `uv run pytest -q tests/test_file_orchestration_journal.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_scheduler_generation.py tests/test_scheduler_backfill.py` -> all pass.
 - [x] 5.3 Run `uv run ruff check .` -> zero findings.
 - [x] 5.4 Run `openspec validate scheduler-cohort-retry-evidence --strict --no-interactive` -> valid.
-- [ ] 5.5 On node-27 final pushed HEAD, run the focused backend tests and record the exact SHA/results; node-22 runtime receipt is not required because sbatch/gateway/resource/submission semantics do not change.
-- [ ] 5.6 Audit final diff: no threshold/cadence/whitelist/cohort-key/partial-advance/DB/Slurm-template behavior changed, no raw state evidence leaked, and every acceptance criterion from #1562/#1199 is met or the archived-branch deviation is recorded.
+- [x] 5.5 On node-27 final pushed HEAD, run the focused backend tests and record the exact SHA/results; node-22 runtime receipt is not required because sbatch/gateway/resource/submission semantics do not change.
+- [x] 5.6 Audit final diff: no threshold/cadence/whitelist/cohort-key/partial-advance/DB/Slurm-template behavior changed, no raw state evidence leaked, and every acceptance criterion from #1562/#1199 is met or the archived-branch deviation is recorded.
 - [x] 5.7 Run the large-file commit guard and `tests/test_entropy_audit_script.py -k "structural_file_budget or compatibility_facade or chain"`; all newly authored source modules remain below 1000 lines and legacy forwarders remain identity/monkeypatch compatible.
 
 ## 6. Non-goals
