@@ -22,6 +22,18 @@ Safety posture (never-break-userspace):
   their own window, behind a default-off gate. Their cycle-scoped prefixes are
   never touched: the copyback root's ``forcing/`` tree is node-27's live
   disk-only display serving surface.
+- Root admission is shared between the primary and additional roots (issues
+  #1616/#1617): an explicitly blank primary is rejected as
+  ``primary_root_blank`` and a relative one as ``primary_root_not_absolute``
+  before any path resolution, so no deletion surface can derive from the
+  process working directory; a root whose POTENTIAL canonical target tree
+  intersects an already-admitted root's (``runs/<canonical_run_id>`` on every
+  root, plus ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary)
+  is rejected with ``root_overlap`` plus ``conflicting_root`` naming the
+  winner, while ordinary parent/child ancestry with disjoint lanes is
+  admitted. A symlinked ``runs/`` root stays refused, while a selected
+  additional-root run workspace is removed by unlinking its descendant
+  symlinks without following them (issue #1615).
 """
 
 from __future__ import annotations
@@ -34,7 +46,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from packages.common.safe_fs import SafeFilesystemError, rmtree_no_follow
+from packages.common.safe_fs import SafeFilesystemError, remove_tree_allow_symlinks
 from services.orchestrator.run_identity import parse_run_cycle
 
 # Per-cycle prefixes whose second path segment ({source}) contains cycle
@@ -77,6 +89,28 @@ RUNS_ROOT_SYMLINK_REASON = "runs_root_symlink_skipped"
 # dropped silently because -- unlike an unset root -- it is a misconfiguration
 # somebody has to see.
 EXTRA_ROOT_NOT_ABSOLUTE_REASON = "extra_root_not_absolute"
+
+# Skip reason for an explicitly empty/whitespace primary root (#1616). The
+# value must be recorded BEFORE it can collapse into ``None`` in
+# ``ProductionSchedulerConfig`` normalization, so the receipt stays readable
+# instead of silently looking like an unset root.
+PRIMARY_ROOT_BLANK_REASON = "primary_root_blank"
+
+# Skip reason for a non-blank but relative primary root (#1616). Resolving it
+# would anchor the deletion surface to the process working directory (or, for
+# the pass, the scheduler workspace); recorded rather than dropped because it
+# is a misconfiguration somebody has to see.
+PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
+
+# Skip reason for a root rejected because its potential canonical deletion
+# tree intersects an already-admitted root's (#1617). The equality-only dedup
+# of #1318 could not see ``A/runs/<canonical_run_id>`` beneath ``A``, so both
+# roots would scan and select the same subtree twice. Directory ancestry alone
+# is not overlap: only target-tree intersection (``runs/<canonical_run_id>``
+# everywhere, ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary)
+# rejects a root. The loser is recorded with ``conflicting_root`` naming the
+# accepted winner.
+ROOT_OVERLAP_REASON = "root_overlap"
 
 
 @dataclass
@@ -395,6 +429,47 @@ def _iter_dirs(parent: Path) -> list[Path]:
     return [entry for entry in entries if entry.is_dir() and not entry.is_symlink()]
 
 
+def _sanitize_root_candidate(
+    value: Path | str | None,
+    *,
+    reason_blank: str | None,
+    reason_not_absolute: str,
+) -> tuple[str | None, Path | None, str | None]:
+    """Shared pre-resolution root hygiene (issues #1616/#1617).
+
+    One admission path for both the primary root and every additional root, so
+    a blank or relative value can never reach ``Path()`` construction or
+    ``resolve()`` and derive a working-directory deletion surface. Returns
+    ``(raw, resolved, rejected_reason)``; exactly one of ``resolved`` /
+    ``rejected_reason`` is set.
+
+    - ``None`` -> ordinary unset no-op: neither resolved nor rejected.
+    - empty/whitespace -> rejected with ``reason_blank`` when the caller
+      supplies a token, otherwise a silent no-op. The primary lane freezes its
+      own token so an explicitly blank primary stays distinguishable from an
+      unset one even after config normalization collapsed it; the additional
+      lane keeps the #1318 contract that blank values are discarded silently.
+    - non-blank but still relative after ``expanduser()`` -> rejected with
+      ``reason_not_absolute`` (the ``extra_root_not_absolute`` token for
+      additional roots stays stable; the primary lane carries its own token).
+    - otherwise -> resolved to an absolute path (``Path(value).expanduser()
+      .resolve()``).
+    """
+    if value is None:
+        return None, None, None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return value, None, reason_blank
+    candidate = Path(value).expanduser()
+    # A degenerate ``Path`` (``Path("")`` / whitespace-only) is blank too.
+    if isinstance(value, Path) and not str(value).strip():
+        return str(value), None, reason_blank
+    if not candidate.is_absolute():
+        return str(value), None, reason_not_absolute
+    return str(value), candidate.resolve(), None
+
+
 def _resolve_runs_only_roots(
     values: Sequence[Path | str | None],
     *,
@@ -420,40 +495,149 @@ def _resolve_runs_only_roots(
     value is stripped first, because ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` reaches
     here as the bare environment string -- surrounding whitespace included.
 
-    De-duplication is by resolved absolute path (design D5): the object-store
-    root wins, because it is swept with the fuller cycle-prefix semantics.
-    Overlapping-but-unequal roots are *not* rejected -- additional roots only
-    ever scan ``<root>/runs``, and ``A/runs`` cannot intersect ``A/b/runs``, so
-    equality is the only way to produce a duplicate target.
+    Overlap (issue #1617 / design D2): a root is rejected only when its
+    POTENTIAL deletion target tree intersects an already-admitted root's --
+    ``runs/<canonical_run_id>`` on every root, plus
+    ``raw|canonical|forcing/<source>/<valid_cycle>`` on the primary. Directory
+    ancestry outside those lanes is admitted (a parent workspace with a nested
+    child object-store stays fully swept). The primary root always wins; among
+    additional roots the first accepted configured root wins. The loser is
+    omitted from the resolved list and recorded in ``skipped`` with
+    ``reason=root_overlap`` and ``conflicting_root=<winner>``. Equal aliases
+    (path / symlink / trailing-slash) resolve to the same absolute path and
+    remain the #1318 silent dedup.
     """
     resolved: list[Path] = []
     skipped: list[dict[str, Any]] = []
-    seen: set[Path] = set()
+    admitted: list[tuple[Path, bool]] = []
     if primary is not None:
-        seen.add(primary)
+        admitted.append((primary, True))
     for value in values:
-        if value is None:
-            continue
-        if isinstance(value, str):
-            value = value.strip()
-            if not value:
-                continue
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
+        raw, candidate, rejected = _sanitize_root_candidate(
+            value,
+            # #1318 contract: an unset/blank additional root is a SILENT discard
+            # (``None`` is the normal case on non-db-free deployments). Only the
+            # relative shape is a misconfiguration worth recording.
+            reason_blank=None,
+            reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+        )
+        if rejected is not None:
             skipped.append(
                 {
                     "key": RUNS_PREFIX,
-                    "root": str(value),
-                    "reason": EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+                    "root": str(raw),
+                    "reason": rejected,
                 }
             )
             continue
-        candidate = candidate.resolve()
-        if candidate in seen:
+        if candidate is None:
             continue
-        seen.add(candidate)
+        if any(candidate == admitted_path for admitted_path, _is_primary in admitted):
+            continue
+        conflicting = _find_conflicting_root(candidate, admitted)
+        if conflicting is not None:
+            skipped.append(
+                {
+                    "key": RUNS_PREFIX,
+                    "root": str(candidate),
+                    "reason": ROOT_OVERLAP_REASON,
+                    "conflicting_root": str(conflicting),
+                }
+            )
+            continue
+        admitted.append((candidate, False))
         resolved.append(candidate)
     return resolved, skipped
+
+
+def _find_conflicting_root(
+    candidate: Path,
+    admitted: Sequence[tuple[Path, bool]],
+) -> Path | None:
+    """Return the admitted root whose potential deletion tree intersects the
+    candidate's, or None.
+
+    ``admitted`` is the list of already-accepted roots as ``(path, is_primary)``
+    pairs, in admission order (the primary first when configured). "Overlap"
+    means either root lies at or below the other root's POTENTIAL retention
+    deletion target -- the same canonical shapes the collectors can delete, so
+    admission cannot drift from the scan (issue #1617 / design D2):
+
+    - every root owns potential ``runs/<canonical_run_id>/**`` targets, and
+    - the primary additionally owns potential
+      ``raw|canonical|forcing/<source>/<valid_cycle>/**`` targets.
+
+    Directory ancestry outside those lanes is NOT overlap: a parent workspace
+    with a nested child object-store (``WORKSPACE_ROOT`` / ``OBJECT_STORE_ROOT``)
+    has disjoint ``runs/`` and cycle trees and both remain admitted. The
+    comparison is purely lexical on resolved absolute path components -- no
+    filesystem enumeration and no dependence on whether the target currently
+    exists or is within its window.
+    """
+    for admitted_path, admitted_is_primary in admitted:
+        if _potential_targets_intersect(
+            candidate,
+            is_primary=False,
+            other=admitted_path,
+            other_is_primary=admitted_is_primary,
+        ):
+            return admitted_path
+    return None
+
+
+def _potential_targets_intersect(
+    path: Path,
+    *,
+    is_primary: bool,
+    other: Path,
+    other_is_primary: bool,
+) -> bool:
+    """True when two resolved roots' potential deletion target trees intersect.
+
+    Both containment directions are checked with the same lane predicate: the
+    contained root's relative components are classified against the container's
+    target lanes (``runs/<canonical>`` always; cycle prefixes only for the
+    primary), because the primary's cycle lane is not shared by additional
+    roots.
+    """
+    try:
+        relative = path.relative_to(other).parts
+        if _parts_lie_in_potential_target(relative, primary=other_is_primary):
+            return True
+    except ValueError:
+        pass
+    try:
+        relative = other.relative_to(path).parts
+        if _parts_lie_in_potential_target(relative, primary=is_primary):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def _parts_lie_in_potential_target(parts: tuple[str, ...], *, primary: bool) -> bool:
+    """Classify relative path components against a root's potential target lanes.
+
+    Mirrors the collectors exactly (no filesystem access):
+
+    - ``runs/<canonical_run_id>/...`` is a target on every root: ``parts[0]``
+      must be ``runs`` and ``parts[1]`` must parse as a canonical run id via the
+      shared ``_extract_run_cycle``. A root at ``A/runs`` or
+      ``A/runs/<not-a-canonical-id>`` is not inside a deletable run tree.
+    - ``raw|canonical|forcing/<source>/<valid_cycle>/...`` is a target on the
+      primary only: ``parts[0]`` must be a cycle-scoped prefix and ``parts[2]``
+      must parse as a ``%Y%m%d%H`` cycle via ``_parse_cycle_name`` (the source
+      segment is any directory name, matching ``_collect_cycle_targets``).
+      ``A/raw/gfs/not-a-cycle/...`` is not a deletable cycle tree, and the
+      static ``grid`` segment never parses as a cycle.
+    """
+    if len(parts) >= 2 and parts[0] == RUNS_PREFIX:
+        if _extract_run_cycle(parts[1]) is not None:
+            return True
+    if primary and len(parts) >= 3 and parts[0] in CYCLE_SCOPED_PREFIXES:
+        if _parse_cycle_name(parts[2]) is not None:
+            return True
+    return False
 
 
 def plan_retention(
@@ -497,8 +681,14 @@ def plan_retention(
     extra_days = (
         extra_roots_retention_days if extra_roots_retention_days is not None else retention_days
     )
-    primary_root = (
-        Path(object_store_root).expanduser().resolve() if object_store_root is not None else None
+    # Shared pre-resolution hygiene for the primary root too (issue #1616): a
+    # blank or relative ``OBJECT_STORE_ROOT`` must never become a
+    # working-directory-derived scan/deletion surface. ``None`` stays an
+    # ordinary unset no-op.
+    _primary_raw, primary_root, primary_rejected = _sanitize_root_candidate(
+        object_store_root,
+        reason_blank=PRIMARY_ROOT_BLANK_REASON,
+        reason_not_absolute=PRIMARY_ROOT_NOT_ABSOLUTE_REASON,
     )
     extra_roots, extra_root_skipped = _resolve_runs_only_roots(
         runs_only_roots, primary=primary_root
@@ -515,6 +705,14 @@ def plan_retention(
         extra_roots_cutoff=extra_cutoff.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         extra_roots=[str(root) for root in extra_roots],
     )
+    if primary_rejected is not None:
+        result.skipped.append(
+            {
+                "key": "",
+                "root": str(_primary_raw),
+                "reason": primary_rejected,
+            }
+        )
 
     published_resolved = (
         Path(published_artifact_root).expanduser().resolve()
@@ -659,10 +857,12 @@ def _delete_entry(
 ) -> None:
     """Remove one planned entry, recording failure instead of raising.
 
-    ``containment_root`` is set for additional roots (design D6): removal goes
-    through ``rmtree_no_follow`` so the walk cannot follow a symlink out of the
-    root that is being swept. The object-store root keeps the historical
-    ``shutil.rmtree``; changing it is out of this change's scope.
+    ``containment_root`` is set for additional roots (design D6 / issue #1615):
+    removal goes through ``remove_tree_allow_symlinks`` on the run's parent, so
+    the walk cannot follow a symlink out of the root that is being swept, and a
+    descendant symlink inside a selected, aged run workspace is unlinked as a
+    link instead of refusing the whole tree. The object-store root keeps the
+    historical ``shutil.rmtree``; changing it is out of this change's scope.
 
     ``SafeFilesystemError`` is a ``RuntimeError``, **not** an ``OSError``, so it
     must be named explicitly here: letting it escape would collapse the pass
@@ -673,7 +873,12 @@ def _delete_entry(
     path = Path(entry["path"])
     try:
         if containment_root is not None:
-            rmtree_no_follow(path, containment_root=containment_root)
+            remove_tree_allow_symlinks(
+                path.parent,
+                path.name,
+                containment_root=containment_root,
+                missing_ok=False,
+            )
         else:
             shutil.rmtree(path)
     except (OSError, SafeFilesystemError) as error:

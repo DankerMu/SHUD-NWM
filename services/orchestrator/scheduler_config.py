@@ -254,6 +254,15 @@ class ProductionSchedulerConfig:
     _evidence_root_preflight_path: Path = field(init=False, repr=False, compare=False)
     _workspace_root_raw_preflight_path: Path = field(init=False, repr=False, compare=False)
     _object_store_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    # Constructor-time ``object_store_root`` value, captured BEFORE
+    # ``__post_init__`` normalizes it (issue #1616 / design D1). ``__post_init__``
+    # collapses an explicitly blank value into ``None`` and anchors a relative
+    # value beneath the workspace root; retention must see the raw value so a
+    # blank/relative ``OBJECT_STORE_ROOT`` is rejected as a deletion surface
+    # instead of resolving to a derived one. Private by contract: every
+    # non-retention scheduler path keeps consuming the normalized
+    # ``object_store_root`` field.
+    _object_store_root_raw: Path | str | None = field(init=False, repr=False, compare=False)
     _published_artifact_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
     _runtime_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
     _temp_root_raw_preflight_path: Path | None = field(init=False, repr=False, compare=False)
@@ -261,6 +270,10 @@ class ProductionSchedulerConfig:
     _evidence_root_raw_preflight_path: Path = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Capture the constructor-time raw value BEFORE normalization below
+        # (issue #1616 / design D1). This runs first because every later branch
+        # reads/writes the normalized form; the raw value feeds retention only.
+        object.__setattr__(self, "_object_store_root_raw", self.object_store_root)
         db_free_required = bool(self.scheduler_db_free_required)
         object.__setattr__(self, "scheduler_db_free_required", db_free_required)
         _scheduler._reject_blank_config_path(self.workspace_root, "workspace_root")
