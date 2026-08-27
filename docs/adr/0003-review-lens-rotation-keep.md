@@ -2230,3 +2230,27 @@ for a cut would therefore confuse treatment outcome with defect prevalence.
 **Keep rotation** unchanged. The aggregate still gives no basis for an autonomous
 cut, and any reversal continues to require the previously recorded attribution
 schema/round-role fixes plus maintainer review.
+
+## Revisit 2026-08-27 (post #1709/#1713/#1715 / PR #1869) — keep; pinned fix-verification round, no rotation datum
+
+`loop_log_audit.py` now reports **135** multi-round merged PRs and later-round
+catches **core=85 / rotated=296**, moving from `134 / 85 / 296` after PR #1859.
+PR #1869 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used six lenses and produced two independently verified P1 findings.
+Round 2 deliberately re-ran the four relevant Round 1 lenses — correctness,
+test-evidence, spec-compliance, and integration — against the test/spec-only fix
+commit. It closed both findings and returned no new candidates. Although the
+round-2 manifest called integration a rotated free slot, integration was already
+present in Round 1; no genuinely new subject-matter lens was applied.
+
+This is another pinned fix-verification sample, not a rotation experiment. The
+clean round proves closure for this PR, but the unchanged counters cannot say
+whether a new lens would have added recall. It also reinforces the existing
+instrumentation requirement: record whether rotation was actually applied rather
+than inferring it from round count or lens-name variants such as
+`integration-fix-delta`.
+
+**Keep rotation** unchanged under the recorded autonomous default. This sample
+adds no evidence for either keep or cut; any reversal still requires the existing
+attribution schema/round-role repair plus maintainer review.
