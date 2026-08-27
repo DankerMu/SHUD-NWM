@@ -14696,6 +14696,66 @@ def test_exact_cycle_missing_forcing_repair_plan_previews_forcing_array_without_
     assert state_evidence["nfs_raw_manifest"]["object_store_root"] == "[local-path]"
 
 
+def test_missing_forcing_repair_rechecks_blocker_created_by_warm_manifest_upgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    candidate = _scheduler_candidate_fixture()
+    raw_root = tmp_path / "nfs-raw-post-upgrade"
+    readiness = _write_missing_forcing_repair_raw_manifest(raw_root, cycle_time=cycle_time)
+    state = {
+        **_production_identity_fixture(),
+        "candidate_id": candidate.candidate_id,
+        "nfs_raw_manifest": readiness,
+    }
+    monkeypatch.setattr(
+        scheduler_module,
+        "_candidate_state_decision",
+        lambda *_args: CandidateStateDecision(
+            "retry",
+            "resume_after_completed_stage",
+            {
+                "decision": "retry_after_completed_stage",
+                "reason": "resume_after_completed_stage",
+                "restart_stage": "forcing",
+                "run_manifest_initial_state": {
+                    "state_id": None,
+                    "quality": "cold_start_no_state",
+                },
+            },
+        ),
+    )
+    scheduler = ProductionScheduler(
+        _missing_forcing_repair_config(
+            tmp_path,
+            monkeypatch,
+            cycle_time=cycle_time,
+            dry_run=True,
+            raw_root=raw_root,
+        ),
+        registry=FakeRegistry(
+            [_model("model_a", "basin_a", resource_profile=_missing_forcing_repair_direct_grid_profile())]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: pytest.fail("plan mode must not submit"),
+    )
+    scheduler._strict_warm_start_for_candidate = (  # type: ignore[method-assign]
+        lambda *_args: _complete_missing_forcing_repair_warm_state()
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "planned"
+    assert result.evidence["blocked_candidates"] == []
+    state_evidence = result.evidence["candidates"][0]["state_evidence"]
+    assert state_evidence["missing_forcing_repair"]["status"] == "authorized"
+    assert state_evidence["restart_stage"] == "forcing"
+    assert state_evidence["artifact_guard"]["stable_classifier"] == "FORCING_VERSION_ROW_ABSENT"
+
+
 def test_file_journal_missing_forcing_repair_uses_trusted_raw_root_and_public_redaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
