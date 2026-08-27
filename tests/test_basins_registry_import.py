@@ -2078,8 +2078,12 @@ def _make_valid_model(
     river_count = sp_segment_count if sp_river_count is None else sp_river_count
     sp_riv_rows = "".join(f"{index} 0 0 0.01 100 0\n" for index in range(1, river_count + 1))
     (input_dir / f"{input_name}.sp.riv").write_text(f"{river_count} 6\n{sp_riv_rows}", encoding="utf-8")
+    sp_rivseg_rows = "".join(
+        f"{index} {((index - 1) % river_count) + 1} {index} 100\n"
+        for index in range(1, sp_segment_count + 1)
+    )
     (input_dir / f"{input_name}.sp.rivseg").write_text(
-        f"{sp_segment_count} 4\n1 1 1 100\n",
+        f"{sp_segment_count} 4\nIndex iRiv iEle Length\n{sp_rivseg_rows}",
         encoding="utf-8",
     )
     gis_dir = input_dir / "gis"
