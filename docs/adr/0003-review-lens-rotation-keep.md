@@ -2254,3 +2254,23 @@ than inferring it from round count or lens-name variants such as
 **Keep rotation** unchanged under the recorded autonomous default. This sample
 adds no evidence for either keep or cut; any reversal still requires the existing
 attribution schema/round-role repair plus maintainer review.
+
+## Revisit 2026-08-27 (post #1562/#1199 / PR #1868) — keep; pinned fix-verification adds no rotation datum
+
+`loop_log_audit.py` now reports **136** multi-round merged PRs and later-round
+catches **core=85 / rotated=296**, moving from `135 / 85 / 296` after PR #1869.
+PR #1868 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used six lenses and produced four independently verified findings. Round
+2 deliberately re-ran four Round 1 lenses — correctness, test-evidence,
+security-performance, and invariant-state — against the exact-one projection and
+receipt-coverage fixes. All prior findings closed and no new candidate survived;
+the frozen-head Phase 7 Gap Sweep was also clean.
+
+This is pinned fix-verification, not a rotation experiment: the Round 2 lens set
+is a strict subset of Round 1 and no new subject-matter lens was introduced. Its
+zero later-round catches prove closure for this PR but cannot distinguish whether
+free-slot rotation would have added recall. **Keep rotation** unchanged under the
+recorded autonomous default. This sample adds no evidence for either keep or cut;
+any reversal still requires the existing attribution schema/round-role repair
+plus maintainer review.
