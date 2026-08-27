@@ -10,6 +10,15 @@ Two modes, selected by ``--transfer-mode``:
     written to the DB-free scheduler state index.  Cold candidates are verified
     to have no target state at the cutover time; no state is fabricated.
 
+    Each basin/source is one fail-closed unit.  Under ``--apply`` an abort on a
+    later unit (after an earlier warm clone went live in the state index) writes
+    an aborted receipt declaring every completed decision plus the failed
+    basin/source and reason BEFORE the original exception propagates, so the
+    already-live rows keep their only declared evidence.  A failure before any
+    live clone, and every dry-run failure, writes no abort receipt.  ``--receipt``
+    stays optional here (legacy contract); a clean invocation with a requested
+    receipt persists it as before.
+
 ``recalibration`` (change ``recalibration-state-carryover``)
     An ``M1 -> M1'`` package update whose only hydrologic-core change is
     calibration parameters.  Source AND target are both direct-grid variants,
@@ -320,6 +329,47 @@ def _write_receipt(path_value: str, receipt: Mapping[str, Any]) -> None:
         handle.write("\n")
 
 
+def _write_receipt_failure_aware(
+    path_value: str,
+    receipt: Mapping[str, Any],
+    *,
+    primary_error: BaseException | None,
+) -> None:
+    """Persist ``receipt`` without ever masking a primary clone failure.
+
+    One receipt-write discipline for both transfer modes:
+
+    * No primary failure: any receipt error propagates unchanged -- a clean
+      invocation whose receipt cannot be created is a failure, never silently
+      swallowed.
+    * Primary failure present: the receipt is still attempted (live clone rows
+      need declaring); an ``OSError`` from persistence is attached to the
+      primary exception with an exception note (Python 3.11+ ``add_note``), so
+      the operator sees BOTH facts -- the clone/mirror failure that stopped the
+      run AND that its only evidence could not be written -- while the exact
+      original exception object/type/message is re-raised by the caller. The
+      original abort reason is never replaced, and an existing ``O_EXCL`` path
+      is never overwritten.
+    """
+
+    try:
+        _write_receipt(path_value, receipt)
+    except OSError as error:
+        if primary_error is None:
+            raise
+        primary_error.add_note(
+            "receipt persistence failed; the clone's declared evidence was not "
+            f"written: {type(error).__name__}: {error}"
+        )
+    except Exception as error:  # noqa: BLE001 - attached, never replaces primary
+        if primary_error is None:
+            raise
+        primary_error.add_note(
+            "receipt persistence failed; the clone's declared evidence was not "
+            f"written: {type(error).__name__}: {error}"
+        )
+
+
 def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
     """Execute the ``M1 -> M1'`` recalibration carry-over for every declared pair.
 
@@ -563,20 +613,27 @@ def run_recalibration(args: argparse.Namespace) -> dict[str, Any]:
         "spin_up_distortion_announcement": RECALIBRATION_SPIN_UP_DISTORTION_ANNOUNCEMENT,
         "pairs": pair_records,
     }
+    # The primary error is the loop exception when there is one; otherwise the
+    # mirror divergence -- ONE CutoverCloneError object, so a receipt-write
+    # failure is annotated onto the exact instance that is then raised and the
+    # operator sees both facts on the same exception.
+    primary_error: BaseException | None = aborted_error
+    if primary_error is None and mirror_failure is not None:
+        primary_error = CutoverCloneError(
+            "mirror state-index write failed after the canonical write succeeded; "
+            f"repair the mirror before t*: {mirror_failure}"
+        )
     # On an aborted run the receipt is written ONLY when a pair was actually
     # applied: those rows are live in both indexes and need declaring. A
     # first/only-pair refusal wrote nothing anywhere, so it keeps producing no
     # receipt -- there is nothing to declare and an O_EXCL receipt file would
     # only stand in the way of the corrected re-run.
     if args.receipt and (aborted_error is None or cloned_pair_count > 0):
-        _write_receipt(args.receipt, receipt)
-    if aborted_error is not None:
-        raise aborted_error
-    if mirror_failure is not None:
-        raise CutoverCloneError(
-            "mirror state-index write failed after the canonical write succeeded; "
-            f"repair the mirror before t*: {mirror_failure}"
+        _write_receipt_failure_aware(
+            args.receipt, receipt, primary_error=primary_error
         )
+    if primary_error is not None:
+        raise primary_error
     return receipt
 
 
@@ -612,105 +669,154 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         create_missing=False,
     )
     decisions: list[dict[str, Any]] = []
+    aborted_error: Exception | None = None
+    failed_unit: dict[str, Any] | None = None
 
     for baseline_id in sorted(registry_basins):
         baseline = baseline_models.get(baseline_id)
         if baseline is None:
-            raise CutoverCloneError(f"baseline registry entry missing: {baseline_id}")
+            # Same fail-closed unit discipline as a basin/source failure below:
+            # under ``--apply`` earlier basins' clones are ALREADY live in the
+            # file index and this receipt is their only declared evidence, so a
+            # mid-loop abort must not unwind past the aborted receipt. No source
+            # unit began for this basin, so the failed location names the basin
+            # with ``source_id=None`` -- a stable honest location, never a
+            # fabricated source. Stop all further work and re-raise the exact
+            # original error after the failure-aware receipt write.
+            aborted_error = CutoverCloneError(f"baseline registry entry missing: {baseline_id}")
+            failed_unit = {
+                "basin_model_id": baseline_id,
+                "source_id": None,
+                "target_model_id": None,
+                "failure_kind": "basin_source_not_completed",
+                "error": f"{type(aborted_error).__name__}: {aborted_error}",
+            }
+            break
         for source_id in ("gfs", "IFS"):
-            variant = variants[(baseline_id, source_id)]
-            target_id = str(variant["model_id"])
-            existing_file = file_repo.get_state_snapshot_by_model_time(
-                model_id=target_id,
-                source_id=source_id,
-                valid_time=cutover_time,
-            )
-            if baseline_id in cold_basins:
-                if existing_file is not None:
-                    raise CutoverCloneError(
-                        f"cold basin already has target state: {baseline_id}/{source_id}/{target_id}"
+            try:
+                variant = variants[(baseline_id, source_id)]
+                target_id = str(variant["model_id"])
+                existing_file = file_repo.get_state_snapshot_by_model_time(
+                    model_id=target_id,
+                    source_id=source_id,
+                    valid_time=cutover_time,
+                )
+                if baseline_id in cold_basins:
+                    if existing_file is not None:
+                        raise CutoverCloneError(
+                            f"cold basin already has target state: {baseline_id}/{source_id}/{target_id}"
+                        )
+                    decisions.append(
+                        {
+                            "basin_model_id": baseline_id,
+                            "source_id": source_id,
+                            "target_model_id": target_id,
+                            "decision": "cold_new_basin",
+                            "state_id": None,
+                        }
                     )
+                    continue
+
+                source_state = file_repo.get_state_snapshot_by_model_time(
+                    model_id=baseline_id,
+                    source_id=source_id,
+                    valid_time=cutover_time,
+                )
+                if source_state is None or not source_state.usable_flag or source_state.lead_hours != 12:
+                    raise CutoverCloneError(f"qualified source state missing: {baseline_id}/{source_id}")
+                baseline_root = _package_root_from_uri(
+                    store,
+                    source_state.model_package_version,
+                    identity=f"{baseline_id}/{source_id}/{source_state.state_id}",
+                )
+                variant_root = _package_root(store, variant)
+                baseline_sp_att = _required_single(baseline_root, "*.sp.att")
+                variant_sp_att = _required_single(variant_root, "*.sp.att")
+                categories = _category_files(variant_root)
+                state_schema_bytes = _required_single(baseline_root, "*.cfg.ic").read_bytes()
+                solver_config_bytes = _required_single(baseline_root, "*.cfg.para").read_bytes()
+                fingerprint = verify_hydrologic_core_fingerprint_equal(
+                    baseline_root,
+                    variant_root,
+                    baseline_sp_att_path=baseline_sp_att,
+                    variant_sp_att_path=variant_sp_att,
+                    category_files=categories,
+                    baseline_state_schema_bytes=state_schema_bytes,
+                    variant_state_schema_bytes=state_schema_bytes,
+                    baseline_solver_config_bytes=solver_config_bytes,
+                    variant_solver_config_bytes=solver_config_bytes,
+                )
+                if args.dry_run:
+                    state_id = None
+                else:
+                    manifest = _read_json(variant_root / "manifest.json")
+                    recorder = _RefusalRecorder()
+                    result = fingerprint_gated_state_clone(
+                        m0_model_id=baseline_id,
+                        m1_model_id=target_id,
+                        m1_model_package_version=str(variant["model_package_uri"]),
+                        m1_model_package_checksum=str(variant["package_checksum"]),
+                        source_id=source_id,
+                        cutover_valid_time=cutover_time,
+                        m0_package_root=baseline_root,
+                        m1_package_root=variant_root,
+                        m0_sp_att_path=baseline_sp_att,
+                        m1_sp_att_path=variant_sp_att,
+                        m1_category_files=categories,
+                        m1_recorded_hydrologic_core_fingerprint=fingerprint.hash,
+                        state_schema_bytes=state_schema_bytes,
+                        solver_config_bytes=solver_config_bytes,
+                        m1_forcing_mapping_manifest=dict(manifest.get("direct_grid_forcing") or {}),
+                        repository=file_repo,
+                        audit_recorder=recorder,
+                    )
+                    if result.refused or result.cloned_row is None:
+                        raise CutoverCloneError(
+                            f"state clone refused: {baseline_id}/{source_id}: "
+                            f"{result.refusal_scope}; audit={recorder.records}"
+                        )
+                    state_id = result.cloned_row.state_id
                 decisions.append(
                     {
                         "basin_model_id": baseline_id,
                         "source_id": source_id,
                         "target_model_id": target_id,
-                        "decision": "cold_new_basin",
-                        "state_id": None,
+                        "decision": "warm_clone",
+                        "state_id": state_id,
+                        "hydrologic_core_fingerprint": fingerprint.hash,
                     }
                 )
-                continue
-
-            source_state = file_repo.get_state_snapshot_by_model_time(
-                model_id=baseline_id,
-                source_id=source_id,
-                valid_time=cutover_time,
-            )
-            if source_state is None or not source_state.usable_flag or source_state.lead_hours != 12:
-                raise CutoverCloneError(f"qualified source state missing: {baseline_id}/{source_id}")
-            baseline_root = _package_root_from_uri(
-                store,
-                source_state.model_package_version,
-                identity=f"{baseline_id}/{source_id}/{source_state.state_id}",
-            )
-            variant_root = _package_root(store, variant)
-            baseline_sp_att = _required_single(baseline_root, "*.sp.att")
-            variant_sp_att = _required_single(variant_root, "*.sp.att")
-            categories = _category_files(variant_root)
-            state_schema_bytes = _required_single(baseline_root, "*.cfg.ic").read_bytes()
-            solver_config_bytes = _required_single(baseline_root, "*.cfg.para").read_bytes()
-            fingerprint = verify_hydrologic_core_fingerprint_equal(
-                baseline_root,
-                variant_root,
-                baseline_sp_att_path=baseline_sp_att,
-                variant_sp_att_path=variant_sp_att,
-                category_files=categories,
-                baseline_state_schema_bytes=state_schema_bytes,
-                variant_state_schema_bytes=state_schema_bytes,
-                baseline_solver_config_bytes=solver_config_bytes,
-                variant_solver_config_bytes=solver_config_bytes,
-            )
-            if args.dry_run:
-                state_id = None
-            else:
-                manifest = _read_json(variant_root / "manifest.json")
-                recorder = _RefusalRecorder()
-                result = fingerprint_gated_state_clone(
-                    m0_model_id=baseline_id,
-                    m1_model_id=target_id,
-                    m1_model_package_version=str(variant["model_package_uri"]),
-                    m1_model_package_checksum=str(variant["package_checksum"]),
-                    source_id=source_id,
-                    cutover_valid_time=cutover_time,
-                    m0_package_root=baseline_root,
-                    m1_package_root=variant_root,
-                    m0_sp_att_path=baseline_sp_att,
-                    m1_sp_att_path=variant_sp_att,
-                    m1_category_files=categories,
-                    m1_recorded_hydrologic_core_fingerprint=fingerprint.hash,
-                    state_schema_bytes=state_schema_bytes,
-                    solver_config_bytes=solver_config_bytes,
-                    m1_forcing_mapping_manifest=dict(manifest.get("direct_grid_forcing") or {}),
-                    repository=file_repo,
-                    audit_recorder=recorder,
-                )
-                if result.refused or result.cloned_row is None:
-                    raise CutoverCloneError(
-                        f"state clone refused: {baseline_id}/{source_id}: "
-                        f"{result.refusal_scope}; audit={recorder.records}"
-                    )
-                state_id = result.cloned_row.state_id
-            decisions.append(
-                {
+            except Exception as error:
+                # One fail-closed unit of work per basin/source. Any exception
+                # after a completed decision must NOT unwind past the receipt:
+                # under ``--apply`` earlier warm clones in THIS invocation are
+                # already live in the file index, and this receipt is their only
+                # declared evidence. Record the failing unit, stop all further
+                # work (never widen partial state), and let the failure-aware
+                # receipt write below run BEFORE re-raising the exact original
+                # exception so the exit code stays non-zero. A unit failure
+                # before ANY live clone exists -- a preflight miss, a first-item
+                # refusal, or any dry-run failure -- creates no abort receipt.
+                # ``Exception`` (not ``BaseException``) is deliberate: the
+                # operational failures this path can hit all inherit
+                # ``Exception`` (matching ``run_recalibration``), while
+                # KeyboardInterrupt / SystemExit / GeneratorExit are
+                # process-control signals that must keep unwinding rather than
+                # being converted into receipt bookkeeping.
+                aborted_error = error
+                failed_unit = {
                     "basin_model_id": baseline_id,
                     "source_id": source_id,
-                    "target_model_id": target_id,
-                    "decision": "warm_clone",
-                    "state_id": state_id,
-                    "hydrologic_core_fingerprint": fingerprint.hash,
+                    "failure_kind": "basin_source_not_completed",
+                    "error": f"{type(error).__name__}: {error}",
                 }
-            )
+                break
+        if aborted_error is not None:
+            break
 
+    completed_live = sum(
+        item["decision"] == "warm_clone" and item["state_id"] is not None for item in decisions
+    )
     receipt = {
         "schema_version": "nhms.direct_grid_cutover_state_clone.v1",
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -722,6 +828,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "cold_candidate_count": sum(item["decision"] == "cold_new_basin" for item in decisions),
         "decisions": decisions,
     }
+    if aborted_error is not None:
+        # An abort receipt is only due when at least one clone row was actually
+        # persisted in this invocation: those rows are live and need declaring.
+        # A first-item/no-live-row failure and every dry-run failure wrote
+        # nothing, so they keep producing no receipt and leave the O_EXCL path
+        # free for the corrected re-run. Deciding from the persisted state_id /
+        # apply state -- not merely ``len(decisions)`` -- is what keeps a
+        # completed dry-run decision from consuming an abort receipt.
+        if args.apply and completed_live > 0:
+            receipt["invocation_outcome"] = "aborted"
+            receipt["failed_basin_source"] = failed_unit
+            if args.receipt:
+                _write_receipt_failure_aware(args.receipt, receipt, primary_error=aborted_error)
+        raise aborted_error
     if args.receipt:
         _write_receipt(args.receipt, receipt)
     return receipt
@@ -742,6 +862,7 @@ _REQUIRED_FLAGS_BY_MODE: dict[str, tuple[tuple[str, str], ...]] = {
         ("variant_registry", "--variant-registry"),
         ("pairs", "--pairs"),
         ("mirror_state_index", "--mirror-state-index"),
+        ("receipt", "--receipt"),
     ),
 }
 

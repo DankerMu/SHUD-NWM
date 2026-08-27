@@ -1857,6 +1857,10 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
   `huai-2026081512-dry-run.json`）：`O_EXCL` 下重复路径会让一次本来干净的调用直接失败
   （post-loop 写 receipt 时 `FileExistsError`），而实际上什么问题都没有。逐流域跑、
   同一流域 dry-run 与 `--apply` 各一次，路径都要各自唯一。
+  **中止路径上的 receipt 写失败不会顶掉原始错误**：已写入克隆行后中途失败、且 receipt
+  路径又已存在时，原始克隆/镜像异常照常传播（进程仍非零退出），`FileExistsError` 作为
+  exception note 附加在原始异常上（Python 3.11+ `add_note`），operator 同时看到两个事实
+  ——克隆为什么停 + 它的声明凭证没写成——而旧 receipt 文件保持原样、绝不被覆盖。
 - **先看 `invocation_outcome`**：`complete` = 每一对都跑到了记录结果；`aborted` = 中途
   停了，`failed_pair` 指名是哪一对、`failure_kind` 是 `pair_not_completed`（该对被拒
   或报错）还是 `mirror_write_failed`，`error` 带原文。`declared_pair_count` vs
