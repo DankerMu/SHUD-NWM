@@ -12270,11 +12270,14 @@ def _job_is_breaker_terminal_success(job: Mapping[str, Any], *, model_id: str) -
     An aggregate terminal-success master always qualifies (legacy shapes carry
     no projections at all).  A ``partially_failed`` cohort master counts for
     the target ``model_id`` only when its bounded ``candidate_projections``
-    (at most 256 entries) contains that exact model with
-    ``array_task_outcome == "succeeded"``.  A failed, missing, malformed,
-    truncated, or duplicate projection never counts: the breaker fails toward
-    liveness, so a target that is not visible after the 256-entry bound
-    undercounts to zero and the quarantine retry stays engaged.
+    (at most 256 entries) contains EXACTLY ONE projection naming that model
+    and that projection carries ``array_task_outcome == "succeeded"``.  A
+    failed, missing, malformed, truncated, or duplicate target projection
+    never counts — a succeeded-then-failed or succeeded-then-succeeded
+    duplicate is an ambiguous projection and undercounts to zero like any
+    other non-proof: the breaker fails toward liveness, so a target that is
+    not visible after the 256-entry bound undercounts to zero and the
+    quarantine retry stays engaged.
     """
 
     if _job_is_terminal_success(job):
@@ -12284,13 +12287,19 @@ def _job_is_breaker_terminal_success(job: Mapping[str, Any], *, model_id: str) -
     projections = job.get("candidate_projections")
     if not isinstance(projections, Sequence) or isinstance(projections, str | bytes | bytearray):
         return False
-    for projection in projections[:MAX_FORECAST_COHORT_MEMBERS]:
+    bounded_projections = projections[:MAX_FORECAST_COHORT_MEMBERS]
+    target_outcomes: list[str] = []
+    for projection in bounded_projections:
         if not isinstance(projection, Mapping):
             continue
         if str(projection.get("model_id") or "") != model_id:
             continue
-        return str(projection.get("array_task_outcome") or "") == "succeeded"
-    return False
+        target_outcomes.append(str(projection.get("array_task_outcome") or ""))
+    if len(target_outcomes) != 1:
+        # Zero targets (no projection names this model) and multiple targets
+        # (same/conflicting outcomes/task ids) are both ambiguous: never count.
+        return False
+    return target_outcomes[0] == "succeeded"
 
 
 _INIT_STATE_ALIAS_KEYS = ("init_state_id", "initial_state_id", "state_id")

@@ -17,6 +17,7 @@ at the bottom of this file pin that they stay faithful.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -225,7 +226,8 @@ def test_forced_resubmit_archived_marker_shape_stays_non_qualifying() -> None:
 
     ``replay_manual_retry_admission`` existed only on the never-merged archived
     branch commit ``2094d480``; current master has no such eligibility contract.
-    A marker-shaped mapping with a NON-whitelisted decision must stay
+    The archived shape nests the marker under ``state_evidence``; a marker
+    with a NON-whitelisted decision (``manual_retry``) must stay
     non-qualifying — the marker never creates forced-resubmit eligibility.
 
     This is a PRESERVE/CONTROL test: it documents and pins the absent contract
@@ -237,31 +239,24 @@ def test_forced_resubmit_archived_marker_shape_stays_non_qualifying() -> None:
         _terminal_stage_needs_forced_resubmit,
     )
 
-    # Marker-shaped mapping (``replay_manual_retry_admission`` key present with
-    # ``status=admitted``) on a basin whose decision is NOT in the current
-    # master whitelist: the marker is ignored, the basin stays non-qualifying,
-    # and the all-basin conjunction stays False.
-    context = _forced_resubmit_context(
-        [
-            _forced_resubmit_basin("model_a"),
-            _forced_resubmit_basin(
-                "model_b",
-                decision="manual_retry",
-                replay_manual_retry_admission={"status": "admitted"},
-            ),
-        ]
-    )
+    def marker_basin() -> dict[str, Any]:
+        basin = _forced_resubmit_basin("model_b", decision="manual_retry")
+        basin["state_evidence"]["replay_manual_retry_admission"] = {"status": "admitted"}
+        return basin
+
+    # The control must use the HISTORICAL nested shape: the marker lives under
+    # ``state_evidence`` (as the archived branch emitted it), never at the
+    # basin top level.  Pin the nesting so future helper drift cannot silently
+    # weaken the control into a shape master never saw.
+    nested = marker_basin()
+    assert isinstance(nested["state_evidence"], dict)
+    assert nested["state_evidence"]["replay_manual_retry_admission"] == {"status": "admitted"}
+    assert "replay_manual_retry_admission" not in nested
+
+    context = _forced_resubmit_context([_forced_resubmit_basin("model_a"), marker_basin()])
     assert _terminal_stage_needs_forced_resubmit(context, _FORCED_RESUBMIT_TERMINAL_JOB) is False
     # The same marker shape must not qualify on its own either (solo cohort).
-    solo = _forced_resubmit_context(
-        [
-            _forced_resubmit_basin(
-                "model_b",
-                decision="manual_retry",
-                replay_manual_retry_admission={"status": "admitted"},
-            )
-        ]
-    )
+    solo = _forced_resubmit_context([marker_basin()])
     assert _terminal_stage_needs_forced_resubmit(solo, _FORCED_RESUBMIT_TERMINAL_JOB) is False
 
 
@@ -552,3 +547,190 @@ def test_terminal_job_statuses_keeps_pre_change_mutable_set_semantics() -> None:
     assert forecast_execution.TERMINAL_JOB_STATUSES is canonical
     # Pre-change semantics: the canonical object stays mutable.
     assert not isinstance(canonical, frozenset)
+
+
+def test_forced_resubmit_restart_stage_unavailable_cause_is_exact() -> None:
+    """#1199: a whitelisted decision with no restart source reports the exact
+    ``restart_stage_unavailable`` cause.
+
+    The basin's decision IS in the whitelist but ``restart_stage``,
+    ``restart_from_stage``, and the context fallback are all absent, so the
+    canonical restart stage is ``None`` and the qualification clause that
+    fails is the restart-stage availability check — not the decision check.
+    The single record carries the exact whitelist decision token and a
+    ``None`` canonical restart stage alongside the cause.
+    """
+    from services.orchestrator.chain_forced_resubmit import (
+        FORCED_RESUBMIT_VETO_CAUSE_RESTART_STAGE_UNAVAILABLE,
+        _terminal_stage_needs_forced_resubmit,
+    )
+
+    context = _forced_resubmit_context(
+        [
+            _forced_resubmit_basin("model_a"),
+            _forced_resubmit_basin(
+                "model_b",
+                decision="retry_terminal_run_manifest_missing",
+                restart_stage=None,
+                restart_from_stage=None,
+            ),
+        ],
+        restart_stage=None,
+    )
+    assert _terminal_stage_needs_forced_resubmit(context, _FORCED_RESUBMIT_TERMINAL_JOB) is False
+
+    record = context.forced_resubmit_veto
+    assert record is not None
+    assert record["veto_cause"] == FORCED_RESUBMIT_VETO_CAUSE_RESTART_STAGE_UNAVAILABLE
+    assert record["veto_cause"] == "restart_stage_unavailable"
+    # The exact whitelist token is reported verbatim as the veto decision.
+    assert record["veto_decision"] == "retry_terminal_run_manifest_missing"
+    assert record["canonical_restart_stage"] is None
+    # Veto candidate/model binding is exact (stable active-basin order).
+    assert record["first_veto_model_id"] == "model_b"
+    assert record["first_veto_basin_id"] == "basin_model_b"
+    assert record["first_veto_candidate_id"] == (
+        "gfs:2026-06-28T00:00:00Z:model_b:forecast_gfs_deterministic"
+    )
+    assert record["cohort_size"] == 2
+    assert record["qualifying_request_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #1199 Round 1: the REAL public cycle path — gate-produced veto record reaches
+# the returned ``PipelineResult.candidate_outcomes`` over a mixed cohort whose
+# terminal forecast job is resumed (no replacement Slurm submission).
+# ---------------------------------------------------------------------------
+
+
+def _veto_cycle_basin(
+    model_id: str,
+    *,
+    decision: str,
+    restart_stage: str | None = "forecast",
+) -> dict[str, Any]:
+    return {
+        "model_id": model_id,
+        "basin_id": f"basin_{model_id}",
+        "basin_version_id": "bv",
+        "river_network_version_id": "rn",
+        "model_package_uri": f"s3://nhms/models/{model_id}/v1/package/",
+        "run_id": f"fcst_gfs_2026062800_{model_id}",
+        "candidate_id": f"gfs:2026-06-28T00:00:00Z:{model_id}:forecast_gfs_deterministic",
+        "state_evidence": {
+            "decision": decision,
+            "restart_stage": restart_stage,
+            "restart_from_stage": restart_stage,
+        },
+    }
+
+
+def test_real_cycle_resume_mixed_cohort_produces_veto_receipt_in_candidate_outcomes(
+    tmp_path: Path,
+) -> None:
+    """#1199 Round 1: the REAL public ``ForecastOrchestrator.orchestrate_cycle``
+    resume path carries the gate-produced veto record into the returned
+    ``PipelineResult.candidate_outcomes``.
+
+    This is the missing end-to-end composition proof: a terminal succeeded
+    forecast stage job exists; the cohort mixes one whitelisted forced-resubmit
+    basin with one non-whitelisted veto basin.  ``_run_cycle_chain`` drives the
+    real ``_terminal_stage_needs_manual_retry`` -> real
+    ``_terminal_stage_needs_forced_resubmit`` gate: the mixed verdict is False,
+    so the terminal job is RESUMED (no replacement submission for the forecast
+    stage — the fake client records zero extra forecast submissions), and the
+    final ``PipelineResult.candidate_outcomes`` attaches the fixed-shape veto
+    receipt exactly to the vetoing candidate, omitting it from the qualifying
+    sibling.
+    """
+    # ``tests.test_orchestration_chain`` imports the ``chain`` facade at module
+    # top, so the cycle module is already importable when this body runs.
+    from services.orchestrator.chain_forced_resubmit import (
+        FORCED_RESUBMIT_VETO_REASON,
+        FORCED_RESUBMIT_VETO_SCHEMA,
+    )
+    from tests.test_orchestration_chain import (
+        FakeCycleRepository,
+        FakeCycleSlurmClient,
+        _dt,
+        _fmt,
+        _orchestrator,
+    )
+
+    cycle_id = "gfs_2026062800"
+    run_id = "cycle_gfs_2026062800"
+    forecast_job_id = "job_cycle_gfs_2026062800_forecast"
+
+    repository = FakeCycleRepository()
+    repository.jobs[forecast_job_id] = {
+        "job_id": forecast_job_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "job_type": "run_shud_forecast_array",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "succeeded",
+        "stage": "forecast",
+        "submitted_at": _fmt(_dt("2026-06-28T00:00:00Z")),
+        "started_at": None,
+        "finished_at": None,
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+
+    client = FakeCycleSlurmClient(array_results_by_stage={"forecast": ["succeeded", "succeeded"]})
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forecast",
+        "status": "succeeded",
+        "submitted_at": _fmt(_dt("2026-06-28T00:00:00Z")),
+        "payload": {"tasks": [{}, {}]},
+    }
+
+    basins = [
+        _veto_cycle_basin("model_0", decision="retry_terminal_run_manifest_missing"),
+        _veto_cycle_basin("model_1", decision="skip_terminal"),
+    ]
+    for basin in basins:
+        repository.hydro_runs[str(basin["run_id"])] = {
+            "run_id": str(basin["run_id"]),
+            "status": "submitted",
+        }
+
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    result = orchestrator.orchestrate_cycle("gfs", "2026062800", basins)
+
+    # Pre-change decision semantics: the terminal job is resumed, no replacement
+    # submission for this stage.  Only the downstream stages (parse/state_save_qc/
+    # publish) submit.
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == [
+        "parse",
+        "state_save_qc",
+        "publish",
+    ]
+
+    # The returned candidate outcomes expose the real gate receipt on exactly
+    # the vetoing candidate; the qualifying sibling omits it.
+    by_model = {outcome["model_id"]: outcome for outcome in result.candidate_outcomes}
+    assert set(by_model) == {"model_0", "model_1"}
+    veto = by_model["model_1"].get("terminal_stage_forced_resubmit_veto")
+    assert veto is not None
+    assert veto["schema"] == FORCED_RESUBMIT_VETO_SCHEMA
+    assert veto["reason"] == FORCED_RESUBMIT_VETO_REASON
+    assert veto["cycle_id"] == cycle_id
+    assert veto["pipeline_run_id"] == run_id
+    assert veto["terminal_job_id"] == forecast_job_id
+    assert veto["canonical_job_stage"] == "forecast"
+    assert veto["cohort_size"] == 2
+    assert veto["qualifying_request_count"] == 1
+    assert veto["first_veto_model_id"] == "model_1"
+    assert veto["first_veto_basin_id"] == "basin_model_1"
+    assert veto["veto_decision"] == "skip_terminal"
+    assert veto["canonical_restart_stage"] == "forecast"
+    assert veto["veto_cause"] == "decision_not_in_whitelist"
+    assert "terminal_stage_forced_resubmit_veto" not in by_model["model_0"]

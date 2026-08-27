@@ -9114,6 +9114,101 @@ def test_init_state_occurrences_partial_cohort_target_failed_counts_zero(tmp_pat
     assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
 
 
+def test_init_state_occurrences_partial_duplicate_target_succeeded_then_failed_counts_zero(
+    tmp_path: Path,
+) -> None:
+    """#1562 Round 1: a duplicate target projection never arms the breaker.
+
+    A marker-free/direct-written latest view can carry two task projections
+    naming the same target model.  The succeeded-then-failed order used to
+    count 1 on the first matching projection; an ambiguous duplicate must
+    undercount to zero like any other non-proof (fail toward liveness).
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[
+                    _projection("model_a", "succeeded"),
+                    _projection("model_b", "failed"),
+                    _projection("model_a", "failed"),
+                ],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
+def test_init_state_occurrences_partial_duplicate_target_succeeded_then_succeeded_counts_zero(
+    tmp_path: Path,
+) -> None:
+    """#1562 Round 1: two succeeded projections for one target still count 0.
+
+    Even when both duplicates say ``succeeded`` the projection is ambiguous —
+    the direct-written view cannot be trusted to resolve which one is this
+    model's true task, so the breaker stays disengaged.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[
+                    _projection("model_a", "succeeded"),
+                    _projection("model_b", "failed"),
+                    _projection("model_a", "succeeded"),
+                ],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
+def test_init_state_occurrences_partial_duplicate_target_failed_then_succeeded_counts_zero(
+    tmp_path: Path,
+) -> None:
+    """#1562 Round 1: order reversal of a duplicate target also counts 0.
+
+    The first bounded projection matching the target no longer decides: a
+    failed-then-succeeded duplicate used to count 0 only because the first
+    match failed; under the exactly-one rule it stays 0, and the reversed
+    succeeded-first order now joins it instead of counting 1.
+    """
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    repository = _breaker_journal(
+        tmp_path,
+        cycle_time,
+        [
+            _partial_cohort_master_job(
+                cycle_time,
+                projections=[
+                    _projection("model_a", "failed"),
+                    _projection("model_b", "failed"),
+                    _projection("model_a", "succeeded"),
+                ],
+                quarantine_rerun_model_ids=["model_a"],
+            )
+        ],
+        model_ids=("model_a", "model_b"),
+    )
+
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_a") == 0
+    assert _breaker_occurrences(repository, cycle_time, model_id="model_b") == 0
+
+
 @pytest.mark.parametrize(
     "leg",
     [
