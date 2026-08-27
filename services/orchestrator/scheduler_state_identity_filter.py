@@ -15,7 +15,9 @@ from services.orchestrator.scheduler_state_failure import (
 )
 from services.orchestrator.scheduler_state_manual_retry import (
     MARKER_TARGET_ROW_DETAIL_KEYS,
+    _event_is_adopted_manual_retry_marker,
     _event_is_manual_retry_marker,
+    _marker_event_recovered_canonical_stage,
 )
 from services.orchestrator.scheduler_state_rows import (
     STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
@@ -46,12 +48,84 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """The ordinary candidate decision state: failure policy, cancelled evidence, all non-manual consumers.
+
+    This is #1179 E13b byte-for-byte: the shared-cycle aggregate arm strips the pipeline
+    decision surface, floors, and events.  The manual-retry lane does NOT read this --
+    ``_candidate_state_manual_retry_decision_state`` carries the lineage capsule across the
+    same strip (round-1 cand-st-01/cand-te-01).
+    """
+
+    return _candidate_state_decision_views(state, evidence)[0]
+
+def _candidate_state_manual_retry_decision_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Dedicated manual-retry decision view: ordinary state plus the minimal lineage capsule.
+
+    The ordinary ``_candidate_state_decision_state`` strips the shared-cycle pipeline surface
+    -- floors, sources, and the model-less marker event -- but geometry B's manual mint needs
+    exactly that evidence (the failed row is outside the row window by construction, so no
+    view built on the surviving rows can name the stage).  This view therefore carries ONLY
+    the newest adopted marker plus the one canonical stage's already-narrowed floor/sources
+    into the stripped state.  It restores no truncated row, no top-level stage/status/retry
+    field, no unrelated floor or event, and no older marker behind a newest unmatched one.
+    ``None`` when no capsule exists, so the caller falls back to the ordinary state exactly as
+    before.
+
+    Only the manual-retry gate/evidence lane in ``scheduler_state_decision`` consumes it.
+    """
+
+    ordinary, capsule = _candidate_state_decision_views(state, evidence)
+    return _candidate_state_manual_retry_view(ordinary, capsule)
+
+def _candidate_state_manual_retry_view(
+    ordinary: Mapping[str, Any],
+    capsule: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Overlay the lineage capsule onto the already-filtered ordinary state.
+
+    ``capsule`` comes from ``_candidate_state_decision_views`` (the shared filter), so the
+    overlay cannot re-admit evidence the ordinary lane rejected.  The manual view is a shallow
+    copy of the ordinary state plus exactly the capsule's floors/sources and its single
+    newest-adopted marker event; it restores no row or top-level field.
+    """
+
+    if capsule is None:
+        return None
+    manual = dict(ordinary)
+    manual[STAGE_RETRY_ATTEMPT_FLOORS_KEY] = capsule["floors"]
+    manual[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY] = capsule["sources"]
+    # The capsule marker is the newest adopted marker; ordinary surviving markers (a
+    # non-shared-cycle state keeps them) are replaced by it so exactly one marker lineage is
+    # visible and its terminal ordering is preserved.
+    events = [
+        dict(event) for event in _state_events(manual) if not _event_is_adopted_manual_retry_marker(manual, event)
+    ]
+    events.append(dict(capsule["marker"]))
+    manual["pipeline_events"] = events
+    return manual
+
+def _candidate_state_decision_views(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """One shared filter implementation producing the ordinary state and the manual capsule.
+
+    Both views are built through the SAME authority rules (row filtering, event sanitization,
+    floor/source narrowing) so the manual lane can never observe evidence the ordinary lane
+    would reject.  The capsule is captured AFTER
+    ``_candidate_authoritative_stage_retry_attempt_floor_state`` narrows the carried floors
+    and BEFORE ``_candidate_scoped_shared_cycle_aggregate_state`` strips them.
+    """
+
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return _candidate_state_filtered_decision_state(state, evidence)
+        return _candidate_state_filtered_decision_views(state, evidence)
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return _candidate_state_filtered_decision_state(state, evidence)
+        return _candidate_state_filtered_decision_views(state, evidence)
     unresolved_source_cycle_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
@@ -94,12 +168,20 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
-    return _candidate_state_filtered_decision_state(filtered, evidence)
+    return _candidate_state_filtered_decision_views(filtered, evidence)
 
 def _candidate_state_filtered_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
-    filtered = _inconclusive_source_cycle_decision_state(state)
-    filtered = _candidate_authoritative_stage_retry_attempt_floor_state(filtered, evidence)
-    return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+    return _candidate_state_filtered_decision_views(state, evidence)[0]
+
+def _candidate_state_filtered_decision_views(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    inconclusive = _inconclusive_source_cycle_decision_state(state)
+    narrowed = _candidate_authoritative_stage_retry_attempt_floor_state(inconclusive, evidence)
+    capsule = _manual_retry_lineage_capsule(narrowed, evidence)
+    ordinary = _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(narrowed, evidence))
+    return ordinary, capsule
 
 def _candidate_authoritative_stage_retry_attempt_floor_state(
     state: Mapping[str, Any],
@@ -132,6 +214,59 @@ def _candidate_authoritative_stage_retry_attempt_floor_state(
         or _global_source_cycle_download_blocker_job(row, evidence),
     )
     return filtered
+
+def _manual_retry_lineage_capsule(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Capture the exact manual-retry lineage the shared-cycle strip would erase.
+
+    Runs on the ALREADY-NARROWED state (after
+    ``_candidate_authoritative_stage_retry_attempt_floor_state``), before
+    ``_candidate_scoped_shared_cycle_aggregate_state`` strips the pipeline surface.  A
+    capsule exists only when the NEWEST ADOPTED marker directly matches -- through the same
+    exact identity-vs-reference lineage rule the manual evidence uses
+    (``_marker_event_recovered_canonical_stage``) -- at least one contributor OWN id under
+    exactly one canonical floor stage.  It carries only that marker, the matching canonical
+    stage's already-narrowed floor, and that stage's already-narrowed source records.  No
+    truncated row, top-level stage/status/retry field, unrelated floor/event, or older marker
+    is captured; an unmatched newest adopted marker terminates the scan (no fall-through).
+
+    Stale/repaired gate semantics are deliberately NOT repeated here: ``_manual_retry_requested``
+    owns them and closes the lane after this view is composed.
+    """
+
+    expected = _candidate_identity_from_evidence(evidence.get("candidate_identity") or {})
+    if not expected:
+        return None
+    floors = state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY)
+    if not isinstance(floors, Mapping):
+        return None
+    sources = state.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+    if not isinstance(sources, Mapping):
+        return None
+    for event in reversed(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
+        stage = _marker_event_recovered_canonical_stage(state, event)
+        if stage is None:
+            return None
+        floor = floors.get(stage)
+        contributors = sources.get(stage)
+        if floor in (None, ""):
+            return None
+        if not isinstance(contributors, Sequence) or isinstance(contributors, str | bytes | bytearray):
+            return None
+        rows = [dict(row) for row in contributors if isinstance(row, Mapping)]
+        if not rows:
+            return None
+        return {
+            "marker": dict(event),
+            "stage": stage,
+            "floors": {stage: floor},
+            "sources": {stage: rows},
+        }
+    return None
 
 def _candidate_authoritative_stage_retry_attempt_state(
     state: Mapping[str, Any],

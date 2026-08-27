@@ -29,7 +29,7 @@ Issues: #1586, #1584, #1577 (one user-requested PR)
 - E6 (#1577): legacy marker without `failed_stage` still recovers from exact contributor id; a valid marker stage alias agrees by canonical identity; foreign, stale, no-source, alias-spelled/non-canonical floor keys, and the same identifier under disagreeing canonical stages do not infer or charge unrelated floors.
 - E7 compatibility: existing #1179 E5/E13a-d/E13f/E15/E16, nameable/manual-pinned mint, pure-freshness selection, stage-less attempt, flat-channel, force-resubmit, failure-policy, and non-canonical-stage tests remain unchanged; E13e's narrowing assertion is retained under E3 on an unmodified real projection rather than its obsolete synthetic top-level-`run_id` swap.
 - E8 red proof: new-behavior tests fail against pre-change runtime source in one batched run and pass after implementation; no `red-proof` stash remains.
-- E9 local commands: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or source_cycle_blocker or manual_retry or geometry_b or retry_attempt or floor"`; `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py`; `uv run ruff check .`; `openspec validate scheduler-retry-identity-closure --strict --no-interactive`.
+- E9 local commands: `uv run pytest -q tests/test_production_scheduler.py -k "strict_warm_start or source_cycle_blocker or manual_retry or geometry_b or retry_attempt or floor or execution_cohort or cohort_authority"` (collect MUST include E1/E2); `uv run pytest -q tests/test_file_orchestration_journal.py -k "manual_repair or manual_retry"`; `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py`; `uv run ruff check .`; `openspec validate scheduler-retry-identity-closure --strict --no-interactive`.
 - E10 node-27 oracle: frozen PR head runs the focused scheduler test selection and the issue-specified scheduler suite on node-27; no node-22 receipt because sbatch/Slurm resource behavior is unchanged.
 
 ## 1. Candidate-Authoritative Attempt View (#1586)
@@ -51,5 +51,13 @@ Issues: #1586, #1584, #1577 (one user-requested PR)
 
 - [x] 4.1 Audit every `_state_retry_attempt` consumer and the blocker/marker sibling surfaces against the Invariant Matrix; change no unrelated consumer.
 - [x] 4.2 Update code docstrings and `docs/runbooks/failed-basin-retry.md` so #1586/#1584/#1577 are no longer documented as accepted active boundaries; retain #1579/#1572 exclusions.
-- [x] 4.3 Run E7-E9, record red/green evidence and deviations, and mark each completed task.
+- [x] 4.3 Run initial E7-E9, record red/green evidence and deviations, and mark each completed task.
 - [ ] 4.4 Run E10 on node-27 for the frozen PR head and capture the exact commit/command/result receipt.
+
+## 5. Round-1 Verified Invariant Closure
+
+- [x] 5.1 Add a dedicated manual-retry decision view that preserves only the newest exact authority-narrowed marker/floor lineage capsule across the shared-cycle strip; keep the ordinary E13b state stripped and geometry-B visibility unchanged.
+- [x] 5.2 Narrow recovery identity sets to marker target ids versus contributor own ids; add predecessor/`details.job_id` spoof negatives and direct-match controls.
+- [x] 5.3 Make both file-journal manual writers derive N+1 with `effective_retry_attempt`; add suffix-only and non-suffix writer-to-projection regressions.
+- [x] 5.4 Add production decision-path E5, distinct explicit pin, newest-unmatched marker, and ordinary-state strip proofs; correct E9 selector so collect includes E1/E2.
+- [x] 5.5 Close the Phase 6.2 capsule-owner negative coverage (foreign exact contributor and newest-unmatched-over-older-match), prove pre-narrow/continue mutants red, rerun the fix matrix, and record final evidence before round 2.

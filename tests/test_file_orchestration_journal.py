@@ -3536,6 +3536,128 @@ def test_file_journal_manual_repair_marker_event_records_the_failed_stage(tmp_pa
     assert "stage" not in event["details"]
 
 
+def _suffix_only_failed_forecast_journal(
+    journal_root: Path,
+    *,
+    job_id: str,
+    retry_count: int,
+) -> tuple[FileOrchestrationJournalRepository, FileJournalRetryService]:
+    """One failed forecast row whose attempt lives only where the fixture says.
+
+    ``_pipeline_reservation_record`` accepts any job id, so ``job_id`` may carry a
+    ``_retry_<n>`` suffix that the durable ``retry_count`` does not record -- the exact
+    shape the file-journal clean-reservation invariant leaves behind on master rows
+    (#1577 round-1 cand-st-02).  The cycle is fixed to ``_MARKER_RECORD_CYCLE_TIME`` so the
+    returned repository projects for ``_scheduler_candidate_fixture``'s candidate.
+    """
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    record = _pipeline_reservation_record(_MARKER_RECORD_CYCLE_TIME, job_id=job_id)
+    record["retry_count"] = retry_count
+    repository.reserve_pipeline_job(record)
+    repository.update_pipeline_job_status(
+        job_id,
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        finished_at=_MARKER_RECORD_CYCLE_TIME,
+    )
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    return repository, service
+
+
+def test_file_journal_manual_repair_suffix_only_target_emits_next_durable_attempt(tmp_path: Path) -> None:
+    """#1577 round-1 (cand-st-02): a suffix-only target N writes the marker as N+1.
+
+    The failed row records attempt 87 only in its ``_retry_87`` id suffix while the persisted
+    ``retry_count`` is 0 (the clean-reservation invariant).  ``record_manual_repair`` used to
+    write ``retry_count`` 1 -- a producer-shaped marker that falsely pins attempt one and
+    overrides the recovered floor on the projection.  The writer now derives the next attempt
+    with the single owner ``effective_retry_attempt``, so the marker event, the returned
+    namespace and the failure payload all carry 88, and the projected manual decision reports
+    previous 87 / new 88.
+    """
+
+    repository, service = _suffix_only_failed_forecast_journal(
+        tmp_path / "journal-suffix",
+        job_id="job_fcst_gfs_2026052106_model_a_forecast_retry_87",
+        retry_count=0,
+    )
+
+    repair = service.record_manual_repair("fcst_gfs_2026052106_model_a", trusted_internal=True)
+
+    assert repair.retry_count == 88
+    state = _candidate_state(repository, cycle_time=_MARKER_RECORD_CYCLE_TIME)
+    assert state is not None
+    event = next(
+        event
+        for event in state["pipeline_events"]
+        if event["entity_id"] == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
+    )
+    assert event["details"]["retry_count"] == 88
+    assert event["details"]["failure"]["attempt"] == 88
+    assert event["details"]["previous_job_id"] == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
+
+    decision = scheduler_state_decision_module._candidate_state_decision(
+        _scheduler_candidate_fixture(),
+        state,
+    )
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["manual_retry"]["previous_attempt"] == 87
+    assert decision.evidence["manual_retry"]["new_attempt"] == 88
+
+
+def test_file_journal_pending_manual_retry_suffix_only_target_emits_next_durable_attempt(tmp_path: Path) -> None:
+    """#1577 round-1 (cand-st-02): the pending manual-retry writer uses the corrected attempt.
+
+    A suffix-only ``_retry_87`` target (persisted count 0) produced a pending row, marker
+    event, idempotency key, and failure payload all claiming attempt 1.  The producer now
+    derives N+1 through ``effective_retry_attempt``, so every one of those bytes carries 88.
+    The non-suffixed count-3 control keeps the pre-existing 3 -> 4 contract.
+    """
+
+    repository, service = _suffix_only_failed_forecast_journal(
+        tmp_path / "journal-pending-suffix",
+        job_id="job_fcst_gfs_2026052106_model_a_forecast_retry_87",
+        retry_count=0,
+    )
+
+    result = service._create_pending_manual_retry_job("fcst_gfs_2026052106_model_a")
+
+    assert result.public_job.retry_count == 88
+    assert result.public_job.previous_job_id == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
+    assert result.private_snapshot["retry_count"] == 88
+    assert result.private_snapshot["idempotency_key"] == "manual_retry:fcst_gfs_2026052106_model_a:88"
+    event_payloads = _jsonl_payloads(repository, "pipeline_event")
+    marker_event = next(
+        payload
+        for payload in event_payloads
+        if payload.get("entity_id") == result.public_job.job_id
+        and payload.get("event_type") == "retry"
+    )
+    assert marker_event["details"]["retry_count"] == 88
+    assert marker_event["details"]["failure"]["attempt"] == 88
+    assert marker_event["details"]["previous_job_id"] == "job_fcst_gfs_2026052106_model_a_forecast_retry_87"
+
+    # Non-suffixed persistence-count contract stays 3 -> 4.
+    plain_repository, plain_service = _suffix_only_failed_forecast_journal(
+        tmp_path / "journal-pending-plain",
+        job_id="job_fcst_gfs_2026052106_model_a_forecast",
+        retry_count=3,
+    )
+    plain = plain_service._create_pending_manual_retry_job("fcst_gfs_2026052106_model_a")
+    assert plain.public_job.retry_count == 4
+    plain_event = next(
+        payload
+        for payload in _jsonl_payloads(plain_repository, "pipeline_event")
+        if payload.get("entity_id") == plain.public_job.job_id
+        and payload.get("event_type") == "retry"
+    )
+    assert plain_event["details"]["retry_count"] == 4
+    assert plain_event["details"]["failure"]["attempt"] == 4
+    assert plain.private_snapshot["idempotency_key"] == "manual_retry:fcst_gfs_2026052106_model_a:4"
+
+
 _MARKER_RECORD_CYCLE_TIME = _dt("2026-05-21T06:00:00Z")
 
 

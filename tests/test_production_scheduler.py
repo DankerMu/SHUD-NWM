@@ -49031,6 +49031,282 @@ def test_geometry_b_manual_retry_mints_the_next_durable_attempt() -> None:
     assert _pipeline_retry_job_id(base_job_id, minted_attempt) == f"{base_job_id}_retry_88"
 
 
+def test_geometry_b_manual_retry_reaches_the_production_lane() -> None:
+    """E5 round-1 (#1577) -- the production decision path mints N+1 from the lineage capsule.
+
+    The ordinary shared-cycle decision state strips geometry B's carried floor, its
+    floor-source contributors, and the model-less adopted marker (E13b), so the manual lane
+    used to compose on the already-stripped state and never mint (cand-st-01/cand-te-01: raw
+    helper-only E5 did not exercise this seam).  With the dedicated manual-retry view the
+    production ``_candidate_state_decision`` reaches ``retry/manual_retry_requested`` with
+    ``previous_attempt == 87`` / ``new_attempt == 88``, while the raw projection visibility
+    (E11-v2) is unchanged, the ordinary decision state still carries no floor keys and no
+    marker event, and the manual view contains ONLY the exact capsule (one marker, one
+    canonical floor, its narrowed sources, no rows).
+    """
+
+    from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_failure import (
+        _candidate_failed_stage,
+        _failed_stage,
+    )
+    from services.orchestrator.scheduler_state_identity_filter import (
+        _candidate_state_decision_state,
+        _candidate_state_manual_retry_decision_state,
+    )
+    from services.orchestrator.scheduler_state_manual_retry import _marker_recovered_candidate_stage
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    job_limit = 5
+    wedge_id = f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87"
+    state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[_retention_adopted_manual_marker_event()],
+    )
+    # A live manual-retry state: the hydro leg is a non-durable failure, so the ladder does
+    # not stop at the terminal-hydro-success arm before the manual lane.
+    state["hydro_run"] = {"run_id": _RETENTION_RUN_ID, "status": "failed", "init_state_id": None}
+    state["hydro_status"] = "failed"
+
+    # Raw visibility pins (E11-v2): the failed row is truncated, top-level stage keys stay
+    # empty, and both failed-stage resolvers stay unresolved.
+    assert _retention_job_ids(state) == [f"job_{_RETENTION_CYCLE_RUN_ID}_publish_{index}" for index in range(1, 6)]
+    assert all(state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
+    assert _failed_stage(state) is None
+    assert _candidate_failed_stage(state) is None
+    assert _retention_floors(state) == {"forecast": 87}
+
+    # Ordinary decision state: E13b strip is untouched -- no floors and no marker event.
+    ordinary = _candidate_state_decision_state(state, _candidate_state_evidence(_retention_candidate(), state))
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) in (None, {})
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY) in (None, {})
+    assert [event.get("event_type") for event in ordinary.get("pipeline_events", [])] == []
+
+    # Manual view: only the exact capsule.
+    manual = _candidate_state_manual_retry_decision_state(
+        state, _candidate_state_evidence(_retention_candidate(), state)
+    )
+    assert manual is not None
+    assert manual[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+    assert [str(row["job_id"]) for row in manual[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]] == [wedge_id]
+    assert [event.get("event_type") for event in manual["pipeline_events"]] == ["manual_retry"]
+    assert len(manual["pipeline_events"]) == 1
+    assert manual.get("pipeline_jobs") in (None, [])
+    assert _marker_recovered_candidate_stage(manual) == "forecast"
+
+    # Highest seam: the production decision reaches the manual lane with N/N+1.
+    decision = _candidate_state_decision(_retention_candidate(), state)
+    assert decision is not None
+    assert (decision.action, decision.reason) == ("retry", "manual_retry_requested")
+    assert decision.evidence["manual_retry"]["previous_attempt"] == 87
+    assert decision.evidence["manual_retry"]["new_attempt"] == 88
+    assert decision.evidence["manual_retry"]["allowed"] is True
+
+
+def test_geometry_b_manual_retry_marker_target_uses_direct_identity_only() -> None:
+    """E6 round-1 (#1577) -- references are not identity; direct targets still recover.
+
+    cand-st-03: recovery intersected reference fields as identity.  A marker targeting only a
+    contributor's ``previous_job_id`` (a predecessor name, not the row itself) and a foreign
+    marker whose ``details.job_id`` happens to equal a contributor's own id must NOT recover a
+    stage; the direct ``entity_id`` / ``previous_job_id`` target still does.
+    """
+
+    from types import SimpleNamespace
+
+    from services.orchestrator.scheduler_state_failure import _manual_retry_state_evidence
+    from services.orchestrator.scheduler_state_manual_retry import _marker_recovered_candidate_stage
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    job_limit = 5
+    wedge_id = f"job_{_RETENTION_CYCLE_RUN_ID}_forecast_retry_87"
+    candidate = SimpleNamespace(
+        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+        run_id=_RETENTION_RUN_ID,
+    )
+
+    # Predecessor-only contributor: the only intersection is the contributor's
+    # ``previous_job_id`` equal to the marker's target -- no recovery, fallback 0 -> 1.
+    predecessor_state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[_retention_adopted_manual_marker_event()],
+    )
+    predecessor_state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY] = {
+        "forecast": [{"job_id": "job_other_forecast", "previous_job_id": wedge_id}],
+    }
+    predecessor_state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] = {"forecast": 87}
+    assert _marker_recovered_candidate_stage(predecessor_state) is None
+    predecessor_evidence = _manual_retry_state_evidence(candidate, predecessor_state, {})
+    assert predecessor_evidence["manual_retry"]["previous_attempt"] == 0
+    assert predecessor_evidence["manual_retry"]["new_attempt"] == 1
+
+    # Foreign marker entity + ``details.job_id`` equal to the contributor's own id: the
+    # ``details.job_id`` bridge is not identity -> no recovery, fallback 0 -> 1.
+    spoof_marker = _retention_adopted_manual_marker_event()
+    spoof_marker["entity_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    spoof_marker["details"]["previous_job_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    spoof_marker["details"]["job_id"] = wedge_id
+    spoof_state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[spoof_marker],
+    )
+    assert _marker_recovered_candidate_stage(spoof_state) is None
+    spoof_evidence = _manual_retry_state_evidence(candidate, spoof_state, {})
+    assert spoof_evidence["manual_retry"]["previous_attempt"] == 0
+    assert spoof_evidence["manual_retry"]["new_attempt"] == 1
+
+    # Direct marker entity -> contributor own id still recovers (the E5-derived control).
+    direct_state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[_retention_adopted_manual_marker_event()],
+    )
+    assert _marker_recovered_candidate_stage(direct_state) == "forecast"
+    direct_evidence = _manual_retry_state_evidence(candidate, direct_state, {})
+    assert direct_evidence["manual_retry"]["previous_attempt"] == 87
+    assert direct_evidence["manual_retry"]["new_attempt"] == 88
+
+
+def test_geometry_b_newest_unmatched_marker_does_not_fall_through_to_an_older_match() -> None:
+    """E6 round-1 (#1577) -- a newer unmatched adopted marker terminates the lineage scan.
+
+    cand-te-04: no existing geometry exercised terminal scan ordering.  The newest adopted
+    marker targets a row no contributor owns, while an OLDER adopted marker exactly matches the
+    forecast contributor.  The newest marker is terminal: no stage is recovered, the older
+    marker does not authorize recovery, and the stage-less fallback (0 -> 1) is preserved.
+    """
+
+    from types import SimpleNamespace
+
+    from services.orchestrator.scheduler_state_failure import _manual_retry_state_evidence
+    from services.orchestrator.scheduler_state_manual_retry import _marker_recovered_candidate_stage
+
+    job_limit = 5
+    older = _retention_adopted_manual_marker_event()
+    newer = _retention_adopted_manual_marker_event()
+    newer["event_id"] = 10
+    newer["created_at"] = "2026-07-20T03:00:00Z"
+    newer["entity_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    newer["details"]["previous_job_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    newer["details"]["failed_stage"] = "convert"
+    state = _retention_state(
+        [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[older, newer],
+    )
+
+    # Premise: the older marker exactly matches the forecast contributor on the raw state;
+    # the newer marker does not match anything.
+    assert _marker_recovered_candidate_stage(
+        _retention_state(
+            [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+            job_limit=job_limit,
+            retry_limit=100,
+            events=[older],
+        )
+    ) == "forecast"
+    assert _marker_recovered_candidate_stage(
+        _retention_state(
+            [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)],
+            job_limit=job_limit,
+            retry_limit=100,
+            events=[newer],
+        )
+    ) is None
+
+    # Terminal: the two-marker state recovers nothing and mints the fallback.
+    assert _marker_recovered_candidate_stage(state) is None
+    candidate = SimpleNamespace(
+        candidate_id="GFS:2026-07-20T00:00:00Z:model_a:forecast_gfs_deterministic",
+        run_id=_RETENTION_RUN_ID,
+    )
+    evidence = _manual_retry_state_evidence(candidate, state, {})
+    assert evidence["manual_retry"]["previous_attempt"] == 0
+    assert evidence["manual_retry"]["new_attempt"] == 1
+
+
+def test_geometry_b_newest_unmatched_marker_terminates_the_capsule_owner_scan() -> None:
+    """E6 round-1 (#1577) -- no older matching marker behind a newest unmatched one at the capsule.
+
+    cand-te-01: the newest-terminal ordering was only exercised through the raw helper
+    (``_marker_recovered_candidate_stage``); the new capsule owner
+    (``_manual_retry_lineage_capsule`` in ``scheduler_state_identity_filter``) carries its own
+    newest-adopted-marker loop whose ``stage is None`` arm must TERMINATE, not fall through.
+    Here the raw two-marker state recovers nothing -- the older marker alone exactly matches the
+    ``forecast`` contributor (it would mint 87 -> 88) and the newer adopted marker alone matches
+    nothing -- so the paired views expose no capsule/manual view and the production failed-hydro
+    decision never enters the manual lane from the older marker.  If the capsule loop ever
+    changed its ``stage is None`` arm to ``continue``, this test goes red.
+    """
+
+    from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_identity_filter import (
+        _candidate_state_decision_state,
+        _candidate_state_manual_retry_decision_state,
+    )
+    from services.orchestrator.scheduler_state_manual_retry import _marker_recovered_candidate_stage
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    job_limit = 5
+    jobs = [_retention_forecast_retry_job(87, minutes=1), *_retention_publish_filler(job_limit + 1)]
+    older = _retention_adopted_manual_marker_event()
+    newer = _retention_adopted_manual_marker_event()
+    newer["event_id"] = 10
+    newer["created_at"] = "2026-07-20T03:00:00Z"
+    newer["entity_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    newer["details"]["previous_job_id"] = f"job_{_RETENTION_CYCLE_RUN_ID}_convert_retry_3"
+    newer["details"]["failed_stage"] = "convert"
+
+    # Premise: the OLDER marker alone is an exact forecast-lineage match, the NEWER marker
+    # alone matches nothing, and together the raw state recovers nothing (terminal scan).
+    older_state = _retention_state(list(jobs), job_limit=job_limit, retry_limit=100, events=[older])
+    newer_state = _retention_state(list(jobs), job_limit=job_limit, retry_limit=100, events=[newer])
+    assert _marker_recovered_candidate_stage(older_state) == "forecast"
+    assert _marker_recovered_candidate_stage(newer_state) is None
+    state = _retention_state(list(jobs), job_limit=job_limit, retry_limit=100, events=[older, newer])
+    assert _marker_recovered_candidate_stage(state) is None
+
+    # A live manual-retry state: failed hydro, so the ladder can reach the manual lane.
+    state["hydro_run"] = {"run_id": _RETENTION_RUN_ID, "status": "failed", "init_state_id": None}
+    state["hydro_status"] = "failed"
+
+    # Paired views: ordinary E13b stays stripped; the manual view is None (no capsule).
+    evidence = _candidate_state_evidence(_retention_candidate(), state)
+    ordinary = _candidate_state_decision_state(state, evidence)
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) in (None, {})
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY) in (None, {})
+    assert [event.get("event_type") for event in ordinary.get("pipeline_events", [])] == []
+    manual = _candidate_state_manual_retry_decision_state(state, evidence)
+    assert manual is None
+
+    # Highest seam: the production decision never mints the older marker's 87 -> 88.
+    decision = _candidate_state_decision(_retention_candidate(), state)
+    assert decision is not None
+    assert (decision.action, decision.reason) != ("retry", "manual_retry_requested")
+    manual_payload = decision.evidence.get("manual_retry") or {}
+    assert manual_payload.get("previous_attempt") != 87
+    assert manual_payload.get("new_attempt") != 88
+
+
 def test_geometry_b_manual_retry_recovery_negative_controls() -> None:
     """E6 (#1577) -- no no-source/disagreeing-recording/absent-floor lineage inference.
 
@@ -49372,6 +49648,95 @@ def test_geometry_b_foreign_floor_contributor_is_filtered_before_recovery() -> N
     assert evidence["manual_retry"]["new_attempt"] == 1
 
 
+def test_geometry_b_foreign_exact_contributor_never_mints_at_the_capsule_owner() -> None:
+    """E6 round-1 (#1577) -- the capsule captures only AUTHORITY-NARROWED sources (cand-te-01).
+
+    The new capsule owner (``_manual_retry_lineage_capsule``) runs on the ALREADY-NARROWED
+    state, inside ``_candidate_state_filtered_decision_views`` AFTER
+    ``_candidate_authoritative_stage_retry_attempt_floor_state`` and BEFORE the shared-cycle
+    strip.  Here the ONLY ``forecast`` floor contributor is a FOREIGN model's row
+    (``run_id`` ``fcst_gfs_2026072000_model_b``, ``model_id`` ``model_b``) and the marker
+    targets its EXACT id -- on the raw projected state the lineage would recover ``forecast``
+    and mint 87 -> 88, exactly as the helper foreign test's premise proves.  The production
+    seam must not: paired views expose no capsule/manual view, and the failed-hydro production
+    decision never returns ``retry/manual_retry_requested``.  If capsule capture ever moved
+    BEFORE the authority narrowing (or the narrowing stopped running first), this test goes red.
+    """
+
+    from services.orchestrator.scheduler_state_decision import _candidate_state_decision
+    from services.orchestrator.scheduler_state_evidence_owner import _candidate_state_evidence
+    from services.orchestrator.scheduler_state_identity_filter import (
+        _candidate_authoritative_stage_retry_attempt_floor_state,
+        _candidate_state_decision_state,
+        _candidate_state_manual_retry_decision_state,
+    )
+    from services.orchestrator.scheduler_state_manual_retry import _marker_recovered_candidate_stage
+    from services.orchestrator.scheduler_state_rows import (
+        STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
+        STAGE_RETRY_ATTEMPT_FLOORS_KEY,
+    )
+
+    job_limit = 5
+    foreign_id = "job_fcst_gfs_2026072000_model_b_forecast_retry_87"
+    foreign = _retention_job(
+        foreign_id,
+        stage="forecast",
+        job_type="run_shud_forecast_array",
+        status="failed",
+        minutes=1,
+        run_id="fcst_gfs_2026072000_model_b",
+        model_id="model_b",
+    )
+    foreign_marker = _retention_adopted_manual_marker_event()
+    foreign_marker["entity_id"] = foreign_id
+    foreign_marker["details"]["previous_job_id"] = foreign_id
+    state = _retention_state(
+        [foreign, *_retention_publish_filler(job_limit + 1)],
+        job_limit=job_limit,
+        retry_limit=100,
+        events=[foreign_marker],
+    )
+
+    # Premise: real projection shape -- the raw state has a floor/source mapping for the
+    # foreign contributor (the truncation-carried row), an exact marker-to-source identifier
+    # intersection (NOT a no-intersection shortcut), and the raw projection is a shared-cycle
+    # aggregate whose terminal-success fillers empty every stage key, so the failed-stage
+    # resolvers cannot name the stage and only the carried floor could.
+    assert state.get("shared_cycle_aggregate") is True
+    contributors = state[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY]["forecast"]
+    assert [str(row["job_id"]) for row in contributors] == [foreign_id]
+    assert state[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {"forecast": 87}
+    assert all(state.get(key) in (None, "") for key in ("failed_stage", "stage", "restart_stage"))
+    assert foreign_id not in _retention_job_ids(state)
+    assert _marker_recovered_candidate_stage(state) == "forecast"
+
+    # A live manual-retry state: failed hydro, so the production ladder can reach the seam.
+    state["hydro_run"] = {"run_id": _RETENTION_RUN_ID, "status": "failed", "init_state_id": None}
+    state["hydro_status"] = "failed"
+
+    # Authority narrowing strips the foreign contributor (the real filter's floor arm).
+    evidence = _candidate_state_evidence(_retention_candidate(), state)
+    narrowed = _candidate_authoritative_stage_retry_attempt_floor_state(state, evidence)
+    assert narrowed[STAGE_RETRY_ATTEMPT_FLOORS_KEY] == {}
+    assert _marker_recovered_candidate_stage(narrowed) is None
+
+    # Paired views: ordinary E13b stays stripped; the manual view is None (no capsule).
+    ordinary = _candidate_state_decision_state(state, evidence)
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY) in (None, {})
+    assert ordinary.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY) in (None, {})
+    assert [event.get("event_type") for event in ordinary.get("pipeline_events", [])] == []
+    manual = _candidate_state_manual_retry_decision_state(state, evidence)
+    assert manual is None
+
+    # Highest seam: the production decision never mints the foreign N/N+1.
+    decision = _candidate_state_decision(_retention_candidate(), state)
+    assert decision is not None
+    assert (decision.action, decision.reason) != ("retry", "manual_retry_requested")
+    manual_payload = decision.evidence.get("manual_retry") or {}
+    assert manual_payload.get("previous_attempt") != 87
+    assert manual_payload.get("new_attempt") != 88
+
+
 def test_geometry_b_stale_repaired_marker_is_gated_before_recovery() -> None:
     """E6 (#1577) -- the recovery never resurrects a marker the manual path treats as stale.
 
@@ -49556,10 +49921,12 @@ def test_geometry_b_marker_attempt_and_nameable_stage_precedence_unchanged() -> 
         run_id=_RETENTION_RUN_ID,
     )
 
-    # Explicit marker attempt (retry_count 88 pinned by the operator) wins over
-    # the derived N+1, on geometry B.
+    # Explicit marker attempt wins over the derived N+1, on geometry B.  The pin value is
+    # deliberately DISTINCT from the derived 88 (round-1 cand-te-04): a pin equal to
+    # ``floor + 1`` is indistinguishable from the fallback, so this cell could never prove
+    # the precedence contract.
     pinned_marker = _retention_adopted_manual_marker_event()
-    pinned_marker["details"]["retry_count"] = 88
+    pinned_marker["details"]["retry_count"] = 95
     pinned_state = _retention_state(
         [_retention_forecast_retry_job(87, minutes=1), *filler],
         job_limit=job_limit,
@@ -49569,7 +49936,7 @@ def test_geometry_b_marker_attempt_and_nameable_stage_precedence_unchanged() -> 
     assert _marker_recovered_candidate_stage(pinned_state) == "forecast"
     pinned_evidence = _manual_retry_state_evidence(candidate, pinned_state, {})
     assert pinned_evidence["manual_retry"]["previous_attempt"] == 87
-    assert pinned_evidence["manual_retry"]["new_attempt"] == 88
+    assert pinned_evidence["manual_retry"]["new_attempt"] == 95
 
     # Nameable stage: the candidate's own in-window failed row names ``forecast``,
     # so ``_candidate_failed_stage`` resolves it and the recovery is bypassed.

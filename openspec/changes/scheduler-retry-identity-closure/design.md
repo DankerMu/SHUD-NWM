@@ -59,7 +59,7 @@ All other core packs are not selected: Public API / CLI / script entry (private 
 
 - Governing invariant: every retry attempt, blocker restoration, and manual mint decision SHALL be derived from evidence authoritative for the same candidate or source cycle and exact repair lineage; truncation may hide rows but may not authorize foreign evidence or force an ambiguous guess.
 - Source-of-truth identity/contract: `candidate_identity`; source/cycle blocker row identity; adopted marker `entity_id`/`previous_job_id`/`failed_stage`; `stage_retry_attempt_floors` and `stage_retry_attempt_floor_sources`.
-- Producers: `candidate_state_from_rows`, `stage_retry_attempt_floors`, `FileOrchestrationRetryService.record_manual_repair` (unchanged bytes).
+- Producers: `candidate_state_from_rows` and `stage_retry_attempt_floors` remain unchanged; `FileOrchestrationRetryService.record_manual_repair` and the pending manual-retry writer now derive the next attempt from `effective_retry_attempt(target_job_id, target_retry_count) + 1` while preserving all other target-record fields.
 - Validators/preflight: `_state_row_has_authoritative_candidate_proof`, `_source_cycle_identity_matches_expected`, `_event_is_adopted_manual_retry_marker`, exact marker/floor-source lineage resolver.
 - Storage/cache/query: file-journal projected state and marker events; DB query semantics unchanged and #1572 remains out of scope.
 - Public routes/entrypoints: scheduler candidate decision; manual retry request remains unchanged at the API boundary.
@@ -77,7 +77,7 @@ All other core packs are not selected: Public API / CLI / script entry (private 
 - Shared helper roots: candidate identity predicates, stage attempt derivation, marker adoption/target lineage.
 - Public entrypoints: scheduler candidate decision and manual retry evidence composition.
 - Read surfaces: projected jobs, floor/source mappings, marker events, blocker row identity.
-- Write/delete/overwrite surfaces: no runtime writes changed; marker producer inspected for compatibility only.
+- Write/delete/overwrite surfaces: manual marker and pending retry row/event/idempotency/failure attempt bytes change only to carry the corrected durable N+1; no delete, overwrite, or other publish behavior changes.
 - Staging/publish/rollback surfaces: none.
 - Producer/consumer evidence boundaries: projection floor sources -> identity view; marker event -> manual mint; blocker row -> restored top-level decision.
 - Stale-state/idempotency boundaries: exact marker target, newest adopted marker, no ambiguous stage inference, no `_retry_1` collision in geometry B.
@@ -94,6 +94,19 @@ All other core packs are not selected: Public API / CLI / script entry (private 
 
 No data migration is required. Deploy the code and tests together. Rollback is a normal code revert because no persistent schema or marker bytes change. Node-27 is the backend oracle; node-22 validation is not required because no Slurm/sbatch/runtime scheduling resource behavior changes.
 
+## Round-1 Verified Invariant Closure
+
+Cross-review found that the initial helper-level #1577 implementation did not survive the production decision path: the ordinary shared-cycle aggregate strip correctly erased floors (the #1179 E13b contract) and candidate-scoped event filtering removed the model-less marker before the manual lane. The repair therefore uses two views, not a global exception:
+
+- the ordinary decision state remains byte-for-byte responsible for failure policy, cancelled evidence, and all non-manual consumers, including E13b floor stripping;
+- a dedicated manual-retry decision view is built by the same filter implementation and consumed only by the manual marker gate/evidence lane. After authority floor narrowing and before the shared-cycle strip, it captures a minimal lineage capsule only when the newest adopted marker directly matches a contributor's own row identity under exactly one canonical floor stage. The capsule contains only that marker and that stage's narrowed floor/sources; it restores no row, top-level stage/status/retry field, unrelated event, or older marker.
+
+The exact-lineage rule distinguishes identity from reference fields. Marker target identity is event `entity_id` plus `details.previous_job_id` / `details.failed_job_id`; contributor identity is row `job_id` / `pipeline_job_id` / `entity_id`. Contributor predecessor fields and marker `details.job_id` are references or unsupported input, not identity, and cannot authorize recovery. `_state_row_references_job_ids` remains broader because it intentionally answers a reference question for inconclusive source-cycle filtering.
+
+The file-journal manual writer is also part of the invariant. Both `record_manual_repair` and the pending manual-retry row/event writer derive their new attempt through the existing single owner `effective_retry_attempt(job_id, retry_count) + 1`; a suffix-only `_retry_N` row can no longer write a producer-shaped marker that falsely pins attempt one. Consumer code does not guess whether a marker count was operator-derived.
+
+Round-1 verified test obligations are production-seam, not helper-only: geometry B must reach `_candidate_state_decision`'s manual lane with N/N+1 while ordinary E13b remains stripped; explicit pin uses a value distinct from N+1; newest-unmatched marker terminates before an older matching marker; foreign contributors are rejected after authority narrowing; and the focused E9 selector explicitly collects E1/E2. Phase 6.2 applies both negative rules at the capsule/production owner itself, not only at `_marker_recovered_candidate_stage`, and mutation-proves that moving capsule capture before narrowing or falling through to an older marker turns the tests red.
+
 ## Open Questions
 
-None. The issue bodies and existing #1179/#1308 contracts determine all three choices.
+None. The issue bodies, #1179/#1308 contracts, and round-1 independent verifier evidence determine the closure.
