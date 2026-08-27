@@ -5033,9 +5033,9 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
             "callers, which must now supply a bound or fail closed. The pass-side frontier requirement "
             "and receipt shape are unchanged by this requirement."
         ),
-        # scripts/node22_clone_direct_grid_cutover_states.py:25
+        # scripts/node22_clone_direct_grid_cutover_states.py:34
         "    node-22-local scratch mirror -- in one invocation.",
-        # scripts/node22_clone_direct_grid_cutover_states.py:28
+        # scripts/node22_clone_direct_grid_cutover_states.py:37
         "NFS canonical index and the node-22-local ``/scratch`` mirror, and it is",
         # The rollback leg recognises a lexeme, not a bare substring: scrollback is a
         # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an

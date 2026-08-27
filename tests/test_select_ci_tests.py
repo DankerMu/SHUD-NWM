@@ -7065,21 +7065,24 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ): "edge-consumer",
     # -- edge-consumer: workers/mapping_builder/rewrite.py state-clone importers
     # (#1711) ---------------------------------------------------------------
-    # rewrite.py's three non-gated importer suites OUTSIDE the mapping-builder
+    # rewrite.py's four non-gated importer suites OUTSIDE the mapping-builder
     # package set each belong to an independent owning surface, never the
     # mapping-builder lane: tests/test_state_clone.py rides the broad
     # `services/orchestrator/**` rule; tests/test_state_clone_cutover_hook.py
     # rides the `workers/data_adapters/base.py` and
     # `packages/common/state_clone_hook.py` rules; tests/test_state_clone_
-    # recalibration.py rides the `scripts/node22_clone_direct_grid_cutover_
-    # states.py` rule. Copying any of them into `workers/mapping_builder/**`
-    # would make every mapping-builder PR pay for a state-clone surface — the
-    # exact contamination #1711 forbids. The edge-consumer liveness guard
-    # machine-checks each suite is selected by a rule whose pattern does not
-    # match rewrite.py.
+    # recalibration.py and tests/test_state_clone_baseline_cutover_cli.py ride
+    # the `scripts/node22_clone_direct_grid_cutover_states.py` rule (the
+    # baseline suite imports `HydrologicCoreFingerprintMismatchError` from
+    # rewrite.py to name the fingerprint-gate failure it induces). Copying any
+    # of them into `workers/mapping_builder/**` would make every mapping-builder
+    # PR pay for a state-clone surface — the exact contamination #1711 forbids.
+    # The edge-consumer liveness guard machine-checks each suite is selected by
+    # a rule whose pattern does not match rewrite.py.
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_cutover_hook.py"): "edge-consumer",
     ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_recalibration.py"): "edge-consumer",
+    ("workers/mapping_builder/rewrite.py", "tests/test_state_clone_baseline_cutover_cli.py"): "edge-consumer",
 }
 
 
@@ -7629,6 +7632,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     (
         "tests/state_clone_recalibration_fixtures.py",
         "tests/test_state_clone_recalibration.py",
+    ),
+    # The CLI environment helpers split at the §6.8 marker: both recalibration
+    # CLI modules import it, so either consumer is a valid derivation anchor.
+    (
+        "tests/state_clone_recalibration_cli_fixtures.py",
+        "tests/test_state_clone_recalibration_cli.py",
     ),
     (
         "tests/lineage_state_index_fixtures.py",
@@ -8625,8 +8634,13 @@ def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> N
     assert "tests/test_state_clone_cutover_hook.py" in hook
 
     script = select_tests(["scripts/node22_clone_direct_grid_cutover_states.py"], repo_root=Path("."))
+    # The node-22 clone script owns all four state-clone suites: the
+    # recalibration core, both recalibration CLI modules (end-to-end and the
+    # §6.8 validation split), and the baseline-cutover CLI suite.
     assert "tests/test_state_clone_recalibration.py" in script
     assert "tests/test_state_clone_recalibration_cli.py" in script
+    assert "tests/test_state_clone_recalibration_cli_validation.py" in script
+    assert "tests/test_state_clone_baseline_cutover_cli.py" in script
 
     # Neither irregular source may drag the unrelated tests/test_state_clone.py
     # (it belongs to the broad services/orchestrator/** rule, not these rules).
@@ -8634,11 +8648,38 @@ def test_state_clone_hook_and_node22_script_select_their_irregular_suites() -> N
     assert "tests/test_state_clone.py" not in script
 
 
+def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:
+    # #1697 package fixtures + #1713 CLI-helper split: a change to either shared
+    # fixture module must run every suite that consumes it. The package fixtures
+    # are consumed by the recalibration core plus BOTH recalibration CLI modules
+    # AND the baseline-cutover CLI suite (which imports `_write_package`, the
+    # calibration constants and `_IC_V1`/`_PARA_V1`); the CLI helpers are
+    # consumed by exactly the two recalibration CLI modules.
+    package = select_tests(
+        ["tests/state_clone_recalibration_fixtures.py"], repo_root=Path(".")
+    )
+    assert "tests/test_state_clone_recalibration.py" in package
+    assert "tests/test_state_clone_recalibration_cli.py" in package
+    assert "tests/test_state_clone_recalibration_cli_validation.py" in package
+    assert "tests/test_state_clone_baseline_cutover_cli.py" in package
+
+    cli_helpers = select_tests(
+        ["tests/state_clone_recalibration_cli_fixtures.py"], repo_root=Path(".")
+    )
+    assert "tests/test_state_clone_recalibration_cli.py" in cli_helpers
+    assert "tests/test_state_clone_recalibration_cli_validation.py" in cli_helpers
+    # The CLI helpers are recalibration-only: the baseline suite builds its own
+    # environment and must not be dragged in by a helper change.
+    assert "tests/test_state_clone_baseline_cutover_cli.py" not in cli_helpers
+
+
 def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
     # #1711: workers/mapping_builder must be in DIRECTORY_RULE_AUDIT_PATHS, and
-    # its derived importer gaps must be EXACTLY the three rewrite.py state-clone
+    # its derived importer gaps must be EXACTLY the four rewrite.py state-clone
     # pairs, each dispositioned as `edge-consumer` in the exclusion table (they
-    # belong to independent owning surfaces, never the mapping-builder lane).
+    # belong to independent owning surfaces, never the mapping-builder lane;
+    # the baseline suite imports `HydrologicCoreFingerprintMismatchError` from
+    # rewrite.py to name the fingerprint-gate failure it induces).
     # The global disposition guard therefore stays clean while the mapping
     # rule itself carries no state-clone suites.
     assert "workers/mapping_builder" in DIRECTORY_RULE_AUDIT_PATHS
@@ -8651,6 +8692,7 @@ def test_mapping_builder_joins_the_directory_audit_without_new_gaps() -> None:
             "tests/test_state_clone.py",
             "tests/test_state_clone_cutover_hook.py",
             "tests/test_state_clone_recalibration.py",
+            "tests/test_state_clone_baseline_cutover_cli.py",
         }
     }
     assert mapping_gaps == expected_gaps, f"mapping-builder gap set changed: {mapping_gaps}"

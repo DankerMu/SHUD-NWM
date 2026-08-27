@@ -304,15 +304,27 @@ MAPPING_BUILDER_TESTS: tuple[str, ...] = (
 # #1711: irregular file-to-suite mappings whose suite names are deliberately NOT
 # same-name derivable. state_clone_hook.py has no tests/test_state_clone_hook.py
 # (its consumer suite is the cutover-hook suite), and the node-22 clone script
-# has no tests/test_node22_clone_direct_grid_cutover_states.py (its two suites
-# are the recalibration pair). Kept as explicit constants so the rule site and
-# the meta-tests read one authority.
+# has no tests/test_node22_clone_direct_grid_cutover_states.py (its four suites
+# are the recalibration core, the recalibration CLI end-to-end, the recalibration
+# CLI validation split, and the baseline-cutover CLI suite). Kept as explicit
+# constants so the rule site and the meta-tests read one authority.
 STATE_CLONE_HOOK_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_cutover_hook.py",
 )
 NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_recalibration.py",
     "tests/test_state_clone_recalibration_cli.py",
+    "tests/test_state_clone_recalibration_cli_validation.py",
+    "tests/test_state_clone_baseline_cutover_cli.py",
+)
+# The CLI environment helpers shared by BOTH recalibration CLI modules. A change
+# to this support module must run both consumers; its suite names are not
+# same-name derivable (no tests/state_clone_recalibration_cli_fixtures.py), so
+# the route is explicit -- consistent with the shared-fixtures support rule
+# below.
+RECALIBRATION_CLI_FIXTURES_TESTS: tuple[str, ...] = (
+    "tests/test_state_clone_recalibration_cli.py",
+    "tests/test_state_clone_recalibration_cli_validation.py",
 )
 
 # #1571: the repository default Python pin and its instruction source are the
@@ -658,13 +670,28 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # independent fingerprint oracle (#1697). The oracle is why this rule
         # matters more than a fixture-builder rule usually does: it re-implements
         # the documented hash format from the fixture bytes, so a change here can
-        # flip both suites from "gate proven" to "gate agreeing with itself"
-        # without touching a line of production code. Both are sub-second.
+        # flip the gate suites from "gate proven" to "gate agreeing with itself"
+        # without touching a line of production code. After the CLI suite split
+        # this rule lists the recalibration core suite plus BOTH recalibration
+        # CLI modules (the end-to-end and the validation split); the baseline
+        # CLI suite ALSO top-level-imports `_write_package`, the calibration
+        # constants and `_IC_V1`/`_PARA_V1`, so it is a fourth direct consumer
+        # and is listed here too. All are sub-second.
         "tests/state_clone_recalibration_fixtures.py",
         (
             "tests/test_state_clone_recalibration.py",
             "tests/test_state_clone_recalibration_cli.py",
+            "tests/test_state_clone_recalibration_cli_validation.py",
+            "tests/test_state_clone_baseline_cutover_cli.py",
         ),
+    ),
+    PathTestRule(
+        # The CLI environment helpers shared by both recalibration CLI modules
+        # (extracted at the §6.8 split). A change here can silently alter what
+        # either module's dispatch/apply tests build, so both consumers must run;
+        # the suite names are not same-name derivable, hence the explicit route.
+        "tests/state_clone_recalibration_cli_fixtures.py",
+        RECALIBRATION_CLI_FIXTURES_TESTS,
     ),
     PathTestRule(
         # The #1735 lineage index builders: every lineage suite publishes REAL
@@ -1058,8 +1085,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         STATE_CLONE_HOOK_TESTS,
     ),
     PathTestRule(
-        # #1711: the node-22 clone script's two suites are the recalibration
-        # pair, not same-name derivable. Explicit irregular mapping.
+        # #1711: the node-22 clone script's four suites are the recalibration
+        # core, the recalibration CLI end-to-end, the recalibration CLI
+        # validation split, and the baseline-cutover CLI suite, not same-name
+        # derivable. Explicit irregular mapping.
         "scripts/node22_clone_direct_grid_cutover_states.py",
         NODE22_CLONE_CUTOVER_STATES_TESTS,
     ),
