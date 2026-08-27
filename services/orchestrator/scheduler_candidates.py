@@ -652,6 +652,13 @@ def build_candidates(
                     raw_candidate_state,
                     state_decision,
                 )
+                state_decision = _apply_explicit_missing_forcing_repair_policy(
+                    context.config,
+                    candidate,
+                    raw_candidate_state,
+                    state_decision,
+                    strict_warm_start=strict_warm_start,
+                )
             if strict_warm_start is not None:
                 candidate = _candidate_with_state_evidence(candidate, strict_warm_start)
             if (
