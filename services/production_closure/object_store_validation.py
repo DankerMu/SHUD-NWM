@@ -499,12 +499,12 @@ def write_synthetic_basins_fixture(root: Path, *, containment_root: Path | None 
     )
     _safe_fixture_write_text(
         input_dir / f"{input_name}.sp.riv",
-        "2 6\n1 0 0 0.01 100 0\n",
+        "2 6\n1 2 0 0.01 100 0\n2 0 0 0.01 100 0\n",
         containment_root=containment_root,
     )
     _safe_fixture_write_text(
         input_dir / f"{input_name}.sp.rivseg",
-        "2 4\n1 1 1 100\n",
+        "2 4\n1 1 1 100\n2 2 2 100\n",
         containment_root=containment_root,
     )
     gis_dir = input_dir / "gis"

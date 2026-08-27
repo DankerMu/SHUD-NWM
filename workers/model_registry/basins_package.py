@@ -868,18 +868,31 @@ def _validate_rivseg_reach_mapping(
     sp_riv = next(file.source_path for file in files if file.relative_path.endswith(".sp.riv"))
     sp_rivseg = next(file.source_path for file in files if file.relative_path.endswith(".sp.rivseg"))
     try:
-        if sp_rivseg.stat().st_size > MAX_RIVSEG_MAPPING_BYTES:
+        if sp_riv.stat().st_size > MAX_RIVSEG_MAPPING_BYTES or sp_rivseg.stat().st_size > MAX_RIVSEG_MAPPING_BYTES:
             raise ValueError("file exceeds the validation byte limit")
-        with sp_riv.open("r", encoding="utf-8") as handle:
-            reach_count = int(handle.readline(4097).split()[0])
-        lines = sp_rivseg.read_text(encoding="utf-8").splitlines()
-        segment_count = int(lines[0].split()[0])
-        if reach_count < 1 or segment_count < 1 or len(lines) != segment_count + 2:
+        reach_lines = sp_riv.read_text(encoding="utf-8").splitlines()
+        reach_count = int(reach_lines[0].split()[0])
+        reach_rows = reach_lines[1:]
+        if reach_rows and not reach_rows[0].split()[0].lstrip("+-").isdigit():
+            reach_rows = reach_rows[1:]
+        reach_ids = {int(line.split()[0]) for line in reach_rows}
+
+        segment_lines = sp_rivseg.read_text(encoding="utf-8").splitlines()
+        segment_count = int(segment_lines[0].split()[0])
+        segment_rows = segment_lines[1:]
+        if segment_rows and not segment_rows[0].split()[0].lstrip("+-").isdigit():
+            segment_rows = segment_rows[1:]
+        if (
+            reach_count < 1
+            or segment_count < 1
+            or len(reach_rows) != reach_count
+            or len(segment_rows) != segment_count
+        ):
             raise ValueError("declared counts do not match the file rows")
-        river_ids = {int(line.split()[1]) for line in lines[2:]}
-        invalid_ids = sorted(river_id for river_id in river_ids if not 1 <= river_id <= reach_count)
+        river_ids = {int(line.split()[1]) for line in segment_rows}
+        invalid_ids = sorted(river_ids - reach_ids)
         if invalid_ids:
-            raise ValueError(f"iRiv values are outside 1..{reach_count}: {invalid_ids}")
+            raise ValueError(f"iRiv values are absent from .sp.riv Index: {invalid_ids}")
     except (OSError, UnicodeError, ValueError, IndexError) as error:
         raise BasinsPackageError(
             "BASINS_RIVSEG_MAPPING_INVALID",

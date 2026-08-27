@@ -3213,6 +3213,27 @@ def test_publish_basins_accepts_multi_reach_rivseg_mapping(
     assert result["status"] == "published"
 
 
+def test_publish_basins_accepts_non_contiguous_reach_indices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_rivseg_mapping_inventory(
+        tmp_path,
+        [1, 9, 180],
+        reach_indices=[1, 9, 180],
+    )
+    _object_store_env(tmp_path, monkeypatch)
+
+    result = basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version="vbasins-rivseg-non-contiguous",
+        output_path=tmp_path / "manifest.json",
+    )
+
+    assert result["status"] == "published"
+
+
 def test_publish_basins_rejects_collapsed_rivseg_mapping_before_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3261,7 +3282,7 @@ def test_publish_basins_rejects_out_of_range_rivseg_mapping(
         )
 
     assert exc_info.value.error_code == "BASINS_RIVSEG_MAPPING_INVALID"
-    assert "outside 1..3" in str(exc_info.value)
+    assert "absent from .sp.riv Index" in str(exc_info.value)
     assert not any(object_root.rglob("*"))
     assert not (tmp_path / "manifest.json").exists()
 
@@ -3330,15 +3351,24 @@ def _write_valid_inventory(
     return inventory_path, inventory["models"][0]["model_id"]
 
 
-def _write_rivseg_mapping_inventory(tmp_path: Path, river_ids: list[int]) -> tuple[Path, str]:
+def _write_rivseg_mapping_inventory(
+    tmp_path: Path,
+    river_ids: list[int],
+    *,
+    reach_indices: list[int] | None = None,
+) -> tuple[Path, str]:
     inventory_path, _model_id = _write_valid_inventory(tmp_path)
     input_dir = tmp_path / "basins" / "basin-a" / "input" / "alias-a"
+    indices = reach_indices or [1, 2, 3]
+    assert len(indices) == 3
+    reach_rows = "".join(
+        f"{index}\t{-1 if position == len(indices) - 1 else indices[position + 1]}\t3\t0.001\t1\t0\n"
+        for position, index in enumerate(indices)
+    )
     (input_dir / "alias-a.sp.riv").write_text(
         "3\t6\n"
         "Index\tDown\tType\tSlope\tLength\tBC\n"
-        "1\t2\t3\t0.001\t1\t0\n"
-        "2\t3\t3\t0.001\t1\t0\n"
-        "3\t-1\t3\t0.001\t1\t0\n",
+        f"{reach_rows}",
         encoding="utf-8",
     )
     rows = "".join(
