@@ -133,6 +133,47 @@ def _candidate_authoritative_stage_retry_attempt_floor_state(
     )
     return filtered
 
+def _candidate_authoritative_stage_retry_attempt_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy-on-read candidate-authoritative attempt view for the raw-state budget read (#1586).
+
+    The strict-warm-start budget is the one attempt read that takes the RAW
+    projected state (the identity-filtered decision state is a local of
+    ``_candidate_state_decision_evaluated`` and never flows back to it).  The
+    carried floors are already narrowed by
+    ``_candidate_authoritative_stage_retry_attempt_floor_state``, but the budget
+    then scans the raw in-window ``pipeline_jobs`` unfiltered, so a model-less
+    suffixed execution-cohort row still inside the window could spend every
+    candidate's budget through the row-scan channel.
+
+    This view narrows BOTH components with the SAME authority predicate, so a
+    candidate's budget cannot diverge between a contributor that truncation left
+    inside the window and one it carried as a floor.  It is copy-on-read: the
+    caller's raw state is never mutated, and the flat top-level ``retry_count``
+    channel stays untouched (#1579).  Deliberately NOT the full
+    ``_candidate_state_decision_state`` -- its shared-cycle aggregate arm strips
+    the authoritative bare ``cycle_<source>_<stamp>`` wedge floor, which must
+    keep binding (#1173 E5).  The source-cycle download blocker escape stays as
+    symmetric as the row loop's, so promoting ``download`` into a canonical
+    stage cannot silently disarm it.
+    """
+
+    expected = _candidate_identity_from_evidence(evidence.get("candidate_identity") or {})
+    jobs = _state_jobs(state)
+    if not expected or not jobs:
+        return _candidate_authoritative_stage_retry_attempt_floor_state(state, evidence)
+    filtered = dict(state)
+    filtered["pipeline_jobs"] = [
+        dict(job)
+        for job in jobs
+        if _state_row_has_authoritative_candidate_proof(expected, job)
+        or _global_source_cycle_download_blocker_job(job, evidence)
+    ]
+    filtered.pop("jobs", None)
+    return _candidate_authoritative_stage_retry_attempt_floor_state(filtered, evidence)
+
 def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
     unresolved_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
     if not unresolved_job_ids:
@@ -386,9 +427,26 @@ def _top_level_source_cycle_download_blocker(
     expected: Mapping[str, Any],
     state: Mapping[str, Any],
 ) -> bool:
+    """Recognise the top-level source-cycle download blocker from blocker-row proof (#1584).
+
+    The shared-cycle aggregate cast (``candidate_state_from_rows``) fills the
+    top-level failure/stage keys from the ACTIVE source-cycle download failure
+    while the state's top-level ``run_id`` stays the CANDIDATE's own run id.  The
+    previous comparison of that top-level ``run_id`` against the source-cycle
+    identity therefore rejected every real projection before a blocker row was
+    even inspected, leaving the restore branch (and the shared-cycle aggregate
+    arm's blocker preservation) unreachable.
+
+    Identity now comes from a CONCRETE unrepaired source-cycle download blocker
+    job row, matched through the same ``_global_source_cycle_download_blocker_job``
+    / ``_source_cycle_identity_matches_expected`` chain the row filter uses.  The
+    top-level failure/stage shape is still validated first, and the candidate's
+    top-level ``run_id`` is deliberately NOT treated as blocker identity.  A
+    top-level-only failure with no matching blocker row -- or with a blocker row
+    naming another source/cycle -- fails closed and is not restored.
+    """
+
     if state.get("shared_cycle_aggregate") is not True:
-        return False
-    if not _source_cycle_identity_matches_expected(expected, state):
         return False
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     if pipeline_status not in FAILED_PIPELINE_STATUSES and state.get("error_code") in (None, ""):
@@ -398,7 +456,7 @@ def _top_level_source_cycle_download_blocker(
         return False
     jobs = _state_jobs(state)
     if not jobs:
-        return True
+        return False
     return any(
         _global_source_cycle_download_blocker_job(job, {"candidate_identity": expected})
         for job in jobs

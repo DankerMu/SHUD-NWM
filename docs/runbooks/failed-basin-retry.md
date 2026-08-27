@@ -131,13 +131,15 @@ Manual re-entry, in order:
    attempt read (no `stage` argument) still answers with the flat candidate-scoped count
    and never sees the floors; a floor whose every contributing row is judged
    non-authoritative for the candidate leaves with those rows, so a cycle cohort row's
-   attempt cannot become this candidate's — that narrowing covers the FLOORS channel
-   only, and at the strict-warm-start budget read an in-window cycle-wide row still
-   reaches the number through the unnarrowed row-scan channel, a pre-existing surface
-   tracked in #1586; and under the geometry where the failed row is
-   outside the window AND a succeeded terminal-stage row empties the stage keys,
-   `_failed_stage` is `None`, so the manual-retry mint still re-derives `_retry_1` and
-   no-ops on the existing key (an accepted boundary, tracked in #1577). When the stage IS
+   attempt cannot become this candidate's — since #1586 that narrowing covers the
+   strict-warm-start budget read's ROW-SCAN channel too, so an in-window suffixed
+   execution-cohort row no longer spends the candidate's budget; and under the geometry
+   where the failed row is outside the window AND a succeeded terminal-stage row empties
+   the stage keys, `_failed_stage` is `None` — since #1577 the manual-retry mint recovers
+   the canonical stage from the newest adopted marker's exact target lineage against the
+   carried floor sources and mints `_retry_<N+1>` instead of re-deriving the consumed
+   `_retry_1` identity (the recovery fails closed when lineage is foreign, absent, stale,
+   non-canonical, or maps to disagreeing stages). When the stage IS
    nameable the mint moves with the floor — it mints `_retry_<N+1>` off the true attempt
    rather than the window-local one. The DB-backed read path truncates in SQL upstream of
    the projection, so an attempt outside that window never reaches the floors either

@@ -36,6 +36,7 @@ from services.orchestrator.scheduler_state_manual_retry import (
     _event_is_manual_retry_marker,
     _manual_retry_new_attempt,
     _manual_retry_payload,
+    _marker_recovered_candidate_stage,
 )
 from services.orchestrator.scheduler_state_rows import (
     _bounded_task_result_rows,
@@ -2203,8 +2204,17 @@ def _manual_retry_state_evidence(
     manual = _manual_retry_payload(state)
     prior_failure = _prior_failure_reason(state) or failure["reason_code"]
     # Candidate-scoped stage axis (#1300): with a cohort-only geometry this resolves nothing
-    # and the derivation falls through to the flat and restarted-stage-family paths.
+    # and the derivation falls through to the flat and restarted-stage-family paths.  When it
+    # is unresolved, the newest adopted marker's exact target lineage may still recover the
+    # truncated row's canonical stage from the carried floor sources, so the mint derives
+    # ``N+1`` instead of re-minting the consumed ``_retry_1`` identity (#1577).  The
+    # stage-scoped read maxes with the flat channel, so no explicit stage-less fallback is
+    # ever overridden, and ``_manual_retry_new_attempt`` keeps its explicit-marker-attempt
+    # precedence unchanged.
     previous_attempt = _state_retry_attempt(state, stage=_candidate_failed_stage(state))
+    recovered_stage = _marker_recovered_candidate_stage(state)
+    if recovered_stage is not None:
+        previous_attempt = _state_retry_attempt(state, stage=recovered_stage)
     new_attempt = _manual_retry_new_attempt(state, previous_attempt=previous_attempt)
     evidence = {
         **base_evidence,
