@@ -34,6 +34,7 @@ from scripts.select_ci_tests import (
     DIRECT_GRID_SURFACE_TESTS,
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
+    FORCED_RESUBMIT_SURFACE_TESTS,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
@@ -253,6 +254,31 @@ def test_select_tests_maps_scheduler_facade_to_manifest_and_file_journal_surface
     assert "tests/test_file_orchestration_migration.py" in selected
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_production_scheduler.py" not in selected
+
+
+def test_select_tests_maps_forced_resubmit_owner_to_focused_suite_plus_integration() -> None:
+    # #1562: the forced-resubmit owner's dedicated suite must join the broad
+    # orchestrator integration selection for an owner-only PR.
+    selected = select_tests(["services/orchestrator/chain_forced_resubmit.py"], repo_root=Path("."))
+
+    assert set(FORCED_RESUBMIT_SURFACE_TESTS) <= set(selected)
+    assert "tests/test_forced_resubmit_veto.py" in selected
+    # The broad `services/orchestrator/**` rule still carries the integration
+    # suites that drive the owner through the composed facade.
+    assert "tests/test_orchestration_chain.py" in selected
+    assert "tests/test_production_scheduler.py" in selected
+    assert "tests/test_warm_start_chaining.py" in selected
+
+
+def test_select_tests_maps_array_evidence_owner_to_focused_suite_plus_integration() -> None:
+    # #1562: the candidate-outcome/evidence owner's dedicated suite must join
+    # the broad orchestrator integration selection for an owner-only PR.
+    selected = select_tests(["services/orchestrator/chain_array_evidence.py"], repo_root=Path("."))
+
+    assert set(FORCED_RESUBMIT_SURFACE_TESTS) <= set(selected)
+    assert "tests/test_forced_resubmit_veto.py" in selected
+    assert "tests/test_orchestration_chain.py" in selected
+    assert "tests/test_production_scheduler.py" in selected
 
 
 def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites() -> None:

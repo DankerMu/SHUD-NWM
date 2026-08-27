@@ -344,12 +344,22 @@ predecessor 始终没有记录）。这类 stall **不能**用补 state 解决�
 `init_state_id` 与 T 的期望 predecessor token 同 base key、异 lineage 后缀"的
 completed-skip 降级为 `retry_journal_predecessor_identity_mismatch` 重跑。这个
 reason 表示该重跑已被证明**不收敛**：同一 cycle+model 上**已有一次 quarantine
-重跑**回来仍记录同一个 stale token。计数口径 = journal 里 terminal-success
-cohort **master** 行中，`journal_predecessor_quarantine_rerun_model_ids`（提交
-预留时按 basin decision 落下的 provenance 戳）含本 model **且**记录了该 token
-的那些；reconcile 复制到 per-model terminal 行的那份不计，所以一次 submission
-的 master+terminal 算 1。首犯那一次不进计数——调用方自己那次 positive mismatch
-就是它的证据——所以阈值是"带戳计数 ≥1"。**不带戳的 master 一律不计**：
+重跑**回来仍记录同一个 stale token。计数口径 = journal 里 terminal cohort **master** 行中，
+`journal_predecessor_quarantine_rerun_model_ids`（提交预留时按 basin decision
+落下的 provenance 戳）含本 model **且**记录了该 token 的那些；reconcile 复制到
+per-model terminal 行的那份不计，所以一次 submission 的 master+terminal 算 1。
+首犯那一次不进计数——调用方自己那次 positive mismatch 就是它的证据——所以阈值
+是"带戳计数 ≥1"。
+
+**master 的"完成"口径（#1562）**：aggregate terminal success（`succeeded` /
+`complete` / `published`）的 master 恒计——它不需要 `candidate_projections`，
+legacy 无投影行照旧。`partially_failed` 的 cohort master **只对本 model 计**：
+仅当它的 bounded `candidate_projections`（journal 最多保留 256 条）里出现该
+exact `model_id` 且 `array_task_outcome="succeeded"` 时，才把这次 submission
+计为该 model 的一次失败收敛尝试——同一 cohort 里别的 basin 任务失败不影响它。
+该 model 自己的投影是 `failed`、缺失、畸形、截断、或在 256 条边界之后看不到
+（fail toward liveness：投影不可见就**下数到 0**，断路器保持断开，宁可再跑一次
+重跑也不要错误 fail-stop），该行对本 model 计 0。**不带戳的 master 一律不计**：
 `retry_terminal_run_manifest_missing` / `retry_missing_forecast_output` 这类与
 §8.7 无关的白名单重提交也会重录同一个 token，把它们计进来会在第一次 quarantine
 判定前就预充断路器、直接 fail-stop 掉本该重跑的那一轮。#1157 之前写的旧 journal
@@ -432,6 +442,83 @@ cohort **master** 行中，`journal_predecessor_quarantine_rerun_model_ids`（�
    应记录 `expected_init_state_id`，§8.7 随即不再判定，cycle 转 complete；
    `blocked_candidates[]` 条目与 backfill `not_selected` 条目同时从 pass evidence
    中消失。
+
+## `terminal_stage_forced_resubmit_veto`
+
+### 含义
+
+Issue #1199 引入的**有界 typed 收据**：当 terminal stage 的 forced-resubmit 判定是
+**混合 cohort**（至少一个 basin 的 decision + canonical restart stage 满足
+forced-resubmit 条件，且至少一个不满足）时，gate 照旧返回 `False`（合取判定
+**逐字不变**，白名单 `_FORCE_TERMINAL_RESUBMIT_DECISIONS` / canonical stage
+顺序规则都不动），并额外记录**第一个**不合资格 basin 的一张定形记录：
+
+```json
+{
+  "schema": "nhms.chain.terminal_stage_forced_resubmit_veto.v1",
+  "reason": "mixed_cohort_forced_resubmit_veto",
+  "cycle_id": "gfs_2026062800",
+  "pipeline_run_id": "cycle_gfs_2026062800",
+  "terminal_job_id": "job_cycle_gfs_2026062800_forecast",
+  "canonical_job_stage": "forecast",
+  "cohort_size": 2,
+  "qualifying_request_count": 1,
+  "first_veto_candidate_id": "gfs:2026-06-28T00:00:00Z:model_b:forecast_gfs_deterministic",
+  "first_veto_model_id": "model_b",
+  "first_veto_basin_id": "basin_model_b",
+  "veto_decision": "skip_terminal",
+  "canonical_restart_stage": "forecast",
+  "veto_cause": "decision_not_in_whitelist"
+}
+```
+
+字段全为**有界标量**：schema/reason 两个稳定 token、cycle/pipeline run/terminal
+job/canonical stage 身份、cohort 规模与合资格请求数、首个 veto 的
+candidate/model/basin 身份、veto decision、canonical restart stage（可空）、
+稳定 cause。`canonical_restart_stage` 按与判定相同的来源优先级
+（`restart_stage` → `restart_from_stage` → context 兜底）解析，**即使**该 basin
+卡在 decision 白名单一关也照常带出（上面的例子就是非白名单 `skip_terminal`
+但 restart stage 仍是 `forecast`）；只有完全解析不出来才为 `null`。每个文本
+字段都受单一名义上限 `FORCED_RESUBMIT_VETO_TEXT_FIELD_MAX`（256）约束——正常
+生产 ID/token 逐字不变，超限值截断并以稳定后缀标记。**没有** basin 列表、原始
+`state_evidence`、路径、URI、secret 或 journal 内容。一次 orchestration
+invocation 至多一张：后面的 stage 检查或更多 veto basin 都不覆盖第一张。
+
+记录只挂在 veto basin 自己的返回 `candidate_outcome` 上，并在 scheduler 执行
+证据里以同名**顶层字段**投影到该候选行（bounded 摘要也会原样保留它）；兄弟候选
+行不带副本。判定为 `True`（全员合资格）或零个合资格（`False`）时**不产生**
+记录——后者不是"混合 incident"，不要当 veto 处置。
+
+`veto_cause` 的稳定取值与含义：
+
+| cause | 含义 |
+|---|---|
+| `state_evidence_missing` | 该 basin 的 `state_evidence` 缺失或不是 mapping |
+| `decision_not_in_whitelist` | `state_evidence.decision` 不在两处 forced-resubmit 白名单里 |
+| `restart_stage_unavailable` | decision 在白名单，但 canonical restart stage 解析不出来（`None`） |
+| `stage_before_restart_stage` | 白名单内且 restart stage 存在，但 terminal job stage 早于 restart stage（`_STAGE_ORDER` 顺序规则） |
+
+### 处置
+
+1. **先分清是"混合 veto"还是"零请求"**。读到这张记录说明 gate 返回了 `False`
+   且 cohort 里至少有一个 basin 原本合格——它的 replacement 被另一个 basin
+   挡住。**没有**记录而 gate 是 `False`（例如 `blocked_candidates[]` 里全员非
+   白名单 decision）是零请求 cohort，不是被否决，处置按对应 typed reason，不
+   是本节。
+2. **看 `first_veto_*` 与 `veto_cause` 定位是哪个 basin、卡在哪一关**：
+   `decision_not_in_whitelist` → 查该 basin 的 decision 为什么没进白名单（正常
+   是 `blocked_*` 或 `skip_*` 系，属正确 fail-closed，不要为了放行去改白名单）；
+   `restart_stage_unavailable` → 该 basin 缺可续跑 restart 点（处置同 failed-basin
+   retry 手册的 restart 口径）；`stage_before_restart_stage` → restart 点在 terminal
+   stage 之后，等 restart 点到站或按链推进。**不要**把 `blocked_journal_*
+   identity_quarantine` 一类 blocked decision 加进两处白名单来"放行"——那正是
+   断路器要防的复活。
+3. **零提交的核对**。收到这张记录的那一轮 pass，对应 terminal stage 没有提交
+   replacement——这是**正确**行为（合取判定没变）。要确认本轮真的零提交，读
+   `counts.submitted_count` 与 `model_run_evidence[].submitted`，不要只靠这条
+   记录本身。
+4. **验证**：把 `veto_cause` 指出的那一关修好后，下一个自然 pass 该 basin 转合格，
+   cohort 全合格时 gate 回 `True` 且**记录消失**——记录只在混合 cohort 出现。
 
 ## 相关文档
 

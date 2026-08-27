@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol, Sequence
 
-from packages.common.redaction import redact_payload
 from services.orchestrator.accepted_submit_identity import (
     accepted_submit_contract_is_current,
     accepted_submit_row_kind,
@@ -95,6 +94,18 @@ def _default_dependencies() -> ArrayAccountingDependencies:
     )
 
 
+# ---------------------------------------------------------------------------
+# #1199 structural split: candidate-outcome / task-outcome / evidence
+# serialization ownership moved to ``chain_array_evidence``.  These thin
+# wrappers keep every pre-existing ``chain_array_accounting.*`` import and
+# monkeypatch path byte-identical (the compatibility inventory's
+# ``_CHAIN_ARRAY_ACCOUNTING_COMPAT_*`` name set requires these names on this
+# module), and they delegate through the SAME dependency injection so the
+# facade bindings in ``chain._array_accounting_dependencies()`` and the
+# module-local ``_default_dependencies()`` remain the single binding authority.
+# ---------------------------------------------------------------------------
+
+
 def record_array_task_outcomes(
     context: CycleOrchestrationContext,
     *,
@@ -102,44 +113,14 @@ def record_array_task_outcomes(
     aggregation: ArrayAggregation,
     deps: ArrayAccountingDependencies | None = None,
 ) -> None:
-    deps = deps or _default_dependencies()
-    basins_by_task = {
-        int(basin.get("task_id", index)): dict(basin) for index, basin in enumerate(context.active_basins)
-    }
-    for task in aggregation.task_results:
-        basin = basins_by_task.get(task.task_id)
-        if basin is None:
-            continue
-        original_task_id = deps.basin_original_task_id(basin, task.task_id)
-        if task.status == "succeeded":
-            previous = context.task_outcomes.get(original_task_id)
-            if previous is None or previous.get("status") == "active":
-                context.task_outcomes[original_task_id] = deps.safe_candidate_outcome_payload(
-                    {
-                        "status": "active",
-                        "stage": stage,
-                        "task_id": task.task_id,
-                        "original_task_id": original_task_id,
-                        "slurm_job_id": task.slurm_job_id,
-                        "exit_code": task.exit_code,
-                        "log_uri": task.log_uri,
-                        "accounting": dict(task.accounting),
-                    }
-                )
-            continue
-        context.task_outcomes[original_task_id] = deps.safe_candidate_outcome_payload(
-            {
-                "status": task.status if task.status in {"failed", "cancelled"} else "unavailable",
-                "stage": stage,
-                "task_id": task.task_id,
-                "original_task_id": original_task_id,
-                "slurm_job_id": task.slurm_job_id,
-                "exit_code": task.exit_code,
-                "log_uri": task.log_uri,
-                "accounting": dict(task.accounting),
-                "reason": f"{stage}_task_{task.status}",
-            }
-        )
+    from services.orchestrator import chain_array_evidence
+
+    chain_array_evidence.record_array_task_outcomes(
+        context,
+        stage=stage,
+        aggregation=aggregation,
+        deps=deps,
+    )
 
 
 def candidate_outcomes(
@@ -148,43 +129,55 @@ def candidate_outcomes(
     final_status: str,
     deps: ArrayAccountingDependencies | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    deps = deps or _default_dependencies()
-    active_keys = {deps.basin_key(basin) for basin in context.active_basins}
-    outcomes: list[dict[str, Any]] = []
-    for index, basin in enumerate(context.all_basins):
-        original_task_id = deps.basin_original_task_id(basin, index)
-        task_outcome = dict(context.task_outcomes.get(original_task_id) or {})
-        is_active = deps.basin_key(basin) in active_keys
-        status = str(task_outcome.get("status") or ("active" if is_active else "unavailable"))
-        if final_status == "failed" and is_active and status == "active":
-            status = "failed"
-        reason = task_outcome.get("reason")
-        if reason is None and not is_active:
-            reason = str(task_outcome.get("stage") or "array_stage") + "_task_excluded"
-        outcomes.append(
-            deps.safe_candidate_outcome_payload(
-                {
-                    "candidate_id": basin.get("candidate_id"),
-                    "run_id": basin.get("run_id"),
-                    "model_id": basin.get("model_id"),
-                    "basin_id": basin.get("basin_id"),
-                    "basin_version_id": basin.get("basin_version_id"),
-                    "river_network_version_id": basin.get("river_network_version_id"),
-                    "task_id": int(basin.get("task_id", index)),
-                    "original_task_id": original_task_id,
-                    "status": status,
-                    "reason": reason,
-                    "failed_stage": (
-                        task_outcome.get("stage") if status in {"failed", "cancelled", "unavailable"} else None
-                    ),
-                    "slurm_job_id": task_outcome.get("slurm_job_id"),
-                    "exit_code": task_outcome.get("exit_code"),
-                    "log_uri": task_outcome.get("log_uri"),
-                    "accounting": task_outcome.get("accounting") or {},
-                }
-            )
-        )
-    return tuple(outcomes)
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence.candidate_outcomes(
+        context,
+        final_status=final_status,
+        deps=deps,
+    )
+
+
+def _matching_veto_basin(
+    basins: Sequence[Mapping[str, Any]],
+    veto: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence._matching_veto_basin(basins, veto)
+
+
+def safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence.safe_candidate_outcome_payload(payload)
+
+
+def json_safe_pipeline_event_value(value: Any) -> Any:
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence.json_safe_pipeline_event_value(value)
+
+
+def stage_task_result_evidence(
+    aggregation: ArrayAggregation | None,
+    *,
+    context: CycleOrchestrationContext | None = None,
+    deps: ArrayAccountingDependencies | None = None,
+) -> tuple[Mapping[str, Any], ...]:
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence.stage_task_result_evidence(
+        aggregation,
+        context=context,
+        deps=deps,
+    )
+
+
+def _basins_by_task_id(context: CycleOrchestrationContext | None) -> dict[int, Mapping[str, Any]]:
+    from services.orchestrator import chain_array_evidence
+
+    return chain_array_evidence._basins_by_task_id(context)
 
 
 def aggregate_array_stage(
@@ -545,41 +538,16 @@ def record_cycle_stage_accounting_event(
     log_uri: str | None,
     deps: ArrayAccountingDependencies | None = None,
 ) -> None:
-    deps = deps or _default_dependencies()
-    accounting = deps.slurm_accounting_from_payload(terminal)
-    if not accounting:
-        orchestrator._record_cycle_stage_accounting_gap(
-            stage,
-            context,
-            pipeline_job_id,
-            slurm_job_id=str(terminal.get("job_id") or terminal.get("slurm_job_id") or ""),
-            message="Slurm accounting metrics were unavailable.",
-            details={"reason": "accounting_unavailable"},
-        )
-        return
-    orchestrator.repository.insert_pipeline_event(
-        entity_type="pipeline_job",
-        entity_id=pipeline_job_id,
-        event_type="slurm_accounting",
-        status_from=None,
-        status_to=str(terminal.get("status") or ""),
-        message=f"{stage.stage} Slurm accounting captured.",
-        details=deps.safe_pipeline_event_details(
-            {
-                "stage": stage.stage,
-                "job_type": stage.job_type,
-                "cycle_id": context.cycle_id,
-                "slurm": {
-                    "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
-                    "state": terminal.get("state") or terminal.get("status"),
-                    "array_task_id": terminal.get("array_task_id"),
-                    "exit_code": terminal.get("exit_code"),
-                    "log_uri": log_uri,
-                    "accounting": accounting,
-                    "resource_metrics": deps.resource_metrics_from_payload(terminal),
-                },
-            }
-        ),
+    from services.orchestrator import chain_array_evidence
+
+    chain_array_evidence.record_cycle_stage_accounting_event(
+        orchestrator,
+        stage,
+        context,
+        pipeline_job_id,
+        terminal,
+        log_uri=log_uri,
+        deps=deps,
     )
 
 
@@ -594,24 +562,17 @@ def record_cycle_stage_accounting_gap(
     details: Mapping[str, Any],
     deps: ArrayAccountingDependencies | None = None,
 ) -> None:
-    deps = deps or _default_dependencies()
-    orchestrator.repository.insert_pipeline_event(
-        entity_type="pipeline_job",
-        entity_id=pipeline_job_id,
-        event_type="slurm_accounting_gap",
-        status_from=None,
-        status_to="blocked",
+    from services.orchestrator import chain_array_evidence
+
+    chain_array_evidence.record_cycle_stage_accounting_gap(
+        orchestrator,
+        stage,
+        context,
+        pipeline_job_id,
+        slurm_job_id=slurm_job_id,
         message=message,
-        details=deps.safe_pipeline_event_details(
-            {
-                "stage": stage.stage,
-                "job_type": stage.job_type,
-                "cycle_id": context.cycle_id,
-                "slurm_job_id": slurm_job_id,
-                "gap": dict(details),
-                "fabricated_metrics": False,
-            }
-        ),
+        details=details,
+        deps=deps,
     )
 
 
@@ -635,11 +596,6 @@ def apply_array_progress(
     context.had_partial = True
     context.last_partial_status = orchestrator._partial_cycle_status(stage)
     context.active_basins = deps.build_reindexed_manifest(context.active_basins, aggregation.succeeded_task_ids)
-
-
-def safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    redacted = redact_payload(json_safe_pipeline_event_value(payload))
-    return dict(redacted) if isinstance(redacted, Mapping) else {}
 
 
 def parse_sacct_array_results(
@@ -839,95 +795,9 @@ def resource_metrics_from_payload(
 
 
 def safe_pipeline_event_details(details: Mapping[str, Any]) -> dict[str, Any]:
-    redacted = redact_payload(json_safe_pipeline_event_value(details))
-    return dict(redacted) if isinstance(redacted, Mapping) else {}
+    from services.orchestrator import chain_array_evidence
 
-
-def json_safe_pipeline_event_value(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return _format_time(value)
-    if isinstance(value, Mapping):
-        return {str(key): json_safe_pipeline_event_value(nested) for key, nested in value.items()}
-    if isinstance(value, tuple):
-        return tuple(json_safe_pipeline_event_value(item) for item in value)
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [json_safe_pipeline_event_value(item) for item in value]
-    return value
-
-
-def stage_task_result_evidence(
-    aggregation: ArrayAggregation | None,
-    *,
-    context: CycleOrchestrationContext | None = None,
-    deps: ArrayAccountingDependencies | None = None,
-) -> tuple[Mapping[str, Any], ...]:
-    if aggregation is None:
-        return ()
-    deps = deps or _default_dependencies()
-    basins_by_task: dict[int, Mapping[str, Any]] = {}
-    if context is not None:
-        basins_by_task = {
-            int(basin.get("task_id", index)): basin for index, basin in enumerate(context.active_basins)
-        }
-    results: list[Mapping[str, Any]] = []
-    for task in aggregation.task_results:
-        basin = basins_by_task.get(task.task_id)
-        original_task_id = task.task_id if basin is None else deps.basin_original_task_id(basin, task.task_id)
-        payload: dict[str, Any] = {
-            "array_task_id": task.task_id,
-            "task_id": task.task_id,
-            "original_task_id": original_task_id,
-            "slurm_job_id": task.slurm_job_id,
-            "state": task.status,
-            "status": task.status,
-            "production_status": deps.production_status_for(task.status),
-            "exit_code": task.exit_code,
-            "error_code": task.error_code,
-            "error_message": task.error_message,
-            "log_uri": task.log_uri,
-            "accounting": dict(task.accounting),
-            "resource_metrics": deps.resource_metrics_from_payload(task.accounting),
-        }
-        if basin is not None:
-            for key in (
-                "model_id",
-                "basin_id",
-                "candidate_id",
-                "run_id",
-                "source_id",
-                "cycle_time",
-                "canonical_product_id",
-                "forcing_version_id",
-                "hydro_run_id",
-                "published_manifest_id",
-            ):
-                value = basin.get(key)
-                if value not in (None, ""):
-                    payload[key] = value
-        results.append(deps.safe_pipeline_event_details(payload))
-    return tuple(results)
-
-
-def _basins_by_task_id(context: CycleOrchestrationContext | None) -> dict[int, Mapping[str, Any]]:
-    """Rebuild the task -> basin mapping using the module's canonical keying rule.
-
-    ``record_array_task_outcomes`` keeps its own local mapping; the stamp sites
-    below run on the re-indexed cohort and must key on the member's own
-    ``run_id``, never ``context.run_id``.
-    """
-
-    if context is None:
-        return {}
-    mapping: dict[int, Mapping[str, Any]] = {}
-    for index, basin in enumerate(getattr(context, "active_basins", ()) or ()):
-        if not isinstance(basin, Mapping):
-            continue
-        try:
-            task_id = int(basin.get("task_id", index))
-        except (TypeError, ValueError):
-            continue
-        mapping[task_id] = basin
-    return mapping
+    return chain_array_evidence.safe_pipeline_event_details(details)
 
 
 def _resolve_task_error_code(

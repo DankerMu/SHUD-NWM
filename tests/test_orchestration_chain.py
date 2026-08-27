@@ -1148,6 +1148,10 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("last_partial_status", None),
                 ("task_outcomes", ("factory", "dict")),
                 ("retry_attempt", None),
+                # #1199: invocation-local, at-most-one mixed-cohort forced-
+                # resubmit veto receipt; additive with a default so positional
+                # constructors stay valid.
+                ("forced_resubmit_veto", None),
             ],
         ),
         "ModelRunAssembly": (
@@ -2126,6 +2130,118 @@ def test_chain_array_accounting_legacy_candidate_outcome_sanitizer_binding(
     assert context.task_outcomes[0]["sanitizer"] == "patched"
     assert outcomes[0]["sanitizer"] == "patched"
     assert outcomes[0]["failed_stage"] == "forcing"
+
+
+# ---------------------------------------------------------------------------
+# #1199: the invocation-local mixed-cohort forced-resubmit veto record attaches
+# ONLY to the vetoing basin's returned candidate outcome — never to a sibling —
+# and only when an exact candidate match is available.
+# ---------------------------------------------------------------------------
+
+
+def _forced_resubmit_veto_fixture() -> dict[str, Any]:
+    return {
+        "schema": "nhms.chain.terminal_stage_forced_resubmit_veto.v1",
+        "reason": "mixed_cohort_forced_resubmit_veto",
+        "cycle_id": "gfs_2026062800",
+        "pipeline_run_id": "cycle_gfs_2026062800",
+        "terminal_job_id": "job_cycle_gfs_2026062800_forecast",
+        "canonical_job_stage": "forecast",
+        "cohort_size": 2,
+        "qualifying_request_count": 1,
+        "first_veto_candidate_id": "gfs:2026-06-28T00:00:00Z:model_b:forecast_gfs_deterministic",
+        "first_veto_model_id": "model_b",
+        "first_veto_basin_id": "basin_model_b",
+        "veto_decision": "skip_terminal",
+        "canonical_restart_stage": "forecast",
+        "veto_cause": "decision_not_in_whitelist",
+    }
+
+
+def _forced_resubmit_outcome_basin(model_id: str) -> dict[str, Any]:
+    return {
+        "task_id": 0 if model_id == "model_a" else 1,
+        "model_id": model_id,
+        "basin_id": f"basin_{model_id}",
+        "candidate_id": f"gfs:2026-06-28T00:00:00Z:{model_id}:forecast_gfs_deterministic",
+        "run_id": f"fcst_gfs_2026062800_{model_id}",
+        "basin_version_id": "bv",
+        "river_network_version_id": "rn",
+    }
+
+
+def test_candidate_outcomes_attach_veto_only_to_vetoing_basin_outcome() -> None:
+    from services.orchestrator import chain_array_accounting
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    veto = _forced_resubmit_veto_fixture()
+    basins = [_forced_resubmit_outcome_basin("model_a"), _forced_resubmit_outcome_basin("model_b")]
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-06-28T00:00:00Z"),
+        cycle_id="gfs_2026062800",
+        run_id="cycle_gfs_2026062800",
+        all_basins=list(basins),
+        active_basins=list(basins),
+        restart_stage="forecast",
+        forced_resubmit_veto=veto,
+    )
+
+    outcomes = chain_array_accounting.candidate_outcomes(context, final_status="succeeded")
+
+    by_model = {outcome["model_id"]: outcome for outcome in outcomes}
+    assert by_model["model_b"]["terminal_stage_forced_resubmit_veto"] == veto
+    assert "terminal_stage_forced_resubmit_veto" not in by_model["model_a"]
+
+
+def test_candidate_outcomes_omit_veto_when_no_exact_candidate_match() -> None:
+    from services.orchestrator import chain_array_accounting
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    # The record names candidate identity that does not appear in the cohort,
+    # and the model/basin identity is not unique either — no safe exact match,
+    # so the boolean verdict is preserved and evidence is omitted rather than
+    # misattached.
+    veto = dict(_forced_resubmit_veto_fixture())
+    veto["first_veto_candidate_id"] = "unknown_candidate"
+    veto["first_veto_model_id"] = "model_x"
+    veto["first_veto_basin_id"] = "basin_x"
+    basins = [_forced_resubmit_outcome_basin("model_a"), _forced_resubmit_outcome_basin("model_b")]
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-06-28T00:00:00Z"),
+        cycle_id="gfs_2026062800",
+        run_id="cycle_gfs_2026062800",
+        all_basins=list(basins),
+        active_basins=list(basins),
+        restart_stage="forecast",
+        forced_resubmit_veto=veto,
+    )
+
+    outcomes = chain_array_accounting.candidate_outcomes(context, final_status="succeeded")
+
+    assert all("terminal_stage_forced_resubmit_veto" not in outcome for outcome in outcomes)
+
+
+def test_candidate_outcomes_omit_veto_when_no_record_was_created() -> None:
+    from services.orchestrator import chain_array_accounting
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    basins = [_forced_resubmit_outcome_basin("model_a"), _forced_resubmit_outcome_basin("model_b")]
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-06-28T00:00:00Z"),
+        cycle_id="gfs_2026062800",
+        run_id="cycle_gfs_2026062800",
+        all_basins=list(basins),
+        active_basins=list(basins),
+        restart_stage="forecast",
+        forced_resubmit_veto=None,
+    )
+
+    outcomes = chain_array_accounting.candidate_outcomes(context, final_status="succeeded")
+
+    assert all("terminal_stage_forced_resubmit_veto" not in outcome for outcome in outcomes)
 
 
 def test_display_log_publication_attempt_type_hints_resolve_through_legacy_chain() -> None:

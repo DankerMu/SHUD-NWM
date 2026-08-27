@@ -492,6 +492,18 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_warm_start_chaining.py",
 )
 
+# #1562 structural split: the forced-resubmit evaluator/evidence owner
+# (chain_forced_resubmit.py) and the candidate-outcome/evidence owner
+# (chain_array_evidence.py) each have one dedicated focused suite. The broad
+# `services/orchestrator/**` rule already selects the integration suites that
+# drive these owners (test_orchestration_chain.py, test_production_scheduler.py,
+# test_warm_start_chaining.py); this additive non-stop rule attaches the focused
+# suite so an owner-only PR runs its own assertions instead of falling to
+# integration-only coverage.
+FORCED_RESUBMIT_SURFACE_TESTS: tuple[str, ...] = (
+    "tests/test_forced_resubmit_veto.py",
+)
+
 SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_cli_publish_qdown.py",
     "tests/test_scheduler_backfill.py",
@@ -1818,6 +1830,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # resolved) alongside core smoke and the selector meta-guard.
         "uv.lock",
         (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST),
+    ),
+    # #1562 structural split owners.  Additive (non-stop) on purpose: the broad
+    # `services/orchestrator/**` rule below the stop rules already carries the
+    # integration suites for these owners, and these narrow rules only attach
+    # the dedicated focused suite.  Without them an owner-only PR would run the
+    # integration suites but never this suite's own assertions.
+    PathTestRule(
+        "services/orchestrator/chain_forced_resubmit.py",
+        FORCED_RESUBMIT_SURFACE_TESTS,
+    ),
+    PathTestRule(
+        "services/orchestrator/chain_array_evidence.py",
+        FORCED_RESUBMIT_SURFACE_TESTS,
     ),
 )
 

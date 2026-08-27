@@ -21,35 +21,60 @@ from services.orchestrator.accepted_submit_identity import (
 from services.orchestrator.accepted_submit_identity import (
     OPERATOR_VERIFIED_ABSENCE_DECISION as _OPERATOR_VERIFIED_ABSENCE_DECISION,
 )
+from services.orchestrator.chain_forced_resubmit import (
+    _FORCE_TERMINAL_RESUBMIT_DECISIONS as _FORCE_TERMINAL_RESUBMIT_DECISIONS,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _STAGE_ORDER as _STAGE_ORDER,
+)
+
+#: #1199 forced-resubmit evaluator/evidence ownership lives in
+#: ``chain_forced_resubmit``.  This module retains the pre-existing
+#: ``_FORCE_TERMINAL_RESUBMIT_DECISIONS``, ``_canonical_stage``, and
+#: ``_terminal_stage_needs_forced_resubmit`` import/monkeypatch surface as
+#: direct aliases so the class gate and historical callers/tests keep reading
+#: exactly the same objects (one source of truth, no second implementation).
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_CAUSE_DECISION_NOT_IN_WHITELIST as FORCED_RESUBMIT_VETO_CAUSE_DECISION_NOT_IN_WHITELIST,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_CAUSE_RESTART_STAGE_UNAVAILABLE as FORCED_RESUBMIT_VETO_CAUSE_RESTART_STAGE_UNAVAILABLE,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_CAUSE_STAGE_BEFORE_RESTART as FORCED_RESUBMIT_VETO_CAUSE_STAGE_BEFORE_RESTART,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_CAUSE_STATE_EVIDENCE_MISSING as FORCED_RESUBMIT_VETO_CAUSE_STATE_EVIDENCE_MISSING,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_REASON as FORCED_RESUBMIT_VETO_REASON,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_SCHEMA as FORCED_RESUBMIT_VETO_SCHEMA,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    FORCED_RESUBMIT_VETO_TEXT_FIELD_MAX as FORCED_RESUBMIT_VETO_TEXT_FIELD_MAX,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _basin_qualifies_forced_resubmit as _basin_qualifies_forced_resubmit,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _bounded_veto_text as _bounded_veto_text,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _canonical_stage as _canonical_stage,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _forced_resubmit_veto_record as _forced_resubmit_veto_record,
+)
+from services.orchestrator.chain_forced_resubmit import (
+    _terminal_stage_needs_forced_resubmit as _terminal_stage_needs_forced_resubmit,
+)
 from services.orchestrator.file_orchestration_journal import (
     OPERATOR_RECOVERY_ATTESTATION_FIELD,
     FileOrchestrationJournalError,
 )
 from services.orchestrator.retry_identity import RETRY_JOB_ID_MARKER, split_retry_job_identity
-
-_FORCE_TERMINAL_RESUBMIT_DECISIONS = {
-    "retry_repair_missing_forcing",
-    "retry_missing_forecast_output",
-    "retry_strict_warm_start_terminal_init_state_mismatch",
-    "retry_strict_warm_start_terminal_run_manifest_missing",
-    "retry_strict_warm_start_retry_run_manifest_mismatch",
-    "retry_terminal_run_manifest_missing",
-    # §8.7 quarantine rerun (#1157): the cycle's forecast job already
-    # SUCCEEDED with a stale predecessor lineage, so an idle resume would
-    # re-adopt that very run.  The rerun only means anything as a real
-    # replacement submission.  Its breaker fail-stop decision
-    # (``blocked_journal_predecessor_identity_quarantine``) is deliberately
-    # NOT a member — nothing may revive it.
-    "retry_journal_predecessor_identity_mismatch",
-}
-_STAGE_ORDER = {
-    "convert": 0,
-    "forcing": 1,
-    "forecast": 2,
-    "state_save_qc": 3,
-    "parse": 4,
-    "publish": 5,
-}
 
 
 class ForecastOrchestratorCycleMixin:
@@ -897,34 +922,6 @@ class ForecastOrchestratorCycleMixin:
         return _chain.chain_forecast_cycle.job_needs_submission(job)
 
 
-def _terminal_stage_needs_forced_resubmit(
-    context: _chain.CycleOrchestrationContext,
-    job: _chain.Mapping[str, _chain.Any],
-) -> bool:
-    status = str(job.get("status") or "")
-    if status not in _chain.TERMINAL_JOB_STATUSES:
-        return False
-    if not context.active_basins:
-        return False
-    job_stage = _canonical_stage(job.get("stage") or job.get("job_type"))
-    if job_stage is None:
-        return False
-    for basin in context.active_basins:
-        state_evidence = basin.get("state_evidence")
-        if not isinstance(state_evidence, _chain.Mapping):
-            return False
-        if state_evidence.get("decision") not in _FORCE_TERMINAL_RESUBMIT_DECISIONS:
-            return False
-        restart_stage = _canonical_stage(
-            state_evidence.get("restart_stage")
-            or state_evidence.get("restart_from_stage")
-            or context.restart_stage
-        )
-        if restart_stage is None or _STAGE_ORDER[job_stage] < _STAGE_ORDER[restart_stage]:
-            return False
-    return True
-
-
 def _verified_accepted_submit_forecast_retry(job: _chain.Mapping[str, _chain.Any]) -> bool:
     """Allow the reclaim shortcut only for reconcile-verified forecast cohorts."""
 
@@ -965,19 +962,3 @@ def _operator_recovery_attested(job: _chain.Mapping[str, _chain.Any]) -> bool:
         and job.get("slurm_job_id") in (None, "")
         and job.get("matched_slurm_job_id") in (None, "")
     )
-
-
-def _canonical_stage(value: _chain.Any) -> str | None:
-    if value in (None, ""):
-        return None
-    stage = str(value)
-    aliases = {
-        "convert_canonical": "convert",
-        "produce_forcing_array": "forcing",
-        "run_shud_forecast_array": "forecast",
-        "save_state_snapshot_array": "state_save_qc",
-        "parse_output_array": "parse",
-        "publish_tiles": "publish",
-    }
-    stage = aliases.get(stage, stage)
-    return stage if stage in _STAGE_ORDER else None

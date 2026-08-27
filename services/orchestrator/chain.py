@@ -82,6 +82,7 @@ from services.orchestrator.chain_types import (
     PipelineResult,
     StageDefinition,
     StageRunResult,
+    TERMINAL_JOB_STATUSES,
     TerminalJobObservation,
 )
 from services.orchestrator.persistence import PipelineEvent as PipelineEvent
@@ -203,15 +204,6 @@ _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
-TERMINAL_JOB_STATUSES = {
-    "succeeded",
-    "partially_failed",
-    "failed",
-    "cancelled",
-    "submission_failed",
-    "reservation_lost",
-    "permanently_failed",
-}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
 COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}

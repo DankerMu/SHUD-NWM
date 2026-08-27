@@ -4,6 +4,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
+#: Terminal job statuses shared across the orchestrator chain.  Lives here (the
+#: dependency-free types module) so light owner modules such as
+#: ``chain_forced_resubmit`` can read it without importing the heavy ``chain``
+#: facade; ``chain`` re-exports the same object, so the legacy
+#: ``chain.TERMINAL_JOB_STATUSES`` import surface is unchanged.  Deliberately a
+#: plain ``set`` (not ``frozenset``): the pre-split canonical object was a
+#: mutable ``set`` and the behavior-preserving split must not change an
+#: importable object's type or mutability.
+TERMINAL_JOB_STATUSES = {
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "cancelled",
+    "submission_failed",
+    "reservation_lost",
+    "permanently_failed",
+}
+
 
 class OrchestratorError(RuntimeError):
     def __init__(self, error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
@@ -227,6 +245,12 @@ class CycleOrchestrationContext:
     last_partial_status: str | None = None
     task_outcomes: dict[int, dict[str, Any]] = field(default_factory=dict)
     retry_attempt: int | None = None
+    #: Invocation-local, at-most-one mixed-cohort forced-resubmit veto receipt
+    #: (#1199).  Set by the forced-resubmit gate on the first decisive veto and
+    #: never overwritten by later stage checks; it rides the returned
+    #: candidate outcome of the vetoing basin.  Never a process-global or
+    #: orchestrator attribute, so concurrent cohort workers cannot race it.
+    forced_resubmit_veto: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

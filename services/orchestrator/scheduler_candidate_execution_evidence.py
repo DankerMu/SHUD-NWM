@@ -770,6 +770,14 @@ def _candidate_execution_evidence_item(
     if candidate_outcome is not None:
         candidate_outcome = _evidence_safe(candidate_outcome)
         item["candidate_outcome"] = candidate_outcome
+        # #1199: project the mixed-cohort forced-resubmit veto record as a
+        # named TOP-LEVEL field on the vetoing candidate row.  The nested
+        # ``candidate_outcome`` may still carry it; the top-level field is what
+        # survives bounded candidate summarization (the summary row retains the
+        # fixed-shape record verbatim).  Never fanned to sibling candidate rows.
+        veto = candidate_outcome.get("terminal_stage_forced_resubmit_veto")
+        if isinstance(veto, Mapping):
+            item["terminal_stage_forced_resubmit_veto"] = _evidence_safe(dict(veto))
         if _is_partial_candidate_evidence(item):
             item["error_code"] = str(candidate_outcome.get("reason") or f"CANDIDATE_{status}").upper()
             item["error_message"] = f"Candidate {candidate.candidate_id} was {status} in the partial multi-basin cycle."

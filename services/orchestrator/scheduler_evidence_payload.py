@@ -20,6 +20,13 @@ _BOUNDED_CANDIDATE_SUMMARY_KEYS = (
     "model_id",
     "status",
     "reason",
+    # #1199: the fixed-shape mixed-cohort forced-resubmit veto record must
+    # survive bounded candidate summarization so the operator-facing zero-submit
+    # explanation stays traceable under evidence pressure.  It is one bounded
+    # scalar block (no lists), so retaining it verbatim keeps the summary
+    # bounded while preserving the exact schema/reason, identities, counts,
+    # decision, restart stage, and cause.
+    "terminal_stage_forced_resubmit_veto",
     # Retained so an already-summarized row survives a second summary pass.
     "summary_error",
 )

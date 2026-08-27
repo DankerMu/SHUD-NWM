@@ -31689,6 +31689,149 @@ def test_non_dry_run_partial_cycle_marks_failed_candidate_without_fanning_succes
     }
 
 
+# ---------------------------------------------------------------------------
+# #1199: the mixed-cohort forced-resubmit veto record is projected as a named
+# top-level field on the vetoing candidate's scheduler execution evidence row,
+# is NOT fanned to sibling rows, and survives bounded candidate summarization
+# with its exact fixed shape.
+# ---------------------------------------------------------------------------
+
+
+_FORCED_RESUBMIT_VETO_FIXTURE = {
+    "schema": "nhms.chain.terminal_stage_forced_resubmit_veto.v1",
+    "reason": "mixed_cohort_forced_resubmit_veto",
+    "cycle_id": "gfs_2026052106",
+    "pipeline_run_id": "cycle_gfs_2026052106",
+    "terminal_job_id": "job_cycle_gfs_2026052106_forecast",
+    "canonical_job_stage": "forecast",
+    "cohort_size": 2,
+    "qualifying_request_count": 1,
+    "first_veto_candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+    "first_veto_model_id": "model_b",
+    "first_veto_basin_id": "basin_b",
+    "veto_decision": "skip_terminal",
+    "canonical_restart_stage": "forecast",
+    "veto_cause": "decision_not_in_whitelist",
+}
+
+
+def test_non_dry_run_mixed_cohort_veto_projects_top_level_field_on_vetoing_candidate(
+    tmp_path: Path,
+) -> None:
+    """#1199: the receipt is a named top-level field on the vetoing row only."""
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_b",
+                "model_id": "model_b",
+                "status": "active",
+                "stage": "forecast",
+                "terminal_stage_forced_resubmit_veto": dict(_FORCED_RESUBMIT_VETO_FIXTURE),
+            },
+        ),
+        result_status="parsed_partial",
+    )
+    config = _config(tmp_path, now=now, dry_run=False)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    evidence_by_model = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    assert "terminal_stage_forced_resubmit_veto" not in evidence_by_model["model_a"]
+    veto_row = evidence_by_model["model_b"]["terminal_stage_forced_resubmit_veto"]
+    assert veto_row == _FORCED_RESUBMIT_VETO_FIXTURE
+    # The nested candidate outcome may still carry it, but the top-level field is
+    # the named projection consumers read.
+    assert (
+        evidence_by_model["model_b"]["candidate_outcome"]["terminal_stage_forced_resubmit_veto"]
+        == _FORCED_RESUBMIT_VETO_FIXTURE
+    )
+
+
+def test_bounded_candidate_summary_retains_forced_resubmit_veto_fixed_shape() -> None:
+    """#1199: bounded summarization keeps the fixed-shape record verbatim.
+
+    The scheduler receipt compacts candidate rows under evidence pressure; the
+    vetoing row's `terminal_stage_forced_resubmit_veto` block must survive with
+    the exact schema/reason, identities, counts, decision, restart stage, and
+    cause — and sibling rows must not inherit a copy.
+    """
+
+    import services.orchestrator.scheduler as scheduler_module
+    import services.orchestrator.scheduler_evidence_payload as scheduler_evidence_payload_module
+
+    vetoing_row = {
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_b:forecast_gfs_deterministic",
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "cycle_time_utc": "2026-05-21T06:00:00Z",
+        "scenario_id": "forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026052106_model_b",
+        "forcing_version_id": "forc_gfs_2026052106_model_b",
+        "basin_id": "basin_b",
+        "model_id": "model_b",
+        "status": "submitted_partial",
+        "reason": "partial_cycle",
+        "state_evidence": {"decision": "skip_terminal", "restart_stage": "forecast"},
+        "terminal_stage_forced_resubmit_veto": dict(_FORCED_RESUBMIT_VETO_FIXTURE),
+    }
+    sibling_row = {
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "cycle_time_utc": "2026-05-21T06:00:00Z",
+        "scenario_id": "forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "forcing_version_id": "forc_gfs_2026052106_model_a",
+        "basin_id": "basin_a",
+        "model_id": "model_a",
+        "status": "submitted_partial",
+        "state_evidence": {"decision": "retry_terminal_run_manifest_missing", "restart_stage": "forecast"},
+    }
+
+    summary = scheduler_evidence_payload_module._bounded_candidate_summary(vetoing_row)
+    assert summary["terminal_stage_forced_resubmit_veto"] == _FORCED_RESUBMIT_VETO_FIXTURE
+    # The retained block is one bounded scalar mapping; no list fan-out.
+    assert isinstance(summary["terminal_stage_forced_resubmit_veto"], dict)
+    # Idempotent under a second summary pass.
+    assert scheduler_evidence_payload_module._bounded_candidate_summary(summary) == summary
+
+    sibling_summary = scheduler_evidence_payload_module._bounded_candidate_summary(sibling_row)
+    assert "terminal_stage_forced_resubmit_veto" not in sibling_summary
+
+    # End-to-end through the scheduler receipt compaction: the fixed shape
+    # survives candidate-list summarization, sibling rows carry no copy.
+    payload = _incident_scheduler_evidence_payload("scheduler_2026052112_veto")
+    payload["candidates"] = [sibling_row, vetoing_row]
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+    summarized = json.loads(json.dumps(bounded))
+    scheduler_evidence_payload_module._summarize_bounded_candidate_lists(summarized)
+    veto_rows = [row for row in summarized["candidates"] if row.get("model_id") == "model_b"]
+    sibling_rows = [row for row in summarized["candidates"] if row.get("model_id") == "model_a"]
+    assert veto_rows and veto_rows[0]["terminal_stage_forced_resubmit_veto"] == _FORCED_RESUBMIT_VETO_FIXTURE
+    assert sibling_rows and "terminal_stage_forced_resubmit_veto" not in sibling_rows[0]
+
+
 @pytest.mark.parametrize("outcome_status", ["submission_failed", "permanently_failed"])
 def test_non_dry_run_partial_cycle_counts_failed_alias_candidate_as_failed(
     tmp_path: Path,
