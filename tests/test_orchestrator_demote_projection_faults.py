@@ -494,6 +494,120 @@ def test_plain_reserve_post_append_direct_fault_returns_committed_reservation(
     assert fresh.query_candidate_state(record["idempotency_key"])["status"] == "reserved"
 
 
+def test_plain_reserve_post_append_latest_fault_returns_committed_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1796 task 1.1: the model-bearing plain reserve's independent LATEST
+    projection fault after the committed append is contained exactly like the
+    direct one: the committed reservation is returned, exactly one bounded
+    warning and one durable bounded event identify ``projection=latest``, the
+    event append never re-enters the failed latest projection
+    (``materialize=False``), and journal replay stays authoritative."""
+    import json
+    import logging
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    root = repository.root
+    record = _plain_reservation_record()
+
+    class SecretShapedError(RuntimeError):
+        pass
+
+    latest_calls: list[str] = []
+
+    def fail_latest_once(*, source_id: Any, cycle_time: Any, model_id: str, **kwargs: Any) -> None:
+        latest_calls.append(model_id)
+        if len(latest_calls) == 1:
+            error = SecretShapedError(
+                "Authorization: Bearer abc.def.ghi password=supersecret /private/secret-path/token=tok_live_123"
+            )
+            error.reason = "supersecret"
+            error.error_code = "tok_live_123"
+            raise error
+
+    monkeypatch.setattr(repository, "_materialize_latest_unlocked", fail_latest_once)
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        reserved = repository.reserve_pipeline_job(record)
+
+    # The committed reservation is returned, never a false write failure; the
+    # real direct/inventory projection path still succeeded before the fault.
+    assert reserved is not None
+    assert reserved["status"] == "reserved"
+    assert reserved["job_id"] == record["job_id"]
+    assert reserved["idempotency_key"] == record["idempotency_key"]
+    direct_path = root / "pipeline-jobs" / f"{record['job_id']}.json"
+    assert json.loads(direct_path.read_text(encoding="utf-8"))["payload"]["status"] == "reserved"
+    inventory_anchor = root / "reconcile-inventory" / f"{record['job_id']}.json"
+    assert json.loads(inventory_anchor.read_text(encoding="utf-8"))["job_id"] == record["job_id"]
+    # The latest projection was attempted exactly once -- the durable event
+    # append uses ``materialize=False``, so it never recursively re-enters the
+    # failed latest projection (a second call would succeed and break this).
+    assert latest_calls == ["model_0"]
+    # Exactly one bounded non-secret warning for ``projection=latest`` with the
+    # fixed token; no exception text/class/path/error_code/reason/secrets.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "projection=latest" in message
+    assert "model_id=model_0" in message
+    assert "code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT" in message
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+    ):
+        assert literal not in message
+    # Exactly one durable bounded committed-fault event for the latest
+    # projection; fixed reason/error_type tokens, committed reservation, no
+    # secret-shaped data anywhere in the payload.
+    events = [
+        event
+        for event in _durable_events(root)
+        if event.get("event_type") == "committed_projection_fault"
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["status_to"] == "reserved"
+    details = event["details"]
+    assert details["projection"] == "latest"
+    assert details["model_id"] == "model_0"
+    assert details["reason"] == "projection_fault"
+    assert details["error_type"] == "projection_fault"
+    assert details["committed"] is True
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+        "injected",
+    ):
+        assert literal not in json.dumps(event)
+    # A fresh repository (no monkeypatches) replays the same committed
+    # reservation from authority.
+    fresh = FileOrchestrationJournalRepository(root)
+    current = fresh.get_pipeline_job(record["job_id"])
+    assert current is not None
+    assert current["status"] == "reserved"
+    assert current["job_id"] == record["job_id"]
+    assert current["idempotency_key"] == record["idempotency_key"]
+    assert current["status"] == reserved["status"]
+    assert current["job_id"] == reserved["job_id"]
+    assert current["idempotency_key"] == reserved["idempotency_key"]
+
+
 def test_plain_reserve_pre_append_append_fault_stays_fail_closed_byte_identical(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
