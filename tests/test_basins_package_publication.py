@@ -3368,7 +3368,12 @@ def _write_rivseg_mapping_inventory(
     (input_dir / "alias-a.sp.riv").write_text(
         "3\t6\n"
         "Index\tDown\tType\tSlope\tLength\tBC\n"
-        f"{reach_rows}",
+        f"{reach_rows}"
+        "3\t4\n"
+        "Index\tX1\tY1\tNode1\n"
+        "1\t0\t0\t1\n"
+        "2\t1\t1\t2\n"
+        "3\t2\t2\t3\n",
         encoding="utf-8",
     )
     rows = "".join(

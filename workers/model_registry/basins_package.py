@@ -875,6 +875,12 @@ def _validate_rivseg_reach_mapping(
         reach_rows = reach_lines[1:]
         if reach_rows and not reach_rows[0].split()[0].lstrip("+-").isdigit():
             reach_rows = reach_rows[1:]
+        if len(reach_rows) < reach_count:
+            raise ValueError("declared reach count exceeds the .sp.riv body rows")
+        # Standard SHUD .sp.riv files carry coordinate/topology blocks after
+        # the declared reach table.  Only the first reach_count rows define the
+        # Index values referenced by .sp.rivseg.
+        reach_rows = reach_rows[:reach_count]
         reach_ids = {int(line.split()[0]) for line in reach_rows}
 
         segment_lines = sp_rivseg.read_text(encoding="utf-8").splitlines()
@@ -885,7 +891,6 @@ def _validate_rivseg_reach_mapping(
         if (
             reach_count < 1
             or segment_count < 1
-            or len(reach_rows) != reach_count
             or len(segment_rows) != segment_count
         ):
             raise ValueError("declared counts do not match the file rows")
