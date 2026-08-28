@@ -2300,3 +2300,23 @@ round intent, distinguishes lens identity only by labels, and mixes pinned
 fix-verification with genuine exploration. **Keep rotation** unchanged under the
 recorded autonomous default; any reversal still requires the existing
 schema/round-role repair plus maintainer review.
+
+## Revisit 2026-08-28 (post #1586/#1584/#1577 / PR #1876) — keep; clean pinned closure adds no rotation datum
+
+`loop_log_audit.py` now reports **138** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `137 / 86 / 296` after PR #1873.
+PR #1876 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced six independently verified
+FIX_NOW findings. Round 2 deliberately re-ran four Round 1 lenses — correctness,
+integration, test-evidence, and invariant-state — against the paired-state,
+writer-attempt, direct-identity, and production-evidence fixes. It returned zero
+candidates, and both Phase 7 gap sweeps were clean.
+
+This is pinned fix-verification, not a rotation experiment: Round 2 introduced no
+new subject-matter lens. Its clean result proves closure for this PR but cannot
+show whether a rotated free slot would add recall. The cumulative aggregate still
+favors retaining rotation, and this sample supplies no evidence for a cut.
+**Keep rotation** unchanged under the recorded autonomous default; any reversal
+still requires the existing attribution schema/round-role repair plus maintainer
+review.
