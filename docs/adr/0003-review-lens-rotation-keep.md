@@ -2356,3 +2356,18 @@ free slot. **Keep rotation** unchanged under the recorded autonomous default.
 The cumulative aggregate still supplies no basis for an autonomous cut; any
 reversal continues to require the existing attribution schema/round-role repair
 plus maintainer review.
+
+## Revisit 2026-08-28 (post #1872 child 2 / PR #1883) — keep; final single-round clean adds no rotation datum
+
+After the PR #1883 accountability line, `loop_log_audit.py` still reports **139**
+multi-round merged PRs and later-round catches **core=86 / rotated=296**. The
+counts are unchanged from the post-PR #1880 revisit because PR #1883 had one
+comprehensive round only: its six-lens Round 1 and Phase 7 Gap Sweep were clean,
+so no follow-up lens set existed to classify as pinned or rotated.
+
+PR #1883 completes #1872's second physical-split child and confirms the high-tier
+first-pass review can close a selector- and collection-sensitive test move. It
+still supplies no observation about free-slot rotation. **Keep rotation**
+unchanged under the recorded autonomous default; the cumulative aggregate gives
+no basis for an autonomous cut, and any reversal continues to require the
+existing attribution schema/round-role repair plus maintainer review.
