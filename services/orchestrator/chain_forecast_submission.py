@@ -5,6 +5,7 @@ from pathlib import Path
 
 from services.orchestrator import chain as _chain
 from services.orchestrator.accepted_submit_identity import accepted_submit_pipeline_job_model_id
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
 
 CycleOrchestrationContext = _chain.CycleOrchestrationContext
 OrchestratorError = _chain.OrchestratorError
@@ -161,8 +162,14 @@ def _skip_duplicate_submission(
             ),
             details=_safe_pipeline_event_details(skip),
         )
-    except OrchestratorError:
-        # Evidence emission must never abort a correct skip decision.
+    except (OrchestratorError, FileOrchestrationJournalError):
+        # Evidence emission must never abort a correct skip decision.  The
+        # db-free repository's evidence writes raise
+        # ``FileOrchestrationJournalError`` (a sibling of ``OrchestratorError``,
+        # not a subclass), so both repository-domain families are contained
+        # here -- the same contract as the sibling same-intent handler in
+        # ``chain_forecast_orchestrator_cycle``.  Arbitrary exceptions still
+        # surface: the catch set is exactly the two evidence families.
         pass
     return StageRunResult(
         stage=stage.stage,

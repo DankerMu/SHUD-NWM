@@ -7,6 +7,8 @@ and carries bounded non-secret warnings.
 
 from __future__ import annotations
 
+import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,19 @@ from tests.orchestrator_demote_reserved_job_helpers import (
     _held_row,
     _journal_bytes,
 )
+
+
+def _durable_events(root: Path) -> list[dict[str, Any]]:
+    """All durable ``pipeline_event`` payloads for the fixture journal."""
+    events: list[dict[str, Any]] = []
+    for path in sorted((root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            payload = record.get("payload") or {}
+            if record.get("record_type") == "pipeline_event":
+                events.append(payload)
+    return events
+
 
 
 def test_demote_direct_projection_fault_returns_committed_receipt_with_warning(
@@ -395,3 +410,425 @@ def test_reclaim_post_append_inventory_fault_keeps_reclaim_committed(
     assert current["status"] == "reserved"
     assert int(current["submission_attempt"]) == int(demoted["submission_attempt"]) + 1
     assert current["idempotency_key"] == demoted["idempotency_key"]
+
+
+# ---------------------------------------------------------------------------
+# #1796: generic reservation/reclaim commit boundary (plain reserve + automatic
+# absence) — the post-append projection containment generalizes from the
+# operator old-ID route to every reserve/reclaim write.
+# ---------------------------------------------------------------------------
+def _plain_reservation_record() -> dict[str, Any]:
+    return {
+        "job_id": "job_generic_reserve",
+        "run_id": "fcst_gfs_2026071200_model_0",
+        "cycle_id": "gfs_2026071200",
+        "job_type": "run_shud_forecast_array",
+        "model_id": "model_0",
+        "status": "reserved",
+        "stage": "forecast",
+        "idempotency_key": "gfs:gfs_2026071200:basin_0:forecast",
+        "candidate_id": "candidate_0",
+    }
+
+
+def test_plain_reserve_post_append_direct_fault_returns_committed_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1796 task 1.1/1.3: a plain clean reservation's authority append commits
+    before the derived direct/latest projections, so a post-append direct fault
+    must return the committed row (not ``FILE_JOURNAL_WRITE_FAILED``) and fresh
+    replay must observe the same reservation; the pre-append control stays
+    fail-closed with byte-identical authority."""
+    import logging
+
+    from services.orchestrator.chain_types import OrchestratorError
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _plain_reservation_record()
+
+    latest_calls: list[str] = []
+    original_materialize = repository._materialize_latest_unlocked
+
+    def tracking_materialize(*, source_id: Any, cycle_time: Any, model_id: str, **kwargs: Any) -> None:
+        latest_calls.append(model_id)
+        original_materialize(source_id=source_id, cycle_time=cycle_time, model_id=model_id, **kwargs)
+
+    def fail_direct(*_args: Any, **_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+
+    monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", fail_direct)
+    monkeypatch.setattr(repository, "_materialize_latest_unlocked", tracking_materialize)
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        reserved = repository.reserve_pipeline_job(record)
+
+    # The committed reservation is returned, never a false write failure.
+    assert reserved is not None
+    assert reserved["status"] == "reserved"
+    assert reserved["job_id"] == record["job_id"]
+    assert reserved["idempotency_key"] == record["idempotency_key"]
+    # The remaining independent latest projection was still attempted.
+    assert latest_calls == ["model_0"]
+    # Exactly one bounded non-secret warning with the fixed token.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "projection=pipeline_job_direct" in message
+    assert "code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT" in message
+    assert "injected" not in message
+    assert "FILE_JOURNAL_WRITE_FAILED" not in message
+    assert "OrchestratorError" not in message
+    # A fresh repository replays the committed reservation.
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    current = fresh.get_pipeline_job(record["job_id"])
+    assert current is not None
+    assert current["status"] == "reserved"
+    assert current["idempotency_key"] == record["idempotency_key"]
+    assert fresh.query_candidate_state(record["idempotency_key"])["status"] == "reserved"
+
+
+def test_plain_reserve_post_append_latest_fault_returns_committed_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1796 task 1.1: the model-bearing plain reserve's independent LATEST
+    projection fault after the committed append is contained exactly like the
+    direct one: the committed reservation is returned, exactly one bounded
+    warning and one durable bounded event identify ``projection=latest``, the
+    event append never re-enters the failed latest projection
+    (``materialize=False``), and journal replay stays authoritative."""
+    import json
+    import logging
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    root = repository.root
+    record = _plain_reservation_record()
+
+    class SecretShapedError(RuntimeError):
+        pass
+
+    latest_calls: list[str] = []
+
+    def fail_latest_once(*, source_id: Any, cycle_time: Any, model_id: str, **kwargs: Any) -> None:
+        latest_calls.append(model_id)
+        if len(latest_calls) == 1:
+            error = SecretShapedError(
+                "Authorization: Bearer abc.def.ghi password=supersecret /private/secret-path/token=tok_live_123"
+            )
+            error.reason = "supersecret"
+            error.error_code = "tok_live_123"
+            raise error
+
+    monkeypatch.setattr(repository, "_materialize_latest_unlocked", fail_latest_once)
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        reserved = repository.reserve_pipeline_job(record)
+
+    # The committed reservation is returned, never a false write failure; the
+    # real direct/inventory projection path still succeeded before the fault.
+    assert reserved is not None
+    assert reserved["status"] == "reserved"
+    assert reserved["job_id"] == record["job_id"]
+    assert reserved["idempotency_key"] == record["idempotency_key"]
+    direct_path = root / "pipeline-jobs" / f"{record['job_id']}.json"
+    assert json.loads(direct_path.read_text(encoding="utf-8"))["payload"]["status"] == "reserved"
+    inventory_anchor = root / "reconcile-inventory" / f"{record['job_id']}.json"
+    assert json.loads(inventory_anchor.read_text(encoding="utf-8"))["job_id"] == record["job_id"]
+    # The latest projection was attempted exactly once -- the durable event
+    # append uses ``materialize=False``, so it never recursively re-enters the
+    # failed latest projection (a second call would succeed and break this).
+    assert latest_calls == ["model_0"]
+    # Exactly one bounded non-secret warning for ``projection=latest`` with the
+    # fixed token; no exception text/class/path/error_code/reason/secrets.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "projection=latest" in message
+    assert "model_id=model_0" in message
+    assert "code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT" in message
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+    ):
+        assert literal not in message
+    # Exactly one durable bounded committed-fault event for the latest
+    # projection; fixed reason/error_type tokens, committed reservation, no
+    # secret-shaped data anywhere in the payload.
+    events = [
+        event
+        for event in _durable_events(root)
+        if event.get("event_type") == "committed_projection_fault"
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["status_to"] == "reserved"
+    details = event["details"]
+    assert details["projection"] == "latest"
+    assert details["model_id"] == "model_0"
+    assert details["reason"] == "projection_fault"
+    assert details["error_type"] == "projection_fault"
+    assert details["committed"] is True
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+        "injected",
+    ):
+        assert literal not in json.dumps(event)
+    # A fresh repository (no monkeypatches) replays the same committed
+    # reservation from authority.
+    fresh = FileOrchestrationJournalRepository(root)
+    current = fresh.get_pipeline_job(record["job_id"])
+    assert current is not None
+    assert current["status"] == "reserved"
+    assert current["job_id"] == record["job_id"]
+    assert current["idempotency_key"] == record["idempotency_key"]
+    assert current["status"] == reserved["status"]
+    assert current["job_id"] == reserved["job_id"]
+    assert current["idempotency_key"] == reserved["idempotency_key"]
+
+
+def test_plain_reserve_pre_append_append_fault_stays_fail_closed_byte_identical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1796 task 1.3: an authority-append failure before commit raises the
+    existing typed error and leaves the journal bytes byte-identical."""
+    from services.orchestrator.chain_types import OrchestratorError
+    from tests.orchestrator_demote_reserved_job_helpers import _journal_bytes
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _plain_reservation_record()
+    before = _journal_bytes(repository.root)
+
+    def fail_append(*_args: Any, **_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "forced append failure")
+
+    monkeypatch.setattr(repository, "_append_journal_record_unlocked", fail_append)
+
+    with pytest.raises(OrchestratorError):
+        repository.reserve_pipeline_job(record)
+    assert _journal_bytes(repository.root) == before
+
+
+def test_clean_reserve_emits_no_committed_projection_fault_event(tmp_path: Path) -> None:
+    """#1796 task 1.2/4.1 clean-path control: a fault-free plain reservation
+    appends no ``committed_projection_fault`` event and no bounded warning."""
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    reserved = repository.reserve_pipeline_job(_plain_reservation_record())
+    assert reserved is not None and reserved["status"] == "reserved"
+    assert _durable_events(repository.root) == []
+    # Also covers the clean reclaim control through the automatic absence door.
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        JOB_ID,
+        _held_cohort_repository,
+        _held_row,
+    )
+
+    second = _held_cohort_repository(tmp_path / "auto")
+    held = _held_row(second)
+    assert second.permit_pipeline_job_retry(
+        JOB_ID,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = _held_row(second)
+    reclaimed = second.reclaim_pipeline_job_reservation(
+        {
+            **permitted,
+            "expected_submission_attempt": permitted["submission_attempt"],
+            "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+            "status": "reserved",
+            "submission_attempt": int(permitted["submission_attempt"]) + 1,
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "matched_slurm_job_id": None,
+        }
+    )
+    assert reclaimed is not None and reclaimed["status"] == "reserved"
+    assert _durable_events(second.root) == []
+
+
+def test_plain_reserve_projection_and_secondary_evidence_fault_still_returns_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1796 task 1.2: a secondary evidence-write failure after a committed
+    projection fault must not reverse the committed reservation."""
+    from services.orchestrator.chain_types import OrchestratorError
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    record = _plain_reservation_record()
+
+    def fail_direct(*_args: Any, **_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+
+    def fail_event_append(*_args: Any, **_kwargs: Any) -> None:
+        raise FileOrchestrationJournalError("file_journal_append_failed", field="append")
+
+    monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", fail_direct)
+    monkeypatch.setattr(repository, "_append_pipeline_job_event_unlocked", fail_event_append)
+
+    reserved = repository.reserve_pipeline_job(record)
+    assert reserved is not None
+    assert reserved["status"] == "reserved"
+    # The committed reservation survives both fault layers.
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    assert fresh.get_pipeline_job(record["job_id"])["status"] == "reserved"
+
+
+def test_plain_reserve_post_append_fault_warning_and_event_are_non_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1796 task 1.2 auth surface: a secret-shaped exception never reaches the
+    bounded warning or the durable committed-warning event; both carry fixed
+    tokens, and the event identifies the projection without raw exception data."""
+    import json
+    import logging
+
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    root = repository.root
+    record = _plain_reservation_record()
+
+    class SecretShapedError(RuntimeError):
+        pass
+
+    def fail_direct(*_args: Any, **_kwargs: Any) -> None:
+        error = SecretShapedError(
+            "Authorization: Bearer abc.def.ghi password=supersecret /private/secret-path/token=tok_live_123"
+        )
+        error.reason = "supersecret"
+        error.error_code = "tok_live_123"
+        raise error
+
+    monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", fail_direct)
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        reserved = repository.reserve_pipeline_job(record)
+    assert reserved is not None and reserved["status"] == "reserved"
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+    ):
+        assert literal not in message
+
+    # The durable committed-warning event carries only fixed tokens.
+    events = _durable_events(root)
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "committed_projection_fault"
+    assert event["status_to"] == "reserved"
+    details = event["details"]
+    assert details["projection"] == "pipeline_job_direct"
+    assert details["model_id"] is None
+    assert details["reason"] == "projection_fault"
+    assert details["error_type"] == "projection_fault"
+    for literal in (
+        "abc.def.ghi",
+        "supersecret",
+        "secret-path",
+        "tok_live_123",
+        "SecretShapedError",
+        "Bearer",
+        "injected",
+    ):
+        assert literal not in json.dumps(event)
+
+
+def test_automatic_absence_reclaim_post_append_direct_fault_returns_committed_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1796 task 1.1: the generic reclaim for an automatic
+    ``absence_retry_permitted`` row (not the operator route) must contain a
+    post-append direct fault and return the committed reserved attempt+1."""
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.chain_types import OrchestratorError
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        JOB_ID,
+        STARTED_AT,
+        _held_cohort_repository,
+        _held_row,
+    )
+
+    repository = _held_cohort_repository(tmp_path)
+    held = _held_row(repository)
+    assert repository.permit_pipeline_job_retry(
+        JOB_ID,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = _held_row(repository)
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+    locked_anchor = STARTED_AT + timedelta(hours=5)
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: locked_anchor)
+
+    def fail_direct_once(*_args: Any, **_kwargs: Any) -> None:
+        raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+
+    monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", fail_direct_once)
+
+    reclaimed = repository.reclaim_pipeline_job_reservation(
+        {
+            **permitted,
+            "expected_submission_attempt": permitted["submission_attempt"],
+            "expected_submission_attempt_started_at": permitted["submission_attempt_started_at"],
+            "status": "reserved",
+            "submission_attempt": int(permitted["submission_attempt"]) + 1,
+            "submit_outcome": None,
+            "reconciliation_source": None,
+            "reconciliation_decision": None,
+            "matched_slurm_job_id": None,
+        }
+    )
+
+    assert reclaimed is not None
+    assert reclaimed["status"] == "reserved"
+    assert int(reclaimed["submission_attempt"]) == int(permitted["submission_attempt"]) + 1
+    assert reclaimed["idempotency_key"] == permitted["idempotency_key"]
+    # Fresh replay sees the committed reservation.
+    fresh = FileOrchestrationJournalRepository(repository.root)
+    current = fresh.get_accepted_submit_pipeline_job(JOB_ID)
+    assert current["status"] == "reserved"
+    assert int(current["submission_attempt"]) == int(permitted["submission_attempt"]) + 1
+    assert current["submission_attempt_started_at"] == locked_anchor.isoformat().replace("+00:00", "Z")

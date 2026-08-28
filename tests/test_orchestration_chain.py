@@ -13915,6 +13915,341 @@ def test_public_operator_recovery_automatic_absence_keeps_retry_suffix_replaceme
     assert repository.get_accepted_submit_pipeline_job(retry_job_id) is not None
 
 
+@pytest.mark.parametrize("projection_site", ["direct", "inventory"])
+def test_public_automatic_absence_post_append_projection_fault_still_submits_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    projection_site: str,
+) -> None:
+    """#1796 task 2.1/2.2 (public seam): a one-shot post-append direct or
+    reconcile-inventory fault on the automatic ``absence_retry_permitted``
+    recovery still completes the single submission.
+
+    The automatic path mints a fresh retry-suffixed reservation (old dead row
+    stays ``reservation_lost``), so the escaping window is the plain reserve of
+    the retry-suffixed current master: the authority append commits then the
+    direct/inventory projection faults exactly once inside the containment
+    window.  The same public pass must succeed, submit exactly once with the
+    retry-suffixed identity, keep journal replay authoritative, never surface
+    ``FILE_JOURNAL_WRITE_FAILED``, and emit exactly one bounded warning.  A
+    second independent public pass resumes the terminal, submits zero, and
+    never reports ``PIPELINE_ALREADY_ACTIVE``.
+    """
+    import logging
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.chain_types import OrchestratorError
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _held_cohort_repository,
+    )
+
+    repository = _held_cohort_repository(tmp_path / "auto")
+    root = repository.root
+    old_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    held = repository.get_accepted_submit_pipeline_job(old_job_id)
+    # Pin the journal clock BEFORE the fake client's terminal timestamps
+    # (2026-05-01), so the second pass's stage selection deterministically
+    # prefers the committed retry-1 terminal row over the older dead row's
+    # refreshed ``updated_at`` -- the automatic-absence retry semantics are
+    # unchanged; this only removes a wall-clock race from the fixture.
+    pinned_clock = _dt("2026-04-30T12:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: pinned_clock)
+    assert repository.permit_pipeline_job_retry(
+        old_job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+
+    retry_job_id = f"{old_job_id}_retry_1"
+    retry_key = "cycle_gfs_2026071200_forecast_fixture:forecast:retry_1"
+
+    original_direct = repository._write_pipeline_job_direct_unlocked
+    original_sync_inventory = repository._sync_reconcile_inventory_for_row_unlocked
+    original_write_unlocked = repository._write_pipeline_job_unlocked
+    faults_fired = [0]
+    in_containment = [False]
+    direct_writes = [0]
+    inventory_syncs = [0]
+
+    def tracing_write_unlocked(
+        row: Any, *, exclusive_direct: bool, model_id: str | None, **kwargs: Any
+    ) -> Any:
+        containment = bool(kwargs.get("_committed_projection_containment"))
+        if containment:
+            in_containment[0] = True
+        try:
+            return original_write_unlocked(
+                row, exclusive_direct=exclusive_direct, model_id=model_id, **kwargs
+            )
+        finally:
+            if containment:
+                in_containment[0] = False
+
+    def counting_direct(row: Any, record: Any) -> None:
+        if str(row.get("job_id") or "") == retry_job_id:
+            direct_writes[0] += 1
+        if (
+            projection_site == "direct"
+            and in_containment[0]
+            and str(row.get("job_id") or "") == retry_job_id
+            and faults_fired[0] == 0
+        ):
+            faults_fired[0] += 1
+            raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+        return original_direct(row, record)
+
+    def failing_inventory_sync(row: Any) -> bool:
+        if (
+            projection_site == "inventory"
+            and in_containment[0]
+            and str(row.get("job_id") or "") == retry_job_id
+            and str(row.get("status") or "") == "reserved"
+            and faults_fired[0] == 0
+        ):
+            inventory_syncs[0] += 1
+            if inventory_syncs[0] == 2:
+                faults_fired[0] += 1
+                raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected inventory projection failure")
+        return original_sync_inventory(row)
+
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path / "auto-orch", repository, client, terminal_stage="forecast")
+    monkeypatch.setattr(repository, "_write_pipeline_job_unlocked", tracing_write_unlocked)
+    monkeypatch.setattr(repository, "_write_pipeline_job_direct_unlocked", counting_direct)
+    if projection_site == "inventory":
+        monkeypatch.setattr(repository, "_sync_reconcile_inventory_for_row_unlocked", failing_inventory_sync)
+
+    with caplog.at_level(logging.WARNING, logger="services.orchestrator.file_orchestration_journal"):
+        result = orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+
+    # The same public pass succeeded with exactly one submission, no PAA, and no
+    # escaping FILE_JOURNAL_WRITE_FAILED surface.
+    assert result.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in result.stages}
+    assert len(client.submissions) == 1
+    assert client.submissions[0]["stage"] == "forecast"
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{retry_key}"
+    # Retry-suffixed identity is preserved and the immutable cohort member
+    # contract holds.  (``cohort_digest`` deliberately differs: it hashes the
+    # retry job id / idempotency key, so a fresh retry-suffixed reservation is
+    # a new identity -- the immutable contract is the member projection.)
+    current = repository.get_accepted_submit_pipeline_job(retry_job_id)
+    assert current is not None
+    assert current["job_id"] == retry_job_id
+    assert current["idempotency_key"] == retry_key
+    assert current["cohort_members"] == permitted["cohort_members"]
+    assert current["status"] in {"submitted", "running", "succeeded", "failed"}
+    # The old dead row is untouched by the automatic path.
+    old = repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert old["status"] == "reservation_lost"
+    assert old["reconciliation_decision"] == "absence_retry_permitted"
+    # Exactly one bounded non-secret warning fired at the injected site.
+    assert faults_fired[0] == 1
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warning_records) == 1
+    message = warning_records[0].getMessage()
+    assert "projection=pipeline_job_direct" in message
+    assert "code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT" in message
+    assert "injected" not in message
+    assert "FILE_JOURNAL_WRITE_FAILED" not in message
+    assert "OrchestratorError" not in message
+    if projection_site == "inventory":
+        assert direct_writes[0] >= 1
+        assert inventory_syncs[0] == 2
+    # Fresh replay (no monkeypatches) sees the committed retry reservation.
+    fresh = FileOrchestrationJournalRepository(root)
+    replayed = fresh.get_accepted_submit_pipeline_job(retry_job_id)
+    assert replayed is not None
+    assert replayed["idempotency_key"] == retry_key
+    assert replayed["job_id"] == retry_job_id
+    assert fresh.query_candidate_state(retry_key) is not None
+
+    # Second independent public pass: zero additional submission, no PAA.
+    second_client = FakeCycleSlurmClient()
+    second_orchestrator = _orchestrator(
+        tmp_path / "second", repository, second_client, terminal_stage="forecast"
+    )
+    second = second_orchestrator.orchestrate_cycle("gfs", "2026071200", _operator_recovery_basins())
+    assert len(second_client.submissions) == 0
+    assert second.status == "succeeded"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {stage.error_code for stage in second.stages}
+
+
+def test_two_concurrent_public_automatic_absence_cycles_with_projection_fault_submit_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#1796 task 2.3: deterministic winner/loser proof that post-append
+    containment cannot let two passes own the same automatic retry attempt.
+
+    Two independent orchestrator/repository instances share one journal and
+    rendezvous deterministically around the REAL reserve boundary (barrier
+    wrappers delegate to the real implementations).  The winner's reserve
+    commits the fresh retry-suffixed attempt with a one-shot direct projection
+    fault contained; the loser's reserve runs against the committed row, loses
+    the gate, and is governed to the duplicate-skip terminal.  Exactly one
+    submission, no ``PIPELINE_ALREADY_ACTIVE``, exactly one bounded warning.
+    """
+    import logging
+    import threading
+
+    from services.orchestrator import file_orchestration_journal as journal_module
+    from services.orchestrator.accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
+    from services.orchestrator.chain_types import OrchestratorError
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.orchestrator_demote_reserved_job_helpers import (
+        _held_cohort_repository,
+    )
+
+    held_repository = _held_cohort_repository(tmp_path)
+    journal_root = held_repository.root
+    old_job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    held = held_repository.get_accepted_submit_pipeline_job(old_job_id)
+    # Same wall-clock pin as the single-pass sibling: the fixture's fake client
+    # timestamps (2026-05-01) must stay newer than the journal clock so the
+    # committed retry-1 terminal is the deterministic stage-selection winner.
+    pinned_clock = _dt("2026-04-30T12:00:00Z")
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: pinned_clock)
+    assert held_repository.permit_pipeline_job_retry(
+        old_job_id,
+        accepted_submit_contract_version=ACCEPTED_SUBMIT_CONTRACT_VERSION,
+        expected_submission_attempt=1,
+        expected_submission_attempt_started_at=held["submission_attempt_started_at"],
+    ) == 1
+    permitted = held_repository.get_accepted_submit_pipeline_job(old_job_id)
+    assert permitted["reconciliation_decision"] == "absence_retry_permitted"
+
+    retry_job_id = f"{old_job_id}_retry_1"
+    retry_key = "cycle_gfs_2026071200_forecast_fixture:forecast:retry_1"
+
+    repo_a = FileOrchestrationJournalRepository(journal_root)
+    repo_b = FileOrchestrationJournalRepository(journal_root)
+    client = FakeCycleSlurmClient()
+    orch_a = _orchestrator(tmp_path / "a", repo_a, client, terminal_stage="forecast")
+    orch_b = _orchestrator(tmp_path / "b", repo_b, client, terminal_stage="forecast")
+
+    # Deterministic rendezvous: A reaches the real reserve and waits for B's
+    # preflight; B crosses the preflight (A has not committed yet), signals, and
+    # then blocks on A's committed attempt.  A commits with the one-shot
+    # projection fault contained, so B's reserve CAS always runs against A's
+    # committed row and B loses.
+    b_preflighted = threading.Event()
+    a_appended = threading.Event()
+    faults_fired = [0]
+    in_containment = [False]
+    a_reserve_original = repo_a.reserve_pipeline_job
+    a_write_unlocked_original = repo_a._write_pipeline_job_unlocked
+    a_direct_original = repo_a._write_pipeline_job_direct_unlocked
+
+    def tracing_write_unlocked(
+        row: Any, *, exclusive_direct: bool, model_id: str | None, **kwargs: Any
+    ) -> Any:
+        containment = bool(kwargs.get("_committed_projection_containment"))
+        if containment:
+            in_containment[0] = True
+        try:
+            return a_write_unlocked_original(
+                row, exclusive_direct=exclusive_direct, model_id=model_id, **kwargs
+            )
+        finally:
+            if containment:
+                in_containment[0] = False
+
+    def failing_direct(row: Any, record: Any) -> None:
+        if (
+            in_containment[0]
+            and str(row.get("job_id") or "") == retry_job_id
+            and faults_fired[0] == 0
+        ):
+            faults_fired[0] += 1
+            raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected direct projection failure")
+        return a_direct_original(row, record)
+
+    repo_a._write_pipeline_job_unlocked = tracing_write_unlocked
+    repo_a._write_pipeline_job_direct_unlocked = failing_direct
+
+    def a_reserve(*args: Any, **kwargs: Any) -> Any:
+        assert b_preflighted.wait(timeout=15), "B never crossed the preflight"
+        result = a_reserve_original(*args, **kwargs)
+        a_appended.set()
+        return result
+
+    repo_a.reserve_pipeline_job = a_reserve
+
+    b_reserve_original = repo_b.reserve_pipeline_job
+
+    def b_reserve(*args: Any, **kwargs: Any) -> Any:
+        b_preflighted.set()
+        assert a_appended.wait(timeout=15), "A never committed the reservation append"
+        return b_reserve_original(*args, **kwargs)
+
+    repo_b.reserve_pipeline_job = b_reserve
+
+    outcomes: dict[str, Any] = {}
+
+    def run(name: str, orchestrator: Any) -> None:
+        outcomes[name] = orchestrator.orchestrate_cycle(
+            "gfs", "2026071200", _operator_recovery_basins()
+        )
+
+    threads = [
+        threading.Thread(target=run, args=("a", orch_a)),
+        threading.Thread(target=run, args=("b", orch_b)),
+    ]
+    threads[0].start()
+    threads[1].start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "cycle thread hung at the rendezvous"
+
+    a_result = outcomes["a"]
+    b_result = outcomes["b"]
+    assert a_result.status == "succeeded"
+    assert b_result.status == "skipped_duplicate_submission"
+    assert "PIPELINE_ALREADY_ACTIVE" not in {s.error_code for s in b_result.stages}
+    assert len(client.submissions) == 1
+    assert client.submissions[0]["manifest"]["comment"] == f"nhms_idem:{retry_key}"
+    assert faults_fired[0] == 1
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.name == "services.orchestrator.file_orchestration_journal"
+        and record.levelno == logging.WARNING
+        and "committed reclaim projection fault" in record.getMessage()
+    ]
+    assert len(warning_records) == 1
+    # Only ONE pass owns the retry attempt; the loser's skip evidence is durable.
+    current = repo_a.get_accepted_submit_pipeline_job(retry_job_id)
+    assert current is not None
+    assert current["idempotency_key"] == retry_key
+    assert any(skip["idempotency_key"] == retry_key for skip in orch_b.duplicate_submission_skips)
+    events = []
+    for path in sorted((journal_root / "journal").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            payload = record.get("payload") or {}
+            if record.get("record_type") == "pipeline_event" and payload.get(
+                "event_type"
+            ) == "submission_skipped":
+                events.append(payload)
+    assert len(events) == 1
+    assert events[0]["entity_id"] == retry_job_id
+    assert events[0]["status_to"] == "skipped_duplicate_submission"
+
+
 def test_operator_direct_retry_attempt_fields_bypass_manual_retry_claim_judgement() -> None:
     """E3: direct basin fields are the invocation's own input, not a scheduler projection."""
 
@@ -14441,6 +14776,121 @@ def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path
     # No second durable row was created for the key.
     rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
     assert len(rows) == 1
+
+
+@pytest.mark.parametrize("fault_class", ["orchestrator", "file_journal"])
+def test_skip_duplicate_submission_survives_expected_evidence_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_class: str,
+) -> None:
+    """#1568 task 3.2 (real skip seam): a duplicate-skip evidence write that
+    raises either repository-domain exception family still returns
+    ``skipped_duplicate_submission``, keeps the bounded in-memory skip evidence,
+    and performs zero sbatch."""
+    from services.orchestrator.chain import _cycle_stage_idempotency_key
+    from services.orchestrator.chain_types import OrchestratorError
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    store = _pipeline_store()
+    repository = _RaceSemanticsCycleRepository(store)
+
+    class _FailingEventRepository(_RaceSemanticsCycleRepository):
+        def insert_pipeline_event(self, **_kwargs: Any) -> dict[str, Any]:
+            if fault_class == "orchestrator":
+                raise OrchestratorError("FILE_JOURNAL_WRITE_FAILED", "injected event failure")
+            raise FileOrchestrationJournalError("file_journal_byte_limit_exceeded", field="event")
+
+    repository = _FailingEventRepository(store)
+    submit_calls: list[str] = []
+
+    class _CountingSubmitClient(FakeCycleSlurmClient):
+        def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+            submit_calls.append(payload["manifest"]["stage"])
+            return super().submit_job(payload)
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            submit_calls.append(kwargs.get("stage_name", "array"))
+            return super().submit_job_array(*args, **kwargs)
+
+    client = _CountingSubmitClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    stage = M3_STAGES[0]  # convert: non-array, single submit_job.
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=_basins(2),
+        active_basins=_basins(2),
+    )
+    key = _cycle_stage_idempotency_key(context, stage)
+    store.reserve_job(
+        job_id="prior_pass_job",
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        job_type=stage.job_type,
+        model_id=None,
+        stage=stage.stage,
+        idempotency_key=key,
+    )
+    store.bind_reservation(key, slurm_job_id="90099", status="running")
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(stage, context)
+
+    assert result.status == "skipped_duplicate_submission"
+    assert result.error_code is None
+    assert aggregation is None
+    assert submit_calls == []
+    # Bounded in-memory skip evidence is preserved even when the durable event
+    # emission raised.
+    assert [skip["idempotency_key"] for skip in orchestrator.duplicate_submission_skips] == [key]
+    assert orchestrator.duplicate_submission_skips[0]["reason"] == "candidate_already_inflight"
+
+
+def test_skip_duplicate_submission_does_not_catch_arbitrary_exceptions(
+    tmp_path: Path,
+) -> None:
+    """#1568 control: the aligned handler still does NOT catch arbitrary
+    exceptions — a RuntimeError from the evidence write escapes, proving the
+    catch set was not broadened."""
+    from services.orchestrator.chain import _cycle_stage_idempotency_key
+
+    store = _pipeline_store()
+    repository = _RaceSemanticsCycleRepository(store)
+
+    class _BoomEventRepository(_RaceSemanticsCycleRepository):
+        def insert_pipeline_event(self, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("programming bug must surface")
+
+    repository = _BoomEventRepository(store)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    stage = M3_STAGES[0]
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=_basins(2),
+        active_basins=_basins(2),
+    )
+    key = _cycle_stage_idempotency_key(context, stage)
+    store.reserve_job(
+        job_id="prior_pass_job",
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        job_type=stage.job_type,
+        model_id=None,
+        stage=stage.stage,
+        idempotency_key=key,
+    )
+    store.bind_reservation(key, slurm_job_id="90099", status="running")
+
+    with pytest.raises(RuntimeError, match="programming bug must surface"):
+        orchestrator._submit_and_wait_cycle_stage(stage, context)
 
 
 # --- #1202: fail-closed cycle-stage terminal handling -----------------------
