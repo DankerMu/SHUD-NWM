@@ -38,7 +38,6 @@
     "packages/common/state_manager.py",
     "services/orchestrator/file_orchestration_journal.py",
     "services/orchestrator/scheduler_candidates.py",
-    "services/orchestrator/scheduler_config.py",
     "services/orchestrator/scheduler_generation.py",
     "services/orchestrator/scheduler_state_failure.py",
     "services/orchestrator/scheduler_evidence.py",

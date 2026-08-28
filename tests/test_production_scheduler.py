@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 from urllib.parse import unquote, urlparse
 
 import pytest
@@ -18526,12 +18526,24 @@ def test_issue_1400_removed_the_db_free_selector_path_resolve_line() -> None:
 
 
 def _functions_calling_resolve(module: Any) -> set[str]:
-    """Every function in ``module`` that still calls ``.resolve()``, in any form."""
+    """Every function in ``module`` that still calls ``.resolve()``, in any form.
 
-    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    Package-aware: a module owner scans its single ``.py`` file; a package owner
+    scans every direct implementation ``.py`` beneath the package (including the
+    compatibility barrel) so moving functions between package files cannot make
+    the oracle silently blind.
+    """
+
+    source_path = Path(module.__file__ or "")
+    source_files = (
+        sorted(source_path.parent.glob("*.py"))
+        if source_path.name == "__init__.py"
+        else [source_path]
+    )
     return {
         node.name
-        for node in ast.walk(ast.parse(source))
+        for source in source_files
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _resolve_call_names(node)
     }
 
@@ -18558,6 +18570,23 @@ def test_db_free_normalization_modules_call_resolve_only_where_allowlisted() -> 
     # out of scope and that is routed for a family-level ruling of its own.
     assert _functions_calling_resolve(retry_module) == set()
     assert _functions_calling_resolve(scheduler_config_module) == {"_safe_preserve_final_component"}
+
+
+def test_db_free_helper_annotations_resolve_config_class_through_package() -> None:
+    # #1872 package split regression: in the monolith, ``_db_free_allowed_roots``
+    # and ``_db_free_allowed_roots_and_blockers`` shared a module namespace with
+    # ``ProductionSchedulerConfig``, so ``typing.get_type_hints`` resolved their
+    # ``config`` annotations to the live class. The package moved the helpers to
+    # ``db_free.py``, which only declares the class under TYPE_CHECKING, so the
+    # annotation became unresolvable at runtime. The barrel must bind the class
+    # into ``db_free``'s runtime globals after importing it so the historical
+    # introspection contract (and any consumer of it) stays intact. The asserted
+    # identity is the facade class after scheduler-first import, i.e. exactly
+    # ``scheduler_config_module.ProductionSchedulerConfig``.
+    for helper_name in ("_db_free_allowed_roots", "_db_free_allowed_roots_and_blockers"):
+        helper = getattr(scheduler_config_module, helper_name)
+        config_hint = get_type_hints(helper)["config"]
+        assert config_hint is scheduler_config_module.ProductionSchedulerConfig, helper_name
 
 
 #: The one in-domain input class where the two primitives genuinely disagree and
