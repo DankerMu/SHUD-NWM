@@ -69,6 +69,13 @@ AND they identify the backend scheduler/orchestrator path as the production auto
 
 When the scheduler pass evidence payload exceeds the configured size bound and the bounded fallback shape is emitted, the artifact SHALL preserve an operator-readable observability floor — the true computed pass status, per-candidate summary rows, and a compact restart-reconcile block — without weakening the fail-closed top-level status contract or the hard size bound.
 
+#### Scenario: candidate-heavy evidence is summarized before fail-closed fallback
+
+- WHEN full-fidelity candidate, model-run, or cancellation rows make a pass artifact exceed `max_evidence_bytes`
+- THEN the writer first replaces those rows with fixed-key identity/outcome summaries and records `evidence_compaction.mode = "non_blocking_summary"`
+- AND if that summarized artifact fits, it preserves the pass status computed by the scheduler instead of reporting `resource_limit_blocked`
+- AND if it still does not fit, the existing bounded fallback and its fail-closed top-level status contract apply unchanged.
+
 #### Scenario: pre-limit status is preserved inside the limit block
 
 - WHEN the evidence payload exceeds `max_evidence_bytes` and the bounded fallback payload is written
@@ -332,4 +339,3 @@ their existing normalized values byte-for-byte in all of these helpers.
 - **WHEN** any helper in this lane normalizes them
 - **THEN** the resulting values and verdicts are byte-for-byte identical to
   the pre-change behavior
-
