@@ -12,6 +12,7 @@ from services.orchestrator import cli as cli_module
 from services.orchestrator import file_orchestration_migration as migration_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
+from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
 from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
 from services.orchestrator.file_orchestration_migration import (
     MIGRATION_RECEIPT_SCHEMA_VERSION,
@@ -963,7 +964,7 @@ def test_stale_own_marker_does_not_leak_attempt_when_newer_cycle_scope_marker_ex
         "pipeline_status": "failed",
         "retry_count": 3,
         "failed_stage": "forecast",
-        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_jobs": _consumed_attempt_jobs(),
         "pipeline_events": [
             _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=3, event_id=30),
             _manual_retry_marker_event(
@@ -971,6 +972,10 @@ def test_stale_own_marker_does_not_leak_attempt_when_newer_cycle_scope_marker_ex
             ),
         ],
     }
+
+    # Premise (#1579): the candidate-scoped forecast attempt is authoritative on
+    # the own forecast row, not on the top-level flat ``retry_count``.
+    assert scheduler_state_rows_module._state_retry_attempt(state, stage="forecast") == 3
 
     evidence = _manual_retry_state_evidence(candidate, state, {})
 
@@ -1018,6 +1023,20 @@ def _older_own_model_pinning_marker() -> dict[str, Any]:
     return _manual_retry_marker_event(entity_id="job_model_a_forecast", retry_count=3, event_id=30)
 
 
+def _consumed_attempt_jobs() -> list[dict[str, Any]]:
+    """The #1289 consumed-attempt row geometry: forecast attempt 3 is authoritative.
+
+    #1579 removed the top-level flat ``retry_count`` from explicit stage truth, so
+    a consumed-attempt fixture must carry attempt 3 on the candidate-scoped
+    FORECAST row itself (the durable ``retry_count`` field; ``effective_retry_attempt``
+    takes recorded count or ``_retry_<n>`` id suffix, whichever is higher).  The
+    own-model ``job_id`` stays ``job_model_a_forecast`` so the marker-adoption and
+    pin premise assertions keep resolving the same row.
+    """
+
+    return [dict(_CYCLE_SCOPE_JOB), {**_OWN_MODEL_JOB, "retry_count": 3}]
+
+
 def _consumed_attempt_marker_state(events: list[dict[str, Any]]) -> dict[str, Any]:
     """The #1289 shape: ``previous_attempt`` 3 is already spent, ``failed_stage`` resolves.
 
@@ -1031,7 +1050,7 @@ def _consumed_attempt_marker_state(events: list[dict[str, Any]]) -> dict[str, An
         "pipeline_status": "failed",
         "retry_count": 3,
         "failed_stage": "forecast",
-        "pipeline_jobs": [dict(_CYCLE_SCOPE_JOB), dict(_OWN_MODEL_JOB)],
+        "pipeline_jobs": _consumed_attempt_jobs(),
         "pipeline_events": events,
     }
 
@@ -1064,6 +1083,9 @@ def test_newest_adopted_marker_without_retry_count_terminates_the_attempt_scan(r
     assert scheduler_state_manual_retry_module._marker_event_pins_attempt(state, older) is True
     assert scheduler_state_manual_retry_module._event_is_adopted_manual_retry_marker(state, newest) is True
     assert newest["details"].get("retry_count") in (None, "")
+    # Premise (#1579): the candidate-scoped forecast attempt is authoritative on
+    # the own forecast row; the fixture can never silently regress to flat-only.
+    assert scheduler_state_rows_module._state_retry_attempt(state, stage="forecast") == 3
 
     evidence = _manual_retry_state_evidence(candidate, state, {})
     payload = scheduler_module._manual_retry_payload(state)

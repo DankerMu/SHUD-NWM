@@ -3853,13 +3853,13 @@ def test_all_other_live_receipts_accepted_with_scheduler_bound_to_dry_run_keeps_
 def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    second = scheduler_root / "second.json"
+    first = scheduler_root / "scheduler_20260521120000_first.json"
+    second = scheduler_root / "scheduler_20260521120000_second.json"
     _write_scheduler_payload(first, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_first"))
     _write_scheduler_payload(second, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_second"))
     receipt = _scheduler_proof_bound_to_evidence(
         second,
-        producer_artifact_ref="scheduler:second.json",
+        producer_artifact_ref="scheduler:scheduler_20260521120000_second.json",
         producer_run_id="scheduler_20260521120000_second",
     )
 
@@ -3882,8 +3882,8 @@ def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path
 def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not_ambiguous(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    second = scheduler_root / "second.json"
+    first = scheduler_root / "scheduler_20260521120000_same_a.json"
+    second = scheduler_root / "scheduler_20260521120000_same_b.json"
     checksum = _write_scheduler_payload(
         first,
         _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_same"),
@@ -3892,7 +3892,7 @@ def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not
     second.write_bytes(first.read_bytes())
     receipt = _scheduler_proof_bound_to_evidence(
         second,
-        producer_artifact_ref="scheduler:second.json",
+        producer_artifact_ref="scheduler:scheduler_20260521120000_same_b.json",
         producer_run_id="scheduler_20260521120000_same",
         checksum=checksum,
     )
@@ -3920,8 +3920,8 @@ def test_scheduler_root_duplicate_exact_match_blocks_ambiguous_binding(
 ) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    duplicate = scheduler_root / "duplicate.json"
+    first = scheduler_root / "scheduler_20260521120000_same_a.json"
+    duplicate = scheduler_root / "scheduler_20260521120000_same_b.json"
     monkeypatch.setattr(
         "services.production_closure.readiness_validation._scheduler_evidence_artifact_ref",
         lambda path, *, config: "scheduler:same.json",
