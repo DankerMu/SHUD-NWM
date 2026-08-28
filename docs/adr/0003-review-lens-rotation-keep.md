@@ -2336,3 +2336,23 @@ rotation denominator. **Keep rotation** unchanged under the recorded autonomous
 default. The cumulative aggregate still supplies no basis for an autonomous cut,
 and any reversal continues to require the existing attribution schema/round-role
 repair plus maintainer review.
+
+## Revisit 2026-08-28 (post #1579/#1575/#1692/#1572/#1553 / PR #1880) — keep; pinned closure adds no rotation datum
+
+`loop_log_audit.py` now reports **139** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `138 / 86 / 296` after PR #1879.
+PR #1880 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced three independently verified
+P1 findings. Round 2 deliberately re-ran four Round 1 lenses — correctness,
+integration, test-evidence, and invariant-state — against the submit-provenance,
+selector-coverage, and live-receipt fixes. It returned zero candidates, and both
+Phase 7 gap sweeps were clean.
+
+This is pinned fix-verification, not a rotation experiment: Round 2 is a strict
+subset of Round 1 and introduces no new subject-matter lens. Its clean result
+proves closure for this PR but carries no keep/cut information about a rotated
+free slot. **Keep rotation** unchanged under the recorded autonomous default.
+The cumulative aggregate still supplies no basis for an autonomous cut; any
+reversal continues to require the existing attribution schema/round-role repair
+plus maintainer review.
