@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, get_type_hints
 from urllib.parse import unquote, urlparse
 
+import httpx
 import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
@@ -8105,10 +8106,17 @@ def test_projected_unrepaired_cancelled_only_cycle_download_exposure_matches_the
     assert scheduler_state_failure_module._failed_stage(cancelled["decision_state"]) == "download"
     assert scheduler_state_failure_module._failed_stage(failed["decision_state"]) == "download"
 
-    # Asymmetry 2: the decision reason is the pre-existing cancelled arm, at the same attempt.
+    # Asymmetry 2 / #1579: the decision reasons keep their pre-existing arms,
+    # but the ATTEMPT axis now derives only from candidate-scope raw-stage rows
+    # -- the cycle-scope-only blocker's persisted ``retry_count`` used to reach
+    # this candidate through the flat channel, which #1579 closes.  With no
+    # candidate-scope download row the explicit download read is 0, so the
+    # failed leg stays retriable instead of blocking on a foreign budget; the
+    # stage-less flat channel still carries the 4 for evidence/manual-retry
+    # consumers (see ``test_stage_less_state_retry_attempt_is_unchanged...``).
     assert cancelled["decision"] == ("blocked", "manual_retry_required_after_cancelled")
-    assert failed["decision"] == ("blocked", "retry_limit_exhausted")
-    assert cancelled["decision_attempt"] == failed["decision_attempt"] == 4
+    assert failed["decision"] == ("retry", "retry_failed_candidate")
+    assert cancelled["decision_attempt"] == failed["decision_attempt"] == 0
 
 
 def test_cancelled_own_row_also_closes_the_unresolvable_cohort_master_pin() -> None:
@@ -25838,6 +25846,35 @@ def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
+def _candidate_scoped_attempt_row(stage: str, attempt: int, **overrides: Any) -> dict[str, Any]:
+    """One candidate-scope row carrying attempt ``N`` in its ``_retry_N`` suffix.
+
+    The production wedge shape: a master row's ``retry_count`` is reset to 0 by
+    the clean-reservation invariant, so the only durable per-stage record is the
+    suffix.  Hand-built DB-shaped states must carry stage truth in a
+    candidate-scope matching row — the top-level flat ``retry_count`` is a
+    window-local stage-less aggregate (#1579) and no longer reaches explicit
+    stage reads.
+    """
+
+    row: dict[str, Any] = {
+        "job_id": f"job_fcst_gfs_2026052106_model_a_{stage}_retry_{attempt}",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "cycle_id": "gfs_2026052106",
+        "model_id": "model_a",
+        "stage": stage,
+        "job_type": {
+            "forecast": "run_shud_forecast_array",
+            "parse": "parse_output_array",
+        }[stage],
+        "status": "failed",
+        "retry_count": 0,
+        "error_code": "NODE_FAILURE",
+    }
+    row.update(overrides)
+    return row
+
+
 @pytest.mark.parametrize(
     ("error_code", "expected_reason"),
     [
@@ -25863,6 +25900,9 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
             "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
+            # #1579: the stage budget derives from the candidate-scope matching
+            # row's durable ``_retry_N`` suffix, not from the flat aggregate.
+            "pipeline_jobs": [_candidate_scoped_attempt_row("forecast", 3)],
         }
     )
     orchestrator = FakeProductionOrchestrator()
@@ -25910,6 +25950,7 @@ def test_model_package_refresh_allows_automatic_retry_after_retry_limit_exhauste
             "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("forecast", 3)],
             "run_manifest_model_package": {
                 "source": "run_manifest",
                 "status": "loaded",
@@ -25965,6 +26006,7 @@ def test_same_model_package_still_blocks_after_retry_limit_exhausted(tmp_path: P
             "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
             "retry_limit": 3,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("forecast", 3)],
             "run_manifest_model_package": {
                 "source": "run_manifest",
                 "status": "loaded",
@@ -28675,6 +28717,7 @@ def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preser
             "error_code": "INVALID_MANIFEST",
             "retry_count": 3,
             "retry_limit": 3,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("forecast", 3)],
             "manual_retry": {"marker": True, "requested_by": "operator"},
             "prior_failure_reason": "INVALID_MANIFEST",
         }
@@ -28717,6 +28760,7 @@ def test_db_shaped_transient_failure_uses_scheduler_retry_limit_without_state_re
             "error_code": "SLURM_TIMEOUT",
             "forcing_package_uri": _RECORDED_FORCING_PACKAGE_URI,
             "retry_count": 3,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("forecast", 3)],
         }
     )
     orchestrator = FakeProductionOrchestrator()
@@ -28755,6 +28799,7 @@ def test_durable_downstream_permanent_or_exhausted_failure_blocks_until_manual_r
             "failed_stage": "parse",
             "error_code": error_code,
             "retry_count": retry_count,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("parse", retry_count)],
         }
     )
     orchestrator = FakeProductionOrchestrator()
@@ -28975,6 +29020,7 @@ def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attemp
             "failed_stage": "parse",
             "error_code": "INVALID_MANIFEST",
             "retry_count": 3,
+            "pipeline_jobs": [_candidate_scoped_attempt_row("parse", 3)],
             "pipeline_events": [
                 {
                     "event_type": "retry",
@@ -48405,6 +48451,15 @@ def test_db_free_strict_warm_start_terminal_mismatch_blocks_when_budget_exhauste
             {
                 "hydro_status": "published",
                 "retry_count": retry_count,
+                # #1579: the stage budget derives from the candidate-scope
+                # matching row's durable ``_retry_N`` suffix; the flat value is a
+                # stage-less aggregate and never reaches the explicit forecast
+                # read.  The row is terminal-success so the candidate reaches the
+                # strict warm-start terminal mismatch ladder (the production
+                # geometry whose master row records attempt only in the suffix).
+                "pipeline_jobs": [
+                    _candidate_scoped_attempt_row("forecast", retry_count, status="succeeded")
+                ],
                 "hydro_run": {
                     "run_id": run_id,
                     "status": "published",
@@ -48940,6 +48995,72 @@ def test_stage_less_retry_attempt_reading_ignores_the_floors() -> None:
     assert _state_retry_attempt(state) == 0
     assert _state_retry_attempt(state, stage=None) == 0
     assert _state_retry_attempt(state, stage="publish") == 0
+
+
+def _flat_cross_stage_state(jobs: list[dict[str, Any]], *, job_limit: int) -> dict[str, Any]:
+    """Project a state whose top-level flat ``retry_count`` is 5 via a convert row.
+
+    The candidate-scope convert row carries ``retry_count=5`` (the #1579
+    minimal counterexample: a convert row's persisted count reaching the top
+    level through ``candidate_state_from_rows``'s ``retry_count_jobs`` max),
+    while NO forecast or download row carries any retry.
+    """
+
+    state = _retention_state(jobs, job_limit=job_limit)
+    assert state["retry_count"] == 5, state["retry_count"]
+    return state
+
+
+def _flat_cross_stage_convert_row(minutes: int) -> dict[str, Any]:
+    # Candidate-scope (own run id + model): the #1579 minimal counterexample
+    # needs the convert row to reach the projection's candidate-scoped flat
+    # ``retry_count`` aggregate via ``retry_count_jobs``.
+    return _retention_job(
+        f"job_{_RETENTION_CYCLE_RUN_ID}_convert",
+        stage="convert",
+        job_type="convert_canonical",
+        status="succeeded",
+        minutes=minutes,
+        retry_count=5,
+        run_id=_RETENTION_RUN_ID,
+        model_id="model_a",
+    )
+
+
+def test_explicit_stage_reads_ignore_the_cross_stage_flat_retry_count() -> None:
+    """#1579 -- a convert row's flat count 5 must not charge forecast/download budgets.
+
+    The candidate-scope convert row (retry_count=5) projects the top-level flat
+    ``retry_count`` to 5.  Under BOTH the friendly (large ``job_limit``) and
+    truncated (``job_limit`` smaller than the admitted row count) windows,
+    explicit ``forecast`` and ``download`` attempt reads both return 0, because
+    no forecast/download row carries any retry.  The stage-less read still sees
+    the existing flat-first value 5, byte-for-byte as before.
+    """
+
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    friendly = _flat_cross_stage_state(
+        [_flat_cross_stage_convert_row(minutes=1), *_retention_publish_filler(6, first_minute=10)],
+        job_limit=20,
+    )
+    truncated = _flat_cross_stage_state(
+        [_flat_cross_stage_convert_row(minutes=12), *_retention_publish_filler(6, first_minute=1)],
+        job_limit=5,
+    )
+
+    assert friendly["state_truncated"] is False
+    assert truncated["state_truncated"] is True
+    assert _state_retry_attempt(friendly, stage="forecast") == 0
+    assert _state_retry_attempt(friendly, stage="download") == 0
+    assert _state_retry_attempt(truncated, stage="forecast") == 0
+    assert _state_retry_attempt(truncated, stage="download") == 0
+    # Stage-less flat-first semantics are preserved byte-for-byte: the flat
+    # value is a window-local compatibility/evidence aggregate (#1579), never a
+    # stage budget.
+    assert _state_retry_attempt(friendly) == 5
+    assert _state_retry_attempt(truncated) == 5
+    assert _state_retry_attempt(friendly, stage=None) == 5
 
 
 def test_geometry_b_keeps_the_failed_stage_invisible_while_the_floor_carries() -> None:
@@ -51592,6 +51713,347 @@ def _nested_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
     return result
 
 
+def _first_attempt_gateway_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
+    """Run the FIRST forecast submit through the gateway with an empty-ID ambiguity.
+
+    Producer: the bare-RuntimeError fallback path — a raise inside
+    ``submit_job_array`` after the gateway boundary, classified ambiguous by
+    ``_submit_error_is_ambiguous`` (no ``submit_disposition`` marker, so
+    ambiguity-safe).  The accepted-submit repository commits a durable
+    ``submission_ambiguous`` transition (``transition_pipeline_job_submit_evidence``
+    with ``AcceptedSubmitTransition.timeout()``) and the stage returns a raw
+    empty-ID ``submit_result_ambiguous`` with the fallback error code
+    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` and its own pipeline job identity --
+    the producer-owned provenance #1692 requires.  No prior confirmed Slurm
+    identity exists (attempt 0 fails), so the cycle lands ``reconciling``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileJournalRetryService,
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.retry import RetryConfig
+    from tests.test_orchestration_chain import (
+        AttemptScopedArraySubmitFailureClient,
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = AttemptScopedArraySubmitFailureClient(
+        submit_fail_stage="forecast",
+        submit_fail_attempt=0,
+        array_results_by_stage={"forecast": [["failed", "failed"]]},
+    )
+    retry_service = FileJournalRetryService(repository, RetryConfig(max_retries=1, backoff_schedule=[0]))
+    orchestrator = _orchestrator(tmp_path, repository, client, retry_service=retry_service)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    assert result.status == "reconciling"
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.slurm_job_id == ""
+    assert forecast.error_code == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+    assert forecast.pipeline_job_id
+    return result
+
+
+def _first_attempt_real_gateway_ambiguous_cycle_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transport_error: Exception | None,
+    status_code: int | None,
+    response_payload: dict[str, Any] | None,
+    expected_origin_code: str,
+) -> PipelineResult:
+    """Run the FIRST forecast submit through the REAL HTTP gateway client.
+
+    Only the HTTP transport is stubbed (``httpx.Client`` at the system
+    boundary); the real ``HttpSlurmGatewayClient`` parses the response,
+    preserves the ORIGIN error code (``SLURM_GATEWAY_UNAVAILABLE`` /
+    ``SLURM_PARSE_ERROR`` / ``SLURM_GATEWAY_INVALID_RESPONSE``), and the real
+    ``ForecastOrchestrator`` accepted-submit path durably commits the
+    ambiguity and returns the empty-ID ``submit_result_ambiguous`` terminal.
+    """
+
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_orchestration_chain import (
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            if transport_error is not None:
+                raise transport_error
+            return httpx.Response(status_code or 500, json=response_payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = HttpSlurmGatewayClient("http://gateway.test")
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    assert result.status == "reconciling"
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.slurm_job_id == ""
+    assert forecast.error_code == expected_origin_code
+    assert forecast.pipeline_job_id
+    return result
+
+
+def _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path: Path, cycle_result: PipelineResult) -> None:
+    """Run the real ``ProductionScheduler`` pass and assert unknown at every layer.
+
+    Shared by the fallback RuntimeError producer test and the real HTTP-gateway
+    origin-code variants: model-run evidence, execution proof, no-mutation
+    proof, persisted artifact, and bounded compaction all report the
+    producer-owned first-attempt ambiguity as ``unknown_after_attempt`` —
+    never proven absence, never confirmed submission.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_0", "basin_0"), _model("model_1", "basin_1")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T00:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    items = {item["model_id"]: item for item in result.evidence["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert items[model_id]["status"] == "reconciling"
+        assert items[model_id]["submitted"] is False
+        assert items[model_id]["slurm_submit_called"] == "unknown_after_attempt"
+        assert items[model_id]["execution_attempted"] is True
+        assert items[model_id]["final_candidate_success"] is False
+        assert items[model_id]["candidate_outcome"]["status"] == "active"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["counts"]["partial_count"] == 2
+    assert result.evidence["counts"]["failed_count"] == 0
+    proof = result.evidence["execution_write_proof"]
+    assert proof["submitted_count"] == 0
+    assert proof["slurm_submit_count"] == 0
+    assert proof["slurm_submit_called"] == "unknown_after_attempt"
+    assert proof["slurm_submit_outcome"] == "unknown_after_attempt"
+    assert proof["unknown_slurm_submit_count"] == 2
+    assert proof["slurm_submit_proven_absent"] is False
+    assert proof["mutation_outcome"] == "unknown_after_attempt"
+    assert proof["mutation_occurred"] == "unknown_after_attempt"
+    # No-mutation proof: the SAME uncertainty, never "slurm_submit_called=false".
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+    # Persisted artifact preserves the same tri-state facts.
+    assert result.artifact_path is not None
+    persisted = json.loads(Path(result.artifact_path).read_text(encoding="utf-8"))
+    persisted_items = {item["model_id"]: item for item in persisted["model_run_evidence"]}
+    for model_id in ("model_0", "model_1"):
+        assert persisted_items[model_id]["submitted"] is False
+        assert persisted_items[model_id]["slurm_submit_called"] == "unknown_after_attempt"
+    persisted_proof = persisted["execution_write_proof"]
+    assert persisted_proof["submitted_count"] == 0
+    assert persisted_proof["slurm_submit_count"] == 0
+    assert persisted_proof["slurm_submit_outcome"] == "unknown_after_attempt"
+    assert persisted_proof["unknown_slurm_submit_count"] == 2
+    assert persisted_proof["slurm_submit_proven_absent"] is False
+    assert persisted["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+    # Bounded compaction: the same tri-state facts survive the evidence byte limit.
+    compacted = scheduler_module._bounded_evidence_payload(
+        persisted,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    compacted_proof = compacted["execution_write_proof"]
+    assert compacted_proof["status"] == "unknown_after_attempt"
+    assert compacted_proof["submitted_count"] == 0
+    assert compacted_proof["slurm_submit_called"] == "unknown_after_attempt"
+    assert compacted_proof["slurm_submit_count"] == 0
+    assert compacted_proof["slurm_submit_proven_absent"] is False
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+
+
+def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """#1692: producer-proven gateway ambiguity is unknown, never proven-absent.
+
+    The FIRST forecast submission crosses the gateway boundary, the
+    accepted-submit producer durably records the ambiguous accepted-submit
+    transition, and the result carries no confirmed Slurm identity.  The real
+    ``ProductionScheduler`` pass must produce:
+
+    * model-run evidence ``submitted=False`` and
+      ``slurm_submit_called="unknown_after_attempt"``;
+    * an execution proof with zero confirmed submits, a nonzero
+      ``unknown_slurm_submit_count``, ``slurm_submit_outcome`` and
+      ``mutation_outcome`` of ``unknown_after_attempt``, and
+      ``slurm_submit_proven_absent=False``;
+    * a no-mutation proof carrying the same unknown submit-call fact, never a
+      proven absence;
+    * persisted and ``_bounded_evidence_payload(max_evidence_bytes=2000)``
+      artifacts preserving all of it.
+    """
+
+    _assert_first_attempt_ambiguity_unknown_everywhere(
+        tmp_path,
+        _first_attempt_gateway_ambiguous_cycle_result(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "transport_error",
+        "status_code",
+        "response_payload",
+        "expected_origin_code",
+    ),
+    [
+        (
+            httpx.ConnectError("connection refused"),
+            None,
+            None,
+            "SLURM_GATEWAY_UNAVAILABLE",
+        ),
+        (
+            None,
+            502,
+            {"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}},
+            "SLURM_PARSE_ERROR",
+        ),
+        (
+            None,
+            200,
+            {"status": "submitted"},
+            "SLURM_GATEWAY_INVALID_RESPONSE",
+        ),
+    ],
+    ids=("unavailable", "parse_error", "invalid_response"),
+)
+def test_first_attempt_real_gateway_origin_code_keeps_submit_call_unknown_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport_error: Exception | None,
+    status_code: int | None,
+    response_payload: dict[str, Any] | None,
+    expected_origin_code: str,
+) -> None:
+    """#1692 producer code: real origin gateway codes still mean unknown.
+
+    The real ``HttpSlurmGatewayClient`` preserves ``SLURM_GATEWAY_UNAVAILABLE``,
+    ``SLURM_PARSE_ERROR``, or ``SLURM_GATEWAY_INVALID_RESPONSE`` on the durable
+    ambiguous ``StageRunResult``.  The consumer judgement must key on the
+    producer-owned shape (``submit_result_ambiguous`` + own pipeline job
+    identity + empty Slurm identity), NOT on the fallback
+    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` code, so every real origin code reaches
+    ``submitted=false`` / ``slurm_submit_called=unknown_after_attempt`` at
+    model-run, proof, persisted, and bounded layers.  Only the HTTP transport
+    is stubbed; the HTTP client and the full accepted-submit producer path are
+    real.
+    """
+
+    cycle_result = _first_attempt_real_gateway_ambiguous_cycle_result(
+        tmp_path,
+        monkeypatch,
+        transport_error=transport_error,
+        status_code=status_code,
+        response_payload=response_payload,
+        expected_origin_code=expected_origin_code,
+    )
+    _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path, cycle_result)
+
+
+def test_token_only_pending_without_producer_provenance_remains_proven_no_submit(
+    tmp_path: Path,
+) -> None:
+    """#1692 control: a status token alone never manufactures unknown or positive facts.
+
+    A hand-built ``PipelineResult`` carrying ``submit_result_ambiguous`` WITHOUT
+    the producer-owned gateway fields (no ``SBATCH_SUBMIT_RESULT_AMBIGUOUS``
+    error code and no pipeline job identity) keeps ``submitted=false``,
+    ``slurm_submit_called=false``, an execution proof with
+    ``slurm_submit_proven_absent=true`` and zero unknown counts, and a
+    no-mutation proof that stays proven-absent.
+    """
+
+    now = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator(
+        candidate_outcomes=(
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "status": "active",
+                "stage": "forecast",
+            },
+        ),
+        result_status="reconciling",
+    )
+    # Replace the default stages (which carry ``slurm_job_id``) with the bare
+    # token-only shape: no confirmed id, no gateway-proven error code or
+    # pipeline job identity.
+    orchestrator.orchestrate_cycle = lambda source, cycle_time, basins: PipelineResult(
+        run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+        cycle_id=cycle_id_for(source, cycle_time),
+        status="reconciling",
+        stages=(
+            StageRunResult(
+                stage="forecast",
+                job_type="run_shud_forecast_array",
+                pipeline_job_id="",
+                slurm_job_id="",
+                status="submit_result_ambiguous",
+                error_code="OTHER_AMBIGUITY",
+            ),
+        ),
+        candidate_outcomes=orchestrator.candidate_outcomes,
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    item = result.evidence["model_run_evidence"][0]
+    assert item["submitted"] is False
+    assert item["slurm_submit_called"] is False
+    proof = result.evidence["execution_write_proof"]
+    assert proof["slurm_submit_count"] == 0
+    assert "unknown_slurm_submit_count" not in proof
+    assert proof["slurm_submit_proven_absent"] is True
+    assert proof["slurm_submit_called"] is False
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    # Bounded evidence keeps the proven-absence control; never unknown.
+    compacted = scheduler_module._bounded_evidence_payload(
+        result.evidence,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=2_000,
+    )
+    assert compacted["no_mutation_proof"]["slurm_submit_called"] is False
+    assert compacted["execution_write_proof"]["slurm_submit_proven_absent"] is True
+
+
 def test_nested_pending_produced_artifact_retains_confirmed_submission_facts(
     tmp_path: Path,
 ) -> None:
@@ -53484,12 +53946,10 @@ def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter()
     Mutation pin: delete the ``not _job_is_cycle_scope_row(job)`` conjunct from
     ``_state_non_canonical_stage_retry_attempt`` and this test reds with 7 / 8.
 
-    The last assertion pins the other half of the arm's composition -- the flat term the
-    canonical arm also carries.  The projection aggregates the flat ``retry_count`` as a max
-    across the candidate's rows at ALL stages, so a flat value above the row-derived one is
-    ordinary; dropping the ``max(flat or 0, ...)`` wrapper lowers the answer and reds here.
-    It is asserted on a copy so the leg's own ``previous_attempt == 0`` premise (which needs
-    flat 0) is untouched.
+    The last assertion pins the #1579 closure of the EXACT stage-scoped arm: the
+    top-level flat ``retry_count`` is a window-local stage-less aggregate and no
+    longer augments an explicit stage read -- a flat 6 on this state still
+    derives download's attempt from the candidate-scope matching row (4).
     """
 
     candidate = _scheduler_candidate_fixture()
@@ -53521,11 +53981,13 @@ def test_non_canonical_arm_never_reads_the_cohort_cycle_scope_download_counter()
     assert scheduler_state_manual_retry_module._restarted_stage_family(decision_state) == {"download"}
 
     assert scheduler_state_rows_module._state_retry_attempt(decision_state, stage="download") == 4
+    # #1579: an explicit stage read never maxes against the flat aggregate; a
+    # flat 6 above the row-derived 4 does not charge download's budget.
     assert (
         scheduler_state_rows_module._state_retry_attempt(
             {**decision_state, "retry_count": 6}, stage="download"
         )
-        == 6
+        == 4
     )
     previous_attempt = _production_previous_attempt(decision_state)
     assert previous_attempt == 0

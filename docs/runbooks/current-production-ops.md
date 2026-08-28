@@ -826,8 +826,11 @@ canonical replace 前退出、非零：
   model 的包变 invalid（`*.cfg.ic` 头部畸形、缺 `*.tsd.rl` 且无模板可修等）会被 bulk
   publish 合法 skip，prospective 因此少一行，同样判 removal；而 `--dry-run` 预览
   **看不到**这条拒绝（dry_run 不评估 removal）。两形靠 refusal entry 区分（#1433）：
-  带 `status` / `missing_required_files` / `invalid_required_files` 三键 = 包变 invalid
-  被 skip（键值就是 publisher 的 not-publishable 判据）；无这三键 = model 目录真没了。
+  带 `status` / `missing_required_files` / `invalid_required_files` /
+  `unreadable_required_files` 四键 = 包变 invalid 被 skip（键值就是
+  publisher 的 not-publishable 判据；`unreadable_required_files` 是「必需文件
+  匹配到但读不出」的第三态，#1552/#1553：此时前两个 list 可能都为空，不能据此
+  当成「无因的 partial」）；无这四键 = model 目录真没了。
   合法下线走下面的 **retire declaration 恢复顺序**；不打算下线就修包后重跑。
 - `registry_cutover_declaration_invalid`：declaration 文件本身或某条 entry 无效。常见
   原因：`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` 指向的文件不存在 / 不可读（已被删除或

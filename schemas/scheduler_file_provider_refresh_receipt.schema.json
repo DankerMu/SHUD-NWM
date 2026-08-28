@@ -355,7 +355,8 @@
               },
               "status": {"type": "string", "maxLength": 512},
               "missing_required_files": {"$ref": "#/$defs/skip_cause_files"},
-              "invalid_required_files": {"$ref": "#/$defs/skip_cause_files"}
+              "invalid_required_files": {"$ref": "#/$defs/skip_cause_files"},
+              "unreadable_required_files": {"$ref": "#/$defs/skip_cause_files"}
             }
           }
         },

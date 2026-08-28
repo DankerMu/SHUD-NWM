@@ -498,10 +498,12 @@ def _canonical_downstream_stage(stage: str | None) -> str | None:
 def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) -> int:
     """Return the retry attempt recorded for ``state``, scoped to ``stage`` when given.
 
-    With ``stage`` supplied the answer is ``max(flat, stage-matching jobs)``:
-    the state's own candidate-scoped ``retry_count`` is the floor, and ONLY jobs
-    whose canonical stage matches contribute anything beyond it — via their
-    durable ``_retry_<n>`` suffix attempt.  Non-matching jobs contribute nothing,
+    With ``stage`` supplied the answer derives ONLY from stage-matching rows:
+    the candidate-level flat ``retry_count`` is deliberately EXCLUDED, because
+    it is a window-local, stage-less compatibility/evidence aggregate rather
+    than per-stage truth (#1579).  ONLY jobs whose canonical stage matches
+    contribute — via their durable ``_retry_<n>`` suffix attempt — plus the
+    projection's carried floors.  Non-matching jobs contribute nothing,
     because ``pipeline_jobs`` is the unfiltered cycle-wide list while the flat
     count is candidate-scoped; charging a cycle-scope download's persisted
     ``retry_count`` to the forecast budget would block candidates whose own
@@ -510,15 +512,13 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     because production ids embed several stage tokens
     (``..._convert_model_0_forecast_retry_1_retry_2``).
 
-    A stage-scoped read also honours the projection's
-    ``stage_retry_attempt_floors`` (#1179).  What that makes
-    truncation-invariant is the STAGE-MATCHING ROW SCAN component: for every
-    canonical stage it returns what the untruncated job list would have derived.
-    The candidate-level flat ``retry_count`` this maxes against is aggregated
-    AFTER truncation and stays window-sensitive exactly as it was before #1179 —
-    a cross-stage row's persisted count reaching this answer through the flat
-    channel is pre-existing behaviour, tracked in #1579, not something the floors
-    fix or promise.
+    A stage-scoped read honours the projection's ``stage_retry_attempt_floors``
+    (#1179), which makes the STAGE-MATCHING ROW SCAN component
+    truncation-invariant: for every canonical stage it returns what the
+    untruncated job list would have derived.  The candidate-level flat
+    ``retry_count`` used to be maxed against this and remains window-sensitive
+    as a cross-stage channel; it no longer reaches any stage-scoped answer
+    (#1579).
 
     A stage that names no canonical downstream restart stage — ``download``, the
     one production cycle stage outside ``DOWNSTREAM_RESTART_STAGES`` — is derived
@@ -546,20 +546,21 @@ def _state_retry_attempt(state: Mapping[str, Any], *, stage: str | None = None) 
     are preserved byte-for-byte for the evidence-owner / manual-retry consumers,
     and the floors never leak in: they are per-stage maxima over the UNFILTERED
     cycle-wide rows, exactly the cross-scope charge the stage argument exists to
-    prevent.  The flat value never short-circuits the stage-scoped derivation: a
-    real projected state ALWAYS carries a top-level ``retry_count`` (0 whenever
-    the journal's clean-reservation invariant reset the forecast master row).
+    prevent.  A real projected state ALWAYS carries a top-level ``retry_count``
+    (0 whenever the journal's clean-reservation invariant reset the forecast
+    master row), but that value never short-circuits or augments an explicit
+    stage-scoped derivation.
     """
 
-    flat = _state_flat_retry_attempt(state)
     canonical_stage = _canonical_downstream_stage(stage)
     if canonical_stage is None:
         if stage not in (None, ""):
-            return max(flat or 0, _state_non_canonical_stage_retry_attempt(state, str(stage)))
+            return _state_non_canonical_stage_retry_attempt(state, str(stage))
+        flat = _state_flat_retry_attempt(state)
         if flat is not None:
             return flat
         return _state_job_retry_attempt(state, None)
-    return max(flat or 0, _state_job_retry_attempt(state, canonical_stage))
+    return _state_job_retry_attempt(state, canonical_stage)
 
 def _state_non_canonical_stage_retry_attempt(state: Mapping[str, Any], stage: str) -> int:
     """Maximum attempt the CANDIDATE-scope rows at raw stage name ``stage`` carry (#1298).

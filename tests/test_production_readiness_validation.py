@@ -3853,13 +3853,13 @@ def test_all_other_live_receipts_accepted_with_scheduler_bound_to_dry_run_keeps_
 def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    second = scheduler_root / "second.json"
+    first = scheduler_root / "scheduler_20260521120000_first.json"
+    second = scheduler_root / "scheduler_20260521120000_second.json"
     _write_scheduler_payload(first, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_first"))
     _write_scheduler_payload(second, _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_second"))
     receipt = _scheduler_proof_bound_to_evidence(
         second,
-        producer_artifact_ref="scheduler:second.json",
+        producer_artifact_ref="scheduler:scheduler_20260521120000_second.json",
         producer_run_id="scheduler_20260521120000_second",
     )
 
@@ -3882,8 +3882,8 @@ def test_scheduler_root_binds_receipt_to_exact_matching_passed_artifact(tmp_path
 def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not_ambiguous(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    second = scheduler_root / "second.json"
+    first = scheduler_root / "scheduler_20260521120000_same_a.json"
+    second = scheduler_root / "scheduler_20260521120000_same_b.json"
     checksum = _write_scheduler_payload(
         first,
         _submitted_scheduler_payload_with_pass_id("scheduler_20260521120000_same"),
@@ -3892,7 +3892,7 @@ def test_scheduler_root_same_pass_and_checksum_with_distinct_artifact_ref_is_not
     second.write_bytes(first.read_bytes())
     receipt = _scheduler_proof_bound_to_evidence(
         second,
-        producer_artifact_ref="scheduler:second.json",
+        producer_artifact_ref="scheduler:scheduler_20260521120000_same_b.json",
         producer_run_id="scheduler_20260521120000_same",
         checksum=checksum,
     )
@@ -3920,8 +3920,8 @@ def test_scheduler_root_duplicate_exact_match_blocks_ambiguous_binding(
 ) -> None:
     root = tmp_path / "artifacts"
     scheduler_root = tmp_path / "scheduler"
-    first = scheduler_root / "first.json"
-    duplicate = scheduler_root / "duplicate.json"
+    first = scheduler_root / "scheduler_20260521120000_same_a.json"
+    duplicate = scheduler_root / "scheduler_20260521120000_same_b.json"
     monkeypatch.setattr(
         "services.production_closure.readiness_validation._scheduler_evidence_artifact_ref",
         lambda path, *, config: "scheduler:same.json",
@@ -5411,7 +5411,176 @@ def test_scheduler_blocked_model_run_row_with_zero_submitted_count_remains_stabl
     assert summary["final_production_readiness_claimed"] is False
 
 
-def test_scheduler_root_file_limit_blocks_before_per_file_validation(
+def _write_tracker_and_mixed_root(scheduler_root: Path) -> Path:
+    """Write the #1575 mixed root: tracker, temp, unrelated, passed, stable-blocked.
+
+    The tracker deliberately uses the no-progress state filename (no
+    ``scheduler_`` prefix, so retention skips it); the temp and unrelated JSON
+    files are never pass evidence either.
+    """
+
+    from services.orchestrator.scheduler_no_progress import STATE_FILENAME
+
+    (scheduler_root / STATE_FILENAME).write_text(
+        '{"schema_version": "nhms.scheduler.no_progress_tracker.v1", "entries": []}',
+        encoding="utf-8",
+    )
+    (scheduler_root / "scheduler_20260521120000_tmp.json.tmp").write_text("{}", encoding="utf-8")
+    (scheduler_root / "unrelated-payload.json").write_text("{}", encoding="utf-8")
+    passed = scheduler_root / "scheduler_pass_20260817_abc123def456.json"
+    _write_scheduler_payload(
+        passed,
+        {
+            **_submitted_scheduler_payload_with_pass_id("scheduler_pass_20260817_abc123def456"),
+            "status": "passed",
+            "model_run_evidence": [
+                {
+                    **_candidate_for_model("model_a"),
+                    "status": "succeeded",
+                    "submitted": True,
+                }
+            ],
+            "counts": {
+                **_submitted_scheduler_payload()["counts"],
+                "candidate_count": 1,
+                "submitted_count": 1,
+            },
+        },
+    )
+    blocked = scheduler_root / "scheduler_pass_20260818_abc123def456.json"
+    _write_scheduler_payload(
+        blocked,
+        {
+            **_submitted_scheduler_payload_with_pass_id("scheduler_pass_20260818_abc123def456"),
+            "status": "blocked",
+            "model_run_evidence": [
+                {
+                    **_candidate_for_model("model_a"),
+                    "status": "preflight_blocked",
+                    "submitted": False,
+                }
+            ],
+            "counts": {
+                **_submitted_scheduler_payload()["counts"],
+                "candidate_count": 1,
+                "submitted_count": 0,
+            },
+        },
+    )
+    return passed
+
+
+def test_scheduler_root_mixed_evidence_files_admit_only_governed_pass_artifacts(
+    tmp_path: Path,
+) -> None:
+    """#1575: tracker, temp, and unrelated JSON never become readiness items."""
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    scheduler_root.mkdir()
+    passed = _write_tracker_and_mixed_root(scheduler_root)
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    # Only the two governed pass artifacts are admitted; the tracker, temp, and
+    # unrelated JSON files produce no items and consume none of the cap.
+    assert len(items) == 2
+    assert {item["details"]["scheduler_pass_id"] for item in items} == {
+        "scheduler_pass_20260817_abc123def456",
+        "scheduler_pass_20260818_abc123def456",
+    }
+    assert passed.read_text(encoding="utf-8")  # unchanged
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_root_mixed_evidence_non_pass_files_do_not_consume_the_discovery_cap(
+    tmp_path: Path,
+) -> None:
+    """#1575: filter-before-cap; the 16-file limit counts only governed pass files."""
+    root = tmp_path / "artifacts"
+    scheduler_root = tmp_path / "scheduler"
+    scheduler_root.mkdir()
+    passed = _write_tracker_and_mixed_root(scheduler_root)
+    # 16 governed pass artifacts (2 already present) plus 20 unrelated JSON
+    # files: the unrelated files must not push discovery over the cap.
+    for index in range(14):
+        _write_scheduler_payload(
+            scheduler_root / f"scheduler_pass_filler_{index:02d}.json",
+            {
+                **_submitted_scheduler_payload_with_pass_id(f"scheduler_pass_filler_{index:02d}"),
+                "status": "passed",
+                "model_run_evidence": [
+                    {
+                        **_candidate_for_model("model_a"),
+                        "status": "succeeded",
+                        "submitted": True,
+                    }
+                ],
+                "counts": {
+                    **_submitted_scheduler_payload()["counts"],
+                    "candidate_count": 1,
+                    "submitted_count": 1,
+                },
+            },
+        )
+    for index in range(20):
+        (scheduler_root / f"unrelated_{index:02d}.json").write_text("{}", encoding="utf-8")
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(evidence_root=root, run_id="m19", scheduler_evidence_root=scheduler_root)
+    )
+
+    items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    assert len(items) == MAX_SCHEDULER_EVIDENCE_FILES
+    # The cap is filled deterministically by governed pass artifacts in name
+    # order; the tracker and unrelated JSON are absent.
+    pass_ids = {item["details"]["scheduler_pass_id"] for item in items}
+    assert "scheduler_pass_filler_00" in pass_ids
+    assert len(pass_ids) == MAX_SCHEDULER_EVIDENCE_FILES
+    assert passed.read_text(encoding="utf-8")  # unchanged
+
+
+def test_explicit_scheduler_evidence_file_is_not_root_classified(tmp_path: Path) -> None:
+    """#1575: ``--scheduler-evidence-file`` is operator-selected, outside discovery."""
+    root = tmp_path / "artifacts"
+    scheduler_path = tmp_path / "selected" / "no-prefix-pass.json"
+    _write_scheduler_payload(
+        scheduler_path,
+        {
+            **_submitted_scheduler_payload_with_pass_id("scheduler_selected_file"),
+            "status": "passed",
+            "model_run_evidence": [
+                {
+                    **_candidate_for_model("model_a"),
+                    "status": "succeeded",
+                    "submitted": True,
+                }
+            ],
+            "counts": {
+                **_submitted_scheduler_payload()["counts"],
+                "candidate_count": 1,
+                "submitted_count": 1,
+            },
+        },
+    )
+
+    validate_readiness(
+        ProductionReadinessConfig.from_env(
+            evidence_root=root,
+            run_id="m19",
+            scheduler_evidence_file=scheduler_path,
+        )
+    )
+
+    items = [item for item in _items(root) if item["surface"] == "scheduler_production_like_evidence"]
+    assert len(items) == 1
+    assert items[0]["details"]["scheduler_pass_id"] == "scheduler_selected_file"
+    assert items[0]["status"] == "passed"
+
+
+def test_scheduler_root_evidence_file_limit_blocks_before_per_file_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5419,7 +5588,7 @@ def test_scheduler_root_file_limit_blocks_before_per_file_validation(
     scheduler_root = tmp_path / "scheduler"
     scheduler_root.mkdir()
     for index in range(MAX_SCHEDULER_EVIDENCE_FILES + 1):
-        (scheduler_root / f"evidence_{index:02d}.json").write_text(
+        (scheduler_root / f"scheduler_evidence_20260521120000_{index:02d}.json").write_text(
             json.dumps(_scheduler_evidence_payload(pass_id=f"scheduler_20260521120000_{index:02d}")),
             encoding="utf-8",
         )
