@@ -2371,3 +2371,25 @@ still supplies no observation about free-slot rotation. **Keep rotation**
 unchanged under the recorded autonomous default; the cumulative aggregate gives
 no basis for an autonomous cut, and any reversal continues to require the
 existing attribution schema/round-role repair plus maintainer review.
+
+## Revisit 2026-08-28 (post #1796/#1568 / PR #1885) — keep; pinned test-fix closure adds no rotation datum
+
+`loop_log_audit.py` now reports **140** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `139 / 86 / 296` after PR #1883.
+PR #1885 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced one independently verified
+P1 test-evidence finding: the new committed-projection helper's reachable
+model-bearing latest-failure arm lacked a discriminating reserve-boundary test.
+Round 2 deliberately pinned correctness, security-performance, and test-evidence
+to verify the test-only closure. It returned zero candidates, and the final
+Phase 7 Gap Sweep was also clean.
+
+This was fix verification, not a rotation experiment. Round 2 was a strict
+subset of Round 1; all six canonical packs had already run in Round 1, so no
+not-yet-used free-slot lens existed to rotate in. Its clean result proves closure
+for this PR but cannot distinguish whether rotation would add recall. **Keep
+rotation** unchanged under the recorded autonomous default. The cumulative
+aggregate still supplies no basis for an autonomous cut; any reversal continues
+to require the existing attribution schema/round-role repair plus maintainer
+review.
