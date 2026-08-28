@@ -2320,3 +2320,19 @@ favors retaining rotation, and this sample supplies no evidence for a cut.
 **Keep rotation** unchanged under the recorded autonomous default; any reversal
 still requires the existing attribution schema/round-role repair plus maintainer
 review.
+
+## Revisit 2026-08-28 (post #1872 child 1 / PR #1879) — keep; single-round clean adds no rotation datum
+
+After the PR #1879 accountability line, `loop_log_audit.py` still reports **138**
+multi-round merged PRs and later-round catches **core=86 / rotated=296**. The
+counts are unchanged from the post-PR #1876 revisit because PR #1879 had one
+comprehensive round only: its six-lens Round 1 and Phase 7 Gap Sweep were clean,
+so no follow-up lens set existed to classify as pinned or rotated.
+
+That clean result is useful evidence for the high-fixture first-pass gate on a
+mechanical module-to-package split, but it contains no observation about free-slot
+rotation. Treating it as evidence for a cut would put a non-participant into the
+rotation denominator. **Keep rotation** unchanged under the recorded autonomous
+default. The cumulative aggregate still supplies no basis for an autonomous cut,
+and any reversal continues to require the existing attribution schema/round-role
+repair plus maintainer review.
