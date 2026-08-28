@@ -52,7 +52,7 @@ Issues: #1586, #1584, #1577 (one user-requested PR)
 - [x] 4.1 Audit every `_state_retry_attempt` consumer and the blocker/marker sibling surfaces against the Invariant Matrix; change no unrelated consumer.
 - [x] 4.2 Update code docstrings and `docs/runbooks/failed-basin-retry.md` so #1586/#1584/#1577 are no longer documented as accepted active boundaries; retain #1579/#1572 exclusions.
 - [x] 4.3 Run initial E7-E9, record red/green evidence and deviations, and mark each completed task.
-- [ ] 4.4 Run E10 on node-27 for the frozen PR head and capture the exact commit/command/result receipt.
+- [x] 4.4 Run E10 on node-27 for the frozen PR head and capture the exact commit/command/result receipt (`evidence/node27-e10-531c22cd.md`).
 
 ## 5. Round-1 Verified Invariant Closure
 
