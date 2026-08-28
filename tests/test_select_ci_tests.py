@@ -74,6 +74,7 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_api_contract.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -91,6 +92,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
@@ -530,6 +532,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        # #1684 large-file guard repair: the 3.1-contract security half joined
+        # the mvt rule's derived closure as a one-hop importer via
+        # tests/test_openapi_31_contract.py.
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     assert not fallback_only_tests & set(selected)
 

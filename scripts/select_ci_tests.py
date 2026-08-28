@@ -266,10 +266,14 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
 # drift suite as well as its existing API contract consumers.
+# #1684 large-file guard repair: the 3.1-contract security half was physically
+# partitioned into tests/test_slurm_gateway_openapi_security.py; every
+# collectible partition replaces the single target.
 OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_api_contract.py",
     "tests/test_openapi_31_contract.py",
     "tests/test_openapi_drift.py",
+    "tests/test_slurm_gateway_openapi_security.py",
 )
 
 # #1646: the pytest warning-policy suite proves the SHIPPING config semantically
@@ -1254,7 +1258,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_gateway_reconcile_writer_rollforward.py",
             "tests/test_slurm_gateway_app.py",
+            "tests/test_slurm_gateway_auth.py",
+            "tests/test_slurm_gateway_auth_client.py",
+            "tests/test_slurm_gateway_auth_deployment.py",
+            # #1684 large-file guard repair: the auth suite was physically
+            # partitioned; every partition replaces the single target.
             "tests/test_slurm_route_contract.py",
+            "tests/test_slurm_route_security_contract.py",
             "tests/test_real_slurm_gateway.py",
             "tests/test_slurm_array_contract.py",
             "tests/test_job_array.py",
@@ -1374,6 +1384,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
+            # #1684 large-file guard repair: the 3.1-contract security half is
+            # a one-hop importer via tests/test_openapi_31_contract.py, so it
+            # joins the derived closure here (and in the hydro_display rule).
+            "tests/test_slurm_gateway_openapi_security.py",
             # #1714: same guard-derived provenance as the #1597 batch above,
             # not hand-curated — a one-hop importer reached through
             # apps/api/routes/hydro_display.py. Kept as its own entry so the
@@ -1412,6 +1426,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
+            # #1684 large-file guard repair: the 3.1-contract security half is
+            # a one-hop importer via tests/test_openapi_31_contract.py.
+            "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_openapi_drift.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
             "tests/test_runtime_mode.py",
@@ -1429,6 +1446,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_production_readiness_validation.py",
             "tests/test_production_ops_validation.py",
+            # #1684 large-file guard repair: the ops-validation suite was
+            # physically partitioned into auth/dependency/hardening modules;
+            # every collectible partition replaces the single target so a
+            # production_closure change never blinds targeted CI to moved
+            # cases.
+            "tests/test_slurm_gateway_ops_auth_evidence.py",
+            "tests/test_slurm_gateway_ops_dependency_closure.py",
+            "tests/test_slurm_gateway_ops_dependency_hardening.py",
             "tests/test_production_object_store_validation.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_production_scale_validation.py",
@@ -1573,6 +1598,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
+            "tests/test_slurm_gateway_openapi_security.py",
         ),
     ),
     PathTestRule(

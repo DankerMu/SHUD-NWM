@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
+from packages.common.openapi_auth_security import (
+    SECURITY_SCHEME_NAMES,
+    security_scheme_definitions,
+)
 from services.slurm_gateway.app import INTERNAL_RESET_PATH, create_gateway_app
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.mock_backend import MockSlurmGateway
@@ -27,6 +33,32 @@ FRAMEWORK_ROUTE_PATHS = frozenset(
     }
 )
 BUSINESS_MARKERS = ("forecast", "model", "pipeline", "data-source")
+
+SLURM_MUTATION_PATHS = {
+    ("POST", "/api/v1/slurm/jobs"),
+    ("POST", "/api/v1/slurm/job-arrays"),
+    ("DELETE", "/api/v1/slurm/jobs/{job_id}"),
+    ("POST", "/api/v1/slurm/internal/reset"),
+}
+SLURM_READ_PATHS = {
+    ("GET", "/api/v1/slurm/health"),
+    ("GET", "/api/v1/slurm/jobs"),
+    ("GET", "/api/v1/slurm/jobs/{job_id}"),
+    ("GET", "/api/v1/slurm/jobs/{job_id}/array-tasks"),
+    ("GET", "/api/v1/slurm/jobs/{job_id}/logs"),
+}
+
+
+def _collect_referenced_and_defined(spec: dict[str, Any]) -> tuple[set[str], set[str]]:
+    referenced: set[str] = set()
+    for _path, operations in spec["paths"].items():
+        for operation in operations.values():
+            if not isinstance(operation, dict):
+                continue
+            for requirement in operation.get("security", []):
+                referenced.update(requirement)
+    defined = set(spec.get("components", {}).get("securitySchemes", {}))
+    return referenced, defined
 
 
 @dataclass(frozen=True)
@@ -268,3 +300,76 @@ def test_service_role_slurm_gateway_not_fatal(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("NHMS_REQUIRE_SERVICE_ROLE", "true")
     app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
     assert "/api/v1/slurm/health" in _route_paths(app)
+
+
+def test_standalone_enabled_schema_defines_every_referenced_scheme() -> None:
+    # Every operation-level security requirement must be defined in
+    # components.securitySchemes; a referenced-but-undefined scheme is a
+    # dangling OpenAPI ref (issue #1684 regression). The standalone app
+    # publishes the full six-scheme set from the shared owner.
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
+    spec = app.openapi()
+    referenced, defined = _collect_referenced_and_defined(spec)
+
+    assert referenced <= defined
+    assert defined == set(SECURITY_SCHEME_NAMES)
+
+
+def test_standalone_enabled_schema_exact_six_schemes_from_shared_owner() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
+    schemes = app.openapi()["components"]["securitySchemes"]
+
+    assert set(schemes) == set(SECURITY_SCHEME_NAMES)
+    assert schemes == security_scheme_definitions()
+
+
+def test_standalone_enabled_schema_mutations_have_exact_bearer_first_lists() -> None:
+    from packages.common.openapi_auth_security import slurm_mutation_security_alternatives
+
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
+    spec = app.openapi()
+
+    expected = slurm_mutation_security_alternatives()
+    for method, path in sorted(SLURM_MUTATION_PATHS):
+        operation = spec["paths"][path][method.lower()]
+        assert operation["security"] == expected, (method, path)
+
+
+def test_standalone_enabled_schema_read_routes_have_no_security() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
+    spec = app.openapi()
+
+    for method, path in sorted(SLURM_READ_PATHS):
+        operation = spec["paths"][path][method.lower()]
+        assert "security" not in operation, (method, path)
+
+
+def test_standalone_enabled_schema_embeds_no_credential_values() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock", allow_internal_reset=True))
+    serialized = json.dumps(app.openapi())
+
+    for credential_fragment in ("slurm-gateway-service-token", "proof-token", "Bearer secret", "dev-test:"):
+        assert credential_fragment not in serialized
+
+
+def test_standalone_disabled_schema_omits_reset_and_keeps_no_dangling_refs() -> None:
+    # With reset disabled the route is absent (404) and the document must still
+    # define every scheme its remaining operations reference.
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
+    spec = app.openapi()
+
+    assert "post" not in spec["paths"].get("/api/v1/slurm/internal/reset", {})
+    referenced, defined = _collect_referenced_and_defined(spec)
+    assert referenced <= defined
+    assert defined == set(SECURITY_SCHEME_NAMES)
+
+
+def test_standalone_disabled_schema_publishes_all_six_schemes() -> None:
+    # Intentional behavior: the disabled-reset document still publishes all six
+    # scheme definitions (harmless, runbook-clean, and future-proof against
+    # flipping the flag without regenerating the scheme set).
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
+    schemes = app.openapi()["components"]["securitySchemes"]
+
+    assert set(schemes) == set(SECURITY_SCHEME_NAMES)
+    assert schemes == security_scheme_definitions()

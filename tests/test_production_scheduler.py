@@ -45455,8 +45455,10 @@ def _install_fake_httpx(
     import httpx
 
     # HTTP probing is the real-gateway path; force backend=real so the probe
-    # does not take the in-process mock branch.
+    # does not take the in-process mock branch, and provide the scheduler
+    # service bearer so the probe does not fail on the missing-token gate.
     monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", "preflight-service-token-0123456789abcdef")
     _FakeHttpClient.last_url = None
     _FakeHttpClient.response = response
     _FakeHttpClient.raise_error = raise_error

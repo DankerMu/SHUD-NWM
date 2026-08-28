@@ -19,9 +19,6 @@ from packages.common.auth_policy import (
     AuthRole,
     ExecutionMode,
     PolicyDecision,
-    _parse_roles,
-    _raw_roles,
-    _role_mapping_result,
     audit_record,
     cli_policy_decision_from_evidence,
     evaluate_policy,
@@ -30,7 +27,15 @@ from packages.common.auth_policy import (
     simulated_decisions_for_action,
     trusted_internal_policy_decision,
 )
-from packages.common.redaction import REDACTION_MARKER
+from packages.common.request_auth import (
+    SLURM_GATEWAY_SERVICE_TOKEN_ENV,
+    SLURM_SERVICE_ACTOR,
+    slurm_mutation_auth_context,
+    slurm_service_auth_context,
+)
+from packages.common.request_auth import (
+    auth_context_from_request as _shared_auth_context_from_request,
+)
 
 POLICY_CONFIG_ERROR = "POLICY_CONFIG_ERROR"
 
@@ -45,6 +50,8 @@ __all__ = [
     "RBAC_FORBIDDEN",
     "RELEASE_BLOCKED",
     "ROLE_VOCABULARY",
+    "SLURM_GATEWAY_SERVICE_TOKEN_ENV",
+    "SLURM_SERVICE_ACTOR",
     "ActionDecision",
     "AuthContext",
     "AuthRole",
@@ -59,6 +66,8 @@ __all__ = [
     "require_action",
     "require_policy_evidence",
     "simulated_decisions_for_action",
+    "slurm_mutation_auth_context",
+    "slurm_service_auth_context",
     "trusted_internal_policy_decision",
 ]
 
@@ -113,73 +122,14 @@ def evaluate_request_action(
 
 
 def auth_context_from_request(request: Request) -> AuthContext | None:
-    if _live_auth_requested():
-        if not _internal_live_proof_token_matches(request):
-            return _release_blocked_auth_context()
-        live_actor = request.headers.get("X-Live-User-ID", "").strip()
-        raw_roles = _raw_roles(request.headers.get("X-Live-User-Roles", ""))
-        mapped_roles = _parse_roles(request.headers.get("X-Live-User-Roles", ""))
-        provider = request.headers.get("X-Live-Provider", "").strip() or "test-internal-live-proof"
-        if not live_actor:
-            return _release_blocked_auth_context()
-        return AuthContext(
-            actor_id=live_actor,
-            roles=mapped_roles,
-            auth_mode="live_idp",
-            live_backend_auth_executed=True,
-            provider_metadata={
-                "provider": provider,
-                "contract": "test_internal_trusted_live_proof",
-                "credential_header": REDACTION_MARKER,
-            },
-            role_mapping_result={
-                "raw_roles_present": bool(raw_roles),
-                "raw_roles": raw_roles,
-                "mapped_roles": mapped_roles,
-                "unmapped_roles": tuple(role for role in raw_roles if role not in ROLE_VOCABULARY),
-                "mapping_status": "mapped" if mapped_roles else "unmapped",
-            },
-        )
+    """Build the request auth context (dev/test or live/release-blocked).
 
-    if _allow_dev_role_header() and not _production_mode() and "X-User-Role" in request.headers:
-        raw_role_text = request.headers.get("X-User-Role", "")
-        roles = _parse_roles(raw_role_text)
-        raw_roles = _raw_roles(raw_role_text)
-        if roles:
-            actor = request.headers.get("X-User-ID", "").strip() or f"dev-test:{roles[0]}"
-            return AuthContext(
-                actor_id=actor,
-                roles=roles,
-                auth_mode="dev_test",
-                live_backend_auth_executed=False,
-                role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=roles, input_present=True),
-            )
-        actor = request.headers.get("X-User-ID", "").strip() or "dev-test:unmapped-role"
-        return AuthContext(
-            actor_id=actor,
-            roles=(),
-            auth_mode="dev_test",
-            live_backend_auth_executed=False,
-            role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=(), input_present=True),
-        )
-
-    configured_token = os.getenv("NHMS_DEV_AUTH_TOKEN", "").strip()
-    authorization = request.headers.get("Authorization", "")
-    if configured_token and authorization == f"Bearer {configured_token}" and not _production_mode():
-        role_header_present = "X-User-Role" in request.headers
-        raw_role_text = request.headers.get("X-User-Role", "") if role_header_present else "operator"
-        roles = _parse_roles(raw_role_text)
-        raw_roles = _raw_roles(raw_role_text)
-        actor = request.headers.get("X-User-ID", "").strip() or "dev-test:token"
-        return AuthContext(
-            actor_id=actor,
-            roles=roles,
-            auth_mode="dev_test",
-            live_backend_auth_executed=False,
-            role_mapping_result=_role_mapping_result(raw_roles, mapped_roles=roles, input_present=role_header_present),
-        )
-
-    return None
+    Construction lives in ``packages.common.request_auth`` so that
+    ``services.slurm_gateway`` can reuse it without importing ``apps.api``. The
+    Slurm scheduler service bearer is deliberately NOT accepted here: it must
+    never authenticate an original business mutation.
+    """
+    return _shared_auth_context_from_request(request)
 
 
 def _record_decision(request: Request, decision: PolicyDecision, *, payload: Mapping[str, Any] | None) -> None:

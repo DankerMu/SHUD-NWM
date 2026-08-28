@@ -22,9 +22,19 @@
 # - Leave SLURM_GATEWAY_ALLOW_INTERNAL_RESET unset/false in production: the
 #   /api/v1/slurm/internal/reset endpoint clears gateway state and is not
 #   registered unless explicitly enabled.
+# - Slurm mutations require the route-scoped service bearer. The shared
+#   credential is loaded from the untracked owner-mode-0600 EnvironmentFile
+#   below (ACTIVE EnvironmentFile= directive). Replace the path with the live
+#   node-22 secret env source, e.g.
+#   /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env, which both this
+#   unit and the scheduler unit load; keep it 0600 and owned by the service
+#   account. The EnvironmentFile owns SLURM_GATEWAY_SERVICE_TOKEN=<credential>;
+#   the variable name appears here, the value lives only in that file and is
+#   never committed, logged, or serialized. Without a usable token the scheduler
+#   preflight fails closed (never reports submit-ready from anonymous health).
 # - The health endpoint probes sbatch/squeue/sacct/scancel; a missing binary
 #   reports healthy=false, which the scheduler preflight treats as a
-#   pre-mutation blocker.
+#   pre-mutation blocker. Health/read routes stay anonymous.
 
 [Unit]
 Description=NHMS standalone Slurm gateway (node 22)
@@ -39,6 +49,10 @@ Environment=SLURM_GATEWAY_BACKEND=slurm
 Environment=SLURM_GATEWAY_WORKSPACE_DIR=/work/nhms/slurm
 Environment=SLURM_GATEWAY_TEMPLATE_DIR=/opt/SHUD-NWM/infra/sbatch
 Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=/opt/SHUD-NWM/config/resource_profiles.yaml
+# Active owner-only shared secret source (SLURM_GATEWAY_SERVICE_TOKEN). Generic
+# /opt path below; on live node-22 point this at the same untracked 0600 file
+# the scheduler unit loads (see docs/runbooks/current-production-ops.md §3.2.2).
+EnvironmentFile=/opt/SHUD-NWM/infra/env/slurm-gateway.secret
 # Set when the cluster's real partition differs from the canonical "compute"
 # profile; redirects resolved partitions without editing the shared profile.
 # Environment=SLURM_GATEWAY_PARTITION_OVERRIDE=CPU

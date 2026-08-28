@@ -31,6 +31,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - SHUD threading, timeout, restart compatibility, and output cadence
 - Numerical stability: NaN, conservation, unit conversion drift
 - Slurm mock-vs-real parity and stale cluster job reconciliation
+- Service-to-service auth and OpenAPI security parity across dual-mounted control routes
 - Manifest/QC evidence bound to the producing run and provider snapshot
 - Published artifact identity across DB rows, object URIs, and frontend display
 
@@ -59,6 +60,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 ## Verification matrix
 
 - Python/shared helper -> focused pytest + `uv run ruff check .` -> passing tests and zero lint findings.
+- Auth/RBAC + OpenAPI security -> focused policy/route/no-side-effect tests + runtime/static drift check -> enforcement and documented security sets match with no secret material.
 - JSON Schema/examples -> CI `check-jsonschema` metaschema/example loop -> every example validates against its named schema.
 - OpenSpec -> `openspec validate <change> --strict --no-interactive` -> strict-valid change.
 - DB migration/Timescale behavior -> node-27 real-DB pytest/catalog query -> committed live receipt or captured query output.

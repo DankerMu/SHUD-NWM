@@ -5,10 +5,17 @@ from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
+from packages.common.request_auth import read_configured_service_token
 from services.orchestrator.chain_types import OrchestratorError
 from services.slurm_gateway.models import SlurmJobStatus
 
 __all__ = ("HttpSlurmGatewayClient",)
+
+_MUTATION_METHODS = frozenset({"POST", "DELETE"})
+
+# One token contract: the shared owner is the only definition of the env name,
+# min length, trimming, and whitespace rules.
+_configured_service_token = read_configured_service_token
 
 
 def _coerce_mapping(value: Any) -> dict[str, Any]:
@@ -50,6 +57,19 @@ _PROVEN_PRE_ACCEPTANCE_REJECTION_CODES = frozenset(
         "TEMPLATE_NOT_FOUND",
         "TEMPLATE_SECURITY_ERROR",
         "VALIDATION_ERROR",
+    }
+)
+
+# Stable pre-handler auth/policy denial codes returned by the Slurm mutation
+# dependency. They prove no gateway/Slurm acceptance happened (denial precedes
+# body validation and gateway construction), so a POST carrying one is a proven
+# pre-acceptance rejection rather than an ambiguous unknown.
+_POLICY_DENIAL_CODES = frozenset(
+    {
+        "AUTH_REQUIRED",
+        "RBAC_FORBIDDEN",
+        "RELEASE_BLOCKED",
+        "POLICY_CONFIG_ERROR",
     }
 )
 _SUBMIT_JOB_ID_RE = re.compile(r"^(?:\d+|mock_\d+)$")
@@ -131,9 +151,17 @@ class HttpSlurmGatewayClient:
         expected: tuple[int, ...],
         json: dict[str, Any] | None = None,
     ) -> Any:
+        headers: dict[str, str] = {}
+        if method.upper() in _MUTATION_METHODS:
+            token = _configured_service_token()
+            if token is not None:
+                headers["Authorization"] = f"Bearer {token}"
         try:
             with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-                response = client.request(method, path, json=json)
+                if headers:
+                    response = client.request(method, path, json=json, headers=headers)
+                else:
+                    response = client.request(method, path, json=json)
         except httpx.HTTPError as error:
             raise self._error(
                 "SLURM_GATEWAY_UNAVAILABLE",
@@ -145,7 +173,11 @@ class HttpSlurmGatewayClient:
             code = self._error_code_from_response(details)
             disposition = None
             if method == "POST":
-                disposition = "rejected" if code in _PROVEN_PRE_ACCEPTANCE_REJECTION_CODES else "ambiguous"
+                disposition = (
+                    "rejected"
+                    if code in _PROVEN_PRE_ACCEPTANCE_REJECTION_CODES or code in _POLICY_DENIAL_CODES
+                    else "ambiguous"
+                )
             raise self._error(
                 code,
                 f"Slurm Gateway returned HTTP {response.status_code}.",

@@ -2428,6 +2428,13 @@ paths:
       - slurm
       summary: Submit Job
       operationId: submit_job_api_v1_slurm_jobs_post
+      security:
+      - SlurmServiceBearer: []
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
       requestBody:
         required: true
         content:
@@ -2505,6 +2512,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - SlurmServiceBearer: []
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /api/v1/slurm/jobs/{job_id}:
     get:
       tags:
@@ -2536,6 +2550,13 @@ paths:
       - slurm
       summary: Cancel Job
       operationId: cancel_job_api_v1_slurm_jobs__job_id__delete
+      security:
+      - SlurmServiceBearer: []
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
       parameters:
       - name: job_id
         in: path
@@ -2634,6 +2655,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - SlurmServiceBearer: []
+      - DevRoleHeader: []
+      - DevBearerToken: []
+      - InternalLiveProof: []
+        LiveUserID: []
+        LiveUserRoles: []
   /health:
     get:
       summary: Health
@@ -4493,6 +4521,15 @@ components:
                     - 'null'
                     additionalProperties: true
   securitySchemes:
+    SlurmServiceBearer:
+      type: http
+      description: Route-scoped Slurm gateway service bearer. Accepted only at the
+        Slurm mutation operations (job submit, array submit, job cancel, enabled registry
+        reset) when the configured SLURM_GATEWAY_SERVICE_TOKEN is present and the
+        bearer constant-time matches it; the credential authenticates the fixed scheduler
+        actor with operator role and is never accepted by business mutation operations.
+        The configured token value is never embedded in this document.
+      scheme: bearer
     DevRoleHeader:
       type: apiKey
       in: header

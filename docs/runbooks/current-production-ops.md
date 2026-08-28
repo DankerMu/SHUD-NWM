@@ -1367,22 +1367,138 @@ receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
 Slurm Gateway 当前仍在 node-22。它负责把调度/诊断请求转成 Slurm 行为；
 node-27 display 不调用 Slurm Gateway。
 
+四个 Slurm 变更操作（submit / array submit / cancel / enabled reset）要求
+`Authorization: Bearer SLURM_GATEWAY_SERVICE_TOKEN`（路由级 scheduler 服务凭据，
+constant-time 校验，固定 scheduler actor + operator role；reset 仍需 sys_admin，
+scheduler token 到 reset 是 403）。token 只经 POST/DELETE 变更请求转发，
+health/read 路由保持匿名且不携带。**没有该 token 时 scheduler preflight
+fail-closed**（不会仅凭匿名 health 就报 submit-ready）。
+
 确认 node-22 Gateway 与诊断 API：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
 pgrep -af '[s]ervices.slurm_gateway|uvicorn apps[.]api[.]main'
-ss -ltnp 2>/dev/null | grep -E ':(8000|8001)\b' || true
-curl -fsS --max-time 2 http://127.0.0.1:8001/health
+ss -ltnp 2>/dev/null | grep -E ':(8000|8090)\b' || true
+curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 ```
 
-2026-06-22 现场验证：
+> 注：`/health`（bare）是 node-22 历史诊断 API 的路由（见本节末尾 2026-06-22
+> 现场验证，当时在 `:8001` 返回 `{"status":"ok",...}`）；standalone Slurm
+> gateway 的 health 实际是 `/api/v1/slurm/health`。8090 端口上只有
+> `/api/v1/slurm/health`，不要混用两个路径。
+
+#### 3.2.1 凭据与听端口边界（#1684）
+
+- Gateway 只监听 loopback。**实测当前 live 端口是 `127.0.0.1:8090`**（2026-08
+  现场观察，而非模板默认 8081）：`SLURM_GATEWAY_URL=http://127.0.0.1:8090`，
+  `ss -ltnp` 显示仅 `127.0.0.1:8090`（有 IPv6 loopback 时另见 `::1`）。
+- 共享凭据只存在于 untracked、owner-mode-0600 的 env 源
+  （gateway unit 的 `EnvironmentFile=` 与 scheduler unit 的 drop-in
+  EnvironmentFile 各引同一份）。**变量名入库，值永不入库/日志/OpenAPI/证据**；
+  gateway 侧示例路径 `/opt/SHUD-NWM/infra/env/slurm-gateway.secret` 为通用模板，
+  live node-22 实际路径以 drop-in 步骤里的 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`
+  为准。
+- **进程级 loopback bind guard（可部署的等价网络漂移控制）**：
+  `python -m services.slurm_gateway` 在 uvicorn 前 fail-closed，拒绝任何
+  非 loopback bind（`0.0.0.0` / `::` / hostname / 非 loopback IP）；
+  node-22 用户无非交互 sudo，这即是本 issue 要求的用户级等价第二控制。
+- root 管理的 host packet-filter/ACL deny 规则属于**可选**的更强防线：仅在
+  实际存在并留证时记录（本 run 的 PASS 不依赖它）；remote negative probe +
+  bind-guard 拒绝即 live receipt。
+
+#### 3.2.2 协调 rollout / rollback（先停 timer，再配，再启）
+
+停调度、装代码与凭据，验证 gateway，最后恢复 timer：
+
+```bash
+# 1) stop the scheduler timer so no submission races the credential rollout
+systemctl --user stop nhms-compute-scheduler.timer
+
+# 2) install code + the shared owner-only credential (0600 env sources)
+#    The scheduler unit is not tracked; create/refresh an untracked owner-mode
+#    0600 drop-in for the user service, plus the SAME secret file loaded by the
+#    gateway unit:
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/secrets
+install -m 0600 /dev/null /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+cat >> /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env <<'EOF'
+SLURM_GATEWAY_SERVICE_TOKEN=<generated-scheduler-credential>
+EOF
+chmod 0600 /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+
+#    scheduler unit drop-in (user systemd):
+mkdir -p "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d"
+install -m 0600 /dev/null "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
+cat > "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" <<'EOF'
+[Service]
+EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+EOF
+chmod 0600 "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
+
+#    gateway unit (tracked template; replace the generic /opt path):
+#    EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+
+# 3) daemon-reload, restart gateway, verify the EnvironmentFile is active
+systemctl --user daemon-reload
+systemctl --user restart nhms-slurm-gateway.service
+systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles
+stat -c '%a %U %n' /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+ss -ltnp 2>/dev/null | grep ':8090'
+curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
+
+# 4) local auth boundary WITHOUT creating a job; secret-safe probe (value never
+#    on argv/stdout): source the owner-checked file in a private shell and use
+#    a 0600 temp curl header file, cleaned via trap
+token_probe() {
+  local secret_file=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+  test -r "$secret_file" || { echo "secret unreadable" >&2; return 1; }
+  test "$(stat -c %a "$secret_file")" = 600 || { echo "secret mode != 0600" >&2; return 1; }
+  local hdr; hdr="$(mktemp)"; chmod 600 "$hdr"
+  trap 'rm -f "$hdr"' RETURN
+  (
+    set -a
+    . "$secret_file" 2>/dev/null || { echo "secret source failed" >&2; return 1; }
+    set +a
+    printf 'Authorization: Bearer %s\n' "$SLURM_GATEWAY_SERVICE_TOKEN" > "$hdr"
+  )
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+    -H "Content-Type: application/json" -H @"$hdr" -d '{}'
+}
+#    no token -> 401 before body validation
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Content-Type: application/json' -d '{}'
+#    wrong token -> 401
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Authorization: Bearer wrong-token-value-000000' -H 'Content-Type: application/json' -d '{}'
+#    valid token -> auth passes into the existing validation error (422), no sbatch
+token_probe
+#    disabled reset -> 404 for every credential
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8090/api/v1/slurm/internal/reset
+
+# 5) live-safety receipt: loopback bind + remote refusal + bind-guard rejection
+#    - ss -ltnp shows only 127.0.0.1:8090
+#    - from another host: probe node-22:8090 -> connection refused/timed out
+#    - a misbound start is rejected by the process itself before uvicorn:
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway --url http://0.0.0.0:8090
+#      -> nonzero exit, stderr: non-loopback bind host is not allowed
+
+# 6) resume the scheduler timer and prove its preflight/client stays healthy
+systemctl --user start nhms-compute-scheduler.timer
+#    scheduler preflight reports gateway healthy (with token configured)
+```
+
+2026-06-22 现场验证（历史）：
 
 - `python -m services.slurm_gateway` 在 node-22 运行。
 - node-22 diagnostic API `/health` 在 `:8001` 返回 `{"status":"ok",...}`。
 - node-22 `/ghdc/data/nwm/object-store` 与 `/ghdc/data/nwm/published`
   可见，是 node-27 `/home/ghdc/nwm/...` 的同一份 NFS 数据面。
+
+Rollback：再次停 timer → 删除 scheduler drop-in
+（`rm -f ~/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf`、
+`systemctl --user daemon-reload`）→ 恢复上一版 gateway unit/env 备份 →
+重启 gateway 并验证 health/401/404 → 最后恢复 timer。全程无匿名兼容旁路。
 
 ### 3.3 API / 展示服务
 

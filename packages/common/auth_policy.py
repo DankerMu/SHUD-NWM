@@ -32,6 +32,9 @@ ACTION_MATRIX: dict[str, tuple[AuthRole, ...]] = {
     "models.rollback_version": ("model_admin", "sys_admin"),
     "models.supersede": ("model_admin", "sys_admin"),
     "users.manage": ("sys_admin",),
+    "slurm.submit_job": ("operator", "model_admin", "sys_admin"),
+    "slurm.cancel_job": ("operator", "model_admin", "sys_admin"),
+    "slurm.reset_registry": ("sys_admin",),
 }
 
 _LIVE_AUTH_BACKENDS = {"live", "live_idp", "oidc", "saml"}
