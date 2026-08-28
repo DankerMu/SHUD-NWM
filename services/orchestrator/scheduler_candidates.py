@@ -28,7 +28,7 @@ from services.orchestrator.scheduler_state import (
     _bounded_active_slurm_jobs,
     _call_active_slurm_jobs_provider,
     _call_candidate_state_provider,
-    _candidate_authoritative_stage_retry_attempt_floor_state,
+    _candidate_authoritative_stage_retry_attempt_state,
     _candidate_canonical_product_id,
     _candidate_repaired_state_audit_evidence,
     _candidate_state_decision,
@@ -2508,13 +2508,19 @@ def _strict_warm_start_terminal_mismatch_decision(
     the identity-filtered decision state (that one is a local of
     ``_candidate_state_decision_evaluated`` and does not flow back here), so the
     carried attempt floors (#1179) get the same candidate-authority narrowing
-    applied here, at the read.  Only the floor narrowing: running the whole
-    ``_candidate_state_decision_state`` would ALSO take the shared-cycle
-    aggregate arm, whose strip erases the floors of a candidate with no surviving
-    own row -- exactly the wedge geometry this budget exists to bind (#1173 E5).
+    applied here, at the read.  The in-window row-scan channel gets the same
+    authority view (#1586): a model-less suffixed execution-cohort row still
+    inside the window proves no candidate authority and contributes no attempt.
+    Both halves are read through the same copy-on-read candidate-authoritative
+    view (``_candidate_authoritative_stage_retry_attempt_state``), which
+    deliberately does NOT run the whole ``_candidate_state_decision_state`` --
+    that would ALSO take the shared-cycle aggregate arm, whose strip erases the
+    floors of a candidate with no surviving own row -- exactly the wedge geometry
+    this budget exists to bind (#1173 E5).  The flat top-level ``retry_count``
+    channel is untouched (#1579).
     """
 
-    state = _candidate_authoritative_stage_retry_attempt_floor_state(
+    state = _candidate_authoritative_stage_retry_attempt_state(
         raw_candidate_state if isinstance(raw_candidate_state, Mapping) else {},
         terminal_evidence,
     )

@@ -22,7 +22,8 @@ from services.orchestrator.scheduler_state_failure import (
     _state_has_failure_signal,
 )
 from services.orchestrator.scheduler_state_identity_filter import (
-    _candidate_state_decision_state,
+    _candidate_state_decision_views,
+    _candidate_state_manual_retry_view,
     _pipeline_terminal_success_is_candidate_scoped,
     _terminal_hydro_truth_supersedes_failure,
 )
@@ -97,7 +98,20 @@ def _candidate_state_decision_evaluated(
                 "replacement_submitted": False,
             },
         )
-    decision_state = _candidate_state_decision_state(state, evidence)
+    # The ordinary decision state and the manual lineage capsule are computed by ONE shared
+    # filter pass (same authority rules).  The manual-retry lane reads a DEDICATED view: the
+    # ordinary state strips the shared-cycle pipeline surface (E13b), including geometry B's
+    # carried floor/sources and the model-less marker, so the manual gate/evidence composition
+    # would otherwise lose the only lineage that can name the truncated stage (#1577 round-1
+    # cand-st-01).  The manual view overlays ONLY the lineage capsule onto the ordinary state;
+    # every other consumer keeps reading the ordinary state, and ``None`` (no capsule) falls
+    # back to it exactly as before.
+    decision_state, manual_capsule = _candidate_state_decision_views(state, evidence)
+    manual_retry_state = (
+        _candidate_state_manual_retry_view(decision_state, manual_capsule)
+        if manual_capsule is not None
+        else decision_state
+    )
     active_jobs = _state_active_jobs(decision_state)
     if active_jobs:
         return CandidateStateDecision(
@@ -150,8 +164,8 @@ def _candidate_state_decision_evaluated(
     )
     if completed_stage_retry_supersedes_hydro_placeholder:
         hydro_status = None
-    manual_retry_requested = _manual_retry_requested(decision_state)
-    active_truth = _latest_manual_retry_blocker(decision_state)
+    manual_retry_requested = _manual_retry_requested(manual_retry_state)
+    active_truth = _latest_manual_retry_blocker(manual_retry_state)
     if (
         (
             stale_hydro_placeholder_superseded_by_auto_retry
@@ -270,7 +284,7 @@ def _candidate_state_decision_evaluated(
         return CandidateStateDecision(
             "retry",
             "manual_retry_requested",
-            _manual_retry_state_evidence(candidate, decision_state, evidence),
+            _manual_retry_state_evidence(candidate, manual_retry_state, evidence),
         )
 
     downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)

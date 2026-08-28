@@ -10070,7 +10070,13 @@ class FileJournalRetryService:
             previous_error = failed_job.get("error_code") or (
                 "cancelled" if failed_job.get("status") == "cancelled" else None
             )
-            next_retry_count = int(failed_job.get("retry_count") or 0) + 1
+            # The journal's clean-reservation invariant zeroes ``retry_count`` on master
+            # rows, so the durable per-stage attempt lives in the ``_retry_<n>`` job-id
+            # suffix.  A suffix-only target (persisted count 0, suffix N) must emit N+1 --
+            # not a stale attempt-one claim that overrides the recovered floor
+            # (#1577 round-1 cand-st-02).  ``effective_retry_attempt`` is the single owner
+            # of that derivation, used by ``_next_current_master_retry_identity``.
+            next_retry_count = effective_retry_attempt(failed_job["job_id"], failed_job.get("retry_count")) + 1
             details: dict[str, Any] = {
                 "trigger": "manual",
                 "retry_count": next_retry_count,
@@ -10183,7 +10189,12 @@ class FileJournalRetryService:
             previous_error = failed_job.get("error_code") or (
                 "cancelled" if failed_job.get("status") == "cancelled" else None
             )
-            next_retry_count = int(failed_job.get("retry_count") or 0) + 1
+            # Same attempt truth as ``record_manual_repair``: the durable attempt lives in
+            # the job-id suffix when the clean-reservation invariant zeroed the persisted
+            # count, so a suffix-only target must emit N+1 for the retry row, its marker
+            # event, the idempotency key, and the failure payload
+            # (#1577 round-1 cand-st-02).
+            next_retry_count = effective_retry_attempt(failed_job["job_id"], failed_job.get("retry_count")) + 1
             retry_job_id = _next_file_manual_retry_job_id_for_run(self.repository, run_id)
             retry_record = {
                 **failed_job,

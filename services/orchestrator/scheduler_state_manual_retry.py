@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +15,7 @@ from services.orchestrator.scheduler_state_common import (
     _first_state_int,
 )
 from services.orchestrator.scheduler_state_rows import (
+    STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
     _canonical_downstream_stage,
     # Re-exported under this module's name: the predicate sank to the rows module (the
     # import floor) so the attempt derivation and the candidate-scoped failed-stage
@@ -1033,3 +1034,133 @@ def _manual_retry_new_attempt(state: Mapping[str, Any], *, previous_attempt: int
             return _fallback_previous_attempt(state, previous_attempt) + 1
         return _coerce_int(value, default=_fallback_previous_attempt(state, previous_attempt) + 1)
     return _fallback_previous_attempt(state, previous_attempt) + 1
+
+def _marker_recovered_candidate_stage(state: Mapping[str, Any]) -> str | None:
+    """Recover a canonical stage from exact marker-to-source lineage (#1577).
+
+    Geometry B truncates the failed ``forecast`` row out of ``pipeline_jobs`` while the
+    terminal-success filler empties ``failed_stage``/``stage``/``restart_stage``, so both
+    failed-stage resolvers answer ``None`` and the stage-less composition derives attempt 0
+    even though the projection's carried floor (``stage_retry_attempt_floors``) still holds
+    the stage's durable maximum and #1179's contributor record names the truncated row.  This
+    recovery runs ONLY inside manual-retry evidence/mint composition, when
+    ``_candidate_failed_stage`` is unresolved, and only for the NEWEST ADOPTED marker -- the
+    same scan ``_manual_retry_payload`` / ``_manual_retry_new_attempt`` apply, so all three
+    scanners agree on one marker.
+
+    The match itself is ``_marker_event_recovered_canonical_stage`` below, the single shared
+    identity-vs-reference owner; this wrapper keeps the scanner (newest adopted marker,
+    terminal) and the ``_candidate_failed_stage`` pre-gate in one place.  A foreign, stale,
+    non-canonical, disagreeing, multi-stage, or newer-unmatched match keeps the existing
+    stage-less fallback rather than guessing (no job-id stage-token parsing, no "largest
+    floor" choice).
+
+    It adds no state key and widens neither ``_failed_stage`` nor ``_candidate_failed_stage``.
+    """
+
+    from services.orchestrator.scheduler_state_failure import _candidate_failed_stage
+
+    if _candidate_failed_stage(state) is not None:
+        return None
+    for event in reversed(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
+        return _marker_event_recovered_canonical_stage(state, event)
+    return None
+
+def _marker_event_recovered_canonical_stage(
+    state: Mapping[str, Any],
+    event: Mapping[str, Any],
+) -> str | None:
+    """One adopted marker's exact canonical-stage match against the floor sources (#1577).
+
+    A canonical stage is recovered only from an EXACT identifier intersection between that
+    marker's target identity (``entity_id`` plus recorded ``previous_job_id`` /
+    ``failed_job_id`` -- see ``_marker_target_identifiers``) and the
+    ``stage_retry_attempt_floor_sources`` contributor OWN identity (``job_id`` /
+    ``pipeline_job_id`` / ``entity_id`` -- see ``_floor_source_identifiers``).  Contributor
+    predecessor fields and marker ``details.job_id`` are references or unsupported input, not
+    identity, and cannot authorize recovery (round-1 cand-st-03).  The marker's recorded
+    ``details.failed_stage``, when present, must agree with the contributor's stage and may
+    disambiguate.  A unique agreeing canonical stage is returned; ``None`` for no match,
+    a match to a foreign/non-authoritative row, an alias-spelled or non-canonical floor key,
+    or more than one disagreeing canonical stage.
+
+    The agreement is compared on CANONICAL identities, not raw spelling.  The floor mapping
+    is keyed by ``_canonical_downstream_stage`` (#1179), while the marker's ``failed_stage``
+    records the target row's RAW ``stage`` field, which production SHUD rows legitimately
+    carry as ``run_shud_forecast`` (``NATIVE_SHUD_STAGE_ALIASES``): a byte-for-byte
+    comparison rejected exact valid lineage and re-minted the consumed ``_retry_1`` identity.
+    Only a floor key that IS the canonical spelling participates -- an alias-spelled key is a
+    hand-shaped/backward-compatible shape, not a #1179 floor stage, and never authorizes a
+    stage -- and only canonical stages are ever returned.
+    """
+
+    sources = state.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+    if not isinstance(sources, Mapping):
+        return None
+    marker_target_ids = _marker_target_identifiers(event)
+    if not marker_target_ids:
+        return None
+    details = event.get("details")
+    recorded_stage = details.get("failed_stage") if isinstance(details, Mapping) else None
+    recovered: dict[str, int] = {}
+    for contributor_stage, contributors in sources.items():
+        canonical_stage = _canonical_downstream_stage(contributor_stage)
+        # Floor keys are canonical per the #1179 projection; an alias spelling
+        # (``run_shud_forecast``) or a non-canonical stage (``download``) names
+        # no canonical floor stage.
+        if canonical_stage is None or str(contributor_stage) != canonical_stage:
+            continue
+        rows = (
+            [row for row in contributors if isinstance(row, Mapping)]
+            if isinstance(contributors, Sequence) and not isinstance(contributors, str | bytes | bytearray)
+            else []
+        )
+        if not any(_floor_source_identifiers(row) & marker_target_ids for row in rows):
+            continue
+        if recorded_stage not in (None, "") and _canonical_downstream_stage(str(recorded_stage)) != canonical_stage:
+            continue
+        recovered[canonical_stage] = recovered.get(canonical_stage, 0) + 1
+    if len(recovered) != 1:
+        return None
+    return next(iter(recovered))
+
+def _marker_target_identifiers(event: Mapping[str, Any]) -> set[str]:
+    """The exact target row IDENTITY a marker records (#1308), for lineage intersection.
+
+    Identity is event ``entity_id`` plus the recorded ``previous_job_id`` /
+    ``failed_job_id`` -- the fields that NAME the row a marker repairs.  ``details.job_id``
+    is not identity: it is the unsupported/backward-compatible input shape and must never
+    authorize recovery (round-1 cand-st-03), even when its value equals a contributor's own
+    id.
+    """
+
+    identifiers: set[str] = set()
+    entity_id = event.get("entity_id")
+    if entity_id not in (None, ""):
+        identifiers.add(str(entity_id))
+    details = event.get("details")
+    if isinstance(details, Mapping):
+        for key in ("previous_job_id", "failed_job_id"):
+            value = details.get(key)
+            if value not in (None, ""):
+                identifiers.add(str(value))
+    return identifiers
+
+def _floor_source_identifiers(row: Mapping[str, Any]) -> set[str]:
+    """The exact row OWN identity a floor-source record carries (#1179), for lineage intersection.
+
+    Identity is the contributor row's own ``job_id`` / ``pipeline_job_id`` / ``entity_id``.
+    Its ``previous_job_id`` / ``failed_job_id`` are reference fields -- they name the row's
+    predecessor, not the row itself -- and may not match a marker's target (round-1
+    cand-st-03).  ``_state_row_references_job_ids`` (identity filter) intentionally keeps the
+    broader set because it answers a reference question, not this identity one.
+    """
+
+    identifiers: set[str] = set()
+    for key in ("job_id", "pipeline_job_id", "entity_id"):
+        value = row.get(key)
+        if value not in (None, ""):
+            identifiers.add(str(value))
+    return identifiers

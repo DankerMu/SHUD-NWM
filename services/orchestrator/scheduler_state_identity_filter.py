@@ -15,7 +15,9 @@ from services.orchestrator.scheduler_state_failure import (
 )
 from services.orchestrator.scheduler_state_manual_retry import (
     MARKER_TARGET_ROW_DETAIL_KEYS,
+    _event_is_adopted_manual_retry_marker,
     _event_is_manual_retry_marker,
+    _marker_event_recovered_canonical_stage,
 )
 from services.orchestrator.scheduler_state_rows import (
     STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY,
@@ -46,12 +48,84 @@ from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """The ordinary candidate decision state: failure policy, cancelled evidence, all non-manual consumers.
+
+    This is #1179 E13b byte-for-byte: the shared-cycle aggregate arm strips the pipeline
+    decision surface, floors, and events.  The manual-retry lane does NOT read this --
+    ``_candidate_state_manual_retry_decision_state`` carries the lineage capsule across the
+    same strip (round-1 cand-st-01/cand-te-01).
+    """
+
+    return _candidate_state_decision_views(state, evidence)[0]
+
+def _candidate_state_manual_retry_decision_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Dedicated manual-retry decision view: ordinary state plus the minimal lineage capsule.
+
+    The ordinary ``_candidate_state_decision_state`` strips the shared-cycle pipeline surface
+    -- floors, sources, and the model-less marker event -- but geometry B's manual mint needs
+    exactly that evidence (the failed row is outside the row window by construction, so no
+    view built on the surviving rows can name the stage).  This view therefore carries ONLY
+    the newest adopted marker plus the one canonical stage's already-narrowed floor/sources
+    into the stripped state.  It restores no truncated row, no top-level stage/status/retry
+    field, no unrelated floor or event, and no older marker behind a newest unmatched one.
+    ``None`` when no capsule exists, so the caller falls back to the ordinary state exactly as
+    before.
+
+    Only the manual-retry gate/evidence lane in ``scheduler_state_decision`` consumes it.
+    """
+
+    ordinary, capsule = _candidate_state_decision_views(state, evidence)
+    return _candidate_state_manual_retry_view(ordinary, capsule)
+
+def _candidate_state_manual_retry_view(
+    ordinary: Mapping[str, Any],
+    capsule: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Overlay the lineage capsule onto the already-filtered ordinary state.
+
+    ``capsule`` comes from ``_candidate_state_decision_views`` (the shared filter), so the
+    overlay cannot re-admit evidence the ordinary lane rejected.  The manual view is a shallow
+    copy of the ordinary state plus exactly the capsule's floors/sources and its single
+    newest-adopted marker event; it restores no row or top-level field.
+    """
+
+    if capsule is None:
+        return None
+    manual = dict(ordinary)
+    manual[STAGE_RETRY_ATTEMPT_FLOORS_KEY] = capsule["floors"]
+    manual[STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY] = capsule["sources"]
+    # The capsule marker is the newest adopted marker; ordinary surviving markers (a
+    # non-shared-cycle state keeps them) are replaced by it so exactly one marker lineage is
+    # visible and its terminal ordering is preserved.
+    events = [
+        dict(event) for event in _state_events(manual) if not _event_is_adopted_manual_retry_marker(manual, event)
+    ]
+    events.append(dict(capsule["marker"]))
+    manual["pipeline_events"] = events
+    return manual
+
+def _candidate_state_decision_views(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """One shared filter implementation producing the ordinary state and the manual capsule.
+
+    Both views are built through the SAME authority rules (row filtering, event sanitization,
+    floor/source narrowing) so the manual lane can never observe evidence the ordinary lane
+    would reject.  The capsule is captured AFTER
+    ``_candidate_authoritative_stage_retry_attempt_floor_state`` narrows the carried floors
+    and BEFORE ``_candidate_scoped_shared_cycle_aggregate_state`` strips them.
+    """
+
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return _candidate_state_filtered_decision_state(state, evidence)
+        return _candidate_state_filtered_decision_views(state, evidence)
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return _candidate_state_filtered_decision_state(state, evidence)
+        return _candidate_state_filtered_decision_views(state, evidence)
     unresolved_source_cycle_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
@@ -94,12 +168,20 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
-    return _candidate_state_filtered_decision_state(filtered, evidence)
+    return _candidate_state_filtered_decision_views(filtered, evidence)
 
 def _candidate_state_filtered_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
-    filtered = _inconclusive_source_cycle_decision_state(state)
-    filtered = _candidate_authoritative_stage_retry_attempt_floor_state(filtered, evidence)
-    return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+    return _candidate_state_filtered_decision_views(state, evidence)[0]
+
+def _candidate_state_filtered_decision_views(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    inconclusive = _inconclusive_source_cycle_decision_state(state)
+    narrowed = _candidate_authoritative_stage_retry_attempt_floor_state(inconclusive, evidence)
+    capsule = _manual_retry_lineage_capsule(narrowed, evidence)
+    ordinary = _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(narrowed, evidence))
+    return ordinary, capsule
 
 def _candidate_authoritative_stage_retry_attempt_floor_state(
     state: Mapping[str, Any],
@@ -132,6 +214,100 @@ def _candidate_authoritative_stage_retry_attempt_floor_state(
         or _global_source_cycle_download_blocker_job(row, evidence),
     )
     return filtered
+
+def _manual_retry_lineage_capsule(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Capture the exact manual-retry lineage the shared-cycle strip would erase.
+
+    Runs on the ALREADY-NARROWED state (after
+    ``_candidate_authoritative_stage_retry_attempt_floor_state``), before
+    ``_candidate_scoped_shared_cycle_aggregate_state`` strips the pipeline surface.  A
+    capsule exists only when the NEWEST ADOPTED marker directly matches -- through the same
+    exact identity-vs-reference lineage rule the manual evidence uses
+    (``_marker_event_recovered_canonical_stage``) -- at least one contributor OWN id under
+    exactly one canonical floor stage.  It carries only that marker, the matching canonical
+    stage's already-narrowed floor, and that stage's already-narrowed source records.  No
+    truncated row, top-level stage/status/retry field, unrelated floor/event, or older marker
+    is captured; an unmatched newest adopted marker terminates the scan (no fall-through).
+
+    Stale/repaired gate semantics are deliberately NOT repeated here: ``_manual_retry_requested``
+    owns them and closes the lane after this view is composed.
+    """
+
+    expected = _candidate_identity_from_evidence(evidence.get("candidate_identity") or {})
+    if not expected:
+        return None
+    floors = state.get(STAGE_RETRY_ATTEMPT_FLOORS_KEY)
+    if not isinstance(floors, Mapping):
+        return None
+    sources = state.get(STAGE_RETRY_ATTEMPT_FLOOR_SOURCES_KEY)
+    if not isinstance(sources, Mapping):
+        return None
+    for event in reversed(_state_events(state)):
+        if not _event_is_adopted_manual_retry_marker(state, event):
+            continue
+        stage = _marker_event_recovered_canonical_stage(state, event)
+        if stage is None:
+            return None
+        floor = floors.get(stage)
+        contributors = sources.get(stage)
+        if floor in (None, ""):
+            return None
+        if not isinstance(contributors, Sequence) or isinstance(contributors, str | bytes | bytearray):
+            return None
+        rows = [dict(row) for row in contributors if isinstance(row, Mapping)]
+        if not rows:
+            return None
+        return {
+            "marker": dict(event),
+            "stage": stage,
+            "floors": {stage: floor},
+            "sources": {stage: rows},
+        }
+    return None
+
+def _candidate_authoritative_stage_retry_attempt_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy-on-read candidate-authoritative attempt view for the raw-state budget read (#1586).
+
+    The strict-warm-start budget is the one attempt read that takes the RAW
+    projected state (the identity-filtered decision state is a local of
+    ``_candidate_state_decision_evaluated`` and never flows back to it).  The
+    carried floors are already narrowed by
+    ``_candidate_authoritative_stage_retry_attempt_floor_state``, but the budget
+    then scans the raw in-window ``pipeline_jobs`` unfiltered, so a model-less
+    suffixed execution-cohort row still inside the window could spend every
+    candidate's budget through the row-scan channel.
+
+    This view narrows BOTH components with the SAME authority predicate, so a
+    candidate's budget cannot diverge between a contributor that truncation left
+    inside the window and one it carried as a floor.  It is copy-on-read: the
+    caller's raw state is never mutated, and the flat top-level ``retry_count``
+    channel stays untouched (#1579).  Deliberately NOT the full
+    ``_candidate_state_decision_state`` -- its shared-cycle aggregate arm strips
+    the authoritative bare ``cycle_<source>_<stamp>`` wedge floor, which must
+    keep binding (#1173 E5).  The source-cycle download blocker escape stays as
+    symmetric as the row loop's, so promoting ``download`` into a canonical
+    stage cannot silently disarm it.
+    """
+
+    expected = _candidate_identity_from_evidence(evidence.get("candidate_identity") or {})
+    jobs = _state_jobs(state)
+    if not expected or not jobs:
+        return _candidate_authoritative_stage_retry_attempt_floor_state(state, evidence)
+    filtered = dict(state)
+    filtered["pipeline_jobs"] = [
+        dict(job)
+        for job in jobs
+        if _state_row_has_authoritative_candidate_proof(expected, job)
+        or _global_source_cycle_download_blocker_job(job, evidence)
+    ]
+    filtered.pop("jobs", None)
+    return _candidate_authoritative_stage_retry_attempt_floor_state(filtered, evidence)
 
 def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
     unresolved_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
@@ -386,9 +562,26 @@ def _top_level_source_cycle_download_blocker(
     expected: Mapping[str, Any],
     state: Mapping[str, Any],
 ) -> bool:
+    """Recognise the top-level source-cycle download blocker from blocker-row proof (#1584).
+
+    The shared-cycle aggregate cast (``candidate_state_from_rows``) fills the
+    top-level failure/stage keys from the ACTIVE source-cycle download failure
+    while the state's top-level ``run_id`` stays the CANDIDATE's own run id.  The
+    previous comparison of that top-level ``run_id`` against the source-cycle
+    identity therefore rejected every real projection before a blocker row was
+    even inspected, leaving the restore branch (and the shared-cycle aggregate
+    arm's blocker preservation) unreachable.
+
+    Identity now comes from a CONCRETE unrepaired source-cycle download blocker
+    job row, matched through the same ``_global_source_cycle_download_blocker_job``
+    / ``_source_cycle_identity_matches_expected`` chain the row filter uses.  The
+    top-level failure/stage shape is still validated first, and the candidate's
+    top-level ``run_id`` is deliberately NOT treated as blocker identity.  A
+    top-level-only failure with no matching blocker row -- or with a blocker row
+    naming another source/cycle -- fails closed and is not restored.
+    """
+
     if state.get("shared_cycle_aggregate") is not True:
-        return False
-    if not _source_cycle_identity_matches_expected(expected, state):
         return False
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     if pipeline_status not in FAILED_PIPELINE_STATUSES and state.get("error_code") in (None, ""):
@@ -398,7 +591,7 @@ def _top_level_source_cycle_download_blocker(
         return False
     jobs = _state_jobs(state)
     if not jobs:
-        return True
+        return False
     return any(
         _global_source_cycle_download_blocker_job(job, {"candidate_identity": expected})
         for job in jobs
