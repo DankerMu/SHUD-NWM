@@ -45,7 +45,6 @@
     "services/orchestrator/scheduler_runtime.py",
     "tests/test_file_orchestration_journal.py",
     "tests/test_production_scheduler.py",
-    "tests/test_retention.py",
     "tests/test_retry.py",
     "tests/test_scheduler_backfill.py",
     "tests/test_scheduler_generation.py",

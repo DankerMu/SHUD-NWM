@@ -366,6 +366,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # importer gap), and to 36 in #1564 (the four split-demote suites,
     # added at ea0780fa), and to 38 in #1850 (the two accepted-submit-identity
     # gateway-reconcile suites, both sub-second beside the lane they join),
+    # and to 42 in #1872 (the four retention partitions, which replace one
+    # same-name target with the retained core suite plus three moved
+    # partitions — the independent frontier suite already rode here),
     # and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
@@ -398,7 +401,13 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
+        # #1872: the four retention partitions ride the broad orchestrator
+        # directory rule together, so each partition and the independent
+        # frontier suite are pinned here.
+        "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
+        "tests/test_retention_pipeline_frontier.py",
+        "tests/test_retention_root_admission.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
         "tests/test_run_identity.py",
@@ -7549,7 +7558,16 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/orchestrator/scheduler_generation.py", ("tests/test_scheduler_generation.py",)),
     ("services/orchestrator/scheduler_timing.py", ("tests/test_scheduler_timing.py",)),
     ("services/orchestrator/replay_lineage.py", ("tests/test_replay_lineage.py",)),
-    ("services/orchestrator/retention.py", ("tests/test_retention.py",)),
+    (
+        "services/orchestrator/retention.py",
+        (
+            "tests/test_retention.py",
+            "tests/test_retention_extra_roots.py",
+            "tests/test_retention_frontier.py",
+            "tests/test_retention_pipeline_frontier.py",
+            "tests/test_retention_root_admission.py",
+        ),
+    ),
     ("services/orchestrator/run_tree_copyback.py", ("tests/test_run_tree_copyback.py",)),
 )
 
@@ -7571,6 +7589,79 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
 
     missing = sorted(set(required) - selected)
     assert not missing, f"{module_path}: rules stopped selecting audit-floor suites {missing}"
+
+
+# #1872: the four retention partitions ride the broad `services/orchestrator/**`
+# directory rule together with the independent frontier suite. The positive
+# floor above only proves each partition IS selected; this pin names all four
+# partitions and proves each is reached by the production owner route for a
+# `services/orchestrator/retention.py` change.
+RETENTION_PARTITIONS: tuple[str, ...] = (
+    "tests/test_retention.py",
+    "tests/test_retention_extra_roots.py",
+    "tests/test_retention_pipeline_frontier.py",
+    "tests/test_retention_root_admission.py",
+)
+RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
+# The three moved partitions are reached ONLY through the owner rule: the
+# retained same-name core also arrives via same-name suite derivation, so it is
+# not a fracture pin for the rule literal (removing it from the rule stays
+# green via derivation — which is correct, not a gap).
+RETENTION_RULE_ONLY_PARTITIONS: tuple[str, ...] = (
+    "tests/test_retention_extra_roots.py",
+    "tests/test_retention_pipeline_frontier.py",
+    "tests/test_retention_root_admission.py",
+)
+
+
+def _retention_owner_selection() -> set[str]:
+    return set(select_tests(["services/orchestrator/retention.py"], repo_root=Path(".")))
+
+
+def test_production_retention_owner_selects_all_partitions_and_frontier() -> None:
+    # The production owner route for a retention change must carry every
+    # collectible retention partition plus the independent frontier suite —
+    # otherwise a moved case is blind in the targeted PR lane exactly like the
+    # monolithic selection it replaced.
+    module_path = "services/orchestrator/retention.py"
+    assert Path(module_path).is_file()
+
+    selected = _retention_owner_selection()
+
+    assert set(RETENTION_PARTITIONS) <= selected
+    assert RETENTION_FRONTIER_PARTITION in selected
+
+
+@pytest.mark.parametrize("removed", RETENTION_RULE_ONLY_PARTITIONS)
+def test_retention_owner_reds_when_a_partition_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    # The fracture pin: every moved partition is load-bearing in the owner rule.
+    # Removing ONE partition target from the `services/orchestrator/**` rule
+    # must drop it from the production retention selection, so a partition that
+    # silently falls out of the route reds here instead of in the post-merge
+    # master run.
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import PathTestRule
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == "services/orchestrator/**"
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(rule.pattern == "services/orchestrator/**" for rule in patched), "owner rule not found"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    selected = select_tests(["services/orchestrator/retention.py"], repo_root=Path("."))
+
+    assert removed not in selected
 
 
 # Modules whose additions had to be placed with `stop_on_match` in mind: an
@@ -7670,6 +7761,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_scheduler_backfill.py",
     ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
+    # #1872: the retention partitions' shared helper is imported at module scope
+    # by all four collectible partitions; any of them is a valid derivation
+    # anchor, pinned on the core suite (which is also the same-name owner).
+    ("tests/retention_test_helpers.py", "tests/test_retention.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
     # The literal-path half (#1498): this pair exists only because
     # test_shud_runtime.py carries the exact string "tests/mock_shud_omp.py" and
