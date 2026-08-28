@@ -781,6 +781,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # The #1872 retention partition's shared constants/helpers. The four
+        # collectible retention partitions import it at module scope (a design
+        # requirement: selector importer derivation must see the dependency), so
+        # a fixture edit breaks all four during PR-lane collection. They are the
+        # derived importer set; the meta-guard rider covers the tree-derived
+        # guards this very routing can invalidate.
+        "tests/retention_test_helpers.py",
+        (
+            "tests/test_retention.py",
+            "tests/test_retention_extra_roots.py",
+            "tests/test_retention_pipeline_frontier.py",
+            "tests/test_retention_root_admission.py",
+        ),
+    ),
+    PathTestRule(
         # The #1564 split-demote suites' shared fixture module. The four split
         # suites import it at file level, and the public operator-recovery cycle
         # tests import it through a local (function-scope) import, which the
@@ -1180,7 +1195,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_reconcile_sacct_parse.py",
             "tests/test_replay_lineage.py",
             "tests/test_retention.py",
+            # #1872: the retention corpus is physically partitioned; the
+            # production owner rule must select every collectible partition so
+            # a retention change never blinds targeted CI to moved cases.
+            "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
+            "tests/test_retention_pipeline_frontier.py",
+            "tests/test_retention_root_admission.py",
             "tests/test_retry.py",
             "tests/test_retry_cancel_consistency.py",
             "tests/test_run_identity.py",
