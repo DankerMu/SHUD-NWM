@@ -504,3 +504,97 @@ def test_cleanup_with_the_gate_closed_sweeps_no_additional_root(
     assert str(env["workspace"].resolve()) not in roots
     assert (copyback / copyback_key).exists()
     assert (env["workspace"] / workspace_key).exists()
+
+
+# ---------------------------------------------------------------------------
+# I7 (#1616) - the cleanup CLI hands retention the raw OBJECT_STORE_ROOT env
+# value, so a blank/relative primary is rejected as a deletion surface instead
+# of resolving against the CWD (or, for the pass, the scheduler workspace).
+# The scheduler-normalized location is where __post_init__ would anchor a
+# relative value: <workspace>/<relative/store>.
+# ---------------------------------------------------------------------------
+def _write_cycle_and_run(root: Path, cycle: datetime) -> str:
+    cycle_name = _cycle_name(cycle)
+    _write_cycle(root, "raw", "gfs", cycle_name)
+    run_id = f"fcst_gfs_{cycle_name}_model_a"
+    path = root / "runs" / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "out.nc").write_bytes(b"x")
+    return f"runs/{run_id}"
+
+
+def _seed_cli_raw_primary_old_trees(
+    env: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    """Seed aged retention-shaped trees under the CWD and under the
+    scheduler-normalized workspace location; returns (cwd, normalized_store).
+
+    The normalized location is ``<workspace>/relative/store`` -- exactly where
+    ``ProductionSchedulerConfig.__post_init__`` would anchor the relative value
+    ``"relative/store"``. ``WORKSPACE_ROOT`` comes from the ``env`` fixture, so
+    the cleanup's evidence-dir derivation still reads the receipts written to
+    ``env["evidence_dir"]``.
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    normalized_store = env["workspace"] / "relative" / "store"
+    aged = NOW - timedelta(days=40)
+    _write_cycle_and_run(cwd, aged)
+    _write_cycle_and_run(normalized_store, aged)
+    return cwd, normalized_store
+
+
+@pytest.mark.parametrize("value", ["", "   ", "relative/store"])
+def test_cleanup_raw_primary_blank_or_relative_is_never_scanned(
+    env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    """[3.2] ``OBJECT_STORE_ROOT`` as ``""`` / whitespace / ``"relative/store"``:
+    no CWD or scheduler-normalized tree is scanned or removed, physical bytes
+    survive, and ``skipped`` carries the exact primary reason token."""
+    from services.orchestrator.retention import (
+        PRIMARY_ROOT_BLANK_REASON,
+        PRIMARY_ROOT_NOT_ABSOLUTE_REASON,
+    )
+
+    monkeypatch.setenv("OBJECT_STORE_ROOT", value)
+    cwd, normalized_store = _seed_cli_raw_primary_old_trees(env, tmp_path, monkeypatch)
+    # a fresh null-bound receipt keeps the ok (non-blocked) path
+    _write_receipt(env["evidence_dir"], "pass-null", started_at=NOW, retention=_retention_block(None))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    expected_reason = (
+        PRIMARY_ROOT_BLANK_REASON if value.strip() == "" else PRIMARY_ROOT_NOT_ABSOLUTE_REASON
+    )
+    assert payload["dry_run"] is False
+    assert "frontier_blocker" not in payload
+    assert [(entry["key"], entry["reason"]) for entry in payload["skipped"]] == [
+        ("", expected_reason)
+    ]
+    assert payload["planned"] == []
+    assert payload["deleted"] == []
+    # physical bytes under both old-tree locations survive
+    aged = _cycle_name(NOW - timedelta(days=40))
+    for location in (cwd, normalized_store):
+        assert (location / f"raw/gfs/{aged}/payload.nc").exists()
+        assert (location / f"runs/fcst_gfs_{aged}_model_a/out.nc").exists()
+
+
+def test_cleanup_absolute_primary_still_works(env: dict[str, Path], tmp_path: Path) -> None:
+    """[3.2] An ordinary absolute configured primary stays functional through the
+    CLI: the aged cycle is deleted, not skipped."""
+    aged = _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+    _write_receipt(env["evidence_dir"], "pass-1", started_at=NOW, retention=_retention_block(None))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert payload["dry_run"] is False
+    assert payload["skipped"] == []
+    assert not aged.exists()
+    assert any(entry["key"] == f"raw/gfs/{_cycle_name(NOW - timedelta(days=40))}" for entry in payload["deleted"])

@@ -578,20 +578,25 @@ def remove_tree_allow_symlinks(
     containment_root: Path | None = None,
     missing_ok: bool = True,
 ) -> None:
-    """Remove a QUARANTINE tree, unlinking symlink entries instead of refusing them.
+    """Remove a residue tree, unlinking symlink entries instead of refusing them.
 
-    Scope (#1330): this primitive exists for residue/quarantine trees whose
-    contents are untrusted BY CONSTRUCTION — whatever a killed attempt left
-    behind, including symlinks.  ``rmtree_no_follow``'s refuse-on-symlink policy
-    stays the correct one for trees where a symlink is evidence of tampering;
-    here a refusal would permanently lock the run at the hygiene hook.
+    Scope (#1330, #1615): this primitive exists for disposable residue /
+    quarantine trees whose contents are untrusted BY CONSTRUCTION — whatever a
+    killed attempt or an expired selected run workspace left behind, including
+    symlinks.  ``rmtree_no_follow``'s refuse-on-symlink policy stays the
+    correct one for trees where a symlink is evidence of tampering; here a
+    refusal would permanently lock the run at the hygiene hook (or permanently
+    lock an aged additional-root run workspace out of capacity recovery).
 
     Symlinks are never followed: the LINK itself is unlinked through a dir-fd,
     directories are entered only via ``O_DIRECTORY|O_NOFOLLOW`` descriptors, and
     every other entry shape (regular file, FIFO, socket, device) is unlinked
     through the dir-fd without ever being opened.  An absent ``name`` is a no-op
     when ``missing_ok``; a ``name`` that is itself a symlink is unlinked as a
-    link rather than traversed.
+    link rather than traversed.  Retention (#1615) reuses this helper for
+    selected additional-root run trees with ``containment_root=<resolved root>``
+    and ``missing_ok=False``; a symlinked ``runs/`` root stays refused upstream,
+    before any entry is passed here.
 
     Error contract (#1330): traversal / unlink / rmdir ``OSError``s are wrapped
     ``kind="io"``; walk-stage safety refusals keep ``kind="unsafe"``.

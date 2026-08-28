@@ -2044,6 +2044,14 @@ def _run_retention(
     flight from wall-clock deletion; the default ``None`` keeps the previous
     behaviour for callers that have no pass context.
 
+    The primary root is handed over as the constructor-time RAW value
+    (issue #1616 / design D1): ``ProductionSchedulerConfig.__post_init__``
+    collapses an explicitly blank ``OBJECT_STORE_ROOT`` into ``None`` and
+    anchors a relative value beneath the workspace root, and retention must
+    see the raw value so a blank/relative primary is rejected as
+    ``primary_root_blank`` / ``primary_root_not_absolute`` instead of silently
+    becoming a working-directory or workspace-derived deletion surface.
+
     The scheduler workspace root and the object-store copyback root are
     forwarded as additional ``runs/``-only roots (issue #1318), and only when
     ``NHMS_RETENTION_EXTRA_ROOTS_ENABLED`` is on.
@@ -2075,8 +2083,21 @@ def _run_retention(
         retention_config = replace(retention_config, dry_run=True)
         forced_dry_run = True
     try:
+        # The raw constructor-time value, NOT the normalized ``object_store_root``
+        # (issue #1616 / design D1): normalization collapses an explicitly blank
+        # value into ``None`` and anchors a relative value beneath the workspace
+        # root, so feeding the normalized form would let a blank/relative
+        # ``OBJECT_STORE_ROOT`` silently become a working-directory or
+        # workspace-derived deletion surface. The raw field is private and
+        # contract-free for every non-retention path, which keeps consuming the
+        # normalized field. ``object_store_copyback_root`` is already the bare
+        # env string and stays that way.
         result = run_retention(
-            object_store_root=self.config.object_store_root,
+            object_store_root=getattr(
+                self.config,
+                "_object_store_root_raw",
+                self.config.object_store_root,
+            ),
             now=started_at,
             config=retention_config,
             published_artifact_root=self.config.published_artifact_root,
