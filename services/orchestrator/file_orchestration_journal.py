@@ -383,6 +383,13 @@ IDENTITY_RELEASED_SIGNAL_FAILED_EVENT = "identity_released_operator_signal_faile
 # ``cli`` registers the subcommand from this same constant, so the name in the
 # journal record cannot drift away from the name a shell will accept.
 RELEASED_RESERVATION_RECOVERY_COMMAND = "recover-released-identity-blocked-reservation"
+#: #1796: durable best-effort event for a committed reservation/reclaim whose
+#: derived direct/inventory/latest projection failed AFTER the authority append.
+#: Every field is a fixed non-secret token or validated projection/model identity
+#: -- never exception text, class name, path, ``.error_code``, ``.reason``, repr,
+#: or any secret-shaped detail.  A failure to emit it never reverses the
+#: committed reservation.
+COMMITTED_PROJECTION_FAULT_EVENT = "committed_projection_fault"
 
 
 def _released_reservation_recovery_command(job_id: str) -> str:
@@ -2459,7 +2466,19 @@ class FileOrchestrationJournalRepository:
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             if self._pipeline_job_conflicts_unlocked(row):
                 return None
-            return self._write_pipeline_job_unlocked(row, exclusive_direct=True, model_id=model_id)
+            # #1796: the authority append inside ``_write_pipeline_job_unlocked``
+            # is the commit point of this reservation.  A derived
+            # direct/inventory/latest projection fault after it is contained to
+            # a bounded committed-warning (see
+            # ``_project_committed_pipeline_job_write``) instead of escaping as
+            # ``FILE_JOURNAL_WRITE_FAILED`` and stranding a live pre-sbatch
+            # ``reserved`` row.  Pre-append failure stays fail-closed.
+            return self._write_pipeline_job_unlocked(
+                row,
+                exclusive_direct=True,
+                model_id=model_id,
+                _committed_projection_containment=True,
+            )
 
     def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
         expected_current_attempt = record.get("expected_submission_attempt")
@@ -2646,28 +2665,21 @@ class FileOrchestrationJournalRepository:
                 for key in ("run_id", "cycle_id", "model_id", "stage", "candidate_id", "job_type"):
                     if row.get(key) in (None, "") and request_row.get(key) not in (None, ""):
                         row[key] = request_row[key]
-            # #1564 D9 committed reclaim completion (operator old-ID route):
-            # the authority append inside ``_write_pipeline_job_unlocked`` is
-            # the commit point of the new attempt.  A derived direct/inventory
-            # projection failure after that append must never be reported as an
-            # uncommitted failure that strands a live pre-sbatch ``reserved``
-            # row -- the identical defect reachable through automatic
-            # ``absence_retry_permitted`` and other reservation writes is
-            # pre-existing and tracked in #1796.  This route is exactly the
-            # operator flow: the source row carried ``operator_verified_absence``
-            # (the begin-attempt transition clears the accounting tuple, so the
-            # durable pre-append decision is the only reliable marker here), and
-            # a non-operator claim can never match it.
-            operator_old_id_reclaim = bool(
-                str(existing.get("reconciliation_decision") or "")
-                == OPERATOR_VERIFIED_ABSENCE_DECISION
-            )
+            # #1564 D9 / #1796 committed reclaim completion: the authority append
+            # inside ``_write_pipeline_job_unlocked`` is the commit point of the
+            # new attempt.  A derived direct/inventory/latest projection failure
+            # after that append must never be reported as an uncommitted failure
+            # that strands a live pre-sbatch ``reserved`` row -- the identical
+            # defect is reachable through every reclaim door (operator
+            # ``operator_verified_absence`` and automatic
+            # ``absence_retry_permitted``) plus plain reserve, so containment is
+            # opt-in for every reservation/reclaim write at this boundary.
             model_id = _optional_safe_identity(row, "model_id")
             return self._write_pipeline_job_unlocked(
                 row,
                 exclusive_direct=False,
                 model_id=model_id,
-                _committed_projection_containment=operator_old_id_reclaim,
+                _committed_projection_containment=True,
             )
 
     def bind_pipeline_job_reservation(
@@ -4272,6 +4284,7 @@ class FileOrchestrationJournalRepository:
         status_to: str | None,
         message: str | None,
         details: Mapping[str, Any],
+        materialize: bool = True,
     ) -> None:
         """Append one pipeline_job event from inside an open cycle write window.
 
@@ -4303,7 +4316,7 @@ class FileOrchestrationJournalRepository:
             source_id=source_id,
             cycle_time=cycle_time,
             model_id=model_id,
-            materialize_model_id=model_id,
+            materialize_model_id=model_id if materialize else None,
         )
 
     def recover_released_identity_blocked_reservation(
@@ -8636,6 +8649,109 @@ class FileOrchestrationJournalRepository:
         with self._locked_cycle_write(source_id=source_id, cycle_time=cycle_time):
             return self._write_pipeline_job_unlocked(row, exclusive_direct=exclusive_direct, model_id=model_id)
 
+    def _project_committed_pipeline_job_write(
+        self,
+        row: Mapping[str, Any],
+        record: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str | None,
+    ) -> None:
+        """Run every derived projection after a committed reservation/reclaim append.
+
+        #1796 (generalizing #1564 D9): the authority append in
+        ``_write_pipeline_job_unlocked`` / ``_write_current_master_unlocked`` is
+        the commit point of the new reservation attempt.  A direct/inventory or
+        latest projection fault after it is contained to ONE bounded non-secret
+        warning per failed projection (fixed code/reason tokens + validated
+        projection/model identity only -- never exception text, class, path,
+        ``.error_code``, ``.reason``, or secret-shaped detail), plus a
+        best-effort durable ``committed_projection_fault`` event whose append
+        never re-invokes the failed projection.  Every remaining independent
+        projection is still attempted and the committed result is always
+        returned: a later pass must never see a falsely-failed write that
+        strands a live pre-sbatch ``reserved`` row or wedges the cycle.
+        """
+
+        try:
+            self._write_pipeline_job_direct_unlocked(row, record)
+        except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+            _emit_reclaim_projection_warning("pipeline_job_direct", None, error)
+            self._emit_committed_projection_fault_event(
+                row,
+                projection="pipeline_job_direct",
+                projection_model_id=None,
+                error=error,
+                source_id=source_id,
+                cycle_time=cycle_time,
+            )
+        if model_id is not None:
+            try:
+                self._materialize_latest_unlocked(
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
+            except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
+                _emit_reclaim_projection_warning("latest", model_id, error)
+                self._emit_committed_projection_fault_event(
+                    row,
+                    projection="latest",
+                    projection_model_id=model_id,
+                    error=error,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+
+    def _emit_committed_projection_fault_event(
+        self,
+        row: Mapping[str, Any],
+        *,
+        projection: str,
+        projection_model_id: str | None,
+        error: Exception,
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
+        """Best-effort durable bounded evidence for one committed projection fault.
+
+        The authoritative append is already durable, so a failure here must
+        never surface: the process warning and the committed reservation are the
+        final fallback.  ``materialize=False`` keeps the append from
+        re-invoking the projection that just failed (the event lands without
+        re-entering the failed direct/latest write), and the payload carries
+        only fixed tokens plus validated identity.
+        """
+
+        del error  # the exception is used only to decide that it must not surface.
+        try:
+            self._append_pipeline_job_event_unlocked(
+                row,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                event_type=COMMITTED_PROJECTION_FAULT_EVENT,
+                status_from=str(row.get("status") or ""),
+                status_to=str(row.get("status") or ""),
+                message=(
+                    f"committed reservation/reclaim projection fault: "
+                    f"projection={projection} code=FILE_JOURNAL_RECLAIM_PROJECTION_FAULT "
+                    "the reservation is committed; journal replay is authoritative"
+                ),
+                details={
+                    "projection": projection,
+                    "model_id": projection_model_id,
+                    "reason": _PROJECTION_WARNING_FALLBACK_TOKEN,
+                    "error_type": _PROJECTION_WARNING_FALLBACK_TOKEN,
+                    "submission_attempt": row.get("submission_attempt"),
+                    "submission_attempt_started_at": row.get("submission_attempt_started_at"),
+                    "committed": True,
+                },
+                materialize=False,
+            )
+        except Exception:  # noqa: BLE001 - observability must never fail the committed reservation.
+            pass
+
     def _write_pipeline_job_unlocked(
         self,
         row: Mapping[str, Any],
@@ -8702,28 +8818,13 @@ class FileOrchestrationJournalRepository:
                 self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
             raise
         if _committed_projection_containment:
-            # #1564 D9 (operator old-ID reclaim route only): the authority
-            # append above is the commit point of the new attempt.  Derived
-            # projection faults after it are contained to bounded non-secret
-            # warnings (mirroring the dedicated demotion's committed-warning
-            # principle), every remaining independent projection is still
-            # attempted, and journal replay stays the source of truth.  This
-            # never raises, so the operator old-ID recovery path can never
-            # strand a live pre-sbatch ``reserved`` row.  Automatic and other
-            # reservation writes keep their pre-existing behavior (#1796).
-            try:
-                self._write_pipeline_job_direct_unlocked(row, record)
-            except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
-                _emit_reclaim_projection_warning("pipeline_job_direct", None, error)
-            if model_id is not None:
-                try:
-                    self._materialize_latest_unlocked(
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                        model_id=model_id,
-                    )
-                except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
-                    _emit_reclaim_projection_warning("latest", model_id, error)
+            self._project_committed_pipeline_job_write(
+                row,
+                record,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            )
             return _public_scheduler_row(row)
         self._write_pipeline_job_direct_unlocked(row, record)
         if model_id is not None:
@@ -8763,27 +8864,13 @@ class FileOrchestrationJournalRepository:
                     self._remove_reconcile_inventory_anchor_unlocked(str(row["job_id"]))
                 raise
             if _committed_projection_containment:
-                # #1564 D9 (operator old-ID reclaim route only): the authority
-                # append above is the commit point of the new attempt.  Derived
-                # projection faults after it are contained to bounded non-secret
-                # warnings (mirroring the dedicated demotion's committed-warning
-                # principle), every remaining independent projection is still
-                # attempted, and journal replay stays the source of truth.  This
-                # never raises, so the operator old-ID recovery path can never
-                # strand a live pre-sbatch ``reserved`` row.
-                try:
-                    self._write_pipeline_job_direct_unlocked(row, record)
-                except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
-                    _emit_reclaim_projection_warning("pipeline_job_direct", None, error)
-                if model_id is not None:
-                    try:
-                        self._materialize_latest_unlocked(
-                            source_id=source_id,
-                            cycle_time=cycle_time,
-                            model_id=model_id,
-                        )
-                    except Exception as error:  # noqa: BLE001 - bounded committed-warning containment.
-                        _emit_reclaim_projection_warning("latest", model_id, error)
+                self._project_committed_pipeline_job_write(
+                    row,
+                    record,
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                    model_id=model_id,
+                )
                 return _public_scheduler_row(row)
             self._write_pipeline_job_direct_unlocked(row, record)
             if model_id is not None:
