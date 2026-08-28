@@ -15,6 +15,9 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     read_bytes_limited_no_follow,
 )
+from services.orchestrator.scheduler_evidence import (
+    is_scheduler_pass_evidence_filename,
+)
 from services.production_closure import (
     readiness_item_contracts as _readiness_item_contracts,
 )
@@ -459,7 +462,13 @@ def _find_scheduler_evidence_files(
             entry_count += 1
             if entry_count > _MAX_SCHEDULER_EVIDENCE_ROOT_ENTRIES:
                 raise _SchedulerEvidenceRootEntryLimitError
-            if not entry.name.endswith(".json"):
+            # #1575: one shared governed pass filename predicate.  Only
+            # ``scheduler_*.json`` / ``scheduler_*.pre_execution.json`` pass
+            # artifacts are admission candidates; the permanent
+            # ``no-progress-tracker.json``, temp files, and unrelated/unprefixed
+            # JSON never become readiness items or consume the discovery cap.
+            # Filtering happens BEFORE ordering and capping.
+            if not is_scheduler_pass_evidence_filename(entry.name):
                 continue
             candidates.append(root / entry.name)
             if len(candidates) > MAX_SCHEDULER_EVIDENCE_FILES:

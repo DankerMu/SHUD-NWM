@@ -538,7 +538,6 @@ def candidate_state(
             retry_count DESC NULLS LAST,
             created_at DESC,
             job_id DESC
-        LIMIT %s
         """,
         (
             run_id,
@@ -548,7 +547,6 @@ def candidate_state(
             run_id,
             cycle_id,
             cycle_run_id,
-            job_limit + 1,
         ),
     )
     events = self._fetch_all(

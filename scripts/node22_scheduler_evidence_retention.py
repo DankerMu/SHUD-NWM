@@ -38,13 +38,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from services.orchestrator import scheduler_evidence as _scheduler_evidence
+
 SCHEMA_VERSION = "nhms.node22_scheduler_evidence_retention.v1"
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_MB = 512
 DEFAULT_RECEIPT_RETENTION_DAYS = 180
 SAFETY_WINDOW_SECONDS = 3600
-PASS_EVIDENCE_PREFIX = "scheduler_"
-PASS_EVIDENCE_SUFFIXES = (".pre_execution.json", ".json")
+#: Backward-compatible re-export of the shared governed pass-evidence filename
+#: constants (#1575).  The predicate itself is owned by the scheduler evidence
+#: service layer so readiness discovery and retention classify one set of names.
+PASS_EVIDENCE_PREFIX = _scheduler_evidence.SCHEDULER_PASS_EVIDENCE_PREFIX
+PASS_EVIDENCE_SUFFIXES = _scheduler_evidence.SCHEDULER_PASS_EVIDENCE_SUFFIXES
 RECEIPT_DIR_NAME = "retention"
 RECEIPT_FILENAME_PREFIX = "retention-"
 RECEIPT_FILENAME_SUFFIX = ".json"
@@ -210,9 +215,14 @@ def _has_inflight_sibling(path: Path) -> bool:
 
 
 def _is_pass_evidence(name: str) -> bool:
-    if not name.startswith(PASS_EVIDENCE_PREFIX):
-        return False
-    return any(name.endswith(suffix) for suffix in PASS_EVIDENCE_SUFFIXES)
+    """Delegate to the ONE scheduler pass filename predicate (#1575).
+
+    Readiness root discovery and this retention script classify through the same
+    service-layer predicate so ``no-progress-tracker.json``, temp files, and
+    unrelated/unprefixed JSON are never pass evidence on either side.
+    """
+
+    return _scheduler_evidence.is_scheduler_pass_evidence_filename(name)
 
 
 def _is_retention_receipt(path: Path, receipt_dir: Path) -> bool:

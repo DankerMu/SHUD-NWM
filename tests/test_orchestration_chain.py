@@ -45,6 +45,7 @@ from services.orchestrator.chain import (
 )
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
+from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import (
     GFS_REQUIRED_STANDARD_VARIABLES,
@@ -6766,9 +6767,13 @@ def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scop
 
     job_call = next(call for call in calls if "FROM ops.pipeline_job" in call[0])
     event_call = next(call for call in calls if "FROM ops.pipeline_event" in call[0])
-    assert "LIMIT %s" in job_call[0]
+    # #1572: the DB read supplies the COMPLETE candidate/cycle-scoped population
+    # to the shared projection; ``job_limit`` truncation happens in the
+    # projection (pure freshness) so ``pipeline_jobs_total``/``state_truncated``
+    # are the true numbers.  No SQL-local ``LIMIT`` remains on the job read.
+    assert "LIMIT %s" not in job_call[0]
     assert "COALESCE(updated_at, finished_at, submitted_at, started_at, created_at) DESC" in job_call[0]
-    assert job_call[1][-1] == 3
+    assert len(job_call[1]) == 7
     assert "SELECT pj.job_id" in event_call[0]
     assert "ORDER BY pe.created_at DESC, pe.event_id DESC" in event_call[0]
     assert event_call[1] == (
@@ -17814,3 +17819,405 @@ def test_runtime_threads_prefers_explicit_shud_threads_over_cpus_per_task(tmp_pa
 
 def test_runtime_threads_falls_back_to_one_without_any_allocation_hint(tmp_path: Path) -> None:
     assert _threads_for_resource_profile(tmp_path, {}) == 1
+
+
+
+
+# ---------------------------------------------------------------------------
+# #1572: real-DB candidate-state projection oracle (node-27)
+# ---------------------------------------------------------------------------
+
+
+def _integration_cycle_fixture() -> tuple[str, str, datetime]:
+    cycle_id = "gfs_2026050300"
+    cycle_time = datetime(2026, 5, 3, tzinfo=UTC)
+    cycle_run_id = f"cycle_gfs_{format_cycle_time(cycle_time)}"
+    return cycle_id, cycle_run_id, cycle_time
+
+
+def _integration_insert_jobs(
+    database_url: str,
+    rows: list[dict[str, Any]],
+    *,
+    cycle_id: str,
+) -> None:
+    """Insert real ``ops.pipeline_job`` rows from the shared geometry."""
+    from tests.integration_helpers import psycopg_connection
+
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM ops.pipeline_job WHERE cycle_id = %s", (cycle_id,))
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO ops.pipeline_job (
+                        job_id, run_id, cycle_id, job_type, status, stage, retry_count,
+                        model_id, created_at, updated_at, finished_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        row["job_id"],
+                        row["run_id"],
+                        row["cycle_id"],
+                        row["job_type"],
+                        row["status"],
+                        row["stage"],
+                        row["retry_count"],
+                        row["model_id"],
+                        row["created_at"],
+                        row["updated_at"],
+                        row["finished_at"],
+                    ),
+                )
+
+
+def _integration_seed_pipeline_jobs(
+    database_url: str,
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+    job_limit: int,
+    extra_rows: int,
+) -> datetime:
+    """Seed the reverse-truncation geometry: old retry row + fresh other-stage rows."""
+    cycle_time = datetime(2026, 5, 3, tzinfo=UTC)
+    _integration_insert_jobs(
+        database_url,
+        _integration_candidate_rows(
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+            cycle_time=cycle_time,
+            job_limit=job_limit,
+            extra_rows=extra_rows,
+            friendly=False,
+        ),
+        cycle_id=cycle_id,
+    )
+    return cycle_time
+
+
+def _integration_seed_friendly_pipeline_jobs(
+    database_url: str,
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+    job_limit: int,
+) -> None:
+    """Seed the friendly geometry: the retry row is the NEWEST row (in-window)."""
+    cycle_time = datetime(2026, 5, 3, tzinfo=UTC)
+    _integration_insert_jobs(
+        database_url,
+        _integration_candidate_rows(
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+            cycle_time=cycle_time,
+            job_limit=job_limit,
+            extra_rows=1,
+            friendly=True,
+        ),
+        cycle_id=cycle_id,
+    )
+
+
+def _integration_candidate_rows(
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+    cycle_time: datetime,
+    job_limit: int,
+    extra_rows: int,
+    friendly: bool,
+) -> list[dict[str, Any]]:
+    """The one row geometry shared by the DB seed and the file-journal seed.
+
+    Reverse: the ``*_forecast_retry_87`` row carries the maximum stage attempt
+    and sits at the OLD end of the freshness window behind ``job_limit`` fresher
+    other-stage rows.  Friendly: the retry row is the NEWEST row (in-window).
+    Both builders feed the SAME payloads into ``ops.pipeline_job`` and into
+    ``FileOrchestrationJournalRepository.append_historical_pipeline_job``.
+    """
+
+    rows: list[dict[str, Any]] = []
+    if not friendly:
+        rows.append(
+            {
+                "job_id": f"job_{cycle_run_id}_forecast_retry_87",
+                "run_id": cycle_run_id,
+                "cycle_id": cycle_id,
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "stage": "forecast",
+                "retry_count": 0,
+                "model_id": None,
+                "created_at": cycle_time - timedelta(days=1),
+                "updated_at": cycle_time - timedelta(days=1),
+                "finished_at": cycle_time - timedelta(days=1),
+            }
+        )
+    rows.extend(
+        {
+            "job_id": f"job_{cycle_run_id}_publish_{index}",
+            "run_id": cycle_run_id,
+            "cycle_id": cycle_id,
+            "job_type": "publish_tiles",
+            "status": "succeeded",
+            "stage": "publish",
+            "retry_count": 0,
+            "model_id": None,
+            "created_at": cycle_time + timedelta(minutes=index),
+            "updated_at": cycle_time + timedelta(minutes=index),
+            "finished_at": cycle_time + timedelta(minutes=index),
+        }
+        for index in range(job_limit + extra_rows)
+    )
+    if friendly:
+        rows.append(
+            {
+                "job_id": f"job_{cycle_run_id}_forecast_retry_87",
+                "run_id": cycle_run_id,
+                "cycle_id": cycle_id,
+                "job_type": "run_shud_forecast_array",
+                "status": "failed",
+                "stage": "forecast",
+                "retry_count": 0,
+                "model_id": None,
+                "created_at": cycle_time + timedelta(hours=1),
+                "updated_at": cycle_time + timedelta(hours=1),
+                "finished_at": cycle_time + timedelta(hours=1),
+            }
+        )
+    return rows
+
+
+def _integration_file_journal_state(
+    journal_root: Path,
+    *,
+    cycle_time: datetime,
+    job_limit: int,
+) -> dict[str, Any]:
+    """Read candidate state through the REAL file-journal repository."""
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository,
+    )
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id="fcst_gfs_2026050300_model_a",
+        forcing_version_id="forc_gfs_2026050300_model_a",
+        candidate_id="gfs:2026-05-03T00:00:00Z:model_a:forecast_gfs_deterministic",
+        job_limit=job_limit,
+        event_limit=job_limit,
+    )
+    assert state is not None
+    return state
+
+
+@pytest.mark.integration
+def test_integration_candidate_state_reverse_truncation_matches_file_journal(
+    tmp_path: Path,
+    integration_database_url: str,
+) -> None:
+    """#1572 oracle: real-DB candidate state on the reverse-truncation geometry.
+
+    Real ``ops.pipeline_job`` rows: the ``*_forecast_retry_87`` row carries the
+    maximum stage attempt and sits at the OLD end of the freshness window behind
+    ``job_limit`` fresher other-stage rows.  The real
+    ``PsycopgOrchestratorRepository.candidate_state`` and the REAL
+    ``FileOrchestrationJournalRepository.candidate_state`` (rows written through
+    ``append_historical_pipeline_job`` under ``tmp_path``) must both:
+
+    * derive the stage-scoped forecast attempt 87 (the SQL no longer pre-cuts
+      the population);
+    * report ``pipeline_jobs_total`` as the TRUE admitted row count (not the
+      old ``job_limit + 1`` cap);
+    * set ``state_truncated`` from that true total;
+    * return exactly ``job_limit`` pipeline-job rows (pure-freshness top, no
+      row rescue).
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+    from tests.integration_helpers import apply_migrations_from_zero
+
+    apply_migrations_from_zero(integration_database_url)
+    job_limit = 5
+    cycle_id, cycle_run_id, cycle_time = _integration_cycle_fixture()
+    _integration_seed_pipeline_jobs(
+        integration_database_url,
+        cycle_id=cycle_id,
+        cycle_run_id=cycle_run_id,
+        job_limit=job_limit,
+        extra_rows=1,
+    )
+    repository = PsycopgOrchestratorRepository(integration_database_url)
+    db_state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id="fcst_gfs_2026050300_model_a",
+        forcing_version_id="forc_gfs_2026050300_model_a",
+        candidate_id="gfs:2026-05-03T00:00:00Z:model_a:forecast_gfs_deterministic",
+        job_limit=job_limit,
+        event_limit=job_limit,
+    )
+    assert db_state is not None
+    assert len(db_state["pipeline_jobs"]) == job_limit
+    assert db_state["pipeline_jobs_total"] == job_limit + 2  # 1 retry + 6 publishes
+    assert db_state["state_truncated"] is True
+    assert _state_retry_attempt(db_state, stage="forecast") == 87
+
+    # The file-journal side is the REAL repository write/read path, not the
+    # shared projection: ``tmp_path`` journal root, every row through
+    # ``append_historical_pipeline_job``, candidate state through
+    # ``FileOrchestrationJournalRepository.candidate_state``.
+    journal_root = tmp_path / "journal"
+    journal_rows = _integration_candidate_rows(
+        cycle_id=cycle_id,
+        cycle_run_id=cycle_run_id,
+        cycle_time=cycle_time,
+        job_limit=job_limit,
+        extra_rows=1,
+        friendly=False,
+    )
+    for row in journal_rows:
+        FileOrchestrationJournalRepository(journal_root).append_historical_pipeline_job(row)
+    file_state = _integration_file_journal_state(
+        journal_root,
+        cycle_time=cycle_time,
+        job_limit=job_limit,
+    )
+    # Every canonical downstream stage agrees across DB and file journal.
+    for stage in DOWNSTREAM_RESTART_STAGES:
+        assert _state_retry_attempt(file_state, stage=stage) == _state_retry_attempt(
+            db_state, stage=stage
+        ), stage
+    assert file_state["pipeline_jobs_total"] == db_state["pipeline_jobs_total"]
+    assert file_state["state_truncated"] is db_state["state_truncated"]
+    assert [job["job_id"] for job in file_state["pipeline_jobs"]] == [
+        job["job_id"] for job in db_state["pipeline_jobs"]
+    ]
+    assert _state_retry_attempt(file_state, stage="forecast") == 87
+
+    # Friendly geometry: the retry row is inside the freshness window but the
+    # cycle still carries MORE than ``job_limit`` rows, so BOTH paths truncate
+    # (max attempt stays in-window and no row rescue applies).
+    _integration_seed_friendly_pipeline_jobs(
+        integration_database_url,
+        cycle_id=cycle_id,
+        cycle_run_id=cycle_run_id,
+        job_limit=job_limit,
+    )
+    db_friendly = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        model_id="model_a",
+        run_id="fcst_gfs_2026050300_model_a",
+        forcing_version_id="forc_gfs_2026050300_model_a",
+        candidate_id="gfs:2026-05-03T00:00:00Z:model_a:forecast_gfs_deterministic",
+        job_limit=job_limit,
+        event_limit=job_limit,
+    )
+    assert db_friendly is not None
+    friendly_journal_root = tmp_path / "journal-friendly"
+    friendly_rows = _integration_candidate_rows(
+        cycle_id=cycle_id,
+        cycle_run_id=cycle_run_id,
+        cycle_time=cycle_time,
+        job_limit=job_limit,
+        extra_rows=1,
+        friendly=True,
+    )
+    for row in friendly_rows:
+        FileOrchestrationJournalRepository(friendly_journal_root).append_historical_pipeline_job(
+            row
+        )
+    file_friendly = _integration_file_journal_state(
+        friendly_journal_root,
+        cycle_time=cycle_time,
+        job_limit=job_limit,
+    )
+    assert db_friendly["pipeline_jobs_total"] == file_friendly["pipeline_jobs_total"]
+    assert (
+        db_friendly["pipeline_jobs_total"] == job_limit + 2
+    )  # 6 publishes + 1 retry; > job_limit so both truncate
+    assert db_friendly["state_truncated"] is True
+    assert file_friendly["state_truncated"] is True
+    assert [job["job_id"] for job in db_friendly["pipeline_jobs"]] == [
+        job["job_id"] for job in file_friendly["pipeline_jobs"]
+    ]
+    assert _state_retry_attempt(db_friendly, stage="forecast") == 87
+    assert _state_retry_attempt(file_friendly, stage="forecast") == 87
+    # Cross-stage parity holds on the friendly geometry too: both paths return
+    # identical pure-freshness IDs/attempts/totals/truncation.
+    for stage in DOWNSTREAM_RESTART_STAGES:
+        assert _state_retry_attempt(file_friendly, stage=stage) == _state_retry_attempt(
+            db_friendly, stage=stage
+        ), stage
+
+
+def test_file_journal_candidate_state_reverse_and_friendly_geometry_matches_db_contract(
+    tmp_path: Path,
+) -> None:
+    """#1572 local oracle: real file-journal repository, no node-27 needed.
+
+    Seeds the SAME reverse and friendly row geometries through the real
+    ``FileOrchestrationJournalRepository.append_historical_pipeline_job``
+    public durable write API and reads candidate state through the real
+    repository.  Asserts the same DB-facing contract the node-27 integration
+    test proves against ``ops.pipeline_job``: true totals, pure-freshness
+    top-job-limit IDs, hard returned-row bound, stage-scoped forecast attempt
+    87, and cross-stage per-stage attempt parity — all WITHOUT the shared
+    direct projection.
+    """
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository,
+    )
+    from services.orchestrator.scheduler_state_rows import _state_retry_attempt
+
+    cycle_id, cycle_run_id, cycle_time = _integration_cycle_fixture()
+    job_limit = 5
+
+    def _seed_and_read(friendly: bool) -> dict[str, Any]:
+        journal_root = tmp_path / ("journal-friendly" if friendly else "journal")
+        rows = _integration_candidate_rows(
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+            cycle_time=cycle_time,
+            job_limit=job_limit,
+            extra_rows=1,
+            friendly=friendly,
+        )
+        for row in rows:
+            FileOrchestrationJournalRepository(journal_root).append_historical_pipeline_job(row)
+        return _integration_file_journal_state(
+            journal_root,
+            cycle_time=cycle_time,
+            job_limit=job_limit,
+        )
+
+    reverse_state = _seed_and_read(friendly=False)
+    friendly_state = _seed_and_read(friendly=True)
+    assert len(reverse_state["pipeline_jobs"]) == job_limit
+    assert reverse_state["pipeline_jobs_total"] == job_limit + 2
+    assert reverse_state["state_truncated"] is True
+    assert _state_retry_attempt(reverse_state, stage="forecast") == 87
+    assert len(friendly_state["pipeline_jobs"]) == job_limit
+    assert friendly_state["pipeline_jobs_total"] == job_limit + 2
+    assert friendly_state["state_truncated"] is True
+    assert _state_retry_attempt(friendly_state, stage="forecast") == 87
+    # The two geometries admit different freshness windows: friendly tops out
+    # with the retry row, reverse drops it outside the returned list.
+    assert [job["job_id"] for job in reverse_state["pipeline_jobs"]] != [
+        job["job_id"] for job in friendly_state["pipeline_jobs"]
+    ]
+    # Both geometries agree per canonical downstream stage (forecast 87; every
+    # other stage zero-attempt) — the stage derivation is window-independent.
+    for stage in DOWNSTREAM_RESTART_STAGES:
+        assert _state_retry_attempt(reverse_state, stage=stage) == _state_retry_attempt(
+            friendly_state, stage=stage
+        ), stage

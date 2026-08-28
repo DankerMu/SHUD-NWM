@@ -6788,6 +6788,27 @@ def _classification_receipt(
     }
 
 
+def _full_failed_receipt(classification: dict[str, Any]) -> dict[str, Any]:
+    """A full receipt shape carrying ``classification`` for runtime + schema validation."""
+    receipt = refresh._receipt(
+        run_id="refresh_unreadable_skip_cause",
+        started=refresh.datetime(2026, 8, 16, tzinfo=refresh.UTC),
+        outcome="failed",
+        reason="registry_cutover_removal_refused",
+        phase="precommit",
+        providers=[],
+        registry_classification=classification,
+    )
+    return {
+        **receipt,
+        "cutover_gate": {
+            "mode": "enforced",
+            "declaration_env": None,
+            "declaration_present": False,
+        },
+    }
+
+
 def test_dry_run_failure_after_the_gate_persists_the_true_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8248,7 +8269,7 @@ def _refusal_reasons_from_receipt(payload: dict[str, Any]) -> list[tuple[str, st
 
 
 def test_removal_refusal_carries_skip_cause_evidence_when_publish_skipped_it() -> None:
-    """#1433 evidence layer: the refusal says WHY the row disappeared."""
+    """#1433/#1553 evidence layer: the refusal says WHY the row disappeared."""
     previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
     prospective = [_registry_row("basin-101", "a" * 64)]
 
@@ -8260,6 +8281,7 @@ def test_removal_refusal_carries_skip_cause_evidence_when_publish_skipped_it() -
                 "status": "partial",
                 "missing_required_files": ["*.tsd.rl"],
                 "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+                "unreadable_required_files": ["basin-102.tsd.lai: required file could not be read for checksum"],
             }
         },
     )
@@ -8274,6 +8296,7 @@ def test_removal_refusal_carries_skip_cause_evidence_when_publish_skipped_it() -
             "status": "partial",
             "missing_required_files": ["*.tsd.rl"],
             "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+            "unreadable_required_files": ["basin-102.tsd.lai: required file could not be read for checksum"],
         }
     ]
     refresh._validate_object_group(
@@ -8322,6 +8345,12 @@ def test_skip_cause_evidence_is_bounded_on_the_write_side() -> None:
                     f"file-{index}" for index in range(refresh.MAX_COLLECTION_ITEMS + 20)
                 ],
                 "invalid_required_files": ["y" * (refresh.MAX_STRING_LENGTH + 10)],
+                # Long entry first: the list truncates at MAX_COLLECTION_ITEMS,
+                # so the over-long string must sit inside the kept prefix to be
+                # observed (the item-level cap and the string-level cap are
+                # asserted independently).
+                "unreadable_required_files": ["w" * (refresh.MAX_STRING_LENGTH + 10)]
+                + [f"z-{index}" for index in range(refresh.MAX_COLLECTION_ITEMS + 20)],
             }
         },
     )
@@ -8330,7 +8359,100 @@ def test_skip_cause_evidence_is_bounded_on_the_write_side() -> None:
     assert len(refusal["status"]) == refresh.MAX_STRING_LENGTH
     assert len(refusal["missing_required_files"]) == refresh.MAX_COLLECTION_ITEMS
     assert len(refusal["invalid_required_files"][0]) == refresh.MAX_STRING_LENGTH
+    assert len(refusal["unreadable_required_files"]) == refresh.MAX_COLLECTION_ITEMS
+    assert len(refusal["unreadable_required_files"][0]) == refresh.MAX_STRING_LENGTH
     refresh._validate_value_bounds(result.to_receipt())
+
+
+def test_unreadable_skip_cause_runtime_and_jsonschema_agree_on_the_same_receipt() -> None:
+    """#1553: runtime validator and JSON Schema accept the same three-key receipt.
+
+    A receipt carrying ``unreadable_required_files`` alongside the two existing
+    skip-cause lists validates through ``_validate_receipt`` AND through the
+    receipt JSON Schema (additionalProperties false admits the additive key).
+    """
+
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={
+            "basin-102": {
+                "status": "partial",
+                "missing_required_files": ["*.tsd.rl"],
+                "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+                "unreadable_required_files": ["basin-102.tsd.lai: required file could not be read for checksum"],
+            }
+        },
+    )
+    assert reason == "registry_cutover_removal_refused"
+    # The receipt must actually carry the new key: validating a keyless receipt
+    # proves nothing about the schema/runtime admission of it.
+    refusal = result.to_receipt()["refused"]["items"][0]
+    assert refusal["unreadable_required_files"] == [
+        "basin-102.tsd.lai: required file could not be read for checksum"
+    ]
+    full = _full_failed_receipt(result.to_receipt())
+    refresh._validate_receipt(full)
+    _receipt_schema_validator().validate(full)
+
+
+def test_unreadable_skip_cause_over_bound_truncates_identically_at_runtime_and_schema() -> None:
+    """#1553: an over-bound unreadable list truncates and both validators agree."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+    result, _ = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={
+            "basin-102": {
+                "status": "partial",
+                "missing_required_files": [],
+                "invalid_required_files": [],
+                # Over-long entry first: the kept prefix must contain it for the
+                # string cap to be observable after item-level truncation.
+                "unreadable_required_files": ["v" * (refresh.MAX_STRING_LENGTH + 10)]
+                + [f"u-{index}" for index in range(refresh.MAX_COLLECTION_ITEMS + 20)],
+            }
+        },
+    )
+    receipt = result.to_receipt()
+    refusal = receipt["refused"]["items"][0]
+    assert len(refusal["unreadable_required_files"]) == refresh.MAX_COLLECTION_ITEMS
+    assert len(refusal["unreadable_required_files"][0]) == refresh.MAX_STRING_LENGTH
+    full = _full_failed_receipt(receipt)
+    refresh._validate_receipt(full)
+    _receipt_schema_validator().validate(full)
+
+
+def test_historical_receipt_without_unreadable_key_still_validates(
+    tmp_path: Path,
+) -> None:
+    """#1553: old receipts carrying only status/missing/invalid remain valid."""
+    previous = [_registry_row("basin-101", "a" * 64), _registry_row("basin-102", "b" * 64)]
+    prospective = [_registry_row("basin-101", "a" * 64)]
+    result, reason = _classify(
+        previous=previous,
+        prospective=prospective,
+        skipped_models={
+            "basin-102": {
+                "status": "partial",
+                "missing_required_files": ["*.tsd.rl"],
+                "invalid_required_files": ["basin-102.cfg.ic: 2 numeric token(s)"],
+            }
+        },
+    )
+    assert reason == "registry_cutover_removal_refused"
+    receipt = result.to_receipt()
+    # Simulate a HISTORICAL receipt: strip the additive key exactly as a
+    # pre-#1553 writer would have produced it.
+    for item in receipt["refused"]["items"]:
+        item.pop("unreadable_required_files", None)
+    assert "unreadable_required_files" not in receipt["refused"]["items"][0]
+    full = _full_failed_receipt(receipt)
+    refresh._validate_receipt(full)
+    _receipt_schema_validator().validate(full)
 
 
 # ---------------------------------------------------------------------------

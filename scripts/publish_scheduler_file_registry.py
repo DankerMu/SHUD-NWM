@@ -704,6 +704,7 @@ def _record_skipped_model(
                 "status": model.get("status"),
                 "missing_required_files": model.get("missing_required_files") or [],
                 "invalid_required_files": model.get("invalid_required_files") or [],
+                "unreadable_required_files": model.get("unreadable_required_files") or [],
             }
         }
     )
@@ -755,6 +756,7 @@ def _select_publishable_models(
                         "status": model.get("status"),
                         "missing_required_files": model.get("missing_required_files") or [],
                         "invalid_required_files": model.get("invalid_required_files") or [],
+                        "unreadable_required_files": model.get("unreadable_required_files") or [],
                     },
                 )
             continue
@@ -935,6 +937,7 @@ def _apply_calibration_override_contexts(
                     "status": staged_model.get("status"),
                     "missing_required_files": staged_model.get("missing_required_files") or [],
                     "invalid_required_files": staged_model.get("invalid_required_files") or [],
+                    "unreadable_required_files": staged_model.get("unreadable_required_files") or [],
                     "entries": [override.as_entry() for override in basin_overrides],
                 },
             )
@@ -1066,6 +1069,7 @@ def _repair_missing_radiation_contexts(
                         "status": repaired_model.get("status"),
                         "missing_required_files": repaired_model.get("missing_required_files") or [],
                         "invalid_required_files": repaired_model.get("invalid_required_files") or [],
+                        "unreadable_required_files": repaired_model.get("unreadable_required_files") or [],
                         "repair": repair,
                     },
                 )

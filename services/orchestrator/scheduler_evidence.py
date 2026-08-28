@@ -22,6 +22,28 @@ SCHEDULER_EVIDENCE_GITHUB_ISSUE = 196
 MODEL_RUN_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.model_run_evidence.v1"
 MAX_EVIDENCE_BYTES = 5_000_000
 UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
+#: The one governed scheduler pass-artifact filename contract (#1575).  Runtime
+#: pass writers emit ``f"{pass_id}.json"`` / ``f"{pass_id}.pre_execution.json"``
+#: with a ``scheduler_``-prefixed pass id (``scheduler_runtime.py``), and the
+#: no-progress tracker deliberately does NOT use the prefix so retention skips
+#: it.  Readiness root discovery and evidence retention both classify through
+#: this single predicate so a permanent tracker, temp files, or unrelated
+#: top-level JSON can never become pass evidence or consume the discovery cap.
+SCHEDULER_PASS_EVIDENCE_PREFIX = "scheduler_"
+SCHEDULER_PASS_EVIDENCE_SUFFIXES = (".pre_execution.json", ".json")
+
+
+def is_scheduler_pass_evidence_filename(name: str) -> bool:
+    """Return whether ``name`` is a governed scheduler pass artifact filename.
+
+    Governed pass artifacts start with ``scheduler_`` and end with one of the
+    accepted pass JSON suffixes.  Non-pass state (``no-progress-tracker.json``),
+    temporary files, and unrelated/unprefixed JSON are not pass evidence.
+    """
+
+    if not name.startswith(SCHEDULER_PASS_EVIDENCE_PREFIX):
+        return False
+    return any(name.endswith(suffix) for suffix in SCHEDULER_PASS_EVIDENCE_SUFFIXES)
 _EVIDENCE_JSON_INDENT = 2
 _RETAINED_FIELD_SUMMARY_REASON = "evidence_size_limit_exceeded"
 _REQUIRED_BOUNDED_EVIDENCE_FIELDS = frozenset(

@@ -136,7 +136,20 @@ def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted:
     )
 
 
-def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool:
+def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool | str:
+    """Return confirmed-submission vs producer-proven submit-call provenance.
+
+    Confirmed submission (a non-empty Slurm identity anywhere in the returned
+    cycle result) is ``True`` and keeps its current priority.  A producer-owned
+    gateway-crossed accepted-submit ambiguity — the ``chain_stage_execution``
+    empty-ID ``submit_result_ambiguous`` terminal carrying the durable
+    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` code and its own pipeline job identity —
+    is submit-call provenance ``UNKNOWN_AFTER_ATTEMPT`` (#1692): the gateway was
+    entered and the accepted-submit transition was durably recorded, so absence
+    is NOT proven.  A bare ``status="submit_result_ambiguous"`` token without
+    those exact producer fields stays ``False`` — never unknown, never positive.
+    """
+
     for stage in result.stages:
         if _nonempty_evidence_value(getattr(stage, "slurm_job_id", None)):
             return True
@@ -144,11 +157,21 @@ def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool:
         for task in task_results:
             if isinstance(task, Mapping) and _nonempty_evidence_value(task.get("slurm_job_id")):
                 return True
-    return any(
+    if any(
         _nonempty_evidence_value(outcome.get("slurm_job_id"))
         for outcome in getattr(result, "candidate_outcomes", ()) or ()
         if isinstance(outcome, Mapping)
-    )
+    ):
+        return True
+    for stage in result.stages:
+        if (
+            str(getattr(stage, "status", "") or "") == "submit_result_ambiguous"
+            and (getattr(stage, "error_code", None) or None) == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
+            and _nonempty_evidence_value(getattr(stage, "pipeline_job_id", None))
+            and not _nonempty_evidence_value(getattr(stage, "slurm_job_id", None))
+        ):
+            return UNKNOWN_AFTER_ATTEMPT
+    return False
 
 
 def _pipeline_result_pipeline_status_write(result: PipelineResult) -> bool | str:
@@ -213,7 +236,7 @@ def _pipeline_result_write_absence_proven(result: PipelineResult, absent_field: 
     return False
 
 
-def _candidate_slurm_submit_called(outcome: Mapping[str, Any] | None, fallback: bool) -> bool:
+def _candidate_slurm_submit_called(outcome: Mapping[str, Any] | None, fallback: bool | str) -> bool | str:
     if outcome and _nonempty_evidence_value(outcome.get("slurm_job_id")):
         return True
     return fallback
@@ -688,7 +711,7 @@ def _candidate_execution_evidence_item(
     *,
     output_uri: str | None,
     outcome: Mapping[str, Any] | None,
-    slurm_submit_called: bool,
+    slurm_submit_called: bool | str,
     pipeline_status_write: bool | str,
     pipeline_event_write: bool | str,
     stage_names: Sequence[str],
@@ -697,7 +720,8 @@ def _candidate_execution_evidence_item(
 ) -> dict[str, Any]:
     if outcome is None:
         status = result.status
-        candidate_submitted = slurm_submit_called
+        candidate_slurm_submit_called = slurm_submit_called
+        candidate_submitted = slurm_submit_called is True
         candidate_outcome: dict[str, Any] | None = None
         execution_attempted = True
     else:
@@ -705,7 +729,9 @@ def _candidate_execution_evidence_item(
         status = _candidate_status_from_outcome(result.status, outcome_status)
         execution_attempted = True
         candidate_slurm_submit_called = _candidate_slurm_submit_called(outcome, slurm_submit_called)
-        candidate_submitted = candidate_slurm_submit_called and (outcome_status == "active" or execution_attempted)
+        candidate_submitted = candidate_slurm_submit_called is True and (
+            outcome_status == "active" or execution_attempted
+        )
         candidate_outcome = dict(outcome)
     candidate_pipeline_status_write = _candidate_pipeline_write_value(
         outcome,
@@ -718,7 +744,7 @@ def _candidate_execution_evidence_item(
         fallback=pipeline_event_write,
     )
     mutation_occurred = _execution_mutation_value(
-        candidate_submitted,
+        candidate_slurm_submit_called,
         candidate_pipeline_status_write,
         candidate_pipeline_event_write,
     )
@@ -733,7 +759,7 @@ def _candidate_execution_evidence_item(
         **review_evidence,
         "status": status,
         "submitted": candidate_submitted,
-        "slurm_submit_called": candidate_submitted,
+        "slurm_submit_called": candidate_slurm_submit_called,
         "execution_attempted": execution_attempted,
         "final_candidate_success": (
             status == result.status and not _is_non_submitted_terminal_or_unavailable_status(status)

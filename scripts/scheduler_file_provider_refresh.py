@@ -2152,11 +2152,17 @@ CLASSIFICATION_MODES = frozenset({"id_only", "full"})
 # operator must copy into a declaration, and receipts written before it existed
 # are honest, not tampered.
 _CLASSIFICATION_OPTIONAL_KEYS = frozenset({"mode", "declared_retirements", "generation"})
-# #1433: skip-cause evidence keys copied onto a `registry_cutover_removal_refused`
+# #1433/#1553: skip-cause evidence keys copied onto a `registry_cutover_removal_refused`
 # entry when bulk publish reported the model as skipped.  Same key names the
 # publisher's not-publishable diagnostics use
 # (`publish_scheduler_file_registry.py:675`) so operators read one vocabulary.
-_SKIP_CAUSE_LIST_KEYS = frozenset({"missing_required_files", "invalid_required_files"})
+# `unreadable_required_files` mirrors the third discovery cause state (#1552):
+# a required file that MATCHED but could not be read is neither missing nor
+# invalid, and an omission here would render a `partial` refusal with every
+# cause list empty.
+_SKIP_CAUSE_LIST_KEYS = frozenset(
+    {"missing_required_files", "invalid_required_files", "unreadable_required_files"}
+)
 _SKIP_CAUSE_KEYS = frozenset({"status"}) | _SKIP_CAUSE_LIST_KEYS
 
 
@@ -3140,6 +3146,7 @@ def _skip_cause_evidence(
         "status": str(row.get("status") or "")[:MAX_STRING_LENGTH],
         "missing_required_files": _bounded_list(row.get("missing_required_files")),
         "invalid_required_files": _bounded_list(row.get("invalid_required_files")),
+        "unreadable_required_files": _bounded_list(row.get("unreadable_required_files")),
     }
 
 

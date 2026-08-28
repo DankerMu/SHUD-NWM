@@ -287,3 +287,29 @@ def test_retention_creates_receipt_subdir_on_first_run(
     assert payload["deleted_count"] == 0
     # Suppress stdout capture leak between tests.
     capsys.readouterr()
+
+
+def test_retention_and_readiness_classify_the_same_pass_names() -> None:
+    """#1575 shared predicate: retention and readiness agree on pass names.
+
+    The retention script delegates to the SAME service-layer predicate as
+    readiness root discovery, so governed pass artifacts, the tracker, temporary
+    files, and unrelated JSON classify identically on both consumers.
+    """
+
+    from services.orchestrator import scheduler_evidence as evidence_service
+
+    names = [
+        "scheduler_pass_20260817_abc123def456.json",
+        "scheduler_pass_20260817_abc123def456.pre_execution.json",
+        "no-progress-tracker.json",
+        "scheduler_pass_20260817_abc123def456.json.tmp",
+        "unrelated-payload.json",
+        "evidence_00.json",
+    ]
+    for name in names:
+        assert retention._is_pass_evidence(name) is evidence_service.is_scheduler_pass_evidence_filename(name)
+    assert retention._is_pass_evidence("scheduler_pass_20260817_abc123def456.json") is True
+    assert retention._is_pass_evidence("no-progress-tracker.json") is False
+    assert retention._is_pass_evidence("unrelated-payload.json") is False
+    assert retention._is_pass_evidence("scheduler_pass_20260817_abc123def456.json.tmp") is False

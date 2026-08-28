@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 import weakref
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -1058,6 +1060,101 @@ def test_bulk_skip_of_an_already_registered_model_is_refused_by_the_cutover_gate
     }
     # Canonical registry survives untouched: alpha is not republished alone.
     assert registry_manifest.read_bytes() == previous_bytes
+
+
+def test_unreadable_required_file_skip_carries_the_file_name_into_the_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1553: an unreadable required file is named under ``unreadable_required_files``.
+
+    ``basins_discovery`` matches ``bravo.tsd.lai`` (so ``missing_required_files``
+    stays empty) but the strict resolution denies the read, so the model is
+    ``partial`` with ONLY the unreadable cause.  The bulk publish skips it, the
+    cutover gate refuses the removal, and the ``registry_cutover_removal_refused``
+    entry carries the exact file name under ``unreadable_required_files`` instead
+    of a bare ``status=partial`` with empty cause lists.
+    """
+
+    realpath = os.path.realpath
+    target_name = "bravo.tsd.lai"
+    denied = False
+
+    def denied_realpath(path: str, *, strict: bool = False) -> str:
+        if denied and strict and str(path).endswith(target_name):
+            raise PermissionError(errno.EACCES, "simulated denied traversal")
+        return realpath(path, strict=strict)
+
+    monkeypatch.setattr(registry_script.os.path, "realpath", denied_realpath)
+
+    basins_root = tmp_path / "Basins"
+    _write_healthy_basin_pair(basins_root)
+    registry_manifest = tmp_path / "providers" / "scheduler" / "registry" / "manifest-last.json"
+    object_store_root = tmp_path / "objects"
+
+    registry_script.publish_all_basin_scheduler_registry(
+        calibration_overrides_path=_NO_DECLARATION,
+        basins_root=basins_root,
+        registry_manifest=registry_manifest,
+        object_store_root=object_store_root,
+        object_store_prefix="s3://nhms",
+        work_dir=tmp_path / "work-bootstrap",
+    )
+    previous_bytes = registry_manifest.read_bytes()
+    denied = True
+    assert {row["model_id"] for row in json.loads(previous_bytes)["models"]} == {
+        "basins_alpha_shud",
+        "basins_bravo_shud",
+    }
+
+    generated_at = datetime(2026, 8, 16, 0, 0, tzinfo=UTC)
+    classification: dict[str, Any] = {}
+    skipped_models: dict[str, Mapping[str, Any]] = {}
+
+    def precommit_provider_generation(
+        workspace: Path,
+        packages: Sequence[Mapping[str, Any]],
+        registry_models: Sequence[Mapping[str, Any]],
+    ) -> None:
+        refresh._registry_precommit_gate(
+            workspace,
+            packages,
+            registry_models,
+            previous_registry_bytes=previous_bytes,
+            previous_registry_sha256=sha256_bytes(previous_bytes),
+            prospective_generated_at=generated_at,
+            cutover_declaration_env=None,
+            dry_run=False,
+            classification_sink=classification.update,
+            now=generated_at,
+            skipped_models=skipped_models,
+        )
+
+    with pytest.raises(registry_script.SchedulerRegistryPublishError) as excinfo:
+        registry_script.publish_all_basin_scheduler_registry(
+            calibration_overrides_path=_NO_DECLARATION,
+            basins_root=basins_root,
+            registry_manifest=registry_manifest,
+            object_store_root=object_store_root,
+            object_store_prefix="s3://nhms",
+            work_dir=tmp_path / "work-refresh",
+            registry_generated_at=generated_at,
+            precommit_validator=precommit_provider_generation,
+            skipped_model_sink=skipped_models.update,
+        )
+
+    assert excinfo.value.details["provider_reason"] == "registry_cutover_removal_refused"
+    assert registry_manifest.read_bytes() == previous_bytes
+    refusal = classification["refused"]["items"][0]
+    assert refusal["model_id"] == "basins_bravo_shud"
+    assert refusal["reason"] == "registry_cutover_removal_refused"
+    assert refusal["status"] == "partial"
+    # The unreadable cause is carried, not silently folded into a bare partial.
+    assert refusal["missing_required_files"] == []
+    assert refusal["invalid_required_files"] == []
+    assert [reason.split(":")[0] for reason in refusal["unreadable_required_files"]] == [
+        "bravo.tsd.lai"
+    ]
 
 
 def test_undeclared_removal_refusal_carries_the_skip_cause_evidence(
