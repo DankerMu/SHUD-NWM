@@ -81,6 +81,18 @@ def test_publish_update_does_not_stamp_parsed_at() -> None:
     assert "parsed_at" not in statement
 
 
+def test_publish_probe_stays_correlated_and_run_window_scoped() -> None:
+    publish_source = _publish_display_runs_source()
+    statement = publish_source[
+        publish_source.index("cur.execute(") : publish_source.index("return cur.rowcount")
+    ]
+
+    assert "rt.run_key = h.run_key" in statement
+    assert "rt.valid_time >= h.start_time" in statement
+    assert "rt.valid_time <= h.end_time" in statement
+    assert "OFFSET 0" in statement
+
+
 def test_run_scoped_mvt_revision_rotates_on_publish_without_an_updated_at_bump() -> None:
     parsed_version = _run_source_version(_run_row("parsed"))
     published_version = _run_source_version(_run_row("published"))

@@ -44,6 +44,7 @@ FORCING_SAMPLE_FILE_LIMIT = 5
 FORCING_SAMPLE_BYTE_LIMIT = 64 * 1024
 FORCING_SAMPLE_LINE_LIMIT = 1000
 MAX_EXISTING_MANIFEST_BYTES = MAX_OBJECT_MANIFEST_BYTES
+MAX_RIVSEG_MAPPING_BYTES = 16 * 1024 * 1024
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _OS_MKDIR_SUPPORTS_DIR_FD = os.mkdir in os.supports_dir_fd
 _OS_RENAME_SUPPORTS_DIR_FD = os.rename in os.supports_dir_fd
@@ -151,6 +152,12 @@ def publish_basins_package(
         source_root,
         store,
         package_key,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    _validate_rivseg_reach_mapping(
+        package_files,
         model_id=model_id,
         version=version,
         manifest_uri=manifest_uri,
@@ -422,6 +429,12 @@ def basins_package_source_identity(
         source_root,
         None,
         "",
+        model_id=model_id,
+        version=version,
+        manifest_uri=None,
+    )
+    _validate_rivseg_reach_mapping(
+        package_files,
         model_id=model_id,
         version=version,
         manifest_uri=None,
@@ -841,6 +854,74 @@ def _package_source_files(
                 )
             )
     return sorted(files, key=lambda item: (item.role, item.relative_path))
+
+
+def _validate_rivseg_reach_mapping(
+    files: Sequence[SourceFile],
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> None:
+    """Refuse a collapsed ``.sp.rivseg`` before publishing immutable bytes."""
+
+    sp_riv = next(file.source_path for file in files if file.relative_path.endswith(".sp.riv"))
+    sp_rivseg = next(file.source_path for file in files if file.relative_path.endswith(".sp.rivseg"))
+    try:
+        if sp_riv.stat().st_size > MAX_RIVSEG_MAPPING_BYTES or sp_rivseg.stat().st_size > MAX_RIVSEG_MAPPING_BYTES:
+            raise ValueError("file exceeds the validation byte limit")
+        reach_lines = sp_riv.read_text(encoding="utf-8").splitlines()
+        reach_count = int(reach_lines[0].split()[0])
+        reach_rows = reach_lines[1:]
+        if reach_rows and not reach_rows[0].split()[0].lstrip("+-").isdigit():
+            reach_rows = reach_rows[1:]
+        if len(reach_rows) < reach_count:
+            raise ValueError("declared reach count exceeds the .sp.riv body rows")
+        # Standard SHUD .sp.riv files carry coordinate/topology blocks after
+        # the declared reach table.  Only the first reach_count rows define the
+        # Index values referenced by .sp.rivseg.
+        reach_rows = reach_rows[:reach_count]
+        reach_ids = {int(line.split()[0]) for line in reach_rows}
+
+        segment_lines = sp_rivseg.read_text(encoding="utf-8").splitlines()
+        segment_count = int(segment_lines[0].split()[0])
+        segment_rows = segment_lines[1:]
+        if segment_rows and not segment_rows[0].split()[0].lstrip("+-").isdigit():
+            segment_rows = segment_rows[1:]
+        if (
+            reach_count < 1
+            or segment_count < 1
+            or len(segment_rows) != segment_count
+        ):
+            raise ValueError("declared counts do not match the file rows")
+        river_ids = {int(line.split()[1]) for line in segment_rows}
+        invalid_ids = sorted(river_ids - reach_ids)
+        if invalid_ids:
+            raise ValueError(f"iRiv values are absent from .sp.riv Index: {invalid_ids}")
+    except (OSError, UnicodeError, ValueError, IndexError) as error:
+        raise BasinsPackageError(
+            "BASINS_RIVSEG_MAPPING_INVALID",
+            f"SHUD .sp.rivseg mapping is invalid: {error}",
+            model_id=model_id,
+            version=version,
+            path=str(sp_rivseg),
+            manifest_uri=manifest_uri,
+        ) from error
+
+    if reach_count > 1 and segment_count > 1 and len(river_ids) == 1:
+        raise BasinsPackageError(
+            "BASINS_RIVSEG_MAPPING_DEGENERATE",
+            "SHUD .sp.rivseg maps every segment to one reach.",
+            model_id=model_id,
+            version=version,
+            path=str(sp_rivseg),
+            manifest_uri=manifest_uri,
+            details={
+                "reach_count": reach_count,
+                "segment_count": segment_count,
+                "mapped_river_id": next(iter(river_ids)),
+            },
+        )
 
 
 def _optional_shud_runtime_files(

@@ -20858,6 +20858,102 @@ def test_write_evidence_persists_candidate_summaries_and_pre_limit_status(tmp_pa
     assert evidence == persisted
 
 
+def test_write_evidence_summarizes_large_candidate_detail_without_overriding_pass_status(
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import scheduler_evidence
+
+    pass_id = "scheduler_2026082800_non_blocking_summary"
+    config = _config(tmp_path, now=_dt("2026-08-28T00:00:00Z"))
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    context = _scheduler_evidence_test_context(config, max_evidence_bytes=10_000)
+    verbose_marker = "candidate-journal-detail" * 2_000
+    evidence = {
+        "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        "pass_id": pass_id,
+        "status": "submitted",
+        "counts": {"candidate_count": 1, "blocked_candidate_count": 0},
+        "candidates": [
+            {
+                "candidate_id": "gfs:2026-08-23T00:00:00Z:model_a:forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "cycle_time_utc": "2026-08-23T00:00:00Z",
+                "scenario_id": "forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026082300_model_a",
+                "forcing_version_id": "forc_gfs_2026082300_model_a",
+                "basin_id": "basin_a",
+                "model_id": "model_a",
+                "status": "selected",
+                "state_evidence": {"verbose_journal_history": verbose_marker},
+            }
+        ],
+        "blocked_candidates": [],
+        "skipped_candidates": [],
+        "model_run_evidence": [
+            {
+                "candidate_id": "gfs:2026-08-23T00:00:00Z:model_a:forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "cycle_time_utc": "2026-08-23T00:00:00Z",
+                "run_id": "fcst_gfs_2026082300_model_a",
+                "basin_id": "basin_a",
+                "model_id": "model_a",
+                "status": "submitted",
+                "submitted": True,
+                "mutation_occurred": True,
+                "stage_statuses": [{"diagnostics": verbose_marker}],
+            }
+        ],
+    }
+
+    artifact_path = scheduler_evidence.write_evidence(context, pass_id, evidence)
+    serialized = Path(artifact_path or "").read_bytes()
+    persisted = json.loads(serialized.decode("utf-8"))
+
+    assert len(serialized) <= 10_000
+    assert persisted["status"] == "submitted"
+    assert persisted["evidence_compaction"] == {
+        "reason": "evidence_size_limit_exceeded",
+        "mode": "non_blocking_summary",
+        "max_evidence_bytes": 10_000,
+        "pre_compaction_status": "submitted",
+        "summarized_fields": [
+            "candidates",
+            "blocked_candidates",
+            "skipped_candidates",
+            "model_run_evidence",
+        ],
+    }
+    assert persisted["candidates"] == [
+        {
+            "candidate_id": "gfs:2026-08-23T00:00:00Z:model_a:forecast_gfs_deterministic",
+            "source_id": "gfs",
+            "cycle_time_utc": "2026-08-23T00:00:00Z",
+            "scenario_id": "forecast_gfs_deterministic",
+            "run_id": "fcst_gfs_2026082300_model_a",
+            "forcing_version_id": "forc_gfs_2026082300_model_a",
+            "basin_id": "basin_a",
+            "model_id": "model_a",
+            "status": "selected",
+        }
+    ]
+    assert persisted["model_run_evidence"] == [
+        {
+            "candidate_id": "gfs:2026-08-23T00:00:00Z:model_a:forecast_gfs_deterministic",
+            "source_id": "gfs",
+            "cycle_time_utc": "2026-08-23T00:00:00Z",
+            "run_id": "fcst_gfs_2026082300_model_a",
+            "basin_id": "basin_a",
+            "model_id": "model_a",
+            "status": "submitted",
+            "submitted": True,
+            "mutation_occurred": True,
+        }
+    ]
+    assert verbose_marker.encode("utf-8") not in serialized
+    assert evidence == persisted
+
+
 def test_write_evidence_summarizes_injected_bounded_candidate_lists_before_dropping(tmp_path: Path) -> None:
     from services.orchestrator import scheduler_evidence
 

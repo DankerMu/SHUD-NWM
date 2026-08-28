@@ -30,6 +30,23 @@ _BOUNDED_CANDIDATE_SUMMARY_KEYS = (
     # Retained so an already-summarized row survives a second summary pass.
     "summary_error",
 )
+_NON_BLOCKING_EVIDENCE_SUMMARY_FIELDS = (
+    "candidates",
+    "blocked_candidates",
+    "skipped_candidates",
+    "model_run_evidence",
+    "slurm_cancellation_evidence",
+)
+_MODEL_RUN_EVIDENCE_SUMMARY_KEYS = (
+    "type",
+    "stage",
+    "job_id",
+    "slurm_job_id",
+    "submitted",
+    "mutation_occurred",
+    "error_code",
+    "quality_flag",
+)
 _BOUNDED_CANDIDATE_STATE_EVIDENCE_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("decision", ("decision",)),
     ("missing_forcing_repair_status", ("missing_forcing_repair", "status")),
@@ -133,6 +150,32 @@ def _serialized_evidence_within_limit(
             return without_circuit, serialized
         payload = without_circuit
 
+    # Candidate state and per-run execution rows dominate normal production
+    # artifacts because each row carries nested journal/Slurm diagnostics.  Losing
+    # that detail is preferable to rewriting an otherwise truthful pass status to
+    # ``resource_limit_blocked``: the latter made successful/submittable passes look
+    # operationally blocked on every large registry scan.  Try the same fixed-key
+    # summaries used by the bounded fallback first, while keeping the actual status
+    # and an explicit compaction marker.  The existing fail-closed bounded shape
+    # remains the last resort when summaries still cannot satisfy the hard limit.
+    summarized_payload = _non_blocking_evidence_summary(
+        payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    serialized = _serialize_evidence_json_if_within_limit(
+        summarized_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if serialized is not None:
+        return summarized_payload, serialized
+    serialized = _serialize_evidence_json_if_within_limit(
+        summarized_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+        compact=True,
+    )
+    if serialized is not None:
+        return summarized_payload, serialized
+
     bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
     bounded_payload = _fit_bounded_evidence_payload(
         bounded_payload,
@@ -159,6 +202,49 @@ def _serialized_evidence_within_limit(
             "max_evidence_bytes": context.max_evidence_bytes,
         },
     )
+
+
+def _non_blocking_evidence_summary(
+    payload: Mapping[str, Any],
+    *,
+    max_evidence_bytes: int,
+) -> dict[str, Any]:
+    summarized = dict(payload)
+    summarized_fields: list[str] = []
+    for field_name in _NON_BLOCKING_EVIDENCE_SUMMARY_FIELDS:
+        if field_name not in summarized:
+            continue
+        value = summarized[field_name]
+        if field_name in {"model_run_evidence", "slurm_cancellation_evidence"}:
+            summarized[field_name] = _model_run_evidence_summary_rows(value)
+        else:
+            summarized[field_name] = _bounded_candidate_summary_rows(value)
+        summarized_fields.append(field_name)
+    if "restart_reconcile" in summarized:
+        summarized["restart_reconcile"] = _compact_bounded_restart_reconcile(
+            summarized["restart_reconcile"]
+        )
+        summarized_fields.append("restart_reconcile")
+    summarized["evidence_compaction"] = {
+        "reason": "evidence_size_limit_exceeded",
+        "mode": "non_blocking_summary",
+        "max_evidence_bytes": max_evidence_bytes,
+        "pre_compaction_status": payload.get("status"),
+        "summarized_fields": summarized_fields,
+    }
+    return summarized
+
+
+def _model_run_evidence_summary_rows(value: Any) -> list[Any]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in value:
+        summary = _bounded_candidate_summary(row)
+        if isinstance(row, Mapping):
+            summary.update(_present_bounded_summary_keys(row, _MODEL_RUN_EVIDENCE_SUMMARY_KEYS))
+        rows.append(summary)
+    return rows
 
 
 def _fit_bounded_evidence_payload(

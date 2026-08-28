@@ -1363,7 +1363,16 @@ def _publish_display_runs(database_url: str) -> int:
                       -- _already_ingested_runs — the run arrives by join, so no
                       -- transitional text aid applies.
                       AND EXISTS (
-                          SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = h.run_key
+                          SELECT 1
+                          FROM hydro.river_timeseries rt
+                          WHERE rt.run_key = h.run_key
+                            AND rt.valid_time >= h.start_time
+                            AND rt.valid_time <= h.end_time
+                          -- Keep this probe correlated.  Without the barrier,
+                          -- PostgreSQL can decorrelate it into a HashAggregate
+                          -- over every Timescale chunk before updating a handful
+                          -- of parsed runs.
+                          OFFSET 0
                       )
                     """
                 )

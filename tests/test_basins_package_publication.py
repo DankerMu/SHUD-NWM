@@ -3196,6 +3196,97 @@ def test_basins_migration_report_accepts_real_copied_root(
     assert report["production_ready"] is True
 
 
+def test_publish_basins_accepts_multi_reach_rivseg_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_rivseg_mapping_inventory(tmp_path, [1, 2, 3])
+    _object_store_env(tmp_path, monkeypatch)
+
+    result = basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version="vbasins-rivseg-valid",
+        output_path=tmp_path / "manifest.json",
+    )
+
+    assert result["status"] == "published"
+
+
+def test_publish_basins_accepts_non_contiguous_reach_indices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_rivseg_mapping_inventory(
+        tmp_path,
+        [1, 9, 180],
+        reach_indices=[1, 9, 180],
+    )
+    _object_store_env(tmp_path, monkeypatch)
+
+    result = basins_package.publish_basins_package(
+        inventory_path=inventory_path,
+        model_id=model_id,
+        version="vbasins-rivseg-non-contiguous",
+        output_path=tmp_path / "manifest.json",
+    )
+
+    assert result["status"] == "published"
+
+
+def test_publish_basins_rejects_collapsed_rivseg_mapping_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_rivseg_mapping_inventory(tmp_path, [1, 1, 1])
+    object_root = _object_store_env(tmp_path, monkeypatch)
+
+    with pytest.raises(basins_package.BasinsPackageError) as identity_error:
+        basins_package.basins_package_source_identity(
+            inventory_path=inventory_path,
+            model_id=model_id,
+        )
+    assert identity_error.value.error_code == "BASINS_RIVSEG_MAPPING_DEGENERATE"
+
+    with pytest.raises(basins_package.BasinsPackageError) as exc_info:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model_id,
+            version="vbasins-rivseg-collapsed",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    assert exc_info.value.error_code == "BASINS_RIVSEG_MAPPING_DEGENERATE"
+    assert exc_info.value.details == {
+        "reach_count": 3,
+        "segment_count": 3,
+        "mapped_river_id": 1,
+    }
+    assert not any(object_root.rglob("*"))
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_publish_basins_rejects_out_of_range_rivseg_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _write_rivseg_mapping_inventory(tmp_path, [1, 2, 4])
+    object_root = _object_store_env(tmp_path, monkeypatch)
+
+    with pytest.raises(basins_package.BasinsPackageError) as exc_info:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model_id,
+            version="vbasins-rivseg-out-of-range",
+            output_path=tmp_path / "manifest.json",
+        )
+
+    assert exc_info.value.error_code == "BASINS_RIVSEG_MAPPING_INVALID"
+    assert "absent from .sp.riv Index" in str(exc_info.value)
+    assert not any(object_root.rglob("*"))
+    assert not (tmp_path / "manifest.json").exists()
+
+
 @pytest.mark.skipif(
     not Path("data/Basins").exists(),
     reason="real Basins package smoke requires data/Basins",
@@ -3256,6 +3347,44 @@ def _write_valid_inventory(
     )
     inventory = discover_basins_inventory(root)
     inventory_path = tmp_path / "inventory.json"
+    write_inventory(inventory, inventory_path)
+    return inventory_path, inventory["models"][0]["model_id"]
+
+
+def _write_rivseg_mapping_inventory(
+    tmp_path: Path,
+    river_ids: list[int],
+    *,
+    reach_indices: list[int] | None = None,
+) -> tuple[Path, str]:
+    inventory_path, _model_id = _write_valid_inventory(tmp_path)
+    input_dir = tmp_path / "basins" / "basin-a" / "input" / "alias-a"
+    indices = reach_indices or [1, 2, 3]
+    assert len(indices) == 3
+    reach_rows = "".join(
+        f"{index}\t{-1 if position == len(indices) - 1 else indices[position + 1]}\t3\t0.001\t1\t0\n"
+        for position, index in enumerate(indices)
+    )
+    (input_dir / "alias-a.sp.riv").write_text(
+        "3\t6\n"
+        "Index\tDown\tType\tSlope\tLength\tBC\n"
+        f"{reach_rows}"
+        "3\t4\n"
+        "Index\tX1\tY1\tNode1\n"
+        "1\t0\t0\t1\n"
+        "2\t1\t1\t2\n"
+        "3\t2\t2\t3\n",
+        encoding="utf-8",
+    )
+    rows = "".join(
+        f"{index}\t{river_id}\t{index}\t1\n"
+        for index, river_id in enumerate(river_ids, start=1)
+    )
+    (input_dir / "alias-a.sp.rivseg").write_text(
+        f"{len(river_ids)}\t4\nIndex\tiRiv\tiEle\tLength\n{rows}",
+        encoding="utf-8",
+    )
+    inventory = discover_basins_inventory(tmp_path / "basins")
     write_inventory(inventory, inventory_path)
     return inventory_path, inventory["models"][0]["model_id"]
 
@@ -3354,6 +3483,14 @@ def _make_valid_model(
         "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
     )
     (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
+    (input_dir / f"{input_name}.sp.riv").write_text(
+        "1\t6\nIndex\tDown\tType\tSlope\tLength\tBC\n1\t-1\t3\t0.001\t1\t0\n",
+        encoding="utf-8",
+    )
+    (input_dir / f"{input_name}.sp.rivseg").write_text(
+        "1\t4\nIndex\tiRiv\tiEle\tLength\n1\t1\t1\t1\n",
+        encoding="utf-8",
+    )
     (input_dir / f"{input_name}.lake.sp").write_text("lake.sp\n", encoding="utf-8")
     if include_tsd_rl:
         (input_dir / f"{input_name}.tsd.rl").write_text("radiation\n", encoding="utf-8")
