@@ -397,6 +397,8 @@ The manual publisher CLI's concurrency with the provider-refresh timer is govern
 
 The registry cutover declaration SHALL support a `transition_mode: "retire"` entry — `old_checksum` equal to the removed model's previous canonical `package_checksum` and `new_checksum` explicitly `null` — as the only channel through which a model row may legally leave the canonical registry during a refresh. The gate SHALL classify removals exactly as before (a removal is any previous-canonical model id absent from the prospective registry, whatever the cause), record removals matched by a valid retirement entry — under a declaration that is valid as a whole — in a `declared_retirements` classification bucket (a subset of `removed`) without a refusal, and keep every removal not so admitted refused: with exactly one refusal row attributable to the removal itself — `registry_cutover_removal_refused` when no retirement entry names the model, or `registry_cutover_declaration_invalid` when a named retirement entry fails checksum validation or the declaration as a whole is invalid — while the unknown-entry rule may additionally refuse the declaration entry itself (a replace entry naming a model absent from the prospective registry yields both that entry's `registry_cutover_declaration_invalid` row and the removal's `registry_cutover_removal_refused` row). Whether a matched retirement is admitted SHALL NOT depend on the iteration order of the removal set: a declaration invalidated by any entry admits no retirement in that run. Retirement entries SHALL inherit the declaration's existing generation binding, effective-cycle alignment, expiry window, and byte-cap constraints without any retire-specific bypass. Because that binding is what an operator must reproduce, a classification produced by the full path SHALL record the prospective generation it bound to on the receipt, so a refusal receipt carries every value the declaration needs; an id-only classification SHALL record no generation, its rows carrying no checksums to derive the binding value a real publish would use. Existing replace-only declaration files SHALL remain valid unchanged, and a reader without retirement support SHALL fail closed on a retirement declaration with `registry_cutover_declaration_invalid`.
 
+A removal refusal attributable to a model discovered but skipped as unpublishable SHALL mirror the inventory cause set through the publisher, refresh runtime validator, bounded receipt projection, and JSON Schema. The optional list-valued keys are `missing_required_files`, `invalid_required_files`, and `unreadable_required_files`, use the existing receipt collection/string bounds, and remain optional so historical receipts without the additive unreadable key still validate and reconstruct unchanged. This evidence-only extension SHALL NOT change which models are publishable or alter consumers that intentionally compare only the `missing_required_files` set.
+
 #### Scenario: Declared retirement admits the removal and the refresh publishes
 
 - **WHEN** a previously canonical model is absent from the prospective registry (for example its package turned invalid and bulk publish legally skipped it) and the cutover declaration carries a `retire` entry whose `model_id` matches, whose `old_checksum` equals that model's previous canonical `package_checksum`, whose `new_checksum` is `null`, and whose declaration binds to the prospective generation
@@ -412,10 +414,22 @@ The registry cutover declaration SHALL support a `transition_mode: "retire"` ent
 - **WHEN** a declaration carries a `retire` entry for a model that is still present in the prospective registry, or for a model that was never in the previous canonical registry
 - **THEN** the gate SHALL refuse with `registry_cutover_declaration_invalid` — a retirement can only name a model that is actually leaving the canonical registry in this refresh
 
-#### Scenario: Removal refusals carry the skip-cause evidence when the model was skipped rather than deleted
+#### Scenario: Removal refusals carry every skip-cause list when the model was skipped rather than deleted
 
 - **WHEN** a removal refused with `registry_cutover_removal_refused` corresponds to a model that bulk publish discovered but skipped as unpublishable
-- **THEN** that `registry_cutover_removal_refused` entry SHALL carry the model's inventory `status`, `missing_required_files`, and `invalid_required_files` (the same keys the publisher's not-publishable diagnostics use), and a removal whose model directory disappeared entirely SHALL omit those keys — so operators can tell an invalid-package skip from a deleted directory (declaration-invalid refusal rows carry the entry evidence instead and are out of this scenario's scope)
+- **THEN** that `registry_cutover_removal_refused` entry SHALL carry the model's inventory `status`, `missing_required_files`, `invalid_required_files`, and `unreadable_required_files` through the same bounded machine-readable contract used by publisher diagnostics
+- **AND** a model whose required file matched but could not be read SHALL name that file under `unreadable_required_files`, rather than presenting `status=partial` with every cause list empty
+- **AND** a removal whose model directory disappeared entirely SHALL omit all skip-cause keys, while declaration-invalid refusal rows carry entry evidence instead and remain outside this scenario
+
+#### Scenario: Historical receipts without the additive unreadable key remain valid
+
+- **WHEN** runtime validation, JSON Schema validation, or primary-receipt reconstruction reads a historical receipt carrying only status, missing, and invalid skip-cause evidence
+- **THEN** the receipt validates and reconstructs exactly as before, because `unreadable_required_files` is optional
+
+#### Scenario: Unreadable cause lists use the existing evidence bounds
+
+- **WHEN** an unreadable-required-file list exceeds the receipt's collection or string bounds
+- **THEN** the publisher/refresh evidence applies the same item and string limits as the other skip-cause lists, and runtime validation and JSON Schema validation agree on the resulting receipt
 
 #### Scenario: Retirement-aware reconciliation stays tamper-evident
 

@@ -392,7 +392,13 @@ When a candidate carries a failure signal and the forcing package its forecast s
 
 ### Requirement: Strict-warm-start terminal mismatch retries SHALL respect a stage-scoped budget
 
-When the candidate ladder would emit `retry_strict_warm_start_terminal_init_state_mismatch` for a terminal-success candidate whose recorded init-state identity mismatches the strict warm-start resolution, the scheduler SHALL first evaluate the stage-scoped retry attempt against the configured retry limit. When the attempt has reached the limit, the scheduler SHALL emit the stable blocked decision `blocked_strict_warm_start_init_state_mismatch` carrying a retry-policy block (automatic retry not allowed, manual retry required, attempt, retry limit) instead of the retry decision, and the blocked decision SHALL NOT participate in forced terminal resubmission or replacement-retry scoping. When the attempt is below the limit, the retry decision and its evidence SHALL remain unchanged. The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — **including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages**: on the file-journal candidate-state projection (the production path, which reads the cycle's rows unlimited before projecting), the projection SHALL derive, from the untruncated projection input, each canonical downstream stage's maximum effective retry attempt — through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use (including the `job_type` fallback for stage-less rows and the persisted-`retry_count` half for rows without a `_retry_<n>` suffix), never job-id substring parsing and never a locally forked stage-alias table — and carry these upper bounds across truncation so that the stage-matching row-scan component of stage-scoped attempt derivation over the truncated projection returns the true upper bound for every canonical downstream stage (the candidate-level flat retry-count aggregate remains window-sensitive exactly as before this change; its cross-stage contribution is a pre-existing behavior outside this guarantee). The carried upper bounds SHALL record their contributing rows' candidate-identity metadata, and candidate-identity/scope filtering SHALL narrow the carried upper bounds with the row population: a stage's upper bound survives a filtered state only while at least one of its contributing rows passes the same authority/scope predicates that filter the rows — an upper bound whose every contributor is judged non-authoritative for the candidate SHALL NOT reach that candidate's failure-policy, budget, or mint derivations. The truncated row selection itself SHALL remain the pure-freshness top-`job_limit` selection, element for element identical to the pre-change projection in every geometry — the carried upper bounds SHALL add no rows, evict no rows, and change no state key derived from the row population — and the stage-less flat-first attempt derivation SHALL remain byte-identical. The DB-backed candidate-state read path, which truncates in SQL upstream of the projection, is explicitly outside this guarantee (the shared projection computes the carried upper bounds over that path's `job_limit+1` window — a value-level improvement only; its row selection is likewise unchanged).
+When the candidate ladder would emit `retry_strict_warm_start_terminal_init_state_mismatch` for a terminal-success candidate whose recorded init-state identity mismatches the strict warm-start resolution, the scheduler SHALL first evaluate the stage-scoped retry attempt against the configured retry limit. When the attempt has reached the limit, the scheduler SHALL emit the stable blocked decision `blocked_strict_warm_start_init_state_mismatch` carrying a retry-policy block (automatic retry not allowed, manual retry required, attempt, retry limit) instead of the retry decision, and the blocked decision SHALL NOT participate in forced terminal resubmission or replacement-retry scoping. When the attempt is below the limit, the retry decision and its evidence SHALL remain unchanged.
+
+Every explicit stage-scoped attempt read SHALL derive only from rows whose authoritative stage resolves to the requested stage, plus the existing identity-narrowed carried floor for canonical downstream stages. It SHALL NOT max the result against the candidate-level flat `retry_count`: that flat aggregate remains a window-local stage-less compatibility/evidence value, and an unrelated stage's persisted count SHALL NOT charge the requested stage's budget. A stage-less read SHALL retain its flat-first behavior and SHALL NOT consume carried stage floors.
+
+The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages. Both file-journal and DB-backed candidate-state paths SHALL provide the shared projection with the complete job population admitted by their candidate/cycle query before the projection applies `job_limit`; the projection SHALL derive each canonical downstream stage's maximum effective retry attempt through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use (including the `job_type` fallback for stage-less rows and the persisted-`retry_count` half for rows without a `_retry_<n>` suffix), never job-id substring parsing and never a locally forked stage-alias table, and carry these upper bounds across truncation.
+
+The carried upper bounds SHALL record their contributing rows' candidate-identity metadata, and candidate-identity/scope filtering SHALL narrow the carried upper bounds with the row population: a stage's upper bound survives a filtered state only while at least one of its contributing rows passes the same authority/scope predicates that filter the rows — an upper bound whose every contributor is judged non-authoritative for the candidate SHALL NOT reach that candidate's failure-policy, budget, or mint derivations. The truncated row selection itself SHALL remain the pure-freshness top-`job_limit` selection, element for element identical to the pre-change projection in every geometry — the carried upper bounds SHALL add no rows, evict no rows, and change no state key derived from the returned row population. The projection SHALL report `pipeline_jobs_total` as the true number of admitted job rows before `job_limit`, and `state_truncated` SHALL reflect that true total. The DB-backed and file-journal paths SHALL therefore produce the same stage-scoped attempts for the same admitted row geometry while returning no more than `job_limit` pipeline-job rows.
 
 #### Scenario: Budget exhaustion demotes the retry to a stable blocked decision
 
@@ -417,12 +423,23 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 #### Scenario: The budget binds in the reverse truncation geometry
 
 - **WHEN** the `*_forecast_retry_N` row carrying the stage's maximum attempt is older than `job_limit` fresher rows of other stages and `N` has reached the retry limit
-- **THEN** the truncated file-journal projection still yields stage-scoped attempt `N` and the demotion to `blocked_strict_warm_start_init_state_mismatch` triggers instead of an unbudgeted retry
+- **THEN** both the file-journal and DB-backed projections still yield stage-scoped attempt `N`, and the demotion to `blocked_strict_warm_start_init_state_mismatch` triggers instead of an unbudgeted retry
 
 #### Scenario: Projection row selection is unchanged in every geometry
 
 - **WHEN** any input geometry is projected — including the reverse geometry, a geometry whose only completed-stage success row sits at the old end of the freshness window, a geometry with a stale active-status row outside the window, and a geometry whose flat `retry_count` carrier sits inside the window
 - **THEN** `pipeline_jobs` equals the freshness-ordered top-`job_limit` selection element for element, and every state key derived from the row population (`pipeline_status`, `failed_stage`, `restart_stage`, completed-stage evidence, active-job scanning, the flat `retry_count` aggregate, `latest_job` derivation) is identical to the pre-change projection
+
+#### Scenario: DB projection reports true population without breaking the hard returned-row bound
+
+- **WHEN** the DB-backed candidate query admits more than `job_limit` job rows
+- **THEN** `pipeline_jobs_total` equals the full admitted count, `state_truncated` is true, and the returned `pipeline_jobs` list contains exactly the pure-freshness top `job_limit` rows
+- **AND** no SQL-local stage alias table or retry-suffix parser decides which attempts survive
+
+#### Scenario: Friendly DB geometry remains byte-identical
+
+- **WHEN** every stage's maximum-attempt contributor already lies inside the newest `job_limit` rows
+- **THEN** the DB-backed projected row list and all row-derived state keys are element-for-element identical to the prior pure-freshness result
 
 #### Scenario: Zero-attempt stages carry no upper bound
 
@@ -432,7 +449,7 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 #### Scenario: Upper bounds derive through the consumer chain on degenerate row shapes
 
 - **WHEN** the input carries an out-of-window maximum-attempt `copyback` row, out-of-window `download` rows, a row whose attempt lives only in its persisted `retry_count` (no `_retry_<n>` suffix), and a row whose stage lives only in `job_type`
-- **THEN** the `copyback`, persisted-`retry_count`, and `job_type`-only upper bounds are all carried (canonical stages via the consumer chain) while `download` rows contribute no upper bound (not a canonical downstream stage), matching the consumer-side canonical-stage table rather than any locally forked alias table or job-id substring parsing
+- **THEN** the `copyback`, persisted-`retry_count`, and `job_type`-only upper bounds are all carried (canonical stages via the consumer chain) while `download` rows contribute no canonical upper bound, matching the consumer-side canonical-stage table rather than any locally forked alias table or job-id substring parsing
 
 #### Scenario: Carried upper bounds narrow with identity filtering
 
@@ -458,6 +475,12 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 
 - **WHEN** the failed stage is nameable from the filtered state (a candidate-authoritative failed or cancelled row sits inside the window) while the stage's maximum-attempt row `N` sits outside the window, and an adopted manual-retry marker carries no explicit attempt
 - **THEN** the mint derives `previous_attempt == N` and `new_attempt == N+1` instead of the pre-change window-local value
+
+#### Scenario: Explicit stage reads ignore an unrelated flat retry count
+
+- **WHEN** a candidate projection's top-level flat `retry_count` is 5 solely because of a `convert` row and the state has no forecast or download retry attempt
+- **THEN** explicit `forecast` and `download` attempt reads both return 0 under large and truncated windows
+- **AND** a stage-less read keeps the existing flat-first result without making that value a stage budget
 
 #### Scenario: Stage-less flat-first derivation is unaffected
 
