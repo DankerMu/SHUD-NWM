@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import httpx
 import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
@@ -51686,13 +51687,16 @@ def _nested_pending_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
 def _first_attempt_gateway_ambiguous_cycle_result(tmp_path: Path) -> PipelineResult:
     """Run the FIRST forecast submit through the gateway with an empty-ID ambiguity.
 
-    The accepted-submit repository commits a durable ``submission_ambiguous``
-    transition (``transition_pipeline_job_submit_evidence`` with
-    ``AcceptedSubmitTransition.timeout()``) and the stage returns a raw empty-ID
-    ``submit_result_ambiguous`` with error code
-    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` and its own pipeline job identity -- the
-    producer-owned provenance #1692 requires.  No prior confirmed Slurm identity
-    exists (attempt 0 fails), so the cycle lands ``reconciling``.
+    Producer: the bare-RuntimeError fallback path — a raise inside
+    ``submit_job_array`` after the gateway boundary, classified ambiguous by
+    ``_submit_error_is_ambiguous`` (no ``submit_disposition`` marker, so
+    ambiguity-safe).  The accepted-submit repository commits a durable
+    ``submission_ambiguous`` transition (``transition_pipeline_job_submit_evidence``
+    with ``AcceptedSubmitTransition.timeout()``) and the stage returns a raw
+    empty-ID ``submit_result_ambiguous`` with the fallback error code
+    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` and its own pipeline job identity --
+    the producer-owned provenance #1692 requires.  No prior confirmed Slurm
+    identity exists (attempt 0 fails), so the cycle lands ``reconciling``.
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -51728,30 +51732,75 @@ def _first_attempt_gateway_ambiguous_cycle_result(tmp_path: Path) -> PipelineRes
     return result
 
 
-def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
+def _first_attempt_real_gateway_ambiguous_cycle_result(
     tmp_path: Path,
-) -> None:
-    """#1692: producer-proven gateway ambiguity is unknown, never proven-absent.
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transport_error: Exception | None,
+    status_code: int | None,
+    response_payload: dict[str, Any] | None,
+    expected_origin_code: str,
+) -> PipelineResult:
+    """Run the FIRST forecast submit through the REAL HTTP gateway client.
 
-    The FIRST forecast submission crosses the gateway boundary, the
-    accepted-submit producer durably records the ambiguous accepted-submit
-    transition, and the result carries no confirmed Slurm identity.  The real
-    ``ProductionScheduler`` pass must produce:
+    Only the HTTP transport is stubbed (``httpx.Client`` at the system
+    boundary); the real ``HttpSlurmGatewayClient`` parses the response,
+    preserves the ORIGIN error code (``SLURM_GATEWAY_UNAVAILABLE`` /
+    ``SLURM_PARSE_ERROR`` / ``SLURM_GATEWAY_INVALID_RESPONSE``), and the real
+    ``ForecastOrchestrator`` accepted-submit path durably commits the
+    ambiguity and returns the empty-ID ``submit_result_ambiguous`` terminal.
+    """
 
-    * model-run evidence ``submitted=False`` and
-      ``slurm_submit_called="unknown_after_attempt"``;
-    * an execution proof with zero confirmed submits, a nonzero
-      ``unknown_slurm_submit_count``, ``slurm_submit_outcome`` and
-      ``mutation_outcome`` of ``unknown_after_attempt``, and
-      ``slurm_submit_proven_absent=False``;
-    * a no-mutation proof carrying the same unknown submit-call fact, never a
-      proven absence;
-    * persisted and ``_bounded_evidence_payload(max_evidence_bytes=2000)``
-      artifacts preserving all of it.
+    from services.orchestrator.chain import HttpSlurmGatewayClient
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from tests.test_orchestration_chain import (
+        _accepted_submit_forecast_basins,
+        _orchestrator,
+    )
+
+    class _HttpClient:
+        def __enter__(self) -> _HttpClient:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, json: Any = None) -> httpx.Response:
+            del method, path, json
+            if transport_error is not None:
+                raise transport_error
+            return httpx.Response(status_code or 500, json=response_payload)
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _HttpClient())
+
+    cycle = "2026052100"
+    cycle_time = "2026-05-21T00:00:00Z"
+    repository = FileOrchestrationJournalRepository(tmp_path / "journal")
+    client = HttpSlurmGatewayClient("http://gateway.test")
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    result = orchestrator.orchestrate_cycle(
+        "gfs", cycle, _accepted_submit_forecast_basins(cycle=cycle, cycle_time=cycle_time)
+    )
+    assert result.status == "reconciling"
+    forecast = next(stage for stage in result.stages if stage.stage == "forecast")
+    assert forecast.status == "submit_result_ambiguous"
+    assert forecast.slurm_job_id == ""
+    assert forecast.error_code == expected_origin_code
+    assert forecast.pipeline_job_id
+    return result
+
+
+def _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path: Path, cycle_result: PipelineResult) -> None:
+    """Run the real ``ProductionScheduler`` pass and assert unknown at every layer.
+
+    Shared by the fallback RuntimeError producer test and the real HTTP-gateway
+    origin-code variants: model-run evidence, execution proof, no-mutation
+    proof, persisted artifact, and bounded compaction all report the
+    producer-owned first-attempt ambiguity as ``unknown_after_attempt`` —
+    never proven absence, never confirmed submission.
     """
 
     now = _dt("2026-05-21T12:00:00Z")
-    cycle_result = _first_attempt_gateway_ambiguous_cycle_result(tmp_path)
     orchestrator = ReplayedCyclePipelineOrchestrator(cycle_result)
     scheduler = ProductionScheduler(
         _config(tmp_path, now=now, dry_run=False),
@@ -51811,6 +51860,96 @@ def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
     assert compacted_proof["slurm_submit_count"] == 0
     assert compacted_proof["slurm_submit_proven_absent"] is False
     assert compacted["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+
+
+def test_first_attempt_gateway_ambiguity_keeps_submit_call_unknown_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """#1692: producer-proven gateway ambiguity is unknown, never proven-absent.
+
+    The FIRST forecast submission crosses the gateway boundary, the
+    accepted-submit producer durably records the ambiguous accepted-submit
+    transition, and the result carries no confirmed Slurm identity.  The real
+    ``ProductionScheduler`` pass must produce:
+
+    * model-run evidence ``submitted=False`` and
+      ``slurm_submit_called="unknown_after_attempt"``;
+    * an execution proof with zero confirmed submits, a nonzero
+      ``unknown_slurm_submit_count``, ``slurm_submit_outcome`` and
+      ``mutation_outcome`` of ``unknown_after_attempt``, and
+      ``slurm_submit_proven_absent=False``;
+    * a no-mutation proof carrying the same unknown submit-call fact, never a
+      proven absence;
+    * persisted and ``_bounded_evidence_payload(max_evidence_bytes=2000)``
+      artifacts preserving all of it.
+    """
+
+    _assert_first_attempt_ambiguity_unknown_everywhere(
+        tmp_path,
+        _first_attempt_gateway_ambiguous_cycle_result(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "transport_error",
+        "status_code",
+        "response_payload",
+        "expected_origin_code",
+    ),
+    [
+        (
+            httpx.ConnectError("connection refused"),
+            None,
+            None,
+            "SLURM_GATEWAY_UNAVAILABLE",
+        ),
+        (
+            None,
+            502,
+            {"detail": {"error": {"code": "SLURM_PARSE_ERROR"}}},
+            "SLURM_PARSE_ERROR",
+        ),
+        (
+            None,
+            200,
+            {"status": "submitted"},
+            "SLURM_GATEWAY_INVALID_RESPONSE",
+        ),
+    ],
+    ids=("unavailable", "parse_error", "invalid_response"),
+)
+def test_first_attempt_real_gateway_origin_code_keeps_submit_call_unknown_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transport_error: Exception | None,
+    status_code: int | None,
+    response_payload: dict[str, Any] | None,
+    expected_origin_code: str,
+) -> None:
+    """#1692 producer code: real origin gateway codes still mean unknown.
+
+    The real ``HttpSlurmGatewayClient`` preserves ``SLURM_GATEWAY_UNAVAILABLE``,
+    ``SLURM_PARSE_ERROR``, or ``SLURM_GATEWAY_INVALID_RESPONSE`` on the durable
+    ambiguous ``StageRunResult``.  The consumer judgement must key on the
+    producer-owned shape (``submit_result_ambiguous`` + own pipeline job
+    identity + empty Slurm identity), NOT on the fallback
+    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` code, so every real origin code reaches
+    ``submitted=false`` / ``slurm_submit_called=unknown_after_attempt`` at
+    model-run, proof, persisted, and bounded layers.  Only the HTTP transport
+    is stubbed; the HTTP client and the full accepted-submit producer path are
+    real.
+    """
+
+    cycle_result = _first_attempt_real_gateway_ambiguous_cycle_result(
+        tmp_path,
+        monkeypatch,
+        transport_error=transport_error,
+        status_code=status_code,
+        response_payload=response_payload,
+        expected_origin_code=expected_origin_code,
+    )
+    _assert_first_attempt_ambiguity_unknown_everywhere(tmp_path, cycle_result)
 
 
 def test_token_only_pending_without_producer_provenance_remains_proven_no_submit(

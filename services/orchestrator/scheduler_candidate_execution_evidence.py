@@ -142,12 +142,28 @@ def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool | str:
     Confirmed submission (a non-empty Slurm identity anywhere in the returned
     cycle result) is ``True`` and keeps its current priority.  A producer-owned
     gateway-crossed accepted-submit ambiguity — the ``chain_stage_execution``
-    empty-ID ``submit_result_ambiguous`` terminal carrying the durable
-    ``SBATCH_SUBMIT_RESULT_AMBIGUOUS`` code and its own pipeline job identity —
-    is submit-call provenance ``UNKNOWN_AFTER_ATTEMPT`` (#1692): the gateway was
-    entered and the accepted-submit transition was durably recorded, so absence
-    is NOT proven.  A bare ``status="submit_result_ambiguous"`` token without
-    those exact producer fields stays ``False`` — never unknown, never positive.
+    empty-ID ``submit_result_ambiguous`` terminal carrying its own pipeline job
+    identity — is submit-call provenance ``UNKNOWN_AFTER_ATTEMPT`` (#1692): the
+    gateway was entered and the accepted-submit transition was durably recorded,
+    so absence is NOT proven.
+
+    OWNERSHIP CONSTRAINT: the terminal shape ``status="submit_result_ambiguous"
+    with a non-empty ``pipeline_job_id`` and an empty ``slurm_job_id`` is
+    produced by exactly one durable writer — ``chain_stage_execution``'s
+    accepted-submit timeout commit (``chain_stage_execution.py`` StageRunResult
+    constructor after ``transition_pipeline_job_submit_evidence`` with
+    ``AcceptedSubmitTransition.timeout()``).  That constructor runs ONLY after
+    the gateway call boundary was entered and the durable accepted-submit
+    transition committed, so the shape IS the gateway-crossed provenance.  No
+    other StageRunResult producer (submission-failed rejection, duplicate-skip
+    defer, array aggregation, terminal polling) emits this status with this
+    pipeline-job identity, and the error code carried on the result is the
+    ORIGIN code preserved from the real HTTP gateway client
+    (``SLURM_GATEWAY_UNAVAILABLE`` / ``SLURM_PARSE_ERROR`` /
+    ``SLURM_GATEWAY_INVALID_RESPONSE``) — never a closed consumer-side enum, so
+    matching on it would drift.  A bare ``status="submit_result_ambiguous"``
+    token WITHOUT the pipeline-job identity stays ``False`` — never unknown,
+    never positive; status token alone is not trusted.
     """
 
     for stage in result.stages:
@@ -166,7 +182,6 @@ def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool | str:
     for stage in result.stages:
         if (
             str(getattr(stage, "status", "") or "") == "submit_result_ambiguous"
-            and (getattr(stage, "error_code", None) or None) == "SBATCH_SUBMIT_RESULT_AMBIGUOUS"
             and _nonempty_evidence_value(getattr(stage, "pipeline_job_id", None))
             and not _nonempty_evidence_value(getattr(stage, "slurm_job_id", None))
         ):

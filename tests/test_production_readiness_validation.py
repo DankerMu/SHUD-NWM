@@ -5470,7 +5470,7 @@ def _write_tracker_and_mixed_root(scheduler_root: Path) -> Path:
     return passed
 
 
-def test_scheduler_root_mixed_files_admit_only_governed_pass_artifacts(
+def test_scheduler_root_mixed_evidence_files_admit_only_governed_pass_artifacts(
     tmp_path: Path,
 ) -> None:
     """#1575: tracker, temp, and unrelated JSON never become readiness items."""
@@ -5495,7 +5495,7 @@ def test_scheduler_root_mixed_files_admit_only_governed_pass_artifacts(
     assert _summary(root)["final_production_readiness_claimed"] is False
 
 
-def test_scheduler_root_mixed_non_pass_files_do_not_consume_the_discovery_cap(
+def test_scheduler_root_mixed_evidence_non_pass_files_do_not_consume_the_discovery_cap(
     tmp_path: Path,
 ) -> None:
     """#1575: filter-before-cap; the 16-file limit counts only governed pass files."""
@@ -5580,7 +5580,7 @@ def test_explicit_scheduler_evidence_file_is_not_root_classified(tmp_path: Path)
     assert items[0]["status"] == "passed"
 
 
-def test_scheduler_root_file_limit_blocks_before_per_file_validation(
+def test_scheduler_root_evidence_file_limit_blocks_before_per_file_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

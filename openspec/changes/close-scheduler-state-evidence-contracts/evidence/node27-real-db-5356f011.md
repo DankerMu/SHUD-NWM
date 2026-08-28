@@ -9,6 +9,45 @@
 - Test worktree: `/home/nwm/NWM-pr1880`, created detached from the exact pushed SHA
 - Result: PASS (exit code 0)
 
+## Observed/asserted values (test assertions on the passing live run)
+
+The following are the exact values the executed test asserted on the live run
+(reverse geometry first, then friendly geometry; both against the real
+`PsycopgOrchestratorRepository` and the real
+`FileOrchestrationJournalRepository`):
+
+Reverse geometry (old `*_forecast_retry_87` row at the OLD end of the window):
+
+```text
+returned pipeline_jobs rows : 5     (== job_limit; hard returned-row bound)
+pipeline_jobs_total         : 7     (1 retry + 6 publish rows; true admitted count)
+state_truncated             : true  (7 > 5)
+forecast stage attempt      : 87    (from the retry-suffixed row outside the window)
+```
+
+Friendly geometry (retry row is the NEWEST row, in-window, still > job_limit rows):
+
+```text
+returned pipeline_jobs rows : 5     (== job_limit)
+pipeline_jobs_total         : 7     (6 publish + 1 retry)
+state_truncated             : true  (both paths truncate)
+forecast stage attempt      : 87
+```
+
+Canonical downstream-stage attempt parity — every stage, DB and file-journal
+paths both, on BOTH geometries:
+
+```text
+convert 0, forcing 0, forecast 87, parse 0, state_save_qc 0, publish 0, copyback 0
+```
+
+The stage attempts above are the deterministic projection values the test
+asserted per stage via `_state_retry_attempt(..., stage=...)` for every
+`DOWNSTREAM_RESTART_STAGES` member; they are not separately printed log values.
+Returned-row identity (pure-freshness top-`job_limit`, no row rescue) and
+DB-vs-file-journal equality of totals/truncation/IDs are asserted by the same
+pass.
+
 ## Oracle identity
 
 The selected test was:

@@ -16221,7 +16221,11 @@ def test_bare_pending_stage_without_prior_identity_is_not_submitted_evidence() -
             StageRunResult(
                 stage="forecast",
                 job_type=M3_STAGES[2].job_type,
-                pipeline_job_id="job_cycle_gfs_2026050100_forecast",
+                # Bare token: NO producer-owned pipeline job identity and no
+                # confirmed Slurm identity.  The producer-owned gateway shape
+                # requires the pipeline job identity (``chain_stage_execution``
+                # timeout commit), so this stays proven absent (#1692).
+                pipeline_job_id="",
                 slurm_job_id="",
                 status="submit_result_ambiguous",
             ),
