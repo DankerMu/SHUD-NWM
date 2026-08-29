@@ -1,4 +1,19 @@
-"""Accepted shell-first sequence execution and disposable-schema bootstrap."""
+"""Accepted shell-first sequence execution and disposable-schema bootstrap.
+
+Compressed-chunk write guard: intentionally NOT wired.
+
+``bootstrap_schema`` DELETE statements act only on the four-column fixture
+tables this probe creates inside an independent disposable cluster. Live
+container, port, PGDATA, and production paths are already fail-closed
+before that cluster exists, so this module never targets production
+compressed chunks. Importing ``check_batch_targets_uncompressed`` would
+collapse that isolation contract by coupling the disposable engine
+fixture to production compression state. Production write paths import
+the guard (see ``workers/output_parser/parser.py``,
+``workers/forcing_producer/store.py``,
+``packages/common/forcing_domain_handoff_apply.py``); this module does
+not.
+"""
 
 from __future__ import annotations
 

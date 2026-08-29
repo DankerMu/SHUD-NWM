@@ -66,7 +66,7 @@ removed; git history preserves them. Do not recreate `ghdc`.
 
 **Current live fact:** hot storage is `pg_default` on
 `/home/nwm/nhms-pgdata` (container `/home/postgres/pgdata/data`).
-#1894/#1895 own any later `nhms_cold` install/migration. A PGDATA-only
+Issues #1894/#1895 own any later `nhms_cold` install/migration. A PGDATA-only
 backup is incomplete once any `pg_tblspc` target exists.
 
 **Past-tense facts (2026-08-06 overflow, now retired):** a tablespace named
@@ -1300,8 +1300,8 @@ produces a database that cannot open production data. Do not.
 Since 2026-08-06 the container has been mount-critical for the **historical
 `ghdc` residue**: if that catalog name still exists, all three bind mounts
 below must be present or PostgreSQL cannot open those leftover relations.
-That is a residue constraint, not authorization to recreate `ghdc`. The
-#1891 successor bind (`nhms_cold`) is added only by #1894.
+That is a residue constraint, not authorization to recreate `ghdc`.
+The #1891 successor bind (`nhms_cold`) is added only by #1894.
 
 | Host | Container |
 |---|---|

@@ -563,7 +563,7 @@ What it does add is a narrower, DB-only successor: a fresh PostgreSQL
 tablespace named `nhms_cold` that may later hold **terminal compressed chunk
 residency groups** after #1894/#1895. #1892 only freezes the TimescaleDB 2.10.2
 contract on an isolated disposable cluster. Live `nhms-db` is read-only during
-#1892; no production CREATE/DROP TABLESPACE, chunk move, or container recreate
+Issue #1892; no production CREATE/DROP TABLESPACE, chunk move, or container recreate
 is authorized here.
 
 ### What is live vs historical
