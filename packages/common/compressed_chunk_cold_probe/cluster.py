@@ -329,6 +329,7 @@ def cleanup_owned(
     proof: dict[str, Any] = {
         "kept": keep,
         "identity_bound": owned.identity_bound(),
+        "created_container": owned.created_container,
         "container_removed": False,
         "container_absent": False,
         "work_root_removed": False,
@@ -341,11 +342,13 @@ def cleanup_owned(
     if not owned.identity_bound():
         proof["refused"] = "unowned identity"
         return proof
-    if owned.container_name:
+    if owned.container_name and owned.created_container:
         runner([docker_bin, "rm", "-f", owned.container_name], timeout=60)
         inspect = runner([docker_bin, "inspect", "-f", "{{.Name}}", owned.container_name], timeout=20)
         proof["container_removed"] = inspect.returncode != 0
         proof["container_absent"] = inspect.returncode != 0
+    elif owned.container_name:
+        proof["container_cleanup"] = "not created by this run"
     if owned.work_root is not None and owned.created_work_root:
         shutil.rmtree(owned.work_root, ignore_errors=True)
         proof["work_root_removed"] = not owned.work_root.exists()

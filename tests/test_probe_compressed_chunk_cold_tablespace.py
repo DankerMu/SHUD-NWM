@@ -153,7 +153,7 @@ def test_cleanup_removes_only_identity_bound_resources(tmp_path: Path) -> None:
         probe.OwnedResources(
             container_name="nhms-1892-probe-abcdef123456",
             work_root=work,
-            created_work_root=True,
+            created_work_root=True, created_container=True,
         ),
         docker_bin="docker",
         runner=runner,

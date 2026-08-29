@@ -82,6 +82,7 @@ class OwnedResources:
     container_name: str | None = None
     work_root: Path | None = None
     created_work_root: bool = False
+    created_container: bool = False
     created_paths: tuple[Path, ...] = ()
 
     def identity_bound(self) -> bool:

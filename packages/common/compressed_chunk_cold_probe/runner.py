@@ -56,7 +56,6 @@ from packages.common.compressed_chunk_cold_residency import (
 
 
 def run_isolated_cluster(config: ProbeConfig, owned: OwnedResources) -> dict[str, Any]:
-    del owned
     live_image = inspect_live_image(config.docker_bin)
     engine_gate = assert_engine_identity(
         requested_image_id=config.image_id,
@@ -69,6 +68,7 @@ def run_isolated_cluster(config: ProbeConfig, owned: OwnedResources) -> dict[str
     run = _run(docker_run_argv(config), timeout=60)
     if run.returncode != 0:
         raise ProbeError(f"docker run failed: {run.stderr.strip()[:300]}")
+    owned.created_container = True
     try:
         wait_for_port("127.0.0.1", config.host_port)
         wait_for_sql(config)
