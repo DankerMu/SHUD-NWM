@@ -261,10 +261,10 @@ def _resolved_root(value: Path | None, *, env: str, field: str) -> Path:
         if not resolved.is_dir():
             raise FileNotFoundError(str(resolved))
         verify_directory_no_follow(resolved)
-    except (OSError, SafeFilesystemError) as error:
+    except (OSError, SafeFilesystemError, RuntimeError) as error:
         raise RepairCliError(
             "root_unavailable",
-            {"field": field, "path": str(path), "error": str(error)},
+            {"field": field, "path": str(path), "error": type(error).__name__},
         ) from error
     return resolved
 

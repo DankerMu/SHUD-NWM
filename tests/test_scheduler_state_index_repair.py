@@ -32,12 +32,17 @@ PRIVATE_RUN = "fcst_gfs_2026071900_model_a"
 DEST_ONLY_RUN = "fcst_gfs_2026070500_model_a"
 
 
+@pytest.mark.parametrize("defect", ["mismatch", "missing"])
 def test_checksum_invalid_destination_dry_run_changes_no_filesystem_bytes(
     fixture: RepairFixture,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    defect: str,
 ) -> None:
-    fixture.corrupt_destination_checksum()
+    if defect == "mismatch":
+        fixture.corrupt_destination_checksum()
+    else:
+        fixture.delete_destination_checksum()
     _apply_env(monkeypatch, fixture)
     before = _fs_fingerprint(fixture.root)
 
@@ -58,14 +63,19 @@ def test_checksum_invalid_destination_dry_run_changes_no_filesystem_bytes(
     assert not (fixture.receipt_root / "latest.json").exists()
 
 
+@pytest.mark.parametrize("defect", ["mismatch", "missing"])
 def test_enforce_checksum_only_archives_target_and_leaves_sibling_bytes_unchanged(
     fixture: RepairFixture,
     monkeypatch: pytest.MonkeyPatch,
+    defect: str,
 ) -> None:
     original_destination = json.loads(fixture.destination_index.read_text(encoding="utf-8"))
     original_entries = original_destination["entries"]
     reference_before = fixture.reference_index.read_bytes()
-    fixture.corrupt_destination_checksum()
+    if defect == "mismatch":
+        fixture.corrupt_destination_checksum()
+    else:
+        fixture.delete_destination_checksum()
     destination_before = fixture.destination_index.read_bytes()
     _apply_env(monkeypatch, fixture)
 
@@ -86,6 +96,8 @@ def test_enforce_checksum_only_archives_target_and_leaves_sibling_bytes_unchange
     assert stat.S_IMODE(archives[0].stat().st_mode) == 0o600
     assert list(fixture.archive_root.glob("*-reference.json")) == []
     _assert_production_index_readable(fixture.destination_index, fixture.destination_root, "shared-state")
+    if defect == "missing":
+        assert "checksum" not in json.loads(destination_before.decode("utf-8"))
 
 
 @pytest.mark.parametrize(
@@ -185,6 +197,67 @@ def test_zero_multiple_and_cross_lane_mismatch_refuse_without_archive_or_index_w
         assert local.destination_index.read_bytes() == destination_before
         assert list(local.archive_root.iterdir()) == []
         assert not (local.receipt_root / "latest.json").exists()
+
+
+def test_same_state_id_and_base_key_with_divergent_lineage_refuses_without_writes(
+    fixture: RepairFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination_shared = dict(fixture.shared_entry)
+    destination_shared["cycle_id"] = "gfs_2026072006"
+    destination_shared["lead_hours"] = 6
+    _republish(fixture, destination_entries=[fixture.destination_only_entry, destination_shared])
+    _apply_env(monkeypatch, fixture)
+    reference_before = fixture.reference_index.read_bytes()
+    destination_before = fixture.destination_index.read_bytes()
+
+    exit_code = repair.main(["remove-entry", "--state-id", "shared-state", "--enforce"])
+
+    captured = capsys.readouterr()
+    error = json.loads(captured.err.strip().splitlines()[-1])
+    assert exit_code == 2
+    assert error["status"] == "refused"
+    assert error["reason"] == "repair_selector_identity_mismatch"
+    assert "Traceback" not in captured.err
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert list(fixture.archive_root.iterdir()) == []
+    assert not (fixture.receipt_root / "latest.json").exists()
+
+
+def test_symlink_loop_reference_root_is_structured_refusal(
+    fixture: RepairFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    loop_a = fixture.root / "loop-a"
+    loop_b = fixture.root / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    _apply_env(monkeypatch, fixture)
+    monkeypatch.setenv(repair.REFERENCE_ROOT_ENV, str(loop_a))
+    reference_before = fixture.reference_index.read_bytes()
+    destination_before = fixture.destination_index.read_bytes()
+    archive_before = list(fixture.archive_root.iterdir())
+    receipt_before = list(fixture.receipt_root.iterdir())
+
+    exit_code = repair.main(["recompute-checksum", "--lane", "destination", "--enforce"])
+
+    captured = capsys.readouterr()
+    stderr_lines = [line for line in captured.err.strip().splitlines() if line]
+    error = json.loads(stderr_lines[-1])
+    assert exit_code == 2
+    assert error["status"] == "refused"
+    assert error["reason"] == "root_unavailable"
+    assert error["field"] == "reference_root"
+    assert len(stderr_lines) == 1
+    assert "Traceback" not in captured.err
+    assert captured.out.strip() == ""
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert list(fixture.archive_root.iterdir()) == archive_before
+    assert list(fixture.receipt_root.iterdir()) == receipt_before
 
 
 @pytest.mark.parametrize(
@@ -751,6 +824,16 @@ class RepairFixture:
             json.dumps(payload, sort_keys=True, indent=2) + "\n",
         )
         return before
+
+    def delete_destination_checksum(self) -> bytes:
+        before = self.destination_index.read_bytes()
+        payload = json.loads(before.decode("utf-8"))
+        payload.pop("checksum", None)
+        write_provider_destination(
+            self.destination_index,
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        )
+        return self.destination_index.read_bytes()
 
 
 @pytest.fixture(name="fixture")

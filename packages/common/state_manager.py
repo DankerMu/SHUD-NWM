@@ -3262,7 +3262,7 @@ def _resolved_state_index_repair_root(value: str | Path, *, field: str) -> Path:
             raise FileNotFoundError(str(resolved))
         verify_directory_no_follow(resolved)
         return resolved
-    except (OSError, SafeFilesystemError) as error:
+    except (OSError, SafeFilesystemError, RuntimeError) as error:
         raise _state_index_repair_error(
             "root_unavailable",
             field=field,
@@ -3323,7 +3323,14 @@ def _require_owner_private_directory(value: str | Path, *, field: str) -> Path:
     metadata = os.lstat(path)
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
         raise _state_index_repair_error(f"{field}_not_private", field=field)
-    return path.resolve(strict=False)
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError as error:
+        raise _state_index_repair_error(
+            f"{field}_unavailable",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
 
 
 def _state_index_repair_error(

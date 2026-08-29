@@ -4056,6 +4056,115 @@ def test_repair_helper_admits_checksum_mismatch_only_through_rebuilt_production_
     assert any(entry.get("state_id") == "shared-state" for entry in validated.values())
 
 
+def test_repair_helper_admits_missing_top_level_checksum_through_rebuilt_production_checksum(
+    tmp_path: Path,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    original_entries = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    fixture.delete_destination_checksum()
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+    archive_root = _private_dir(tmp_path / "archives")
+
+    summary = repair_state_snapshot_index(
+        reference_root=fixture.reference_root,
+        destination_root=fixture.destination_root,
+        operation="recompute-checksum",
+        object_store_prefix="s3://nhms",
+        archive_root=archive_root,
+        enforce=True,
+        lane="destination",
+        generated_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+
+    repaired = json.loads(fixture.destination_index.read_text(encoding="utf-8"))
+    archives = list(archive_root.glob("*-destination.json"))
+    assert repaired["entries"] == original_entries
+    assert repaired["checksum"] == f"sha256:{_payload_checksum(repaired)}"
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert len(archives) == 1
+    assert archives[0].read_bytes() == destination_before
+    assert "checksum" not in json.loads(destination_before.decode("utf-8"))
+    assert summary["lanes"]["destination"]["checksum_valid"] is False
+    validated = state_manager_module._validate_state_snapshot_index(
+        repaired,
+        object_store_root=fixture.destination_root,
+        object_store_prefix="s3://nhms",
+        published_artifact_root=None,
+        now=datetime(2026, 7, 28, 12, tzinfo=UTC),
+        max_age_hours=168,
+        verify_objects=False,
+        enforce_freshness=False,
+    )
+    assert any(entry.get("state_id") == "shared-state" for entry in validated.values())
+
+
+def test_repair_helper_symlink_loop_root_is_pre_mutation_refusal(tmp_path: Path) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    loop_a = tmp_path / "loop-a"
+    loop_b = tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    archive_root = _private_dir(tmp_path / "archives")
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+
+    with pytest.raises(StateIndexRepairError) as error_info:
+        repair_state_snapshot_index(
+            reference_root=loop_a,
+            destination_root=fixture.destination_root,
+            operation="recompute-checksum",
+            object_store_prefix="s3://nhms",
+            archive_root=archive_root,
+            enforce=True,
+            lane="destination",
+        )
+
+    assert error_info.value.reason == "root_unavailable"
+    assert error_info.value.mutation_started is False
+    assert error_info.value.field == "reference_root"
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert list(archive_root.iterdir()) == []
+
+
+def test_repair_helper_same_state_id_and_base_key_with_divergent_lineage_refuses(
+    tmp_path: Path,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    destination_shared = dict(fixture.shared_entry)
+    destination_shared["cycle_id"] = "gfs_2026072006"
+    destination_shared["lead_hours"] = 6
+    publish_state_snapshot_index(
+        [fixture.destination_only_entry, destination_shared],
+        fixture.destination_index,
+        object_store_root=fixture.destination_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+    archive_root = _private_dir(tmp_path / "archives")
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+
+    with pytest.raises(StateIndexRepairError) as error_info:
+        repair_state_snapshot_index(
+            reference_root=fixture.reference_root,
+            destination_root=fixture.destination_root,
+            operation="remove-entry",
+            object_store_prefix="s3://nhms",
+            archive_root=archive_root,
+            enforce=True,
+            state_id="shared-state",
+        )
+
+    assert error_info.value.reason == "repair_selector_identity_mismatch"
+    assert error_info.value.mutation_started is False
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert list(archive_root.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     ("mutator", "expected_reason"),
     [
@@ -4159,6 +4268,14 @@ class _RepairIndexFixture:
     def corrupt_destination_checksum(self) -> None:
         payload = json.loads(self.destination_index.read_text(encoding="utf-8"))
         payload["checksum"] = "sha256:deadbeef"
+        write_provider_destination(
+            self.destination_index,
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        )
+
+    def delete_destination_checksum(self) -> None:
+        payload = json.loads(self.destination_index.read_text(encoding="utf-8"))
+        payload.pop("checksum", None)
         write_provider_destination(
             self.destination_index,
             json.dumps(payload, sort_keys=True, indent=2) + "\n",

@@ -20,7 +20,7 @@
 
 ## 4. Evidence Floor
 
-- [x] 4.1 `uv run pytest -q tests/test_state_manager.py tests/test_scheduler_state_index_repair.py tests/test_scheduler_state_index_copyback_replay.py` passes (195 passed).
+- [x] 4.1 `uv run pytest -q tests/test_state_manager.py tests/test_scheduler_state_index_repair.py tests/test_scheduler_state_index_copyback_replay.py` passes (202 passed).
 - [x] 4.2 `uv run pytest -q tests/test_production_scheduler.py tests/test_file_orchestration_journal.py` passes for #1482 contract/legacy coverage (2563 passed, 1 skipped).
 - [x] 4.3 `uv run ruff check .` passes.
 - [x] 4.4 `openspec validate scheduler-state-index-repair --strict --no-interactive` passes.
