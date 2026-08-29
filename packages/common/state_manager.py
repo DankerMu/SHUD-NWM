@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import tempfile
+import uuid
 from collections.abc import Collection, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     stat_no_follow,
+    verify_directory_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_lineage import STATE_QC_FAILED
@@ -42,7 +44,35 @@ class StateManagerError(RuntimeError):
     """Raised when StateSnapshot operations cannot complete."""
 
 
+class StateIndexRepairError(StateManagerError):
+    """Typed state-index repair failure with an honest mutation contract.
+
+    ``mutation_started`` is true once either lane may have been replaced. Callers
+    must not report that case as a zero-index-write refusal. ``summary`` carries
+    the bounded per-lane result as far as it is known.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        field: str = "repair",
+        evidence: Mapping[str, Any] | None = None,
+        mutation_started: bool = False,
+        summary: Mapping[str, Any] | None = None,
+        phase: str | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.field = field
+        self.evidence = dict(evidence or {})
+        self.mutation_started = mutation_started
+        self.summary = dict(summary or {})
+        self.phase = phase
+
+
 FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION = "nhms.scheduler.file_state_snapshot_index.v1"
+STATE_SNAPSHOT_INDEX_RELATIVE_PATH = Path("scheduler") / "state-index" / "index-last.json"
 MAX_STATE_SNAPSHOT_INDEX_BYTES = 16 * 1024 * 1024
 MAX_STATE_SNAPSHOT_INDEX_ENTRIES = 100_000
 DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS = 168
@@ -51,6 +81,9 @@ MAX_STATE_SNAPSHOT_INDEX_JSON_NODES = 300_000
 STATE_INDEX_CONTROL_OBJECT_PREFIXES = frozenset({"logs", "manifests", "products", "runs"})
 STATE_INDEX_CONTROL_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 STATE_INDEX_CONTROL_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
+STATE_INDEX_REPAIR_OPERATIONS = frozenset({"remove-entry", "recompute-checksum"})
+STATE_INDEX_REPAIR_LANES = ("reference", "destination")
+_STATE_INDEX_REPAIR_POST_CAS_PHASES = frozenset({"replace_uncertain", "postcommit", "release_uncertain"})
 
 
 def default_database_url() -> str:
@@ -2458,6 +2491,899 @@ def _copyback_raw_entries(
         entry.pop("object_evidence", None)
         normalized[key] = entry
     return normalized
+
+
+def repair_state_snapshot_index(
+    *,
+    reference_root: str | Path,
+    destination_root: str | Path,
+    operation: str,
+    object_store_prefix: str,
+    archive_root: str | Path | None = None,
+    enforce: bool = False,
+    lane: str | None = None,
+    state_id: str | None = None,
+    run_id: str | None = None,
+    model_id: str | None = None,
+    source_id: str | None = None,
+    valid_time: str | None = None,
+    allow_missing_reference: bool = False,
+    allow_missing_destination: bool = False,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Repair the private/reference and shared/destination state-index topology.
+
+    The helper owns topology, selector uniqueness, lock order, archive-before-CAS,
+    canonical publication, and production read-back. Callers own argument parsing
+    and receipt publication. Dry-run never creates locks, archives, or index writes.
+    """
+
+    if operation not in STATE_INDEX_REPAIR_OPERATIONS:
+        raise _state_index_repair_error("repair_operation_invalid", field="operation")
+    selector = _state_index_repair_selector(
+        operation=operation,
+        state_id=state_id,
+        run_id=run_id,
+        model_id=model_id,
+        source_id=source_id,
+        valid_time=valid_time,
+    )
+    if operation == "recompute-checksum":
+        if lane not in STATE_INDEX_REPAIR_LANES:
+            raise _state_index_repair_error("repair_lane_required", field="lane")
+        if allow_missing_reference or allow_missing_destination:
+            raise _state_index_repair_error("repair_missing_lane_flag_invalid", field="lane")
+    elif lane is not None:
+        raise _state_index_repair_error("repair_lane_not_applicable", field="lane")
+    if operation == "remove-entry" and allow_missing_reference and allow_missing_destination:
+        raise _state_index_repair_error("repair_missing_lane_flag_invalid", field="selector")
+
+    reference_path = _resolved_state_index_repair_root(reference_root, field="reference_root")
+    destination_path = _resolved_state_index_repair_root(destination_root, field="destination_root")
+    _refuse_state_index_repair_root_conflicts(reference_path, destination_path)
+    reference_index = reference_path / STATE_SNAPSHOT_INDEX_RELATIVE_PATH
+    destination_index = destination_path / STATE_SNAPSHOT_INDEX_RELATIVE_PATH
+    _refuse_identical_copyback_lockfiles(reference_index, destination_index)
+
+    prefix = str(object_store_prefix or "").strip()
+    if not prefix.startswith("s3://") or not prefix[len("s3://") :].strip("/"):
+        raise _state_index_repair_error("object_store_prefix_invalid", field="object_store_prefix")
+
+    archive_path: Path | None = None
+    if enforce:
+        if archive_root is None:
+            raise _state_index_repair_error("archive_root_required", field="archive_root")
+        archive_path = _require_owner_private_directory(archive_root, field="archive_root")
+
+    summary = _empty_state_index_repair_summary(
+        operation=operation,
+        lane=lane,
+        selector=selector,
+        allow_missing_reference=allow_missing_reference,
+        allow_missing_destination=allow_missing_destination,
+        mode="enforce" if enforce else "dry_run",
+        reference_root=reference_path,
+        destination_root=destination_path,
+    )
+    try:
+        if not enforce:
+            return _state_index_repair_dry_run(
+                summary=summary,
+                reference_root=reference_path,
+                destination_root=destination_path,
+                reference_index=reference_index,
+                destination_index=destination_index,
+                object_store_prefix=prefix,
+                operation=operation,
+                lane=lane,
+                selector=selector,
+                allow_missing_reference=allow_missing_reference,
+                allow_missing_destination=allow_missing_destination,
+            )
+        assert archive_path is not None
+        return _state_index_repair_enforce(
+            summary=summary,
+            reference_root=reference_path,
+            destination_root=destination_path,
+            reference_index=reference_index,
+            destination_index=destination_index,
+            object_store_prefix=prefix,
+            archive_root=archive_path,
+            operation=operation,
+            lane=lane,
+            selector=selector,
+            allow_missing_reference=allow_missing_reference,
+            allow_missing_destination=allow_missing_destination,
+            generated_at=generated_at,
+        )
+    except StateIndexRepairError as error:
+        if summary.get("mutation_started"):
+            error.mutation_started = True
+            if not error.summary:
+                error.summary = dict(summary)
+        raise
+    except StateManagerError as error:
+        mutation_started = bool(summary.get("mutation_started"))
+        raise _wrap_state_index_repair_error(
+            error,
+            summary=summary,
+            mutation_started=mutation_started,
+        ) from error
+    except ProviderAtomicError as error:
+        mutation_started = bool(summary.get("mutation_started"))
+        raise _wrap_provider_repair_error(
+            error,
+            summary=summary,
+            mutation_started=mutation_started,
+        ) from error
+    except Exception as error:
+        if summary.get("mutation_started"):
+            raise _state_index_repair_error(
+                "repair_commit_uncertain",
+                field="repair",
+                mutation_started=True,
+                summary=summary,
+                evidence={"error_type": type(error).__name__},
+                phase="replace_uncertain",
+            ) from error
+        raise
+
+
+def _empty_state_index_repair_summary(
+    *,
+    operation: str,
+    lane: str | None,
+    selector: Mapping[str, Any] | None,
+    allow_missing_reference: bool,
+    allow_missing_destination: bool,
+    mode: str,
+    reference_root: Path,
+    destination_root: Path,
+) -> dict[str, Any]:
+    return {
+        "operation": operation,
+        "mode": mode,
+        "lane": lane,
+        "selector": dict(selector) if selector is not None else None,
+        "allow_missing_reference": allow_missing_reference,
+        "allow_missing_destination": allow_missing_destination,
+        "lock_order": list(STATE_INDEX_REPAIR_LANES),
+        "write_order": list(STATE_INDEX_REPAIR_LANES),
+        "mutation_started": False,
+        "lanes": {
+            name: _empty_state_index_repair_lane(
+                name,
+                root=reference_root if name == "reference" else destination_root,
+            )
+            for name in STATE_INDEX_REPAIR_LANES
+        },
+    }
+
+
+def _empty_state_index_repair_lane(name: str, *, root: Path) -> dict[str, Any]:
+    return {
+        "lane": name,
+        "root": str(root),
+        "index": str(root / STATE_SNAPSHOT_INDEX_RELATIVE_PATH),
+        "status": "pending",
+        "checksum_valid": None,
+        "entry_count_before": None,
+        "entry_count_after": None,
+        "selector_matches": None,
+        "identity_key": None,
+        "state_id": None,
+        "action": None,
+        "untouched_reason": None,
+        "preimage_sha256": None,
+        "postimage_sha256": None,
+        "archive_path": None,
+        "archive_sha256": None,
+        "archive_bytes": None,
+        "committed": False,
+        "commit_uncertain": False,
+    }
+
+
+def _state_index_repair_selector(
+    *,
+    operation: str,
+    state_id: str | None,
+    run_id: str | None,
+    model_id: str | None,
+    source_id: str | None,
+    valid_time: str | None,
+) -> dict[str, Any] | None:
+    provided = {
+        "state_id": _optional_repair_text(state_id),
+        "run_id": _optional_repair_text(run_id),
+        "model_id": _optional_repair_text(model_id),
+        "source_id": _optional_repair_text(source_id),
+        "valid_time": _optional_repair_text(valid_time),
+    }
+    present = {key: value for key, value in provided.items() if value is not None}
+    if operation == "recompute-checksum":
+        if present:
+            raise _state_index_repair_error("repair_selector_not_applicable", field="selector")
+        return None
+    families = (
+        present.keys() == {"state_id"},
+        present.keys() == {"run_id"},
+        present.keys() == {"model_id", "source_id", "valid_time"},
+    )
+    if sum(families) != 1:
+        raise _state_index_repair_error("repair_selector_invalid", field="selector")
+    if "valid_time" in present:
+        try:
+            _parse_state_index_time(present["valid_time"], field="valid_time")
+        except StateManagerError as error:
+            raise _wrap_state_index_repair_error(error, mutation_started=False) from error
+        try:
+            present["source_id"] = _normalize_state_index_source_id(present["source_id"], field="source_id")
+        except StateManagerError as error:
+            raise _wrap_state_index_repair_error(error, mutation_started=False) from error
+    return present
+
+
+def _optional_repair_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _state_index_repair_dry_run(
+    *,
+    summary: dict[str, Any],
+    reference_root: Path,
+    destination_root: Path,
+    reference_index: Path,
+    destination_index: Path,
+    object_store_prefix: str,
+    operation: str,
+    lane: str | None,
+    selector: Mapping[str, Any] | None,
+    allow_missing_reference: bool,
+    allow_missing_destination: bool,
+) -> dict[str, Any]:
+    snapshots = {
+        "reference": _read_state_index_repair_snapshot(
+            index_path=reference_index,
+            containment_root=reference_root,
+            object_store_root=reference_root,
+            object_store_prefix=object_store_prefix,
+            field="reference",
+        ),
+        "destination": _read_state_index_repair_snapshot(
+            index_path=destination_index,
+            containment_root=destination_root,
+            object_store_root=destination_root,
+            object_store_prefix=object_store_prefix,
+            field="destination",
+        ),
+    }
+    plan = _plan_state_index_repair(
+        snapshots=snapshots,
+        operation=operation,
+        lane=lane,
+        selector=selector,
+        allow_missing_reference=allow_missing_reference,
+        allow_missing_destination=allow_missing_destination,
+    )
+    _apply_state_index_repair_plan_preview(summary, snapshots=snapshots, plan=plan)
+    summary["status"] = "preview"
+    return summary
+
+
+def _state_index_repair_enforce(
+    *,
+    summary: dict[str, Any],
+    reference_root: Path,
+    destination_root: Path,
+    reference_index: Path,
+    destination_index: Path,
+    object_store_prefix: str,
+    archive_root: Path,
+    operation: str,
+    lane: str | None,
+    selector: Mapping[str, Any] | None,
+    allow_missing_reference: bool,
+    allow_missing_destination: bool,
+    generated_at: datetime | None,
+) -> dict[str, Any]:
+    mutation_started = False
+    try:
+        with provider_destination_lock(reference_index, containment_root=reference_root):
+            with provider_destination_lock(destination_index, containment_root=destination_root):
+                snapshots = {
+                    "reference": _read_state_index_repair_snapshot(
+                        index_path=reference_index,
+                        containment_root=reference_root,
+                        object_store_root=reference_root,
+                        object_store_prefix=object_store_prefix,
+                        field="reference",
+                    ),
+                    "destination": _read_state_index_repair_snapshot(
+                        index_path=destination_index,
+                        containment_root=destination_root,
+                        object_store_root=destination_root,
+                        object_store_prefix=object_store_prefix,
+                        field="destination",
+                    ),
+                }
+                plan = _plan_state_index_repair(
+                    snapshots=snapshots,
+                    operation=operation,
+                    lane=lane,
+                    selector=selector,
+                    allow_missing_reference=allow_missing_reference,
+                    allow_missing_destination=allow_missing_destination,
+                )
+                _apply_state_index_repair_plan_preview(summary, snapshots=snapshots, plan=plan)
+                archives = _archive_state_index_repair_preimages(
+                    snapshots=snapshots,
+                    plan=plan,
+                    archive_root=archive_root,
+                    summary=summary,
+                )
+                generated = _ensure_utc(generated_at or datetime.now(tz=UTC))
+                for name in STATE_INDEX_REPAIR_LANES:
+                    action = plan[name]["action"]
+                    lane_summary = summary["lanes"][name]
+                    if action == "skip":
+                        lane_summary["status"] = "untouched"
+                        lane_summary["committed"] = False
+                        continue
+                    snapshot = snapshots[name]
+                    lane_summary["status"] = "mutating"
+                    try:
+                        result = publish_state_snapshot_index(
+                            plan[name]["entries"],
+                            snapshot["index_path"],
+                            object_store_root=snapshot["root"],
+                            object_store_prefix=object_store_prefix,
+                            generated_at=generated,
+                            verify_objects=False,
+                            expected_preimage=snapshot["preimage"],
+                            lock_held=True,
+                            destination_containment_root=snapshot["root"],
+                        )
+                    except StateManagerError as error:
+                        wrapped = _wrap_state_index_repair_error(
+                            error,
+                            summary=summary,
+                            mutation_started=mutation_started,
+                            field=name,
+                        )
+                        if wrapped.mutation_started:
+                            mutation_started = True
+                            summary["mutation_started"] = True
+                        if wrapped.phase in _STATE_INDEX_REPAIR_POST_CAS_PHASES:
+                            _mark_repair_lane_uncertain(lane_summary)
+                        raise wrapped from error
+                    except ProviderAtomicError as error:
+                        wrapped = _wrap_provider_repair_error(
+                            error,
+                            summary=summary,
+                            mutation_started=mutation_started,
+                            field=name,
+                        )
+                        if wrapped.mutation_started:
+                            mutation_started = True
+                            summary["mutation_started"] = True
+                        if wrapped.phase in _STATE_INDEX_REPAIR_POST_CAS_PHASES:
+                            _mark_repair_lane_uncertain(lane_summary)
+                        raise wrapped from error
+                    mutation_started = True
+                    summary["mutation_started"] = True
+                    try:
+                        readback = _read_state_index_repair_snapshot(
+                            index_path=snapshot["index_path"],
+                            containment_root=snapshot["root"],
+                            object_store_root=snapshot["root"],
+                            object_store_prefix=object_store_prefix,
+                            field=name,
+                            require_valid_checksum=True,
+                        )
+                    except StateIndexRepairError as error:
+                        _mark_repair_lane_uncertain(lane_summary)
+                        error.mutation_started = True
+                        error.summary = dict(summary)
+                        raise
+                    except StateManagerError as error:
+                        _mark_repair_lane_uncertain(lane_summary)
+                        raise _wrap_state_index_repair_error(
+                            error,
+                            summary=summary,
+                            mutation_started=True,
+                            field=name,
+                        ) from error
+                    if readback["raw_entries"] != plan[name]["entries"]:
+                        _mark_repair_lane_uncertain(lane_summary)
+                        lane_summary["postimage_sha256"] = readback["digest"]
+                        raise _state_index_repair_error(
+                            "repair_readback_entries_mismatch",
+                            field=name,
+                            mutation_started=True,
+                            summary=summary,
+                        )
+                    lane_summary["status"] = "repaired"
+                    lane_summary["committed"] = True
+                    lane_summary["entry_count_after"] = len(readback["raw_entries"])
+                    lane_summary["postimage_sha256"] = result.get("content_sha256") or readback["digest"]
+                    lane_summary["archive_path"] = archives[name]["path"]
+                    lane_summary["archive_sha256"] = archives[name]["sha256"]
+                    lane_summary["archive_bytes"] = archives[name]["bytes"]
+                summary["status"] = "repaired"
+    except StateIndexRepairError as error:
+        if mutation_started:
+            error.mutation_started = True
+            if not error.summary:
+                error.summary = dict(summary)
+        raise
+    except StateManagerError as error:
+        raise _wrap_state_index_repair_error(
+            error,
+            summary=summary,
+            mutation_started=mutation_started,
+        ) from error
+    except ProviderAtomicError as error:
+        raise _wrap_provider_repair_error(
+            error,
+            summary=summary,
+            mutation_started=mutation_started or error.phase in _STATE_INDEX_REPAIR_POST_CAS_PHASES,
+        ) from error
+    except Exception as error:
+        if mutation_started:
+            raise _state_index_repair_error(
+                "repair_commit_uncertain",
+                field="repair",
+                mutation_started=True,
+                summary=summary,
+                evidence={"error_type": type(error).__name__},
+                phase="replace_uncertain",
+            ) from error
+        raise
+    summary["status"] = "repaired"
+    return summary
+
+
+def _mark_repair_lane_uncertain(lane_summary: dict[str, Any]) -> None:
+    lane_summary["status"] = "commit_uncertain"
+    lane_summary["commit_uncertain"] = True
+    lane_summary["committed"] = True
+
+
+def _read_state_index_repair_snapshot(
+    *,
+    index_path: Path,
+    containment_root: Path,
+    object_store_root: Path,
+    object_store_prefix: str,
+    field: str,
+    require_valid_checksum: bool = False,
+) -> dict[str, Any]:
+    try:
+        content, preimage = read_provider_snapshot(
+            index_path,
+            containment_root=containment_root,
+            max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+        )
+    except ProviderAtomicError as error:
+        raise _wrap_provider_repair_error(error, mutation_started=False, field=field) from error
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise _state_index_repair_error(
+            "state_snapshot_index_malformed_json",
+            field=field,
+        ) from error
+    if not isinstance(payload, Mapping):
+        raise _state_index_repair_error("state_snapshot_index_not_object", field=field)
+    original_checksum = payload.get("checksum")
+    expected_checksum = f"sha256:{_payload_checksum(payload)}"
+    checksum_valid = _checksum_matches(original_checksum, expected_checksum)
+    if require_valid_checksum and not checksum_valid:
+        raise _state_index_repair_error("state_snapshot_index_checksum_mismatch", field=field)
+    rebuilt = dict(payload)
+    rebuilt["checksum"] = expected_checksum
+    try:
+        validated = _validate_state_snapshot_index(
+            rebuilt,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+            published_artifact_root=None,
+            now=None,
+            max_age_hours=DEFAULT_STATE_SNAPSHOT_INDEX_MAX_AGE_HOURS,
+            verify_objects=False,
+            enforce_freshness=False,
+        )
+        raw_entries = _copyback_raw_entries(payload, validated)
+    except StateManagerError as error:
+        raise _wrap_state_index_repair_error(error, mutation_started=False, field=field) from error
+    return {
+        "lane": field,
+        "root": containment_root,
+        "index_path": index_path,
+        "content": content,
+        "payload": dict(payload),
+        "preimage": preimage,
+        "digest": sha256_bytes(content),
+        "checksum_valid": checksum_valid,
+        "validated": validated,
+        "raw_entries": [raw_entries[key] for key in validated],
+        "raw_by_key": raw_entries,
+    }
+
+
+def _plan_state_index_repair(
+    *,
+    snapshots: Mapping[str, Mapping[str, Any]],
+    operation: str,
+    lane: str | None,
+    selector: Mapping[str, Any] | None,
+    allow_missing_reference: bool,
+    allow_missing_destination: bool,
+) -> dict[str, dict[str, Any]]:
+    if operation == "recompute-checksum":
+        assert lane in STATE_INDEX_REPAIR_LANES
+        plan: dict[str, dict[str, Any]] = {}
+        for name in STATE_INDEX_REPAIR_LANES:
+            snapshot = snapshots[name]
+            if name == lane:
+                plan[name] = {
+                    "action": "recompute-checksum",
+                    "entries": list(snapshot["raw_entries"]),
+                    "matches": [],
+                    "identity_key": None,
+                    "state_id": None,
+                    "untouched_reason": None,
+                }
+            else:
+                plan[name] = {
+                    "action": "skip",
+                    "entries": list(snapshot["raw_entries"]),
+                    "matches": [],
+                    "identity_key": None,
+                    "state_id": None,
+                    "untouched_reason": "validated_read_only_sibling",
+                }
+        return plan
+
+    assert selector is not None
+    matches = {
+        name: _resolve_state_index_repair_matches(snapshots[name], selector)
+        for name in STATE_INDEX_REPAIR_LANES
+    }
+    for name, found in matches.items():
+        if len(found) > 1:
+            raise _state_index_repair_error(
+                "repair_selector_ambiguous",
+                field=name,
+                evidence={"match_count": len(found)},
+            )
+    allow_missing = {
+        "reference": allow_missing_reference,
+        "destination": allow_missing_destination,
+    }
+    present = {name: found[0] for name, found in matches.items() if found}
+    absent = [name for name in STATE_INDEX_REPAIR_LANES if name not in present]
+    for name in absent:
+        if not allow_missing[name]:
+            raise _state_index_repair_error("repair_selector_absent", field=name)
+    if not present:
+        raise _state_index_repair_error("repair_selector_absent", field="selector")
+    identities = {
+        name: (item["identity_key"], item["state_id"])
+        for name, item in present.items()
+    }
+    unique_identities = set(identities.values())
+    if len(unique_identities) > 1:
+        raise _state_index_repair_error(
+            "repair_selector_identity_mismatch",
+            field="selector",
+            evidence={
+                "reference_state_id": identities.get("reference", (None, None))[1],
+                "destination_state_id": identities.get("destination", (None, None))[1],
+            },
+        )
+    plan = {}
+    for name in STATE_INDEX_REPAIR_LANES:
+        snapshot = snapshots[name]
+        if name in present:
+            match = present[name]
+            plan[name] = {
+                "action": "remove-entry",
+                "entries": [
+                    entry
+                    for index, entry in enumerate(snapshot["raw_entries"])
+                    if index != match["index"]
+                ],
+                "matches": [match],
+                "identity_key": list(match["identity_key"]),
+                "state_id": match["state_id"],
+                "untouched_reason": None,
+            }
+        else:
+            plan[name] = {
+                "action": "skip",
+                "entries": list(snapshot["raw_entries"]),
+                "matches": [],
+                "identity_key": None,
+                "state_id": None,
+                "untouched_reason": "explicit_missing_lane",
+            }
+    return plan
+
+
+def _resolve_state_index_repair_matches(
+    snapshot: Mapping[str, Any],
+    selector: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for index, (identity_key, raw_entry) in enumerate(
+        zip(snapshot["validated"], snapshot["raw_entries"], strict=True)
+    ):
+        if not _state_index_repair_entry_matches(raw_entry, identity_key, selector):
+            continue
+        matches.append(
+            {
+                "index": index,
+                "identity_key": identity_key,
+                "state_id": str(raw_entry.get("state_id") or ""),
+                "run_id": str(raw_entry.get("run_id") or ""),
+            }
+        )
+    return matches
+
+
+def _state_index_repair_entry_matches(
+    entry: Mapping[str, Any],
+    identity_key: tuple[str, str, str, str, str],
+    selector: Mapping[str, Any],
+) -> bool:
+    if "state_id" in selector:
+        return str(entry.get("state_id") or "") == selector["state_id"]
+    if "run_id" in selector:
+        return str(entry.get("run_id") or "") == selector["run_id"]
+    model_id = str(entry.get("model_id") or "")
+    source_id = str(entry.get("source_id") or "")
+    valid_time = str(entry.get("valid_time") or "")
+    try:
+        parsed_valid_time = _parse_state_index_time(valid_time, field="valid_time")
+        normalized_source = _normalize_state_index_source_id(source_id, field="source_id")
+        selector_valid_time = _format_time(
+            _ensure_utc(_parse_state_index_time(selector["valid_time"], field="valid_time"))
+        )
+    except StateManagerError:
+        return False
+    return (
+        model_id == selector["model_id"]
+        and normalized_source == selector["source_id"]
+        and _format_time(_ensure_utc(parsed_valid_time)) == selector_valid_time
+        and identity_key[:3] == (model_id, normalized_source, selector_valid_time)
+    )
+
+
+def _apply_state_index_repair_plan_preview(
+    summary: dict[str, Any],
+    *,
+    snapshots: Mapping[str, Mapping[str, Any]],
+    plan: Mapping[str, Mapping[str, Any]],
+) -> None:
+    for name in STATE_INDEX_REPAIR_LANES:
+        snapshot = snapshots[name]
+        lane_plan = plan[name]
+        lane_summary = summary["lanes"][name]
+        lane_summary["checksum_valid"] = snapshot["checksum_valid"]
+        lane_summary["entry_count_before"] = len(snapshot["raw_entries"])
+        lane_summary["entry_count_after"] = len(lane_plan["entries"])
+        lane_summary["selector_matches"] = len(lane_plan["matches"])
+        lane_summary["identity_key"] = lane_plan["identity_key"]
+        lane_summary["state_id"] = lane_plan["state_id"]
+        lane_summary["action"] = lane_plan["action"]
+        lane_summary["untouched_reason"] = lane_plan["untouched_reason"]
+        lane_summary["preimage_sha256"] = snapshot["digest"]
+        lane_summary["status"] = "preview" if summary["mode"] == "dry_run" else "planned"
+
+
+def _archive_state_index_repair_preimages(
+    *,
+    snapshots: Mapping[str, Mapping[str, Any]],
+    plan: Mapping[str, Mapping[str, Any]],
+    archive_root: Path,
+    summary: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    required = [name for name in STATE_INDEX_REPAIR_LANES if plan[name]["action"] != "skip"]
+    archives: dict[str, dict[str, Any]] = {}
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    unique = uuid.uuid4().hex
+    for name in required:
+        snapshot = snapshots[name]
+        archive_name = f"{stamp}-{unique}-{name}.json"
+        archive_path = archive_root / archive_name
+        try:
+            try:
+                existing = stat_no_follow(archive_path, containment_root=archive_root)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                raise _state_index_repair_error(
+                    "repair_archive_exists",
+                    field=name,
+                    evidence={"archive_name": archive_name},
+                )
+            atomic_write_bytes_no_follow(
+                archive_path,
+                snapshot["content"],
+                containment_root=archive_root,
+                mode=0o600,
+                require_durable_replace=True,
+            )
+            readback = read_bytes_limited_no_follow(
+                archive_path,
+                max_bytes=MAX_STATE_SNAPSHOT_INDEX_BYTES,
+                containment_root=archive_root,
+            )
+        except StateIndexRepairError:
+            raise
+        except (OSError, SafeFilesystemError) as error:
+            raise _state_index_repair_error(
+                "repair_archive_failed",
+                field=name,
+                evidence={"error_type": type(error).__name__},
+            ) from error
+        if readback != snapshot["content"]:
+            raise _state_index_repair_error("repair_archive_readback_mismatch", field=name)
+        digest = sha256_bytes(readback)
+        if digest != snapshot["digest"]:
+            raise _state_index_repair_error("repair_archive_readback_mismatch", field=name)
+        metadata = stat_no_follow(archive_path, containment_root=archive_root)
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise _state_index_repair_error("repair_archive_mode_invalid", field=name)
+        archives[name] = {
+            "path": str(archive_path),
+            "sha256": digest,
+            "bytes": len(readback),
+        }
+        lane_summary = summary["lanes"][name]
+        lane_summary["archive_path"] = archives[name]["path"]
+        lane_summary["archive_sha256"] = digest
+        lane_summary["archive_bytes"] = len(readback)
+    return archives
+
+
+def _resolved_state_index_repair_root(value: str | Path, *, field: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise _state_index_repair_error("root_not_absolute", field=field)
+    try:
+        resolved = path.resolve(strict=False)
+        if not resolved.is_dir():
+            raise FileNotFoundError(str(resolved))
+        verify_directory_no_follow(resolved)
+        return resolved
+    except (OSError, SafeFilesystemError) as error:
+        raise _state_index_repair_error(
+            "root_unavailable",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+
+
+def _refuse_state_index_repair_root_conflicts(reference: Path, destination: Path) -> None:
+    try:
+        if directory_identity_no_follow(reference) == directory_identity_no_follow(destination):
+            raise _state_index_repair_error("roots_identical", field="destination_root")
+    except StateIndexRepairError:
+        raise
+    except (OSError, SafeFilesystemError) as error:
+        raise _state_index_repair_error(
+            "root_unavailable",
+            field="destination_root",
+            evidence={"error_type": type(error).__name__},
+        ) from error
+    if _paths_overlap(reference, destination):
+        raise _state_index_repair_error("roots_overlap", field="destination_root")
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    for first, second in ((left, right), (right, left)):
+        try:
+            first.relative_to(second)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _require_owner_private_directory(value: str | Path, *, field: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise _state_index_repair_error(f"{field}_not_absolute", field=field)
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError as error:
+        raise _state_index_repair_error(f"{field}_missing", field=field) from error
+    except OSError as error:
+        raise _state_index_repair_error(
+            f"{field}_unavailable",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise _state_index_repair_error(f"{field}_not_directory", field=field)
+    try:
+        verify_directory_no_follow(path)
+    except (OSError, SafeFilesystemError) as error:
+        raise _state_index_repair_error(
+            f"{field}_unavailable",
+            field=field,
+            evidence={"error_type": type(error).__name__},
+        ) from error
+    metadata = os.lstat(path)
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise _state_index_repair_error(f"{field}_not_private", field=field)
+    return path.resolve(strict=False)
+
+
+def _state_index_repair_error(
+    reason: str,
+    *,
+    field: str,
+    evidence: Mapping[str, Any] | None = None,
+    mutation_started: bool = False,
+    summary: Mapping[str, Any] | None = None,
+    phase: str | None = None,
+) -> StateIndexRepairError:
+    return StateIndexRepairError(
+        reason,
+        field=field,
+        evidence=_state_index_evidence_safe(dict(evidence or {})),
+        mutation_started=mutation_started,
+        summary=dict(summary or {}),
+        phase=phase,
+    )
+
+
+def _wrap_state_index_repair_error(
+    error: StateManagerError,
+    *,
+    summary: Mapping[str, Any] | None = None,
+    mutation_started: bool,
+    field: str | None = None,
+) -> StateIndexRepairError:
+    reason = str(getattr(error, "reason", error))
+    evidence = dict(getattr(error, "evidence", {}) or {})
+    phase = evidence.get("phase")
+    if isinstance(phase, str) and phase in _STATE_INDEX_REPAIR_POST_CAS_PHASES:
+        mutation_started = True
+    return _state_index_repair_error(
+        reason,
+        field=field or str(getattr(error, "field", "repair")),
+        evidence=evidence,
+        mutation_started=mutation_started,
+        summary=summary,
+        phase=str(phase) if phase is not None else None,
+    )
+
+
+def _wrap_provider_repair_error(
+    error: ProviderAtomicError,
+    *,
+    summary: Mapping[str, Any] | None = None,
+    mutation_started: bool,
+    field: str = "index",
+) -> StateIndexRepairError:
+    if error.phase in _STATE_INDEX_REPAIR_POST_CAS_PHASES:
+        mutation_started = True
+    return _state_index_repair_error(
+        error.reason,
+        field=field,
+        evidence={"phase": error.phase},
+        mutation_started=mutation_started,
+        summary=summary,
+        phase=error.phase,
+    )
 
 
 def _validate_state_snapshot_index(

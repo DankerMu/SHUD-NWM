@@ -8811,9 +8811,10 @@ def _marker_target_row_details(job: Mapping[str, Any]) -> dict[str, Any]:
     constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields -- so the
     persisted row the writer reads never carries them and ``target_repair_status`` /
     ``target_active_blocker`` are, on the current write face, always absent.  A fixture that
-    fills them anchors what the gate must do with such a record, not a marker production emits;
-    closing the write face is issue #1482, and the repaired-at-write-time population is a
-    disclosed permanent limitation (design D4) until it lands.
+    fills them anchors what the gate must do with such a record, not a marker production emits.
+    Persisting those projection-only annotations is an accepted permanent limitation
+    (#1482 option (c)): the repaired-at-write-time population stays a disclosed conservative
+    over-pin rather than a second durable repair authority.  #1186 remains separately open.
     """
 
     recorded = {
@@ -8958,8 +8959,8 @@ def test_same_stage_marker_target_staleness_residue_matrix(
       what the gate owes such a record, NOT that the write face produces one.  The production
       population -- a target already annotated repaired at write time, with the state's
       ``repaired_stage_evidence`` naming some other winner -- still pins here where the twin
-      refuses, and is a disclosed permanent limitation (design D4); closing the write face is
-      issue #1482.
+      refuses.  That is the accepted permanent limitation (#1482 option (c)), not a latent
+      write-face fix.  #1186 remains the separate open operator-entry/exposure issue.
     * ``non_failed_named_by_completed_stage_evidence`` -- (False, False) on both: a succeeded
       target the state's ``completed_stage_evidence`` names by ``job_id`` is refused on both arms
       already (#1292), and the record refuses it a second way (status outside the live-failure
@@ -9167,8 +9168,9 @@ def test_record_borne_staleness_converges_on_every_retry_suffix_geometry(
 
     Same split as the residue matrix these two shapes come from: the placeholder cell is a
     write-face convergence, and the ``repair_status`` cell is a gate-contract anchor on a record
-    the current writer cannot emit (the flag is a projection-time annotation; issue #1482, and
-    the production population is disclosed under design D4).  The geometry claim holds for both
+    the current writer cannot emit (the flag is a projection-time annotation; accepted
+    permanent limitation #1482 option (c), with the production population disclosed rather
+    than persisted).  #1186 remains separately open.  The geometry claim holds for both
     either way -- it is about the id, not about who wrote the record.
     """
 
@@ -9455,7 +9457,8 @@ def test_post_write_fate_outside_the_state_mappings_still_pins_row_absent(
     The same clause carries one shape that is not about post-write fate at all: a target already
     ANNOTATED repaired when the marker was written.  The annotation lives on the projection's row
     copy, never on the persisted row the writer reads, so the record cannot carry it either
-    (issue #1482) and the gate pins there too.
+    (accepted permanent limitation #1482 option (c); #1186 remains separately open) and the
+    gate pins there too.
     """
 
     candidate = _scheduler_candidate_fixture()

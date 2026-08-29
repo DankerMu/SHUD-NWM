@@ -10227,9 +10227,11 @@ class FileJournalRetryService:
             # unreachable from here: ``repair_status``/``active_blocker`` are annotations the
             # candidate-state projection applies to a row copy and ``_pipeline_job_row`` has no
             # such fields, so ``target_repair_status``/``target_active_blocker`` are never
-            # emitted.  The gate honours them if a record ever carries them; recording the
-            # annotation at write time is issue #1482, and until it lands a target already
-            # annotated repaired is a disclosed pin (design D4).
+            # emitted.  The gate honours them if a record ever carries them; recording those
+            # projection-only annotations at write time is an accepted permanent limitation
+            # (#1482 option (c)), so a target already annotated repaired remains a disclosed
+            # conservative pin rather than a second durable repair authority.  #1186 remains
+            # the separate open operator-entry/exposure issue.
             for detail_key, row_field in MARKER_TARGET_ROW_DETAIL_FIELDS:
                 target_value = failed_job.get(row_field)
                 if target_value not in (None, ""):
