@@ -9,6 +9,9 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 fail=0
+# In-process assertion counter: every PASS branch increments it, so the final
+# summary is exactly what THIS run executed (no process substitution / tee race).
+passes=0
 
 # run_hook <repo> <command>; echoes the hook's exit code
 run_hook() {
@@ -22,6 +25,7 @@ check() {
     local name=$1 expected=$2 actual=$3
     if [ "$actual" = "$expected" ]; then
         echo "PASS: $name"
+        passes=$((passes + 1))
     else
         echo "FAIL: $name (expected exit $expected, got $actual)"
         fail=1
@@ -59,6 +63,7 @@ sys.exit(0 if needle in stderr else 1)
 PY
     then
         echo "PASS: $name"
+        passes=$((passes + 1))
     else
         echo "FAIL: $name (stderr lacks exact bytes: $(printf '%q' "$needle"))"
         fail=1
@@ -446,5 +451,42 @@ suffix_case() { # <name> <suffix-byte-literal>
 }
 suffix_case "cr" $'\r'
 suffix_case "lf" $'\n'
+
+# --- 14. exact generated-file exemption vs non-exempt sibling YAML ----------
+# #1684: `openapi/nhms.v1.yaml` is an exact exemption in `.large-file-guard.json`;
+# the exemption is filename-exact, NOT a `*.yaml` glob, so a sibling
+# `openapi/other.yaml` over the limit must still be rejected. Both cases are
+# load-bearing for the checked-in `openapi/**` contract.
+repo="$TMP/yaml-exempt"
+new_repo "$repo"
+# Real repo config mirrors the repository's default 1000-line limit and the
+# exact exemption (the fixture doesn't need the full 1000: use the same 10-line
+# fixture limit with the exact same exemption shape).
+echo '{"maxLines": 10, "exclude": ["openapi/nhms.v1.yaml"]}' > "$repo/.large-file-guard.json"
+mkdir -p "$repo/openapi"
+big_file "$repo/openapi/nhms.v1.yaml" 20
+git -C "$repo" add openapi/nhms.v1.yaml
+check "exact exempt openapi/nhms.v1.yaml over limit is accepted" 0 \
+    "$(run_hook "$repo" "git commit -m x")"
+
+repo="$TMP/yaml-sibling"
+new_repo "$repo"
+echo '{"maxLines": 10, "exclude": ["openapi/nhms.v1.yaml"]}' > "$repo/.large-file-guard.json"
+mkdir -p "$repo/openapi"
+big_file "$repo/openapi/other.yaml" 20
+git -C "$repo" add openapi/other.yaml
+check "non-exempt sibling openapi/other.yaml over limit is rejected" 2 \
+    "$(run_hook "$repo" "git commit -m x")"
+
+# --- 15. honest deterministic summary ---------------------------------------
+# `passes` is incremented in-process by every PASS branch of `check` /
+# `check_stderr_contains`, so the count is exactly this run's executed
+# assertions (no tee/process-substitution race, no hard-coded number).
+echo "summary: $passes PASS assertions executed"
+if [ "$fail" -ne 0 ]; then
+    echo "summary: FAILURES PRESENT ($fail failed)"
+else
+    echo "summary: ALL CHECKS PASSED"
+fi
 
 exit "$fail"

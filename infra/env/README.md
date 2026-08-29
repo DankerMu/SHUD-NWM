@@ -6,6 +6,16 @@ credentials.
 
 Real local `compute.env`, `display.env`, and readonly validation
 `display-readonly-secrets.env` files contain production secret-bearing values.
+
+**Slurm gateway service token contract (#1684):** the shared scheduler
+credential is `SLURM_GATEWAY_SERVICE_TOKEN` and lives ONLY in untracked,
+owner-mode-0600 environment sources consumed by both the gateway unit
+(`EnvironmentFile=`) and the scheduler unit (drop-in `EnvironmentFile=`), in
+production on node-22 at
+`/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env` (mode 0600, owned by
+the service account). The value is never committed, logged, serialized, passed
+via argv, or published in OpenAPI/evidence; only the variable name is
+checked-in.
 Create them with owner-only permissions, for example
 `install -m 0600 infra/env/compute.example infra/env/compute.env` or
 `install -m 0600 /dev/null infra/env/display-readonly-secrets.env`, or under

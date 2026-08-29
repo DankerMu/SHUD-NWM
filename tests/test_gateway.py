@@ -13,6 +13,10 @@ from services.slurm_gateway.gateway import create_gateway
 from services.slurm_gateway.models import ResetRequest
 from services.slurm_gateway.routes import slurm_gateway
 
+_SERVICE_TOKEN = "test-service-token-0123456789abcdef"
+SERVICE_BEARER = {"Authorization": f"Bearer {_SERVICE_TOKEN}"}
+SYSADMIN_IDENTITY = {"X-User-Role": "sys_admin"}
+
 
 @pytest.fixture(autouse=True)
 def reset_mock_gateway():
@@ -22,7 +26,9 @@ def reset_mock_gateway():
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", _SERVICE_TOKEN)
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     app.dependency_overrides[get_settings] = lambda: SlurmGatewaySettings(allow_internal_reset=True)
     transport = ASGITransport(app=app)
     try:
@@ -62,6 +68,7 @@ async def test_submit_job(client):
     response = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_001", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
     assert response.status_code == 201
@@ -105,8 +112,12 @@ async def test_submit_job_offloads_blocking_gateway_calls(client):
     try:
         responses = await asyncio.wait_for(
             asyncio.gather(
-                client.post("/api/v1/slurm/jobs", json={"run_id": "run_a", "model_id": "model_001"}),
-                client.post("/api/v1/slurm/jobs", json={"run_id": "run_b", "model_id": "model_001"}),
+                client.post(
+                    "/api/v1/slurm/jobs", json={"run_id": "run_a", "model_id": "model_001"}, headers=SERVICE_BEARER
+                ),
+                client.post(
+                    "/api/v1/slurm/jobs", json={"run_id": "run_b", "model_id": "model_001"}, headers=SERVICE_BEARER
+                ),
             ),
             timeout=3,
         )
@@ -119,7 +130,7 @@ async def test_submit_job_offloads_blocking_gateway_calls(client):
 
 @pytest.mark.asyncio
 async def test_submit_missing_fields(client):
-    response = await client.post("/api/v1/slurm/jobs", json={"model_id": "model_001"})
+    response = await client.post("/api/v1/slurm/jobs", json={"model_id": "model_001"}, headers=SERVICE_BEARER)
 
     assert response.status_code == 422
     data = response.json()
@@ -131,8 +142,8 @@ async def test_submit_missing_fields(client):
 @pytest.mark.asyncio
 async def test_duplicate_run_id(client):
     payload = {"run_id": "run_duplicate", "model_id": "model_001"}
-    first = await client.post("/api/v1/slurm/jobs", json=payload)
-    second = await client.post("/api/v1/slurm/jobs", json=payload)
+    first = await client.post("/api/v1/slurm/jobs", json=payload, headers=SERVICE_BEARER)
+    second = await client.post("/api/v1/slurm/jobs", json=payload, headers=SERVICE_BEARER)
 
     assert first.status_code == 201
     assert second.status_code == 409
@@ -144,6 +155,7 @@ async def test_get_job_status(client):
     submitted = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_status", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
     response = await client.get(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}")
@@ -162,9 +174,10 @@ async def test_cancel_active_job(client):
     submitted = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_cancel", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
-    response = await client.delete(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}")
+    response = await client.delete(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}", headers=SERVICE_BEARER)
 
     assert response.status_code == 200
     data = response.json()
@@ -177,13 +190,15 @@ async def test_cancel_terminal_job(client):
     await client.post(
         "/api/v1/slurm/internal/reset",
         json={"delay_to_running_seconds": 0, "delay_to_succeeded_seconds": 0},
+        headers=SYSADMIN_IDENTITY,
     )
     submitted = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_terminal", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
-    response = await client.delete(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}")
+    response = await client.delete(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}", headers=SERVICE_BEARER)
 
     assert submitted.json()["status"] == "succeeded"
     assert response.status_code == 409
@@ -192,7 +207,7 @@ async def test_cancel_terminal_job(client):
 
 @pytest.mark.asyncio
 async def test_cancel_not_found(client):
-    response = await client.delete("/api/v1/slurm/jobs/mock_9999")
+    response = await client.delete("/api/v1/slurm/jobs/mock_9999", headers=SERVICE_BEARER)
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
@@ -200,8 +215,12 @@ async def test_cancel_not_found(client):
 
 @pytest.mark.asyncio
 async def test_list_jobs(client):
-    await client.post("/api/v1/slurm/jobs", json={"run_id": "run_list_1", "model_id": "model_001"})
-    await client.post("/api/v1/slurm/jobs", json={"run_id": "run_list_2", "model_id": "model_001"})
+    await client.post(
+        "/api/v1/slurm/jobs", json={"run_id": "run_list_1", "model_id": "model_001"}, headers=SERVICE_BEARER
+    )
+    await client.post(
+        "/api/v1/slurm/jobs", json={"run_id": "run_list_2", "model_id": "model_001"}, headers=SERVICE_BEARER
+    )
 
     response = await client.get("/api/v1/slurm/jobs")
 
@@ -216,6 +235,7 @@ async def test_array_task_results(client):
     await client.post(
         "/api/v1/slurm/internal/reset",
         json={"delay_to_running_seconds": 0, "delay_to_succeeded_seconds": 0},
+        headers=SYSADMIN_IDENTITY,
     )
     submitted = await client.post(
         "/api/v1/slurm/job-arrays",
@@ -229,6 +249,7 @@ async def test_array_task_results(client):
                 {"run_id": "run_1", "model_id": "model_001", "basin_version_id": "basin_1"},
             ],
         },
+        headers=SERVICE_BEARER,
     )
 
     response = await client.get(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}/array-tasks")
@@ -243,10 +264,12 @@ async def test_fetch_logs_succeeded(client):
     await client.post(
         "/api/v1/slurm/internal/reset",
         json={"delay_to_running_seconds": 0, "delay_to_succeeded_seconds": 0},
+        headers=SYSADMIN_IDENTITY,
     )
     submitted = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_logs", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
     response = await client.get(f"/api/v1/slurm/jobs/{submitted.json()['job_id']}/logs")
@@ -259,9 +282,11 @@ async def test_fetch_logs_succeeded(client):
 
 @pytest.mark.asyncio
 async def test_reset(client):
-    await client.post("/api/v1/slurm/jobs", json={"run_id": "run_reset", "model_id": "model_001"})
+    await client.post(
+        "/api/v1/slurm/jobs", json={"run_id": "run_reset", "model_id": "model_001"}, headers=SERVICE_BEARER
+    )
 
-    reset_response = await client.post("/api/v1/slurm/internal/reset")
+    reset_response = await client.post("/api/v1/slurm/internal/reset", headers=SYSADMIN_IDENTITY)
     jobs_response = await client.get("/api/v1/slurm/jobs")
 
     assert reset_response.status_code == 200
@@ -274,11 +299,13 @@ async def test_zero_delay_immediate_success(client):
     await client.post(
         "/api/v1/slurm/internal/reset",
         json={"delay_to_running_seconds": 0, "delay_to_succeeded_seconds": 0},
+        headers=SYSADMIN_IDENTITY,
     )
 
     response = await client.post(
         "/api/v1/slurm/jobs",
         json={"run_id": "run_zero_delay", "model_id": "model_001"},
+        headers=SERVICE_BEARER,
     )
 
     assert response.status_code == 201

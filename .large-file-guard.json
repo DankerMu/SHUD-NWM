@@ -74,6 +74,7 @@
     "tests/test_migrations.py",
     "tests/test_real_database_integration.py",
     "scripts/governance/audit_repo_entropy.py",
-    "tests/test_entropy_audit_script.py"
+    "tests/test_entropy_audit_script.py",
+    "openapi/nhms.v1.yaml"
   ]
 }

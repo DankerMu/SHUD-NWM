@@ -185,6 +185,16 @@ SHUD_EXECUTABLE=/opt/shud/bin/shud
 # sbatch on the login node — that is the diagnostic lane, not production.)
 SLURM_GATEWAY_URL=http://127.0.0.1:8081
 SLURM_GATEWAY_BACKEND=slurm
+# Route-scoped scheduler service bearer shared with the standalone Slurm
+# gateway. The credential value MUST NOT appear here: load it from an untracked
+# owner-mode-0600 environment source (see
+# infra/systemd/nhms-slurm-gateway.service and
+# docs/runbooks/current-production-ops.md §3.2) and reference it by variable
+# only. Only submit/cancel/array mutation calls carry it; health/read requests
+# stay anonymous. The HTTP client fails closed (no Authorization header) when
+# the token is absent, and scheduler preflight refuses to report submit-ready
+# from anonymous health alone.
+# SLURM_GATEWAY_SERVICE_TOKEN=<loaded from 0600 env source>
 # Optional common directory for sacct/scontrol/sacctmgr and other Slurm tools;
 # accepted-submit reconcile uses this same configured path for all three.
 SLURM_GATEWAY_SLURM_BIN_PATH=

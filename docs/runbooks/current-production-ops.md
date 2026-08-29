@@ -1367,22 +1367,576 @@ receipts/manifest-publish-<N>.json      generated_at 2026-08-22T07:02:41Z
 Slurm Gateway 当前仍在 node-22。它负责把调度/诊断请求转成 Slurm 行为；
 node-27 display 不调用 Slurm Gateway。
 
+四个 Slurm 变更操作（submit / array submit / cancel / enabled reset）要求
+`Authorization: Bearer SLURM_GATEWAY_SERVICE_TOKEN`（路由级 scheduler 服务凭据，
+constant-time 校验，固定 scheduler actor + operator role；reset 仍需 sys_admin，
+scheduler token 到 reset 是 403）。token 只经 POST/DELETE 变更请求转发，
+health/read 路由保持匿名且不携带。**没有该 token 时 scheduler preflight
+fail-closed**（不会仅凭匿名 health 就报 submit-ready）。
+
 确认 node-22 Gateway 与诊断 API：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
 pgrep -af '[s]ervices.slurm_gateway|uvicorn apps[.]api[.]main'
-ss -ltnp 2>/dev/null | grep -E ':(8000|8001)\b' || true
-curl -fsS --max-time 2 http://127.0.0.1:8001/health
+ss -ltnp 2>/dev/null | grep -E ':(8000|8090)\b' || true
+curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 ```
 
-2026-06-22 现场验证：
+> 注：`/health`（bare）是 node-22 历史诊断 API 的路由（见本节末尾 2026-06-22
+> 现场验证，当时在 `:8001` 返回 `{"status":"ok",...}`）；standalone Slurm
+> gateway 的 health 实际是 `/api/v1/slurm/health`。8090 端口上只有
+> `/api/v1/slurm/health`，不要混用两个路径。
+
+#### 3.2.1 凭据与听端口边界（#1684）
+
+- Gateway 只监听 loopback。**实测当前 live 端口是 `127.0.0.1:8090`**（2026-08
+  现场观察，而非模板默认 8081）：`SLURM_GATEWAY_URL=http://127.0.0.1:8090`，
+  `ss -ltnp` 显示仅 `127.0.0.1:8090`（有 IPv6 loopback 时另见 `::1`）。
+- 共享凭据只存在于 untracked、owner-mode-0600 的 env 源
+  （gateway unit 的 `EnvironmentFile=` 与 scheduler unit 的 drop-in
+  EnvironmentFile 各引同一份）。**变量名入库，值永不入库/日志/OpenAPI/证据**；
+  gateway 侧示例路径 `/opt/SHUD-NWM/infra/env/slurm-gateway.secret` 为通用模板，
+  live node-22 实际路径以 drop-in 步骤里的 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`
+  为准。
+- **进程级 loopback bind guard（可部署的等价网络漂移控制）**：
+  `python -m services.slurm_gateway` 在 uvicorn 前 fail-closed，拒绝任何
+  非 loopback bind（`0.0.0.0` / `::` / hostname / 非 loopback IP）；
+  node-22 用户无非交互 sudo，这即是本 issue 要求的用户级等价第二控制。
+- **HTTP 实现协议固定 h11（checked-in 模块入口已钉死）**：
+  `services/slurm_gateway/__main__.py` 以 `uvicorn.run(..., http="h11")` 启动，
+  规避 uvicorn 默认 `http="auto"` 落到 node-22 维护期活动 Python 3.12.7 环境里
+  已实测损坏的可选原生 httptools（`AttributeError: module 'httptools.parser'
+  has no attribute '__all__'`，gateway 在 bind 前 exit 1）。
+  `UVICORN_HTTP=h11` 不影响程序化 `uvicorn.run`，只有显式关键字参数是确定性控制；
+  这是**兼容性钉，不是维护窗口依赖修复**，不授权 `uv sync`。
+- root 管理的 host packet-filter/ACL deny 规则属于**可选**的更强防线：仅在
+  实际存在并留证时记录（本 run 的 PASS 不依赖它）；remote negative probe +
+  bind-guard 拒绝即 live receipt。
+
+#### 3.2.2 协调 rollout / rollback（先 runtime ConditionPathExists 围栏，再备份，再配，再启用）
+
+先用可逆的 runtime `ConditionPathExists` drop-in 围住调度器（2026-08-28 现场观察到
+`systemctl --user stop nhms-compute-scheduler.timer` 被另一个并发同用户维护会话
+显式启动 timer 两次撤销；而运行中的 scheduler pass 必须自然跑完，不能 kill；
+**`mask --runtime` 在这个拓扑上无效且被禁止**——对 `~/.config/systemd/user` 下的
+persistent user unit，实测 `mask --runtime` 只造出
+`/run/user/1103/systemd/user/<unit> -> /dev/null`，`is-enabled` 仍为 `static`、
+`LoadState=loaded`，`start` 照常成功/active（2026-08-28 throwaway probe 已证明并清理）。
+所以围栏用**已实测生效的 runtime condition drop-in**：对 timer 与 service 各装一个
+`[Unit] ConditionPathExists=<释放哨兵>`，哨兵不存在时 condition 为 false，任何
+`start` 都 condition-skip（probe 实测 `start` 返回 0、unit skipped、`ConditionResult=no`、
+unit 保持 inactive）。drop-in 位于
+`${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user`，可逆（删文件即恢复）、
+重启即消失；维护期间**不得重启**，任何重启后必须先重建围栏再继续），再备份现有
+配置、安装代码与凭据，AUTHENTICATED 验证 gateway，最后才删除围栏 drop-in 并恢复
+timer。代码回滚由标准 ff-only 部署循环负责
+（`git pull --ff-only` + 远端同步纪律），本块只负责配置/凭据的机械可回滚。
+下面第 3 步 `restart nhms-slurm-gateway.service` 用的是 checked-in 模块入口
+（`python -m services.slurm_gateway`），该入口在程序化 `uvicorn.run` 上钉死
+`http="h11"`——node-22 维护期活动 Python 3.12.7 环境的可选原生 httptools
+2026-08-29 现场复现为损坏（`module 'httptools.parser' has no attribute '__all__'`，
+无法 bind），`UVICORN_HTTP=h11` 对程序化调用无效且不改这里任何行为；这是
+兼容性钉，不是维护窗口依赖修复，**不授权 `uv sync`**。
+
+```bash
+# 0) FENCE the scheduler with REVERSIBLE RUNTIME `ConditionPathExists` drop-ins
+#    before anything else. A plain `stop nhms-compute-scheduler.timer` is NOT a
+#    stable fence: on 2026-08-28 a concurrent same-user maintenance session
+#    explicitly started the timer twice, undoing a plain stop. `mask --runtime`
+#    is FORBIDDEN here: a live throwaway probe proved that for a PERSISTENT user
+#    unit under ~/.config/systemd/user, `mask --runtime` creates only
+#    /run/user/<uid>/systemd/user/<unit> -> /dev/null while `is-enabled` stays
+#    `static`, `LoadState=loaded`, and `start` succeeds/active — the persistent
+#    unit takes precedence over the runtime mask, so a masked timer still fires.
+#    The PROVEN primitive is a runtime condition drop-in: both units get
+#    `[Unit]\nConditionPathExists=<release sentinel>`; absent sentinel => every
+#    start attempt is skipped with ConditionResult=no and the unit stays
+#    inactive. Runtime drop-ins live under
+#    ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user, are REVERSIBLE (delete
+#    the file), and vanish on reboot — NO reboot during maintenance; re-establish
+#    the fence after any reboot before proceeding. NEVER `stop`/`kill` the
+#    scheduler SERVICE while a pass is active: a pass must finish naturally.
+#    Fail-fast shell semantics FIRST, before any state change: errexit +
+#    pipefail make every load-bearing check (grep/test/systemctl/Python) abort
+#    the block instead of silently continuing to fence release or later gates.
+set -euo pipefail
+RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+FENCE_RELEASE="$RUNTIME_DIR/nhms-issue-1684-scheduler-release"
+FENCE_NAME=90-nhms-issue-1684-maintenance-fence.conf
+rm -f "$FENCE_RELEASE"            # absent sentinel => condition false => fence on
+install -d -m 0700 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d"
+install -d -m 0700 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d"
+install -m 0600 /dev/null "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
+cat > "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME" <<EOF
+[Unit]
+ConditionPathExists=$FENCE_RELEASE
+EOF
+install -m 0600 /dev/null "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+cat > "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME" <<EOF
+[Unit]
+ConditionPathExists=$FENCE_RELEASE
+EOF
+chmod 0600 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME" \
+           "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+systemctl --user daemon-reload
+#    Stop the timer: any later start attempt is now condition-skipped (no
+#    rearm race). A concurrent same-user session CANNOT rearm the timer before
+#    this step completes, and even a later direct start is a skipped no-op.
+systemctl --user stop nhms-compute-scheduler.timer
+#    Fail closed if a pass is STILL RUNNING: print a nonsecret instruction and
+#    exit BEFORE backup/overwrite. Re-run this step once the service is
+#    inactive (the pass finished naturally). No sleep loop — one mechanical
+#    check, no waiting/retry. NEVER stop/kill the service.
+if systemctl --user is-active --quiet nhms-compute-scheduler.service; then
+  echo "rollout: a scheduler pass is still active; let it finish naturally" >&2
+  echo "rollout: re-run this rollout step once nhms-compute-scheduler.service is inactive" >&2
+  exit 1
+fi
+#    Mechanically verify the fence is LOADED and LIVE before any
+#    backup/overwrite: both units' DropInPaths must include their runtime
+#    drop-in, and a probe `systemctl --user start` on EACH unit must be a
+#    condition-skipped no-op (unit stays inactive, ConditionResult=no). This
+#    safe skipped start proves the fence; no sleep, one-shot checks only.
+systemctl --user show nhms-compute-scheduler.timer -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
+systemctl --user show nhms-compute-scheduler.service -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+systemctl --user start nhms-compute-scheduler.timer
+test "$(systemctl --user is-active nhms-compute-scheduler.timer)" = inactive
+test "$(systemctl --user show nhms-compute-scheduler.timer -p ConditionResult --value)" = no
+systemctl --user start nhms-compute-scheduler.service
+test "$(systemctl --user is-active nhms-compute-scheduler.service)" = inactive
+test "$(systemctl --user show nhms-compute-scheduler.service -p ConditionResult --value)" = no
+echo "rollout: scheduler fenced (runtime ConditionPathExists drop-ins, skipped starts stay inactive)"
+
+# 1) BACKUP FIRST (before any overwrite): owner-only backup ROOT directory and
+#    a SEPARATE pointer file (the pointer must never be the backup directory —
+#    a directory cannot be written by `>`). Snapshot the secret and both
+#    drop-ins; each gets a .state file saying present/absent so rollback can
+#    restore the EXACT prior file, or remove the rollout-created file when it
+#    was previously absent.
+BACKUP_ROOT="$HOME/.config/systemd/user/gateway-rollout-backups"
+BACKUP_POINTER="$HOME/.config/systemd/user/gateway-rollout-backup"
+install -d -m 0700 "$BACKUP_ROOT"
+BACKUP_DIR="$(mktemp -d -p "$BACKUP_ROOT" snapshot.XXXXXX)"
+chmod 0700 "$BACKUP_DIR"
+install -m 0600 /dev/null "$BACKUP_POINTER.tmp"
+printf '%s\n' "$BACKUP_DIR" > "$BACKUP_POINTER.tmp"
+mv "$BACKUP_POINTER.tmp" "$BACKUP_POINTER"
+chmod 0600 "$BACKUP_POINTER"
+for path in \
+  /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env \
+  "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" \
+  "$HOME/.config/systemd/user/nhms-slurm-gateway.service.d/10-node22-live.conf"; do
+  if [ -e "$path" ]; then
+    printf 'present %s\n' "$path" > "$BACKUP_DIR/$(basename "$path").state"
+    cp -a --preserve=mode,ownership,timestamps "$path" "$BACKUP_DIR/$(basename "$path").previous"
+  else
+    printf 'absent %s\n' "$path" > "$BACKUP_DIR/$(basename "$path").state"
+  fi
+done
+
+# 2) generate the shared owner-only credential (0600 env source). The file is
+#    created at mode 0600 BEFORE any token bytes are written (install), then
+#    the exact active interpreter's stdout goes DIRECTLY into it; the `>`
+#    truncates the already-0600 file without changing the mode (never
+#    argv/stdout/log/evidence). Overwrite, not append (the backup in step 1
+#    already preserves the prior value if one existed):
+install -d -m 0700 /scratch/frd_muziyao/nhms-prod/secrets
+install -m 0600 /dev/null /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+/scratch/frd_muziyao/NWM/.venv/bin/python -c 'import secrets; print("SLURM_GATEWAY_SERVICE_TOKEN=" + secrets.token_urlsafe(32))' \
+  > /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+chmod 0600 /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+#    do NOT print or inspect the token value; only the path may be named.
+
+#    scheduler unit drop-in (user systemd). The live scheduler base unit loads
+#    /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env; the
+#    drop-in RESETS the EnvironmentFile list (dropping any stale
+#    inherited/generic entries) and explicitly re-adds that live base env FIRST,
+#    then the shared secret — so the drop-in override is deterministic and the
+#    real base config survives:
+mkdir -p "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d"
+install -m 0600 /dev/null "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
+cat > "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" <<'EOF'
+[Service]
+EnvironmentFile=
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+EOF
+chmod 0600 "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
+
+#    gateway unit (tracked template is a generic deployable system unit for
+#    /opt/SHUD-NWM + 8081; the LIVE node-22 user-systemd override below RESETS
+#    the inherited EnvironmentFile list, explicitly re-adds the live base env
+#    /scratch/frd_muziyao/NWM/infra/env/compute.host.env (workspace, object
+#    store, partition, runtime) — preserving the REAL base unit config instead
+#    of dropping it along with the generic list — then the SAME untracked 0600
+#    secret file as the scheduler drop-in, and overrides the live loopback 8090
+#    URL):
+GATEWAY_DROPIN_DIR="$HOME/.config/systemd/user/nhms-slurm-gateway.service.d"
+mkdir -p "$GATEWAY_DROPIN_DIR"
+install -m 0600 /dev/null "$GATEWAY_DROPIN_DIR/10-node22-live.conf"
+cat > "$GATEWAY_DROPIN_DIR/10-node22-live.conf" <<'EOF'
+[Service]
+EnvironmentFile=
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.host.env
+EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8090
+EOF
+chmod 0600 "$GATEWAY_DROPIN_DIR/10-node22-live.conf"
+
+# 3) daemon-reload, restart gateway, verify the effective EnvironmentFiles.
+#    `systemctl show -p EnvironmentFiles` prints only the FILE PATHS (never the
+#    token value); for BOTH units assert BOTH resolved paths — the live base
+#    env from the base unit AND the shared scratch secret — with path-only
+#    `grep -F`:
+systemctl --user daemon-reload
+systemctl --user restart nhms-slurm-gateway.service
+systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.host.env'
+systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env'
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
+stat -c '%a %U %n' /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
+ss -ltnp 2>/dev/null | grep ':8090'
+curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
+
+# 4) local auth boundary WITHOUT creating a job. `expect_status` is a generic
+#    secret-safe helper: capture the HTTP status and require the EXACT expected
+#    code, else report on stderr and return nonzero (fail-fast). The valid-token
+#    probe is `token_probe` (value never on argv/stdout): source the owner-checked
+#    0600 file in a private shell, use a 0600 temp curl header file, and require
+#    exactly 422 (auth passed -> existing validation error, no submission).
+expect_status() { # <expected-http> <label> <curl-args...>
+  local expected=$1 label=$2 status
+  shift 2
+  status="$(curl -s -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+  if [ "$status" != "$expected" ]; then
+    echo "auth boundary: $label expected HTTP $expected, got ${status:-no-response}" >&2
+    return 1
+  fi
+  echo "auth boundary: $label -> HTTP $expected (no submission performed)"
+}
+token_probe() {
+  local secret_file=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env status
+  test -r "$secret_file" || { echo "token probe: secret unreadable" >&2; return 1; }
+  test "$(stat -c %a "$secret_file")" = 600 || { echo "token probe: secret mode != 0600" >&2; return 1; }
+  local hdr; hdr="$(mktemp)"; chmod 600 "$hdr"
+  trap 'rm -f "$hdr"' RETURN
+  (
+    set -a
+    . "$secret_file" || { echo "token probe: secret source failed" >&2; return 1; }
+    set +a
+    printf 'Authorization: Bearer %s\n' "$SLURM_GATEWAY_SERVICE_TOKEN" > "$hdr"
+  ) || return 1
+  status="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+    -H 'Content-Type: application/json' -H @"$hdr" -d '{}' 2>/dev/null || true)"
+  if [ "$status" != "422" ]; then
+    echo "token probe: expected 422 authenticated validation, got ${status:-no-response}" >&2
+    return 1
+  fi
+  echo "token probe: authenticated (422 validation, no submission performed)"
+}
+#    no token -> 401 before body validation (fail-fast gate)
+expect_status 401 "no token" -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Content-Type: application/json' -d '{}' || exit 1
+#    wrong token -> 401 (fail-fast gate)
+expect_status 401 "wrong token" -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Authorization: Bearer wrong-token-value-000000' -H 'Content-Type: application/json' -d '{}' || exit 1
+#    valid token -> auth passes into the existing validation error (422), no sbatch
+token_probe || exit 1
+#    disabled reset -> 404 for every credential
+expect_status 404 "disabled reset" -X POST http://127.0.0.1:8090/api/v1/slurm/internal/reset || exit 1
+
+# 5) live-safety receipt: loopback bind + remote refusal + bind-guard rejection
+#    - ss -ltnp shows only 127.0.0.1:8090
+#    - from another host: probe node-22:8090 -> connection refused/timed out
+#    - a misbound start is rejected by the process itself before uvicorn:
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway --url http://0.0.0.0:8090
+#      -> nonzero exit, stderr: non-loopback bind host is not allowed
+
+# 6) AUTHENTICATED pre-validation BEFORE timer resume: anonymous health being
+#    green is NOT enough — prove the gateway actually accepts the configured
+#    service credential (token_probe above must pass 422), then run the
+#    scheduler's own gateway preflight (read-only, NO submission) with the same
+#    secret and the live settings, and only then resume the timer.
+systemctl --user is-active nhms-slurm-gateway.service
+token_probe || exit 1
+# effective EnvironmentFiles path-only check (base env + shared secret, no values)
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env'
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
+/scratch/frd_muziyao/NWM/.venv/bin/python - <<'PY'
+import os
+import sys
+
+SECRET = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
+if (os.stat(SECRET).st_mode & 0o777) != 0o600:
+    print("scheduler preflight: secret mode is not 0600", file=sys.stderr)
+    sys.exit(1)
+found = False
+with open(SECRET, encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.strip()
+        if line.startswith("SLURM_GATEWAY_SERVICE_TOKEN="):
+            os.environ["SLURM_GATEWAY_SERVICE_TOKEN"] = line.split("=", 1)[1]
+            found = True
+            break
+if not found:
+    print("scheduler preflight: secret must define SLURM_GATEWAY_SERVICE_TOKEN", file=sys.stderr)
+    sys.exit(1)
+# Required non-secret config only: the live gateway backend and loopback URL.
+os.environ["SLURM_GATEWAY_BACKEND"] = "slurm"
+os.environ["SLURM_GATEWAY_URL"] = "http://127.0.0.1:8090"
+from services.orchestrator.scheduler import _default_gateway_probe
+
+class _Config:
+    slurm_gateway_url = "http://127.0.0.1:8090"
+
+result = dict(_default_gateway_probe(_Config()))
+ready = (
+    bool(result.get("healthy"))
+    and bool(result.get("submit_capable"))
+    and bool(result.get("accounting_available"))
+)
+if not ready:
+    print(
+        "scheduler preflight: gateway is not submit-ready: %s"
+        % (result.get("reason") or "unknown",),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print("scheduler preflight: healthy submit_capable accounting_available (read-only, no submission)")
+PY
+
+# 7) RELEASE the fence ONLY after the 401/401/404/422 boundaries and the
+#    read-only preflight above ALL passed. The release IS the removal of the
+#    runtime condition drop-ins — NEVER create the release sentinel as a
+#    bypass: an existing sentinel would make `ConditionPathExists` true and
+#    silently start a pass, skipping every gate. Remove BOTH drop-in files
+#    (and the now-empty runtime dirs if possible), daemon-reload, verify the
+#    fence is GONE (DropInPaths no longer list the drop-in), then start the
+#    timer and require active. Ordering is exact — removal/reload/verify
+#    BEFORE start, never start through the fence.
+rm -f "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
+rm -f "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+rmdir "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d" 2>/dev/null || true
+rmdir "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d" 2>/dev/null || true
+systemctl --user daemon-reload
+systemctl --user show nhms-compute-scheduler.timer -p DropInPaths | grep -Fv "$FENCE_NAME"
+systemctl --user show nhms-compute-scheduler.service -p DropInPaths | grep -Fv "$FENCE_NAME"
+systemctl --user start nhms-compute-scheduler.timer
+systemctl --user is-active nhms-compute-scheduler.timer
+```
+
+2026-06-22 现场验证（历史）：
 
 - `python -m services.slurm_gateway` 在 node-22 运行。
 - node-22 diagnostic API `/health` 在 `:8001` 返回 `{"status":"ok",...}`。
 - node-22 `/ghdc/data/nwm/object-store` 与 `/ghdc/data/nwm/published`
   可见，是 node-27 `/home/ghdc/nwm/...` 的同一份 NFS 数据面。
+
+Rollback（先重assert 同一 runtime `ConditionPathExists` 围栏，再从 backup pointer
+精确恢复；**本块绝不删除围栏 drop-in、绝不创建释放哨兵、绝不 daemon-reload 释放、也绝不
+恢复 timer**——恢复后的配置/代码必须独立通过完整 rollout 认证门后由操作者手动删除两个
+runtime drop-in 再手动启 timer；全程无匿名兼容旁路）：
+
+```bash
+# 0) RE-ASSERT THE FENCE. A concurrent same-user session may have removed a
+#    drop-in or started a unit since rollout began; re-establish BOTH runtime
+#    condition drop-ins (exactly like rollout step 0: same RUNTIME_DIR /
+#    FENCE_RELEASE / FENCE_NAME, no release sentinel), daemon-reload, stop the
+#    timer, and make sure both units are fenced BEFORE restoring any file.
+#    `mask --runtime` is still FORBIDDEN (persistent user unit precedence —
+#    proven ineffective on this topology). If a pass is still running, do NOT
+#    stop/kill the service — fail closed and let it finish naturally; re-run
+#    rollback once inactive. Fail-fast shell semantics FIRST, before any state
+#    change: errexit + pipefail make every load-bearing check abort the block
+#    instead of silently continuing to restore or start the timer.
+set -euo pipefail
+RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+FENCE_RELEASE="$RUNTIME_DIR/nhms-issue-1684-scheduler-release"
+FENCE_NAME=90-nhms-issue-1684-maintenance-fence.conf
+rm -f "$FENCE_RELEASE"
+install -d -m 0700 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d"
+install -d -m 0700 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d"
+install -m 0600 /dev/null "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
+cat > "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME" <<EOF
+[Unit]
+ConditionPathExists=$FENCE_RELEASE
+EOF
+install -m 0600 /dev/null "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+cat > "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME" <<EOF
+[Unit]
+ConditionPathExists=$FENCE_RELEASE
+EOF
+chmod 0600 "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME" \
+           "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+systemctl --user daemon-reload
+systemctl --user stop nhms-compute-scheduler.timer
+if systemctl --user is-active --quiet nhms-compute-scheduler.service; then
+  echo "rollback: a scheduler pass is still active; let it finish naturally" >&2
+  echo "rollback: re-run this rollback step once nhms-compute-scheduler.service is inactive" >&2
+  exit 1
+fi
+systemctl --user show nhms-compute-scheduler.timer -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"
+systemctl --user show nhms-compute-scheduler.service -p DropInPaths | grep -F "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"
+systemctl --user start nhms-compute-scheduler.timer
+test "$(systemctl --user is-active nhms-compute-scheduler.timer)" = inactive
+test "$(systemctl --user show nhms-compute-scheduler.timer -p ConditionResult --value)" = no
+systemctl --user start nhms-compute-scheduler.service
+test "$(systemctl --user is-active nhms-compute-scheduler.service)" = inactive
+test "$(systemctl --user show nhms-compute-scheduler.service -p ConditionResult --value)" = no
+echo "rollback: scheduler fenced (runtime ConditionPathExists drop-ins, skipped starts stay inactive)"
+
+# 1) read the backup pointer and restore the EXACT prior state. State value is
+#    matched by `case`: `present` requires the `.previous` file and restores
+#    byte-for-byte with its prior mode; `absent` removes the rollout-created
+#    file; anything else (corrupted/unknown state) FAILS closed rather than
+#    treating it as absent.
+BACKUP_POINTER="$HOME/.config/systemd/user/gateway-rollout-backup"
+if [ ! -r "$BACKUP_POINTER" ]; then
+  echo "rollback: no gateway-rollout-backup pointer; nothing to restore" >&2
+  exit 1
+fi
+BACKUP_DIR="$(cat "$BACKUP_POINTER")"
+restore_snapshot() { # <live-path> <snapshot-basename>
+  local live_path=$1 base=$2 state="$BACKUP_DIR/$2.state" marker
+  if [ ! -f "$state" ]; then
+    echo "rollback: missing snapshot state for $base" >&2
+    return 1
+  fi
+  marker="$(awk 'NR==1 {print $1}' "$state")"
+  case "$marker" in
+    present)
+      if [ ! -f "$BACKUP_DIR/$base.previous" ]; then
+        echo "rollback: $base state is present but .previous snapshot is missing" >&2
+        return 1
+      fi
+      mkdir -p "$(dirname "$live_path")"
+      cp -a --preserve=mode,ownership,timestamps "$BACKUP_DIR/$base.previous" "$live_path"
+      ;;
+    absent)
+      rm -f "$live_path"
+      ;;
+    *)
+      echo "rollback: $base snapshot state is corrupt/unknown: ${marker:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+}
+restore_snapshot /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env slurm-gateway.env || exit 1
+restore_snapshot "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" 10-slurm-gateway-token.conf || exit 1
+restore_snapshot "$HOME/.config/systemd/user/nhms-slurm-gateway.service.d/10-node22-live.conf" 10-node22-live.conf || exit 1
+
+# 2) reload, restart gateway, verify restore (health reachable, mutations 401)
+systemctl --user daemon-reload
+systemctl --user restart nhms-slurm-gateway.service
+systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles
+curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
+
+# 3) FAIL-CLOSED readiness gate: if a first-deploy snapshot had no token/drop-ins
+#    while the NEW auth code remains active, anonymous health alone is NOT
+#    enough. re-run the SAME gates as rollout: no-token/wrong-token/reset exact
+#    statuses, authenticated 422 via token_probe, and the executable scheduler
+#    preflight. Any failure leaves the timer STOPPED and REQUIRES code rollback
+#    or fix-forward — never resume on anonymous health or a bare 401.
+expect_status() { # <expected-http> <label> <curl-args...>
+  local expected=$1 label=$2 status
+  shift 2
+  status="$(curl -s -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+  if [ "$status" != "$expected" ]; then
+    echo "auth boundary: $label expected HTTP $expected, got ${status:-no-response}" >&2
+    return 1
+  fi
+  echo "auth boundary: $label -> HTTP $expected (no submission performed)"
+}
+token_probe() {
+  local secret_file=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env status
+  test -r "$secret_file" || { echo "token probe: secret unreadable" >&2; return 1; }
+  test "$(stat -c %a "$secret_file")" = 600 || { echo "token probe: secret mode != 0600" >&2; return 1; }
+  local hdr; hdr="$(mktemp)"; chmod 600 "$hdr"
+  trap 'rm -f "$hdr"' RETURN
+  (
+    set -a
+    . "$secret_file" || { echo "token probe: secret source failed" >&2; return 1; }
+    set +a
+    printf 'Authorization: Bearer %s\n' "$SLURM_GATEWAY_SERVICE_TOKEN" > "$hdr"
+  ) || return 1
+  status="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+    -H 'Content-Type: application/json' -H @"$hdr" -d '{}' 2>/dev/null || true)"
+  if [ "$status" != "422" ]; then
+    echo "token probe: expected 422 authenticated validation, got ${status:-no-response}" >&2
+    return 1
+  fi
+  echo "token probe: authenticated (422 validation, no submission performed)"
+}
+expect_status 401 "rollback no token" -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Content-Type: application/json' -d '{}' || exit 1
+expect_status 401 "rollback wrong token" -X POST http://127.0.0.1:8090/api/v1/slurm/jobs \
+  -H 'Authorization: Bearer wrong-token-value-000000' -H 'Content-Type: application/json' -d '{}' || exit 1
+expect_status 404 "rollback disabled reset" -X POST http://127.0.0.1:8090/api/v1/slurm/internal/reset || exit 1
+token_probe || exit 1
+/scratch/frd_muziyao/NWM/.venv/bin/python - <<'PY'
+import os
+import sys
+
+SECRET = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
+if (os.stat(SECRET).st_mode & 0o777) != 0o600:
+    print("scheduler preflight: secret mode is not 0600", file=sys.stderr)
+    sys.exit(1)
+found = False
+with open(SECRET, encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.strip()
+        if line.startswith("SLURM_GATEWAY_SERVICE_TOKEN="):
+            os.environ["SLURM_GATEWAY_SERVICE_TOKEN"] = line.split("=", 1)[1]
+            found = True
+            break
+if not found:
+    print("scheduler preflight: secret must define SLURM_GATEWAY_SERVICE_TOKEN", file=sys.stderr)
+    sys.exit(1)
+os.environ["SLURM_GATEWAY_BACKEND"] = "slurm"
+os.environ["SLURM_GATEWAY_URL"] = "http://127.0.0.1:8090"
+from services.orchestrator.scheduler import _default_gateway_probe
+
+class _Config:
+    slurm_gateway_url = "http://127.0.0.1:8090"
+
+result = dict(_default_gateway_probe(_Config()))
+ready = (
+    bool(result.get("healthy"))
+    and bool(result.get("submit_capable"))
+    and bool(result.get("accounting_available"))
+)
+if not ready:
+    print(
+        "scheduler preflight: gateway is not submit-ready: %s"
+        % (result.get("reason") or "unknown",),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print("scheduler preflight: healthy submit_capable accounting_available (read-only, no submission)")
+PY
+
+# 4) FAIL-CLOSED: this block NEVER removes the fence drop-ins, NEVER creates
+#    the release sentinel, NEVER daemon-reloads a release, and NEVER starts the
+#    timer (no executable rm of the fence / sentinel creation / timer start may
+#    appear anywhere in the fenced rollback block). If every gate above passed,
+#    the restored configuration is auth-ready; MANUAL recovery, exactly in this
+#    order:
+#      1. run the FULL authenticated gates (401/401/404/422 + read-only
+#         preflight) against the restored config/code;
+#      2. rm -f  $RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME \
+#               $RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME
+#         (remove BOTH runtime drop-ins; do NOT create the release sentinel)
+#      3. systemctl --user daemon-reload
+#      4. verify DropInPaths no longer list the fence / ConditionResult no
+#         longer blocks, then systemctl --user start nhms-compute-scheduler.timer
+#    The runtime condition fence above stays in place until that manual
+#    recovery — no executable fence removal/start in this block. If any gate
+#    failed (e.g. first-deploy rollback with no shared token while new auth
+#    code is active), the scheduler REMAINS FENCED: code rollback or
+#    fix-forward is required before the scheduler may resume.
+```
 
 ### 3.3 API / 展示服务
 

@@ -116,6 +116,13 @@ _GATEWAY_REQUIRED_BINARIES = ("sbatch", "squeue", "sacct", "scancel")
 _GATEWAY_PROBE_TIMEOUT_SECONDS = 10.0
 
 
+def _configured_service_token() -> str | None:
+    """One token contract: delegated to packages.common.request_auth."""
+    from packages.common.request_auth import read_configured_service_token
+
+    return read_configured_service_token()
+
+
 def _default_gateway_probe(config: Any) -> dict[str, Any]:
     """Bounded, fail-safe gateway health probe."""
 
@@ -137,6 +144,20 @@ def _default_gateway_probe(config: Any) -> dict[str, Any]:
             "submit_capable": False,
             "accounting_available": False,
             "reason": "SLURM_GATEWAY_URL is not configured.",
+        }
+
+    token = _configured_service_token()
+    if token is None:
+        return {
+            "mode": mode,
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": (
+                "SLURM_GATEWAY_SERVICE_TOKEN is not configured with a usable "
+                "value; the gateway rejects anonymous mutations, so submit "
+                "capability cannot be confirmed from anonymous health alone."
+            ),
         }
 
     url = base_url.rstrip("/") + _GATEWAY_HEALTH_PATH

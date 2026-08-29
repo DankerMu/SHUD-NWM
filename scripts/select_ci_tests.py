@@ -266,10 +266,14 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
 # drift suite as well as its existing API contract consumers.
+# #1684 large-file guard repair: the 3.1-contract security half was physically
+# partitioned into tests/test_slurm_gateway_openapi_security.py; every
+# collectible partition replaces the single target.
 OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_api_contract.py",
     "tests/test_openapi_31_contract.py",
     "tests/test_openapi_drift.py",
+    "tests/test_slurm_gateway_openapi_security.py",
 )
 
 # #1646: the pytest warning-policy suite proves the SHIPPING config semantically
@@ -375,6 +379,40 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     "tests/test_publish_scheduler_file_registry.py",
     SELECTOR_META_GUARD_TEST,
 )
+
+# #1684 shared-auth owner-to-focused-suite mappings (EVID-01). These shared
+# modules have no same-name derivable suite and their consumers are the focused
+# partitioned Slurm auth suites, not the broad core-smoke/API/orchestrator
+# suites: an owner-only PR previously selected only generic riders and none of
+# the focused contracts. Each is an exact additive (non-stop) rule so existing
+# intentional supplemental routing (core-smoke baseline for packages/common/**,
+# #1656 timescale rider) survives.
+#
+# `packages/common/auth_policy.py` owns the canonical RBAC action matrix and is
+# asserted by the dedicated matrix suite; `packages/common/request_auth.py` owns
+# the service-token contract (reader/matcher/client/preflight) and
+# `packages/common/openapi_auth_security.py` owns the published scheme/security
+# metadata; `apps/api/auth.py` is the facade whose drift is caught by the
+# shared-auth contract suites plus the role-boundary static suite; the two
+# orchestrator modules (client + scheduler preflight) are owned by their
+# focused auth-client/deployment suites.
+AUTH_POLICY_TEST = "tests/test_auth_policy_matrix.py"
+SLURM_AUTH_CLIENT_TEST = "tests/test_slurm_gateway_auth_client.py"
+SLURM_AUTH_DEPLOYMENT_TEST = "tests/test_slurm_gateway_auth_deployment.py"
+SLURM_AUTH_CORE_TEST = "tests/test_slurm_gateway_auth.py"
+# #1684 EVID-02 partition: the full compute/dev mount matrix lives in its own
+# module (the core suite is at the repo 1,000-line limit); every owner that
+# selects the core suite must select the partition too.
+SLURM_AUTH_FULLMOUNT_TEST = "tests/test_slurm_gateway_auth_fullmount.py"
+SLURM_OPENAPI_SECURITY_TEST = "tests/test_slurm_gateway_openapi_security.py"
+# Static producer/consumer oracle for the tracked unit / env examples / runbook
+# wiring (active EnvironmentFile, same secret path, 8090, executable rollback,
+# no inline credential). Distinct from SLURM_AUTH_DEPLOYMENT_TEST (bind-guard +
+# preflight behavior).
+SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST = "tests/test_slurm_gateway_deployment_contract.py"
+
+# The literal rule rows are declared in PATH_TEST_RULES (after the dataclass);
+# these constants are the single names the selector meta-suite pins.
 
 
 @dataclass(frozen=True)
@@ -1254,7 +1292,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_receipts.py",
             "tests/test_gateway_reconcile_writer_rollforward.py",
             "tests/test_slurm_gateway_app.py",
+            "tests/test_slurm_gateway_auth.py",
+            "tests/test_slurm_gateway_auth_fullmount.py",
+            "tests/test_slurm_gateway_auth_client.py",
+            "tests/test_slurm_gateway_auth_deployment.py",
+            # #1684 large-file guard repair: the auth suite was physically
+            # partitioned; every partition replaces the single target.
             "tests/test_slurm_route_contract.py",
+            "tests/test_slurm_route_security_contract.py",
             "tests/test_real_slurm_gateway.py",
             "tests/test_slurm_array_contract.py",
             "tests/test_job_array.py",
@@ -1374,6 +1419,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
+            # #1684 large-file guard repair: the 3.1-contract security half is
+            # a one-hop importer via tests/test_openapi_31_contract.py, so it
+            # joins the derived closure here (and in the hydro_display rule).
+            "tests/test_slurm_gateway_openapi_security.py",
             # #1714: same guard-derived provenance as the #1597 batch above,
             # not hand-curated — a one-hop importer reached through
             # apps/api/routes/hydro_display.py. Kept as its own entry so the
@@ -1412,6 +1461,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
+            # #1684 large-file guard repair: the 3.1-contract security half is
+            # a one-hop importer via tests/test_openapi_31_contract.py.
+            "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_openapi_drift.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
             "tests/test_runtime_mode.py",
@@ -1429,6 +1481,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_production_readiness_validation.py",
             "tests/test_production_ops_validation.py",
+            # #1684 large-file guard repair: the ops-validation suite was
+            # physically partitioned into auth/dependency/hardening modules;
+            # every collectible partition replaces the single target so a
+            # production_closure change never blinds targeted CI to moved
+            # cases.
+            "tests/test_slurm_gateway_ops_auth_evidence.py",
+            "tests/test_slurm_gateway_ops_dependency_closure.py",
+            "tests/test_slurm_gateway_ops_dependency_hardening.py",
             "tests/test_production_object_store_validation.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_production_scale_validation.py",
@@ -1573,6 +1633,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_monitoring_api.py",
             "tests/test_openapi_31_contract.py",
             "tests/test_openapi_drift.py",
+            "tests/test_slurm_gateway_openapi_security.py",
         ),
     ),
     PathTestRule(
@@ -1608,6 +1669,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/env/**",
         ("tests/test_two_node_docker_runtime.py",),
+    ),
+    # #1684 EVID-05/F: the rollout producers must select the static deployment
+    # contract suite. The runbook is `docs/**` (no backend lane by default) and
+    # the env examples would otherwise select only the two-node runtime suite;
+    # each is an exact additive rule so the runbook/env contract reddens on the
+    # PR that rewrites the wiring.
+    PathTestRule(
+        "docs/runbooks/current-production-ops.md",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/compute.example",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/compute.scheduler-dbfree.env.example",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/README.md",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
     ),
     PathTestRule(
         "scripts/validate_two_node_docker_runtime.py",
@@ -1778,8 +1860,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # by the node-22 owner. infra/** already starts the backend lane, so
         # without this rule a unit-only PR selected nothing and CI degraded to
         # collect-only; the exact rule converts that lane into real assertions.
+        # #1684 EVID-05: the unit's active EnvironmentFile / no-inline-secret
+        # contract is asserted by the static deployment suite, which joins the
+        # rule alongside the node-22 owner.
         NODE22_SLURM_GATEWAY_UNIT,
-        (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
         # #1571: the retention unit's single exact ExecStart (deferred-venv
@@ -1864,6 +1949,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/chain_array_evidence.py",
         FORCED_RESUBMIT_SURFACE_TESTS,
+    ),
+    # #1684 shared-auth owner-to-focused-suite mappings (EVID-01). Additive
+    # (non-stop) on purpose: the broad `apps/api/**` / `services/orchestrator/**`
+    # rules keep their existing riders, `packages/common/**` keeps its #1744
+    # core-smoke baseline and the #1656 timescale rider; these rows only attach
+    # the focused contracts an owner-only PR previously could not reach.
+    PathTestRule(
+        "packages/common/auth_policy.py",
+        (AUTH_POLICY_TEST,),
+    ),
+    PathTestRule(
+        "packages/common/request_auth.py",
+        (
+            SLURM_AUTH_CORE_TEST,
+            SLURM_AUTH_FULLMOUNT_TEST,
+            SLURM_AUTH_CLIENT_TEST,
+            SLURM_AUTH_DEPLOYMENT_TEST,
+        ),
+    ),
+    PathTestRule(
+        "packages/common/openapi_auth_security.py",
+        (SLURM_OPENAPI_SECURITY_TEST,),
+    ),
+    PathTestRule(
+        "apps/api/auth.py",
+        (
+            AUTH_POLICY_TEST,
+            "tests/test_role_boundary_static.py",
+        ),
+    ),
+    PathTestRule(
+        "services/orchestrator/chain_slurm_client.py",
+        (SLURM_AUTH_CLIENT_TEST,),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_gateway.py",
+        (SLURM_AUTH_DEPLOYMENT_TEST,),
     ),
 )
 

@@ -74,6 +74,7 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_api_contract.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -91,6 +92,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     # tests/test_api.py is both a core-smoke member and a legitimate API
     # consumer here; the fallback-only remainder must stay out.
@@ -530,6 +532,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        # #1684 large-file guard repair: the 3.1-contract security half joined
+        # the mvt rule's derived closure as a one-hop importer via
+        # tests/test_openapi_31_contract.py.
+        "tests/test_slurm_gateway_openapi_security.py",
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -808,6 +814,19 @@ NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
 NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
 
+# #1684 EVID-01: the shared Slurm-auth owner-to-focused-suite mappings.
+# Strings mirror scripts/select_ci_tests.py's constants; the pins below assert
+# the exact focused suites are REACHED for each owner-only change.
+AUTH_POLICY_TEST = "tests/test_auth_policy_matrix.py"
+SLURM_AUTH_CLIENT_TEST = "tests/test_slurm_gateway_auth_client.py"
+SLURM_AUTH_DEPLOYMENT_TEST = "tests/test_slurm_gateway_auth_deployment.py"
+SLURM_AUTH_CORE_TEST = "tests/test_slurm_gateway_auth.py"
+# #1684 EVID-02 partition: the full compute/dev mount matrix is its own module
+# and must ride the same owners as the core auth suite.
+SLURM_AUTH_FULLMOUNT_TEST = "tests/test_slurm_gateway_auth_fullmount.py"
+SLURM_OPENAPI_SECURITY_TEST = "tests/test_slurm_gateway_openapi_security.py"
+SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST = "tests/test_slurm_gateway_deployment_contract.py"
+
 
 @pytest.mark.parametrize(
     "producer, owner, smoke_allowed",
@@ -1078,6 +1097,136 @@ def test_calibration_declaration_rule_reds_when_rule_or_consumer_removed(
         assert "tests/test_select_ci_tests.py" in selected
 
 
+def test_shared_auth_owners_select_their_focused_contract_suites() -> None:
+    # #1684 EVID-01 green rows: each shared auth owner must reach its focused
+    # contract suite (plus the preserved riders). Membership pins on purpose:
+    # supplemental routing (core-smoke baseline, #1656 rider) is intentional.
+    owners = {
+        "packages/common/auth_policy.py": {AUTH_POLICY_TEST},
+        "packages/common/request_auth.py": {
+            SLURM_AUTH_CORE_TEST,
+            SLURM_AUTH_FULLMOUNT_TEST,
+            SLURM_AUTH_CLIENT_TEST,
+            SLURM_AUTH_DEPLOYMENT_TEST,
+        },
+        "packages/common/openapi_auth_security.py": {SLURM_OPENAPI_SECURITY_TEST},
+        "apps/api/auth.py": {AUTH_POLICY_TEST, "tests/test_role_boundary_static.py"},
+        "services/orchestrator/chain_slurm_client.py": {SLURM_AUTH_CLIENT_TEST},
+        "services/orchestrator/scheduler_gateway.py": {SLURM_AUTH_DEPLOYMENT_TEST},
+        NODE22_SLURM_GATEWAY_UNIT: {SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST},
+    }
+    for producer, required in owners.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert required <= selected, (
+            f"{producer}: focused owner tests {sorted(required - selected)} not selected (got {sorted(selected)})"
+        )
+
+
+def test_rollout_owner_producers_select_the_static_deployment_contract() -> None:
+    """#1684 EVID-05/F green rows: every rollout producer reaches the static
+    deployment contract suite (the runbook and env examples previously selected
+    nothing / only two-node runtime)."""
+    producers = (
+        "docs/runbooks/current-production-ops.md",
+        "infra/env/compute.example",
+        "infra/env/compute.scheduler-dbfree.env.example",
+        "infra/env/README.md",
+    )
+    for producer in producers:
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST in selected, (
+            f"{producer}: static deployment contract not selected (got {sorted(selected)})"
+        )
+
+
+def test_rollout_owner_producer_rules_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1684 EVID-05/F red leg: dropping a rollout owner rule drops the static
+    deployment contract from that owner's selection."""
+    from scripts import select_ci_tests
+
+    producer_patterns = {
+        "docs/runbooks/current-production-ops.md",
+        "infra/env/compute.example",
+        "infra/env/compute.scheduler-dbfree.env.example",
+        "infra/env/README.md",
+    }
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in producer_patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(producer_patterns)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for producer in producer_patterns:
+        selected = select_tests([producer], repo_root=Path("."))
+        assert SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST not in selected, (
+            f"mutant table without {producer}'s rule still selects deployment contract"
+        )
+
+
+def test_combined_pr_selection_includes_all_focused_auth_suites() -> None:
+    # #1684 EVID-01 combined leg: the full PR changed-file set must include
+    # every focused split module, not just the ones that ride slurm_gateway/**
+    # (which already selected several). Owner-only shared modules previously
+    # selected none of these.
+    changed = [
+        "packages/common/auth_policy.py",
+        "packages/common/request_auth.py",
+        "packages/common/openapi_auth_security.py",
+        "apps/api/auth.py",
+        "services/orchestrator/chain_slurm_client.py",
+        "services/orchestrator/scheduler_gateway.py",
+        "infra/systemd/nhms-slurm-gateway.service",
+        "docs/runbooks/current-production-ops.md",
+        "infra/env/compute.example",
+    ]
+    selected = set(select_tests(changed, repo_root=Path(".")))
+    for focused in (
+        AUTH_POLICY_TEST,
+        SLURM_AUTH_CORE_TEST,
+        SLURM_AUTH_FULLMOUNT_TEST,
+        SLURM_AUTH_CLIENT_TEST,
+        SLURM_AUTH_DEPLOYMENT_TEST,
+        SLURM_OPENAPI_SECURITY_TEST,
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+    ):
+        assert focused in selected, f"combined PR selection missing {focused}"
+
+
+def test_shared_auth_owner_rules_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #1684 EVID-01 red leg (constructed rule table, tracked selector untouched):
+    # removing an owner rule must drop its focused suite from that owner's
+    # selection — the same assertion seam the green rows use.
+    from scripts import select_ci_tests
+
+    owner_patterns = {
+        "packages/common/auth_policy.py",
+        "packages/common/request_auth.py",
+        "packages/common/openapi_auth_security.py",
+        "apps/api/auth.py",
+        "services/orchestrator/chain_slurm_client.py",
+        "services/orchestrator/scheduler_gateway.py",
+    }
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in owner_patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(owner_patterns)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    expected_missing = {
+        "packages/common/auth_policy.py": AUTH_POLICY_TEST,
+        "packages/common/request_auth.py": SLURM_AUTH_CLIENT_TEST,
+        "packages/common/openapi_auth_security.py": SLURM_OPENAPI_SECURITY_TEST,
+        "apps/api/auth.py": AUTH_POLICY_TEST,
+        "services/orchestrator/chain_slurm_client.py": SLURM_AUTH_CLIENT_TEST,
+        "services/orchestrator/scheduler_gateway.py": SLURM_AUTH_DEPLOYMENT_TEST,
+    }
+    for producer, focused in expected_missing.items():
+        selected = select_tests([producer], repo_root=Path("."))
+        assert focused not in selected, (
+            f"mutant table without {producer}'s rule still selects {focused}"
+        )
+
+
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
     # #1571 local-repair: before the exact rules the two systemd units matched
     # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing
@@ -1154,17 +1303,22 @@ def test_environment_backend_filter_entry_reds_when_removed_or_moved_out(entry: 
 def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # Round-2 negatives: the generated `CLAUDE.md`/`AGENTS.md` roots are governed
     # by the instruction source plus byte-exact projection (never a direct
-    # selector rule), and the derived QHH runbook, current-production-ops and
-    # unrelated docs must remain selector-empty and non-exact backend entries.
-    # `docs/**` is deliberately excluded from the backend filter (#1571 scope).
+    # selector rule), and the derived QHH runbook and unrelated docs must remain
+    # selector-empty and non-exact backend entries. EXCEPTION (#1684 EVID-05/F):
+    # `docs/runbooks/current-production-ops.md` is the node-22 gateway rollout
+    # owner and now selects the static deployment contract suite (asserted in
+    # test_rollout_owner_producers_select_the_static_deployment_contract), while
+    # it stays out of the ci.yml backend filter (docs/** remains excluded).
     for path in (
         "CLAUDE.md",
         "AGENTS.md",
         "docs/runbooks/qhh-backend-smoke.md",
-        "docs/runbooks/current-production-ops.md",
         "docs/runbooks/failed-basin-retry.md",
     ):
         assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
+    assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+    ]
 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     for path in (
@@ -3875,10 +4029,11 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # target. Missing meta-guard target under a temporary root is dropped with
     # a warning (row 7), not special-cased.
     no_suite = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
-    # #1744 path B + #1656: packages/common/** now retains the core-smoke
-    # baseline BY POLICY and routes the write-site invariant — no meta-guard
-    # rider (D6 unchanged).
-    assert sorted(no_suite) == sorted({*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH})
+    # #1744 path B + #1656: packages/common/** retains the core-smoke baseline
+    # BY POLICY and routes the write-site invariant — no meta-guard rider (D6
+    # unchanged). #1684 EVID-01: the shared policy owner now also selects its
+    # dedicated focused matrix suite.
+    assert sorted(no_suite) == sorted({*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST})
     assert SELECTOR_META_GUARD_TEST not in no_suite
 
     test_path = tmp_path / "tests" / "test_example.py"
@@ -3928,13 +4083,21 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     assert SELECTOR_META_GUARD_TEST in selected
     # known lives under workers/** and auth_policy under packages/common/**,
     # so both #1656 invariant roots add the write-site suite (deduplicated).
+    # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
     assert sorted(
-        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}
+        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST}
     ) == selected
 
 
 def test_select_tests_ignores_docs_only_changes() -> None:
-    assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
+    # #1684 EVID-05/F: the node-22 gateway rollout runbook is an exact rollout
+    # owner (its §3.2.2 wiring is asserted by the static deployment contract),
+    # so a runbook-only change now selects that focused suite; other `docs/**`
+    # changes still select nothing.
+    assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+    ]
+    assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
 
 
 def test_pyproject_change_selects_policy_core_smoke_and_meta_guard() -> None:
@@ -4361,8 +4524,9 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # #1561: the changed suite plus its two derived direct non-gated
         # module-scope importers plus the accumulated meta-guard.
         ("tests/test_orchestration_chain.py", "4"),
-        # Empty selection: route C, whose own collect-only branch is unchanged.
-        ("docs/runbooks/current-production-ops.md", "0"),
+        # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
+        # owner selecting exactly one focused suite — still non-collapsed.
+        ("docs/runbooks/current-production-ops.md", "1"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
