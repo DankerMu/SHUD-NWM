@@ -1974,6 +1974,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (SLURM_OPENAPI_SECURITY_TEST,),
     ),
     PathTestRule(
+        # #1892/#1900: probe-support modules have no same-name suite and are not
+        # imported by the residency unit suite at module scope, so a support-only
+        # PR previously selected core-smoke plus the #1656 rider and skipped the
+        # focused probe contract. Ownership/cleanup lives in a sibling suite so a
+        # support-only PR cannot skip the created-container marker. Additive: the
+        # #1744 shared-library baseline remains outside this rule.
+        "packages/common/compressed_chunk_cold_probe/**",
+        (
+            "tests/test_probe_compressed_chunk_cold_tablespace.py",
+            "tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py",
+        ),
+    ),
+    PathTestRule(
         "apps/api/auth.py",
         (
             AUTH_POLICY_TEST,
