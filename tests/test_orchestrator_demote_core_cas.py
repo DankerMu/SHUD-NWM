@@ -985,3 +985,129 @@ def test_upsert_non_token_legacy_upgrade_still_applies(
     durable = _durable_pipeline_job_payloads(repository.root, job_id)[-1]
     assert durable.get("accepted_submit_contract_version") == ACCEPTED_SUBMIT_CONTRACT_VERSION
     assert durable["reconciliation_decision"] is None
+
+
+# ---------------------------------------------------------------------------
+# #1805: legacy compatibility writers must not mint operator authority
+# ---------------------------------------------------------------------------
+def test_legacy_transition_pipeline_job_submit_evidence_rejects_forged_operator_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1805 1.1: the legacy accepted-submit transition cannot mint the token.
+
+    A marker-free legacy row plus an ``operator_verified_absence`` transition is
+    the compatibility surface the versioned gate does not cover: the legacy path
+    has no decision whitelist, so it would apply the forged authority.  The
+    typed-authority refusal must fire before the cycle lock, row construction,
+    durable mutation, or event -- leaving the journal byte-identical and the
+    legacy row untouched.
+    """
+    repository = _legacy_marker_free_master_repository(tmp_path)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = _journal_bytes(repository.root)
+    legacy_row = repository.get_pipeline_job(job_id)
+    assert legacy_row.get("accepted_submit_contract_version") is None
+    assert legacy_row["reconciliation_decision"] is None
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    forged = AcceptedSubmitTransition.accounting(
+        OPERATOR_VERIFIED_ABSENCE_DECISION,
+        submit_outcome="submit_result_ambiguous",
+        status="reservation_lost",
+    )
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.transition_pipeline_job_submit_evidence(
+            job_id,
+            forged,
+            accepted_submit_contract_version=None,
+        )
+
+    assert error.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert error.value.field == "reconciliation_decision"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    assert repository.get_pipeline_job(job_id) == legacy_row
+
+
+def test_legacy_reconciliation_recorder_rejects_forged_operator_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1805 1.2: the legacy reconciliation recorder cannot mint the token.
+
+    ``record_pipeline_job_reconciliation`` is the second compatibility writer:
+    it accepts raw ``reconciliation_decision`` strings for marker-free legacy
+    rows.  The forged operator decision must raise the typed-authority error
+    before the cycle lock, row construction, durable mutation, or event, with
+    a byte-identical journal and zero events.
+    """
+    repository = _legacy_marker_free_master_repository(tmp_path)
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    before = _journal_bytes(repository.root)
+    legacy_row = repository.get_pipeline_job(job_id)
+    assert legacy_row.get("accepted_submit_contract_version") is None
+    assert legacy_row["reconciliation_decision"] is None
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    with pytest.raises(FileOrchestrationJournalError) as error:
+        repository.record_pipeline_job_reconciliation(
+            job_id,
+            submit_outcome="submit_result_ambiguous",
+            reconciliation_decision=OPERATOR_VERIFIED_ABSENCE_DECISION,
+            status="reservation_lost",
+        )
+
+    assert error.value.reason == "file_journal_authority_transition_requires_typed_api"
+    assert error.value.field == "reconciliation_decision"
+    assert _journal_bytes(repository.root) == before
+    assert _durable_event_payloads(repository.root) == []
+    assert repository.get_pipeline_job(job_id) == legacy_row
+
+
+def test_legacy_compatibility_writers_still_apply_legal_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1805 controls: legal legacy decisions keep both compatibility APIs.
+
+    The new guard is scoped to exactly the operator token: an ordinary
+    ``accounting_unavailable`` transition through the legacy submit-evidence
+    API and an ``absence_deferred`` decision through the legacy reconciliation
+    recorder must still apply durably.  This is the positive counterpart of the
+    two negative tests above.
+    """
+    transition_repository = _legacy_marker_free_master_repository(tmp_path / "transition")
+    record_repository = _legacy_marker_free_master_repository(tmp_path / "record")
+    job_id = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+    monkeypatch.setattr(journal_module, "_utcnow", lambda: STARTED_AT + timedelta(hours=3))
+
+    applied = transition_repository.transition_pipeline_job_submit_evidence(
+        job_id,
+        AcceptedSubmitTransition.accounting(
+            "accounting_unavailable",
+            submit_outcome="submit_result_ambiguous",
+            reconciliation_reason_class="process_unavailable",
+            status="reserved",
+        ),
+        accepted_submit_contract_version=None,
+    )
+    assert applied.outcome == "applied"
+    transitioned = transition_repository.get_pipeline_job(job_id)
+    assert transitioned["reconciliation_decision"] == "accounting_unavailable"
+    assert transitioned["reconciliation_reason_class"] == "process_unavailable"
+    transition_durable = _durable_pipeline_job_payloads(transition_repository.root, job_id)[-1]
+    assert transition_durable["reconciliation_decision"] == "accounting_unavailable"
+
+    recorded = record_repository.record_pipeline_job_reconciliation(
+        job_id,
+        submit_outcome="submit_result_ambiguous",
+        reconciliation_decision="absence_deferred",
+        status="reserved",
+    )
+    assert recorded is not None
+    assert recorded["reconciliation_decision"] == "absence_deferred"
+    recorded_row = record_repository.get_pipeline_job(job_id)
+    assert recorded_row["reconciliation_decision"] == "absence_deferred"
+    record_durable = _durable_pipeline_job_payloads(record_repository.root, job_id)[-1]
+    assert record_durable["reconciliation_decision"] == "absence_deferred"

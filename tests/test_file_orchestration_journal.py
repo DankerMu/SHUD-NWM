@@ -16627,6 +16627,89 @@ def test_operator_recovery_attestation_cannot_be_set_by_an_ordinary_upsert(tmp_p
     assert fresh_repo.get_pipeline_job(str(fresh_record["job_id"])) is None
 
 
+def test_attested_released_row_is_not_a_manual_retry_source(
+    tmp_path: Path,
+) -> None:
+    """#1804: ``reservation_lost`` stays outside the generic manual-retry set.
+
+    The attested ``reservation_lost/identity_mismatch_released`` wedge must not
+    be selectable by ``_manual_retry_source_for_run`` -- the deliberate
+    reachability gate that keeps the operator-released terminal away from the
+    ordinary operator-driven manual retry lane.  Anchoring the membership
+    exclusion makes the contract explicit rather than incidental.
+    """
+
+    from services.orchestrator.retry import MANUAL_RETRY_SOURCE_STATUSES
+
+    repository, record = _attested_released_master(tmp_path, member_count=2)
+    job_id = str(record["job_id"])
+    released = repository.get_pipeline_job(job_id)
+    assert released["status"] == "reservation_lost"
+    assert released["reconciliation_decision"] == journal_module.IDENTITY_MISMATCH_RELEASED_DECISION
+    assert released[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD] not in (None, "")
+
+    assert "reservation_lost" not in MANUAL_RETRY_SOURCE_STATUSES
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    assert service._manual_retry_source_for_run(str(record["run_id"])) == (None, None)
+
+
+def test_manual_retry_clone_cannot_inherit_operator_attestation(
+    tmp_path: Path,
+) -> None:
+    """#1804: a manual-retry successor is a fresh, unattested attempt.
+
+    An attested released row is deliberately forced through the clone seam
+    (``_manual_retry_source_for_run`` is the ONLY controlled seam) to prove the
+    successor clears ``operator_recovery_attested_at`` even when a caller
+    explicitly supplies the attested predecessor.  The source row retains its
+    attestation unchanged, the successor keeps ``previous_job_id`` and the
+    bounded lineage, and the downstream ``_operator_recovery_attested``
+    predicate refuses the successor.
+    """
+
+    from services.orchestrator.chain_forecast_orchestrator_cycle import _operator_recovery_attested
+
+    repository, record = _attested_released_master(tmp_path, member_count=2)
+    job_id = str(record["job_id"])
+    run_id = str(record["run_id"])
+    attested_source = repository._pipeline_job_for_id_unlocked(job_id)
+    assert attested_source is not None
+    attested_at = attested_source[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD]
+    assert attested_at not in (None, "")
+    assert attested_source["status"] == "reservation_lost"
+    service = FileJournalRetryService(repository, RetryConfig(max_retries=3, backoff_schedule=[0]))
+    # Control ONLY the source-selection seam: the producer re-reads the durable
+    # private row and writes the clone exactly as production would.
+    service._manual_retry_source_for_run = lambda _run_id: (dict(attested_source), None)
+
+    result = service._create_pending_manual_retry_job(run_id)
+
+    retry_job_id = str(result.public_job.job_id)
+    successor = result.private_snapshot
+    assert successor["job_id"] == retry_job_id
+    assert successor[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD] in (None, "")
+    assert "accepted_submit_contract_version" not in successor
+    assert successor["previous_job_id"] == job_id
+    assert successor["init_state_identities"] == attested_source.get("init_state_identities") or []
+    assert successor["init_state_identities"] == []
+    assert _operator_recovery_attested(successor) is False
+    # The durable successor carries no attestation on either write surface.
+    persisted = repository.get_pipeline_job(retry_job_id)
+    assert persisted[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD] in (None, "")
+    assert _direct_row_payload(repository, retry_job_id)[
+        journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD
+    ] in (None, "")
+    assert _durable_pipeline_job_payloads(repository.root, retry_job_id)[-1][
+        journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD
+    ] in (None, "")
+    assert _operator_recovery_attested(persisted) is False
+    # The source row is untouched: the attestation stays on the released row.
+    assert (
+        repository._pipeline_job_for_id_unlocked(job_id)[journal_module.OPERATOR_RECOVERY_ATTESTATION_FIELD]
+        == attested_at
+    )
+
+
 _RECOVER_COMMAND = "recover-released-identity-blocked-reservation"
 
 

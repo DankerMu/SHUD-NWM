@@ -3047,6 +3047,17 @@ class FileOrchestrationJournalRepository:
                 )
             source_id, cycle_time = _accepted_submit_source_cycle_from_job_id(job_id)
         else:
+            # Writer-authority closed world (#1805): the legacy compatibility
+            # path has no decision whitelist, so an ``operator_verified_absence``
+            # transition would mint the typed operator authority without the
+            # dedicated audited demotion.  Refuse before any read, lock
+            # acquisition, row construction, durable mutation, or event.  The
+            # versioned gate above keeps its own unchanged behavior.
+            if transition.reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+                raise FileOrchestrationJournalError(
+                    "file_journal_authority_transition_requires_typed_api",
+                    field="reconciliation_decision",
+                )
             initial = self._pipeline_job_for_id_unlocked(job_id)
             if initial is None:
                 return AcceptedSubmitCommitResult("missing")
@@ -3618,6 +3629,16 @@ class FileOrchestrationJournalRepository:
         status: str | None = None,
     ) -> dict[str, Any] | None:
         """Compatibility/projection API backed by complete typed transitions."""
+        # Writer-authority closed world (#1805): the legacy reconciliation
+        # recorder accepts raw decision strings, so it would mint the typed
+        # operator authority without the dedicated audited demotion.  Refuse
+        # before any read, lock acquisition, row construction, durable
+        # mutation, or event; legal legacy decisions keep this API.
+        if reconciliation_decision == OPERATOR_VERIFIED_ABSENCE_DECISION:
+            raise FileOrchestrationJournalError(
+                "file_journal_authority_transition_requires_typed_api",
+                field="reconciliation_decision",
+            )
         initial = self._pipeline_job_for_id_unlocked(job_id)
         if initial is None:
             return None
@@ -10308,6 +10329,14 @@ class FileJournalRetryService:
             # authority row, so the marker must not carry over.  The lineage
             # map below is attempt-level provenance and stays.
             retry_record.pop(ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD, None)
+            # #1804: the operator-recovery attestation is bound to the exact
+            # released source row, never to a distinct manual-retry attempt.
+            # This clone boundary is the one place a row becomes a NEW retry
+            # row; the successor is explicitly cleared here so the credential
+            # cannot cross even when a future caller selects an attested
+            # released predecessor.  The source row keeps its attestation --
+            # only the successor field is cleared.
+            retry_record[OPERATOR_RECOVERY_ATTESTATION_FIELD] = None
             try:
                 retry_row = self.repository._pipeline_job_row(retry_record)
             except FileOrchestrationJournalError as error:
