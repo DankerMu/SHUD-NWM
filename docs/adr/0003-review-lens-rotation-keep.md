@@ -2393,3 +2393,21 @@ rotation** unchanged under the recorded autonomous default. The cumulative
 aggregate still supplies no basis for an autonomous cut; any reversal continues
 to require the existing attribution schema/round-role repair plus maintainer
 review.
+
+## Revisit 2026-08-29 (post #1805/#1804 / PR #1889) — keep; single-round clean adds no rotation datum
+
+After the PR #1889 accountability line, `loop_log_audit.py` still reports **140**
+multi-round merged PRs and later-round catches **core=86 / rotated=296**. The
+counts are byte-for-byte unchanged from the post-PR #1885 revisit because
+PR #1889 had one comprehensive round only: its six-lens Round 1 produced zero
+candidates, so no verifier batch, fix pass, or follow-up comprehensive round
+existed. The independent Phase 7 Gap Sweep was also clean.
+
+This PR therefore supplies no observation about free-slot rotation. It proves
+that the high-risk operator-authority closure converged in the first pass, not
+that rotation was applied and found nothing. Treating it as a cut signal would
+again confuse an absent treatment with an ineffective treatment. **Keep
+rotation** unchanged under the recorded autonomous default. The accumulated
+86/296 split still supplies no basis for an autonomous cut, while all previously
+recorded attribution-schema and round-role caveats remain load-bearing; any
+reversal continues to require those measurement repairs plus maintainer review.
