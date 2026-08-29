@@ -3482,6 +3482,84 @@ index 可能已被改，不能按"什么都没发生"处理。
 destination 侧收窄为"只校验并搬运本次胜出、且 shared index 尚未逐字节在册的 source entry"，积压用上面的 replay
 （`--cycle gfs_2026072000 --cycle ifs_2026072000 --enforce`）补进 shared index。
 
+### 8.9 state-index checksum mismatch 与受控 repair
+
+症状：调度器 pass 上**所有** candidate 被 `state_snapshot_index_checksum_mismatch`
+挡住，`submitted=0`。单条 candidate 的 retryable 外观**不是**可操作的 retry——index 在
+解析 `entries` 之前就 fail-closed，任何 retry/backfill 都不会前进。
+
+两根角色（不是整文件镜像，禁止互相覆盖）：
+
+- private/reference（默认 `OBJECT_STORE_ROOT`）：node-22 scratch 生命周期 index，
+  `scheduler/state-index/index-last.json`。copyback 的 source。
+- shared/destination（默认 `NHMS_OBJECT_STORE_COPYBACK_ROOT`）：调度器实际读的
+  canonical index，同相对路径。可保留 shared 已归档对象的历史 entry。
+
+**禁止**手改 JSON、重算 checksum、或把一份 index 整文件拷到另一份。两份 entry 集
+本来就可以不同；整文件拷贝会丢生命周期历史或把归档对象复活进 shared。
+
+enforce 前必须冻结所有会写这两份 index 的 writer：scheduler、state-save 作业、
+copyback / replay、recalibration clone、provider-refresh。以 provider 属主
+`frd_muziyao` 在 node-22 跑。archive / receipt 根必须事先存在、属主私有
+（0700 目录）。
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22
+cd /scratch/frd_muziyao/NWM
+set -a
+. infra/env/compute.scheduler-provider-refresh.env
+NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
+NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/archives
+NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/receipts
+set +a
+install -d -m 0700 \
+  "$NHMS_SCHEDULER_STATE_INDEX_REPAIR_ARCHIVE_ROOT" \
+  "$NHMS_SCHEDULER_STATE_INDEX_REPAIR_RECEIPT_ROOT"
+
+# 1) 两根 dry-run（默认：不加锁、不写 archive/receipt/index）
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
+  recompute-checksum --lane destination
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
+  remove-entry --state-id STATE_ID
+
+# 2) 核对 stdout 预览：每 lane 的 checksum_valid、selector 命中、before/after
+#    counts、untouched_reason。确认目标 identity 后才 enforce。
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
+  recompute-checksum --lane destination --enforce
+/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.scheduler_state_index_repair \
+  remove-entry --state-id STATE_ID --enforce
+```
+
+操作口径：
+
+- `recompute-checksum` 必须带 `--lane reference|destination`，只修那一 lane 的
+  顶层 checksum；sibling 只读校验、字节不变。raw `entries` 语义和顺序必须保持。
+- `remove-entry` 三选一：`--state-id`、`--run-id`、或完整
+  `--model-id --source-id --valid-time`。默认两 lane 各恰好命中同一 identity
+  key + `state_id`。零命中 / 多命中 / 跨 lane 不一致 → 拒绝，两份 index 都不写。
+- 一 lane 缺目标时，必须先 dry-run 证明缺席，再带对应的
+  `--allow-missing-reference` 或 `--allow-missing-destination`；不得两边同时缺。
+- enforce 锁序与 copyback 相同：reference 然后 destination，**不按路径排序**。
+  两份所需 archive（owner-private 0600、lane 标签、exact preimage）全部写完并
+  回读后，才做第一次 CAS；remove 先 reference、后 destination，防止 destination
+  失败后 stale reference 经 copyback 复活。
+- 工具只重建顶层 checksum 以接纳 checksum-invalid 但结构完整的 payload；畸形
+  JSON、不支持 schema、unsafe URI、重复 identity、字段非法、字节/entry/JSON
+  复杂度超限一律拒绝。
+
+退出码：
+
+| exit | 含义 | 处置 |
+|---|---|---|
+| 0 | 完成成功；stdout 是 per-lane receipt | 存档 receipt 与 archive |
+| 2 | **可证明零 index 写**（预检拒绝、archive 失败、第一次 CAS 之前的 provider 错） | 修输入/根/archive 后重跑 dry-run |
+| 3 | 任一 lane 可能已替换：部分提交、committed-incomplete、commit-uncertain。stdout 仍打印已知 per-lane 摘要 | **不得**当拒绝。先按摘要看哪 lane 已变 |
+
+source-first 部分恢复：reference 已去掉目标、destination 仍失败时，exit 3。
+**不要**用 destination 回填 reference。从新的 dry-run 完成 destination 修复后再
+解冻 writer。回滚是显式操作员决定，用各 lane 自己的 archive 字节，且必须先核对
+当前 preimage；CLI 不会静默覆盖后来的合法发布。
+
 ## 9. 值守 SQL 片段
 
 Run these on node-27 after sourcing the ingest writer env

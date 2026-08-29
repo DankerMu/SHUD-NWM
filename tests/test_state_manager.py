@@ -34,12 +34,14 @@ from packages.common.provider_atomic import (
 from packages.common.state_manager import (
     FILE_STATE_SNAPSHOT_INDEX_SCHEMA_VERSION,
     FileStateSnapshotIndexRepository,
+    StateIndexRepairError,
     StateManager,
     StateManagerError,
     StateSnapshot,
     assess_freshness,
     merge_state_snapshot_index_copyback,
     publish_state_snapshot_index,
+    repair_state_snapshot_index,
     state_snapshot_id,
 )
 from packages.common.state_qc import MAX_STATE_IC_BYTES
@@ -4015,6 +4017,275 @@ def test_publish_state_snapshot_index_still_verifies_objects_by_default(tmp_path
 
     assert error_info.value.reason == "state_snapshot_index_object_missing"
     assert not index_path.exists()
+
+
+def test_repair_helper_admits_checksum_mismatch_only_through_rebuilt_production_checksum(
+    tmp_path: Path,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    original_entries = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    fixture.corrupt_destination_checksum()
+    archive_root = _private_dir(tmp_path / "archives")
+
+    summary = repair_state_snapshot_index(
+        reference_root=fixture.reference_root,
+        destination_root=fixture.destination_root,
+        operation="recompute-checksum",
+        object_store_prefix="s3://nhms",
+        archive_root=archive_root,
+        enforce=True,
+        lane="destination",
+        generated_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+
+    repaired = json.loads(fixture.destination_index.read_text(encoding="utf-8"))
+    assert repaired["entries"] == original_entries
+    assert repaired["checksum"] == f"sha256:{_payload_checksum(repaired)}"
+    assert summary["lanes"]["destination"]["action"] == "recompute-checksum"
+    assert summary["lanes"]["reference"]["action"] == "skip"
+    validated = state_manager_module._validate_state_snapshot_index(
+        repaired,
+        object_store_root=fixture.destination_root,
+        object_store_prefix="s3://nhms",
+        published_artifact_root=None,
+        now=datetime(2026, 7, 28, 12, tzinfo=UTC),
+        max_age_hours=168,
+        verify_objects=False,
+        enforce_freshness=False,
+    )
+    assert any(entry.get("state_id") == "shared-state" for entry in validated.values())
+
+
+def test_repair_helper_admits_missing_top_level_checksum_through_rebuilt_production_checksum(
+    tmp_path: Path,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    original_entries = json.loads(fixture.destination_index.read_text(encoding="utf-8"))["entries"]
+    fixture.delete_destination_checksum()
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+    archive_root = _private_dir(tmp_path / "archives")
+
+    summary = repair_state_snapshot_index(
+        reference_root=fixture.reference_root,
+        destination_root=fixture.destination_root,
+        operation="recompute-checksum",
+        object_store_prefix="s3://nhms",
+        archive_root=archive_root,
+        enforce=True,
+        lane="destination",
+        generated_at=datetime(2026, 7, 28, 12, tzinfo=UTC),
+    )
+
+    repaired = json.loads(fixture.destination_index.read_text(encoding="utf-8"))
+    archives = list(archive_root.glob("*-destination.json"))
+    assert repaired["entries"] == original_entries
+    assert repaired["checksum"] == f"sha256:{_payload_checksum(repaired)}"
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert len(archives) == 1
+    assert archives[0].read_bytes() == destination_before
+    assert "checksum" not in json.loads(destination_before.decode("utf-8"))
+    assert summary["lanes"]["destination"]["checksum_valid"] is False
+    validated = state_manager_module._validate_state_snapshot_index(
+        repaired,
+        object_store_root=fixture.destination_root,
+        object_store_prefix="s3://nhms",
+        published_artifact_root=None,
+        now=datetime(2026, 7, 28, 12, tzinfo=UTC),
+        max_age_hours=168,
+        verify_objects=False,
+        enforce_freshness=False,
+    )
+    assert any(entry.get("state_id") == "shared-state" for entry in validated.values())
+
+
+def test_repair_helper_symlink_loop_root_is_pre_mutation_refusal(tmp_path: Path) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    loop_a = tmp_path / "loop-a"
+    loop_b = tmp_path / "loop-b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    archive_root = _private_dir(tmp_path / "archives")
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+
+    with pytest.raises(StateIndexRepairError) as error_info:
+        repair_state_snapshot_index(
+            reference_root=loop_a,
+            destination_root=fixture.destination_root,
+            operation="recompute-checksum",
+            object_store_prefix="s3://nhms",
+            archive_root=archive_root,
+            enforce=True,
+            lane="destination",
+        )
+
+    assert error_info.value.reason == "root_unavailable"
+    assert error_info.value.mutation_started is False
+    assert error_info.value.field == "reference_root"
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert list(archive_root.iterdir()) == []
+
+
+def test_repair_helper_same_state_id_and_base_key_with_divergent_lineage_refuses(
+    tmp_path: Path,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    destination_shared = dict(fixture.shared_entry)
+    destination_shared["cycle_id"] = "gfs_2026072006"
+    destination_shared["lead_hours"] = 6
+    publish_state_snapshot_index(
+        [fixture.destination_only_entry, destination_shared],
+        fixture.destination_index,
+        object_store_root=fixture.destination_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+        verify_objects=False,
+    )
+    archive_root = _private_dir(tmp_path / "archives")
+    destination_before = fixture.destination_index.read_bytes()
+    reference_before = fixture.reference_index.read_bytes()
+
+    with pytest.raises(StateIndexRepairError) as error_info:
+        repair_state_snapshot_index(
+            reference_root=fixture.reference_root,
+            destination_root=fixture.destination_root,
+            operation="remove-entry",
+            object_store_prefix="s3://nhms",
+            archive_root=archive_root,
+            enforce=True,
+            state_id="shared-state",
+        )
+
+    assert error_info.value.reason == "repair_selector_identity_mismatch"
+    assert error_info.value.mutation_started is False
+    assert fixture.destination_index.read_bytes() == destination_before
+    assert fixture.reference_index.read_bytes() == reference_before
+    assert list(archive_root.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_reason"),
+    [
+        (lambda payload: payload.__setitem__("schema_version", "v0"), "state_snapshot_index_schema_unsupported"),
+        (lambda payload: payload["entries"].append("{"), "state_snapshot_index_entry_not_object"),
+        (
+            lambda payload: payload["entries"][0].__setitem__("state_uri", "s3://nhms/../escape.cfg.ic"),
+            "state_snapshot_index_object_unsafe_uri",
+        ),
+    ],
+)
+def test_repair_helper_refuses_structural_defects_without_blessing_checksum(
+    tmp_path: Path,
+    mutator: Any,
+    expected_reason: str,
+) -> None:
+    fixture = _RepairIndexFixture(tmp_path)
+    payload = json.loads(fixture.destination_index.read_text(encoding="utf-8"))
+    mutator(payload)
+    payload["checksum"] = f"sha256:{_payload_checksum(payload)}"
+    write_provider_destination(
+        fixture.destination_index,
+        json.dumps(payload, sort_keys=True, indent=2) + "\n",
+    )
+    before = fixture.destination_index.read_bytes()
+    archive_root = _private_dir(tmp_path / "archives")
+
+    with pytest.raises(StateIndexRepairError) as error_info:
+        repair_state_snapshot_index(
+            reference_root=fixture.reference_root,
+            destination_root=fixture.destination_root,
+            operation="recompute-checksum",
+            object_store_prefix="s3://nhms",
+            archive_root=archive_root,
+            enforce=True,
+            lane="destination",
+        )
+
+    assert error_info.value.reason == expected_reason
+    assert error_info.value.mutation_started is False
+    assert fixture.destination_index.read_bytes() == before
+    assert list(archive_root.iterdir()) == []
+
+
+class _RepairIndexFixture:
+    def __init__(self, tmp_path: Path) -> None:
+        self.reference_root = tmp_path / "object-store"
+        self.destination_root = tmp_path / "shared-object-store"
+        store = LocalObjectStore(self.reference_root, "s3://nhms")
+        shared_content = _valid_ic_bytes(b"shared")
+        private_content = _valid_ic_bytes(b"private")
+        dest_only_content = _valid_ic_bytes(b"dest-only")
+        shared_uri = store.write_bytes_atomic("states/gfs/model_a/shared/state.cfg.ic", shared_content)
+        private_uri = store.write_bytes_atomic("states/gfs/model_a/private/state.cfg.ic", private_content)
+        dest_uri = store.write_bytes_atomic("states/gfs/model_a/dest/state.cfg.ic", dest_only_content)
+        self.shared_entry = _copyback_index_entry(
+            state_id="shared-state",
+            run_id="fcst_gfs_2026072000_model_a",
+            state_uri=shared_uri,
+            content=shared_content,
+            valid_time="2026-07-20T12:00:00Z",
+            created_at="2026-07-20T13:00:00Z",
+            cycle_id="gfs_2026072000",
+        )
+        self.private_entry = _copyback_index_entry(
+            state_id="private-state",
+            run_id="fcst_gfs_2026071900_model_a",
+            state_uri=private_uri,
+            content=private_content,
+            valid_time="2026-07-19T12:00:00Z",
+            created_at="2026-07-19T13:00:00Z",
+            cycle_id="gfs_2026071900",
+        )
+        self.destination_only_entry = _copyback_index_entry(
+            state_id="destination-state",
+            run_id="fcst_gfs_2026070500_model_a",
+            state_uri=dest_uri,
+            content=dest_only_content,
+            valid_time="2026-07-05T12:00:00Z",
+            created_at="2026-07-05T13:00:00Z",
+            cycle_id="gfs_2026070500",
+        )
+        self.reference_index = self.reference_root / "scheduler/state-index/index-last.json"
+        self.destination_index = self.destination_root / "scheduler/state-index/index-last.json"
+        publish_state_snapshot_index(
+            [self.private_entry, self.shared_entry],
+            self.reference_index,
+            object_store_root=self.reference_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 27, 1, tzinfo=UTC),
+        )
+        publish_state_snapshot_index(
+            [self.destination_only_entry, self.shared_entry],
+            self.destination_index,
+            object_store_root=self.destination_root,
+            object_store_prefix="s3://nhms",
+            generated_at=datetime(2026, 7, 25, 18, tzinfo=UTC),
+            verify_objects=False,
+        )
+
+    def corrupt_destination_checksum(self) -> None:
+        payload = json.loads(self.destination_index.read_text(encoding="utf-8"))
+        payload["checksum"] = "sha256:deadbeef"
+        write_provider_destination(
+            self.destination_index,
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        )
+
+    def delete_destination_checksum(self) -> None:
+        payload = json.loads(self.destination_index.read_text(encoding="utf-8"))
+        payload.pop("checksum", None)
+        write_provider_destination(
+            self.destination_index,
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        )
+
+
+def _private_dir(path: Path) -> Path:
+    path.mkdir(parents=True)
+    os.chmod(path, 0o700)
+    return path
 
 
 class _LockReleaseSeam:

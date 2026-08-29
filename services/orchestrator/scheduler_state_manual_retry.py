@@ -63,15 +63,17 @@ _CANDIDATE_RUN_ID_RE = re.compile(r"^fcst_([^_]+)_(\d{10})_(.*)")
 #: A predicate that starts reading a new row field MUST gain a key here, or the reconstruction
 #: stops being the row it claims to be (anchored by the residue matrix's anti-drift assertions).
 #:
-#: Two of the eight are GATE CONTRACT keys the current writer cannot fill:
+#: Two of the eight are GATE CONTRACT keys the production writer deliberately never fills:
 #: ``repair_status``/``active_blocker`` are projection-time annotations applied to a row COPY
 #: (``chain_repository_state._annotate_repaired_pipeline_jobs``), and the journal's closed row
 #: constructor (``file_orchestration_journal._pipeline_job_row``) has no such fields, so the
 #: persisted row ``record_manual_repair`` reads never carries them.  They stay in the tuple
 #: because the closure invariant is what makes the reconstruction a faithful row and because a
 #: record that DOES carry them must be honoured; a target already annotated repaired at write
-#: time therefore still pins here where the row-present twin refuses — a disclosed permanent
-#: limitation, with the write-face fix routed to #1482.
+#: time therefore still pins here where the row-present twin refuses — an accepted permanent
+#: limitation (#1482 option (c)).  Projection-only repaired annotations remain outside durable
+#: marker authority rather than becoming a second persisted repair truth.  #1186 remains the
+#: separate open operator-entry/exposure issue and is not closed by this disposition.
 MARKER_TARGET_ROW_DETAIL_FIELDS = (
     ("target_status", "status"),
     # Gate-contract keys: see the note above — the current write face never emits these two.
@@ -402,9 +404,10 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
 
     One member of the clause is not about post-write fate at all: the target was ALREADY
     annotated repaired when the marker was written.  The annotation exists only on the
-    projection's row copy, so the writer cannot see it and the record cannot carry it (#1482) —
-    the record reads "live failure" for the same reason as the shapes above, and this arm pins
-    the same way.
+    projection's row copy, so the writer cannot see it and the record cannot carry it —
+    an accepted permanent limitation (#1482 option (c)), not a latent write-face gap.
+    The record reads "live failure" for the same reason as the shapes above, and this arm
+    pins the same way.  #1186 remains separately open.
 
     In every one of those shapes the record still reads "live failure" and this arm pins where
     the row-present twin, reading the row as it is NOW, would refuse.
