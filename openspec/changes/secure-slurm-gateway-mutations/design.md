@@ -29,16 +29,16 @@ The same router is mounted by the full compute/dev API and the bounded standalon
 
 ## Risks / Trade-offs
 
-- **Credential rollout can temporarily stop scheduling** → stop the scheduler timer, configure both consumers, restart/verify gateway, then resume the timer; never add an anonymous compatibility bypass.
+- **Credential rollout can temporarily stop scheduling** → fence the scheduler with reversible runtime `ConditionPathExists` drop-ins (a plain timer stop was undone twice by a concurrent same-user session; runtime `mask` is provably defeated by persistent user unit precedence on this topology), configure both consumers, restart/verify gateway, then remove the fence drop-ins and resume the timer; never add an anonymous compatibility bypass and never create the release sentinel as a shortcut.
 - **Shared auth extraction can regress existing API behavior** → retain facade names and run existing auth/OpenAPI suites plus Slurm-specific matrix tests.
 - **A token in process environment is visible to same-user processes** → owner-only env files, dedicated service account boundary where available, no serialization/logging, and mandatory entrypoint-enforced loopback binding.
 - **The node-22 service user cannot install root packet-filter rules** → make non-loopback binding mechanically impossible in the checked-in entrypoint and prove remote refusal; record a host packet-filter only if an operator independently installs one.
 
 ## Migration Plan
 
-1. Stop `nhms-compute-scheduler.timer`; install code and owner-only shared credential into the gateway and scheduler env sources.
+1. Fence the scheduler with reversible RUNTIME `ConditionPathExists` drop-ins (see runbook §3.2.2: runtime mask is provably defeated on this topology — persistent user unit precedence — and a plain timer stop was undone twice by a concurrent same-user session; the runtime condition drop-in makes every start attempt a skipped, condition-failed no-op), then install code and owner-only shared credential into the gateway and scheduler env sources.
 2. Deploy the fail-closed loopback bind guard, restart the standalone gateway on measured port 8090, and prove health, anonymous/invalid denial, valid-auth pre-validation passage, reset 404, loopback-only listening, deliberate non-loopback-start rejection, and remote refusal.
-3. Resume the scheduler timer only after authenticated pre-validation and the scheduler's read-only gateway preflight both succeed. Rollout snapshots the prior secret and both user-systemd drop-ins before any overwrite. Rollback stops the timer, restores each prior config file exactly (or removes a rollout-created file that was previously absent), reloads/restarts the gateway, and deliberately leaves the timer stopped until the restored code/config independently passes the complete authenticated rollout gate; it never resumes from anonymous health alone.
+3. Resume the scheduler timer only after authenticated pre-validation and the scheduler's read-only gateway preflight both succeed, by removing the runtime fence drop-ins (never by creating the release sentinel) and only then starting the timer. Rollout snapshots the prior secret and both user-systemd drop-ins before any overwrite. Rollback re-asserts the same runtime condition fence (fail-closed on a live pass; no stop/kill of the service), restores each prior config file exactly (or removes a rollout-created file that was previously absent), reloads/restarts the gateway, and deliberately leaves the fence in place (fence files present, timer not started) until the restored code/config independently passes the complete authenticated rollout gate; it never resumes from anonymous health alone and never auto-removes the fence.
 
 ## Open Questions
 

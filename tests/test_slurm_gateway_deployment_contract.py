@@ -22,9 +22,28 @@ inline credential value; the node-22 runbook §3.2.2 executable block:
   ``token_probe`` to require exactly 422;
 - runs an executable read-only ``_default_gateway_probe`` preflight that asserts
   healthy/submit_capable/accounting_available BEFORE the timer starts;
-- rollback is SELF-CONTAINED (redefines its own gates), restores the exact
-  prior file/mode or removes an absent file via strict ``case`` state matching,
-  and NEVER auto-starts the timer (fail-closed manual recovery).
+- step 0 fences the scheduler with REVERSIBLE RUNTIME ``ConditionPathExists``
+  drop-ins (a plain ``stop`` was undone twice by a concurrent same-user
+  session, and ``mask --runtime`` is provably defeated by persistent user unit
+  precedence via a live throwaway probe): a 0700 runtime drop-in dir and 0600
+  drop-in file per unit, each carrying ``[Unit]`` +
+  ``ConditionPathExists=<release sentinel>`` via an UNQUOTED-EOF heredoc (the
+  sentinel path is removed first so the condition is false); daemon-reload, stop
+  timer, a still-running service pass is NEVER stopped/killed (fail-closed
+  natural-finish exit before backup/overwrite), and both units are mechanically
+  verified — ``DropInPaths`` includes the runtime drop-in, a probe
+  ``start`` is a skipped no-op (stays inactive, ``ConditionResult=no``) —
+  before backup;
+- success path releases the fence in EXACT order: remove BOTH runtime drop-ins
+  (never create the release sentinel as a bypass), daemon-reload, verify
+  ``DropInPaths`` no longer lists the fence, then start the timer and confirm
+  active — only after the 401/401/404/422 boundaries and the read-only
+  preflight pass;
+- rollback is SELF-CONTAINED (redefines its own gates), re-asserts the SAME
+  condition fence (fail-closed on a live pass), restores the exact prior
+  file/mode or removes an absent file via strict ``case`` state matching, and
+  NEVER removes the fence, creates the sentinel, daemon-reloads a release, or
+  starts the timer (fail-closed manual recovery).
 
 This is a STATIC source oracle over the tracked files: it parses the fenced
 bash blocks (not whole-section substring search), distinguishes executable
@@ -55,6 +74,43 @@ GATEWAY_DROPIN = "10-node22-live.conf"
 RUNBOOK = "docs/runbooks/current-production-ops.md"
 
 TIMER_START_LINE = "systemctl --user start nhms-compute-scheduler.timer"
+
+SCHEDULER_TIMER = "nhms-compute-scheduler.timer"
+SCHEDULER_SERVICE = "nhms-compute-scheduler.service"
+# The PROVEN fence primitive on this topology: reversible RUNTIME
+# ConditionPathExists drop-ins. `mask --runtime` is defeated by persistent user
+# unit precedence (live throwaway probe: is-enabled stayed `static`,
+# LoadState=loaded, `start` succeeded/active) and is FORBIDDEN.
+RUNTIME_DIR = '${XDG_RUNTIME_DIR:-/run/user/$(id -u)}'
+FENCE_RELEASE = '"$RUNTIME_DIR/nhms-issue-1684-scheduler-release"'
+FENCE_NAME = "90-nhms-issue-1684-maintenance-fence.conf"
+TIMER_DROPIN = f"$RUNTIME_DIR/systemd/user/{SCHEDULER_TIMER}.d/{FENCE_NAME}"
+SERVICE_DROPIN = f"$RUNTIME_DIR/systemd/user/{SCHEDULER_SERVICE}.d/{FENCE_NAME}"
+# The exact Adjacent body the drop-in file must carry: variable form
+# (the heredoc is UNQUOTED EOF so `$FENCE_RELEASE` expands at install time to
+# the absolute sentinel path under the runtime dir). The oracle pins the
+# variable-form line AND the unquoted-EOF opener; an expanded literal alone
+# would be a different (also acceptable) shape, but the runbook chooses the
+# variable form so the sentinel path is derived from one definition.
+FENCE_CONDITION_LINE = "ConditionPathExists=$FENCE_RELEASE"
+# Executable lines that MUST be absent from any rollout/rollback fence block.
+FORBIDDEN_EXEC = (
+    f"systemctl --user mask --runtime --now {SCHEDULER_TIMER}",
+    f"systemctl --user mask --runtime --now {SCHEDULER_SERVICE}",
+    f"systemctl --user mask --runtime {SCHEDULER_SERVICE}",
+    f"systemctl --user mask --runtime {SCHEDULER_TIMER}",
+    f"systemctl --user unmask --runtime {SCHEDULER_SERVICE} {SCHEDULER_TIMER}",
+    f"systemctl --user unmask --runtime {SCHEDULER_TIMER} {SCHEDULER_SERVICE}",
+    "systemctl --user unmask --runtime",
+    "systemctl --user mask --runtime",
+)
+# The drop-in installed to gate a given unit, with the exact opener line.
+TIMER_DROPIN_OPENER = (
+    f'cat > "$RUNTIME_DIR/systemd/user/{SCHEDULER_TIMER}.d/$FENCE_NAME" <<EOF'
+)
+SERVICE_DROPIN_OPENER = (
+    f'cat > "$RUNTIME_DIR/systemd/user/{SCHEDULER_SERVICE}.d/$FENCE_NAME" <<EOF'
+)
 
 
 def _read(relative: str) -> str:
@@ -422,8 +478,9 @@ def test_rollout_expect_status_requires_exact_401_401_404_fail_fast() -> None:
         assert tail_lines[final_idx].rstrip().endswith("|| exit 1"), (
             f"boundary gate must fail fast on its own final line: {gate}"
         )
-    # The gates precede the timer start.
-    timer = ordered.index(TIMER_START_LINE)
+    # The gates precede the timer RESUME (the last `start`; the step-0 fence
+    # probe `start` is an earlier, skipped no-op and must not satisfy this).
+    timer = ordered.rindex(TIMER_START_LINE)
     assert ordered.index(exact_gates[0]) < timer
     assert ordered.index(exact_gates[2]) < timer
 
@@ -443,10 +500,301 @@ def test_rollout_executable_preflight_bool_assertions_precede_timer_start() -> N
     assert "bool(result.get(\"healthy\"))" in ordered or 'result.get("healthy")' in ordered
     assert "submit_capable" in ordered
     assert "accounting_available" in ordered
-    timer = ordered.index(TIMER_START_LINE)
+    timer = ordered.rindex(TIMER_START_LINE)
     assert ordered.index("_default_gateway_probe") < timer
     assert ordered.index("token_probe || exit 1") < timer
     assert "uv run" not in ordered
+
+
+# ---------------------------------------------------------------------------
+# 4b. rollout/rollback: reversible runtime ConditionPathExists fence (#1684)
+# ---------------------------------------------------------------------------
+
+
+# Exact executable opener lines: unquoted-EOF heredocs so $FENCE_RELEASE
+# expands to the absolute sentinel path inside each installed drop-in.
+DROPIN_OPENERS = (
+    TIMER_DROPIN_OPENER,
+    SERVICE_DROPIN_OPENER,
+)
+LIVE_PASS_FAILCLOSED = (
+    "if systemctl --user is-active --quiet nhms-compute-scheduler.service; then"
+)
+SKIP_VERIFY = (
+    'is-active nhms-compute-scheduler.timer)" = inactive',
+    'is-active nhms-compute-scheduler.service)" = inactive',
+)
+CONDITION_RESULT_PROBE = (
+    f'test "$(systemctl --user show {SCHEDULER_TIMER} -p ConditionResult --value)" = no',
+    f'test "$(systemctl --user show {SCHEDULER_SERVICE} -p ConditionResult --value)" = no',
+)
+DROPIN_PATHS_PROBE = (
+    f'systemctl --user show {SCHEDULER_TIMER} -p DropInPaths | grep -F '
+    f'"$RUNTIME_DIR/systemd/user/{SCHEDULER_TIMER}.d/$FENCE_NAME"',
+    f'systemctl --user show {SCHEDULER_SERVICE} -p DropInPaths | grep -F '
+    f'"$RUNTIME_DIR/systemd/user/{SCHEDULER_SERVICE}.d/$FENCE_NAME"',
+)
+RELEASE_MISSING = 'rm -f "$FENCE_RELEASE"'
+# Fail-fast shell semantics must be the FIRST executable line of both fenced
+# blocks (before RUNTIME_DIR or any state change): errexit + pipefail make
+# every load-bearing check (grep/test/systemctl/Python preflight) abort the
+# block instead of silently continuing to fence release or later restore gates.
+SHELL_HARDENING_LINE = "set -euo pipefail"
+
+
+def _fenced_block_exec(blocks: list[str]) -> str:
+    return "\n".join(line for block in blocks for line in _executable_lines(block))
+
+
+def _fence_heredoc_block(opener: str, blocks: list[str]) -> str:
+    """Fenced bash block whose executable opener lines contain ``opener``."""
+    for block in blocks:
+        if opener in _executable_lines(block):
+            return block
+    raise AssertionError(f"executable fence heredoc opener not found: {opener}")
+
+
+def _assert_no_forbidden_exec(ordered: str, where: str) -> None:
+    for needle in FORBIDDEN_EXEC:
+        assert needle not in ordered, f"{where} must not use forbidden mask/unmask: {needle}"
+
+
+def _assert_no_service_stop_kill(ordered: str, where: str) -> None:
+    for line in ordered.splitlines():
+        if SCHEDULER_SERVICE in line and "stop " in line and "mask" not in line:
+            raise AssertionError(f"{where} must not stop the scheduler service: {line}")
+        if "kill " in line and SCHEDULER_SERVICE in line:
+            raise AssertionError(f"{where} must not kill the scheduler service: {line}")
+
+
+def test_rollout_installs_runtime_condition_fence_with_expanded_absolute_path() -> None:
+    """Defect (probe): `mask --runtime` is defeated by persistent user units.
+
+    A live throwaway probe proved `mask --runtime` on a persistent user unit
+    leaves ``is-enabled=static`` / ``LoadState=loaded`` and ``start`` succeeds;
+    the PROVEN primitive is a runtime ``ConditionPathExists`` drop-in. Step 0
+    must define RUNTIME_DIR/FENCE_RELEASE/FENCE_NAME, remove the release
+    sentinel (condition false => fence on), install owner-0700 runtime drop-in
+    dirs and owner-0600 drop-in files for BOTH units, and the file content must
+    contain the ABSOLUTE expanded ``ConditionPathExists=<sentinel>`` path
+    (unquoted EOF, no literal ``$FENCE_RELEASE`` inside the installed file).
+    """
+    ordered = _join_executable(_rollout_only_blocks())
+    assert f'RUNTIME_DIR={RUNTIME_DIR}' in ordered, "RUNTIME_DIR must be defined"
+    assert FENCE_RELEASE in ordered, "FENCE_RELEASE sentinel must be defined"
+    assert f"FENCE_NAME={FENCE_NAME}" in ordered, "FENCE_NAME must be defined"
+    assert RELEASE_MISSING in ordered, "release sentinel must be removed (condition false)"
+    assert "install -d -m 0700" in ordered
+    assert "install -m 0600 /dev/null" in ordered
+    for opener in DROPIN_OPENERS:
+        assert opener in ordered, f"drop-in opener missing/commented: {opener}"
+        body_blocks = _executable_lines(_fence_heredoc_block(opener, _rollout_only_blocks()))
+        body = "\n".join(body_blocks)
+        assert "[Unit]" in body, f"drop-in must carry [Unit]: {opener}"
+        # The drop-in must carry the exact `[Unit]` + ConditionPathExists
+        # lines, with the variable form (the UNQUOTED-EOF heredoc expands
+        # `$FENCE_RELEASE` at install time to the absolute sentinel path under
+        # the runtime dir; a quoted <<'EOF' would leave the literal unexpanded
+        # and the condition would test the wrong path).
+        assert FENCE_CONDITION_LINE in body, (
+            f"drop-in body must contain ConditionPathExists=$FENCE_RELEASE: {opener}"
+        )
+        assert "<<" in opener and not opener.split("<<", 1)[1].startswith("'"), (
+            f"fence heredoc must use UNQUOTED EOF so the sentinel expands: {opener}"
+        )
+    # No mask/unmask executable anywhere in the rollout fence.
+    _assert_no_forbidden_exec(ordered, "rollout")
+    _assert_no_service_stop_kill(ordered, "rollout")
+
+
+def test_rollout_loads_probes_and_verifies_fence_before_backup() -> None:
+    """Fence must be LOADED and mechanically verified BEFORE backup/overwrite.
+
+    daemon-reload after installing drop-ins; stop the timer; fail closed on a
+    live service pass (no stop/kill); verify BOTH units' DropInPaths list their
+    runtime drop-in, then probe ``systemctl --user start`` on EACH unit and
+    require it stays inactive (skipped start) with ``ConditionResult=no`` —
+    this safe skipped start proves the fence. All checks precede
+    backup/overwrite; no sleep loops.
+    """
+    ordered = _join_executable(_rollout_only_blocks())
+    assert "systemctl --user daemon-reload" in ordered
+    assert f"systemctl --user stop {SCHEDULER_TIMER}" in ordered
+    assert LIVE_PASS_FAILCLOSED in ordered
+    assert "let it finish naturally" in ordered
+    assert "re-run this rollout step once nhms-compute-scheduler.service is inactive" in ordered
+    assert "exit 1" in ordered
+    for probe in DROPIN_PATHS_PROBE:
+        assert probe in ordered, f"DropInPaths probe missing: {probe}"
+    for probe in CONDITION_RESULT_PROBE:
+        assert probe in ordered, f"ConditionResult probe missing: {probe}"
+    for skip in SKIP_VERIFY:
+        assert skip in ordered, f"skipped-start must stay inactive: {skip}"
+    backup_idx = ordered.index("BACKUP_ROOT=")
+    for needle in (
+        "systemctl --user show nhms-compute-scheduler.timer -p DropInPaths",
+        "systemctl --user show nhms-compute-scheduler.service -p DropInPaths",
+        "systemctl --user start nhms-compute-scheduler.timer",
+        "systemctl --user start nhms-compute-scheduler.service",
+    ):
+        assert ordered.index(needle) < backup_idx, (
+            "fence load/probe/verify must precede backup/overwrite"
+        )
+    assert "sleep" not in ordered, "no sleep loops in the fence"
+    # The probe start on the SERVICE must never be a real run: service stays
+    # inactive (condition skipped); no `--quiet` swallowing, no `|| true`.
+    _assert_no_service_stop_kill(ordered, "rollout")
+
+
+def test_fenced_blocks_begin_with_set_euo_pipefail() -> None:
+    """Both fenced blocks fail fast from the very first executable line.
+
+    ``set -euo pipefail`` must be line 0 of BOTH the rollout and rollback fenced
+    bash blocks, BEFORE RUNTIME_DIR or any state change: without errexit/pipefail
+    a failed ``grep``/``test``/``systemctl``/Python preflight can continue to
+    fence release or later restore gates. A commented or missing line cannot
+    satisfy the pin (comments are dropped by ``_executable_lines``).
+    """
+    rollout = _join_executable(_rollout_only_blocks())
+    rollback = _join_executable(_rollback_blocks())
+    assert rollout.splitlines()[0] == SHELL_HARDENING_LINE, (
+        "rollout first executable line must be `set -euo pipefail`"
+    )
+    assert rollback.splitlines()[0] == SHELL_HARDENING_LINE, (
+        "rollback first executable line must be `set -euo pipefail`"
+    )
+    assert rollout.splitlines()[1] == f'RUNTIME_DIR={RUNTIME_DIR}', (
+        "rollout must define RUNTIME_DIR as the first state change after errexit"
+    )
+    # No block may rely on a later `set -e`; the hardening line is unique per block.
+    assert rollout.count(SHELL_HARDENING_LINE) == 1
+    assert rollback.count(SHELL_HARDENING_LINE) == 1
+
+
+def test_rollout_success_removes_dropins_after_gates_before_timer_start() -> None:
+    """Success path: remove BOTH fence drop-ins ONLY after gates, BEFORE start.
+
+    The release is the REMOVAL of the runtime condition drop-ins (plus empty
+    dirs if possible) + daemon-reload; NEVER create the release sentinel as a
+    bypass (existing sentinel => ConditionPathExists true => silent pass, gates
+    skipped). Removal/verify must come AFTER the 401/401/404/422 boundaries and
+    the read-only preflight and BEFORE ``start``; the timer must end active.
+    """
+    lines = _join_executable(_rollout_only_blocks()).splitlines()
+    rm_timer = 'rm -f "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME"'
+    rm_service = 'rm -f "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.service.d/$FENCE_NAME"'
+    rm_timer_idx = lines.index(rm_timer)
+    rm_service_idx = lines.index(rm_service)
+    assert rm_timer_idx == rm_service_idx - 1, "both fence drop-ins must be removed together"
+    # The release zone is everything from the first fence removal onward; the
+    # step-0 probe `start` lines sit BEFORE it, so order pins against this zone
+    # cannot be satisfied by the fence-verification probes.
+    zone = lines[rm_timer_idx:]
+    release_reload = zone.index("systemctl --user daemon-reload")
+    timer_verify = f'systemctl --user show {SCHEDULER_TIMER} -p DropInPaths | grep -Fv "$FENCE_NAME"'
+    service_verify = f'systemctl --user show {SCHEDULER_SERVICE} -p DropInPaths | grep -Fv "$FENCE_NAME"'
+    timer_resume = zone.index(TIMER_START_LINE)
+    assert release_reload > 2, (
+        "daemon-reload must follow both drop-in removals and rmdir cleanup"
+    )
+    assert timer_verify in zone and service_verify in zone
+    assert zone.index(timer_verify) < timer_resume, "fence-gone verify must precede timer start"
+    assert zone.index(service_verify) < timer_resume
+    assert zone.index("systemctl --user is-active nhms-compute-scheduler.timer") > timer_resume, (
+        "resume must be confirmed active after start"
+    )
+    # The release must NEVER be created as a shortcut in the success path.
+    assert 'touch "$FENCE_RELEASE"' not in lines
+    # Release AFTER the auth boundaries and the read-only preflight (which sit
+    # before the release zone).
+    prefix = "\n".join(lines[:rm_timer_idx])
+    assert "token_probe || exit 1" in prefix
+    assert "_default_gateway_probe" in prefix
+    assert 'expect_status 401 "no token"' in prefix
+
+
+def test_rollback_reasserts_condition_fence_and_never_removes_or_starts() -> None:
+    """Rollback re-asserts the SAME runtime condition fence; NEVER releases.
+
+    First executable command line sets RUNTIME_DIR (re-establishing the fence
+    exactly like rollout: same dirs/heredocs/0600, release sentinel removed,
+    daemon-reload, timer stopped, fail-closed on a live service pass, DropInPaths
+    + skipped-start + ConditionResult=no verification). It NEVER removes a fence
+    file, NEVER creates the sentinel, NEVER daemon-reloads a release, and NEVER
+    starts the timer. Manual recovery (run full gates, remove BOTH drop-ins,
+    daemon-reload, verify absent, start timer) is comment/prose only.
+    """
+    ordered = _join_executable(_rollback_blocks())
+    assert ordered.splitlines()[0] == SHELL_HARDENING_LINE, (
+        "rollback's first executable line must be `set -euo pipefail` (fail-fast "
+        "before any state change), then re-fence via RUNTIME_DIR"
+    )
+    assert ordered.splitlines()[1] == f'RUNTIME_DIR={RUNTIME_DIR}', (
+        "rollback must re-fence via RUNTIME_DIR as the first state change"
+    )
+    assert FENCE_RELEASE in ordered
+    assert f"FENCE_NAME={FENCE_NAME}" in ordered
+    assert RELEASE_MISSING in ordered
+    for opener in DROPIN_OPENERS:
+        assert opener in ordered, f"rollback drop-in opener missing/commented: {opener}"
+        body_blocks = _executable_lines(_fence_heredoc_block(opener, _rollback_blocks()))
+        body = "\n".join(body_blocks)
+        assert "[Unit]" in body
+        assert FENCE_CONDITION_LINE in body, (
+            f"rollback drop-in body must contain ConditionPathExists=$FENCE_RELEASE: {opener}"
+        )
+        assert "<<" in opener and not opener.split("<<", 1)[1].startswith("'"), (
+            f"rollback fence heredoc must use UNQUOTED EOF: {opener}"
+        )
+    assert "systemctl --user daemon-reload" in ordered
+    assert f"systemctl --user stop {SCHEDULER_TIMER}" in ordered
+    assert LIVE_PASS_FAILCLOSED in ordered
+    assert "let it finish naturally" in ordered
+    assert "exit 1" in ordered
+    for probe in DROPIN_PATHS_PROBE:
+        assert probe in ordered, f"rollback DropInPaths probe missing: {probe}"
+    for probe in CONDITION_RESULT_PROBE:
+        assert probe in ordered, f"rollback ConditionResult probe missing: {probe}"
+    for skip in SKIP_VERIFY:
+        assert skip in ordered, f"rollback skipped-start must stay inactive: {skip}"
+    # Rollback NEVER releases the fence: no removal of fence files, no sentinel
+    # creation, no release daemon-reload, no timer start. (The re-fencing
+    # daemon-reload is present; only a SECOND daemon-reload after removal would
+    # be a release marker — assert at most one daemon-reload.)
+    assert "rm -f \"$RUNTIME_DIR" not in ordered, (
+        "rollback must not remove any runtime fence drop-in"
+    )
+    assert "rmdir" not in ordered, "rollback must not remove fence dirs"
+    assert 'touch "$FENCE_RELEASE"' not in ordered, (
+        "rollback must not create the release sentinel as a bypass"
+    )
+    # The re-fencing daemon-reload must come BEFORE the restore section; any
+    # daemon-reload AFTER the fence removal would be a release marker. Since
+    # rollback never removes the fence (asserted above), every daemon-reload is
+    # either the fence load or the restore's reload — no release reload allowed
+    # after the last fence file manipulation.
+    last_fence_write = ordered.rindex("cat > \"$RUNTIME_DIR")
+    first_daemon_reload = ordered.index("systemctl --user daemon-reload")
+    assert first_daemon_reload < ordered.index("BACKUP_POINTER="), (
+        "fence load daemon-reload must precede restore"
+    )
+    assert last_fence_write < ordered.index("BACKUP_POINTER="), (
+        "fence re-install must precede restore"
+    )
+    # The only `start` lines are the skipped-start PROBES (each immediately
+    # followed by an `is-active = inactive` verify, asserted in the pre-existing
+    # never-auto-start test); no real resume start exists here.
+    _assert_no_forbidden_exec(ordered, "rollback")
+    _assert_no_service_stop_kill(ordered, "rollback")
+    # Manual recovery instruction exists in the runbook (comment/prose), with
+    # the exact order: run gates -> remove both drop-ins -> daemon-reload ->
+    # verify absent -> start timer.
+    runbook = _runbook()
+    assert "run the FULL authenticated gates" in runbook
+    assert "$RUNTIME_DIR/systemd/user/nhms-compute-scheduler.timer.d/$FENCE_NAME" in runbook
+    assert "systemctl --user daemon-reload" in runbook
+    assert "verify DropInPaths no longer list the fence" in runbook
+    assert TIMER_START_LINE in runbook  # manual recovery mentions start
 
 
 # ---------------------------------------------------------------------------
@@ -526,14 +874,23 @@ def test_rollback_never_auto_starts_timer_and_is_self_contained() -> None:
 
     It is self-contained (redefines expect_status/token_probe/preflight so it
     does not depend on rollout-shell functions), runs the same auth gates, and
-    leaves the timer STOPPED for manual operator recovery; any reference to
-    starting the timer is inside a comment only.
+    leaves the scheduler FENCED (timer stopped) for manual operator recovery.
+    The only ``start`` commands are the step-0 fence PROBES, which must be
+    condition-skipped no-ops immediately followed by an ``is-active`` verify of
+    ``inactive`` — never a real start; a real resume start is comment-only.
     """
     ordered = _join_executable(_rollback_blocks())
-    # No EXECUTABLE timer start in the rollback block.
-    assert TIMER_START_LINE not in ordered, (
-        "rollback must never auto-start the scheduler timer"
-    )
+    # Every timer/service start in the rollback block is a fence probe: it must
+    # be immediately followed (next line) by `test ... is-active ... = inactive`.
+    lines = ordered.splitlines()
+    for idx, line in enumerate(lines):
+        if line in (
+            TIMER_START_LINE,
+            f"systemctl --user start {SCHEDULER_SERVICE}",
+        ):
+            assert idx + 1 < len(lines) and "is-active" in lines[idx + 1], (
+                f"rollback start must be a skipped-start probe, not a real start: {line}"
+            )
     # Self-contained gates are redefined here (not relying on rollout scope).
     for needle in ("expect_status() {", "token_probe() {", "_default_gateway_probe",
                    "expect_status 401 \"rollback no token\"",
