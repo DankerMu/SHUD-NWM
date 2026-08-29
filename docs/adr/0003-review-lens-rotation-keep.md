@@ -2411,3 +2411,24 @@ rotation** unchanged under the recorded autonomous default. The accumulated
 86/296 split still supplies no basis for an autonomous cut, while all previously
 recorded attribution-schema and round-role caveats remain load-bearing; any
 reversal continues to require those measurement repairs plus maintainer review.
+
+## Revisit 2026-08-29 (post #1684 / PR #1888) — keep; pinned auth/deployment closure adds no rotation datum
+
+`loop_log_audit.py` now reports **141** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `140 / 86 / 296` after PR #1889.
+PR #1888 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced seven independently verified
+findings. Round 2 deliberately re-ran security-performance, integration,
+test-evidence, and invariant-state against the authentication, deployment,
+selector, full-mount, guard, and live-evidence closures. All four lenses were
+already present in Round 1; Round 2 returned zero candidates, and the independent
+Phase 7 Gap Sweep was also clean.
+
+This was pinned fix verification, not a rotation experiment. The Round 2 lens set
+is a strict subset of Round 1 and no new subject-matter lens was introduced. Its
+clean result proves closure for this PR but carries no keep/cut information about
+a rotated free slot. **Keep rotation** unchanged under the recorded autonomous
+default. The cumulative aggregate still supplies no basis for an autonomous cut;
+any reversal continues to require the existing attribution-schema and round-role
+repairs plus maintainer review.
