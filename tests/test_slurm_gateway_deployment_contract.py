@@ -10,8 +10,13 @@ inline credential value; the node-22 runbook §3.2.2 executable block:
 - creates the secret at mode 0600 BEFORE any token bytes are written, then
   generates the credential with the exact active node-22 interpreter via
   ``secrets.token_urlsafe`` written DIRECTLY into the 0600 file;
-- resets the generic EnvironmentFile, selects the same scratch secret path as
-  the scheduler drop-in, sets the live loopback 8090 URL;
+- resets the inherited EnvironmentFile list, explicitly re-adds the live base
+  env (compute.host.env for the gateway, compute.scheduler-dbfree.env for the
+  scheduler drop-in) BEFORE the same scratch secret path, sets the live
+  loopback 8090 URL;
+- verifies the EFFECTIVE EnvironmentFiles of BOTH units resolve BOTH their live
+  base env AND the shared scratch secret via path-only ``grep -F`` checks
+  (paths only, never values);
 - uses a generic ``expect_status`` helper to require EXACT 401/401/404 for the
   no-token/wrong-token/reset boundaries (fail-fast ``|| exit 1``) and
   ``token_probe`` to require exactly 422;
@@ -36,6 +41,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SECRET_PATH = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
+# Live node-22 base EnvironmentFiles (observed on the real user units; the
+# drop-ins must reset the inherited list and explicitly re-add these BEFORE the
+# shared secret so the live base config (workspace / object-store / partition /
+# runtime) survives the drop-in override).
+GATEWAY_BASE_ENV = "/scratch/frd_muziyao/NWM/infra/env/compute.host.env"
+SCHEDULER_BASE_ENV = "/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env"
 LIVE_URL = "http://127.0.0.1:8090"
 ACTIVE_PY = "/scratch/frd_muziyao/NWM/.venv/bin/python"
 GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
@@ -221,7 +232,11 @@ def test_rollout_has_backup_before_gateway_environment_reset_and_secret() -> Non
     ordered = _join_executable(_rollout_bash_blocks())
     backup_marker = "BACKUP_ROOT="
     secret_marker = "secrets.token_urlsafe"
-    gateway_reset = "EnvironmentFile=\nEnvironmentFile=" + SECRET_PATH
+    gateway_reset = (
+        "EnvironmentFile=\n"
+        f"EnvironmentFile={GATEWAY_BASE_ENV}\n"
+        f"EnvironmentFile={SECRET_PATH}"
+    )
     assert ordered.index(backup_marker) < ordered.index(secret_marker), (
         "backup must precede secret generation"
     )
@@ -259,11 +274,112 @@ def test_rollout_creates_secret_0600_before_token_bytes_then_exact_python() -> N
     assert f">> {SECRET_PATH}" not in ordered, "credential file must be overwritten, not appended"
 
 
+GATEWAY_DROPIN_OPENER = 'cat > "$GATEWAY_DROPIN_DIR/10-node22-live.conf" <<\'EOF\''
+SCHEDULER_DROPIN_OPENER = (
+    'cat > "$HOME/.config/systemd/user/'
+    'nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" <<\'EOF\''
+)
+
+
+def _heredoc_block(opener: str) -> str:
+    """Fenced bash block whose executable opener lines contain ``opener``."""
+    for block in _rollout_bash_blocks():
+        if opener in _executable_lines(block):
+            return block
+    raise AssertionError(f"executable heredoc opener not found: {opener}")
+
+
 def test_rollout_gateway_dropin_resets_environment_file_and_sets_8090() -> None:
     ordered = _join_executable(_rollout_bash_blocks())
-    assert f"EnvironmentFile=\nEnvironmentFile={SECRET_PATH}" in ordered
+    assert (
+        f"EnvironmentFile=\n"
+        f"EnvironmentFile={GATEWAY_BASE_ENV}\n"
+        f"EnvironmentFile={SECRET_PATH}"
+    ) in ordered
     assert f"Environment=SLURM_GATEWAY_URL={LIVE_URL}" in ordered
     assert "EnvironmentFile=/opt/SHUD-NWM/infra/env/slurm-gateway.secret" not in ordered
+
+
+def test_dropins_explicitly_readd_live_base_env_before_shared_secret() -> None:
+    """Both executable drop-in heredocs must reset the inherited EnvironmentFile
+    list and re-add the live base env BEFORE the shared secret.
+
+    The live gateway base unit loads compute.host.env and the scheduler base
+    unit loads compute.scheduler-dbfree.env. An empty ``EnvironmentFile=``
+    clears everything inherited, so a drop-in that only appends the secret
+    silently DROPS the real base config (workspace / object-store / partition /
+    runtime). The exact adjacent sequence — reset, base env, secret — must be
+    present inside each heredoc, and the base env must be effective-listed
+    afterwards (see the effective-verification test below).
+    """
+    gateway_heredoc = _executable_lines(_heredoc_block(GATEWAY_DROPIN_OPENER))
+    scheduler_heredoc = _executable_lines(_heredoc_block(SCHEDULER_DROPIN_OPENER))
+
+    gateway_sequence = (
+        "EnvironmentFile=\n"
+        f"EnvironmentFile={GATEWAY_BASE_ENV}\n"
+        f"EnvironmentFile={SECRET_PATH}"
+    )
+    scheduler_sequence = (
+        "EnvironmentFile=\n"
+        f"EnvironmentFile={SCHEDULER_BASE_ENV}\n"
+        f"EnvironmentFile={SECRET_PATH}"
+    )
+
+    # Exact adjacent sequence inside each executable heredoc: reset opener,
+    # base env, then shared secret. A commented opener cannot satisfy this
+    # because _executable_lines drops comment lines and the pin is on the
+    # sequence (a `# EnvironmentFile=` line would break adjacency).
+    gateway_body = "\n".join(gateway_heredoc)
+    scheduler_body = "\n".join(scheduler_heredoc)
+    assert gateway_sequence in gateway_body, (
+        f"gateway drop-in must reset EnvironmentFile list, re-add {GATEWAY_BASE_ENV}, "
+        f"then {SECRET_PATH} (adjacent, executable)"
+    )
+    assert f"EnvironmentFile=\nEnvironmentFile={SECRET_PATH}" not in gateway_body, (
+        "gateway drop-in must re-add the live base env before the secret, not jump straight to it"
+    )
+    assert scheduler_sequence in scheduler_body, (
+        f"scheduler drop-in must reset EnvironmentFile list, re-add {SCHEDULER_BASE_ENV}, "
+        f"then {SECRET_PATH} (adjacent, executable)"
+    )
+    assert f"EnvironmentFile=\nEnvironmentFile={SECRET_PATH}" not in scheduler_body, (
+        "scheduler drop-in must re-add the live base env before the secret"
+    )
+    # No generic template path survives as an executable EnvironmentFile line
+    # inside either heredoc.
+    assert "EnvironmentFile=/opt/SHUD-NWM/infra/env/slurm-gateway.secret" not in (
+        gateway_body + "\n" + scheduler_body
+    )
+
+
+def test_rollout_effective_environmentfiles_checks_both_paths_per_unit() -> None:
+    """Effective EnvironmentFiles verification must assert BOTH resolved paths
+    for EACH unit (live base env + shared secret), path-only, no values.
+
+    ``systemctl show -p EnvironmentFiles`` prints file PATHS only; the checks
+    use ``grep -F`` on the path and must not print/inspect the token value.
+    """
+    ordered = _join_executable(_rollout_bash_blocks())
+    for unit in ("nhms-slurm-gateway.service", "nhms-compute-scheduler.service"):
+        base_env = GATEWAY_BASE_ENV if unit.startswith("nhms-slurm-gateway") else SCHEDULER_BASE_ENV
+        base_check = (
+            f'systemctl --user show {unit} -p EnvironmentFiles | grep -F \'{base_env}\''
+        )
+        secret_check = (
+            f'systemctl --user show {unit} -p EnvironmentFiles | grep -F \'{SECRET_PATH}\''
+        )
+        assert base_check in ordered, f"effective check missing base env path for {unit}: {base_check}"
+        assert secret_check in ordered, f"effective check missing secret path for {unit}: {secret_check}"
+    assert "grep -F" in ordered
+    # Path-only checks: the effective-listing lines must NEVER open/print the
+    # secret file's contents; the fixed secret PATH may appear only as a grep
+    # pattern (the token value is sourced exclusively inside token_probe).
+    for opener in ("cat ", "cat ${", "sed -n", "awk "):
+        if opener in ordered:
+            for line in ordered.splitlines():
+                if line.startswith(opener) and SECRET_PATH in line:
+                    raise AssertionError(f"effective check must not read secret contents: {line}")
 
 
 # ---------------------------------------------------------------------------

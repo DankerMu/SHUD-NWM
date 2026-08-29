@@ -1458,36 +1458,52 @@ install -m 0600 /dev/null /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.e
 chmod 0600 /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
 #    do NOT print or inspect the token value; only the path may be named.
 
-#    scheduler unit drop-in (user systemd):
+#    scheduler unit drop-in (user systemd). The live scheduler base unit loads
+#    /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env; the
+#    drop-in RESETS the EnvironmentFile list (dropping any stale
+#    inherited/generic entries) and explicitly re-adds that live base env FIRST,
+#    then the shared secret — so the drop-in override is deterministic and the
+#    real base config survives:
 mkdir -p "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d"
 install -m 0600 /dev/null "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
 cat > "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf" <<'EOF'
 [Service]
+EnvironmentFile=
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
 EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
 EOF
 chmod 0600 "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
 
 #    gateway unit (tracked template is a generic deployable system unit for
-#    /opt/SHUD-NWM + 8081; the LIVE node-22 user-systemd override below resets
-#    its inherited generic EnvironmentFile= list, points at the SAME secret
-#    file as the scheduler drop-in, and overrides the live loopback 8090 URL):
+#    /opt/SHUD-NWM + 8081; the LIVE node-22 user-systemd override below RESETS
+#    the inherited EnvironmentFile list, explicitly re-adds the live base env
+#    /scratch/frd_muziyao/NWM/infra/env/compute.host.env (workspace, object
+#    store, partition, runtime) — preserving the REAL base unit config instead
+#    of dropping it along with the generic list — then the SAME untracked 0600
+#    secret file as the scheduler drop-in, and overrides the live loopback 8090
+#    URL):
 GATEWAY_DROPIN_DIR="$HOME/.config/systemd/user/nhms-slurm-gateway.service.d"
 mkdir -p "$GATEWAY_DROPIN_DIR"
 install -m 0600 /dev/null "$GATEWAY_DROPIN_DIR/10-node22-live.conf"
 cat > "$GATEWAY_DROPIN_DIR/10-node22-live.conf" <<'EOF'
 [Service]
 EnvironmentFile=
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.host.env
 EnvironmentFile=/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
 Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8090
 EOF
 chmod 0600 "$GATEWAY_DROPIN_DIR/10-node22-live.conf"
 
-# 3) daemon-reload, restart gateway, verify the EnvironmentFile is active.
-#    `systemctl show -p EnvironmentFiles` prints only the FILE PATH (never the
-#    token value); BOTH units must list the same scratch secret path:
+# 3) daemon-reload, restart gateway, verify the effective EnvironmentFiles.
+#    `systemctl show -p EnvironmentFiles` prints only the FILE PATHS (never the
+#    token value); for BOTH units assert BOTH resolved paths — the live base
+#    env from the base unit AND the shared scratch secret — with path-only
+#    `grep -F`:
 systemctl --user daemon-reload
 systemctl --user restart nhms-slurm-gateway.service
+systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.host.env'
 systemctl --user show nhms-slurm-gateway.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env'
 systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
 stat -c '%a %U %n' /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env
 ss -ltnp 2>/dev/null | grep ':8090'
@@ -1554,6 +1570,8 @@ expect_status 404 "disabled reset" -X POST http://127.0.0.1:8090/api/v1/slurm/in
 #    secret and the live settings, and only then resume the timer.
 systemctl --user is-active nhms-slurm-gateway.service
 token_probe || exit 1
+# effective EnvironmentFiles path-only check (base env + shared secret, no values)
+systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env'
 systemctl --user show nhms-compute-scheduler.service -p EnvironmentFiles | grep -F '/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env'
 /scratch/frd_muziyao/NWM/.venv/bin/python - <<'PY'
 import os

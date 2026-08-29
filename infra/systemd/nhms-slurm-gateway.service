@@ -3,7 +3,12 @@
 # THIS IS THE GENERIC DEPLOYABLE SYSTEM TEMPLATE, NOT THE LIVE NODE-22 UNIT.
 # The live node-22 gateway runs as a USER-systemd unit with an explicit
 # drop-in override (docs/runbooks/current-production-ops.md §3.2.2) that:
-#   - resets any inherited generic `EnvironmentFile=` list before selecting
+#   - RESETS the inherited generic `EnvironmentFile=` list (an empty
+#     `EnvironmentFile=` clears everything inherited, including any stale
+#     generic entries), then explicitly re-adds the live base env
+#     /scratch/frd_muziyao/NWM/infra/env/compute.host.env FIRST — preserving
+#     the real base unit's workspace/object-store/partition/runtime config
+#     instead of dropping it with the generic list — and then selects
 #     /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env (the SAME
 #     untracked owner-mode-0600 secret the scheduler unit loads);
 #   - sets SLURM_GATEWAY_URL=http://127.0.0.1:8090 (the measured live port,
