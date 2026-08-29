@@ -59,43 +59,49 @@ openspec validate compressed-chunk-cold-tablespace-tiering \
 # Change 'compressed-chunk-cold-tablespace-tiering' is valid
 ```
 
-Node-27 CLI oracle (run from a temporary clone pinned to base
-`a622643e66cb18f24968f986c8834b54953b30f7`, with the four current probe/test
-files copied byte-identically and verified by SHA-256):
+Node-27 CLI oracle ran from a fresh temporary GitHub clone at the exact
+probe-code commit `47f5d4752e4133c7278456bf841564de820b6904`. The clone used a
+detached checkout, was clean before execution, and did not pull or modify the
+activity checkout at `/home/nwm/NWM`:
 
 ```text
-PYTHONPATH=/tmp/nhms-1892-orchestrator-final-a622643e \
-/home/nwm/NWM/.venv/bin/python \
-  scripts/probe_compressed_chunk_cold_tablespace.py \
+ROOT=/tmp/nhms-1892-frozen-47f5d4752e4133c7
+git clone --no-checkout https://github.com/DankerMu/SHUD-NWM.git "$ROOT/repo"
+git -C "$ROOT/repo" checkout --detach \
+  47f5d4752e4133c7278456bf841564de820b6904
+test "$(git -C "$ROOT/repo" rev-parse HEAD)" = \
+  47f5d4752e4133c7278456bf841564de820b6904
+PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python \
+  "$ROOT/repo/scripts/probe_compressed_chunk_cold_tablespace.py" \
   --mode isolated-cluster \
   --host-port 55495 \
   --image-id sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e \
   --image-ref timescale/timescaledb-ha:pg15-latest \
-  --output /tmp/nhms-1892-orchestrator-final-cli.json
-# exit 0; status=passed
+  --output "$ROOT/cli.json"
+# exit 0; status=passed; failures=15
 ```
 
-Node-27 pytest marker oracle, loading the repository's real `tests/conftest.py`;
-the dummy URL satisfies opt-in collection but is never connected because this
-test creates its own cluster:
+Node-27 pytest marker oracle loaded the frozen repository's real
+`tests/conftest.py`; the dummy URL satisfies opt-in collection but is never
+connected because this test creates its own cluster:
 
 ```text
 NHMS_RUN_INTEGRATION=1 \
 NHMS_INTEGRATION_DATABASE_URL=postgresql://unused:unused@127.0.0.1:1/postgres \
-PYTHONPATH=/tmp/nhms-1892-orchestrator-final-a622643e \
-/home/nwm/NWM/.venv/bin/python -m pytest -q \
-  tests/test_probe_compressed_chunk_cold_tablespace.py \
+PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python -m pytest -q \
+  "$ROOT/repo/tests/test_probe_compressed_chunk_cold_tablespace.py" \
   -m timescaledb_210
-# 1 passed, 18 deselected in 17.41s
+# 1 passed, 18 deselected in 16.29s
 ```
 
-The two complete local evidence copies passed the checked-in
-`parse_probe_report` semantic gate:
+The two complete downloaded evidence copies passed the checked-in
+`parse_probe_report` semantic gate before the identity-bound remote temporary
+root was removed:
 
 | Receipt | SHA-256 | Bytes | Result |
 |---|---:|---:|---|
-| orchestrator CLI | `c44f3bef3cb944a41a6d2be1d7497588740b7df37afb118b41646dbae386e6da` | 284120 | `passed` |
-| pytest marker | `c776e18350e3551a423b5a8760bd0e6fc63c472f73690baaa48efbf078e66c3e` | 284121 | `passed` |
+| frozen CLI | `4482e06dd95b864e32ea3143239ac12223c1f606da2aea050e2ff2aef9652151` | 284117 | `passed` |
+| frozen pytest marker | `207b060b52c06c45d1e8442761ad0b4e43aa924ebb03b9701ae2df74d328c340` | 284117 | `passed` |
 
 These full JSON files are local workflow evidence, not committed long-term
 fixtures. This log retains every decision-bearing value and the checked-in
@@ -211,7 +217,7 @@ exercise exact boundary arithmetic; these are **not production values**.
 
 | Case | Decision | Headroom | Mutation proof |
 |---|---|---:|---|
-| measured free space | approved | cold 23482789887; hot 23482855423 | normal probe may proceed |
+| measured free space | approved | cold 23473319935; hot 23473385471 | normal probe may proceed |
 | exact equality | approved | cold 0; hot 0 | boundary is inclusive |
 | cold one byte short | refused | cold -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
 | hot one byte short | refused | hot -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
@@ -221,10 +227,11 @@ after preflight; fresh reconciliation proved `complete_source` with original
 sibling and unchanged parity. This is the rollback defense, not a substitute
 for preflight.
 
-The committed tiny-fixture move advanced the instance LSN from `0/2266CE0` to
-`0/228F270` (165264 bytes by subtraction). The report intentionally labels WAL
-as instance-level `pg_wal_lsn_diff` from `0/0`, not per-group WAL attribution;
-production WAL reserve cannot be derived from this number.
+The frozen committed tiny-fixture move advanced the instance LSN from
+`0/2268030` to `0/2290758` (165672 bytes by subtraction). The report
+intentionally labels WAL as instance-level `pg_wal_lsn_diff` from `0/0`, not
+per-group WAL attribution; production WAL reserve cannot be derived from this
+number.
 
 ## Lifecycle proof
 
