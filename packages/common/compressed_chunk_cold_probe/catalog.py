@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.compressed_chunk_cold_probe.cluster import connect, execute, scalar
+from packages.common.compressed_chunk_cold_probe.fixture_parity import fixture_window_parity_sql
 from packages.common.compressed_chunk_cold_probe.types import (
     CHUNK_INFO_SQL,
     COMPRESSED_SIBLING_SQL,
@@ -26,6 +27,7 @@ from packages.common.compressed_chunk_cold_residency import (
     CatalogChunk,
     CatalogRelation,
     ResidencyGroup,
+    ShellFirstPlan,
     build_shell_first_plan,
     classify_reconciliation,
     classify_residency,
@@ -34,7 +36,6 @@ from packages.common.compressed_chunk_cold_residency import (
     origin_shell_is_not_complete,
     resolve_residency_group,
     snapshot_image_identity,
-    window_parity_sql,
 )
 
 
@@ -53,7 +54,7 @@ def _synthetic_relations(tablespace: str) -> tuple[CatalogRelation, ...]:
     )
 
 
-def synthetic_complete_group() -> ResidencyGroup:
+def synthetic_complete_group(*, tablespace: str = SOURCE_TABLESPACE_NAME) -> ResidencyGroup:
     chunk = CatalogChunk(
         hypertable_schema="hydro",
         hypertable_name="river_timeseries",
@@ -67,7 +68,7 @@ def synthetic_complete_group() -> ResidencyGroup:
         range_end=datetime(2026, 7, 4, 12, tzinfo=UTC),
         is_compressed=True,
     )
-    group = resolve_residency_group(chunk, _synthetic_relations("pg_default"))
+    group = resolve_residency_group(chunk, _synthetic_relations(tablespace))
     if group.blocker:
         raise ProbeError(group.blocker)
     return group
@@ -76,24 +77,7 @@ def synthetic_complete_group() -> ResidencyGroup:
 def unit_plan_report() -> dict[str, Any]:
     group = synthetic_complete_group()
     plan = build_shell_first_plan(group)
-    already = build_shell_first_plan(
-        resolve_residency_group(
-            CatalogChunk(
-                "hydro",
-                "river_timeseries",
-                10,
-                "_timescaledb_internal",
-                "_hyper_1_1_chunk",
-                20,
-                "_timescaledb_internal",
-                "compress_hyper_2_2_chunk",
-                datetime(2026, 6, 27, 12, tzinfo=UTC),
-                datetime(2026, 7, 4, 12, tzinfo=UTC),
-                True,
-            ),
-            _synthetic_relations(COLD_TABLESPACE_NAME),
-        )
-    )
+    already = build_shell_first_plan(synthetic_complete_group(tablespace=COLD_TABLESPACE_NAME))
     sql = [*plan.prefix_sql, *plan.lock_sql, *plan.shell_move_sql]
     if plan.decompress_sql:
         sql.append(plan.decompress_sql)
@@ -243,8 +227,18 @@ def snapshot_group(group: ResidencyGroup) -> dict[str, Any]:
     }
 
 
+def require_migrate_plan(group: ResidencyGroup, *, target: str) -> ShellFirstPlan:
+    plan = build_shell_first_plan(group, target=target)
+    if plan.kind != "migrate" or not plan.shell_move_sql:
+        raise ProbeError(
+            f"required migrate plan for target {target!r} is {plan.kind} "
+            f"with {len(plan.shell_move_sql)} shell-move statements"
+        )
+    return plan
+
+
 def parity(connection: Any, chunk: CatalogChunk) -> dict[str, Any]:
-    sql = window_parity_sql(chunk.hypertable_schema, chunk.hypertable_name)
+    sql = fixture_window_parity_sql(chunk.hypertable_schema, chunk.hypertable_name)
     row = execute(connection, sql, (chunk.range_start, chunk.range_end))[0]
     return {
         "count": int(row["n"]),

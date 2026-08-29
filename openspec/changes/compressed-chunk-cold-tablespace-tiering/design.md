@@ -115,10 +115,17 @@ requirement.
 ### D4 — Migration is one rewrite transaction with pre-commit and post-commit proof
 
 The shared residency module, not the CLI wrapper, owns relation discovery,
-stable OID lock order, in-transaction revalidation, the D3 sequence, and parity
-checks. Data parity is scoped to the durable origin chunk's half-open time
-range and covers every business column; a whole-hypertable aggregate cannot
-substitute because unrelated sibling rows can hide target-chunk loss. Any
+stable OID lock order, in-transaction revalidation, the D3 sequence, and the
+requirement that data parity cover every business column over the durable origin
+chunk's half-open time range. A whole-hypertable aggregate cannot substitute
+because unrelated sibling rows can hide target-chunk loss. The #1892 probe
+hashes every column of its own four-column disposable fixture
+(`id` / canonical UTC `valid_time` / `value` / NULL-distinct `payload`) via a
+probe-support helper; that token is not a production-column contract.
+Migrations 000005/000006 define different identity and business columns.
+#1893 must derive and validate the actual per-hypertable column inventory from
+the live production schema before mutation, and must not reuse the fixture SQL
+as a production all-business-column API. Any
 statement or proof failure aborts the transaction. Connection loss/process
 kill is reconciled by a fresh catalog read keyed by the durable origin
 identity/window: complete source, complete target, mixed, or unknown;

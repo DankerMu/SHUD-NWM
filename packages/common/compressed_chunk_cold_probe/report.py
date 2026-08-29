@@ -11,11 +11,13 @@ from typing import Any
 from packages.common.compressed_chunk_cold_probe.types import WAL_LIMITATION, ProbeError
 from packages.common.compressed_chunk_cold_residency import (
     ACCEPTED_SEQUENCE_NAME,
+    COLD_TABLESPACE_NAME,
     PINNED_IMAGE_ID,
     PINNED_IMAGE_REF,
     REJECTED_SEQUENCE_NAMES,
     SOURCE_TABLESPACE_NAME,
     json_ready,
+    quote_ident,
 )
 
 
@@ -64,6 +66,91 @@ def _well_formed_parity(payload: Mapping[str, Any] | None, *, nonempty: bool = F
     if not isinstance(range_end, str) or not range_end.strip():
         return False
     return True
+
+
+def _members_all_on_target(
+    snapshot: Mapping[str, Any] | None,
+    *,
+    target: str,
+    require_zero_pg_default: bool,
+) -> bool:
+    if not isinstance(snapshot, Mapping):
+        return False
+    members = snapshot.get("members")
+    if not isinstance(members, list) or not members:
+        return False
+    pg_default_bytes = 0
+    for member in members:
+        if not isinstance(member, Mapping):
+            return False
+        tablespace = member.get("tablespace")
+        if tablespace != target:
+            return False
+        if tablespace == SOURCE_TABLESPACE_NAME:
+            pg_default_bytes += int(member.get("bytes") or 0)
+    if require_zero_pg_default and pg_default_bytes != 0:
+        return False
+    return True
+
+
+def _after_decompress_on_target(
+    row: Mapping[str, Any] | None,
+    *,
+    target: str,
+    require_zero_pg_default: bool,
+) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    phases = row.get("phases") if isinstance(row.get("phases"), Mapping) else {}
+    if not _members_all_on_target(
+        phases.get("after_decompress") if isinstance(phases, Mapping) else None,
+        target=target,
+        require_zero_pg_default=require_zero_pg_default,
+    ):
+        return False
+    proof = row.get("after_decompress_proof")
+    if not isinstance(proof, Mapping):
+        return False
+    if proof.get("target") != target:
+        return False
+    if proof.get("all_requested_target") is not True:
+        return False
+    if not isinstance(proof.get("member_count"), int) or proof.get("member_count") <= 0:
+        return False
+    if require_zero_pg_default and proof.get("pg_default_bytes") != 0:
+        return False
+    return True
+
+
+def _required_move_sql(sql: object, *, target: str) -> bool:
+    if not isinstance(sql, str) or not sql.strip():
+        return False
+    compact = " ".join(sql.split()).upper()
+    if compact == "SELECT 1" or compact.startswith("SELECT 1 "):
+        return False
+    return "SET TABLESPACE" in sql and quote_ident(target) in sql
+
+
+def _required_fault_row(
+    row: Mapping[str, Any] | None,
+    *,
+    target: str,
+    error_type: str,
+    sql_key: str = "sql",
+) -> bool:
+    if not isinstance(row, Mapping):
+        return False
+    if row.get("plan_kind") != "migrate":
+        return False
+    if row.get("target") != target:
+        return False
+    sql = row.get(sql_key)
+    if not _required_move_sql(sql, target=target):
+        nested = row.get("exec") if isinstance(row.get("exec"), Mapping) else row.get("move")
+        nested_sql = nested.get("sql") if isinstance(nested, Mapping) else None
+        if not _required_move_sql(nested_sql, target=target):
+            return False
+    return error_type in _error_blob(row)
 
 
 def _row_parities(*rows: Mapping[str, Any] | None) -> list[Mapping[str, Any] | None]:
@@ -124,7 +211,7 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
         return False
     if attach.get("new_group_residency") != "all_source":
         return False
-    if attach.get("business_attached") not in ([], None):
+    if attach.get("business_attached") != []:
         return False
     if (candidates.get("two_transaction") or {}).get("atomic") is not False:
         return False
@@ -139,6 +226,12 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
         return False
     if not _well_formed_parity(rollback.get("before_parity"), nonempty=True):
         return False
+    if not _after_decompress_on_target(
+        rollback,
+        target=COLD_TABLESPACE_NAME,
+        require_zero_pg_default=True,
+    ):
+        return False
     phases = rollback.get("phases") or {}
     if (phases.get("after_recompress") or {}).get("residency") != "already_target":
         return False
@@ -149,6 +242,12 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
     if committed.get("before_parity") != committed.get("after_parity"):
         return False
     if not _well_formed_parity(committed.get("before_parity"), nonempty=True):
+        return False
+    if not _after_decompress_on_target(
+        committed,
+        target=COLD_TABLESPACE_NAME,
+        require_zero_pg_default=True,
+    ):
         return False
     if not lifecycle.get("parity_unchanged_until_replay"):
         return False
@@ -175,7 +274,14 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
         return False
     if _compressed_oid(committed.get("after")) in {None, _compressed_oid(committed.get("before"))}:
         return False
-    if (lifecycle.get("move_back") or {}).get("reconciliation") != "complete_target":
+    move_back = lifecycle.get("move_back") or {}
+    if move_back.get("reconciliation") != "complete_target":
+        return False
+    if not _after_decompress_on_target(
+        move_back,
+        target=SOURCE_TABLESPACE_NAME,
+        require_zero_pg_default=False,
+    ):
         return False
     if lifecycle.get("move_back_residency") != "all_source":
         return False
@@ -190,9 +296,12 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
         return False
     if boundaries.get("same_window_disjoint") is not True:
         return False
-    if boundaries.get("attach_tablespace") not in ([], None):
+    if boundaries.get("attach_tablespace") != []:
         return False
     if not isinstance(boundaries.get("empty_chunk"), Mapping):
+        return False
+    no_index_group = boundaries.get("no_index_group")
+    if not isinstance(no_index_group, Mapping) or not no_index_group.get("members"):
         return False
     if boundaries.get("no_index_origin_index_count") != 0:
         return False
@@ -264,25 +373,49 @@ def _all_passed(report: Mapping[str, Any]) -> bool:
         return False
     if lost.get("committed") is False or lost.get("outcome") != "committed_ack_lost":
         return False
+    if lost.get("commit_ack_lost") is not True:
+        return False
+    if not isinstance(lost.get("error"), Mapping) or lost.get("error", {}).get("error_type") != "CommitAckLost":
+        return False
     if _compressed_oid(lost.get("after")) in {None, _compressed_oid(lost.get("before"))}:
         return False
     if not _well_formed_parity(lost.get("after_parity"), nonempty=True):
         return False
     if lost.get("before_parity") != lost.get("after_parity"):
         return False
+    if not _after_decompress_on_target(
+        lost,
+        target=COLD_TABLESPACE_NAME,
+        require_zero_pg_default=True,
+    ):
+        return False
+    if not _required_fault_row(
+        failures.get("missing_target"),
+        target="nhms_cold_missing",
+        error_type="UndefinedObject",
+    ):
+        return False
     permission = failures.get("permission") or {}
     if permission.get("ok") is True:
+        return False
+    if not _required_fault_row(permission, target=COLD_TABLESPACE_NAME, error_type="InsufficientPrivilege"):
         return False
     full = failures.get("full_target") or {}
     if full.get("genuine_enospc") is not True:
         return False
     if not _source_restored(full):
         return False
-    blob = _error_blob(full)
+    if not _required_fault_row(full, target="probe_full", error_type="DiskFull"):
+        return False
+    move = full.get("move") if isinstance(full.get("move"), Mapping) else {}
+    move_blob = " ".join(str(item) for item in (move.get("error"), move.get("error_type")) if item)
     if (
-        "DiskFull" not in blob
-        and "No space left on device" not in blob
-        and "no space left on device" not in blob.lower()
+        move.get("ok") is not False
+        or (
+            "DiskFull" not in move_blob
+            and "No space left on device" not in move_blob
+            and "no space left on device" not in move_blob.lower()
+        )
     ):
         return False
     mismatch = failures.get("catalog_path_mismatch") or {}

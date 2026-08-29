@@ -73,6 +73,10 @@ class ProbeError(RuntimeError):
     """Fail-closed probe error."""
 
 
+class CommitAckLost(ProbeError):
+    """Client commit acknowledgement was lost after the server commit completed."""
+
+
 @dataclass
 class OwnedResources:
     container_name: str | None = None

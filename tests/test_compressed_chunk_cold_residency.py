@@ -7,6 +7,7 @@ node-27 snapshot, not recomputed from the implementation.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -535,10 +536,40 @@ def test_complete_source_requires_original_sibling_and_window_parity() -> None:
     )
 
 
-def test_window_parity_sql_is_chunk_scoped_over_all_business_columns() -> None:
-    from packages.common.compressed_chunk_cold_residency import window_parity_sql
+def test_shared_residency_module_does_not_export_fixture_four_column_parity() -> None:
+    import packages.common.compressed_chunk_cold_residency as residency
 
-    sql = " ".join(window_parity_sql("hydro", "river_timeseries").split())
+    assert not hasattr(residency, "window_parity_sql")
+    assert not hasattr(residency, "canonical_parity_token")
+    assert not hasattr(residency, "window_parity_from_rows")
+
+
+def test_production_hypertables_are_not_the_probe_four_column_fixture() -> None:
+    from pathlib import Path
+
+    from packages.common.compressed_chunk_cold_probe.fixture_parity import (
+        PROBE_FIXTURE_PARITY_COLUMNS,
+    )
+
+    hydro = Path("db/migrations/000006_hydro.sql").read_text(encoding="utf-8")
+    met = Path("db/migrations/000005_met.sql").read_text(encoding="utf-8")
+    assert PROBE_FIXTURE_PARITY_COLUMNS == ("id", "valid_time", "value", "payload")
+    assert "run_id TEXT NOT NULL" in hydro
+    assert "river_segment_id TEXT NOT NULL" in hydro
+    assert "forcing_version_id TEXT NOT NULL" in met
+    assert "station_id TEXT NOT NULL" in met
+    assert "id integer NOT NULL" not in hydro
+    assert "payload text" not in hydro
+    assert "id integer NOT NULL" not in met
+    assert "payload text" not in met
+
+
+def test_probe_fixture_parity_hashes_all_four_fixture_columns() -> None:
+    from packages.common.compressed_chunk_cold_probe.fixture_parity import (
+        fixture_window_parity_sql,
+    )
+
+    sql = " ".join(fixture_window_parity_sql("hydro", "river_timeseries").split())
     assert '"hydro"."river_timeseries"' in sql
     assert "valid_time >= %s AND valid_time < %s" in sql
     assert "id::text" in sql
@@ -552,11 +583,11 @@ def test_window_parity_sql_is_chunk_scoped_over_all_business_columns() -> None:
 
 
 def test_window_parity_from_rows_ignores_sibling_and_distinguishes_null_payload() -> None:
-    import hashlib
-
-    from packages.common.compressed_chunk_cold_residency import (
-        canonical_parity_token,
-        window_parity_from_rows,
+    from packages.common.compressed_chunk_cold_probe.fixture_parity import (
+        fixture_canonical_parity_token as canonical_parity_token,
+    )
+    from packages.common.compressed_chunk_cold_probe.fixture_parity import (
+        fixture_window_parity_from_rows as window_parity_from_rows,
     )
 
     in_a = {

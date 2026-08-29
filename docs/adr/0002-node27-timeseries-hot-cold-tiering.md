@@ -620,8 +620,12 @@ Measured properties of this sequence:
   `FeatureNotSupported: changing tablespace of compressed chunk is not
   supported` and is not needed.
 - Data parity is scoped to the durable origin window
-  `[range_start, range_end)` over every business column. A replacement
-  compressed sibling at source is `unknown`, not `complete_source`.
+  `[range_start, range_end)` over every business column. #1892 proves this on
+  its four-column disposable fixture; that token is not the production
+  inventory. #1893 must derive and validate every real business column for
+  both production hypertables from the live schema before mutation. A
+  replacement compressed sibling at source is `unknown`, not
+  `complete_source`.
 - WAL observations are instance-level `pg_wal_lsn_diff` from `0/0`, not
   per-group WAL volume. Catalog relation bytes remain the primary
   group-accounting unit.

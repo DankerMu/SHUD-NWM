@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,6 +28,7 @@ from packages.common.compressed_chunk_cold_probe.types import (
     CONTAINER_FULL,
     WAL_LIMITATION,
     WINDOW_STARTS,
+    CommitAckLost,
     ProbeConfig,
     ProbeError,
 )
@@ -40,6 +41,67 @@ from packages.common.compressed_chunk_cold_residency import (
     quote_ident,
     quote_literal,
 )
+
+
+class _AckLossConnection:
+    """Moving-connection wrapper that loses the commit acknowledgement after COMMIT."""
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+        self._unusable = False
+        self.commit_ack_lost = False
+
+    def __getattr__(self, name: str) -> Any:
+        if self._unusable:
+            raise ProbeError("moving connection is unusable after lost commit acknowledgement")
+        return getattr(self._connection, name)
+
+    def commit(self) -> None:
+        if self._unusable:
+            raise ProbeError("moving connection is unusable after lost commit acknowledgement")
+        self._connection.commit()
+        self.commit_ack_lost = True
+        self._unusable = True
+        try:
+            self._connection.close()
+        except Exception:
+            pass
+        raise CommitAckLost("commit acknowledgement lost after server commit")
+
+    def rollback(self) -> None:
+        if self._unusable:
+            raise ProbeError("moving connection is unusable after lost commit acknowledgement")
+        self._connection.rollback()
+
+    def close(self) -> None:
+        if self._unusable:
+            return
+        self._connection.close()
+
+
+def _expanded_member_proof(snapshot: Mapping[str, Any] | None, *, target: str) -> dict[str, Any]:
+    members = list((snapshot or {}).get("members") or [])
+    if not members:
+        return {
+            "target": target,
+            "all_requested_target": False,
+            "pg_default_bytes": None,
+            "member_count": 0,
+        }
+    pg_default_bytes = 0
+    all_target = True
+    for member in members:
+        tablespace = member.get("tablespace")
+        if tablespace != target:
+            all_target = False
+        if tablespace == SOURCE_TABLESPACE_NAME:
+            pg_default_bytes += int(member.get("bytes") or 0)
+    return {
+        "target": target,
+        "all_requested_target": all_target,
+        "pg_default_bytes": pg_default_bytes,
+        "member_count": len(members),
+    }
 
 
 def run_shell_first(
@@ -132,10 +194,12 @@ def run_shell_first(
             "rolled_back_fresh": observed["reconciliation"] == "complete_source",
             "replayed": False,
         }
-    tx = connect(config, autocommit=False)
+    raw_tx = connect(config, autocommit=False)
+    tx: Any = _AckLossConnection(raw_tx) if inject_after == "lost_ack" else raw_tx
     steps: list[dict[str, Any]] = []
     phases: dict[str, Any] = {}
     error: dict[str, Any] | None = None
+    commit_ack_lost = False
     try:
         for statement in (*plan.prefix_sql[1:], *plan.lock_sql, *plan.shell_move_sql):
             execute(tx, statement)
@@ -169,6 +233,10 @@ def run_shell_first(
         else:
             tx.rollback()
             outcome = "rolled_back"
+    except CommitAckLost as exc:
+        commit_ack_lost = True
+        outcome = "unknown"
+        error = {"error_type": type(exc).__name__, "error": str(exc).split("\n")[0]}
     except Exception as exc:
         try:
             tx.rollback()
@@ -188,18 +256,12 @@ def run_shell_first(
     observer = connect(config)
     after_wal = wal_lsn(observer)
     observer.close()
-    if inject_after == "lost_ack" and commit and error is None:
-        recon = observed["reconciliation"]
-        outcome = "committed_ack_lost"
-    expanded_hot = False
-    decomp = phases.get("after_decompress") or {}
-    if decomp:
-        expanded_hot = any(
-            member["tablespace"] == SOURCE_TABLESPACE_NAME
-            and member["kind"] in {"origin_heap", "toast_heap"}
-            and member["bytes"] > 8192
-            for member in decomp.get("members", [])
-        )
+    if commit_ack_lost:
+        if recon == "complete_target" and observed["original_sibling"] is False:
+            outcome = "committed_ack_lost"
+        else:
+            outcome = "unknown"
+    after_decompress_proof = _expanded_member_proof(phases.get("after_decompress"), target=target)
     return {
         "outcome": outcome,
         "error": error,
@@ -211,20 +273,25 @@ def run_shell_first(
         "phases": phases,
         "steps": steps,
         "wal": {"before": before_wal, "after": after_wal, "limitation": WAL_LIMITATION},
-        "expanded_bytes_in_pg_default_after_decompress": expanded_hot,
+        "after_decompress_proof": after_decompress_proof,
+        "expanded_bytes_in_pg_default_after_decompress": (
+            int(after_decompress_proof["pg_default_bytes"] or 0) > 0
+        ),
         "original_sibling": observed["original_sibling"],
         "complete": (
             recon == "complete_target"
-            if commit and error is None
+            if commit and not commit_ack_lost and error is None
             else recon == "complete_source" and observed["original_sibling"] is True
         )
-        and (error is None if commit else True),
+        and (error is None if commit and not commit_ack_lost else True),
         "rolled_back_fresh": recon == "complete_source"
         and observed["original_sibling"] is True
-        and not (commit and error is None),
+        and not (commit and error is None and not commit_ack_lost),
         "replayed": False,
+        "commit_ack_lost": commit_ack_lost,
         "shell_sql_executed": bool(steps),
         "capacity_decision": decision.as_dict(),
+        "target": target,
     }
 
 

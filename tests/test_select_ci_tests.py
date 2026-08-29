@@ -8732,6 +8732,18 @@ def _shared_baseline_violations(
     ]
 
 
+def test_select_tests_maps_compressed_chunk_cold_probe_support_to_focused_probe_suite() -> None:
+    expected_probe = "tests/test_probe_compressed_chunk_cold_tablespace.py"
+    for source in (
+        "packages/common/compressed_chunk_cold_probe/shell.py",
+        "packages/common/compressed_chunk_cold_probe/scenarios.py",
+    ):
+        selected = set(select_tests([source], repo_root=Path(".")))
+        assert expected_probe in selected, f"{source} did not select the focused probe suite"
+        assert set(CORE_SMOKE_TESTS) <= selected
+        assert INVARIANT_SUITE_PATH in selected
+
+
 def test_shared_library_sources_retain_the_full_core_smoke_baseline() -> None:
     # #1744 path B: every packages/common/** source selects its narrow targets
     # AND the complete core-smoke baseline — a narrow rule can never silently

@@ -135,7 +135,7 @@ reported as success.
 #### Scenario: Target-chunk parity cannot be hidden by sibling rows
 
 - **WHEN** migration parity is checked before, inside and after the transaction
-- **THEN** count, aggregate and deterministic checksum are computed over exactly the origin chunk's half-open `[range_start, range_end)` window and all business columns, so an unrelated same-table chunk cannot offset or hide target data loss
+- **THEN** count, aggregate and deterministic checksum are computed over exactly the origin chunk's half-open `[range_start, range_end)` window and all business columns, so an unrelated same-table chunk cannot offset or hide target data loss. The #1892 isolated probe proves this on its four-column fixture; #1893 SHALL derive and validate every live business column for both production hypertables from the production schema before mutation and SHALL NOT treat the fixture four-column token as that inventory
 
 #### Scenario: Catalog and filesystem identity disagree
 

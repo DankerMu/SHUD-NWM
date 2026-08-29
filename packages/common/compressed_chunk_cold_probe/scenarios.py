@@ -13,6 +13,7 @@ from packages.common.compressed_chunk_cold_probe.catalog import (
     fresh_observer,
     load_chunks,
     parity,
+    require_migrate_plan,
     retained_source_bytes,
     sibling_identity,
     snapshot_group,
@@ -37,6 +38,7 @@ from packages.common.compressed_chunk_cold_probe.types import (
     WATERMARK,
     WINDOW_STARTS,
     ProbeConfig,
+    ProbeError,
 )
 from packages.common.compressed_chunk_cold_residency import (
     ACCEPTED_SEQUENCE_NAME,
@@ -45,7 +47,6 @@ from packages.common.compressed_chunk_cold_residency import (
     SOURCE_TABLESPACE_NAME,
     CatalogChunk,
     ResidencyGroup,
-    build_shell_first_plan,
     classify_eligibility,
     classify_reconciliation,
     classify_residency,
@@ -416,14 +417,14 @@ def run_boundaries(connection: Any, config: ProbeConfig) -> dict[str, Any]:
     hydro_group = collect_group(connection, hydro_same)
     met_group = collect_group(connection, met_same)
     no_index_chunks = _load_named_chunks(connection, "hydro", "no_index_timeseries")
-    no_index_group = None
-    if no_index_chunks:
+    if not no_index_chunks:
+        raise ProbeError("no-index group is missing")
+    no_index = no_index_chunks[0]
+    if not no_index.is_compressed:
+        compress_named(connection, no_index.origin_schema, no_index.origin_name)
+        no_index_chunks = _load_named_chunks(connection, "hydro", "no_index_timeseries")
         no_index = no_index_chunks[0]
-        if not no_index.is_compressed:
-            compress_named(connection, no_index.origin_schema, no_index.origin_name)
-            no_index_chunks = _load_named_chunks(connection, "hydro", "no_index_timeseries")
-            no_index = no_index_chunks[0]
-        no_index_group = collect_group(connection, no_index)
+    no_index_group = collect_group(connection, no_index)
     later = datetime(2026, 7, 23, tzinfo=UTC)
     execute(
         connection,
@@ -447,15 +448,11 @@ def run_boundaries(connection: Any, config: ProbeConfig) -> dict[str, Any]:
             lag_seconds=LAG_SECONDS,
         ),
         "empty_chunk": None if empty is None else snapshot_group(collect_group(connection, empty)),
-        "no_index_group": snapshot_group(no_index_group) if no_index_group is not None else None,
-        "no_index_origin_index_count": (
-            0
-            if no_index_group is None
-            else sum(
-                1
-                for member in no_index_group.members
-                if member.kind == "index" and member.heap_oid == no_index_group.origin_oid
-            )
+        "no_index_group": snapshot_group(no_index_group),
+        "no_index_origin_index_count": sum(
+            1
+            for member in no_index_group.members
+            if member.kind == "index" and member.heap_oid == no_index_group.origin_oid
         ),
         "quoted_numeric_leading_index": any(
             member.name[:1].isdigit() for member in hydro_group.members if member.relkind == "i"
@@ -612,13 +609,17 @@ def run_failures(connection: Any, config: ProbeConfig, chunk: CatalogChunk) -> d
     before_parity = parity(connection, chunk)
     before_oids = sorted(member.oid for member in before.members)
 
+    missing_plan = require_migrate_plan(before, target="nhms_cold_missing")
+    missing_sql = missing_plan.shell_move_sql[0]
     missing_target_conn = connect(config, autocommit=False)
-    plan = build_shell_first_plan(before, target="nhms_cold_missing")
-    missing_exec = try_sql(missing_target_conn, plan.shell_move_sql[0] if plan.shell_move_sql else "SELECT 1")
+    missing_exec = try_sql(missing_target_conn, missing_sql)
     missing_target_conn.close()
     missing_obs = fresh_observer(config, before, chunk, before_parity)
     missing_target = {
         "exec": missing_exec,
+        "plan_kind": missing_plan.kind,
+        "target": "nhms_cold_missing",
+        "sql": missing_sql,
         **_observer_payload(before, missing_obs, before_parity),
     }
 
@@ -659,7 +660,9 @@ def run_failures(connection: Any, config: ProbeConfig, chunk: CatalogChunk) -> d
     lost_commit = run_shell_first(config, chunk, commit=True, inject_after="lost_ack")
     lost_commit_ack = {
         **lost_commit,
-        "committed": lost_commit.get("reconciliation") == "complete_target" and lost_commit.get("error") is None,
+        "committed": lost_commit.get("reconciliation") == "complete_target"
+        and lost_commit.get("outcome") == "committed_ack_lost"
+        and lost_commit.get("commit_ack_lost") is True,
         "replayed": False,
     }
     if lost_commit_ack["committed"]:
@@ -668,6 +671,8 @@ def run_failures(connection: Any, config: ProbeConfig, chunk: CatalogChunk) -> d
         before_parity = parity(connection, chunk)
         before_oids = sorted(member.oid for member in before.members)
 
+    permission_plan = require_migrate_plan(before, target=COLD_TABLESPACE_NAME)
+    permission_sql = permission_plan.shell_move_sql[0]
     limited_role = scalar(connection, "SELECT 1 FROM pg_roles WHERE rolname = 'probe_limited'")
     if not limited_role:
         execute(connection, "CREATE ROLE probe_limited LOGIN PASSWORD 'probe_limited'")
@@ -686,12 +691,15 @@ def run_failures(connection: Any, config: ProbeConfig, chunk: CatalogChunk) -> d
             cursor_factory=RealDictCursor,
         )
         limited.autocommit = False
-        permission = try_sql(limited, plan.shell_move_sql[0] if plan.shell_move_sql else "SELECT 1")
+        permission = try_sql(limited, permission_sql)
         limited.close()
     except Exception as error:  # noqa: BLE001
         permission = {"ok": False, "error_type": type(error).__name__, "error": str(error).split("\n")[0]}
     permission_obs = fresh_observer(config, before, chunk, before_parity)
     permission.update(_observer_payload(before, permission_obs, before_parity))
+    permission["plan_kind"] = permission_plan.kind
+    permission["target"] = COLD_TABLESPACE_NAME
+    permission["sql"] = permission_sql
 
     full = _full_target(connection, config, chunk)
 
@@ -865,36 +873,38 @@ def _full_target(connection: Any, config: ProbeConfig, chunk: CatalogChunk) -> d
             pass
     before = collect_group(connection, chunk)
     before_parity = parity(connection, chunk)
-    plan = build_shell_first_plan(before, target="probe_full")
+    plan = require_migrate_plan(before, target="probe_full")
+    move_sql = plan.shell_move_sql[0]
     tx = connect(config, autocommit=False)
-    move = try_sql(tx, plan.shell_move_sql[0] if plan.shell_move_sql else "SELECT 1")
+    move = try_sql(tx, move_sql)
     tx.close()
     observed = fresh_observer(config, before, chunk, before_parity)
     after = observed["after"]
-    error_blob = " ".join(
+    move_blob = " ".join(
         str(item)
-        for item in (
-            fill_error,
-            fill_error_type,
-            move.get("error"),
-            move.get("error_type"),
-        )
+        for item in (move.get("error"), move.get("error_type"))
         if item
     )
     genuine_full = (
-        "DiskFull" in error_blob
-        or "No space left on device" in error_blob
-        or "no space left on device" in error_blob.lower()
+        move.get("ok") is False
+        and (
+            "DiskFull" in move_blob
+            or "No space left on device" in move_blob
+            or "no space left on device" in move_blob.lower()
+        )
     )
     return {
         "fill_error": fill_error,
         "fill_error_type": fill_error_type,
         "genuine_enospc": genuine_full,
+        "plan_kind": plan.kind,
+        "target": "probe_full",
+        "sql": move_sql,
         "move": {k: move[k] for k in move if k != "rows"},
         "reconciliation": observed["reconciliation"],
         "original_sibling": observed["original_sibling"],
         "residency_after": classify_residency(after.members),
         "after": observed["after_snapshot"],
         "after_parity": observed["after_parity"],
-        "limitation": None if genuine_full else "tmpfs fill did not surface DiskFull/ENOSPC",
+        "limitation": None if genuine_full else "move SQL itself did not surface DiskFull/ENOSPC",
     }

@@ -30,7 +30,7 @@ Seams under test:
 
 ## 2. #1893 — Implement bounded cold-residency convergence
 
-- [ ] 2.1 Implement one shared residency-group resolver and transactional move/reconciliation primitive using the #1892 sequence, complete OID/member mapping, stable lock order, finite local timeouts, and source/target/mixed/unknown outcomes.
+- [ ] 2.1 Implement one shared residency-group resolver and transactional move/reconciliation primitive using the #1892 sequence, complete OID/member mapping, stable lock order, finite local timeouts, and source/target/mixed/unknown outcomes. Before any production mutation, derive and validate the complete live business-column inventory for both hypertables from the production schema; the #1892 four-column fixture helper is not that inventory and must not be reused as a production parity API.
 - [ ] 2.2 Implement a dry-run-default runner and wrapper using the existing display business watermark and compression lag, catch-up selection, per-tick bound, deterministic cross-hypertable fairness, whole-run wall budget, and the existing lifecycle mutex/order.
 - [ ] 2.3 Define the receipt JSON Schema/example with exact head/config/cluster/target identity, complete before/after member residency and bytes, durations, result/deferred/error/recovery fields, atomic mode-0600 publication, redaction, and honest post-commit publication-failure handling.
 - [ ] 2.4 Add config and serialized systemd integration without adding a second unlocked lane or attaching the cold tablespace to a hypertable; assert systemd wall > wrapper wall > per-statement wall.

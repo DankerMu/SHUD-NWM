@@ -75,9 +75,7 @@ def test_config_refuses_unowned_container_name() -> None:
 
 def test_unit_plan_is_shell_first_and_rejects_direct_alter() -> None:
     report = probe.unit_plan_report()
-    assert report["accepted_sequence"] == ACCEPTED_SEQUENCE_NAME
-    assert report["accepted_sequence"] == "shell_first_decompress_recompress_atomic"
-    assert "alter_tablespace_oid_order" not in {report["accepted_sequence"]}
+    assert report["accepted_sequence"] == ACCEPTED_SEQUENCE_NAME == "shell_first_decompress_recompress_atomic"
     assert set(report["rejected_sequences"]) == set(REJECTED_SEQUENCE_NAMES)
     assert report["lock_oids"] == [10, 20]
     assert report["shell_move_oids"] == [10, 15, 16]
@@ -88,9 +86,7 @@ def test_unit_plan_is_shell_first_and_rejects_direct_alter() -> None:
     joined = "\n".join(report["sql"])
     assert "SELECT decompress_chunk" in joined
     assert "SELECT compress_chunk" in joined
-    assert "compress_hyper_2_2_chunk" not in joined or "LOCK TABLE" in joined
     assert "ALTER TABLE" in joined and 'SET TABLESPACE "nhms_cold"' in joined
-    assert "ALTER TABLE" not in [s for s in report["sql"] if "compress_hyper_2_2_chunk" in s and "LOCK" not in s]
     assert not any(s.startswith("ALTER TABLE") and "compress_hyper" in s for s in report["sql"])
     assert not any("pg_toast" in s and s.startswith("ALTER") for s in report["sql"])
     assert report["sql"][-1] == "COMMIT"
@@ -190,6 +186,52 @@ _REPLAY_PARITY = {
     "range_start": "2026-06-25T00:00:00Z",
     "range_end": "2026-07-02T00:00:00Z",
 }
+_COLD_EXPANDED_MEMBERS = [
+    {"kind": "origin_heap", "tablespace": "nhms_cold", "bytes": 65536},
+    {"kind": "index", "tablespace": "nhms_cold", "bytes": 8192},
+    {"kind": "toast_heap", "tablespace": "nhms_cold", "bytes": 16384},
+]
+_HOT_EXPANDED_MEMBERS = [
+    {"kind": "origin_heap", "tablespace": "pg_default", "bytes": 65536},
+    {"kind": "index", "tablespace": "pg_default", "bytes": 8192},
+]
+_SOURCE_EXPANDED_MEMBERS = [
+    {"kind": "origin_heap", "tablespace": "pg_default", "bytes": 65536},
+    {"kind": "index", "tablespace": "pg_default", "bytes": 8192},
+    {"kind": "toast_heap", "tablespace": "pg_default", "bytes": 16384},
+]
+_MIXED_EXPANDED_MEMBERS = [
+    {"kind": "origin_heap", "tablespace": "nhms_cold", "bytes": 65536},
+    {"kind": "index", "tablespace": "pg_default", "bytes": 8192},
+]
+
+
+def _after_decompress_row(
+    *,
+    target: str,
+    members: list[dict[str, object]],
+    pg_default_bytes: int,
+) -> dict[str, object]:
+    return {
+        "phases": {"after_decompress": {"members": members, "residency": "already_target"}},
+        "after_decompress_proof": {
+            "target": target,
+            "all_requested_target": True,
+            "pg_default_bytes": pg_default_bytes,
+            "member_count": len(members),
+        },
+    }
+
+
+def _restored(**extra: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "reconciliation": "complete_source",
+        "original_sibling": True,
+        "before_parity": dict(_FAIL_PARITY),
+        "after_parity": dict(_FAIL_PARITY),
+    }
+    row.update(extra)
+    return row
 
 
 def _required_row_report(**overrides: object) -> dict[str, object]:
@@ -246,11 +288,17 @@ def _required_row_report(**overrides: object) -> dict[str, object]:
                 "after": {"compressed": {"oid": 20989, "name": "compress_hyper_2_12_chunk"}},
                 "before_parity": dict(_WINDOW_PARITY),
                 "after_parity": dict(_WINDOW_PARITY),
+                **_after_decompress_row(
+                    target="nhms_cold",
+                    members=_COLD_EXPANDED_MEMBERS,
+                    pg_default_bytes=0,
+                ),
                 "phases": {
+                    "after_decompress": {"members": _COLD_EXPANDED_MEMBERS, "residency": "already_target"},
                     "after_recompress": {
                         "residency": "already_target",
                         "compressed": {"oid": 21196},
-                    }
+                    },
                 },
             },
         },
@@ -261,6 +309,11 @@ def _required_row_report(**overrides: object) -> dict[str, object]:
                 "after_parity": dict(_WINDOW_PARITY),
                 "before": {"compressed": {"oid": 20989, "name": "compress_hyper_2_12_chunk"}},
                 "after": {"compressed": {"oid": 21403, "name": "compress_hyper_2_22_chunk"}},
+                **_after_decompress_row(
+                    target="nhms_cold",
+                    members=_COLD_EXPANDED_MEMBERS,
+                    pg_default_bytes=0,
+                ),
             },
             "cold": {"residency": "already_target"},
             "before_parity": dict(_WINDOW_PARITY),
@@ -274,7 +327,14 @@ def _required_row_report(**overrides: object) -> dict[str, object]:
                 "is_compressed": True,
                 "compressed": {"oid": 21491, "name": "compress_hyper_2_24_chunk"},
             },
-            "move_back": {"reconciliation": "complete_target"},
+            "move_back": {
+                "reconciliation": "complete_target",
+                **_after_decompress_row(
+                    target="pg_default",
+                    members=_SOURCE_EXPANDED_MEMBERS,
+                    pg_default_bytes=90112,
+                ),
+            },
             "move_back_residency": "all_source",
             "drop_remaining": [],
             "drop_before_oids": [10, 15, 16, 20, 25, 30, 31, 40, 41],
@@ -285,92 +345,78 @@ def _required_row_report(**overrides: object) -> dict[str, object]:
             "same_window_disjoint": True,
             "attach_tablespace": [],
             "empty_chunk": {"members": [{"kind": "origin_heap", "bytes": 0}]},
+            "no_index_group": {"members": [{"kind": "origin_heap", "heap_oid": 10, "tablespace": "pg_default"}]},
             "no_index_origin_index_count": 0,
             "quoted_numeric_leading_index": True,
             "owned_toast_present": True,
             "new_chunk_tablespace": "pg_default",
         },
         "failures": {
-            "missing_target": {
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "after": {"compressed": {"oid": 1}},
-                "after_parity": dict(_FAIL_PARITY),
-                "before_parity": dict(_FAIL_PARITY),
-                "exec": {"ok": False, "error": 'tablespace "nhms_cold_missing" does not exist'},
-            },
-            "mid_shell": {
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "error": {"error_type": "UndefinedTable"},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "mid_decompress": {
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "error": {"error_type": "UndefinedTable"},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "mid_recompress": {
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "error": {"error_type": "UndefinedTable"},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "statement_timeout": {
-                "sleep": {"ok": False, "error_type": "QueryCanceled"},
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "after": {"compressed": {"oid": 1}},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "lock_conflict": {
-                "block": {"ok": False, "error_type": "LockNotAvailable"},
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "after": {"compressed": {"oid": 1}},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "pre_commit_interrupt": {
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "after": {"compressed": {"oid": 1}},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-                "error": {"error_type": "OperationalError", "error": "server closed the connection unexpectedly"},
-            },
+            "missing_target": _restored(
+                after={"compressed": {"oid": 1}},
+                plan_kind="migrate",
+                target="nhms_cold_missing",
+                sql='ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "nhms_cold_missing"',
+                exec={
+                    "ok": False,
+                    "error_type": "UndefinedObject",
+                    "error": 'tablespace "nhms_cold_missing" does not exist',
+                    "sql": 'ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "nhms_cold_missing"',
+                },
+            ),
+            "mid_shell": _restored(error={"error_type": "UndefinedTable"}),
+            "mid_decompress": _restored(error={"error_type": "UndefinedTable"}),
+            "mid_recompress": _restored(error={"error_type": "UndefinedTable"}),
+            "statement_timeout": _restored(
+                sleep={"ok": False, "error_type": "QueryCanceled"},
+                after={"compressed": {"oid": 1}},
+            ),
+            "lock_conflict": _restored(
+                block={"ok": False, "error_type": "LockNotAvailable"},
+                after={"compressed": {"oid": 1}},
+            ),
+            "pre_commit_interrupt": _restored(
+                after={"compressed": {"oid": 1}},
+                error={"error_type": "OperationalError", "error": "server closed the connection unexpectedly"},
+            ),
             "lost_commit_ack": {
                 "committed": True,
                 "reconciliation": "complete_target",
                 "replayed": False,
                 "outcome": "committed_ack_lost",
+                "commit_ack_lost": True,
+                "error": {"error_type": "CommitAckLost", "error": "commit acknowledgement lost after server commit"},
                 "before": {"compressed": {"oid": 1, "name": "compress_hyper_2_10_chunk"}},
                 "after": {"compressed": {"oid": 99, "name": "compress_hyper_2_20_chunk"}},
                 "before_parity": dict(_FAIL_PARITY),
                 "after_parity": dict(_FAIL_PARITY),
+                **_after_decompress_row(
+                    target="nhms_cold",
+                    members=_COLD_EXPANDED_MEMBERS,
+                    pg_default_bytes=0,
+                ),
             },
-            "permission": {
-                "ok": False,
-                "error_type": "InsufficientPrivilege",
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
-            "full_target": {
-                "genuine_enospc": True,
-                "move": {"ok": False, "error_type": "DiskFull", "error": "No space left on device"},
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "after": {"compressed": {"oid": 1}},
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
+            "permission": _restored(
+                ok=False,
+                error_type="InsufficientPrivilege",
+                error="permission denied for tablespace nhms_cold",
+                plan_kind="migrate",
+                target="nhms_cold",
+                sql='ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "nhms_cold"',
+            ),
+            "full_target": _restored(
+                genuine_enospc=True,
+                plan_kind="migrate",
+                target="probe_full",
+                sql='ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "probe_full"',
+                move={
+                    "ok": False,
+                    "error_type": "DiskFull",
+                    "error": "No space left on device",
+                    "sql": 'ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "probe_full"',
+                },
+                after={"compressed": {"oid": 1}},
+            ),
             "catalog_path_mismatch": {
                 "refused": True,
                 "relation_oids_unchanged": True,
@@ -379,14 +425,10 @@ def _required_row_report(**overrides: object) -> dict[str, object]:
                 "before_parity": dict(_FAIL_PARITY),
                 "after_parity": dict(_FAIL_PARITY),
             },
-            "injected_missing_relation_error": {
-                "error": {"error_type": "UndefinedTable"},
-                "reconciliation": "complete_source",
-                "original_sibling": True,
-                "selected_relation_disappeared": False,
-                "before_parity": dict(_FAIL_PARITY),
-                "after_parity": dict(_FAIL_PARITY),
-            },
+            "injected_missing_relation_error": _restored(
+                error={"error_type": "UndefinedTable"},
+                selected_relation_disappeared=False,
+            ),
             "selection_disappearance": {
                 "stale_blocked": True,
                 "sacrificed_group_gone": True,
@@ -621,11 +663,206 @@ def test_engine_gate_does_not_overwrite_requested_image_or_run_bootstrap() -> No
 
 
 def test_window_parity_sql_on_probe_seam_is_chunk_scoped() -> None:
-    sql = probe.window_parity_sql("hydro", "river_timeseries")
+    sql = probe.fixture_window_parity_sql("hydro", "river_timeseries")
     assert "valid_time >= %s AND valid_time < %s" in sql
     assert '"hydro"."river_timeseries"' in sql
     assert "payload IS NULL" in sql
     assert "CASE WHEN payload IS NULL THEN 'N' ELSE 'P' || payload END" in sql
+    assert probe.PROBE_FIXTURE_PARITY_COLUMNS == ("id", "valid_time", "value", "payload")
+    assert not hasattr(probe, "window_parity_sql")
+
+
+def test_ack_loss_wrapper_commits_then_makes_the_moving_connection_unusable() -> None:
+    from packages.common.compressed_chunk_cold_probe.shell import _AckLossConnection
+
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.committed = False
+            self.closed = False
+            self.rolled_back = False
+
+        def commit(self) -> None:
+            self.committed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+        def cursor(self) -> object:
+            return object()
+
+    fake = _FakeConnection()
+    wrapper = _AckLossConnection(fake)
+    with pytest.raises(probe.CommitAckLost, match="acknowledgement lost"):
+        wrapper.commit()
+    assert fake.committed is True
+    assert fake.closed is True
+    assert wrapper.commit_ack_lost is True
+    with pytest.raises(probe.ProbeError, match="unusable"):
+        wrapper.rollback()
+    with pytest.raises(probe.ProbeError, match="unusable"):
+        wrapper.cursor()
+    wrapper.close()
+    assert fake.rolled_back is False
+
+
+def test_require_migrate_plan_fails_closed_when_the_plan_is_not_executable() -> None:
+    from packages.common.compressed_chunk_cold_probe.catalog import (
+        require_migrate_plan,
+        synthetic_complete_group,
+    )
+
+    plan = require_migrate_plan(synthetic_complete_group(), target="nhms_cold")
+    assert plan.kind == "migrate"
+    assert plan.shell_move_sql
+    assert "SET TABLESPACE" in plan.shell_move_sql[0]
+    assert '"nhms_cold"' in plan.shell_move_sql[0]
+    with pytest.raises(probe.ProbeError, match="required migrate plan"):
+        require_migrate_plan(synthetic_complete_group(tablespace="nhms_cold"), target="nhms_cold")
+
+
+def test_all_passed_rejects_clean_commit_relabelled_as_lost_ack() -> None:
+    report = _required_row_report()
+    failures = dict(report["failures"])  # type: ignore[arg-type]
+    lost = dict(failures["lost_commit_ack"])  # type: ignore[arg-type]
+    lost["commit_ack_lost"] = False
+    lost["error"] = None
+    failures["lost_commit_ack"] = lost
+    report["failures"] = failures
+    assert probe._all_passed(report) is False
+    lost["commit_ack_lost"] = True
+    lost["error"] = {"error_type": "CommitAckLost", "error": "commit acknowledgement lost after server commit"}
+    failures["lost_commit_ack"] = lost
+    report["failures"] = failures
+    assert probe._all_passed(report) is True
+
+
+def test_all_passed_rejects_lost_ack_without_commit_ack_lost_error() -> None:
+    report = _required_row_report()
+    failures = dict(report["failures"])  # type: ignore[arg-type]
+    lost = dict(failures["lost_commit_ack"])  # type: ignore[arg-type]
+    lost["error"] = {"error_type": "OperationalError", "error": "server closed the connection unexpectedly"}
+    failures["lost_commit_ack"] = lost
+    report["failures"] = failures
+    assert probe._all_passed(report) is False
+
+
+def test_all_passed_rejects_select_one_and_wrong_fault_bindings() -> None:
+    report = _required_row_report()
+    failures = dict(report["failures"])  # type: ignore[arg-type]
+    missing = dict(failures["missing_target"])  # type: ignore[arg-type]
+    missing["sql"] = "SELECT 1"
+    missing["exec"] = {"ok": False, "error_type": "UndefinedObject", "error": "does not exist", "sql": "SELECT 1"}
+    failures["missing_target"] = missing
+    report["failures"] = failures
+    assert probe._all_passed(report) is False
+
+    report = _required_row_report()
+    failures = dict(report["failures"])  # type: ignore[arg-type]
+    permission = dict(failures["permission"])  # type: ignore[arg-type]
+    permission["target"] = "nhms_cold_missing"
+    permission["sql"] = 'ALTER TABLE x SET TABLESPACE "nhms_cold_missing"'
+    failures["permission"] = permission
+    report["failures"] = failures
+    assert probe._all_passed(report) is False
+
+    report = _required_row_report()
+    failures = dict(report["failures"])  # type: ignore[arg-type]
+    full = dict(failures["full_target"])  # type: ignore[arg-type]
+    full["genuine_enospc"] = True
+    full["error_type"] = "DiskFull"
+    full["error"] = "No space left on device"
+    full["sql"] = "SELECT 1"
+    full["move"] = {"ok": True, "sql": "SELECT 1"}
+    failures["full_target"] = full
+    report["failures"] = failures
+    assert probe._all_passed(report) is False
+    report = _required_row_report()
+    assert probe._all_passed(report) is True
+
+
+def test_all_passed_rejects_missing_no_index_group_and_none_attach() -> None:
+    report = _required_row_report()
+    boundaries = dict(report["boundaries"])  # type: ignore[arg-type]
+    boundaries["no_index_group"] = None
+    report["boundaries"] = boundaries
+    assert probe._all_passed(report) is False
+
+    report = _required_row_report()
+    boundaries = dict(report["boundaries"])  # type: ignore[arg-type]
+    boundaries["attach_tablespace"] = None
+    report["boundaries"] = boundaries
+    assert probe._all_passed(report) is False
+
+
+def _with_after_decompress(
+    report: dict[str, object],
+    path: tuple[str, ...],
+    *,
+    members: list[dict[str, object]],
+    proof: dict[str, object] | None,
+) -> dict[str, object]:
+    current: dict[str, object] = report
+    copies: list[tuple[dict[str, object], str, dict[str, object]]] = []
+    for key in path:
+        child = dict(current[key])  # type: ignore[arg-type]
+        copies.append((current, key, child))
+        current = child
+    if proof is None:
+        current.pop("after_decompress_proof", None)
+        current["phases"] = {}
+    else:
+        current["phases"] = {"after_decompress": {"members": members}}
+        current["after_decompress_proof"] = proof
+    for parent, key, child in reversed(copies):
+        parent[key] = child
+    return report
+
+
+def test_all_passed_rejects_mixed_or_hot_after_decompress_and_inverse_cold_classifier() -> None:
+    mixed_proof = {
+        "target": "nhms_cold",
+        "all_requested_target": False,
+        "pg_default_bytes": 8192,
+        "member_count": 2,
+    }
+    report = _with_after_decompress(
+        _required_row_report(),
+        ("candidates", "shell_first_rollback"),
+        members=_MIXED_EXPANDED_MEMBERS,
+        proof=mixed_proof,
+    )
+    assert probe._all_passed(report) is False
+    report = _with_after_decompress(
+        _required_row_report(),
+        ("lifecycle", "committed_move"),
+        members=_HOT_EXPANDED_MEMBERS,
+        proof={**mixed_proof, "pg_default_bytes": 73728},
+    )
+    assert probe._all_passed(report) is False
+    report = _with_after_decompress(
+        _required_row_report(),
+        ("lifecycle", "move_back"),
+        members=_COLD_EXPANDED_MEMBERS,
+        proof={"target": "nhms_cold", "all_requested_target": True, "pg_default_bytes": 0, "member_count": 3},
+    )
+    assert probe._all_passed(report) is False
+    report = _with_after_decompress(
+        _required_row_report(),
+        ("candidates", "shell_first_rollback"),
+        members=_MIXED_EXPANDED_MEMBERS,
+        proof=None,
+    )
+    assert probe._all_passed(report) is False
+    report = _with_after_decompress(
+        _required_row_report(),
+        ("candidates", "shell_first_rollback"),
+        members=_MIXED_EXPANDED_MEMBERS,
+        proof={"target": "nhms_cold", "all_requested_target": True, "pg_default_bytes": 0, "member_count": 2},
+    )
+    assert probe._all_passed(report) is False
 
 
 def test_catalog_path_preflight_refuses_wrong_expected_path() -> None:
@@ -732,7 +969,17 @@ def test_isolated_cluster_probe_is_opt_in() -> None:
     assert document["failures"]["lost_commit_ack"]["reconciliation"] == "complete_target"
     assert document["failures"]["lost_commit_ack"]["replayed"] is False
     assert document["failures"]["lost_commit_ack"]["outcome"] == "committed_ack_lost"
+    assert document["failures"]["lost_commit_ack"]["commit_ack_lost"] is True
+    assert document["failures"]["lost_commit_ack"]["error"]["error_type"] == "CommitAckLost"
+    assert document["failures"]["missing_target"]["target"] == "nhms_cold_missing"
+    assert document["failures"]["missing_target"]["exec"]["error_type"] == "UndefinedObject"
+    assert document["failures"]["permission"]["target"] == "nhms_cold"
+    assert document["failures"]["permission"]["error_type"] == "InsufficientPrivilege"
     assert document["failures"]["full_target"]["genuine_enospc"] is True
+    assert document["failures"]["full_target"]["move"]["error_type"] == "DiskFull"
+    assert "SELECT 1" not in str(document["failures"]["full_target"].get("sql") or "")
+    assert document["boundaries"]["attach_tablespace"] == []
+    assert document["boundaries"]["no_index_group"]["members"]
     assert "injected_missing_relation_error" in document["failures"]
     assert document["failures"]["selection_disappearance"]["stale_blocked"] is True
     assert document["failures"]["selection_disappearance"]["sacrificed_group_gone"] is True

@@ -30,6 +30,7 @@ from packages.common.compressed_chunk_cold_probe.catalog import (
     members_payload,
     parity,
     reload_chunk,
+    require_migrate_plan,
     retained_source_bytes,
     sibling_identity,
     snapshot_group,
@@ -54,6 +55,12 @@ from packages.common.compressed_chunk_cold_probe.cluster import (
     validate_catalog_path_preflight,
     wait_for_port,
     wait_for_sql,
+)
+from packages.common.compressed_chunk_cold_probe.fixture_parity import (
+    PROBE_FIXTURE_PARITY_COLUMNS,
+    fixture_canonical_parity_token,
+    fixture_window_parity_from_rows,
+    fixture_window_parity_sql,
 )
 from packages.common.compressed_chunk_cold_probe.report import (
     _all_passed,
@@ -107,6 +114,7 @@ from packages.common.compressed_chunk_cold_probe.types import (
     WAL_LIMITATION,
     WATERMARK,
     WINDOW_STARTS,
+    CommitAckLost,
     OwnedResources,
     ProbeConfig,
     ProbeError,
@@ -142,7 +150,6 @@ from packages.common.compressed_chunk_cold_residency import (
     resolve_residency_group,
     snapshot_image_identity,
     validate_catalog_path,
-    window_parity_sql,
 )
 
 __all__ = [
@@ -155,6 +162,7 @@ __all__ = [
     "CONTAINER_FULL",
     "CONTAINER_PGDATA",
     "CUTOFF",
+    "CommitAckLost",
     "CatalogChunk",
     "CatalogRelation",
     "ColdResidencyError",
@@ -170,6 +178,7 @@ __all__ = [
     "OwnedResources",
     "PINNED_IMAGE_ID",
     "PINNED_IMAGE_REF",
+    "PROBE_FIXTURE_PARITY_COLUMNS",
     "PROBE_NAME_PREFIX",
     "ProbeConfig",
     "ProbeError",
@@ -217,6 +226,9 @@ __all__ = [
     "docker_run_argv",
     "evaluate_capacity_preflight",
     "execute",
+    "fixture_canonical_parity_token",
+    "fixture_window_parity_from_rows",
+    "fixture_window_parity_sql",
     "fresh_observer",
     "inspect_live_image",
     "json_ready",
@@ -236,6 +248,7 @@ __all__ = [
     "quote_literal",
     "refuse_live_identity",
     "reload_chunk",
+    "require_migrate_plan",
     "resolve_residency_group",
     "restore_source_compressed",
     "retained_source_bytes",
@@ -260,7 +273,6 @@ __all__ = [
     "wait_for_port",
     "wait_for_sql",
     "wal_lsn",
-    "window_parity_sql",
     "write_report",
 ]
 

@@ -120,13 +120,16 @@ value_sum=138.0
 checksum=db2b7ba9b432238a64cc1b09a7d55f53
 ```
 
-Parity hashes all business columns (`id`, canonical UTC `valid_time`, `value`,
-and NULL-distinct `payload`) inside the origin chunk's half-open range. A
-sentinel changed one target-window value without changing the aggregate count,
-then made a compensating change in a sibling chunk. The target checksum changed
-from `44e88875287a81d598d28044dc7e605e` to
-`001197a9aad128bdc6dd20053404c238` and the sibling change could not hide it;
-restoration returned the original checksum.
+The disposable probe fixture has exactly four business columns (`id`, canonical
+UTC `valid_time`, `value`, and NULL-distinct `payload`). #1892 hashes every
+fixture column inside the origin chunk's half-open range; that helper is
+probe-support only and is not a production-column contract. #1893 must still
+cover every live business column on both production hypertables after deriving
+that inventory from the production schema. A sentinel changed one target-window
+value without changing the aggregate count, then made a compensating change in a
+sibling chunk. The target checksum changed from
+`44e88875287a81d598d28044dc7e605e` to `001197a9aad128bdc6dd20053404c238` and
+the sibling change could not hide it; restoration returned the original checksum.
 
 For the accepted/rollback chunk, the compressed source group was:
 
@@ -279,7 +282,7 @@ window parity.
 | statement timeout | `QueryCanceled` | `complete_source`, original sibling |
 | lock conflict | `LockNotAvailable` | zero move, `complete_source` |
 | backend termination before commit | connection closed after mutation began | `complete_source`, original sibling |
-| lost commit acknowledgement | commit completed, client result treated unknown | fresh `complete_target`, new sibling, parity equal, `replayed=false` |
+| lost commit acknowledgement | underlying commit completed; moving-connection commit API returned `CommitAckLost` and the connection became unusable | fresh `complete_target`, new sibling, parity equal, `replayed=false`; classification is from the fresh observer, never a clean-commit relabel |
 | insufficient role | `InsufficientPrivilege: must be owner ...` | zero move, `complete_source` |
 | target ENOSPC | genuine `DiskFull` | rollback `complete_source` |
 | catalog/path mismatch | deliberately wrong expected path | refused before SQL; OIDs/residency/sibling/parity unchanged |
