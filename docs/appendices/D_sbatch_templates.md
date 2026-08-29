@@ -7,6 +7,13 @@
 权威映射以 `services/slurm_gateway/config.py` 的
 `DEFAULT_JOB_TYPE_TEMPLATES` 为准。
 
+四个生产 array 模板（`produce_forcing_array`、`run_shud_forecast_array`、
+`parse_output_array`、`save_state_snapshot_array`）把 `%A_%a` stdout/stderr
+写到 cohort-neutral 目录 `{{workspace_dir}}/{{cycle_id}}/array_logs/<index-stem>/`。
+该目录由 immutable manifest-index 文件名派生，gateway 在调用 `sbatch` 前安全创建；
+路径不含任何 member `run_id`。历史 `workspace/<run_id>/logs/%A_%a` 布局只作为只读回退。
+非 array 模板与任务产物路径不变。
+
 ## 1. Forecast array 模板
 
 ```bash
@@ -18,8 +25,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
-#SBATCH --output=/work/nhms/slurm_logs/%x_%A_%a.out
-#SBATCH --error=/work/nhms/slurm_logs/%x_%A_%a.err
+#SBATCH --output={{workspace_dir}}/{{cycle_id}}/array_logs/<index-stem>/%A_%a.out
+#SBATCH --error={{workspace_dir}}/{{cycle_id}}/array_logs/<index-stem>/%A_%a.err
 
 set -euo pipefail
 
@@ -47,8 +54,8 @@ nhms-shud-runtime execute --manifest-index "$MANIFEST_INDEX" --task-id "$TASK_ID
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
-#SBATCH --output=/work/nhms/slurm_logs/%x_%A_%a.out
-#SBATCH --error=/work/nhms/slurm_logs/%x_%A_%a.err
+#SBATCH --output={{workspace_dir}}/{{cycle_id}}/array_logs/<index-stem>/%A_%a.out
+#SBATCH --error={{workspace_dir}}/{{cycle_id}}/array_logs/<index-stem>/%A_%a.err
 
 set -euo pipefail
 
@@ -61,8 +68,9 @@ nhms-parse shud-output --manifest-index "$MANIFEST_INDEX" --task-id "$TASK_ID"
 ## 3. 提交依赖示例
 
 ```text
-convert_canonical           -> infra/sbatch/convert_canonical.sbatch
-produce_forcing_array       -> infra/sbatch/produce_forcing_array.sbatch
-run_shud_forecast_array     -> infra/sbatch/run_shud_forecast_array.sbatch
-parse_output_array          -> infra/sbatch/parse_output_array.sbatch
+convert_canonical             -> infra/sbatch/convert_canonical.sbatch
+produce_forcing_array         -> infra/sbatch/produce_forcing_array.sbatch
+run_shud_forecast_array       -> infra/sbatch/run_shud_forecast_array.sbatch
+parse_output_array            -> infra/sbatch/parse_output_array.sbatch
+save_state_snapshot_array     -> infra/sbatch/save_state_snapshot_array.sbatch
 ```

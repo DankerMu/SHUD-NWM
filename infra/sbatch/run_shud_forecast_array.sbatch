@@ -10,8 +10,8 @@
 #SBATCH --cpus-per-task={{cpus_per_task}}
 #SBATCH --mem={{memory_gb}}G
 #SBATCH --time={{walltime}}
-#SBATCH --output={{workspace_dir}}/{{run_id}}/logs/%A_%a.out
-#SBATCH --error={{workspace_dir}}/{{run_id}}/logs/%A_%a.err
+#SBATCH --output={{array_log_dir}}/%A_%a.out
+#SBATCH --error={{array_log_dir}}/%A_%a.err
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ set -euo pipefail
 {% if target_python_runtime | default('') %}
 cd "$NHMS_TARGET_PYTHON_SOURCE_ROOT"
 {% endif %}
-mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
+mkdir -p "{{array_log_dir}}"
 VALIDATION_EXPECTED_OUTCOME="$({% if target_python_runtime | default('') %}"$NHMS_TARGET_PYTHON_RUNTIME"{% else %}python{% endif %} - <<'PY'
 import os
 

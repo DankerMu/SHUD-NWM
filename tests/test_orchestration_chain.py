@@ -1604,6 +1604,57 @@ def test_unbound_receipt_without_attempt_identity_is_never_trusted(tmp_path: Pat
     assert aggregation.task_results[0].error_code == "NODE_FAILURE"
 
 
+@pytest.mark.parametrize("raw_state", ["", "   ", "\t", "\n"])
+def test_array_task_status_maps_empty_or_whitespace_state_to_failed(raw_state: str) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    assert chain_array_accounting.array_task_status(raw_state) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("raw_state", "expected"),
+    [
+        ("COMPLETED", "succeeded"),
+        ("COMPLETED+", "succeeded"),
+        ("CANCELLED", "cancelled"),
+        ("CANCELLED by 12", "cancelled"),
+        ("FAILED", "failed"),
+        ("TIMEOUT", "failed"),
+        ("NODE_FAIL", "failed"),
+        ("OUT_OF_MEMORY", "failed"),
+    ],
+)
+def test_array_task_status_preserves_existing_nonempty_mappings(raw_state: str, expected: str) -> None:
+    from services.orchestrator import chain_array_accounting
+
+    assert chain_array_accounting.array_task_status(raw_state) == expected
+
+
+def test_empty_sacct_state_produces_failed_task_without_index_error() -> None:
+    from services.orchestrator import chain_array_accounting
+
+    aggregation = chain_array_accounting.parse_sacct_array_results("4000_0||1:0", "4000")
+
+    assert aggregation.total == 1
+    assert aggregation.failed == 1
+    assert aggregation.task_results[0].status == "failed"
+    assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
+def test_gateway_payload_missing_status_and_state_produces_failed_task() -> None:
+    from services.orchestrator import chain_array_accounting
+
+    aggregation = chain_array_accounting.coerce_array_aggregation(
+        [{"task_id": 0, "exit_code": 1}],
+        "4000",
+    )
+
+    assert aggregation.total == 1
+    assert aggregation.failed == 1
+    assert aggregation.task_results[0].status == "failed"
+    assert aggregation.task_results[0].error_code == "NODE_FAILURE"
+
+
 class _DbFreeRetryGateService(RetryService):
     """RetryService without a SQL store: the DB-free forecast-cohort gate shape."""
 

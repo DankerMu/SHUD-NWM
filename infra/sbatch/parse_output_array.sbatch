@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task={{cpus_per_task}}
 #SBATCH --mem={{memory_gb}}G
 #SBATCH --time={{walltime}}
-#SBATCH --output={{workspace_dir}}/{{run_id}}/logs/%A_%a.out
-#SBATCH --error={{workspace_dir}}/{{run_id}}/logs/%A_%a.err
+#SBATCH --output={{array_log_dir}}/%A_%a.out
+#SBATCH --error={{array_log_dir}}/%A_%a.err
 
 set -euo pipefail
 
@@ -20,5 +20,5 @@ set -euo pipefail
 {{ export_line }}
 {% endfor %}
 
-mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"
+mkdir -p "{{array_log_dir}}"
 nhms-parse shud-output --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"

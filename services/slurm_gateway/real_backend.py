@@ -12,14 +12,14 @@ import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
 from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
-from packages.common.manifest_index import serialize_manifest_index
+from packages.common.manifest_index import manifest_task_identities, serialize_manifest_index
 from packages.common.python_runtime import (
     validated_target_python_runtime,
     validated_target_python_source_root,
@@ -34,6 +34,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,
     list_directory_no_follow,
+    list_directory_no_follow_limited,
     read_bytes_limited_no_follow,
     stat_no_follow,
     write_bytes_no_follow_exclusive,
@@ -74,6 +75,7 @@ from services.slurm_gateway.models import (
 )
 from services.slurm_gateway.resource_validation import (
     ResourceProfileValidationError,
+    validate_directive_path,
     validate_resource_profile,
     validate_sbatch_directive_context,
 )
@@ -95,6 +97,11 @@ MAX_SLURM_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
+MAX_ARRAY_TASK_LOGS = 200
+MAX_ARRAY_LOG_DIR_ENTRIES = MAX_ARRAY_TASK_LOGS * 2
+MAX_DISCOVERY_ENTRIES = 256
+ARRAY_LOGS_DIRNAME = "array_logs"
+MANIFESTS_DIRNAME = "manifests"
 _ACTIVE_BINDING_BOOTSTRAP_ENV_KEYS = frozenset({"PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 _ACTIVE_ROLLBACK_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 LOG_TRUNCATION_MARKER = "\n\n[truncated: log exceeded 10485760 bytes]\n"
@@ -122,6 +129,23 @@ ARRAY_CAPABLE_JOB_TYPES = {
     "run_shud_forecast_array",
     "parse_output_array",
 }
+
+PRODUCTION_ARRAY_TEMPLATE_NAMES = frozenset(
+    {
+        "produce_forcing_array.sbatch",
+        "run_shud_forecast_array.sbatch",
+        "parse_output_array.sbatch",
+        "save_state_snapshot_array.sbatch",
+    }
+)
+
+
+class _ArrayLogBinding(NamedTuple):
+    expected: Path | None
+    explicit: bool
+    identity_lane: Path | None
+    allow_identities: bool
+
 
 SLURM_STATE_MAP = {
     "PENDING": SlurmJobStatus.SUBMITTED,
@@ -326,6 +350,8 @@ class RealSlurmGateway(SlurmGateway):
         effective_max_concurrent = min(max_concurrent, task_count)
         profile["max_concurrent"] = effective_max_concurrent
         manifest_index_path = self.write_manifest_index(cycle_id, stage_name, task_list, workspace_dir=workspace_root)
+        array_log_dir = self._array_log_dir(workspace_root, cycle_id, manifest_index_path)
+        self._ensure_array_log_directory(array_log_dir, workspace_root)
         render_manifest = {
             **base_manifest,
             "job_type": job_type,
@@ -334,6 +360,7 @@ class RealSlurmGateway(SlurmGateway):
             "run_id": first_task.get("run_id", base_manifest.get("run_id", f"{cycle_id}_{stage_name}")),
             "model_id": model_id,
             "manifest_index_path": str(manifest_index_path),
+            "array_log_dir": str(array_log_dir),
             "workspace_dir": str(workspace_root),
             "slurm_env": slurm_env,
         }
@@ -366,6 +393,7 @@ class RealSlurmGateway(SlurmGateway):
                 **render_manifest,
                 "array_task_count": task_count,
                 "manifest_index_path": str(manifest_index_path),
+                "array_log_dir": str(array_log_dir),
                 "max_concurrent": effective_max_concurrent,
             },
         )
@@ -754,9 +782,36 @@ class RealSlurmGateway(SlurmGateway):
                 exc.details,
             ) from exc
         template_path = self._resolve_template_path(job_type)
+        workspace_root = self._resolve_submission_workspace_dir(manifest_dict.get("workspace_dir"))
         context = {**manifest_dict, **resource_profile}
         context["manifest"] = manifest_dict
         context["manifest_index_path"] = manifest_index_path or str(manifest_dict.get("manifest_index_path") or "")
+        if template_path.name in PRODUCTION_ARRAY_TEMPLATE_NAMES:
+            array_log_dir = self._bound_production_array_log_dir(
+                workspace_root,
+                manifest_dict,
+                context["manifest_index_path"],
+            )
+        else:
+            array_log_dir = str(manifest_dict.get("array_log_dir") or "").strip()
+            if not array_log_dir:
+                derived_log_dir = self._array_log_dir_from_manifest(
+                    workspace_root,
+                    manifest_dict,
+                    context["manifest_index_path"],
+                )
+                array_log_dir = str(derived_log_dir) if derived_log_dir is not None else ""
+        if array_log_dir:
+            try:
+                validate_directive_path(array_log_dir, "manifest.array_log_dir")
+            except ResourceProfileValidationError as exc:
+                raise ConfigurationError(
+                    "Resolved resource profile contains invalid Slurm directive values.",
+                    exc.details,
+                ) from exc
+            context["array_log_dir"] = array_log_dir
+            context["manifest"]["array_log_dir"] = array_log_dir
+            manifest_dict["array_log_dir"] = array_log_dir
         context["slurm_env"] = slurm_env
         context["slurm_env_exports"] = [
             f"export {key}={shlex.quote(value)}" for key, value in sorted(slurm_env.items())
@@ -1480,11 +1535,19 @@ class RealSlurmGateway(SlurmGateway):
 
     def _resolve_log_path(self, job_id: str, run_id: str, record: SlurmJobRecord | None) -> Path | None:
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
-        candidates = [
-            workspace_dir / run_id / "logs" / f"{job_id}.out",
-            workspace_dir / "logs" / f"{job_id}.out",
-        ]
+        candidates: list[Path] = []
+        if record is not None:
+            stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
+            if stored_log_dir is not None:
+                candidates.append(stored_log_dir / f"{job_id}.out")
+        candidates.extend(
+            [
+                workspace_dir / run_id / "logs" / f"{job_id}.out",
+                workspace_dir / "logs" / f"{job_id}.out",
+            ]
+        )
         if record is None:
+            candidates.extend(self._discover_neutral_array_logs(job_id, "out", array_tasks=False))
             candidates.extend(self._discover_workspace_logs(job_id, "out"))
         if record is not None:
             manifest_run_id = record.manifest.get("run_id")
@@ -1493,6 +1556,10 @@ class RealSlurmGateway(SlurmGateway):
         if "_" in job_id:
             master_job_id, task_id = job_id.rsplit("_", maxsplit=1)
             if task_id.isdigit():
+                if record is not None:
+                    stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
+                    if stored_log_dir is not None:
+                        candidates.append(stored_log_dir / f"{master_job_id}_{task_id}.out")
                 candidates.extend(
                     [
                         workspace_dir / run_id / "logs" / f"{master_job_id}_{task_id}.out",
@@ -1513,7 +1580,27 @@ class RealSlurmGateway(SlurmGateway):
         if "_" in job_id:
             return None
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
-        log_dirs = [workspace_dir / run_id / "logs", workspace_dir / "logs"]
+        log_dirs: list[Path] = []
+        identities: dict[int, tuple[str, str]] = {}
+        identity_lane: Path | None = None
+        if record is not None:
+            binding = self._array_log_binding(
+                workspace_dir,
+                record.manifest,
+                str(record.manifest.get("manifest_index_path") or ""),
+            )
+            stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
+            if stored_log_dir is not None:
+                log_dirs.append(stored_log_dir)
+            if binding.allow_identities:
+                identities = self._identities_from_record(record, workspace_dir)
+                identity_lane = binding.identity_lane
+        else:
+            discovered_dirs, identities = self._discover_neutral_array_submission(job_id, workspace_dir)
+            log_dirs.extend(discovered_dirs)
+            if len(discovered_dirs) == 1:
+                identity_lane = discovered_dirs[0]
+        log_dirs.extend([workspace_dir / run_id / "logs", workspace_dir / "logs"])
         if record is None:
             discovered_dirs = {
                 candidate.parent
@@ -1526,9 +1613,17 @@ class RealSlurmGateway(SlurmGateway):
             if manifest_run_id and str(manifest_run_id) != run_id:
                 log_dirs.insert(0, workspace_dir / str(manifest_run_id) / "logs")
 
-        task_ids: set[int] = set()
+        seen_dirs: set[Path] = set()
+        unique_log_dirs: list[Path] = []
         for log_dir in log_dirs:
-            for name in self._list_log_dir(log_dir):
+            if log_dir in seen_dirs:
+                continue
+            seen_dirs.add(log_dir)
+            unique_log_dirs.append(log_dir)
+
+        task_ids: set[int] = set()
+        for log_dir in unique_log_dirs:
+            for name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
                 match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.(?:out|err)", name)
                 if match:
                     task_ids.add(int(match.group(1)))
@@ -1536,21 +1631,31 @@ class RealSlurmGateway(SlurmGateway):
         if not task_ids:
             return None
 
-        max_task_logs = 200
         entries: list[dict[str, Any]] = []
-        for task_id in sorted(task_ids)[:max_task_logs]:
-            stdout, stdout_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "out")
-            stderr, stderr_truncated = self._read_first_existing_task_log(log_dirs, job_id, task_id, "err")
-            entries.append(
-                {
-                    "task_id": task_id,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "truncated": stdout_truncated or stderr_truncated,
-                    "missing_stdout": not stdout and not stdout_truncated,
-                    "missing_stderr": not stderr and not stderr_truncated,
-                }
+        for task_id in sorted(task_ids)[:MAX_ARRAY_TASK_LOGS]:
+            stdout, stdout_truncated, stdout_dir = self._read_first_existing_task_log(
+                unique_log_dirs, job_id, task_id, "out"
             )
+            stderr, stderr_truncated, stderr_dir = self._read_first_existing_task_log(
+                unique_log_dirs, job_id, task_id, "err"
+            )
+            entry: dict[str, Any] = {
+                "task_id": task_id,
+                "stdout": stdout,
+                "stderr": stderr,
+                "truncated": stdout_truncated or stderr_truncated,
+                "missing_stdout": not stdout and not stdout_truncated,
+                "missing_stderr": not stderr and not stderr_truncated,
+                "identity_complete": False,
+            }
+            identity = identities.get(task_id)
+            if identity is not None and self._identity_matches_content_lane(
+                identity_lane, stdout_dir, stderr_dir
+            ):
+                entry["model_id"] = identity[0]
+                entry["run_id"] = identity[1]
+                entry["identity_complete"] = True
+            entries.append(entry)
         return entries
 
     def _read_first_existing_task_log(
@@ -1559,13 +1664,25 @@ class RealSlurmGateway(SlurmGateway):
         job_id: str,
         task_id: int,
         suffix: str,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, Path | None]:
         filename = f"{job_id}_{task_id}.{suffix}"
         for log_dir in log_dirs:
             candidate = log_dir / filename
             if self._log_path_exists(candidate):
-                return self._read_log_file(candidate)
-        return "", False
+                content, truncated = self._read_log_file(candidate)
+                return content, truncated, log_dir
+        return "", False, None
+
+    @staticmethod
+    def _identity_matches_content_lane(
+        identity_lane: Path | None,
+        stdout_dir: Path | None,
+        stderr_dir: Path | None,
+    ) -> bool:
+        if identity_lane is None:
+            return True
+        present = [log_dir for log_dir in (stdout_dir, stderr_dir) if log_dir is not None]
+        return bool(present) and all(log_dir == identity_lane for log_dir in present)
 
     def _parse_exit_code(self, raw_exit_code: str) -> int | None:
         if not raw_exit_code:
@@ -1763,10 +1880,16 @@ class RealSlurmGateway(SlurmGateway):
             return False
         return True
 
-    def _list_log_dir(self, log_dir: Path) -> list[str]:
+    def _list_log_dir(self, log_dir: Path, *, max_entries: int | None = None) -> list[str]:
         workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
         try:
-            return list_directory_no_follow(log_dir, containment_root=workspace_root)
+            if max_entries is None:
+                return list_directory_no_follow(log_dir, containment_root=workspace_root)
+            return list_directory_no_follow_limited(
+                log_dir,
+                max_entries=max_entries,
+                containment_root=workspace_root,
+            )[:max_entries]
         except (FileNotFoundError, NotADirectoryError, OSError, SafeFilesystemError):
             return []
 
@@ -1778,12 +1901,194 @@ class RealSlurmGateway(SlurmGateway):
             else re.compile(rf"^{re.escape(job_id)}\.{re.escape(suffix)}$")
         )
         matches: list[Path] = []
-        for name in self._list_log_dir(workspace_root):
+        for name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
             run_log_dir = workspace_root / name / "logs"
-            for log_name in self._list_log_dir(run_log_dir):
+            for log_name in self._list_log_dir(run_log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
                 if pattern.fullmatch(log_name):
                     matches.append(run_log_dir / log_name)
         return sorted(matches)
+
+    def _array_log_dir(self, workspace_root: Path, cycle_id: str, manifest_index_path: Path | str) -> Path:
+        index_stem = Path(str(manifest_index_path)).stem
+        if not index_stem or not SAFE_IDENTIFIER_RE.fullmatch(index_stem):
+            raise SlurmValidationError(
+                "Manifest index filename is not a safe array log directory component.",
+                {"manifest_index_path": str(manifest_index_path)},
+            )
+        log_dir = _lexical_absolute_path(workspace_root / cycle_id / ARRAY_LOGS_DIRNAME / index_stem)
+        self._ensure_lexical_within_workspace(log_dir, workspace_dir=workspace_root)
+        return log_dir
+
+    def _array_log_binding(
+        self,
+        workspace_root: Path,
+        manifest: Mapping[str, Any],
+        manifest_index_path: str,
+    ) -> _ArrayLogBinding:
+        cycle_id = str(manifest.get("cycle_id") or "").strip()
+        index_path = str(manifest_index_path or "").strip()
+        stored = str(manifest.get("array_log_dir") or "").strip()
+        expected: Path | None = None
+        if cycle_id and index_path:
+            try:
+                expected = self._array_log_dir(workspace_root, cycle_id, index_path)
+            except SlurmValidationError:
+                expected = None
+        if not stored:
+            return _ArrayLogBinding(
+                expected=expected,
+                explicit=False,
+                identity_lane=None,
+                allow_identities=expected is not None,
+            )
+        stored_path = _lexical_absolute_path(stored)
+        try:
+            self._ensure_lexical_within_workspace(stored_path, workspace_dir=workspace_root)
+            stored_in_workspace = True
+        except SlurmValidationError:
+            stored_in_workspace = False
+        if not stored_in_workspace or expected is None or stored_path != expected:
+            return _ArrayLogBinding(
+                expected=expected,
+                explicit=True,
+                identity_lane=None,
+                allow_identities=False,
+            )
+        return _ArrayLogBinding(
+            expected=expected,
+            explicit=True,
+            identity_lane=expected,
+            allow_identities=True,
+        )
+
+    def _bound_production_array_log_dir(
+        self,
+        workspace_root: Path,
+        manifest: Mapping[str, Any],
+        manifest_index_path: str,
+    ) -> str:
+        binding = self._array_log_binding(workspace_root, manifest, manifest_index_path)
+        stored = str(manifest.get("array_log_dir") or "").strip()
+        if binding.expected is None:
+            raise ManifestValidationError(
+                "Array template rendering requires a cohort-neutral array_log_dir bound to the manifest index.",
+                {"field": "manifest.array_log_dir"},
+            )
+        if stored and _lexical_absolute_path(stored) != binding.expected:
+            raise ManifestValidationError(
+                "Array template rendering requires a cohort-neutral array_log_dir bound to the manifest index.",
+                {"field": "manifest.array_log_dir"},
+            )
+        return str(binding.expected)
+
+    def _array_log_dir_from_manifest(
+        self,
+        workspace_root: Path,
+        manifest: Mapping[str, Any],
+        manifest_index_path: str,
+    ) -> Path | None:
+        binding = self._array_log_binding(workspace_root, manifest, manifest_index_path)
+        if binding.explicit:
+            return binding.identity_lane
+        return binding.expected
+
+    def _ensure_array_log_directory(self, log_dir: Path, workspace_root: Path) -> None:
+        try:
+            ensure_directory_no_follow(log_dir, containment_root=workspace_root)
+        except (OSError, SafeFilesystemError) as exc:
+            raise SlurmValidationError(
+                "Unable to create a safe array log directory.",
+                {"path": str(log_dir), "error": str(exc)},
+            ) from exc
+
+    def _stored_array_log_dir(self, record: SlurmJobRecord, workspace_root: Path) -> Path | None:
+        return self._array_log_dir_from_manifest(
+            workspace_root,
+            record.manifest,
+            str(record.manifest.get("manifest_index_path") or ""),
+        )
+
+    def _identities_from_record(
+        self,
+        record: SlurmJobRecord,
+        workspace_root: Path,
+    ) -> dict[int, tuple[str, str]]:
+        index_path = str(record.manifest.get("manifest_index_path") or "").strip()
+        return self._identities_from_index_path(index_path, workspace_root)
+
+    def _identities_from_index_path(
+        self,
+        index_path: str,
+        workspace_root: Path,
+    ) -> dict[int, tuple[str, str]]:
+        if not index_path:
+            return {}
+        path = _lexical_absolute_path(index_path)
+        try:
+            self._ensure_lexical_within_workspace(path, workspace_dir=workspace_root)
+        except SlurmValidationError:
+            return {}
+        try:
+            return manifest_task_identities(str(path))
+        except CommonManifestValidationError:
+            return {}
+        except (OSError, SafeFilesystemError, ValueError, TypeError, RecursionError):
+            return {}
+
+    def _ensure_lexical_within_workspace(self, path: Path, *, workspace_dir: Path) -> None:
+        workspace_root = _lexical_absolute_path(workspace_dir)
+        try:
+            path.relative_to(workspace_root)
+        except ValueError as exc:
+            raise SlurmValidationError(
+                "Resolved Slurm gateway path is outside the configured workspace directory.",
+                {"path": str(path), "workspace_dir": str(workspace_root)},
+            ) from exc
+
+    def _discover_neutral_array_logs(
+        self,
+        job_id: str,
+        suffix: str,
+        *,
+        array_tasks: bool,
+    ) -> list[Path]:
+        workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
+        pattern = (
+            re.compile(rf"^{re.escape(job_id)}_\d+\.{re.escape(suffix)}$")
+            if array_tasks
+            else re.compile(rf"^{re.escape(job_id)}\.{re.escape(suffix)}$")
+        )
+        matches: list[Path] = []
+        for cycle_name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
+            array_root = workspace_root / cycle_name / ARRAY_LOGS_DIRNAME
+            for submission_name in self._list_log_dir(array_root, max_entries=MAX_DISCOVERY_ENTRIES):
+                log_dir = array_root / submission_name
+                for log_name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+                    if pattern.fullmatch(log_name):
+                        matches.append(log_dir / log_name)
+        return sorted(matches)
+
+    def _discover_neutral_array_submission(
+        self,
+        job_id: str,
+        workspace_root: Path,
+    ) -> tuple[list[Path], dict[int, tuple[str, str]]]:
+        matches: list[Path] = []
+        for cycle_name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
+            array_root = workspace_root / cycle_name / ARRAY_LOGS_DIRNAME
+            for submission_name in self._list_log_dir(array_root, max_entries=MAX_DISCOVERY_ENTRIES):
+                log_dir = array_root / submission_name
+                for log_name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+                    if re.fullmatch(rf"{re.escape(job_id)}_\d+\.(?:out|err)", log_name):
+                        matches.append(log_dir)
+                        break
+        unique_dirs = sorted(set(matches))
+        if len(unique_dirs) != 1:
+            return unique_dirs, {}
+        log_dir = unique_dirs[0]
+        index_path = log_dir.parent.parent / MANIFESTS_DIRNAME / f"{log_dir.name}.json"
+        identities = self._identities_from_index_path(str(index_path), workspace_root)
+        return unique_dirs, identities
 
     def _resolve_submission_workspace_dir(self, workspace_dir: Path | str | None = None) -> Path:
         requested = str(workspace_dir or "").strip()
@@ -1847,6 +2152,15 @@ class RealSlurmGateway(SlurmGateway):
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
+
+
+def _lexical_absolute_path(path: Path | str) -> Path:
+    """Make a path absolute and collapse ``.``/``..`` without following any component."""
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    return Path(os.path.normpath(candidate))
 
 
 def _python_runtime_export_lines(
