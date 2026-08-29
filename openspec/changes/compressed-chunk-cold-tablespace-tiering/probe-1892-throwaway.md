@@ -48,11 +48,14 @@ Local gates:
 
 ```text
 uv run pytest -q tests/test_compressed_chunk_cold_residency.py \
-  tests/test_probe_compressed_chunk_cold_tablespace.py -m 'not integration'
-# 56 passed, 1 deselected
+  tests/test_probe_compressed_chunk_cold_tablespace.py \
+  tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py \
+  -m 'not integration'
+# 65 passed, 1 deselected
 
-uv run pytest -q tests/test_select_ci_tests.py
-# 397 passed
+uv run pytest -q tests/test_select_ci_tests.py \
+  tests/test_select_ci_tests_probe_cleanup.py
+# 398 passed
 
 uv run ruff check .
 # All checks passed!
@@ -64,17 +67,17 @@ openspec validate compressed-chunk-cold-tablespace-tiering \
 
 Node-27 CLI oracle ran from a fresh temporary GitHub clone at the exact
 post-review probe-code commit
-`4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70`. The clone used a detached
+`d66d91f52b69051f808eb823cc26bc94f14b7689`. The clone used a detached
 checkout, was clean before execution, and did not pull or modify the activity
 checkout at `/home/nwm/NWM`:
 
 ```text
-ROOT=/tmp/nhms-1892-frozen-4f47ac11ba076859
+ROOT=/tmp/nhms-1892-frozen-d66d91f5
 git clone --no-checkout https://github.com/DankerMu/SHUD-NWM.git "$ROOT/repo"
 git -C "$ROOT/repo" checkout --detach \
-  4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70
+  d66d91f52b69051f808eb823cc26bc94f14b7689
 test "$(git -C "$ROOT/repo" rev-parse HEAD)" = \
-  4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70
+  d66d91f52b69051f808eb823cc26bc94f14b7689
 PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python \
   "$ROOT/repo/scripts/probe_compressed_chunk_cold_tablespace.py" \
   --mode isolated-cluster \
@@ -85,17 +88,22 @@ PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python \
 # exit 0; status=passed; failures=15
 ```
 
-Node-27 pytest marker oracle loaded the frozen repository's real
-`tests/conftest.py`; the dummy URL satisfies opt-in collection but is never
-connected because this test creates its own cluster:
+Node-27 first ran the frozen cleanup-ownership suite without Docker mutation,
+then loaded the frozen repository's real `tests/conftest.py` for the isolated
+marker. The dummy URL satisfies opt-in collection but is never connected because
+the marker creates its own cluster:
 
 ```text
+PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python -m pytest -q \
+  "$ROOT/repo/tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py"
+# 9 passed in 0.15s
+
 NHMS_RUN_INTEGRATION=1 \
 NHMS_INTEGRATION_DATABASE_URL=postgresql://unused:unused@127.0.0.1:1/postgres \
 PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python -m pytest -q \
   "$ROOT/repo/tests/test_probe_compressed_chunk_cold_tablespace.py" \
   -m timescaledb_210
-# 1 passed, 25 deselected in 17.13s
+# 1 passed, 25 deselected in 17.22s
 ```
 
 The two complete downloaded evidence copies passed the checked-in
@@ -104,8 +112,8 @@ root was removed:
 
 | Receipt | SHA-256 | Bytes | Result |
 |---|---:|---:|---|
-| frozen CLI | `e8c6a581983dd2e56c28f75a7b9c5fdca909f0b618e286bbb9fbc3481648673e` | 286968 | `passed` |
-| frozen pytest marker | `2dde9799107b491b27eed67e68b8bef1227749b06e39c67d6dc44f5f4c8a846f` | 286972 | `passed` |
+| frozen CLI | `a33b5be6f6f5f1906036bc6ba1a2a532c773a4e5be145e7c251cd405bf4600ac` | 287002 | `passed` |
+| frozen pytest marker | `54afcb38871cc4b9ec75a70ef8b199cfd66bac03db1e4139c9dc27ab2715e6fe` | 287001 | `passed` |
 
 These full JSON files are local workflow evidence, not committed long-term
 fixtures. This log retains every decision-bearing value and the checked-in
@@ -139,9 +147,9 @@ For the accepted/rollback chunk, the compressed source group was:
 
 | Member class | Representative identity | Source bytes / residency |
 |---|---|---:|
-| origin heap | `_hyper_1_6_chunk` OID 20864 | 0, `pg_default` |
-| origin TOAST + index | OIDs 20867 / 20868 | 0 / 8192, `pg_default` |
-| three origin indexes | OIDs 20870 / 20872 / 20873 | 8192 each, `pg_default` |
+| origin heap | `_hyper_1_2_chunk` OID 20828 | 0, `pg_default` |
+| origin TOAST + index | OIDs 20831 / 20832 | 0 / 8192, `pg_default` |
+| three origin indexes | OIDs 20834 / 20836 / 20837 | 8192 each, `pg_default` |
 | compressed heap | `compress_hyper_2_13_chunk` OID 21008 | 8192, `pg_default` |
 | compressed TOAST + index | OIDs 21011 / 21012 | 16384 each, `pg_default` |
 | compressed index | OID 21013 | 16384, `pg_default` |
@@ -230,7 +238,7 @@ exercise exact boundary arithmetic; these are **not production values**.
 
 | Case | Decision | Headroom | Mutation proof |
 |---|---|---:|---|
-| measured free space | approved | cold 23466119167; hot 23466184703 | normal probe may proceed |
+| measured free space | approved | cold 23494750207; hot 23494815743 | normal probe may proceed |
 | exact equality | approved | cold 0; hot 0 | boundary is inclusive |
 | cold one byte short | refused | cold -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
 | hot one byte short | refused | hot -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
@@ -241,7 +249,7 @@ sibling and unchanged parity. This is the rollback defense, not a substitute
 for preflight.
 
 The frozen committed tiny-fixture move advanced the instance LSN from
-`0/2267400` to `0/228FD38` (166200 bytes by subtraction). The report
+`0/2264990` to `0/228D0F8` (165736 bytes by subtraction). The report
 intentionally labels WAL as instance-level `pg_wal_lsn_diff` from `0/0`, not
 per-group WAL attribution; production WAL reserve cannot be derived from this
 number.
@@ -259,7 +267,7 @@ number.
 - Inverse shell-first move to `pg_default`: new sibling OID 22250; complete
   group `all_source`, parity preserved at count 25.
 - `drop_chunks`: all pre-drop OIDs
-  `[20864, 20867, 20868, 20870, 20872, 20873, 22250, 22253, 22254, 22255]`
+  `[20828, 20831, 20832, 20834, 20836, 20837, 22250, 22253, 22254, 22255]`
   were absent afterwards; no origin/compressed/index/TOAST member remained.
 
 ## Boundary proof
@@ -303,8 +311,11 @@ No failure row produced false success.
 
 ## Cleanup and limits
 
-- Both final runs reported `container_absent=true`, `work_root_absent=true`, and
-  `identity_bound=true`.
+- Both final runs reported `created_container=true`, `container_removed=true`,
+  `container_absent=true`, `work_root_absent=true`, and `identity_bound=true`.
+- The frozen cleanup suite proved the ownership complement: a failed
+  same-name `docker run` leaves `created_container=false`, and terminal cleanup
+  issues no `docker rm -f`; `--keep` and unowned-identity refusal remain no-op.
 - Final node-27 checks found no `nhms-1892-*` container or work root. The live
   `nhms-db` remained running on the same image ID.
 - The node-27 temporary source clones and JSON files were removed after receipt
