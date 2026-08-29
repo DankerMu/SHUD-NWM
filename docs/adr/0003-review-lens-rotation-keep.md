@@ -2452,3 +2452,29 @@ slot would add recall. **Keep rotation** unchanged under the recorded autonomous
 default. The cumulative aggregate still supplies no basis for an autonomous cut;
 any reversal continues to require the existing attribution-schema and round-role
 repairs plus maintainer review.
+
+## Revisit 2026-08-29 (post #1892 / PR #1900) — keep; pinned closure and independent Gap Sweep add no rotation datum
+
+`loop_log_audit.py` now reports **143** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `142 / 86 / 296` after PR #1896.
+PR #1900 therefore adds one multi-round sample and zero to either later-round
+numerator.
+
+Round 1 used the standard six subject-matter lenses and produced six net review
+catches. Round 2 deliberately re-ran four Round 1 lenses against those fixes and
+returned zero candidates. The independent Phase 7 Gap Sweep then found one
+container-cleanup ownership defect. That catch is valuable evidence for retaining
+the final sweep, but it is not evidence about comprehensive-review lens rotation;
+the accountability line records it as `phase7-gap-sweep` at round zero so the
+current name-based audit does not misclassify it as a rotated later-round lens.
+After the semantic repair, Round 3 used composite correctness/integration,
+security/resource, and test/evidence closure lenses and returned zero candidates;
+the repeated Phase 7 sweep was also clean.
+
+This is pinned fix verification plus an independent final-review catch, not a
+causal rotation experiment. The clean later rounds prove closure for this PR but
+do not distinguish whether a genuinely new free-slot lens would have added
+recall. **Keep rotation** unchanged under the recorded autonomous default. The
+cumulative aggregate still supplies no basis for an autonomous cut; any reversal
+continues to require the existing attribution-schema and round-role repairs plus
+maintainer review.
