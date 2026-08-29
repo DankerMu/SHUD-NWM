@@ -2398,8 +2398,8 @@ review.
 
 After the PR #1889 accountability line, `loop_log_audit.py` still reports **140**
 multi-round merged PRs and later-round catches **core=86 / rotated=296**. The
-counts are byte-for-byte unchanged from the post-PR #1885 revisit because PR
-#1889 had one comprehensive round only: its six-lens Round 1 produced zero
+counts are byte-for-byte unchanged from the post-PR #1885 revisit because
+PR #1889 had one comprehensive round only: its six-lens Round 1 produced zero
 candidates, so no verifier batch, fix pass, or follow-up comprehensive round
 existed. The independent Phase 7 Gap Sweep was also clean.
 
