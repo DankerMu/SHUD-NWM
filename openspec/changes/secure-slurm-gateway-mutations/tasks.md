@@ -20,7 +20,7 @@ Upstream suggested level: absent
 
 - [x] 3.1 Publish a token-free Slurm service bearer scheme and two exact security sets: the original 11 business mutations keep only the existing three alternatives; the four Slurm mutations add the service bearer; public Slurm reads stay root-anonymous.
 - [x] 3.2 Make the documented protected-operation set equal the enforced set across every HTTP method, including DELETE, and keep runtime OpenAPI, static YAML, and generated API types equal and secret-free.
-- [x] 3.3 Update node-22 env/systemd examples and `docs/runbooks/current-production-ops.md` with owner-only credential rollout, fail-closed loopback bind guard, rollback, remote-refusal receipt commands, and optional packet-filter evidence only when actually installed.
+- [x] 3.3 Update node-22 env/systemd examples and `docs/runbooks/current-production-ops.md` with owner-only credential rollout, fail-closed loopback bind guard, rollback, remote-refusal receipt commands, and optional packet-filter evidence only when actually installed. The runbook additionally records the deterministic `http="h11"` protocol pin on the checked-in module entrypoint: node-22's maintained active environment has live-proven broken optional native httptools, `UVICORN_HTTP` does not affect programmatic `uvicorn.run`, and this is a compatibility pin, not a maintenance-window dependency repair (no `uv sync` authorized).
 - [ ] 3.4 Produce a node-22 live receipt proving local health, anonymous/wrong-token denial, valid-token pre-validation passage, reset 404, loopback binding on the measured 8090 port, deliberate non-loopback-start rejection, remote refusal, and resumed scheduler health.
 
 ## 4. Required Evidence

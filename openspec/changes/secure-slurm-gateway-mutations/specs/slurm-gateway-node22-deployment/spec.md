@@ -3,6 +3,13 @@
 ### Requirement: Node-22 Slurm mutation defense in depth
 The production Slurm gateway SHALL combine application-layer service authentication with an entrypoint-enforced loopback-only bind. The service SHALL reject every non-loopback bind before uvicorn starts; a root-managed host packet-filter or ACL is an optional stronger control, not a claim made without an installed live mechanism.
 
+#### Scenario: Standalone entrypoint starts with a deterministic HTTP protocol implementation
+- **WHEN** the checked-in module entrypoint (`python -m services.slurm_gateway`) starts the standalone gateway
+- **THEN** it passes `http="h11"` explicitly to programmatic `uvicorn.run`
+- **AND** the resolved host/port (from `SLURM_GATEWAY_URL` or `--url` plus any `--host`/`--port` override) are forwarded unchanged
+- **AND** the loopback-only bind guard still runs before uvicorn is imported or started
+- **AND** no fallback, try/except, or dependency change is introduced: an optional native httptools runtime breakage in the node-22 maintained active Python environment must not turn the gateway into an unbound exit-1 process, and this pin is not an authorization to rebuild that environment.
+
 #### Scenario: Gateway and scheduler share an owner-only credential
 - **WHEN** the node-22 gateway and DB-free scheduler are deployed
 - **THEN** both consume the same `SLURM_GATEWAY_SERVICE_TOKEN` from one untracked owner-mode-0600 environment source

@@ -53,20 +53,35 @@ def _fake_uvicorn_module(monkeypatch, called: dict) -> None:
         @staticmethod
         def run(app, **kwargs):
             called["uvicorn"] += 1
+            called["app"] = app
+            called["kwargs"] = kwargs
             return None
 
     monkeypatch.setitem(sys.modules, "uvicorn", FakeUvicorn)
 
 
 def test_bind_guard_rejects_non_loopback_before_uvicorn(monkeypatch) -> None:
+    import builtins
+
     import services.slurm_gateway.__main__ as cli_module
 
     called = {"uvicorn": 0}
     _fake_uvicorn_module(monkeypatch, called)
+    original_import = builtins.__import__
+
+    def _record_import(name, *args, **kwargs):
+        imported_names.append(name)
+        return original_import(name, *args, **kwargs)
+
+    imported_names: list[str] = []
+    monkeypatch.setattr(builtins, "__import__", _record_import)
     with pytest.raises(SystemExit) as exc_info:
         cli_module.main(["--url", "http://0.0.0.0:8090"])
     assert exc_info.value.code == 2
     assert called["uvicorn"] == 0
+    assert "uvicorn" not in imported_names, (
+        "bind guard must reject before uvicorn is imported/started"
+    )
 
 
 def test_bind_guard_allows_loopback_then_starts_uvicorn(monkeypatch) -> None:
@@ -76,6 +91,45 @@ def test_bind_guard_allows_loopback_then_starts_uvicorn(monkeypatch) -> None:
     _fake_uvicorn_module(monkeypatch, called)
     cli_module.main(["--url", "http://127.0.0.1:8090"])
     assert called["uvicorn"] == 1
+
+
+def test_uvicorn_run_pins_http_h11_and_preserves_host_port(monkeypatch) -> None:
+    """The module entrypoint must deterministically pin the pure-Python h11
+    protocol implementation.
+
+    node-22's maintained active Python 3.12.7 environment has a live-proven
+    broken optional native httptools (``AttributeError: module 'httptools.parser'
+    has no attribute '__all__'``), and uvicorn's ``http="auto"`` default selects
+    it, so a ``uvicorn.run(..., http="h11")`` keyword is the only deterministic
+    control (``UVICORN_HTTP`` does not affect programmatic ``uvicorn.run``).
+    Host/port derived from the URL and any CLI override must be forwarded
+    unchanged, and the app must still be the gateway app.
+    """
+    import services.slurm_gateway.__main__ as cli_module
+
+    called = {"uvicorn": 0}
+    _fake_uvicorn_module(monkeypatch, called)
+    cli_module.main(["--url", "http://127.0.0.1:8090"])
+    assert called["uvicorn"] == 1
+    assert called["kwargs"]["http"] == "h11"
+    assert called["kwargs"]["host"] == "127.0.0.1"
+    assert called["kwargs"]["port"] == 8090
+    assert called["app"] is not None
+
+
+def test_uvicorn_run_pins_http_h11_with_cli_overrides(monkeypatch) -> None:
+    """CLI ``--host``/``--port`` overrides must still reach uvicorn.run with the
+    h11 pin in place (override semantics must not be phased out by the pin)."""
+    import services.slurm_gateway.__main__ as cli_module
+
+    called = {"uvicorn": 0}
+    _fake_uvicorn_module(monkeypatch, called)
+    cli_module.main(
+        ["--url", "http://127.0.0.1:8090", "--host", "127.0.0.2", "--port", "9090"]
+    )
+    assert called["kwargs"]["http"] == "h11"
+    assert called["kwargs"]["host"] == "127.0.0.2"
+    assert called["kwargs"]["port"] == 9090
 
 
 # ---------------------------------------------------------------------------

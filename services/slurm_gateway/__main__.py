@@ -87,7 +87,13 @@ def main(argv: list[str] | None = None) -> int:
 
     from services.slurm_gateway.app import create_gateway_app
 
-    uvicorn.run(create_gateway_app(), host=host, port=port)
+    # Load-bearing compatibility pin: `http="h11"` (deterministic pure-Python
+    # protocol) avoids uvicorn's `auto` default drifting onto the optional native
+    # httptools, which is live-proven broken in the node-22 maintained active
+    # Python environment (module.parser missing `__all__` -> startup exit 1).
+    # `UVICORN_HTTP` does NOT affect programmatic `uvicorn.run`; the keyword is
+    # the only deterministic control. Not a dependency repair: no `uv sync`.
+    uvicorn.run(create_gateway_app(), host=host, port=port, http="h11")
     return 0
 
 
