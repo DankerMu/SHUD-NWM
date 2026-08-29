@@ -1,5 +1,17 @@
 # Example systemd unit for the standalone NHMS Slurm gateway on node 22.
 #
+# THIS IS THE GENERIC DEPLOYABLE SYSTEM TEMPLATE, NOT THE LIVE NODE-22 UNIT.
+# The live node-22 gateway runs as a USER-systemd unit with an explicit
+# drop-in override (docs/runbooks/current-production-ops.md §3.2.2) that:
+#   - resets any inherited generic `EnvironmentFile=` list before selecting
+#     /scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env (the SAME
+#     untracked owner-mode-0600 secret the scheduler unit loads);
+#   - sets SLURM_GATEWAY_URL=http://127.0.0.1:8090 (the measured live port,
+#     NOT the template's 8081);
+#   - keeps WorkingDirectory/ExecStart pointed at the /scratch checkout.
+# The generic /opt/SHUD-NWM paths and 8081 default are intentional template
+# defaults for other deployments; they are NOT the node-22 live values.
+#
 # This unit serves ONLY the bounded gateway app
 # (services.slurm_gateway.app:create_gateway_app via
 # `<repo>/.venv/bin/python -m services.slurm_gateway` — the exact active
@@ -50,8 +62,9 @@ Environment=SLURM_GATEWAY_WORKSPACE_DIR=/work/nhms/slurm
 Environment=SLURM_GATEWAY_TEMPLATE_DIR=/opt/SHUD-NWM/infra/sbatch
 Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=/opt/SHUD-NWM/config/resource_profiles.yaml
 # Active owner-only shared secret source (SLURM_GATEWAY_SERVICE_TOKEN). Generic
-# /opt path below; on live node-22 point this at the same untracked 0600 file
-# the scheduler unit loads (see docs/runbooks/current-production-ops.md §3.2.2).
+# /opt path below; on live node-22 the user-systemd drop-in RESETS this generic
+# EnvironmentFile list and points at the same untracked 0600 scratch secret the
+# scheduler unit loads (see docs/runbooks/current-production-ops.md §3.2.2).
 EnvironmentFile=/opt/SHUD-NWM/infra/env/slurm-gateway.secret
 # Set when the cluster's real partition differs from the canonical "compute"
 # profile; redirects resolved partitions without editing the shared profile.

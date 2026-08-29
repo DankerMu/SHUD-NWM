@@ -51,6 +51,41 @@ def test_any_whitespace_token_byte_is_rejected_without_trimming() -> None:
     assert read_configured_service_token({"SLURM_GATEWAY_SERVICE_TOKEN": SERVICE_TOKEN}) == SERVICE_TOKEN
 
 
+def test_non_ascii_configured_token_is_unusable_configuration() -> None:
+    """A non-ASCII configured token is unusable/missing configuration.
+
+    The service token contract is an ASCII opaque bearer token (it must be
+    representable in an HTTP Authorization header). Any non-ASCII configured
+    value is rejected by the shared reader as not configured — never accepted
+    by preflight yet unrepresentable in the actual header path. It must return
+    ``None``, never raise.
+    """
+    from packages.common.request_auth import read_configured_service_token
+
+    assert read_configured_service_token({"SLURM_GATEWAY_SERVICE_TOKEN": "tókén-0123456789abcdef"}) is None
+    assert read_configured_service_token({"SLURM_GATEWAY_SERVICE_TOKEN": "token-1234567890-eñe"}) is None
+
+
+def test_non_ascii_provided_header_is_ordinary_mismatch() -> None:
+    """A raw non-ASCII Authorization header is an ordinary mismatch, not a 500.
+
+    Starlette latin-1-decodes raw header bytes, so the route can receive a
+    non-ASCII ``str``. Comparing it must not raise ``TypeError`` (the pre-fix
+    ``hmac.compare_digest`` on ``str`` did); it is simply not the configured
+    credential.
+    """
+    from packages.common.request_auth import service_bearer_matches
+
+    class _Request:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.headers = headers
+
+    env = {"SLURM_GATEWAY_SERVICE_TOKEN": SERVICE_TOKEN}
+    assert service_bearer_matches(_Request({"Authorization": "Bearer tókén-wrong-value-abcdef"}), env) is False
+    assert service_bearer_matches(_Request({"Authorization": "Bearer óther-wrong-value-abcdef"}), env) is False
+    assert service_bearer_matches(_Request({"Authorization": ""}), env) is False
+
+
 def test_shared_token_behavior_rejects_leading_trailing_whitespace(monkeypatch) -> None:
     """Client and shared validator reject the same whitespace-bearing values."""
     from packages.common.request_auth import read_configured_service_token

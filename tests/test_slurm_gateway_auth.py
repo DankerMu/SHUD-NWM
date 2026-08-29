@@ -95,7 +95,7 @@ def _client_for(
     *,
     service_token: str | None = SERVICE_TOKEN,
     allow_dev_role_header: bool = True,
-    additional_env: dict[str, str] | None = None,
+    additional_env: dict[str, str | None] | None = None,
 ) -> TestClient:
     env_values: dict[str, str | None] = {"SLURM_GATEWAY_SERVICE_TOKEN": service_token}
     if allow_dev_role_header:
@@ -190,6 +190,136 @@ def test_enabled_reset_wrong_bearer_401(monkeypatch) -> None:
     response = client.post("/api/v1/slurm/internal/reset", headers=WRONG_BEARER)
     assert response.status_code == 401
     assert response.json()["error"]["code"] == AUTH_REQUIRED
+
+
+# ---------------------------------------------------------------------------
+# AUTH-01 - non-ASCII/malformed credentials fail closed canonically (no 500)
+# ---------------------------------------------------------------------------
+
+# Raw wire bytes Starlette latin-1-decodes into a non-ASCII str; httpx cannot
+# encode a non-ASCII str header itself, so the regression probe must pass raw
+# bytes (exactly what a hostile/misconfigured client would send on the wire).
+NON_ASCII_AUTH_BYTES = b"Bearer s\xc3\xb3mething-wrong-abcdef"
+
+
+def test_non_ascii_header_401_auth_required_not_500(monkeypatch) -> None:
+    """Raw non-ASCII Authorization bytes + valid ASCII configured token -> 401.
+
+    Regression for AUTH-01: the pre-fix `hmac.compare_digest(str, str)` raised
+    ``TypeError`` on a non-ASCII operand, escaping `SlurmSafeValidationRoute`
+    as a plain-text 500 before any policy/audit evidence was recorded.
+    """
+    app = _standalone_app()
+    client = _client_for(monkeypatch, app)
+    response = client.post(
+        "/api/v1/slurm/jobs",
+        json=SUBMIT_BODY,
+        headers={"Authorization": NON_ASCII_AUTH_BYTES},
+    )
+    assert response.status_code == 401, response.text
+    body = response.json()
+    assert body["error"]["code"] == AUTH_REQUIRED
+    # Canonical policy audit/request-id evidence exists (pre-fix 500 had none).
+    assert body["error"]["details"]["policy_decision"]["reason_code"] == AUTH_REQUIRED
+    assert body["error"]["details"]["audit_record"]["reason_code"] == AUTH_REQUIRED
+    assert body["error"]["details"]["audit_record"]["no_mutation_expected"] is True
+    assert body["request_id"] == response.headers.get("X-Request-ID")
+    # No gateway side effect.
+    assert client.get("/api/v1/slurm/jobs").json() == []
+
+
+def test_non_ascii_header_401_on_all_four_mutations(monkeypatch) -> None:
+    """The same non-ASCII denial applies to array, cancel, and enabled reset."""
+    app = _standalone_app()
+    client = _client_for(monkeypatch, app)
+    for method, path, body in ALL_MUTATION_CALLS:
+        response = client.request(method, path, json=body, headers={"Authorization": NON_ASCII_AUTH_BYTES})
+        assert response.status_code == 401, (method, path, response.text)
+        assert response.json()["error"]["code"] == AUTH_REQUIRED, (method, path)
+
+
+def test_non_ascii_header_records_audit_without_gateway_construction(monkeypatch) -> None:
+    """F1 non-ASCII leg: zero construction/call, discrimination included."""
+    import services.slurm_gateway.routes as routes_module
+
+    real_singleton = routes_module.slurm_gateway
+    original_create_gateway = routes_module.create_gateway
+    constructed = {"count": 0}
+    calls: list[tuple[str, list[Any]]] = []
+
+    class RecordingGateway:
+        def __getattr__(self, name: str):
+            def recorder(*args, **kwargs):
+                calls.append((name, [*args, kwargs]))
+                raise AssertionError(f"gateway method {name} must not be called on a denied request")
+
+            return recorder
+
+    def counting_create_gateway(*args, **kwargs):
+        constructed["count"] += 1
+        return RecordingGateway()
+
+    monkeypatch.setattr(routes_module, "create_gateway", counting_create_gateway)
+    real_singleton.reset_instance()
+    app = _standalone_app()
+    client = _client_for(monkeypatch, app)
+    try:
+        for method, path, body in ALL_MUTATION_CALLS:
+            response = client.request(method, path, json=body, headers={"Authorization": NON_ASCII_AUTH_BYTES})
+            assert response.status_code == 401, (method, path)
+        assert constructed["count"] == 0
+        assert calls == []
+        # Discrimination: the counting factory can construct.
+        with pytest.raises(AssertionError, match="gateway method health must not be called"):
+            real_singleton.health()
+        assert constructed["count"] == 1
+        assert [name for name, _ in calls] == ["health"]
+    finally:
+        routes_module.create_gateway = original_create_gateway
+        real_singleton.reset_instance()
+
+
+def test_non_ascii_configured_token_fails_closed_on_route(monkeypatch) -> None:
+    """A non-ASCII configured token is unusable config: 401, never 500.
+
+    The pre-fix path accepted the non-ASCII value in preflight
+    (``_is_valid_token`` checked length/whitespace only) and then raised
+    TypeError during the header comparison; now the shared reader rejects it as
+    not configured, so the route denies with the canonical decision. The probe
+    sends the matching raw wire bytes (httpx refuses to encode a non-ASCII str
+    header itself, exactly like a real HTTP client may never send one).
+    """
+    from packages.common.request_auth import read_configured_service_token
+
+    app = _standalone_app()
+    non_ascii_configured = "tókén-0123456789abcdef"
+    assert read_configured_service_token({"SLURM_GATEWAY_SERVICE_TOKEN": non_ascii_configured}) is None
+    client = _client_for(monkeypatch, app, service_token=non_ascii_configured)
+    response = client.post(
+        "/api/v1/slurm/jobs",
+        json=SUBMIT_BODY,
+        headers={"Authorization": f"Bearer {non_ascii_configured}".encode("latin-1")},
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == AUTH_REQUIRED
+    assert client.get("/api/v1/slurm/jobs").json() == []
+
+
+def test_ascii_match_mismatch_and_whitespace_unchanged(monkeypatch) -> None:
+    """ASCII match/mismatch plus whitespace rules remain exactly as before."""
+    from packages.common.request_auth import read_configured_service_token
+
+    # Match still reaches the gateway.
+    app = _standalone_app()
+    client = _client_for(monkeypatch, app)
+    response = client.post("/api/v1/slurm/jobs", json=SUBMIT_BODY, headers=SERVICE_BEARER)
+    assert response.status_code == 201
+    # Mismatch still 401.
+    response = client.post("/api/v1/slurm/jobs", json=SUBMIT_BODY, headers=WRONG_BEARER)
+    assert response.status_code == 401
+    # Whitespace-bearing configured values are still rejected (no trim).
+    for value in (f" {SERVICE_TOKEN}", f"{SERVICE_TOKEN}\n", SERVICE_TOKEN.replace("token", "token\t", 1)):
+        assert read_configured_service_token({"SLURM_GATEWAY_SERVICE_TOKEN": value}) is None, repr(value)
 
 
 # ---------------------------------------------------------------------------
@@ -584,26 +714,7 @@ def test_denied_standalone_403_503_request_id_parity(monkeypatch) -> None:
     assert body["error"]["details"]["audit_record"]["request_id"] == "req-503-1684"
 
 
-def test_denied_full_app_request_id_parity(monkeypatch) -> None:
-    from apps.api.main import create_app
-
-    app = create_app(
-        {"NHMS_SERVICE_ROLE": "compute_control", "NHMS_REQUIRE_SERVICE_ROLE": "true"}
-    )
-    client = _client_for(
-        monkeypatch,
-        app,
-        service_token=None,
-        allow_dev_role_header=False,
-        additional_env={"NHMS_SERVICE_ROLE": "compute_control", "NHMS_REQUIRE_SERVICE_ROLE": "true"},
-    )
-    response = client.post(
-        "/api/v1/slurm/jobs",
-        json=SUBMIT_BODY,
-        headers={"X-Request-ID": "req-full-1684"},
-    )
-    body = response.json()
-    assert response.status_code == 401
-    assert response.headers.get("X-Request-ID") == "req-full-1684"
-    assert body["request_id"] == "req-full-1684"
-    assert body["error"]["details"]["audit_record"]["request_id"] == "req-full-1684"
+# The EVID-02 full compute/dev mount matrix has been partitioned into
+# tests/test_slurm_gateway_auth_fullmount.py (this suite is at the repo's
+# 1,000-line limit); shared fixtures/constants live here and are imported by
+# that module.

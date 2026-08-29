@@ -45,10 +45,13 @@ def read_configured_service_token(env: Mapping[str, str] | None = None) -> str |
     """Return the configured service token or ``None`` when not usable.
 
     Fail closed: missing, empty, whitespace-bearing (any ``isspace()`` byte
-    anywhere, including leading/trailing — the raw value is never trimmed), or
-    shorter than ``SERVICE_TOKEN_MIN_LENGTH`` credentials are treated as not
-    configured. A legitimate token is returned byte-for-byte unchanged so the
-    constant-time comparison sees exactly what was configured.
+    anywhere, including leading/trailing — the raw value is never trimmed),
+    shorter than ``SERVICE_TOKEN_MIN_LENGTH``, or non-ASCII credentials are
+    treated as not configured. The contract is an ASCII opaque bearer token:
+    a non-ASCII configured value is unusable configuration, never a credential
+    that preflight accepts yet the real HTTP header path cannot represent.
+    A legitimate token is returned byte-for-byte unchanged so the constant-time
+    comparison sees exactly what was configured.
     """
     raw = _env_value(env, SLURM_GATEWAY_SERVICE_TOKEN_ENV)
     if not _is_valid_token(raw):
@@ -61,12 +64,31 @@ def service_token_configured(env: Mapping[str, str] | None = None) -> bool:
 
 
 def service_bearer_matches(request: Any, env: Mapping[str, str] | None = None) -> bool:
-    """Constant-time comparison of ``Authorization: Bearer ...`` to the token."""
+    """Constant-time comparison of ``Authorization: Bearer ...`` to the token.
+
+    Total over malformed input: a non-ASCII or otherwise unusable header value
+    is an ordinary mismatch (``False``), never a ``TypeError`` escaped to the
+    route as a 500. Both operands are encoded to bytes before the constant-time
+    comparison (Starlette decodes raw latin-1 header bytes, so a non-ASCII
+    ``str`` here is exactly the HTTP byte value); a non-ASCII configured token
+    is already rejected as unusable by ``read_configured_service_token``, so a
+    configured value can never be accepted by preflight yet be unrepresentable
+    in the actual HTTP header path.
+    """
     configured = read_configured_service_token(env)
     if configured is None:
         return False
     provided = request.headers.get("Authorization", "")
-    return hmac.compare_digest(provided, f"Bearer {configured}")
+    if not isinstance(provided, str):
+        return False
+    try:
+        provided_bytes = provided.encode("ascii")
+        configured_bytes = f"Bearer {configured}".encode("ascii")
+    except UnicodeEncodeError:
+        # Non-ASCII provided header (raw bytes from the wire) or configured
+        # value: an ordinary mismatch, fail closed without raising.
+        return False
+    return hmac.compare_digest(provided_bytes, configured_bytes)
 
 
 def slurm_service_auth_context(request: Any, env: Mapping[str, str] | None = None) -> AuthContext | None:
@@ -206,7 +228,15 @@ def record_request_policy_decision(
 
 
 def _is_valid_token(value: str) -> bool:
-    return len(value) >= SERVICE_TOKEN_MIN_LENGTH and not any(character.isspace() for character in value)
+    # ASCII opaque bearer token contract: at least SERVICE_TOKEN_MIN_LENGTH
+    # chars, no whitespace, no non-ASCII chars (an HTTP header cannot carry a
+    # non-ASCII credential unambiguously, so such a configured value is
+    # unusable configuration rather than a usable credential).
+    return (
+        len(value) >= SERVICE_TOKEN_MIN_LENGTH
+        and not any(character.isspace() for character in value)
+        and value.isascii()
+    )
 
 
 def _env_value(env: Mapping[str, str] | None, key: str) -> str:

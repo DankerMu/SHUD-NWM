@@ -380,6 +380,40 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     SELECTOR_META_GUARD_TEST,
 )
 
+# #1684 shared-auth owner-to-focused-suite mappings (EVID-01). These shared
+# modules have no same-name derivable suite and their consumers are the focused
+# partitioned Slurm auth suites, not the broad core-smoke/API/orchestrator
+# suites: an owner-only PR previously selected only generic riders and none of
+# the focused contracts. Each is an exact additive (non-stop) rule so existing
+# intentional supplemental routing (core-smoke baseline for packages/common/**,
+# #1656 timescale rider) survives.
+#
+# `packages/common/auth_policy.py` owns the canonical RBAC action matrix and is
+# asserted by the dedicated matrix suite; `packages/common/request_auth.py` owns
+# the service-token contract (reader/matcher/client/preflight) and
+# `packages/common/openapi_auth_security.py` owns the published scheme/security
+# metadata; `apps/api/auth.py` is the facade whose drift is caught by the
+# shared-auth contract suites plus the role-boundary static suite; the two
+# orchestrator modules (client + scheduler preflight) are owned by their
+# focused auth-client/deployment suites.
+AUTH_POLICY_TEST = "tests/test_auth_policy_matrix.py"
+SLURM_AUTH_CLIENT_TEST = "tests/test_slurm_gateway_auth_client.py"
+SLURM_AUTH_DEPLOYMENT_TEST = "tests/test_slurm_gateway_auth_deployment.py"
+SLURM_AUTH_CORE_TEST = "tests/test_slurm_gateway_auth.py"
+# #1684 EVID-02 partition: the full compute/dev mount matrix lives in its own
+# module (the core suite is at the repo 1,000-line limit); every owner that
+# selects the core suite must select the partition too.
+SLURM_AUTH_FULLMOUNT_TEST = "tests/test_slurm_gateway_auth_fullmount.py"
+SLURM_OPENAPI_SECURITY_TEST = "tests/test_slurm_gateway_openapi_security.py"
+# Static producer/consumer oracle for the tracked unit / env examples / runbook
+# wiring (active EnvironmentFile, same secret path, 8090, executable rollback,
+# no inline credential). Distinct from SLURM_AUTH_DEPLOYMENT_TEST (bind-guard +
+# preflight behavior).
+SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST = "tests/test_slurm_gateway_deployment_contract.py"
+
+# The literal rule rows are declared in PATH_TEST_RULES (after the dataclass);
+# these constants are the single names the selector meta-suite pins.
+
 
 @dataclass(frozen=True)
 class PathTestRule:
@@ -1259,6 +1293,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_rollforward.py",
             "tests/test_slurm_gateway_app.py",
             "tests/test_slurm_gateway_auth.py",
+            "tests/test_slurm_gateway_auth_fullmount.py",
             "tests/test_slurm_gateway_auth_client.py",
             "tests/test_slurm_gateway_auth_deployment.py",
             # #1684 large-file guard repair: the auth suite was physically
@@ -1635,6 +1670,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/**",
         ("tests/test_two_node_docker_runtime.py",),
     ),
+    # #1684 EVID-05/F: the rollout producers must select the static deployment
+    # contract suite. The runbook is `docs/**` (no backend lane by default) and
+    # the env examples would otherwise select only the two-node runtime suite;
+    # each is an exact additive rule so the runbook/env contract reddens on the
+    # PR that rewrites the wiring.
+    PathTestRule(
+        "docs/runbooks/current-production-ops.md",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/compute.example",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/compute.scheduler-dbfree.env.example",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
+    PathTestRule(
+        "infra/env/README.md",
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+    ),
     PathTestRule(
         "scripts/validate_two_node_docker_runtime.py",
         ("tests/test_two_node_docker_runtime.py",),
@@ -1804,8 +1860,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # by the node-22 owner. infra/** already starts the backend lane, so
         # without this rule a unit-only PR selected nothing and CI degraded to
         # collect-only; the exact rule converts that lane into real assertions.
+        # #1684 EVID-05: the unit's active EnvironmentFile / no-inline-secret
+        # contract is asserted by the static deployment suite, which joins the
+        # rule alongside the node-22 owner.
         NODE22_SLURM_GATEWAY_UNIT,
-        (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
         # #1571: the retention unit's single exact ExecStart (deferred-venv
@@ -1890,6 +1949,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/chain_array_evidence.py",
         FORCED_RESUBMIT_SURFACE_TESTS,
+    ),
+    # #1684 shared-auth owner-to-focused-suite mappings (EVID-01). Additive
+    # (non-stop) on purpose: the broad `apps/api/**` / `services/orchestrator/**`
+    # rules keep their existing riders, `packages/common/**` keeps its #1744
+    # core-smoke baseline and the #1656 timescale rider; these rows only attach
+    # the focused contracts an owner-only PR previously could not reach.
+    PathTestRule(
+        "packages/common/auth_policy.py",
+        (AUTH_POLICY_TEST,),
+    ),
+    PathTestRule(
+        "packages/common/request_auth.py",
+        (
+            SLURM_AUTH_CORE_TEST,
+            SLURM_AUTH_FULLMOUNT_TEST,
+            SLURM_AUTH_CLIENT_TEST,
+            SLURM_AUTH_DEPLOYMENT_TEST,
+        ),
+    ),
+    PathTestRule(
+        "packages/common/openapi_auth_security.py",
+        (SLURM_OPENAPI_SECURITY_TEST,),
+    ),
+    PathTestRule(
+        "apps/api/auth.py",
+        (
+            AUTH_POLICY_TEST,
+            "tests/test_role_boundary_static.py",
+        ),
+    ),
+    PathTestRule(
+        "services/orchestrator/chain_slurm_client.py",
+        (SLURM_AUTH_CLIENT_TEST,),
+    ),
+    PathTestRule(
+        "services/orchestrator/scheduler_gateway.py",
+        (SLURM_AUTH_DEPLOYMENT_TEST,),
     ),
 )
 

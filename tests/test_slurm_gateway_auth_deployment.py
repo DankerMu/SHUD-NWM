@@ -101,6 +101,25 @@ def test_preflight_missing_token_fails_submit_ready_clearly(monkeypatch) -> None
     assert "not configured" in result["reason"]
 
 
+def test_preflight_non_ascii_token_is_unusable_and_fails_closed(monkeypatch) -> None:
+    # A non-ASCII configured token is unusable configuration (the ASCII opaque
+    # bearer-token contract). The preflight must NOT report submit-ready from
+    # anonymous health with such a value, and must not leak it in the reason.
+    from services.orchestrator.scheduler import _default_gateway_probe
+
+    class _Config:
+        slurm_gateway_url = "http://127.0.0.1:8090"
+
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", "tókén-0123456789abcdef")
+    result = _default_gateway_probe(_Config())
+    assert result["healthy"] is False
+    assert result["submit_capable"] is False
+    assert "SLURM_GATEWAY_SERVICE_TOKEN" in result["reason"]
+    assert "not configured" in result["reason"]
+    assert "tókén" not in str(result)
+
+
 def test_preflight_token_present_probes_health(monkeypatch) -> None:
     import httpx
 
