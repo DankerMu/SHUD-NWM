@@ -58,158 +58,30 @@ even if the host date is later.
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`
 
-## Recorded exception (2026-08-06): the `ghdc` tablespace shares `/dev/md0`
+## Recorded exception (2026-08-06): historical `ghdc` (retired; do not recreate)
 
-Part of the database lives on `/dev/md0`, the filesystem that also carried the
-now-retired cold archive tier (retirement record above). This is a knowing,
-recorded exception to ADR 0002's rule that the hot tier and that device stay
-separate — read this before touching either.
+This section is immutable history plus current policy. Runnable
+`CREATE TABLESPACE ghdc`, relocate, rsync, and mount instructions were
+removed; git history preserves them. Do not recreate `ghdc`.
 
-| Tablespace | Host path | Container path | Device |
-|---|---|---|---|
-| `pg_default` | `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` | `/dev/mapper/ubuntu--vg-home` (1.7 TB, shared with the object store) |
-| `ghdc` | `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | `/dev/md0` (15 TB) — **also carries `/data/GHDC/nwm-archive`** |
+**Current live fact:** hot storage is `pg_default` on
+`/home/nwm/nhms-pgdata` (container `/home/postgres/pgdata/data`).
+#1894/#1895 own any later `nhms_cold` install/migration. A PGDATA-only
+backup is incomplete once any `pg_tblspc` target exists.
 
-`ghdc` holds `hydro.river_timeseries` chunks `_hyper_3_10_chunk` and
+**Past-tense facts (2026-08-06 overflow, now retired):** a tablespace named
+`ghdc` was created at host `/data/GHDC/nwm-archive/nhms-tablespace`,
+container `/home/postgres/pgdata/tablespaces/ghdc`, on `/dev/md0`. It
+held `hydro.river_timeseries` chunks `_hyper_3_10_chunk` and
 `_hyper_3_14_chunk`, `met.forcing_station_timeseries` chunks
-`_hyper_1_12_chunk` and `_hyper_1_13_chunk`, and all 18 of their indexes —
-roughly 502 GB decompressed.
+`_hyper_1_12_chunk` and `_hyper_1_13_chunk`, and their indexes. That
+placement was a decompression-overflow exception, not the #1891 successor.
 
-**Why.** The six-basin production replay (#1164) had to decompress those four
-chunks to lift the compressed-chunk write guard, and `/home` had only ~357 GB
-free against a ~502 GB requirement. No sequencing avoided it: each backfilled
-cycle's forecast window spans both the 07-02…07-09 and 07-09…07-16 chunks, so
-both must be uncompressed at once. On `/data/GHDC` the only `nwm`-writable
-location is `nwm-archive/`; everything else under that mount is `root` or
-`ghdcadmin` owned, and provisioning a sibling mount point needs root.
-
-**The risk this re-introduces.** The 2026-07-26 deadlock (a full archive
-filesystem freezing the only lane able to free it) died with the mover, but so
-did that lane's telemetry: since #1370 no runner measures `/dev/md0` at all
-and the governance receipt no longer reports it (below). DB growth on the
-`ghdc` tablespace is therefore silent until somebody runs `df` — and the
-device is shared with `root`/`ghdcadmin` trees that grow independently of
-NHMS.
-
-**Required mitigations while the exception stands:**
-
-- **Nothing polices free space on that device any more.** The mover's
-  warn/refuse watermarks were deleted with the mover (#1370), and PostgreSQL
-  enforces no tablespace quota, so no threshold anywhere reserves or defends
-  bytes for `ghdc`. Treat every `/dev/md0` capacity statement as
-  operator-measured until a replacement observation lane exists.
-- **Bound the tablespace's working set.** That is the only lever that
-  actually protects `/dev/md0`: re-compress promptly after a decompress, and
-  never hold more than the chunks you are actively reingesting in
-  uncompressed form.
-- **Read both devices, every time.** `df -h /home /data/GHDC`. See the
-  capacity caveat below for exactly what the governance receipt does and does
-  not tell you.
-- **Do not treat headroom as permanent.** 15 TB with ~19 GB of archive and
-  ~502 GB of tablespace is comfortable today; that is the reason the exception
-  was accepted, not a reason it is safe indefinitely. `/dev/md0` is also not
-  NHMS-exclusive — `/data/GHDC` carries `root`- and `ghdcadmin`-owned trees
-  (~1 TB was already in use at the 2026-07-26 migration), so free space can
-  fall without any NHMS growth at all. Revisit when either tier changes shape
-  or when third-party usage moves, and prefer a dedicated filesystem for
-  `ghdc` the next time root-level provisioning is available on node-27.
-
-**What the governance receipt actually shows (read this before quoting it).**
-`scripts/node27_resource_governance.py`:
-
-- **Does NOT report `/dev/md0` at all.** The receipt's archive-root block and
-  its free-space band were removed with the archive lane (#1370), so current
-  receipts carry no such key and no free-space recommendation fires for that
-  device. Receipts generated before 2026-08-14 still carry the block — read
-  them as history, not as a live alarm.
-- **Does not** list `/data/GHDC` in the receipt's `filesystems` block either —
-  `collect_filesystem()` enumerates only `/`, `/home`, the repo filesystem
-  and the object-store filesystem, and the `df -ih` inode check covers only
-  `/` and `/home`.
-- **Under-reports the DB.** `path_sizes["pgdata_root"]` is a `du` of
-  `NODE27_GOVERNANCE_PGDATA_ROOT` (`/home/nwm/nhms-pgdata`) only, so the ~502 GB
-  that moved to `ghdc` vanished from the reported DB footprint with nothing
-  deleted. Do not read that drop as retention succeeding.
-
-The only measurement of that device is therefore manual: `df -h /data/GHDC`
-for headroom, and `du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive` to
-separate the retired archive's residue from the live tablespace. Quote both,
-or quote neither.
-
-No open tracker owns this caliber question: #1290 (governance-receipt capacity
-caliber) and #1309 (the `/dev/md0` double-disk failure) are both CLOSED and are
-historical records only — cite them as background, not as work in flight.
-
-**Establishing the tablespace for the first time** (DR from scratch, or a
-brand-new tablespace). Order matters — the container must carry the mount
-*before* `CREATE TABLESPACE` runs, because the `LOCATION` is a container
-path:
-
-1. Host directory, empty, owned by the container's uid/gid:
-
-   ```bash
-   mkdir -p /data/GHDC/nwm-archive/nhms-tablespace
-   chown nwm:nwm /data/GHDC/nwm-archive/nhms-tablespace
-   chmod 0700 /data/GHDC/nwm-archive/nhms-tablespace
-   ```
-
-2. Recreate the container with the bind mount — §4.3.3 below.
-
-3. Create the tablespace (superuser; the target directory must be empty):
-
-   ```sql
-   CREATE TABLESPACE ghdc LOCATION '/home/postgres/pgdata/tablespaces/ghdc';
-   ```
-
-4. Move chunks and **their indexes** into it — see §4.3.2 step 3a for the
-   `format(%I)` + `\gexec` form.
-
-**Relocating the existing tablespace to another filesystem** (the promised
-move to a dedicated device) is a *different* procedure — the 502 GB must move
-with it, and `CREATE TABLESPACE` must NOT run (the tablespace already exists;
-PostgreSQL resolves it through the `pg_tblspc` symlink, which lands wherever
-the container mount points). Recreating the container with an empty new
-directory bound to the same container path would start a cluster whose
-`ghdc` chunks are simply gone — and PostgreSQL would happily write new files
-into the empty directory, splitting the tablespace across two host paths.
-
-1. Stop the container cleanly (`docker stop -t 300 nhms-db` — §4.3.3 step 2
-   discipline, plus the step 1 timer quiesce).
-2. Copy the old host directory to the new device, preserving everything:
-
-   ```bash
-   rsync -aHAX --numeric-ids \
-     /data/GHDC/nwm-archive/nhms-tablespace/ /new/device/nhms-tablespace/
-   diff <(cd /data/GHDC/nwm-archive/nhms-tablespace && find . -type f | sort) \
-        <(cd /new/device/nhms-tablespace && find . -type f | sort)
-   du -sb /data/GHDC/nwm-archive/nhms-tablespace /new/device/nhms-tablespace
-   ```
-
-   File list identical, byte totals equal, ownership `nwm:nwm`, mode `0700`.
-3. Recreate the container per §4.3.3 with the **new** host path bound to the
-   **same** container path `/home/postgres/pgdata/tablespaces/ghdc`.
-4. Verify with the real chunk read from §4.3.3 step 4(a). Only after that
-   passes, retire the old directory.
-
-Once a second tablespace exists, any file-level backup or restore must cover
-the `pg_tblspc` link targets as well as `PGDATA`; a `PGDATA`-only copy is no
-longer a complete backup.
-
-**Tablespace residency is per chunk and is not part of the schema.** Nothing
-under `db/` or `packages/common/migrate.py` references a tablespace; `ghdc` is
-a node-27 physical placement only. Local dev, CI and
-`infra/docker-compose.dev.yml` are unaffected and must NOT gain a `ghdc`
-mount. Resolve a chunk's residency before acting on it:
-
-```sql
-SELECT c.relname,
-       COALESCE(t.spcname, 'pg_default') AS tablespace
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
-WHERE n.nspname = '_timescaledb_internal'
-  AND c.relname = '<chunk_name>';
-```
+**Current policy:** leftover `ghdc` catalog/bind residue is not a live
+cold-residency target and is not authorization to recreate it. Operators
+must not attach `ghdc` or `nhms_cold` to a business hypertable. Re-admitting
+`/dev/md0` for terminal compressed DB bytes requires root `mdadm --detail`
+plus both-member SMART PASS; `[UU]` is insufficient. #1894 owns those gates.
 
 ## Install (node-27, `nwm` user)
 
@@ -1295,35 +1167,54 @@ window trades one loop for another.
      AND chunk_name = '_hyper_1_1_chunk';
    ```
 
-3a. **Resolve the chunk's tablespace and size the check against the right
-   device.** Decompression restores the data into the chunk relation's own
-   tablespace, so the filesystem that needs room is the chunk's, not
-   necessarily pgdata's — see "Recorded exception (2026-08-06)" above. Use the
-   residency query there; `pg_default` → `df -h /home`, `ghdc` →
-   `df -h /data/GHDC`. The number to compare against is
-   `before_compression_total_bytes` from
-   `chunk_compression_stats(<hypertable>)`, which is exactly what
-   decompression will write back (for the four migrated chunks that ranged
-   from 20 GB to 333 GB).
+3a. **Resolve the complete residency group and size the check against the
+   right device.** Decompression restores data into the origin chunk's own
+   tablespace, so the filesystem that needs room is that tablespace's device,
+   not necessarily pgdata's. Live hot storage is `pg_default` → `df -h /home`.
+   Historical `ghdc` residue, if still catalogued, is **not** the successor
+   (Recorded exception 2026-08-06; ADR 0002 Amendment 2026-08-29). The future
+   DB-only successor is `nhms_cold` on `/data/GHDC` after #1894. Compare
+   against `before_compression_total_bytes` from
+   `chunk_compression_stats(<hypertable>)`. Capacity preflight is
+   `required_cold = before_compression_total_bytes + operator cold reserve`
+   and `required_hot = operator WAL reserve`; retained compressed source
+   bytes stay allocated until commit and are not treated as free. #1893
+   owns production reserve values.
 
-   If the chunk sits on a device without the room, move the chunk **and every
-   one of its indexes** to `ghdc` first. A compressed chunk's relation is a
-   near-empty shell, so both moves are instant at this point, and
-   `ALTER TABLE … SET TABLESPACE` does **not** carry indexes with it:
+   A compressed chunk has two identities: the origin shell and the internal
+   compressed relation. At a **terminal** boundary, moving only the origin
+   shell does **not** prove compressed bytes left `/home`. The #1892 isolated
+   2.10.2 probe froze one accepted sequence,
+   `shell_first_decompress_recompress_atomic`:
 
    ```
-   ALTER TABLE _timescaledb_internal._hyper_1_1_chunk SET TABLESPACE ghdc;
-   SELECT format('ALTER INDEX %I.%I SET TABLESPACE ghdc;', schemaname, indexname)
-   FROM pg_indexes
-   WHERE schemaname = '_timescaledb_internal'
-     AND tablename = '_hyper_1_1_chunk'
-   \gexec
+   BEGIN;
+   -- Probe fixture timeouts were 2s/30s on tens of KiB. Production
+   -- lock/statement/wall budgets are owned by #1893 and must be sized
+   -- for a full uncompressed rewrite plus WAL, not copied from the probe.
+   SET LOCAL lock_timeout = '<production budget>';
+   SET LOCAL statement_timeout = '<production budget>';
+   -- LOCK TABLE origin, compressed heaps IN ACCESS EXCLUSIVE MODE (OID order)
+   -- ALTER TABLE origin SET TABLESPACE nhms_cold
+   -- ALTER INDEX every origin index SET TABLESPACE nhms_cold (quote %I)
+   -- SELECT decompress_chunk(origin); prove expanded origin/index/TOAST cold
+   -- SELECT compress_chunk(origin); prove new complete group cold + parity
+   COMMIT;
+   -- fresh connection readback
    ```
+
+   Do **not** ALTER the compressed heap or TOAST. Do **not**
+   `attach_tablespace` to either business hypertable. Rejected alternatives
+   (`move_chunk`, direct compressed-heap ALTER, decompress-first hot
+   expansion, two-transaction) are evidence, not fallback lanes. The
+   transaction is a full cold-device rewrite; budget cold expansion plus hot
+   PGDATA/WAL while the original compressed source remains until commit.
 
    TimescaleDB index names can begin with a digit
-   (`10_23_river_timeseries_pkey`), which is not a valid bare identifier — use
-   the `format(%I)` + `\gexec` form above rather than hand-writing the
-   statements.
+   (`10_23_river_timeseries_pkey`), which is not a valid bare identifier. A
+   PGDATA-only backup is incomplete once any `pg_tblspc` target exists. Root
+   `mdadm --detail` plus both-member SMART PASS is required before production
+   re-admission of `/dev/md0`; `[UU]` is insufficient. #1894 owns those gates.
 
 4. Decompress the chunk:
 
@@ -1363,16 +1254,17 @@ window trades one loop for another.
    outage), keep the compression timer stopped until the catch-up has
    advanced past those chunk ranges.
 
-   **Unverified as of 2026-08-06:** compressing a chunk creates a new
-   `_timescaledb_internal.compress_hyper_*_chunk` relation, and it has not
-   been confirmed on this deployment that the new relation inherits the source
-   chunk's tablespace rather than landing in `pg_default`. After the first
-   compression tick that touches a `ghdc` chunk, re-run the residency query
-   against both the chunk and its `compress_hyper_*` counterpart. If the
-   compressed relation lands in `pg_default`, move it to `ghdc` explicitly —
-   otherwise the compression tier silently refills `/home`, which is the
-   pressure this split exists to relieve. Never "restore" a `ghdc` chunk to
-   `pg_default`.
+   After a shell-first migration, recompression of a cold origin creates a
+   new compressed sibling that inherits `nhms_cold` on 2.10.2. Resolve the
+   complete group (origin, new compressed relation, every index, owned TOAST)
+   and treat any remaining hot member as mixed/recovery, never success. The
+   same accepted sequence, targeting `pg_default`, is the inverse move-back.
+   Never treat origin-shell movement as byte movement. Never "restore" a cold
+   group by deleting a referenced tablespace path. Historical `ghdc` is not
+   the destination for new moves. WAL evidence from the isolated probe is
+   instance-level `pg_wal_lsn_diff` from `0/0`, not a per-group byte count.
+   An injected missing-relation SQL error is not proof that a selected
+   relation disappeared.
 
 Rollback: none required — `decompress_chunk` is idempotent and can be
 undone by the scheduled compression runner. If the reingest itself
@@ -1405,9 +1297,11 @@ that is also named `nhms-db`, but that is the *local dev* stack (named volume,
 port 5432, dev credentials); using it as a recreate template on node-27
 produces a database that cannot open production data. Do not.
 
-Since 2026-08-06 the container is mount-critical: **all three** bind mounts
-must be present, or PostgreSQL comes up unable to read the four chunks and 18
-indexes in the `ghdc` tablespace.
+Since 2026-08-06 the container has been mount-critical for the **historical
+`ghdc` residue**: if that catalog name still exists, all three bind mounts
+below must be present or PostgreSQL cannot open those leftover relations.
+That is a residue constraint, not authorization to recreate `ghdc`. The
+#1891 successor bind (`nhms_cold`) is added only by #1894.
 
 | Host | Container |
 |---|---|

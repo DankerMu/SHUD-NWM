@@ -17,6 +17,10 @@ Context amendment: 2026-08-14 (the Context claim that the remaining
 `hydro.river_timeseries` index families "cannot be pruned further" is
 superseded by new measurements; see "Amendment (2026-08-14)" below)
 
+Amendment: 2026-08-29 (DB-only `nhms_cold` successor; archive retirement
+stands; isolated 2.10.2 probe freezes shell-first movement — see
+"Amendment (2026-08-29)" below)
+
 ## Status
 
 Accepted
@@ -546,3 +550,128 @@ throwaway database (`nhms_1339_probe`, since dropped); the full experiment log,
 including the exact error texts and the measurements that refuted two earlier
 designs, is
 `openspec/changes/river-identity-normalization-backfill/probe-1339-throwaway.md`.
+
+## Amendment (2026-08-29): DB-only `nhms_cold` successor; archive retirement stands
+
+The 2026-08-11 revision retired the **product archive / salvage / rebuild**
+lanes after the `/dev/md0` double-disk failure (#1309/#1370). That retirement
+still stands. This amendment does **not** restore those lanes, does **not**
+revive the historical `ghdc` tablespace as a live operator target, and does
+**not** re-authorize archive-gated retention.
+
+What it does add is a narrower, DB-only successor: a fresh PostgreSQL
+tablespace named `nhms_cold` that may later hold **terminal compressed chunk
+residency groups** after #1894/#1895. #1892 only freezes the TimescaleDB 2.10.2
+contract on an isolated disposable cluster. Live `nhms-db` is read-only during
+#1892; no production CREATE/DROP TABLESPACE, chunk move, or container recreate
+is authorized here.
+
+### What is live vs historical
+
+- `pg_default` on `/home/nwm/nhms-pgdata` remains the live hot tablespace.
+- The historical `ghdc` tablespace path
+  (`/data/GHDC/nwm-archive/nhms-tablespace`, container
+  `/home/postgres/pgdata/tablespaces/ghdc`) is a **retired exception** from
+  the 2026-08-06 decompression overflow. It is not the successor, not an
+  installer target, and not a live cold-residency name. Operators must not
+  treat leftover `ghdc` catalog/bind residue as the #1891 cold tier.
+- `nhms_cold` is the only DB-only successor name. Production host path
+  `/data/GHDC/nhms-cold-tablespace` and container path
+  `/home/postgres/pgdata/tablespaces/nhms_cold` are owned by #1894. #1892
+  must not create them on the live cluster.
+
+### Frozen 2.10.2 movement sequence
+
+Pinned image identity is the live `nhms-db` image
+`sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
+(`timescale/timescaledb-ha:pg15-latest`), PostgreSQL 15.2, TimescaleDB 2.10.2.
+The isolated probe on the pinned 2.10.2 image freezes **exactly one**
+accepted sequence: `shell_first_decompress_recompress_atomic`.
+
+In one explicit transaction with finite `SET LOCAL lock_timeout` /
+`statement_timeout`. The isolated probe uses `2s` / `30s` only because its
+fixture is tens of kilobytes; those values are not production budgets for
+gigabyte relations. #1893 owns configurable lock/statement/wall budgets sized
+for a full cold rewrite plus WAL.
+
+1. lock origin and compressed heaps in OID order and revalidate;
+2. `ALTER TABLE <origin> SET TABLESPACE nhms_cold` plus every origin
+   index in OID order (never ALTER the compressed heap or TOAST);
+3. `decompress_chunk(origin)` and prove the expanded origin/index/TOAST
+   group is entirely cold;
+4. `compress_chunk(origin)` and prove the **new** complete compressed
+   group is entirely cold with unchanged data parity;
+5. commit, then a **fresh** connection readback. Test rollback also uses
+   a fresh observer.
+
+Measured properties of this sequence:
+
+- It is a full cold-device rewrite, not metadata-only. Preflight must
+  reserve cold expansion/rollback headroom and hot PGDATA/WAL headroom
+  while the original compressed hot bytes remain until commit.
+- After the shell move, a transient mixed state is legal **only inside
+  the transaction** (the compressed index may remain hot until
+  `decompress_chunk` drops the old sibling).
+- Recompression creates a new compressed sibling OID/name. Durable
+  identity is hypertable + origin OID/name + range; sibling identities
+  are recorded before/after separately.
+- Expanded uncompressed bytes land in `nhms_cold`, not `pg_default`.
+- Direct `ALTER` of the compressed heap remains
+  `FeatureNotSupported: changing tablespace of compressed chunk is not
+  supported` and is not needed.
+- Data parity is scoped to the durable origin window
+  `[range_start, range_end)` over every business column. A replacement
+  compressed sibling at source is `unknown`, not `complete_source`.
+- WAL observations are instance-level `pg_wal_lsn_diff` from `0/0`, not
+  per-group WAL volume. Catalog relation bytes remain the primary
+  group-accounting unit.
+- Capacity preflight is `required_cold = before_compression_total_bytes +
+  operator cold reserve` and `required_hot = operator WAL reserve`; the
+  original compressed source remains allocated until commit and is not
+  added to free bytes. #1893 owns production reserve values; the probe
+  does not invent production defaults.
+
+Rejected alternatives (not fallback lanes):
+
+1. `timescaledb_experimental.move_chunk` is a procedure, cannot run
+   inside a transaction, and on this single-node image errors with
+   `function must be run on the access node only`.
+2. Direct compressed-heap / TOAST ALTER or LOCK is refused.
+3. `attach_tablespace('nhms_cold', internal compressed hypertable)` does
+   not route new compressed chunks and must not attach either business
+   hypertable.
+4. Decompress-first is atomic but expands the origin on the hot device.
+5. Two-transaction move-then-recompress leaves a committed uncompressed
+   window.
+
+A group is the origin heap + compressed heap + every index + every owned
+TOAST heap/index reachable from both. Moving only the origin shell does not
+prove compressed bytes left `/home` at a **terminal** boundary. `already_cold`
+is a lock-only no-op. Mixed residency is never a terminal success.
+
+`CREATE TABLESPACE` / `DROP TABLESPACE` are cluster-scoped. A throwaway
+database inside live `nhms-db` is not isolation. The probe must refuse live
+container `nhms-db`, port 55432, PGDATA `/home/nwm/nhms-pgdata`, and any
+production checkout/data root.
+
+Do **not** `attach_tablespace('nhms_cold')` to either business hypertable.
+New chunks stay in `pg_default`.
+
+### RAID, SMART, and backup gates (production, not this probe)
+
+Re-admitting `/dev/md0` for terminal compressed DB storage requires
+root-generated `mdadm --detail` plus SMART PASS evidence for **both** member
+devices, with no degraded/rebuild/recovering/unknown state. `/proc/mdstat
+[UU]` or a successful mount alone is insufficient. A PGDATA-only backup is
+incomplete once any external `pg_tblspc` target exists; backup readiness
+must cover PGDATA and every tablespace location. #1894 owns the installer
+and those gates; this amendment only freezes the policy.
+
+### Lifecycle contract measured by the isolated probe
+
+Legal state flow is `hot-uncompressed -> hot-compressed -> cold-compressed
+-> cold-uncompressed-replay -> cold-compressed`. Cold decompression writes
+into the origin's tablespace. Replay stays there. Recompression placement
+is engine-defined and must be measured; if any member lands hot, the same
+serialized tick converges the group or reports mixed/recovery. `drop_chunks`
+must leave no origin/compressed/index/TOAST catalog or files.
