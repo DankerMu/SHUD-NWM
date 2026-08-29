@@ -677,8 +677,8 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI that converts 
 
 #### Scenario: Non-dedicated accepted-submit writers cannot persist the operator decision
 
-- **WHEN** the submit-attempt commit writer receives an accepted transition carrying `operator_verified_absence`, the cohort defer or cohort task-projection writer receives the raw decision token, or ordinary pipeline-job upsert receives the token while creating or upgrading a current-contract row
-- **THEN** each current-contract writer rejects it with the typed-authority error before row construction, lock acquisition, durable mutation, or event, the journal stays byte-identical, and existing legitimate decisions and non-token legacy upgrades still apply unchanged; legacy transition/reconciliation writer compatibility is tracked separately in #1805
+- **WHEN** the submit-attempt commit writer receives an accepted transition carrying `operator_verified_absence`, the cohort defer or cohort task-projection writer receives the raw decision token, ordinary pipeline-job upsert receives the token while creating or upgrading a current-contract row, the legacy `transition_pipeline_job_submit_evidence` path receives a transition carrying the token, or `record_pipeline_job_reconciliation` receives the token
+- **THEN** every non-dedicated writer rejects it with `file_journal_authority_transition_requires_typed_api` before row construction, lock acquisition, durable mutation, or event, the journal stays byte-identical, and existing legitimate current-contract decisions, legacy decisions, and non-token legacy upgrades still apply unchanged
 
 #### Scenario: Committed reclaim never strands a pre-sbatch live reservation
 
