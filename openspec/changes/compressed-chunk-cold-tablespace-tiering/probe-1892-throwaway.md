@@ -49,7 +49,10 @@ Local gates:
 ```text
 uv run pytest -q tests/test_compressed_chunk_cold_residency.py \
   tests/test_probe_compressed_chunk_cold_tablespace.py -m 'not integration'
-# 47 passed, 1 deselected
+# 56 passed, 1 deselected
+
+uv run pytest -q tests/test_select_ci_tests.py
+# 397 passed
 
 uv run ruff check .
 # All checks passed!
@@ -60,17 +63,18 @@ openspec validate compressed-chunk-cold-tablespace-tiering \
 ```
 
 Node-27 CLI oracle ran from a fresh temporary GitHub clone at the exact
-probe-code commit `47f5d4752e4133c7278456bf841564de820b6904`. The clone used a
-detached checkout, was clean before execution, and did not pull or modify the
-activity checkout at `/home/nwm/NWM`:
+post-review probe-code commit
+`4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70`. The clone used a detached
+checkout, was clean before execution, and did not pull or modify the activity
+checkout at `/home/nwm/NWM`:
 
 ```text
-ROOT=/tmp/nhms-1892-frozen-47f5d4752e4133c7
+ROOT=/tmp/nhms-1892-frozen-4f47ac11ba076859
 git clone --no-checkout https://github.com/DankerMu/SHUD-NWM.git "$ROOT/repo"
 git -C "$ROOT/repo" checkout --detach \
-  47f5d4752e4133c7278456bf841564de820b6904
+  4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70
 test "$(git -C "$ROOT/repo" rev-parse HEAD)" = \
-  47f5d4752e4133c7278456bf841564de820b6904
+  4f47ac11ba076859d87cf8fcaa7fbdeca56f5a70
 PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python \
   "$ROOT/repo/scripts/probe_compressed_chunk_cold_tablespace.py" \
   --mode isolated-cluster \
@@ -91,7 +95,7 @@ NHMS_INTEGRATION_DATABASE_URL=postgresql://unused:unused@127.0.0.1:1/postgres \
 PYTHONPATH="$ROOT/repo" /home/nwm/NWM/.venv/bin/python -m pytest -q \
   "$ROOT/repo/tests/test_probe_compressed_chunk_cold_tablespace.py" \
   -m timescaledb_210
-# 1 passed, 18 deselected in 16.29s
+# 1 passed, 25 deselected in 17.13s
 ```
 
 The two complete downloaded evidence copies passed the checked-in
@@ -100,8 +104,8 @@ root was removed:
 
 | Receipt | SHA-256 | Bytes | Result |
 |---|---:|---:|---|
-| frozen CLI | `4482e06dd95b864e32ea3143239ac12223c1f606da2aea050e2ff2aef9652151` | 284117 | `passed` |
-| frozen pytest marker | `207b060b52c06c45d1e8442761ad0b4e43aa924ebb03b9701ae2df74d328c340` | 284117 | `passed` |
+| frozen CLI | `e8c6a581983dd2e56c28f75a7b9c5fdca909f0b618e286bbb9fbc3481648673e` | 286968 | `passed` |
+| frozen pytest marker | `2dde9799107b491b27eed67e68b8bef1227749b06e39c67d6dc44f5f4c8a846f` | 286972 | `passed` |
 
 These full JSON files are local workflow evidence, not committed long-term
 fixtures. This log retains every decision-bearing value and the checked-in
@@ -135,9 +139,9 @@ For the accepted/rollback chunk, the compressed source group was:
 
 | Member class | Representative identity | Source bytes / residency |
 |---|---|---:|
-| origin heap | `_hyper_1_2_chunk` OID 20828 | 0, `pg_default` |
-| origin TOAST + index | OIDs 20831 / 20832 | 0 / 8192, `pg_default` |
-| three origin indexes | OIDs 20834 / 20836 / 20837 | 8192 each, `pg_default` |
+| origin heap | `_hyper_1_6_chunk` OID 20864 | 0, `pg_default` |
+| origin TOAST + index | OIDs 20867 / 20868 | 0 / 8192, `pg_default` |
+| three origin indexes | OIDs 20870 / 20872 / 20873 | 8192 each, `pg_default` |
 | compressed heap | `compress_hyper_2_13_chunk` OID 21008 | 8192, `pg_default` |
 | compressed TOAST + index | OIDs 21011 / 21012 | 16384 each, `pg_default` |
 | compressed index | OID 21013 | 16384, `pg_default` |
@@ -193,7 +197,13 @@ Measured stages:
 
 Rollback parity remained exactly `count=24`, `value_sum=138.0`, checksum
 `44e88875287a81d598d28044dc7e605e`; reconciliation was
-`complete_source`, and `original_sibling=true`.
+`complete_source`, and `original_sibling=true`. The post-review PASS gate also
+required the recorded expanded proof to bind all six uncompressed
+origin/index/TOAST members to target `nhms_cold`, with
+`all_requested_target=true` and `pg_default_bytes=0`; missing, mixed, or
+self-contradictory intermediate evidence fails the report even when the final
+recompressed group is cold. The inverse move carries the same target-aware
+proof for `pg_default` rather than reusing a cold-only classifier.
 
 A committed repetition created new sibling OID 22065
 `compress_hyper_2_30_chunk`, resolved the entire group at `nhms_cold`, and
@@ -220,7 +230,7 @@ exercise exact boundary arithmetic; these are **not production values**.
 
 | Case | Decision | Headroom | Mutation proof |
 |---|---|---:|---|
-| measured free space | approved | cold 23473319935; hot 23473385471 | normal probe may proceed |
+| measured free space | approved | cold 23466119167; hot 23466184703 | normal probe may proceed |
 | exact equality | approved | cold 0; hot 0 | boundary is inclusive |
 | cold one byte short | refused | cold -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
 | hot one byte short | refused | hot -1 | `shell_sql_executed=false`; OIDs/residency/sibling/parity unchanged |
@@ -231,7 +241,7 @@ sibling and unchanged parity. This is the rollback defense, not a substitute
 for preflight.
 
 The frozen committed tiny-fixture move advanced the instance LSN from
-`0/2268030` to `0/2290758` (165672 bytes by subtraction). The report
+`0/2267400` to `0/228FD38` (166200 bytes by subtraction). The report
 intentionally labels WAL as instance-level `pg_wal_lsn_diff` from `0/0`, not
 per-group WAL attribution; production WAL reserve cannot be derived from this
 number.
@@ -249,7 +259,7 @@ number.
 - Inverse shell-first move to `pg_default`: new sibling OID 22250; complete
   group `all_source`, parity preserved at count 25.
 - `drop_chunks`: all pre-drop OIDs
-  `[20828, 20831, 20832, 20834, 20836, 20837, 22250, 22253, 22254, 22255]`
+  `[20864, 20867, 20868, 20870, 20872, 20873, 22250, 22253, 22254, 22255]`
   were absent afterwards; no origin/compressed/index/TOAST member remained.
 
 ## Boundary proof
@@ -283,8 +293,8 @@ window parity.
 | lock conflict | `LockNotAvailable` | zero move, `complete_source` |
 | backend termination before commit | connection closed after mutation began | `complete_source`, original sibling |
 | lost commit acknowledgement | underlying commit completed; moving-connection commit API returned `CommitAckLost` and the connection became unusable | fresh `complete_target`, new sibling, parity equal, `replayed=false`; classification is from the fresh observer, never a clean-commit relabel |
-| insufficient role | `InsufficientPrivilege: must be owner ...` | zero move, `complete_source` |
-| target ENOSPC | genuine `DiskFull` | rollback `complete_source` |
+| insufficient role | `InsufficientPrivilege: must be owner ...` on an `nhms_cold` shell-move statement | zero move, `complete_source` |
+| target ENOSPC | the shell-move `ALTER TABLE ... SET TABLESPACE probe_full` itself returned genuine `DiskFull` (filler-only failure is not accepted) | rollback `complete_source` |
 | catalog/path mismatch | deliberately wrong expected path | refused before SQL; OIDs/residency/sibling/parity unchanged |
 | injected missing-relation SQL | `UndefinedTable` | explicitly **not** claimed as selected-relation disappearance |
 | selected relation disappears | dedicated selected chunk dropped from another connection before lock/revalidation | stale plan blocked `origin heap is missing`; every sacrificed OID absent; unrelated witness unchanged |
