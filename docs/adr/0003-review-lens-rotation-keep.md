@@ -2432,3 +2432,23 @@ a rotated free slot. **Keep rotation** unchanged under the recorded autonomous
 default. The cumulative aggregate still supplies no basis for an autonomous cut;
 any reversal continues to require the existing attribution-schema and round-role
 repairs plus maintainer review.
+
+## Revisit 2026-08-29 (post #1204/#1482 / PR #1896) — keep; pinned repair closure adds no rotation datum
+
+`loop_log_audit.py` now reports **142** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `141 / 86 / 296` after PR #1888.
+PR #1896 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced three independently verified
+P2 findings: one structured-refusal defect and two mandatory test-evidence gaps.
+Round 2 deliberately re-ran correctness, security-performance, and test-evidence
+against those exact fixes. All three lenses were already present in Round 1;
+Round 2 returned zero candidates, and both final-head Gap Sweeps were clean.
+
+This was pinned fix verification, not a rotation experiment. The Round 2 lens set
+is a strict subset of Round 1 and introduces no new subject-matter lens. Its clean
+result proves closure for this PR but cannot distinguish whether a rotated free
+slot would add recall. **Keep rotation** unchanged under the recorded autonomous
+default. The cumulative aggregate still supplies no basis for an autonomous cut;
+any reversal continues to require the existing attribution-schema and round-role
+repairs plus maintainer review.
