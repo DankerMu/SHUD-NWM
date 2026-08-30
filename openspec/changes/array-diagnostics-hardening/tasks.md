@@ -16,7 +16,7 @@ Upstream suggested level: absent
 
 - [x] 2.1 Red proof: new requirement tests fail against pre-change source in one batched run, then `uv run pytest -q tests/test_slurm_array_contract.py tests/test_real_slurm_gateway.py tests/test_orchestration_chain.py` passes.
 - [x] 2.2 `uv run ruff check .` and `openspec validate array-diagnostics-hardening --strict --no-interactive` pass; final-head regression executes the touched rows plus repository default backend test row.
-- [ ] 2.3 node-22 live receipt submits a forecast array with at least two members, proves the log directory names no member, and proves two task ids map to their own model/run through the log interface.
+- [x] 2.3 node-22 live receipt submits a forecast array with at least two members, proves the log directory names no member, and proves two task ids map to their own model/run through the log interface.
 - [x] 2.4 `uv run pytest -q tests/test_production_slurm_validation.py` proves the direct submitter creates the exact rendered neutral directory before raw `sbatch`, reads success/missing-marker/missing-log/symlink/non-regular/TOCTOU cases from that lane, and no-submit/fake/blocked paths do not create it.
 
 ## 3. Risk and invariant fixture
