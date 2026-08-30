@@ -247,3 +247,52 @@ def test_inspect_failure_does_not_mark_container_created(
     with pytest.raises(probe.ProbeError, match="inspect failed before docker run"):
         isolated_runner.run_isolated_cluster(config, owned)
     assert owned.created_container is False
+
+
+def test_main_reports_pre_container_probe_error_before_truthful_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed live-image inspect reports its primary error without Docker mutation."""
+    output = tmp_path / "probe-report.json"
+    docker_calls: list[list[str]] = []
+
+    def boom(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise probe.ProbeError("inspect failed before docker run")
+
+    def no_docker_remove(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        docker_calls.append(list(argv))
+        raise AssertionError(f"unexpected Docker cleanup call: {argv}")
+
+    cleanup_owned = probe.cleanup_owned
+
+    def cleanup_without_docker_mutation(owned: probe.OwnedResources, **_kwargs: object) -> dict[str, object]:
+        return cleanup_owned(owned, docker_bin="docker", runner=no_docker_remove)
+
+    monkeypatch.setattr(probe, "run_isolated_cluster", boom)
+    monkeypatch.setattr(probe, "cleanup_owned", cleanup_without_docker_mutation)
+
+    code = probe.main(
+        [
+            "--mode",
+            "isolated-cluster",
+            "--container-name",
+            _OWNED_NAME,
+            "--host-port",
+            "55492",
+            "--work-root",
+            str(tmp_path / _OWNED_NAME),
+            "--output",
+            str(output),
+        ]
+    )
+
+    document = probe.parse_probe_report(output.read_text(encoding="utf-8"))
+    assert code == 1
+    assert document["status"] == "failed"
+    assert document["error_type"] == "ProbeError"
+    assert document["error"] == "inspect failed before docker run"
+    assert document["cleanup"]["created_container"] is False
+    assert document["cleanup"]["container_absent"] is False
+    assert document["cleanup"]["container_removed"] is False
+    assert docker_calls == []

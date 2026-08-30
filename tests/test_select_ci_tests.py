@@ -4,6 +4,7 @@ import ast
 import fnmatch
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
+from _pytest.mark.expression import Expression, Scanner, TokenType
 
 # The shared pure activation predicate is deliberately accessed through the
 # production module (not imported by name): the #1561 guard-domain classifier
@@ -3605,10 +3607,10 @@ def _tracked_tests_support_modules() -> list[str]:
 # they DO derive non-gated importer suites. Issue #1487 excludes them by name, so
 # this is an inherited scope boundary, not a coverage claim. The factual
 # predicate it cites: ci.yml's `database` paths-filter lists each path and
-# starts `real-db-integration`, which runs `pytest -q -m integration` — measured
-# coverage of integration_helpers' importers' tests is 75 of 245, because the
-# non-gated derivation and `-m integration` select near-disjoint sets by
-# construction. PARTIAL, not full compensation. The closure guard pins each path
+# starts `real-db-integration`, which runs ordinary integration rows under
+# `pytest -vv -rs -m "integration and not timescaledb_210"`. That is PARTIAL,
+# not full compensation: generic SQL-marker selection and non-gated derivation
+# select near-disjoint sets by construction. The closure guard pins each path
 # inside that filter block, so if the filter drops one the carve-out reds and has
 # to be re-decided rather than rotting into a silent hole.
 #
@@ -9172,8 +9174,78 @@ def _real_db_job_block(workflow: str) -> str:
 REAL_DB_DEDICATED_DSN_ENV = "NHMS_INTEGRATION_DATABASE_URL"
 REAL_DB_OPT_IN_ENV = "NHMS_RUN_INTEGRATION"
 REAL_DB_SERVICE_IMAGE = "timescale/timescaledb-ha:pg15-latest"
-REAL_DB_INTEGRATION_COMMAND = "pytest -vv -rs -m integration"
 REAL_DB_COMMAND_STEP_NAME = "Run real database integration tests"
+REAL_DB_GENERIC_INTEGRATION_MARKER = "integration"
+REAL_DB_NODE27_ONLY_MARKER = "timescaledb_210"
+REAL_DB_SUITE_COMMAND_PREFIX = ("pytest", "-vv", "-rs", "-m")
+REAL_DB_SUITE_COMMAND_SHAPE = "pytest -vv -rs -m <marker-expression>"
+
+
+def _real_db_marker_expression_violations(expression: object) -> list[str]:
+    """Return semantic marker-routing violations for one pytest ``-m`` expression."""
+    if not isinstance(expression, str):
+        return ["real-db marker selection expression must be valid pytest syntax"]
+    try:
+        compiled = Expression.compile(expression)
+        scanner = Scanner(expression)
+    except (SyntaxError, pytest.UsageError):
+        return ["real-db marker selection expression must be valid pytest syntax"]
+    identifiers = (
+        {scanner.current.value} if scanner.current.type is TokenType.IDENT else set()
+    ) | {token.value for token in scanner.tokens if token.type is TokenType.IDENT}
+    required_identifiers = {REAL_DB_GENERIC_INTEGRATION_MARKER, REAL_DB_NODE27_ONLY_MARKER}
+    unexpected_identifiers = identifiers - required_identifiers
+
+    rows = (
+        ("ordinary integration", frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER}), True),
+        (
+            "node-27-only integration",
+            frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER, REAL_DB_NODE27_ONLY_MARKER}),
+            False,
+        ),
+        ("unmarked", frozenset(), False),
+        (
+            "ordinary integration plus e2e",
+            frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER, "e2e"}),
+            True,
+        ),
+        (
+            "ordinary integration plus unrelated marker",
+            frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER, "unrelated_marker"}),
+            True,
+        ),
+    )
+    violations: list[str] = []
+    for description, markers, expected in rows:
+        selected = compiled.evaluate(lambda marker, **_kwargs: marker in markers)
+        if selected != expected:
+            expected_text = "select" if expected else "deselect"
+            violations.append(f"real-db marker selection must {expected_text} {description} items")
+    if unexpected_identifiers:
+        violations.append("real-db marker selection must mention only `integration` and `timescaledb_210`")
+    return violations
+
+
+def _real_db_suite_command_violations(command: object) -> list[str]:
+    """Return violations for the closed suite-root argv and its marker expression."""
+    if not isinstance(command, str):
+        return [
+            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
+            "with no extra options or paths"
+        ]
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return [
+            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
+            "with no extra options or paths"
+        ]
+    if len(argv) != 5 or tuple(argv[:4]) != REAL_DB_SUITE_COMMAND_PREFIX:
+        return [
+            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
+            "with no extra options or paths"
+        ]
+    return _real_db_marker_expression_violations(argv[4])
 
 
 # The exact normalized event-gate condition the real-db job must carry.
@@ -9252,8 +9324,11 @@ def _real_db_job_contract_violations(workflow_text: str) -> list[str]:
       behavior);
     - workflow-level `env` absent/empty (no BASH_ENV/PYTHONPATH/PATH override);
     - the integration command comes from the named step
-      `Run real database integration tests` and normalizes to exactly
-      `pytest -vv -rs -m integration` (a comment or another step cannot satisfy);
+      `Run real database integration tests`, has the closed suite-root argv
+      ``pytest -vv -rs -m <one expression token>`` with no other options or
+      paths, and its pytest-parsed marker expression selects ordinary
+      ``integration`` rows while deselecting only ``integration +
+      timescaledb_210`` rows (a comment or another step cannot satisfy);
     - the named step's effective execution context (see
       ``_real_db_named_step_violations``): no step env, no step condition, no
       step/job `continue-on-error`, no step/job shell or working-directory, and
@@ -9387,8 +9462,7 @@ def _real_db_named_step_violations(job_data: dict, parsed: dict | None = None) -
     step = named[0]
 
     command = step.get("run")
-    if not isinstance(command, str) or _normalize_ws(command) != _normalize_ws(REAL_DB_INTEGRATION_COMMAND):
-        violations.append(f"real-db job command must be `{REAL_DB_INTEGRATION_COMMAND}`")
+    violations.extend(_real_db_suite_command_violations(command))
 
     step_env = step.get("env")
     if isinstance(step_env, dict) and step_env:
@@ -9702,34 +9776,90 @@ def test_real_db_job_contract_reds_when_the_named_step_is_renamed() -> None:
     # Parse-scope sanity: valid YAML, no step named as required, command intact.
     parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_COMMAND_STEP_NAME not in [s.get("name") for s in parsed["steps"]]
-    assert any(REAL_DB_INTEGRATION_COMMAND in str(s.get("run", "")) for s in parsed["steps"])
+    assert any(
+        _real_db_suite_command_violations(s.get("run")) == []
+        for s in parsed["steps"]
+        if isinstance(s, dict)
+    )
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
     assert REAL_DB_COMMAND_STEP_NAME in joined, f"expected a named missing-step violation, got {violations}"
 
 
-def test_real_db_job_contract_reds_when_the_integration_command_is_changed() -> None:
-    # Branch-completeness inventory row B (cand-r2-02): the command identity is
-    # load-bearing. Keeping the named step but changing the command to the prior
-    # `pytest -q -m integration` must be rejected by the SAME structured helper
-    # with a named command violation. The tracked workflow is untouched.
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("pytest -vv -rs -m integration", "deselect node-27-only integration items"),
+        ("pytest -vv -rs -m 'not timescaledb_210 or e2e'", "mention only `integration` and `timescaledb_210`"),
+        ("pytest -vv -rs -m 'integration and not e2e'", "deselect node-27-only integration items"),
+        (
+            "pytest -vv -rs -m 'integration and not (timescaledb_210 or unrelated_marker)'",
+            "mention only `integration` and `timescaledb_210`",
+        ),
+    ],
+    ids=["bare-integration", "missing-integration", "missing-node27-exclusion", "over-broad-exclusion"],
+)
+def test_real_db_job_contract_reds_on_marker_expression_drift(command: str, expected: str) -> None:
+    # #1914: each YAML mutation preserves the closed argv shape but fails the
+    # same marker-routing truth-table contract that the live workflow satisfies.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    job = _real_db_job_block(workflow)
-    cmd_line = next(
-        line for line in job.splitlines() if line.strip().startswith(f"run: {REAL_DB_INTEGRATION_COMMAND}")
+    mutated_workflow = _mutated_real_db_workflow(
+        workflow,
+        lambda mapping: _real_db_named_step(mapping).update({"run": command}) or None,
     )
-    mutated = workflow.replace(cmd_line, cmd_line.replace(REAL_DB_INTEGRATION_COMMAND, "pytest -q -m integration"))
-    # Parse-scope sanity: valid YAML, named step present, command changed.
-    parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
-    assert REAL_DB_COMMAND_STEP_NAME in [s.get("name") for s in parsed["steps"]]
-    assert "pytest -q -m integration" in [
-        str(s.get("run", "")) for s in parsed["steps"] if s.get("name") == REAL_DB_COMMAND_STEP_NAME
-    ]
+    parsed_command = _real_db_named_step(yaml.safe_load(mutated_workflow)["jobs"]["real-db-integration"])["run"]
+    assert parsed_command == command
 
-    violations = _real_db_job_contract_violations(mutated)
-    joined = "\n".join(violations)
-    assert "command" in joined, f"expected a named command violation, got {violations}"
+    violations = _real_db_job_contract_violations(mutated_workflow)
+    assert any(expected in violation for violation in violations), (
+        f"expected `{expected}` in violations, got {violations}"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -vv -rs -m 'integration and not timescaledb_210' tests/test_one.py",
+        "pytest -vv -rs --collect-only -m 'integration and not timescaledb_210'",
+    ],
+    ids=["trailing-test-path", "extra-collect-only"],
+)
+def test_real_db_job_contract_reds_on_suite_command_shape_drift(command: str) -> None:
+    # Both mutations retain valid YAML and a semantically correct ``-m`` value,
+    # but narrow or empty the full suite. They must therefore name the closed
+    # suite-command violation, not merely a marker-routing violation.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    mutated_workflow = _mutated_real_db_workflow(
+        workflow,
+        lambda mapping: _real_db_named_step(mapping).update({"run": command}) or None,
+    )
+    parsed_command = _real_db_named_step(yaml.safe_load(mutated_workflow)["jobs"]["real-db-integration"])["run"]
+    assert parsed_command == command
+
+    violations = _real_db_job_contract_violations(mutated_workflow)
+    expected = f"suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}`"
+    assert any(expected in violation for violation in violations), (
+        f"expected `{expected}` in violations, got {violations}"
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [None, "pytest -vv -rs -m 'not timescaledb_210 and integration'"],
+    ids=["live-command", "equivalent-expression"],
+)
+def test_real_db_marker_expression_matches_generic_and_node27_truth_table(command: str | None) -> None:
+    # #1914: marker capability, not a probe filename/import, is the routing
+    # authority. The dual-marked row models the #1907 sibling shape without
+    # Docker, a database, or importing that branch's test module. The second
+    # argv preserves the closed shape while proving semantic expression variants
+    # remain accepted.
+    if command is None:
+        command = _real_db_named_step(
+            yaml.safe_load(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))["jobs"]["real-db-integration"]
+        )["run"]
+    assert _real_db_suite_command_violations(command) == []
 
 
 def _splice_real_db_job_block(workflow: str, job: str, mutated_job: str) -> str:
