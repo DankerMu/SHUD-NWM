@@ -2500,3 +2500,30 @@ slot would add recall. **Keep rotation** unchanged under the recorded autonomous
 default. The cumulative aggregate still supplies no basis for an autonomous cut;
 any reversal continues to require the existing attribution-schema and round-role
 repairs plus maintainer review.
+
+## Revisit 2026-08-30 (post #1742/#1539 / PR #1901) — keep; pinned depth catch is not a rotation counterexample
+
+`loop_log_audit.py` now reports **145** multi-round merged PRs and later-round
+catches **core=87 / rotated=296**, moving from `144 / 86 / 296` after PR #1916.
+PR #1901 therefore contributes the full `core +1 / rotated +0` delta.
+
+The attribution is real but its interpretation is narrow. Round 1 used the
+standard six-lens mix and found four defects. Round 2 intentionally retained the
+Round 1 correctness lens while checking whether those fixes covered every carrier
+of the same scheduler-log provenance invariant. It found one P1 sibling recurrence:
+`production_closure` rendered the new neutral path but still pre-created and read
+the legacy leader-run lane around its direct raw-`sbatch` path. That repeat
+triggered the workflow's same-invariant depth retro and the canonical-path redesign;
+Round 3 and both final-head Gap Sweeps were clean.
+
+This is evidence that the **pinned core** earns fix-propagation recall: the lens
+that named the provenance invariant had to remain present to see the same invariant
+violated at a sibling submitter. It is not evidence against additive free-slot
+rotation, because Round 2 introduced no new lens and therefore applied no rotation
+treatment to compare. Reading `core +1 / rotated +0` as a cut signal would again
+confuse an intentional depth recheck with a failed rotation experiment.
+
+**Keep rotation** unchanged under the recorded autonomous default. This sample
+strengthens the reason to keep the core pinned while leaving the additive rotation
+question untouched. Any reversal still requires the existing attribution-schema,
+round-intent and round-role repairs plus maintainer review.
