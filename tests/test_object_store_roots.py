@@ -195,6 +195,12 @@ def test_real_templates_export_object_store_root(template_name: str) -> None:
         "max_concurrent": 1,
         "shud_threads": 1,
     }
+    context["array_log_dir"] = str(
+        Path(context["workspace_dir"])
+        / context["cycle_id"]
+        / "array_logs"
+        / Path(context["manifest_index_path"]).stem
+    )
     context["export_lines"] = [
         f"export WORKSPACE_ROOT={shlex.quote(context['workspace_dir'])}",
         f"export OBJECT_STORE_ROOT={shlex.quote(context['workspace_dir'])}",

@@ -59,7 +59,8 @@ from services.production_closure.scale_validation import (
     validate_scale,
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
-from services.slurm_gateway.real_backend import RealSlurmGateway, map_slurm_error_code
+from services.slurm_gateway.gateway import SlurmValidationError
+from services.slurm_gateway.real_backend import RealSlurmGateway, array_log_dir, map_slurm_error_code
 
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 SAFE_SLURM_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -376,8 +377,13 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
     )
     rendered_script = _render_production_template(config, manifest_index, writer)
     writer.write_text(config.lane_dir / "rendered_run_shud_forecast_array.sbatch", rendered_script)
+    submit_manifest_index = manifest_index
 
-    accounting = _fake_accounting(config) if config.fake_slurm else _real_accounting(config, blockers)
+    accounting = (
+        _fake_accounting(config)
+        if config.fake_slurm
+        else _real_accounting(config, blockers, submit_manifest_index)
+    )
     if accounting.get("shared_runtime_inputs_cleaned") is True:
         manifest_index, manifest_tasks = _write_manifest_index(
             config,
@@ -386,13 +392,13 @@ def validate_slurm(config: ProductionSlurmConfig) -> dict[str, Any]:
         )
     writer.write_json(config.lane_dir / "slurm_accounting.json", accounting)
 
-    partial_success = _partial_success_evidence(config, accounting)
+    partial_success = _partial_success_evidence(config, accounting, submit_manifest_index)
     writer.write_json(config.lane_dir / "array_partial_success.json", partial_success)
 
     retry_cancel = _retry_cancel_evidence(config, partial_success, accounting)
     writer.write_json(config.lane_dir / "retry_cancel.json", retry_cancel)
 
-    qc = _qc_blocking_evidence(config, partial_success, accounting)
+    qc = _qc_blocking_evidence(config, partial_success, accounting, submit_manifest_index)
     writer.write_json(config.lane_dir / "qc_blocking.json", qc)
 
     metadata = _environment_metadata(config)
@@ -864,7 +870,7 @@ def _render_production_template(config: ProductionSlurmConfig, manifest_index: P
         "model_id": config.model_id,
         "job_type": "run_shud_forecast_array",
         "stage_name": "run_shud_forecast_array",
-        "cycle_id": f"{config.run_id}_cycle",
+        "cycle_id": _production_cycle_id(config),
         "account": config.account,
         "manifest_index_path": str(manifest_index),
         "workspace_dir": str(config.workspace_root),
@@ -882,7 +888,11 @@ def _safe_template_model_package_uri(value: str) -> str:
     return redact_text(value) if secret_bearing_url_reason(value) is not None else value
 
 
-def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str]]) -> dict[str, Any]:
+def _real_accounting(
+    config: ProductionSlurmConfig,
+    blockers: list[dict[str, str]],
+    manifest_index: Path,
+) -> dict[str, Any]:
     if blockers or not config.submit:
         return {
             "mode": "blocked" if blockers else "not_submitted",
@@ -890,7 +900,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
             "commands": _inspection_commands(config),
             "records": [],
         }
-    _prepare_shared_log_dir(config)
+    _prepare_shared_log_dir(config, manifest_index)
     script_path = config.lane_dir / "rendered_run_shud_forecast_array.sbatch"
     array_spec = f"0-1%{max(1, min(config.max_concurrent, 2))}"
     submit_command = ["sbatch", "--parsable", f"--array={array_spec}"]
@@ -936,7 +946,7 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     poll = _poll_sacct_for_expected_array(config, job_id, expected_task_ids={0, 1})
     sacct = poll["last_sacct"]
     records = poll["records"]
-    task_blockers = [*poll["blockers"], *_submitted_log_blockers(config, job_id, records)]
+    task_blockers = [*poll["blockers"], *_submitted_log_blockers(config, job_id, records, manifest_index)]
     mode = "blocked" if task_blockers else "submitted"
     return {
         "mode": mode,
@@ -962,9 +972,15 @@ def _real_accounting(config: ProductionSlurmConfig, blockers: list[dict[str, str
     }
 
 
-def _prepare_shared_log_dir(config: ProductionSlurmConfig) -> Path:
-    log_dir = config.workspace_root / config.run_id / "logs"
-    _safe_workspace_path(config.workspace_root, log_dir)
+def _prepare_shared_log_dir(config: ProductionSlurmConfig, manifest_index: Path) -> Path:
+    try:
+        log_dir = _slurm_log_dir(config, manifest_index)
+        _safe_workspace_path(config.workspace_root, log_dir)
+    except ProductionValidationError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_LOG_DIR_INVALID",
+            error.message,
+        ) from error
     if log_dir.exists() and not log_dir.is_dir():
         raise ProductionValidationError(
             "PRODUCTION_SLURM_LOG_DIR_INVALID",
@@ -1207,6 +1223,7 @@ def _submitted_log_blockers(
     config: ProductionSlurmConfig,
     job_id: str,
     records: list[dict[str, Any]],
+    manifest_index: Path,
 ) -> list[dict[str, Any]]:
     task_records = {int(record["task_id"]): record for record in records if record.get("task_id") is not None}
     blockers: list[dict[str, Any]] = []
@@ -1215,12 +1232,18 @@ def _submitted_log_blockers(
         if not record or str(record.get("state", "")) not in TERMINAL_SLURM_STATES:
             continue
         for suffix in ("out", "err"):
-            path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
-            blocker = _slurm_log_file_blocker(config, path, task_id=task_id, suffix=suffix)
+            path = _slurm_log_file(config, job_id, task_id, suffix=suffix, manifest_index=manifest_index)
+            blocker = _slurm_log_file_blocker(
+                config, path, task_id=task_id, suffix=suffix, manifest_index=manifest_index
+            )
             if blocker:
                 blockers.append(blocker)
     task1 = task_records.get(1)
-    if task1 and _is_controlled_failure_outcome(task1) and not _controlled_failure_log_evidence_present(config, job_id):
+    if (
+        task1
+        and _is_controlled_failure_outcome(task1)
+        and not _controlled_failure_log_evidence_present(config, job_id, manifest_index)
+    ):
         blockers.append(
             {
                 "error_code": "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING",
@@ -1232,8 +1255,12 @@ def _submitted_log_blockers(
     return blockers
 
 
-def _controlled_failure_log_evidence_present(config: ProductionSlurmConfig, job_id: str) -> bool:
-    task1_logs = _read_task_logs(config, job_id, task_id=1)
+def _controlled_failure_log_evidence_present(
+    config: ProductionSlurmConfig,
+    job_id: str,
+    manifest_index: Path,
+) -> bool:
+    task1_logs = _read_task_logs(config, job_id, task_id=1, manifest_index=manifest_index)
     if not task1_logs:
         return False
     joined_logs = "\n".join(task1_logs)
@@ -1242,15 +1269,30 @@ def _controlled_failure_log_evidence_present(config: ProductionSlurmConfig, job_
     )
 
 
-def _controlled_failure_marker_present(config: ProductionSlurmConfig, job_id: str) -> bool:
-    return any(CONTROLLED_FAILURE_LOG_MARKER in content for content in _read_task_logs(config, job_id, task_id=1))
+def _controlled_failure_marker_present(
+    config: ProductionSlurmConfig,
+    job_id: str,
+    manifest_index: Path,
+) -> bool:
+    return any(
+        CONTROLLED_FAILURE_LOG_MARKER in content
+        for content in _read_task_logs(config, job_id, task_id=1, manifest_index=manifest_index)
+    )
 
 
-def _read_task_logs(config: ProductionSlurmConfig, job_id: str, *, task_id: int) -> list[str]:
+def _read_task_logs(
+    config: ProductionSlurmConfig,
+    job_id: str,
+    *,
+    task_id: int,
+    manifest_index: Path,
+) -> list[str]:
     contents: list[str] = []
     for suffix in ("out", "err"):
-        path = _slurm_log_file(config, job_id, task_id, suffix=suffix)
-        blocker, content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix)
+        path = _slurm_log_file(config, job_id, task_id, suffix=suffix, manifest_index=manifest_index)
+        blocker, content = _validated_slurm_log_content(
+            config, path, task_id=task_id, suffix=suffix, manifest_index=manifest_index
+        )
         if blocker or content is None:
             continue
         contents.append(content)
@@ -1263,8 +1305,11 @@ def _slurm_log_file_blocker(
     *,
     task_id: int,
     suffix: str,
+    manifest_index: Path,
 ) -> dict[str, str] | None:
-    blocker, _content = _validated_slurm_log_content(config, path, task_id=task_id, suffix=suffix, read_content=False)
+    blocker, _content = _validated_slurm_log_content(
+        config, path, task_id=task_id, suffix=suffix, read_content=False, manifest_index=manifest_index
+    )
     return blocker
 
 
@@ -1275,12 +1320,13 @@ def _validated_slurm_log_content(
     task_id: int,
     suffix: str,
     read_content: bool = True,
+    manifest_index: Path,
 ) -> tuple[dict[str, str] | None, str | None]:
     field = f"task_{task_id}_{suffix}"
-    bound_log, blocker = _bind_slurm_log_path(config, path, field=field, task_id=task_id)
+    bound_log, blocker = _bind_slurm_log_path(config, path, field=field, task_id=task_id, manifest_index=manifest_index)
     if blocker:
         return blocker, None
-    blocker = _validate_slurm_log_path(config, path, field=field, task_id=task_id)
+    blocker = _validate_slurm_log_path(config, path, field=field, task_id=task_id, manifest_index=manifest_index)
     if blocker:
         return blocker, None
     if bound_log is None:
@@ -1316,8 +1362,9 @@ def _bind_slurm_log_path(
     *,
     field: str,
     task_id: int,
+    manifest_index: Path,
 ) -> tuple[_BoundSlurmLogPath | None, dict[str, str] | None]:
-    log_dir = _slurm_log_dir(config)
+    log_dir = _slurm_log_dir(config, manifest_index)
     try:
         _refuse_symlink_components(log_dir)
         resolved_log_dir = log_dir.resolve(strict=True)
@@ -1425,11 +1472,12 @@ def _validate_slurm_log_path(
     *,
     field: str,
     task_id: int,
+    manifest_index: Path,
 ) -> dict[str, str] | None:
     try:
         _refuse_symlink_components(path.parent)
         resolved_path = path.resolve(strict=False)
-        resolved_log_dir = _slurm_log_dir(config).resolve(strict=False)
+        resolved_log_dir = _slurm_log_dir(config, manifest_index).resolve(strict=False)
         resolved_path.relative_to(resolved_log_dir)
     except (OSError, ProductionValidationError, ValueError):
         return _slurm_log_blocker("SLURM_ARRAY_TASK_LOG_UNSAFE", field, task_id, path)
@@ -1534,7 +1582,11 @@ def _allowlisted_slurm_config(stdout: str) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[str, Any]) -> dict[str, Any]:
+def _partial_success_evidence(
+    config: ProductionSlurmConfig,
+    accounting: dict[str, Any],
+    manifest_index: Path,
+) -> dict[str, Any]:
     records = accounting.get("records") if isinstance(accounting.get("records"), list) else []
     task_records = [record for record in records if record.get("task_id") is not None]
     blockers = accounting.get("blockers") if isinstance(accounting.get("blockers"), list) else []
@@ -1581,10 +1633,10 @@ def _partial_success_evidence(config: ProductionSlurmConfig, accounting: dict[st
                 "publishable": succeeded,
                 "status": "succeeded" if succeeded else "blocked",
                 "error_code": task_error_code,
-                "stdout_path": _slurm_log_path(config, accounting, task_id, suffix="out")
+                "stdout_path": _slurm_log_path(config, accounting, task_id, suffix="out", manifest_index=manifest_index)
                 if accounting.get("job_id")
                 else None,
-                "stderr_path": _slurm_log_path(config, accounting, task_id, suffix="err")
+                "stderr_path": _slurm_log_path(config, accounting, task_id, suffix="err", manifest_index=manifest_index)
                 if accounting.get("job_id")
                 else None,
                 "log_verified": log_verified,
@@ -1658,17 +1710,45 @@ def _task_log_error_code(blockers: list[dict[str, Any]], task_id: int) -> str:
     return "SLURM_ARRAY_TASK_LOG_MISSING"
 
 
-def _slurm_log_path(config: ProductionSlurmConfig, accounting: dict[str, Any], task_id: int, *, suffix: str) -> str:
+def _slurm_log_path(
+    config: ProductionSlurmConfig,
+    accounting: dict[str, Any],
+    task_id: int,
+    *,
+    suffix: str,
+    manifest_index: Path,
+) -> str:
     array_job_id = str(accounting.get("job_id") or "9001")
-    return str(_slurm_log_file(config, array_job_id, task_id, suffix=suffix))
+    return str(_slurm_log_file(config, array_job_id, task_id, suffix=suffix, manifest_index=manifest_index))
 
 
-def _slurm_log_file(config: ProductionSlurmConfig, array_job_id: str, task_id: int, *, suffix: str) -> Path:
-    return _slurm_log_dir(config) / f"{array_job_id}_{task_id}.{suffix}"
+def _slurm_log_file(
+    config: ProductionSlurmConfig,
+    array_job_id: str,
+    task_id: int,
+    *,
+    suffix: str,
+    manifest_index: Path,
+) -> Path:
+    return _slurm_log_dir(config, manifest_index) / f"{array_job_id}_{task_id}.{suffix}"
 
 
-def _slurm_log_dir(config: ProductionSlurmConfig) -> Path:
-    return config.workspace_root / config.run_id / "logs"
+def _production_cycle_id(config: ProductionSlurmConfig) -> str:
+    return f"{config.run_id}_cycle"
+
+
+def _production_array_log_dir(config: ProductionSlurmConfig, manifest_index: Path) -> Path:
+    try:
+        return array_log_dir(config.workspace_root, _production_cycle_id(config), manifest_index)
+    except SlurmValidationError as error:
+        raise ProductionValidationError(
+            "PRODUCTION_SLURM_LOG_DIR_INVALID",
+            f"Unable to derive the cohort-neutral Slurm log directory: {error.message}",
+        ) from error
+
+
+def _slurm_log_dir(config: ProductionSlurmConfig, manifest_index: Path) -> Path:
+    return _production_array_log_dir(config, manifest_index)
 
 
 def _blocked_partial_success(
@@ -1741,6 +1821,7 @@ def _qc_blocking_evidence(
     config: ProductionSlurmConfig,
     partial_success: dict[str, Any],
     accounting: dict[str, Any],
+    manifest_index: Path,
 ) -> dict[str, Any]:
     success = next((task for task in partial_success["tasks"] if task["publishable"]), None)
     mode = str(accounting.get("mode", ""))
@@ -1748,7 +1829,9 @@ def _qc_blocking_evidence(
     evidence_verified = mode == "fake" or (
         mode == "submitted"
         and not _has_blocker(blockers, "SLURM_ARRAY_TASK_CONTROLLED_FAILURE_MARKER_MISSING")
-        and _controlled_failure_marker_present(config, str(accounting.get("job_id") or ""))
+        and _controlled_failure_marker_present(
+            config, str(accounting.get("job_id") or ""), manifest_index
+        )
     )
     malformed_status = "blocked" if evidence_verified else "not_verified"
     return {

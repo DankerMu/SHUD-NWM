@@ -14,6 +14,7 @@ import pytest
 import yaml
 from jinja2.exceptions import SecurityError
 
+from packages.common.manifest_index import MAX_MANIFEST_INDEX_ENTRIES
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
@@ -32,9 +33,12 @@ from services.slurm_gateway.gateway import (
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import (
+    ARRAY_LOGS_DIRNAME,
     LOG_TRUNCATION_MARKER,
+    MAX_ARRAY_TASK_LOGS,
     RealSlurmGateway,
     _normalize_slurm_state,
+    array_log_dir,
     map_slurm_error_code,
 )
 
@@ -1598,9 +1602,13 @@ def test_safe_resource_profile_renders_manifest_identity_unchanged(monkeypatch, 
         },
     )
 
+    index_stem = Path(record.manifest["manifest_index_path"]).stem
+    expected_log_dir = tmp_path / "workspace" / "cycle_manifest" / "array_logs" / index_stem
     assert record.run_id == "run_manifest"
     assert "#SBATCH --job-name=nhms_forecast" in captured["script"]
-    assert f"#SBATCH --output={tmp_path / 'workspace'}/run_manifest/logs/%A_%a.out" in captured["script"]
+    assert f"#SBATCH --output={expected_log_dir}/%A_%a.out" in captured["script"]
+    assert "run_manifest/logs" not in captured["script"]
+    assert expected_log_dir.is_dir()
     assert "export WORKSPACE_ROOT=" + shlex.quote(str(tmp_path / "workspace")) in captured["script"]
     assert "export NHMS_RUN_ID=run_manifest" in captured["script"]
     assert "export NHMS_CYCLE_ID=cycle_manifest" in captured["script"]
@@ -3319,6 +3327,7 @@ def test_array_master_log_aggregates_task_logs(monkeypatch, tmp_path) -> None:
             "truncated": False,
             "missing_stdout": False,
             "missing_stderr": False,
+            "identity_complete": False,
         },
         {
             "task_id": 1,
@@ -3327,8 +3336,11 @@ def test_array_master_log_aggregates_task_logs(monkeypatch, tmp_path) -> None:
             "truncated": False,
             "missing_stdout": False,
             "missing_stderr": False,
+            "identity_complete": False,
         },
     ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
 
 
 def test_missing_task_log_does_not_discard_existing(monkeypatch, tmp_path) -> None:
@@ -3359,6 +3371,7 @@ def test_missing_task_log_does_not_discard_existing(monkeypatch, tmp_path) -> No
             "truncated": False,
             "missing_stdout": False,
             "missing_stderr": True,
+            "identity_complete": False,
         },
         {
             "task_id": 1,
@@ -3367,8 +3380,1337 @@ def test_missing_task_log_does_not_discard_existing(monkeypatch, tmp_path) -> No
             "truncated": False,
             "missing_stdout": True,
             "missing_stderr": False,
+            "identity_complete": False,
         },
     ]
+
+
+def _write_array_manifest_index(path: Path, *members: tuple[str, str]) -> Path:
+    entries = [
+        {
+            "task_id": index,
+            "model_id": model_id,
+            "basin_version_id": f"basin_{index}",
+            "river_network_version_id": f"river_{index}",
+            "run_id": run_id,
+            "source_id": "GFS",
+            "cycle_time": "2026-05-08T12:00:00Z",
+            "workspace_dir": str(path.parent),
+        }
+        for index, (run_id, model_id) in enumerate(members)
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    return path
+
+
+def test_array_log_dir_helper_binds_workspace_cycle_and_safe_index_stem(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    index_path = workspace_root / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    expected = workspace_root / "cycle_001" / ARRAY_LOGS_DIRNAME / index_path.stem
+
+    assert array_log_dir(workspace_root, "cycle_001", index_path) == expected
+    assert array_log_dir(workspace_root, "cycle_001", str(index_path)) == expected
+    gateway = _production_gateway(tmp_path)
+    assert gateway._array_log_dir(workspace_root, "cycle_001", index_path) == expected
+
+
+def test_array_log_dir_helper_rejects_unsafe_index_stem_and_escape(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    with pytest.raises(SlurmValidationError, match="not a safe array log directory component"):
+        array_log_dir(workspace_root, "cycle_001", "bad stem.json")
+    with pytest.raises(SlurmValidationError, match="not a safe array log directory component"):
+        array_log_dir(workspace_root, "cycle_001", "..")
+    with pytest.raises(SlurmValidationError, match="outside the configured workspace directory"):
+        array_log_dir(workspace_root, "..", "manifest_index.json")
+
+
+def test_submit_job_array_creates_cohort_neutral_log_directory_before_sbatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        script = Path(command[-1]).read_text(encoding="utf-8")
+        observed["script"] = script
+        output_line = next(line for line in script.splitlines() if line.startswith("#SBATCH --output="))
+        log_dir = Path(output_line.split("=", maxsplit=1)[1]).parent
+        observed["log_dir"] = log_dir
+        observed["log_dir_exists_at_sbatch"] = log_dir.is_dir()
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    tasks = [
+        {**_fake_array_task("leader_run", "model_001"), "workspace_dir": str(tmp_path / "workspace")},
+        {**_fake_array_task("member_run", "model_002"), "workspace_dir": str(tmp_path / "workspace")},
+    ]
+    record = gateway.submit_job_array(
+        job_type="run_shud_forecast_array",
+        cycle_id="cycle_001",
+        stage_name="forecast",
+        tasks=tasks,
+        manifest=_production_manifest(tmp_path, "run_shud_forecast_array"),
+    )
+
+    expected_log_dir = Path(str(observed["log_dir"]))
+    script = str(observed["script"])
+    index_stem = Path(record.manifest["manifest_index_path"]).stem
+    assert observed["log_dir_exists_at_sbatch"] is True
+    assert expected_log_dir == tmp_path / "workspace" / "cycle_001" / "array_logs" / index_stem
+    assert f"#SBATCH --output={expected_log_dir}/%A_%a.out" in script
+    assert f"#SBATCH --error={expected_log_dir}/%A_%a.err" in script
+    assert "leader_run" not in script.split("#SBATCH --output=", maxsplit=1)[1].splitlines()[0]
+    assert "leader_run" not in script.split("#SBATCH --error=", maxsplit=1)[1].splitlines()[0]
+    assert "leader_run/logs" not in script
+    assert expected_log_dir.is_dir()
+
+
+def test_array_master_logs_join_exact_manifest_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("alpha stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("beta stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "alpha stdout",
+            "stderr": "alpha stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_alpha",
+            "run_id": "run_alpha",
+            "identity_complete": True,
+        },
+        {
+            "task_id": 1,
+            "stdout": "beta stdout",
+            "stderr": "beta stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_beta",
+            "run_id": "run_beta",
+            "identity_complete": True,
+        },
+    ]
+
+
+def test_array_log_lookup_after_restart_uses_exact_neutral_index(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="sacct unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    older = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T110000.json",
+        ("run_old", "model_old"),
+        ("run_other", "model_other"),
+    )
+    newer = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T130000.json",
+        ("run_new", "model_new"),
+        ("run_fresh", "model_fresh"),
+    )
+    exact = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / exact.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    del older, newer
+
+    response = gateway.fetch_logs("12345")
+
+    by_task = {entry["task_id"]: entry for entry in response.array_task_logs or []}
+    assert by_task[0]["stdout"] == "alpha stdout"
+    assert by_task[0]["model_id"] == "model_alpha"
+    assert by_task[0]["run_id"] == "run_alpha"
+    assert by_task[0]["identity_complete"] is True
+    assert by_task[1]["stdout"] == "beta stdout"
+    assert by_task[1]["model_id"] == "model_beta"
+    assert by_task[1]["run_id"] == "run_beta"
+    assert by_task[1]["identity_complete"] is True
+    assert response.metadata_complete is False
+
+
+def test_legacy_leader_run_logs_remain_readable_without_false_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="leader_run",
+        model_id="model_leader",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={"run_id": "leader_run"},
+    )
+    log_dir = tmp_path / "workspace" / "leader_run" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("legacy task 0", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("legacy task 1", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "legacy task 0",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        },
+        {
+            "task_id": 1,
+            "stdout": "",
+            "stderr": "legacy task 1",
+            "truncated": False,
+            "missing_stdout": True,
+            "missing_stderr": False,
+            "identity_complete": False,
+        },
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def test_corrupt_manifest_index_preserves_log_content_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text("{not-json", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("readable stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "readable stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def test_fifo_array_log_does_not_block_or_claim_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    fifo_path = log_dir / "12345_0.out"
+    try:
+        os.mkfifo(fifo_path)
+    except OSError as exc:
+        pytest.skip(f"fifo creation is not supported: {exc}")
+    (log_dir / "12345_0.err").write_text("safe stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "",
+            "stderr": "safe stderr",
+            "truncated": False,
+            "missing_stdout": True,
+            "missing_stderr": False,
+            "model_id": "model_alpha",
+            "run_id": "run_alpha",
+            "identity_complete": True,
+        }
+    ]
+
+
+def _nested_manifest_index_payload(depth: int = 20_000) -> bytes:
+    return ("[" + '{"k":' * depth + "1" + "}" * depth + "]").encode("ascii")
+
+
+def test_symlink_leaf_manifest_index_preserves_logs_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    target_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T130000.json",
+        ("run_wrong", "model_wrong"),
+    )
+    index_path = tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    try:
+        index_path.symlink_to(target_index)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("readable stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "readable stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def test_symlink_ancestor_manifest_index_preserves_logs_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    real_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "real_manifests" / "forecast_index_20260508T120000.json",
+        ("run_wrong", "model_wrong"),
+    )
+    manifests_link = tmp_path / "workspace" / "cycle_001" / "manifests"
+    try:
+        manifests_link.symlink_to(real_index.parent)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    index_path = manifests_link / real_index.name
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("readable stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "readable stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def test_deeply_nested_manifest_index_preserves_logs_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_bytes(_nested_manifest_index_payload())
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("readable stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "readable stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def test_invalid_utf8_manifest_index_preserves_logs_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_bytes(b"[\xff\xfe]")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.FAILED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("readable stdout", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "readable stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+
+
+def _assert_fetch_logs_does_not_bind_wrong_array_content(response, wrong_content: str) -> None:
+    dumped = response.model_dump_json()
+    assert wrong_content not in dumped
+    assert wrong_content not in response.logs
+    if response.array_task_logs is None:
+        return
+    for entry in response.array_task_logs:
+        assert wrong_content not in (entry.get("stdout") or "")
+        assert wrong_content not in (entry.get("stderr") or "")
+        assert entry.get("identity_complete") is not True
+
+
+def test_symlink_leaf_array_log_dir_does_not_bind_wrong_content_to_exact_index(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    expected_log_dir = tmp_path / "workspace" / "cycle_1" / "array_logs" / index_path.stem
+    sibling = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    sibling.mkdir(parents=True)
+    (sibling / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    (sibling / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    try:
+        expected_log_dir.symlink_to(sibling)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(expected_log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_symlink_ancestor_array_logs_does_not_bind_wrong_content_to_exact_index(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    real_array_logs = tmp_path / "workspace" / "cycle_1" / "real_array_logs"
+    diverted = real_array_logs / index_path.stem
+    diverted.mkdir(parents=True)
+    (diverted / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    (diverted / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    array_logs_link = tmp_path / "workspace" / "cycle_1" / "array_logs"
+    try:
+        array_logs_link.symlink_to(real_array_logs)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    expected_log_dir = array_logs_link / index_path.stem
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(expected_log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_symlink_ancestor_cycle_dir_does_not_bind_wrong_content_to_exact_index(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    real_cycle = tmp_path / "workspace" / "real_cycle_1"
+    index_path = _write_array_manifest_index(
+        real_cycle / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    diverted = real_cycle / "array_logs" / index_path.stem
+    diverted.mkdir(parents=True)
+    (diverted / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    (diverted / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    cycle_link = tmp_path / "workspace" / "cycle_1"
+    try:
+        cycle_link.symlink_to(real_cycle)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    linked_index = cycle_link / "manifests" / index_path.name
+    expected_log_dir = cycle_link / "array_logs" / index_path.stem
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(linked_index),
+            "array_log_dir": str(expected_log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_stored_array_log_dir_at_different_contained_directory_does_not_bind_to_exact_index(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    expected_log_dir = tmp_path / "workspace" / "cycle_1" / "array_logs" / index_path.stem
+    expected_log_dir.mkdir(parents=True)
+    diverted = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    diverted.mkdir(parents=True)
+    (diverted / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    (diverted / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(diverted),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_stored_exact_deterministic_array_log_dir_still_joins_identities(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("alpha stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("beta stderr", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "alpha stdout",
+            "stderr": "alpha stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_alpha",
+            "run_id": "run_alpha",
+            "identity_complete": True,
+        },
+        {
+            "task_id": 1,
+            "stdout": "beta stdout",
+            "stderr": "beta stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_beta",
+            "run_id": "run_beta",
+            "identity_complete": True,
+        },
+    ]
+
+
+def test_explicit_symlink_array_log_dir_reads_legacy_fallback_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    expected_log_dir = tmp_path / "workspace" / "cycle_1" / "array_logs" / index_path.stem
+    sibling = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    sibling.mkdir(parents=True)
+    (sibling / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    try:
+        expected_log_dir.symlink_to(sibling)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    fallback = tmp_path / "workspace" / "run_right" / "logs"
+    fallback.mkdir(parents=True)
+    (fallback / "12345_0.out").write_text("legacy fallback stdout", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(expected_log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "legacy fallback stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_explicit_mismatched_array_log_dir_reads_legacy_fallback_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    diverted = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    diverted.mkdir(parents=True)
+    (diverted / "12345_0.out").write_text("WRONG CONTENT", encoding="utf-8")
+    fallback = tmp_path / "workspace" / "run_right" / "logs"
+    fallback.mkdir(parents=True)
+    (fallback / "12345_0.out").write_text("legacy fallback stdout", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(diverted),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "legacy fallback stdout",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        }
+    ]
+    assert "model_id" not in response.array_task_logs[0]
+    assert "run_id" not in response.array_task_logs[0]
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_legacy_record_without_explicit_array_log_dir_joins_leader_path_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    log_dir = tmp_path / "workspace" / "run_alpha" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("alpha stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("beta stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "alpha stdout",
+            "stderr": "alpha stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_alpha",
+            "run_id": "run_alpha",
+            "identity_complete": True,
+        },
+        {
+            "task_id": 1,
+            "stdout": "beta stdout",
+            "stderr": "beta stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "model_id": "model_beta",
+            "run_id": "run_beta",
+            "identity_complete": True,
+        },
+    ]
+
+
+def test_explicit_mismatched_array_log_dir_scalar_logs_use_fallback(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    diverted = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    diverted.mkdir(parents=True)
+    (diverted / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    fallback = tmp_path / "workspace" / "run_right" / "logs"
+    fallback.mkdir(parents=True)
+    (fallback / "12345.out").write_text("fallback scalar", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(diverted),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == "fallback scalar"
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def test_explicit_symlink_array_log_dir_scalar_logs_use_fallback(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_1" / "manifests" / "forecast_index_20260829.json",
+        ("run_right", "model_right"),
+    )
+    expected_log_dir = tmp_path / "workspace" / "cycle_1" / "array_logs" / index_path.stem
+    sibling = tmp_path / "workspace" / "cycle_1" / "array_logs" / "other"
+    sibling.mkdir(parents=True)
+    (sibling / "12345.out").write_text("WRONG CONTENT", encoding="utf-8")
+    try:
+        expected_log_dir.symlink_to(sibling)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is not supported: {exc}")
+    fallback = tmp_path / "workspace" / "run_right" / "logs"
+    fallback.mkdir(parents=True)
+    (fallback / "12345.out").write_text("fallback scalar", encoding="utf-8")
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_right",
+        model_id="model_right",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_right",
+            "cycle_id": "cycle_1",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(expected_log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.logs == "fallback scalar"
+    _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def _completed_sacct_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        del kwargs
+        requested = "12345"
+        for arg in command:
+            if isinstance(arg, str) and arg.startswith("--jobs="):
+                requested = arg.split("=", maxsplit=1)[1]
+                break
+        stdout = f"{requested}|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def _assert_array_identity_omitted(entry: dict[str, object]) -> None:
+    assert entry["identity_complete"] is False
+    assert "model_id" not in entry
+    assert "run_id" not in entry
+
+
+def test_fetch_logs_after_healthy_sacct_restart_joins_exact_neutral_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    exact = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / exact.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("alpha stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("beta stderr", encoding="utf-8")
+
+    first = gateway.fetch_logs("12345")
+    cached = gateway._jobs["12345"]
+    second = gateway.fetch_logs("12345")
+
+    assert cached.run_id == ""
+    assert cached.status == SlurmJobStatus.SUCCEEDED
+    for response in (first, second):
+        assert response.complete is True
+        assert response.metadata_complete is False
+        assert response.array_task_logs == [
+            {
+                "task_id": 0,
+                "stdout": "alpha stdout",
+                "stderr": "alpha stderr",
+                "truncated": False,
+                "missing_stdout": False,
+                "missing_stderr": False,
+                "model_id": "model_alpha",
+                "run_id": "run_alpha",
+                "identity_complete": True,
+            },
+            {
+                "task_id": 1,
+                "stdout": "beta stdout",
+                "stderr": "beta stderr",
+                "truncated": False,
+                "missing_stdout": False,
+                "missing_stderr": False,
+                "model_id": "model_beta",
+                "run_id": "run_beta",
+                "identity_complete": True,
+            },
+        ]
+
+
+def test_fetch_logs_after_healthy_sacct_restart_reads_historical_logs_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    log_dir = tmp_path / "workspace" / "leader_run" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("legacy task 0", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("legacy task 1", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.complete is True
+    assert response.metadata_complete is False
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "legacy task 0",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        },
+        {
+            "task_id": 1,
+            "stdout": "",
+            "stderr": "legacy task 1",
+            "truncated": False,
+            "missing_stdout": True,
+            "missing_stderr": False,
+            "identity_complete": False,
+        },
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+    _assert_array_identity_omitted(response.array_task_logs[1])
+
+
+def test_fetch_logs_individual_task_after_healthy_sacct_restart_discovers_neutral_log(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    exact = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / exact.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+
+    first = gateway.fetch_logs("12345_0")
+    second = gateway.fetch_logs("12345_0")
+
+    assert first.logs == "alpha stdout"
+    assert first.complete is True
+    assert first.metadata_complete is False
+    assert first.array_task_logs is None
+    assert second.logs == "alpha stdout"
+    assert second.metadata_complete is False
+
+
+def test_legacy_leader_and_root_mixed_streams_preserve_content_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    leader_dir = tmp_path / "workspace" / "run_alpha" / "logs"
+    leader_dir.mkdir(parents=True)
+    (leader_dir / "12345_0.out").write_text("leader stdout", encoding="utf-8")
+    root_dir = tmp_path / "workspace" / "logs"
+    root_dir.mkdir(parents=True)
+    (root_dir / "12345_0.err").write_text("root stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "leader stdout",
+            "stderr": "root stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "identity_complete": False,
+        }
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+
+
+def test_legacy_root_only_streams_preserve_content_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    root_dir = tmp_path / "workspace" / "logs"
+    root_dir.mkdir(parents=True)
+    (root_dir / "12345_0.out").write_text("root-only stdout", encoding="utf-8")
+    (root_dir / "12345_0.err").write_text("root-only stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "root-only stdout",
+            "stderr": "root-only stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "identity_complete": False,
+        }
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+
+
+def test_supported_large_array_selects_numeric_lowest_task_logs_despite_hostile_listing_order(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    for index in range(50):
+        (log_dir / f"zzzz_noise_{index}").touch()
+    for task_id in range(249, -1, -1):
+        (log_dir / f"12345_{task_id}.out").write_text(f"task {task_id} stdout", encoding="utf-8")
+        (log_dir / f"12345_{task_id}.err").write_text(f"task {task_id} stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs is not None
+    assert [entry["task_id"] for entry in response.array_task_logs] == list(range(MAX_ARRAY_TASK_LOGS))
+    assert response.array_task_logs[0]["stdout"] == "task 0 stdout"
+    assert response.array_task_logs[-1]["stdout"] == f"task {MAX_ARRAY_TASK_LOGS - 1} stdout"
+
+
+def test_over_supported_array_log_dir_fails_closed_without_identity_or_content_claim(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("must-not-claim-overflow-content", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("must-not-claim-overflow-stderr", encoding="utf-8")
+    for index in range((MAX_MANIFEST_INDEX_ENTRIES * 2) + 1):
+        (log_dir / f"zzzz_noise_{index:05d}").touch()
+    assert len(list(log_dir.iterdir())) > (MAX_MANIFEST_INDEX_ENTRIES * 2)
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    dumped = response.model_dump_json()
+    assert "must-not-claim-overflow-content" not in dumped
+    assert "must-not-claim-overflow-stderr" not in dumped
+    assert response.array_task_logs is None
+
+
+def test_recordless_ambiguous_neutral_dirs_preserve_content_without_guessed_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="sacct unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    first_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T110000.json",
+        ("run_old", "model_old"),
+        ("run_other", "model_other"),
+    )
+    second_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T130000.json",
+        ("run_new", "model_new"),
+        ("run_fresh", "model_fresh"),
+    )
+    first_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / first_index.stem
+    second_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / second_index.stem
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    (first_dir / "12345_0.out").write_text("older stdout", encoding="utf-8")
+    (first_dir / "12345_0.err").write_text("older stderr", encoding="utf-8")
+    (second_dir / "12345_0.out").write_text("newer stdout", encoding="utf-8")
+    (second_dir / "12345_0.err").write_text("newer stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs is not None
+    assert [entry["task_id"] for entry in response.array_task_logs] == [0]
+    assert response.array_task_logs[0]["stdout"] in {"older stdout", "newer stdout"}
+    _assert_array_identity_omitted(response.array_task_logs[0])
+    dumped = response.model_dump_json()
+    for forbidden in (
+        "run_old",
+        "model_old",
+        "run_new",
+        "model_new",
+        "run_other",
+        "model_other",
+        "run_fresh",
+        "model_fresh",
+    ):
+        assert forbidden not in dumped
 
 
 def test_parse_slurm_datetime_rejects_garbage(tmp_path):

@@ -111,6 +111,8 @@ def validate_resource_profile(
 def validate_sbatch_directive_context(context: Mapping[str, Any]) -> None:
     if "workspace_dir" in context:
         validate_directive_path(context["workspace_dir"], "manifest.workspace_dir")
+    if "array_log_dir" in context and context.get("array_log_dir") not in (None, ""):
+        validate_directive_path(context["array_log_dir"], "manifest.array_log_dir")
     for field_name in ("run_id", "stage_name"):
         if field_name in context:
             validate_directive_token(context[field_name], f"manifest.{field_name}")
