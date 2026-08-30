@@ -33,8 +33,39 @@ The `unit-test` job runs:
 pytest tests/ -v --tb=short -m "not e2e and not grib and not integration"
 ```
 
-So pure CI never collects e2e/grib/integration tests. `real-db-integration`
-still runs `-m integration` against its TimescaleDB service.
+So pure CI never collects e2e/grib/integration tests. The generic GitHub
+`real-db-integration` (`SQL Migration Dry Run`) lane runs its TimescaleDB service
+with:
+
+```
+pytest -vv -rs -m "integration and not timescaledb_210"
+```
+
+This is the generic SQL lane: ordinary `integration` items run, while
+`timescaledb_210` stays out because its PostgreSQL 15.2 / TimescaleDB 2.10.2
+oracle is node-27. A Docker socket, `/.dockerenv`, or a runnable Docker daemon
+is not authorization to run that marker.
+
+## node-27 TimescaleDB 2.10.2 lane (produce a receipt)
+
+Run the #1892 isolated probe only explicitly on node-27, outside a production
+window. Do not target `nhms-db`, port `55432`, live PGDATA, production paths, or
+a production/live DSN. The probe creates its own disposable cluster; the
+integration URL only unlocks collection and this isolated probe never connects
+to it. Its safe receipt command is intentionally separate from the generic SQL
+lane and pins the probe node explicitly:
+
+```bash
+NHMS_RUN_INTEGRATION=1 \
+NHMS_INTEGRATION_DATABASE_URL=postgresql://unused:unused@127.0.0.1:1/postgres \
+uv run --no-sync pytest -vv -rs -m timescaledb_210 \
+  tests/test_probe_compressed_chunk_cold_tablespace.py::test_isolated_cluster_probe_is_opt_in
+```
+
+Keep the terminal report as the receipt: it must show the explicit marker
+execution and identity-bound owned cleanup. Future `timescaledb_210` tests that
+use database fixtures need their own explicit database/DSN contract; they must
+not silently inherit this non-routable dummy-URL command.
 
 ## node-27 run convention (produce a receipt)
 
