@@ -18,7 +18,7 @@ Upstream suggested level: absent
 - [x] 2.2 `uv run pytest -q tests/test_integration_gate.py tests/test_select_ci_tests.py tests/test_probe_compressed_chunk_cold_tablespace.py tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py -m 'not timescaledb_210'` passes without Docker mutation.
 - [x] 2.3 A CI-equivalent collection/execution proof shows ordinary `integration` items remain selected and all `integration and timescaledb_210` items are deselected; PR #1907's sibling marker shape is covered by capability rather than filename.
 - [x] 2.4 `uv run ruff check` for touched Python, `openspec validate node27-isolated-probe-opt-in --strict --no-interactive`, `git diff --check`, and the repository default backend test row pass.
-- [ ] 2.5 Node-27 frozen-head receipt explicitly runs `-m timescaledb_210`, proves disposable probe PASS and cleanup identity, leaves active `nhms-db` and checkout unchanged, and uses no production business DB mutation.
+- [x] 2.5 Node-27 frozen-head receipt explicitly runs `-m timescaledb_210`, proves disposable probe PASS and cleanup identity, leaves active `nhms-db` and checkout unchanged, and uses no production business DB mutation.
 
 ## 3. Risk and invariant fixture
 
