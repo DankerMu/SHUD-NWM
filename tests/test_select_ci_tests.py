@@ -9199,6 +9199,11 @@ def _real_db_marker_expression_violations(expression: object) -> list[str]:
     rows = (
         ("ordinary integration", frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER}), True),
         (
+            "node-27-only marker",
+            frozenset({REAL_DB_NODE27_ONLY_MARKER}),
+            False,
+        ),
+        (
             "node-27-only integration",
             frozenset({REAL_DB_GENERIC_INTEGRATION_MARKER, REAL_DB_NODE27_ONLY_MARKER}),
             False,
@@ -9797,8 +9802,18 @@ def test_real_db_job_contract_reds_when_the_named_step_is_renamed() -> None:
             "pytest -vv -rs -m 'integration and not (timescaledb_210 or unrelated_marker)'",
             "mention only `integration` and `timescaledb_210`",
         ),
+        (
+            "pytest -vv -rs -m '(timescaledb_210 and not integration) or (integration and not timescaledb_210)'",
+            "deselect node-27-only marker items",
+        ),
     ],
-    ids=["bare-integration", "missing-integration", "missing-node27-exclusion", "over-broad-exclusion"],
+    ids=[
+        "bare-integration",
+        "missing-integration",
+        "missing-node27-exclusion",
+        "over-broad-exclusion",
+        "marker-only-selection",
+    ],
 )
 def test_real_db_job_contract_reds_on_marker_expression_drift(command: str, expected: str) -> None:
     # #1914: each YAML mutation preserves the closed argv shape but fails the
