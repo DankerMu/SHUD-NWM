@@ -1949,15 +1949,7 @@ class RealSlurmGateway(SlurmGateway):
         return sorted(matches)
 
     def _array_log_dir(self, workspace_root: Path, cycle_id: str, manifest_index_path: Path | str) -> Path:
-        index_stem = Path(str(manifest_index_path)).stem
-        if not index_stem or not SAFE_IDENTIFIER_RE.fullmatch(index_stem):
-            raise SlurmValidationError(
-                "Manifest index filename is not a safe array log directory component.",
-                {"manifest_index_path": str(manifest_index_path)},
-            )
-        log_dir = _lexical_absolute_path(workspace_root / cycle_id / ARRAY_LOGS_DIRNAME / index_stem)
-        self._ensure_lexical_within_workspace(log_dir, workspace_dir=workspace_root)
-        return log_dir
+        return array_log_dir(workspace_root, cycle_id, manifest_index_path)
 
     def _array_log_binding(
         self,
@@ -2235,6 +2227,31 @@ def _lexical_absolute_path(path: Path | str) -> Path:
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     return Path(os.path.normpath(candidate))
+
+
+def array_log_dir(
+    workspace_root: Path | str,
+    cycle_id: str,
+    manifest_index_path: Path | str,
+) -> Path:
+    """Return the cohort-neutral array log directory for one immutable index."""
+
+    index_stem = Path(str(manifest_index_path)).stem
+    if not index_stem or not SAFE_IDENTIFIER_RE.fullmatch(index_stem):
+        raise SlurmValidationError(
+            "Manifest index filename is not a safe array log directory component.",
+            {"manifest_index_path": str(manifest_index_path)},
+        )
+    workspace = _lexical_absolute_path(workspace_root)
+    log_dir = _lexical_absolute_path(Path(workspace_root) / cycle_id / ARRAY_LOGS_DIRNAME / index_stem)
+    try:
+        log_dir.relative_to(workspace)
+    except ValueError as exc:
+        raise SlurmValidationError(
+            "Resolved Slurm gateway path is outside the configured workspace directory.",
+            {"path": str(log_dir), "workspace_dir": str(workspace)},
+        ) from exc
+    return log_dir
 
 
 def _python_runtime_export_lines(

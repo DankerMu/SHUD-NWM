@@ -13,6 +13,12 @@ Real Slurm log retrieval SHALL work after gateway restart, SHALL support array t
 - **THEN** its output, error, and directory-creation paths MUST use one submission-specific neutral log directory and MUST NOT contain the first or any other member's run id
 - **AND** submission MUST safely create that directory before invoking `sbatch`
 
+#### Scenario: Direct array-template submitters preserve the rendered log binding
+- **WHEN** a supported production acceptance or validation lane renders a production array template and invokes `sbatch` directly instead of `submit_job_array`
+- **THEN** it MUST derive the same neutral directory from the workspace, cycle, and immutable manifest index through the canonical path contract and safely create it before invoking `sbatch`
+- **AND** every post-submit task-log check and emitted evidence path MUST read that exact directory rather than a legacy member-run directory
+- **AND** no-submit, blocked-preflight, and fake-validation lanes MUST NOT create the shared scheduler-log directory
+
 #### Scenario: Gateway restart recovers exact array identity
 - **WHEN** the gateway process restarts before logs are fetched
 - **THEN** deterministic neutral-path discovery MUST locate the task logs and derive the one exact immutable manifest index for that submission without choosing a newest or otherwise guessed index

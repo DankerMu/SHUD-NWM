@@ -4,8 +4,8 @@ Slurm array stdout/stderr currently uses the first task's `run_id` as the direct
 
 ## What Changes
 
-- Store all four production array templates' scheduler logs in a cohort-neutral, submission-specific directory that is bound to the immutable manifest index and exists before `sbatch` runs.
-- Return each discovered array log with its exact `task_id`, `model_id`, and `run_id`; retain bounded, fail-safe lookup for legacy leader-run paths and for gateway restart.
+- Store all four production array templates' scheduler logs in a cohort-neutral, submission-specific directory that is bound to the immutable manifest index and exists before `sbatch` runs, including direct-render/raw-sbatch consumers outside `submit_job_array`.
+- Return each discovered array log with its exact `task_id`, `model_id`, and `run_id`; retain bounded, fail-safe lookup for legacy leader-run paths and for gateway restart, and keep production-closure evidence readers on the same rendered lane.
 - Treat empty or whitespace-only orchestrator array task state as `failed`, preserving the existing `succeeded|cancelled|failed` return domain and preventing bare `IndexError` on sacct and gateway-payload paths.
 - Add contract, regression, and node-22 live evidence for both issues. No public endpoint is removed.
 
@@ -22,4 +22,4 @@ Slurm array stdout/stderr currently uses the first task's `run_id` as the direct
 
 ## Impact
 
-Affected surfaces are the four `infra/sbatch/*_array.sbatch` templates, `services/slurm_gateway/real_backend.py` and its log response, `services/orchestrator/chain_array_accounting.py`, owning tests, and the two OpenSpec contracts. New log placement changes only diagnostics; task manifests, worker execution, and artifact ownership remain unchanged. The fixture is `expanded` with `high` repair intensity because it changes file paths, an API payload, restart discovery, and a shared accounting boundary.
+Affected surfaces are the four `infra/sbatch/*_array.sbatch` templates, `services/slurm_gateway/real_backend.py` and its log response, the direct-render/raw-sbatch consumer `services/production_closure/slurm_validation.py`, `services/orchestrator/chain_array_accounting.py`, owning tests, and the two OpenSpec contracts. New log placement changes only diagnostics; task manifests, worker execution, and artifact ownership remain unchanged. The fixture is `expanded` with `high` repair intensity because it changes file paths, an API payload, restart discovery, and a shared accounting boundary.

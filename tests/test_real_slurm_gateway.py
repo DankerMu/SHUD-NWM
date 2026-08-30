@@ -33,10 +33,12 @@ from services.slurm_gateway.gateway import (
 from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import (
+    ARRAY_LOGS_DIRNAME,
     LOG_TRUNCATION_MARKER,
     MAX_ARRAY_TASK_LOGS,
     RealSlurmGateway,
     _normalize_slurm_state,
+    array_log_dir,
     map_slurm_error_code,
 )
 
@@ -3400,6 +3402,27 @@ def _write_array_manifest_index(path: Path, *members: tuple[str, str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(entries), encoding="utf-8")
     return path
+
+
+def test_array_log_dir_helper_binds_workspace_cycle_and_safe_index_stem(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    index_path = workspace_root / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json"
+    expected = workspace_root / "cycle_001" / ARRAY_LOGS_DIRNAME / index_path.stem
+
+    assert array_log_dir(workspace_root, "cycle_001", index_path) == expected
+    assert array_log_dir(workspace_root, "cycle_001", str(index_path)) == expected
+    gateway = _production_gateway(tmp_path)
+    assert gateway._array_log_dir(workspace_root, "cycle_001", index_path) == expected
+
+
+def test_array_log_dir_helper_rejects_unsafe_index_stem_and_escape(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    with pytest.raises(SlurmValidationError, match="not a safe array log directory component"):
+        array_log_dir(workspace_root, "cycle_001", "bad stem.json")
+    with pytest.raises(SlurmValidationError, match="not a safe array log directory component"):
+        array_log_dir(workspace_root, "cycle_001", "..")
+    with pytest.raises(SlurmValidationError, match="outside the configured workspace directory"):
+        array_log_dir(workspace_root, "..", "manifest_index.json")
 
 
 def test_submit_job_array_creates_cohort_neutral_log_directory_before_sbatch(
