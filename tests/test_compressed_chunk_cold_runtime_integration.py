@@ -428,16 +428,31 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         )
         """,
     )
-    for schema, table in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries")):
+    compression_settings = {
+        ("hydro", "river_timeseries"): (
+            "timescaledb.compress = true, "
+            "timescaledb.compress_segmentby = 'run_id, river_network_version_id, river_segment_id', "
+            "timescaledb.compress_orderby = 'variable, valid_time'"
+        ),
+        ("met", "forcing_station_timeseries"): (
+            "timescaledb.compress = true, "
+            "timescaledb.compress_segmentby = 'forcing_version_id, station_id', "
+            "timescaledb.compress_orderby = 'variable, valid_time'"
+        ),
+    }
+    migration = (
+        Path(__file__).resolve().parents[1] / "db/migrations/000047_hypertable_compression_settings.sql"
+    ).read_text(encoding="utf-8")
+    assert "timescaledb.compress_segmentby = 'run_id, river_network_version_id, river_segment_id'" in migration
+    assert "timescaledb.compress_segmentby = 'forcing_version_id, station_id'" in migration
+    assert migration.count("timescaledb.compress_orderby = 'variable, valid_time'") == 2
+    for (schema, table), options in compression_settings.items():
         execute(
             connection,
             "SELECT create_hypertable(%s, 'valid_time', chunk_time_interval => interval '7 days')",
             (f"{schema}.{table}",),
         )
-        execute(
-            connection,
-            f"ALTER TABLE {schema}.{table} SET (timescaledb.compress, timescaledb.compress_orderby = 'valid_time')",
-        )
+        execute(connection, f"ALTER TABLE {schema}.{table} SET ({options})")
     start = datetime(2026, 6, 27, tzinfo=UTC)
     execute(
         connection,
