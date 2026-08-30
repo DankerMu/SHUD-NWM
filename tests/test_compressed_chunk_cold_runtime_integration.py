@@ -223,6 +223,7 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
                 expected_catalog_location="/home/postgres/pgdata/tablespaces/nhms_cold",
                 expected_container_bind=str(work / "cold"),
                 expected_host_path=str(work / "cold"),
+                expected_container_name=config.container_name,
                 expected_device_identity="isolated",
                 inspect_target=lambda: {
                     "container_name": config.container_name,

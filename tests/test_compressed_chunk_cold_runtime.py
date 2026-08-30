@@ -712,6 +712,68 @@ def test_enforce_requires_explicit_device_identity() -> None:
     del item
 
 
+def test_runtime_config_propagates_disposable_container_name() -> None:
+    from packages.common.compressed_chunk_cold_tick import runtime_config
+    from scripts.node27_cold_residency import RunnerConfig
+
+    config = RunnerConfig(
+        database_url="postgresql://unused",
+        lag_seconds=604800,
+        per_tick_bound=1,
+        receipt_path=Path("/unused/receipt.json"),
+        intent_path=Path("/unused/.receipt.json.intent"),
+        lock_path=Path("/unused/runner.lock"),
+        lifecycle_lock_path=Path("/unused/lifecycle.lock"),
+        enforce=True,
+        statement_timeout_ms=3600000,
+        wrapper_wall_seconds=3901,
+        compression_wrapper_wall_seconds=3900,
+        systemd_wall_seconds=7842,
+        cold_reserve_bytes=1,
+        wal_reserve_bytes=1,
+        max_members=64,
+        lock_timeout="30s",
+        expected_catalog_location="/home/postgres/pgdata/tablespaces/nhms_cold",
+        expected_container_bind="/unused/cold",
+        expected_host_path="/unused/cold",
+        expected_container_name="nhms-1893-isolated",
+        expected_device_identity="isolated",
+        inspect_target=lambda: {
+            "container_name": "nhms-1893-isolated",
+            "container_bind": "/unused/cold",
+            "host_path": "/unused/cold",
+            "device_identity": "isolated",
+        },
+    )
+    runtime = runtime_config(config)
+    assert runtime.expected_container_name == "nhms-1893-isolated"
+    connection, item = _loaded(FakeConnection())
+    identity = preflight_target_identity(
+        lambda sql, params=None: connection.dispatch(sql, params)[0],
+        runtime,
+    )
+    assert identity.device_identity == "isolated"
+    mismatched = runtime_config(
+        config.__class__(
+            **{
+                **config.__dict__,
+                "inspect_target": lambda: {
+                    "container_name": "nhms-db",
+                    "container_bind": "/unused/cold",
+                    "host_path": "/unused/cold",
+                    "device_identity": "isolated",
+                },
+            }
+        )
+    )
+    with pytest.raises(ColdRuntimeError, match="container identity drifted"):
+        preflight_target_identity(
+            lambda sql, params=None: connection.dispatch(sql, params)[0],
+            mismatched,
+        )
+    del item
+
+
 class _StepClock:
     def __init__(self) -> None:
         self.value = 0.0

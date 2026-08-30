@@ -84,6 +84,7 @@ def runtime_config(config: Any) -> RuntimeConfig:
         expected_container_bind=config.expected_container_bind,
         expected_host_path=config.expected_host_path,
         expected_device_identity=config.expected_device_identity,
+        expected_container_name=config.expected_container_name,
         inspect_target=config.inspect_target,
         clock=getattr(config, "clock", None) or default_clock,
     )

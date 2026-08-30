@@ -41,6 +41,7 @@ from packages.common.compressed_chunk_cold_runtime import (
     DEFAULT_LOCK_TIMEOUT,
     DEFAULT_MAX_MEMBERS,
     HOST_COLD_PATH,
+    LIVE_CONTAINER_NAME,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.compressed_chunk_cold_tick import run_tick as execute_tick
@@ -97,6 +98,7 @@ class RunnerConfig:
     expected_catalog_location: str
     expected_container_bind: str
     expected_host_path: str
+    expected_container_name: str
     expected_device_identity: str
     inspect_target: Callable[[], Mapping[str, Any]] | None = None
     cold_free_bytes: int | None = None
@@ -326,6 +328,7 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         expected_catalog_location=env.get("NODE27_COLD_RESIDENCY_CATALOG_LOCATION") or CONTAINER_COLD_PATH,
         expected_container_bind=env.get("NODE27_COLD_RESIDENCY_CONTAINER_BIND") or HOST_COLD_PATH,
         expected_host_path=env.get("NODE27_COLD_RESIDENCY_HOST_PATH") or HOST_COLD_PATH,
+        expected_container_name=LIVE_CONTAINER_NAME,
         expected_device_identity=env.get("NODE27_COLD_RESIDENCY_DEVICE_IDENTITY") or "",
     )
 
@@ -525,6 +528,7 @@ def main(
                     expected_catalog_location=CONTAINER_COLD_PATH,
                     expected_container_bind=HOST_COLD_PATH,
                     expected_host_path=HOST_COLD_PATH,
+                    expected_container_name=LIVE_CONTAINER_NAME,
                     expected_device_identity="",
                 )
                 payload = _tombstone(

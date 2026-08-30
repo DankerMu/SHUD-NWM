@@ -373,3 +373,16 @@ def test_ci_selector_owns_timing_module() -> None:
     selected = select_tests(["packages/common/compressed_chunk_cold_runtime_timing.py"], repo_root=_ROOT)
     assert "tests/test_compressed_chunk_cold_runtime.py" in selected
     assert "tests/test_node27_cold_residency_phase2.py" in selected
+
+
+def test_production_expected_container_name_is_fixed_nhms_db(tmp_path: Path) -> None:
+    from packages.common.compressed_chunk_cold_runtime import LIVE_CONTAINER_NAME
+    from packages.common.compressed_chunk_cold_tick import runtime_config
+
+    env = _base_env(tmp_path, override={"NODE27_COLD_RESIDENCY_CONTAINER_NAME": "evil"})
+    config = runner.config_from_args(_args(), env)
+    assert LIVE_CONTAINER_NAME == "nhms-db"
+    assert config.expected_container_name == "nhms-db"
+    assert runtime_config(config).expected_container_name == "nhms-db"
+    source = (_ROOT / "scripts/node27_cold_residency.py").read_text(encoding="utf-8")
+    assert "NODE27_COLD_RESIDENCY_CONTAINER_NAME" not in source
