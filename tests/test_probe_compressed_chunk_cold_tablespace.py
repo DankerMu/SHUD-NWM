@@ -957,9 +957,9 @@ def test_isolated_cluster_probe_is_opt_in() -> None:
         ]
     )
     document = probe.parse_probe_report(output.read_text(encoding="utf-8"))
+    assert document["status"] == "passed", document.get("error")
     assert document["cleanup"]["container_absent"] is True
     assert document["cleanup"]["work_root_absent"] is True
-    assert document["status"] == "passed"
     assert document["sequence"]["accepted"] == ACCEPTED_SEQUENCE_NAME
     assert document["engine_gate"]["image_pin_ok"] is True
     assert document["engine_gate"]["pg_matches_pin"] is True

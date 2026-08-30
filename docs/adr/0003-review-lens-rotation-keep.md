@@ -2478,3 +2478,25 @@ recall. **Keep rotation** unchanged under the recorded autonomous default. The
 cumulative aggregate still supplies no basis for an autonomous cut; any reversal
 continues to require the existing attribution-schema and round-role repairs plus
 maintainer review.
+
+## Revisit 2026-08-30 (post #1914 / PR #1916) — keep; pinned oracle-fix closure adds no rotation datum
+
+`loop_log_audit.py` now reports **144** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `143 / 86 / 296` after PR #1900.
+PR #1916 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced one independently verified
+P2 test-evidence finding: the marker truth table omitted the
+`timescaledb_210`-only input, so a full-workflow expression could select that
+node-27-only shape while satisfying every existing semantic row. Round 2
+re-ran correctness, test-evidence, and integration against the exact mutation
+closure. All three lenses were already present in Round 1; Round 2 returned zero
+candidates, and the independent Phase 7 Gap Sweep was also clean.
+
+This was pinned fix verification, not a rotation experiment. The Round 2 lens set
+is a strict subset of Round 1 and introduces no new subject-matter lens. Its clean
+result proves closure for this PR but cannot distinguish whether a rotated free
+slot would add recall. **Keep rotation** unchanged under the recorded autonomous
+default. The cumulative aggregate still supplies no basis for an autonomous cut;
+any reversal continues to require the existing attribution-schema and round-role
+repairs plus maintainer review.
