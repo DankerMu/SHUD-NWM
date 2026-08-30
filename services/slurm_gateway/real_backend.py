@@ -18,8 +18,14 @@ import yaml
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
-from packages.common.manifest_index import ManifestValidationError as CommonManifestValidationError
-from packages.common.manifest_index import manifest_task_identities, serialize_manifest_index
+from packages.common.manifest_index import (
+    MAX_MANIFEST_INDEX_ENTRIES,
+    manifest_task_identities,
+    serialize_manifest_index,
+)
+from packages.common.manifest_index import (
+    ManifestValidationError as CommonManifestValidationError,
+)
 from packages.common.python_runtime import (
     validated_target_python_runtime,
     validated_target_python_source_root,
@@ -98,7 +104,7 @@ MAX_SLURM_ERROR_SNIPPET_BYTES = 2048
 DEFAULT_LIST_LOOKBACK_HOURS = 24
 MAX_LOG_BYTES = 10 * 1024 * 1024
 MAX_ARRAY_TASK_LOGS = 200
-MAX_ARRAY_LOG_DIR_ENTRIES = MAX_ARRAY_TASK_LOGS * 2
+MAX_ARRAY_STREAM_FILES = MAX_MANIFEST_INDEX_ENTRIES * 2
 MAX_DISCOVERY_ENTRIES = 256
 ARRAY_LOGS_DIRNAME = "array_logs"
 MANIFESTS_DIRNAME = "manifests"
@@ -143,7 +149,7 @@ PRODUCTION_ARRAY_TEMPLATE_NAMES = frozenset(
 class _ArrayLogBinding(NamedTuple):
     expected: Path | None
     explicit: bool
-    identity_lane: Path | None
+    identity_lanes: tuple[Path, ...]
     allow_identities: bool
 
 
@@ -504,14 +510,12 @@ class RealSlurmGateway(SlurmGateway):
     def fetch_logs(self, job_id: str) -> SlurmLogsResponse:
         self._validate_job_id(job_id)
         record = self._jobs.get(job_id)
-        metadata_complete = record is not None
         if record is None:
             try:
                 record = self.get_job_status(job_id)
-                metadata_complete = True
             except SlurmGatewayError:
                 record = None
-                metadata_complete = False
+        metadata_complete = self._submission_metadata_complete(record)
 
         run_id = record.run_id if record and record.run_id else job_id
         log_path = self._resolve_log_path(job_id, run_id, record)
@@ -531,6 +535,13 @@ class RealSlurmGateway(SlurmGateway):
             metadata_complete=metadata_complete,
             array_task_logs=array_task_logs,
         )
+
+    @staticmethod
+    def _submission_metadata_complete(record: SlurmJobRecord | None) -> bool:
+        return bool(record is not None and str(record.run_id or "").strip())
+
+    def _record_lacks_log_binding(self, record: SlurmJobRecord | None) -> bool:
+        return not self._submission_metadata_complete(record)
 
     def reset(self, request: ResetRequest | None = None) -> ResetResponse:
         del request
@@ -1536,23 +1547,21 @@ class RealSlurmGateway(SlurmGateway):
     def _resolve_log_path(self, job_id: str, run_id: str, record: SlurmJobRecord | None) -> Path | None:
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
         candidates: list[Path] = []
+        discover_unbound = self._record_lacks_log_binding(record)
         if record is not None:
             stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
             if stored_log_dir is not None:
                 candidates.append(stored_log_dir / f"{job_id}.out")
-        candidates.extend(
-            [
-                workspace_dir / run_id / "logs" / f"{job_id}.out",
-                workspace_dir / "logs" / f"{job_id}.out",
-            ]
-        )
-        if record is None:
+        if run_id:
+            candidates.append(workspace_dir / run_id / "logs" / f"{job_id}.out")
+        candidates.append(workspace_dir / "logs" / f"{job_id}.out")
+        if discover_unbound:
             candidates.extend(self._discover_neutral_array_logs(job_id, "out", array_tasks=False))
             candidates.extend(self._discover_workspace_logs(job_id, "out"))
         if record is not None:
-            manifest_run_id = record.manifest.get("run_id")
-            if manifest_run_id and str(manifest_run_id) != run_id:
-                candidates.insert(0, workspace_dir / str(manifest_run_id) / "logs" / f"{job_id}.out")
+            manifest_run_id = str(record.manifest.get("run_id") or "").strip()
+            if manifest_run_id and manifest_run_id != run_id:
+                candidates.insert(0, workspace_dir / manifest_run_id / "logs" / f"{job_id}.out")
         if "_" in job_id:
             master_job_id, task_id = job_id.rsplit("_", maxsplit=1)
             if task_id.isdigit():
@@ -1560,12 +1569,9 @@ class RealSlurmGateway(SlurmGateway):
                     stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
                     if stored_log_dir is not None:
                         candidates.append(stored_log_dir / f"{master_job_id}_{task_id}.out")
-                candidates.extend(
-                    [
-                        workspace_dir / run_id / "logs" / f"{master_job_id}_{task_id}.out",
-                        workspace_dir / "logs" / f"{master_job_id}_{task_id}.out",
-                    ]
-                )
+                if run_id:
+                    candidates.append(workspace_dir / run_id / "logs" / f"{master_job_id}_{task_id}.out")
+                candidates.append(workspace_dir / "logs" / f"{master_job_id}_{task_id}.out")
         for candidate in candidates:
             if self._log_path_exists(candidate):
                 return candidate
@@ -1582,8 +1588,9 @@ class RealSlurmGateway(SlurmGateway):
         workspace_dir = Path(self.settings.workspace_dir).expanduser().resolve()
         log_dirs: list[Path] = []
         identities: dict[int, tuple[str, str]] = {}
-        identity_lane: Path | None = None
-        if record is not None:
+        identity_lanes: tuple[Path, ...] = ()
+        discover_unbound = self._record_lacks_log_binding(record)
+        if record is not None and not discover_unbound:
             binding = self._array_log_binding(
                 workspace_dir,
                 record.manifest,
@@ -1592,16 +1599,24 @@ class RealSlurmGateway(SlurmGateway):
             stored_log_dir = self._stored_array_log_dir(record, workspace_dir)
             if stored_log_dir is not None:
                 log_dirs.append(stored_log_dir)
-            if binding.allow_identities:
+            if binding.allow_identities or not binding.explicit:
                 identities = self._identities_from_record(record, workspace_dir)
-                identity_lane = binding.identity_lane
-        else:
-            discovered_dirs, identities = self._discover_neutral_array_submission(job_id, workspace_dir)
+            if binding.explicit:
+                identity_lanes = binding.identity_lanes
+            else:
+                identity_lanes = binding.identity_lanes + self._legacy_identity_lanes(record, workspace_dir)
+        if discover_unbound:
+            discovered_dirs, discovered_identities = self._discover_neutral_array_submission(
+                job_id, workspace_dir
+            )
             log_dirs.extend(discovered_dirs)
+            identities = discovered_identities
             if len(discovered_dirs) == 1:
-                identity_lane = discovered_dirs[0]
-        log_dirs.extend([workspace_dir / run_id / "logs", workspace_dir / "logs"])
-        if record is None:
+                identity_lanes = (discovered_dirs[0],)
+        if run_id:
+            log_dirs.append(workspace_dir / run_id / "logs")
+        log_dirs.append(workspace_dir / "logs")
+        if discover_unbound:
             discovered_dirs = {
                 candidate.parent
                 for suffix in ("out", "err")
@@ -1609,9 +1624,10 @@ class RealSlurmGateway(SlurmGateway):
             }
             log_dirs.extend(sorted(discovered_dirs))
         if record is not None:
-            manifest_run_id = record.manifest.get("run_id")
-            if manifest_run_id and str(manifest_run_id) != run_id:
-                log_dirs.insert(0, workspace_dir / str(manifest_run_id) / "logs")
+            manifest_run_id = str(record.manifest.get("run_id") or "").strip()
+            if manifest_run_id and manifest_run_id != run_id:
+                extra_lane = workspace_dir / manifest_run_id / "logs"
+                log_dirs.insert(0, extra_lane)
 
         seen_dirs: set[Path] = set()
         unique_log_dirs: list[Path] = []
@@ -1622,8 +1638,13 @@ class RealSlurmGateway(SlurmGateway):
             unique_log_dirs.append(log_dir)
 
         task_ids: set[int] = set()
+        readable_log_dirs: list[Path] = []
         for log_dir in unique_log_dirs:
-            for name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+            names, lane_overflow = self._list_array_stream_names(log_dir)
+            if lane_overflow:
+                continue
+            readable_log_dirs.append(log_dir)
+            for name in names:
                 match = re.fullmatch(rf"{re.escape(job_id)}_(\d+)\.(?:out|err)", name)
                 if match:
                     task_ids.add(int(match.group(1)))
@@ -1634,10 +1655,10 @@ class RealSlurmGateway(SlurmGateway):
         entries: list[dict[str, Any]] = []
         for task_id in sorted(task_ids)[:MAX_ARRAY_TASK_LOGS]:
             stdout, stdout_truncated, stdout_dir = self._read_first_existing_task_log(
-                unique_log_dirs, job_id, task_id, "out"
+                readable_log_dirs, job_id, task_id, "out"
             )
             stderr, stderr_truncated, stderr_dir = self._read_first_existing_task_log(
-                unique_log_dirs, job_id, task_id, "err"
+                readable_log_dirs, job_id, task_id, "err"
             )
             entry: dict[str, Any] = {
                 "task_id": task_id,
@@ -1649,8 +1670,8 @@ class RealSlurmGateway(SlurmGateway):
                 "identity_complete": False,
             }
             identity = identities.get(task_id)
-            if identity is not None and self._identity_matches_content_lane(
-                identity_lane, stdout_dir, stderr_dir
+            if identity is not None and self._identity_matches_content_lanes(
+                identity_lanes, stdout_dir, stderr_dir
             ):
                 entry["model_id"] = identity[0]
                 entry["run_id"] = identity[1]
@@ -1674,15 +1695,19 @@ class RealSlurmGateway(SlurmGateway):
         return "", False, None
 
     @staticmethod
-    def _identity_matches_content_lane(
-        identity_lane: Path | None,
+    def _identity_matches_content_lanes(
+        identity_lanes: Sequence[Path],
         stdout_dir: Path | None,
         stderr_dir: Path | None,
     ) -> bool:
-        if identity_lane is None:
-            return True
+        if not identity_lanes:
+            return False
+        allowed = set(identity_lanes)
         present = [log_dir for log_dir in (stdout_dir, stderr_dir) if log_dir is not None]
-        return bool(present) and all(log_dir == identity_lane for log_dir in present)
+        if not present:
+            return False
+        first = present[0]
+        return first in allowed and all(log_dir == first for log_dir in present)
 
     def _parse_exit_code(self, raw_exit_code: str) -> int | None:
         if not raw_exit_code:
@@ -1889,9 +1914,18 @@ class RealSlurmGateway(SlurmGateway):
                 log_dir,
                 max_entries=max_entries,
                 containment_root=workspace_root,
-            )[:max_entries]
+            )
         except (FileNotFoundError, NotADirectoryError, OSError, SafeFilesystemError):
             return []
+
+    def _list_bounded_names(self, log_dir: Path, *, max_entries: int) -> tuple[list[str], bool]:
+        names = self._list_log_dir(log_dir, max_entries=max_entries)
+        if len(names) > max_entries:
+            return names[:max_entries], True
+        return names, False
+
+    def _list_array_stream_names(self, log_dir: Path) -> tuple[list[str], bool]:
+        return self._list_bounded_names(log_dir, max_entries=MAX_ARRAY_STREAM_FILES)
 
     def _discover_workspace_logs(self, job_id: str, suffix: str, *, array_tasks: bool = False) -> list[Path]:
         workspace_root = Path(self.settings.workspace_dir).expanduser().resolve()
@@ -1901,9 +1935,15 @@ class RealSlurmGateway(SlurmGateway):
             else re.compile(rf"^{re.escape(job_id)}\.{re.escape(suffix)}$")
         )
         matches: list[Path] = []
-        for name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
+        cycle_names, overflow = self._list_bounded_names(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES)
+        if overflow:
+            return []
+        for name in cycle_names:
             run_log_dir = workspace_root / name / "logs"
-            for log_name in self._list_log_dir(run_log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+            log_names, lane_overflow = self._list_array_stream_names(run_log_dir)
+            if lane_overflow:
+                continue
+            for log_name in log_names:
                 if pattern.fullmatch(log_name):
                     matches.append(run_log_dir / log_name)
         return sorted(matches)
@@ -1938,7 +1978,7 @@ class RealSlurmGateway(SlurmGateway):
             return _ArrayLogBinding(
                 expected=expected,
                 explicit=False,
-                identity_lane=None,
+                identity_lanes=(expected,) if expected is not None else (),
                 allow_identities=expected is not None,
             )
         stored_path = _lexical_absolute_path(stored)
@@ -1951,13 +1991,13 @@ class RealSlurmGateway(SlurmGateway):
             return _ArrayLogBinding(
                 expected=expected,
                 explicit=True,
-                identity_lane=None,
+                identity_lanes=(),
                 allow_identities=False,
             )
         return _ArrayLogBinding(
             expected=expected,
             explicit=True,
-            identity_lane=expected,
+            identity_lanes=(expected,),
             allow_identities=True,
         )
 
@@ -1989,8 +2029,20 @@ class RealSlurmGateway(SlurmGateway):
     ) -> Path | None:
         binding = self._array_log_binding(workspace_root, manifest, manifest_index_path)
         if binding.explicit:
-            return binding.identity_lane
+            return binding.identity_lanes[0] if binding.identity_lanes else None
         return binding.expected
+
+    def _legacy_identity_lanes(
+        self,
+        record: SlurmJobRecord,
+        workspace_root: Path,
+    ) -> tuple[Path, ...]:
+        leader = str(record.run_id or "").strip()
+        if not leader:
+            leader = str(record.manifest.get("run_id") or "").strip()
+        if not leader:
+            return ()
+        return (workspace_root / leader / "logs",)
 
     def _ensure_array_log_directory(self, log_dir: Path, workspace_root: Path) -> None:
         try:
@@ -2059,11 +2111,22 @@ class RealSlurmGateway(SlurmGateway):
             else re.compile(rf"^{re.escape(job_id)}\.{re.escape(suffix)}$")
         )
         matches: list[Path] = []
-        for cycle_name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
+        cycle_names, overflow = self._list_bounded_names(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES)
+        if overflow:
+            return []
+        for cycle_name in cycle_names:
             array_root = workspace_root / cycle_name / ARRAY_LOGS_DIRNAME
-            for submission_name in self._list_log_dir(array_root, max_entries=MAX_DISCOVERY_ENTRIES):
+            submission_names, submission_overflow = self._list_bounded_names(
+                array_root, max_entries=MAX_DISCOVERY_ENTRIES
+            )
+            if submission_overflow:
+                continue
+            for submission_name in submission_names:
                 log_dir = array_root / submission_name
-                for log_name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+                log_names, lane_overflow = self._list_array_stream_names(log_dir)
+                if lane_overflow:
+                    continue
+                for log_name in log_names:
                     if pattern.fullmatch(log_name):
                         matches.append(log_dir / log_name)
         return sorted(matches)
@@ -2074,11 +2137,22 @@ class RealSlurmGateway(SlurmGateway):
         workspace_root: Path,
     ) -> tuple[list[Path], dict[int, tuple[str, str]]]:
         matches: list[Path] = []
-        for cycle_name in self._list_log_dir(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES):
+        cycle_names, overflow = self._list_bounded_names(workspace_root, max_entries=MAX_DISCOVERY_ENTRIES)
+        if overflow:
+            return [], {}
+        for cycle_name in cycle_names:
             array_root = workspace_root / cycle_name / ARRAY_LOGS_DIRNAME
-            for submission_name in self._list_log_dir(array_root, max_entries=MAX_DISCOVERY_ENTRIES):
+            submission_names, submission_overflow = self._list_bounded_names(
+                array_root, max_entries=MAX_DISCOVERY_ENTRIES
+            )
+            if submission_overflow:
+                continue
+            for submission_name in submission_names:
                 log_dir = array_root / submission_name
-                for log_name in self._list_log_dir(log_dir, max_entries=MAX_ARRAY_LOG_DIR_ENTRIES):
+                log_names, lane_overflow = self._list_array_stream_names(log_dir)
+                if lane_overflow:
+                    continue
+                for log_name in log_names:
                     if re.fullmatch(rf"{re.escape(job_id)}_\d+\.(?:out|err)", log_name):
                         matches.append(log_dir)
                         break

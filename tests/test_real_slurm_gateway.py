@@ -14,6 +14,7 @@ import pytest
 import yaml
 from jinja2.exceptions import SecurityError
 
+from packages.common.manifest_index import MAX_MANIFEST_INDEX_ENTRIES
 from services.orchestrator.chain import ANALYSIS_STAGES, M3_STAGES
 from services.orchestrator.retry import NON_TRANSIENT_ERROR_CODES, TRANSIENT_ERROR_CODES
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
@@ -33,6 +34,7 @@ from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SlurmJobRecord, SlurmJobStatus, SubmitJobRequest
 from services.slurm_gateway.real_backend import (
     LOG_TRUNCATION_MARKER,
+    MAX_ARRAY_TASK_LOGS,
     RealSlurmGateway,
     _normalize_slurm_state,
     map_slurm_error_code,
@@ -4339,6 +4341,353 @@ def test_explicit_symlink_array_log_dir_scalar_logs_use_fallback(monkeypatch, tm
 
     assert response.logs == "fallback scalar"
     _assert_fetch_logs_does_not_bind_wrong_array_content(response, "WRONG CONTENT")
+
+
+def _completed_sacct_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        del kwargs
+        requested = "12345"
+        for arg in command:
+            if isinstance(arg, str) and arg.startswith("--jobs="):
+                requested = arg.split("=", maxsplit=1)[1]
+                break
+        stdout = f"{requested}|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def _assert_array_identity_omitted(entry: dict[str, object]) -> None:
+    assert entry["identity_complete"] is False
+    assert "model_id" not in entry
+    assert "run_id" not in entry
+
+
+def test_fetch_logs_after_healthy_sacct_restart_joins_exact_neutral_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    exact = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / exact.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("alpha stderr", encoding="utf-8")
+    (log_dir / "12345_1.out").write_text("beta stdout", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("beta stderr", encoding="utf-8")
+
+    first = gateway.fetch_logs("12345")
+    cached = gateway._jobs["12345"]
+    second = gateway.fetch_logs("12345")
+
+    assert cached.run_id == ""
+    assert cached.status == SlurmJobStatus.SUCCEEDED
+    for response in (first, second):
+        assert response.complete is True
+        assert response.metadata_complete is False
+        assert response.array_task_logs == [
+            {
+                "task_id": 0,
+                "stdout": "alpha stdout",
+                "stderr": "alpha stderr",
+                "truncated": False,
+                "missing_stdout": False,
+                "missing_stderr": False,
+                "model_id": "model_alpha",
+                "run_id": "run_alpha",
+                "identity_complete": True,
+            },
+            {
+                "task_id": 1,
+                "stdout": "beta stdout",
+                "stderr": "beta stderr",
+                "truncated": False,
+                "missing_stdout": False,
+                "missing_stderr": False,
+                "model_id": "model_beta",
+                "run_id": "run_beta",
+                "identity_complete": True,
+            },
+        ]
+
+
+def test_fetch_logs_after_healthy_sacct_restart_reads_historical_logs_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    log_dir = tmp_path / "workspace" / "leader_run" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("legacy task 0", encoding="utf-8")
+    (log_dir / "12345_1.err").write_text("legacy task 1", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.complete is True
+    assert response.metadata_complete is False
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "legacy task 0",
+            "stderr": "",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": True,
+            "identity_complete": False,
+        },
+        {
+            "task_id": 1,
+            "stdout": "",
+            "stderr": "legacy task 1",
+            "truncated": False,
+            "missing_stdout": True,
+            "missing_stderr": False,
+            "identity_complete": False,
+        },
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+    _assert_array_identity_omitted(response.array_task_logs[1])
+
+
+def test_fetch_logs_individual_task_after_healthy_sacct_restart_discovers_neutral_log(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    _completed_sacct_run(monkeypatch)
+    exact = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / exact.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("alpha stdout", encoding="utf-8")
+
+    first = gateway.fetch_logs("12345_0")
+    second = gateway.fetch_logs("12345_0")
+
+    assert first.logs == "alpha stdout"
+    assert first.complete is True
+    assert first.metadata_complete is False
+    assert first.array_task_logs is None
+    assert second.logs == "alpha stdout"
+    assert second.metadata_complete is False
+
+
+def test_legacy_leader_and_root_mixed_streams_preserve_content_without_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    leader_dir = tmp_path / "workspace" / "run_alpha" / "logs"
+    leader_dir.mkdir(parents=True)
+    (leader_dir / "12345_0.out").write_text("leader stdout", encoding="utf-8")
+    root_dir = tmp_path / "workspace" / "logs"
+    root_dir.mkdir(parents=True)
+    (root_dir / "12345_0.err").write_text("root stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "leader stdout",
+            "stderr": "root stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "identity_complete": False,
+        }
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+
+
+def test_legacy_root_only_streams_preserve_content_without_identity(monkeypatch, tmp_path) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+        ("run_beta", "model_beta"),
+    )
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+        },
+    )
+    root_dir = tmp_path / "workspace" / "logs"
+    root_dir.mkdir(parents=True)
+    (root_dir / "12345_0.out").write_text("root-only stdout", encoding="utf-8")
+    (root_dir / "12345_0.err").write_text("root-only stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs == [
+        {
+            "task_id": 0,
+            "stdout": "root-only stdout",
+            "stderr": "root-only stderr",
+            "truncated": False,
+            "missing_stdout": False,
+            "missing_stderr": False,
+            "identity_complete": False,
+        }
+    ]
+    _assert_array_identity_omitted(response.array_task_logs[0])
+
+
+def test_supported_large_array_selects_numeric_lowest_task_logs_despite_hostile_listing_order(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_001",
+        model_id="model_001",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+    )
+    log_dir = tmp_path / "workspace" / "run_001" / "logs"
+    log_dir.mkdir(parents=True)
+    for index in range(50):
+        (log_dir / f"zzzz_noise_{index}").touch()
+    for task_id in range(249, -1, -1):
+        (log_dir / f"12345_{task_id}.out").write_text(f"task {task_id} stdout", encoding="utf-8")
+        (log_dir / f"12345_{task_id}.err").write_text(f"task {task_id} stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs is not None
+    assert [entry["task_id"] for entry in response.array_task_logs] == list(range(MAX_ARRAY_TASK_LOGS))
+    assert response.array_task_logs[0]["stdout"] == "task 0 stdout"
+    assert response.array_task_logs[-1]["stdout"] == f"task {MAX_ARRAY_TASK_LOGS - 1} stdout"
+
+
+def test_over_supported_array_log_dir_fails_closed_without_identity_or_content_claim(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
+    index_path = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T120000.json",
+        ("run_alpha", "model_alpha"),
+    )
+    log_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / index_path.stem
+    log_dir.mkdir(parents=True)
+    (log_dir / "12345_0.out").write_text("must-not-claim-overflow-content", encoding="utf-8")
+    (log_dir / "12345_0.err").write_text("must-not-claim-overflow-stderr", encoding="utf-8")
+    for index in range((MAX_MANIFEST_INDEX_ENTRIES * 2) + 1):
+        (log_dir / f"zzzz_noise_{index:05d}").touch()
+    assert len(list(log_dir.iterdir())) > (MAX_MANIFEST_INDEX_ENTRIES * 2)
+    now = datetime.now(UTC)
+    gateway._jobs["12345"] = SlurmJobRecord(
+        job_id="12345",
+        run_id="run_alpha",
+        model_id="model_alpha",
+        status=SlurmJobStatus.SUCCEEDED,
+        submitted_at=now,
+        updated_at=now,
+        finished_at=now,
+        manifest={
+            "run_id": "run_alpha",
+            "cycle_id": "cycle_001",
+            "manifest_index_path": str(index_path),
+            "array_log_dir": str(log_dir),
+        },
+    )
+
+    response = gateway.fetch_logs("12345")
+
+    dumped = response.model_dump_json()
+    assert "must-not-claim-overflow-content" not in dumped
+    assert "must-not-claim-overflow-stderr" not in dumped
+    assert response.array_task_logs is None
+
+
+def test_recordless_ambiguous_neutral_dirs_preserve_content_without_guessed_identity(
+    monkeypatch, tmp_path
+) -> None:
+    gateway = _production_gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="sacct unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    first_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T110000.json",
+        ("run_old", "model_old"),
+        ("run_other", "model_other"),
+    )
+    second_index = _write_array_manifest_index(
+        tmp_path / "workspace" / "cycle_001" / "manifests" / "forecast_index_20260508T130000.json",
+        ("run_new", "model_new"),
+        ("run_fresh", "model_fresh"),
+    )
+    first_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / first_index.stem
+    second_dir = tmp_path / "workspace" / "cycle_001" / "array_logs" / second_index.stem
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    (first_dir / "12345_0.out").write_text("older stdout", encoding="utf-8")
+    (first_dir / "12345_0.err").write_text("older stderr", encoding="utf-8")
+    (second_dir / "12345_0.out").write_text("newer stdout", encoding="utf-8")
+    (second_dir / "12345_0.err").write_text("newer stderr", encoding="utf-8")
+
+    response = gateway.fetch_logs("12345")
+
+    assert response.array_task_logs is not None
+    assert [entry["task_id"] for entry in response.array_task_logs] == [0]
+    assert response.array_task_logs[0]["stdout"] in {"older stdout", "newer stdout"}
+    _assert_array_identity_omitted(response.array_task_logs[0])
+    dumped = response.model_dump_json()
+    for forbidden in (
+        "run_old",
+        "model_old",
+        "run_new",
+        "model_new",
+        "run_other",
+        "model_other",
+        "run_fresh",
+        "model_fresh",
+    ):
+        assert forbidden not in dumped
 
 
 def test_parse_slurm_datetime_rejects_garbage(tmp_path):
