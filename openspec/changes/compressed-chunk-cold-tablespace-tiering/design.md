@@ -15,7 +15,7 @@ cluster-scoped, so a throwaway database inside the live `nhms-db` cluster is
 not an isolated oracle for tablespace creation, filesystem faults, or catalog
 drift. The 2.10.2 experiment therefore runs in a separate disposable cluster
 using the exact node-27 image identity; the live cluster is read-only during
-#1892.
+Issue #1892.
 
 Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
 
@@ -114,20 +114,35 @@ requirement.
 
 ### D4 — Migration is one rewrite transaction with pre-commit and post-commit proof
 
-The shared residency module, not the CLI wrapper, owns relation discovery,
-stable OID lock order, in-transaction revalidation, the D3 sequence, and the
-requirement that data parity cover every business column over the durable origin
-chunk's half-open time range. A whole-hypertable aggregate cannot substitute
-because unrelated sibling rows can hide target-chunk loss. The #1892 probe
-hashes every column of its own four-column disposable fixture
+The production owner is `packages/common/compressed_chunk_cold_runtime.py`, not
+the CLI wrapper or any `compressed_chunk_cold_probe` module. It consumes the
+pure contract frozen by Issue #1892 and owns relation discovery, stable OID lock
+order,
+in-transaction revalidation, the D3 sequence, and parity over the durable origin
+chunk's half-open time range. Before the first candidate mutation in every run,
+it queries both allowlisted live hypertables for every non-dropped user column
+in physical `attnum` order, validates from the Timescale catalog that `valid_time` is the sole open time
+dimension and that its PostgreSQL type is `timestamptz`, and binds the complete name/type/nullability/
+generation inventory plus its digest to the run. Its generated parity query
+covers that exact inventory and records window row count, per-column non-null
+counts, and a deterministic multiset checksum. The database returns one bounded
+aggregate row per window; production code never fetches or materializes all
+business rows in the client, and any configured row ceiling is enforced by SQL
+before client materialization. A whole-hypertable aggregate cannot substitute
+because unrelated sibling rows can hide target-chunk loss.
+
+The #1892 probe hashes every column of its own four-column disposable fixture
 (`id` / canonical UTC `valid_time` / `value` / NULL-distinct `payload`) via a
 probe-support helper; that token is not a production-column contract.
-Migrations 000005/000006 define different identity and business columns.
-#1893 must derive and validate the actual per-hypertable column inventory from
-the live production schema before mutation, and must not reuse the fixture SQL
-as a production all-business-column API. Any
-statement or proof failure aborts the transaction. Connection loss/process
-kill is reconciled by a fresh catalog read keyed by the durable origin
+Migrations 000005/000006 define different identity and business columns. The
+production runtime MUST NOT import the fixture helper or accept an unvalidated
+caller-supplied column list. After stable heap locks, the runtime re-derives both
+inventories and the target-window parity on the moving transaction, compares
+them with the preflight descriptors/digests/parity, and only then issues the
+first movement SQL. The parity SELECT holds the hypertable read lock through
+commit. Any inventory, statement, or proof failure aborts before success and,
+when it precedes mutation, before the first movement SQL.
+Connection loss/process kill is reconciled by a fresh catalog read keyed by the durable origin
 identity/window: complete source, complete target, mixed, or unknown;
 mixed/unknown is a recovery blocker, never success. A rolled-back source result
 must restore the original compressed sibling OID/name and parity. Only a
@@ -137,9 +152,11 @@ unknown, not proof of rollback.
 
 The operation is not metadata-only: it temporarily rewrites the full
 uncompressed chunk on the cold device and emits WAL through PGDATA. Preflight
-must therefore reserve cold-device expansion/rollback headroom and hot-device
-PGDATA/WAL headroom, while retaining the original compressed hot bytes until
-commit. A post-commit readback proves every current member at `nhms_cold`. The
+therefore requires cold free bytes for the full pre-compression expansion plus
+cold reserve, and hot free bytes for the configured WAL reserve. The original
+compressed source bytes remain allocated until commit and are recorded, but are
+not reclaimed capacity and are not a second hot-free demand. A post-commit
+readback proves every current member at `nhms_cold`. The
 receipt records before/intermediate/after identities, tablespaces and relation
 bytes, transaction outcome, parity, waits/durations, and recovery
 classification. Filesystem deltas and WAL growth are secondary aggregate
@@ -156,32 +173,82 @@ Manual decompression is permitted only after the same group and capacity
 preflight. The decompressed origin stays in `nhms_cold`; replay writes there.
 Recompression must produce a fully cold group as proven by the #1892 sequence;
 if engine behavior creates any hot member, the same serialized tick immediately
-converges that group or reports a non-success mixed/recovery state. The
-compression and residency stages share one mutex and fixed ordering; no second
-unlocked timer may race the same chunk. Retention, decompression, or relation
-disappearance after selection yields a deferred/reconciled result, not a stale
-success.
+converges that group or reports a non-success mixed/recovery state.
+
+One fixed process mutex, `/tmp/nhms-node27-timeseries-lifecycle.lock`, is owned by
+`packages/common/node27_timeseries_lifecycle_lock.py`. Recurring compression,
+cold residency, retention, and manual decompression/replay acquire it before
+any existing lane-local flock and before database relation locks; contention is
+a no-mutation refused/deferred result, and every terminal path releases it.
+Autopipe does not acquire this mutex because its writer contract excludes
+eligible compressed groups; selection-to-lock drift remains fenced by stable
+heap locks plus in-transaction catalog and eligibility revalidation.
+
+The existing compression oneshot is the only recurring trigger: its current
+04:25 timer starts compression first and cold residency as a second sequential
+`ExecStart`. No cold-residency timer or asynchronous service lane is added. The
+service wall budget exceeds both sequential wrapper wall budgets plus a systemd
+margin; each wrapper wall exceeds its own maximum statement budget plus cleanup
+margin. The existing retention timer moves after that worst-case service window;
+the lifecycle mutex remains the runtime backstop if manual activation or delay
+still overlaps. The retention window does not change. The checked-in unit/config
+is installed and enabled only by #1895 after #1894
+creates the target. Retention, decompression, or relation disappearance after
+selection yields a deferred/reconciled result, not stale success.
 
 ### D6 — Runner is dry-run by default, bounded, fair, and receipted
 
-#1893 adds one CLI/wrapper integrated into the existing compression lifecycle.
-Enforce has an independent per-tick group bound, stable fair ordering across
-both hypertables, a whole-run wall bound outside per-statement bounds, and one
-shared lock. It scans all eligible compressed groups, including chunks
-compressed before the current tick. `already_cold` is a no-write no-op.
-Partially cold groups are never ordinary candidates: they enter explicit
-recovery classification and enforce fails closed unless the #1892 recovery
-protocol proves a safe all-or-nothing convergence.
+Issue #1893 adds `scripts/node27_cold_residency.py` and its one wrapper to the
+existing compression oneshot. Enforce has an independent positive per-tick
+mutation bound, a maximum members-per-group bound, finite catalog row/byte
+limits, and a whole-run wall outside per-statement bounds. Candidates receive
+an oldest-first rank within each allowlisted hypertable and are merged by
+`(per_hypertable_rank, range_end, hypertable identity, origin OID)`. This deterministic interleave gives each nonempty hypertable a candidate
+before either receives its next rank. Newly eligible chunks have later range
+ends, and `already_cold` observations are recorded without consuming the
+mutation bound, so both backlogs progress without a persisted cursor. The runner
+scans all eligible compressed groups, including chunks compressed before the
+current tick. Partially cold groups are
+never ordinary candidates: they enter explicit recovery classification and
+enforce fails closed unless the #1892 recovery protocol proves a safe
+all-or-nothing convergence.
 
-Receipt publication is atomic, mode 0600, schema-validated, and bound to the
-exact head SHA, config, business watermark, lag/cutoff, cluster identity, target
-catalog/path/device identity, and group observations. Publish failure makes the
-run non-success even if reconciliation proves the database commit; it never
-retries database mutation merely to regenerate evidence.
+Capacity preflight obtains `before_compression_total_bytes` from the target
+chunk's TimescaleDB compression statistics and uses the #1892 arithmetic without
+crediting retained source bytes. Immediately before every group preflight, it
+freshly samples both devices; a prior group's free-space sample is never reused
+for a later rewrite. Both `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES`
+and `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` are mandatory positive integer
+byte inputs with no Python, shell, or example-template default. This fixture
+does not invent a universal reserve from disposable WAL observations; #1895
+freezes measured live values in the mode-0600 environment before installing the
+unit. Exact equality is admitted, and either one-byte short case refuses before
+movement SQL.
+
+Receipt publication is atomic, mode 0600, schema-validated before replacement,
+and bound to the exact head SHA, config, business watermark, lag/cutoff, cluster
+identity, target catalog/path/device identity, validated business-column
+inventory and per-window parity, capacity decision, and group observations.
+Target bind/host/device observations come from a required production inspector;
+configuration supplies expected values only and may never echo them as observed
+truth. Before enforce mutation, the runner atomically writes a same-directory mode-0600
+intent sidecar and replaces the public receipt with the same schema-valid
+`in_progress` payload naming selected groups and the complete preflight source
+snapshot: original compressed sibling/member identities, source residency,
+inventory digest, target-window parity, and per-group capacity decision. The
+sidecar is the authority whenever it exists. Terminal publication first atomically replaces the
+public receipt after fresh reconciliation, then durably removes the sidecar; a
+failure before or after replacement therefore leaves either the public intent or
+a truthful terminal plus an authoritative sidecar, never an older success as
+current. Durable sidecar removal includes parent-directory fsync and identity
+verification; a successful pathname unlink alone is not terminal durability. A later invocation that finds the sidecar fresh-reconciles every named
+group and durably publishes a recovery terminal before selecting new mutation;
+mixed/unknown blocks the tick. Publication failure makes the run non-success and
+never replays database mutation or overwrites unresolved intent with a new run.
 
 ### D7 — Fresh installation is a separate fail-closed boundary
 
-#1894 owns a dry-run-default installer/preflight and governance extension for
+Issue #1894 owns a dry-run-default installer/preflight and governance extension for
 fixed catalog name `nhms_cold`, fresh host path
 `/data/GHDC/nhms-cold-tablespace`, and fixed container path
 `/home/postgres/pgdata/tablespaces/nhms_cold`. Installation requires an empty,
@@ -208,7 +275,7 @@ headroom and are recorded in the rollout receipt.
 
 ### D9 — Rollout is bounded and independently reversible
 
-#1895 freezes exact reviewed HEAD and pre-mutation catalog/data/filesystem/API
+Issue #1895 freezes exact reviewed HEAD and pre-mutation catalog/data/filesystem/API
 baselines, quiesces writers and lifecycle timers, passes D7 gates, creates the
 fresh tablespace, previews candidates, then moves one group at a time with
 post-group parity. It restores timers only after all six baseline groups and
@@ -344,6 +411,7 @@ Boundary-surface checklist:
 
 ## Open Questions
 
-- The exact supported migration SQL and recompression behavior are intentionally
-  unresolved until #1892's pinned 2.10.2 probe; any probe result that cannot
-  satisfy the governing invariant stops #1893 rather than weakening it.
+- None for #1893. The #1892 probe fixed the only movement sequence; D4-D6 fix the
+  production owner, live-column parity, mutex/order, systemd trigger, capacity
+  inputs, and publication boundary. #1894/#1895 still own installation and the
+  measured live reserve values, not alternate runtime semantics.

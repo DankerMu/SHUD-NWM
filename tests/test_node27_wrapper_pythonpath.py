@@ -123,6 +123,14 @@ _WRAPPER_CASES = [
         None,
         None,
     ),
+    (
+        "cold_residency",
+        "node27_cold_residency_once.sh",
+        "NODE27_COLD_RESIDENCY_REPO_ROOT",
+        "NODE27_COLD_RESIDENCY_ENV_FILE",
+        "NODE27_COLD_RESIDENCY_PYTHON",
+        "NODE27_COLD_RESIDENCY_SCRIPT",
+    ),
 ]
 
 

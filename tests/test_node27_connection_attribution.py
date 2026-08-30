@@ -14,21 +14,14 @@ Three layers are asserted here:
   and neither DSN validator's verdict moves.
 * T5 -- a static guard over the registered files, so a new unmarked connect
   site or a renamed identity fails instead of silently losing attribution.
-* T5b -- the same guard extended over *delegated* connect surfaces: a
-  registered component that opens its connection inside an imported helper
-  (``packages/common/display_watermark.py``,
-  ``packages/common/display_coverage.py``) is invisible to the per-file AST
-  walk, which is exactly how two unattributed production connect sites shipped
-  green in round 1. ``DELEGATED_CONNECT_CLOSURE`` below is the single source of
-  truth: every connect-owning module in a registered component's import
-  closure must be classified there, and the ``attributed`` ones must actually
-  be called with an attributed ``connect=`` callable.
+
+T5b (delegated connect surfaces / ``DELEGATED_CONNECT_CLOSURE``) lives in
+``tests/test_node27_connection_attribution_delegated.py``.
 """
 
 from __future__ import annotations
 
 import ast
-import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,9 +34,10 @@ import pytest
 from psycopg2.extras import RealDictCursor
 
 from apps.api.routes import hydro_display
-from packages.common import display_coverage, display_watermark
+from packages.common import display_coverage
 from scripts import (
     node27_autopipeline,
+    node27_cold_residency,
     node27_download_cycles,
     node27_ingest_run,
     node27_raw_retention,
@@ -71,6 +65,7 @@ REGISTERED_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("scripts/node27_timeseries_retention.py", "nhms-ts-retention"),
     ("scripts/node27_timeseries_compression.py", "nhms-ts-compression"),
     ("scripts/node27_raw_retention.py", "nhms-raw-retention"),
+    ("scripts/node27_cold_residency.py", "nhms-ts-cold-residency"),
 )
 
 
@@ -139,6 +134,10 @@ def _invoke_compression_compress_chunk(dsn: str, tmp_path: Path) -> None:
     node27_timeseries_compression._default_compress_chunk(dsn, None, compress_timeout_ms=1000)
 
 
+def _invoke_cold_residency_connect(dsn: str, tmp_path: Path) -> None:
+    node27_cold_residency._connect_factory(dsn, node27_cold_residency._DEFAULT_STATEMENT_TIMEOUT_MS)()
+
+
 # (case id, invoker, expected identity, expected OTHER connect kwargs).
 # The fourth element is the invariant lock: introducing the attribution kwarg
 # must not have moved cursor_factory / connect_timeout / options on any site.
@@ -170,6 +169,12 @@ PSYCOPG2_CASES: tuple[tuple[str, Any, str, dict[str, Any]], ...] = (
         _invoke_compression_compress_chunk,
         "nhms-ts-compression",
         {"connect_timeout": 10},
+    ),
+    (
+        "cold_residency_connect",
+        _invoke_cold_residency_connect,
+        "nhms-ts-cold-residency",
+        {"connect_timeout": 10, "cursor_factory": psycopg2.extras.RealDictCursor},
     ),
 )
 
@@ -418,6 +423,23 @@ def _run_compression_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: 
     assert node27_timeseries_compression.main([]) != 0
 
 
+def _run_cold_residency_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
+    for key, value in {
+        "DATABASE_URL": dsn,
+        "NODE27_COLD_RESIDENCY_RECEIPT_PATH": str(tmp_path / "receipt.json"),
+        "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
+        "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
+        "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        node27_cold_residency,
+        "_observe_head",
+        lambda *_args, **_kwargs: ("a" * 40, True, False),
+    )
+    assert node27_cold_residency.main([]) != 0
+
+
 def _run_raw_retention_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str = DSN) -> None:
     """``main()`` with no ``--reference-time`` -- the production timer shape."""
     root = tmp_path / "object-store"
@@ -437,6 +459,7 @@ DELEGATED_WATERMARK_CASES: tuple[tuple[str, Any, str], ...] = (
     ("retention_main_watermark", _run_retention_main, "nhms-ts-retention"),
     ("compression_main_watermark", _run_compression_main, "nhms-ts-compression"),
     ("raw_retention_main_watermark", _run_raw_retention_main, "nhms-raw-retention"),
+    ("cold_residency_main_watermark", _run_cold_residency_main, "nhms-ts-cold-residency"),
 )
 
 
@@ -701,6 +724,7 @@ def test_registered_modules_expose_the_expected_identity_at_runtime() -> None:
         "scripts/node27_timeseries_retention.py": node27_timeseries_retention,
         "scripts/node27_timeseries_compression.py": node27_timeseries_compression,
         "scripts/node27_raw_retention.py": node27_raw_retention,
+        "scripts/node27_cold_residency.py": node27_cold_residency,
     }
     assert dict(REGISTERED_COMPONENTS).keys() == imported.keys()
     for relative_path, expected_name in REGISTERED_COMPONENTS:
@@ -734,314 +758,3 @@ def test_guard_rejects_an_unmarked_connect_site(tmp_path: Path) -> None:
     literal = ast.parse('import psycopg2\npsycopg2.connect(u, fallback_application_name="nhms-autopipe")\n')
     literal_call = next(node for node in ast.walk(literal) if isinstance(node, ast.Call))
     assert _connect_site_marked(literal_call) is False
-
-
-# --------------------------------------------------------------------------- #
-# T5b -- delegated connect surfaces: discovery + classification
-#
-# The per-file guard above walks ONLY the registered files, so a connect site a
-# registered component delegates into an imported helper is structurally
-# invisible to it. That blindness is what let two unattributed production
-# connect sites ship green. The guard below closes the class in two halves:
-#
-#   discovery     -- walk each registered component's transitive first-party
-#                    import closure and collect every module that owns a DB
-#                    connect surface. A new delegation shows up here whether or
-#                    not anyone remembered to register it.
-#   classification-- DELEGATED_CONNECT_CLOSURE must classify each discovered
-#                    module as ``attributed`` (the component injects its own
-#                    attributed connect callable) or ``unreachable`` (in the
-#                    import closure, but no call path from this entrypoint
-#                    reaches its connect surface -- with the reason recorded).
-#
-# The registry is the single source of truth: adding a delegation, dropping an
-# attribution, or removing the helper's injection seam all turn this red.
-#
-# Honest limits -- what this guard still cannot catch:
-#   * discovery is over the STATIC import graph, so ``importlib``/plugin-style
-#     dynamic imports are invisible;
-#   * ``unreachable`` verdicts are human call-path judgements pinned as text,
-#     not proofs -- a later edit that makes an ``unreachable`` module genuinely
-#     reachable keeps this green (the registry row must be re-read by a human);
-#   * only ``psycopg2.connect`` and ``create_engine`` are recognised connect
-#     surfaces; psycopg3 (``psycopg.connect``, e.g.
-#     ``services/orchestrator/file_orchestration_migration.py``), asyncpg or raw
-#     libpq would slip through;
-#   * inside a registered file, aliasing (``c = psycopg2.connect; c(dsn)``)
-#     defeats the per-file call-node scan above;
-#   * subprocess-spawned components (autopipe -> ingest_run / output_parser /
-#     refresh_coverage) are not import edges; they are covered only because each
-#     is separately registered here.
-# --------------------------------------------------------------------------- #
-FIRST_PARTY_ROOTS = ("scripts", "workers", "packages", "apps", "services")
-
-ATTRIBUTED = "attributed"
-UNREACHABLE = "unreachable"
-
-# (registered component, connect-owning module in its import closure, verdict,
-#  detail). For ``attributed`` the detail is the helper function the component
-# must call with an attributed ``connect=``; for ``unreachable`` it is the
-# recorded reason no call path reaches that module's connect surface.
-DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "scripts/node27_autopipeline.py",
-        "workers/model_registry/basins_registry_import.py",
-        UNREACHABLE,
-        "autopipeline imports only _backfill_output_segment_geometry(cursor, ...) and hands it a "
-        "cursor from its own attributed _connect; basins_registry_import._transaction is never called",
-    ),
-    (
-        "scripts/node27_refresh_coverage.py",
-        "packages/common/display_coverage.py",
-        ATTRIBUTED,
-        "refresh_all_run_display_coverage",
-    ),
-    (
-        "scripts/node27_refresh_coverage.py",
-        "packages/common/forecast_store.py",
-        UNREACHABLE,
-        "display_coverage imports only the constants MVP_STATION_VARIABLES / "
-        "QHH_LATEST_EXPECTED_HORIZON_HOURS; PsycopgForecastStore is never constructed on this path",
-    ),
-    (
-        "apps/api/routes/hydro_display.py",
-        "apps/api/routes/pipeline.py",
-        UNREACHABLE,
-        "hydro_display imports only the _ok response helper; pipeline._engine belongs to the "
-        "control-plane routes and is never reached from a display route",
-    ),
-    (
-        "scripts/node27_timeseries_retention.py",
-        "packages/common/display_watermark.py",
-        ATTRIBUTED,
-        "fetch_display_watermark",
-    ),
-    (
-        "scripts/node27_timeseries_compression.py",
-        "packages/common/display_watermark.py",
-        ATTRIBUTED,
-        "fetch_display_watermark",
-    ),
-    (
-        "scripts/node27_raw_retention.py",
-        "packages/common/display_watermark.py",
-        ATTRIBUTED,
-        "fetch_display_watermark",
-    ),
-)
-
-# The keyword every delegated helper exposes so a caller can inject its own
-# attributed connect callable, and the module-level wrapper each registered
-# component passes through it.
-DELEGATED_CONNECT_KEYWORD = "connect"
-ATTRIBUTED_CONNECT_WRAPPER = "_attributed_connect"
-
-
-def _first_party_imports(path: Path) -> set[str]:
-    """Dotted first-party module names imported by ``path`` (any nesting)."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                package = path.parent.relative_to(REPO_ROOT).as_posix().replace("/", ".")
-                for _ in range(node.level - 1):
-                    package = package.rsplit(".", 1)[0]
-                module = f"{package}.{node.module}" if node.module else package
-            else:
-                module = node.module or ""
-            if not module:
-                continue
-            names.add(module)
-            # ``from pkg.mod import name`` may name a submodule, not an object.
-            names.update(f"{module}.{alias.name}" for alias in node.names)
-    return {name for name in names if name.split(".")[0] in FIRST_PARTY_ROOTS}
-
-
-def _module_path(dotted: str) -> Path | None:
-    module = REPO_ROOT / (dotted.replace(".", "/") + ".py")
-    if module.is_file():
-        return module
-    package = REPO_ROOT / dotted.replace(".", "/") / "__init__.py"
-    return package if package.is_file() else None
-
-
-def _owns_connect_surface(path: Path) -> bool:
-    """True if the module names ``psycopg2.connect`` / ``create_engine`` at all.
-
-    Deliberately matches bare attribute REFERENCES, not just calls:
-    ``display_watermark.py`` assigns ``connect = psycopg2.connect`` and calls it
-    later, which a call-only scan misses entirely -- precisely the shape this
-    guard exists to catch.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and (_is_psycopg2_connect(node.func) or _is_create_engine(node.func)):
-            return True
-        if isinstance(node, ast.Attribute) and _is_psycopg2_connect(node):
-            return True
-        if isinstance(node, ast.Attribute) and node.attr == "create_engine":
-            return True
-    return False
-
-
-def _connect_owning_closure(relative_path: str) -> set[str]:
-    """Modules with a connect surface reachable BY IMPORT from a component.
-
-    Registered components are excluded: each is covered by its own per-file
-    guard above, so re-reporting them here would be noise.
-    """
-    registered = {path for path, _name in REGISTERED_COMPONENTS}
-    entry = REPO_ROOT / relative_path
-    seen_modules: set[str] = set()
-    visited: set[Path] = set()
-    pending = [entry]
-    owners: set[str] = set()
-    while pending:
-        current = pending.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        current_relative = current.relative_to(REPO_ROOT).as_posix()
-        if current is not entry and current_relative not in registered and _owns_connect_surface(current):
-            owners.add(current_relative)
-        for dotted in _first_party_imports(current):
-            if dotted in seen_modules:
-                continue
-            seen_modules.add(dotted)
-            resolved = _module_path(dotted)
-            if resolved is not None:
-                pending.append(resolved)
-    return owners
-
-
-@pytest.mark.parametrize(
-    ("relative_path", "expected_name"),
-    REGISTERED_COMPONENTS,
-    ids=[path for path, _ in REGISTERED_COMPONENTS],
-)
-def test_every_delegated_connect_surface_is_classified(relative_path: str, expected_name: str) -> None:
-    """Discovery half: nothing may connect on a component's behalf unregistered."""
-    discovered = _connect_owning_closure(relative_path)
-    classified = {
-        module
-        for component, module, _verdict, _detail in DELEGATED_CONNECT_CLOSURE
-        if component == relative_path
-    }
-    assert discovered == classified, (
-        f"{relative_path} ({expected_name}): the set of connect-owning modules in its import "
-        f"closure moved. Unclassified: {sorted(discovered - classified)}; "
-        f"stale registry rows: {sorted(classified - discovered)}. Add each new module to "
-        "DELEGATED_CONNECT_CLOSURE as 'attributed' (inject an attributed connect callable) or "
-        "'unreachable' (with the reason no call path reaches it)."
-    )
-
-
-@pytest.mark.parametrize(
-    ("component", "helper_module", "helper_function"),
-    [
-        (component, module, detail)
-        for component, module, verdict, detail in DELEGATED_CONNECT_CLOSURE
-        if verdict == ATTRIBUTED
-    ],
-    ids=[
-        f"{component}->{detail}"
-        for component, _module, verdict, detail in DELEGATED_CONNECT_CLOSURE
-        if verdict == ATTRIBUTED
-    ],
-)
-def test_delegated_helper_is_called_with_an_attributed_connect(
-    component: str, helper_module: str, helper_function: str
-) -> None:
-    """Classification half, caller side: every call site injects the wrapper."""
-    tree = ast.parse((REPO_ROOT / component).read_text(encoding="utf-8"))
-    sites = 0
-    unattributed: list[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
-        if called != helper_function:
-            continue
-        sites += 1
-        injected = next(
-            (kw.value for kw in node.keywords if kw.arg == DELEGATED_CONNECT_KEYWORD),
-            None,
-        )
-        if not (isinstance(injected, ast.Name) and injected.id == ATTRIBUTED_CONNECT_WRAPPER):
-            unattributed.append(node.lineno)
-
-    assert sites >= 1, f"{component} no longer calls {helper_function}; the registry row is stale"
-    assert unattributed == [], (
-        f"{component} lines {unattributed} call {helper_function} (which opens its own "
-        f"connection in {helper_module}) without {DELEGATED_CONNECT_KEYWORD}="
-        f"{ATTRIBUTED_CONNECT_WRAPPER}, so that connection lands in pg_stat_activity unattributed"
-    )
-
-
-@pytest.mark.parametrize(
-    ("helper_module", "helper_function"),
-    sorted({(module, detail) for _c, module, verdict, detail in DELEGATED_CONNECT_CLOSURE if verdict == ATTRIBUTED}),
-    ids=lambda value: value if isinstance(value, str) else str(value),
-)
-def test_delegated_helper_still_exposes_the_connect_injection_seam(
-    helper_module: str, helper_function: str
-) -> None:
-    """Classification half, helper side: the seam may not be removed."""
-    module = {
-        "packages/common/display_watermark.py": display_watermark,
-        "packages/common/display_coverage.py": display_coverage,
-    }[helper_module]
-    parameters = inspect.signature(getattr(module, helper_function)).parameters
-    assert DELEGATED_CONNECT_KEYWORD in parameters, (
-        f"{helper_module}::{helper_function} dropped its {DELEGATED_CONNECT_KEYWORD}= seam; "
-        "its callers can no longer attribute the connection it opens"
-    )
-    parameter = parameters[DELEGATED_CONNECT_KEYWORD]
-    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    # Bound at call time, never in the signature default: an import-time default
-    # would bypass a monkeypatched psycopg2.connect and silently drop callers.
-    assert parameter.default is None
-
-
-@pytest.mark.parametrize(
-    ("component", "expected_name"),
-    sorted(
-        {
-            (component, dict(REGISTERED_COMPONENTS)[component])
-            for component, _m, verdict, _d in DELEGATED_CONNECT_CLOSURE
-            if verdict == ATTRIBUTED
-        }
-    ),
-    ids=lambda value: value,
-)
-def test_attributed_connect_wrapper_stamps_the_component_identity(
-    monkeypatch: pytest.MonkeyPatch, component: str, expected_name: str
-) -> None:
-    """The injected callable itself: what a helper ends up handing to libpq."""
-    module = {
-        "scripts/node27_refresh_coverage.py": node27_refresh_coverage,
-        "scripts/node27_timeseries_retention.py": node27_timeseries_retention,
-        "scripts/node27_timeseries_compression.py": node27_timeseries_compression,
-        "scripts/node27_raw_retention.py": node27_raw_retention,
-    }[component]
-    probe = _probe_psycopg2_connect(monkeypatch)
-
-    with pytest.raises(_ConnectIntercepted):
-        getattr(module, ATTRIBUTED_CONNECT_WRAPPER)(DSN, connect_timeout=5)
-
-    assert probe.args == (DSN,)
-    assert probe.kwargs == {"fallback_application_name": expected_name, "connect_timeout": 5}
-
-
-def test_delegated_closure_registry_is_well_formed() -> None:
-    """Registry hygiene: no unknown verdicts, no rows for unregistered files."""
-    registered = {path for path, _name in REGISTERED_COMPONENTS}
-    for component, helper_module, verdict, detail in DELEGATED_CONNECT_CLOSURE:
-        assert component in registered, f"{component} is not a registered component"
-        assert verdict in {ATTRIBUTED, UNREACHABLE}
-        assert (REPO_ROOT / helper_module).is_file()
-        assert detail.strip(), f"{component} -> {helper_module} needs a reason/helper name"

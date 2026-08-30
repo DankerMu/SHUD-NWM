@@ -1,0 +1,148 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-15T04:25:30Z",
+  "mode": "enforce",
+  "outcome": "failed",
+  "state": "mixed",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "watermark": "2026-07-11T12:00:00Z",
+  "lag_seconds": 604800,
+  "cutoff": "2026-07-04T12:00:00Z",
+  "per_tick_bound": 1,
+  "max_members": 64,
+  "budget": {
+    "statement_timeout_ms": 3600000,
+    "wrapper_wall_seconds": 3901,
+    "compression_wrapper_wall_seconds": 3900,
+    "systemd_wall_seconds": 7842,
+    "cleanup_margin_seconds": 300,
+    "systemd_margin_seconds": 40
+  },
+  "cluster": {
+    "server_version": "15.2",
+    "timescaledb_version": "2.10.2",
+    "application_name": "nhms-ts-cold-residency",
+    "observed": true
+  },
+  "target": {
+    "catalog_name": "nhms_cold",
+    "catalog_location": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "container_bind": "/data/GHDC/nhms-cold-tablespace",
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "device_identity": "md0",
+    "observed": true
+  },
+  "inventory": {
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "observed": true,
+    "hypertables": {
+      "hydro.river_timeseries": {
+        "schema": "hydro",
+        "name": "river_timeseries",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "run_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 5,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      },
+      "met.forcing_station_timeseries": {
+        "schema": "met",
+        "name": "forcing_station_timeseries",
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "forcing_version_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 4,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      }
+    }
+  },
+  "selected": [
+    {
+      "durable": {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "origin_oid": 10,
+        "origin_schema": "_timescaledb_internal",
+        "origin_name": "_hyper_1_1_chunk",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "outcome": "mixed",
+      "reconciliation": "mixed",
+      "plan_kind": "blocked",
+      "shell_sql_executed": false,
+      "replayed": false,
+      "error": {
+        "class": "mixed",
+        "stage": "reconcile",
+        "reason": "mixed residency blocks new mutation"
+      },
+      "timing": {
+        "total_ms": 18,
+        "heap_lock_wait_ms": null,
+        "revalidation_ms": null,
+        "shell_move_ms": null,
+        "decompress_ms": null,
+        "recompress_ms": null,
+        "commit_ms": null,
+        "fresh_reconciliation_ms": 18
+      }
+    }
+  ],
+  "deferred": [],
+  "skipped": [],
+  "per_table_totals": {
+    "hydro.river_timeseries": {
+      "selected": 1,
+      "migrated": 0,
+      "already_cold": 0,
+      "deferred": 0
+    },
+    "met.forcing_station_timeseries": {
+      "selected": 0,
+      "migrated": 0,
+      "already_cold": 0,
+      "deferred": 0
+    }
+  },
+  "error": {
+    "class": "mixed",
+    "stage": "startup",
+    "reason": "unresolved intent blocks new selection"
+  },
+  "recovery": {
+    "classification": "mixed",
+    "sidecar_present": true,
+    "replayed": false,
+    "blocked_new_selection": true
+  },
+  "config_observed": true
+}

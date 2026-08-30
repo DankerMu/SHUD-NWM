@@ -14,6 +14,17 @@ from psycopg2 import sql
 
 from apps.api.display_cache import clear_display_catalog_cache, stop_display_catalog_warmer
 
+
+@pytest.fixture(autouse=True)
+def isolate_timeseries_lifecycle_lock(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the process mutex out of the shared /tmp path during unit tests."""
+
+    lock_dir = tmp_path_factory.mktemp("timeseries-lifecycle")
+    isolated = pathlib.Path(lock_dir / "lifecycle.lock")
+    monkeypatch.setattr("packages.common.node27_timeseries_lifecycle_lock.LIFECYCLE_LOCK_PATH", isolated)
+
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 

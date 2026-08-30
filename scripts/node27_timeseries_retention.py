@@ -70,6 +70,12 @@ from urllib.parse import urlsplit
 import jsonschema
 
 from packages.common.display_watermark import fetch_display_watermark
+from packages.common.node27_timeseries_lifecycle_lock import (
+    LifecycleLockError,
+    acquire_timeseries_lifecycle_lock,
+    refuse_lifecycle_lock_env_override,
+    release_timeseries_lifecycle_lock,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -461,6 +467,10 @@ def config_from_args(
     else:
         raw = env.get("NODE27_TIMESERIES_RETENTION_ENFORCE", "").strip().lower()
         enforce = bool(raw) and raw not in {"0", "false", "no"}
+    try:
+        refuse_lifecycle_lock_env_override(env)
+    except LifecycleLockError as error:
+        raise RetentionConfigError(str(error)) from error
     return RetentionConfig(
         database_url=database_url,
         window_days=window_days,
@@ -1228,11 +1238,9 @@ def main(
         return 2
     stamp = now or datetime.now(UTC)
 
-    # Acquire single-instance lock. On contention, publish a refused
-    # receipt with RETENTION_CONCURRENT_INVOCATION and exit non-zero.
     try:
-        lock_fd = acquire_lock(config.lock_path)
-    except RetentionConfigError as error:
+        lifecycle_fd = acquire_timeseries_lifecycle_lock()
+    except LifecycleLockError as error:
         print(
             json.dumps(
                 {"status": "failed", "code": CODE_RETENTION_CONFIG_INVALID, "reason": str(error)},
@@ -1241,7 +1249,7 @@ def main(
             file=sys.stderr,
         )
         return 2
-    if lock_fd is None:
+    if lifecycle_fd is None:
         try:
             receipt = build_receipt(
                 "refused",
@@ -1265,7 +1273,45 @@ def main(
             )
         return 1
 
+    lock_fd: int | None = None
     try:
+        # Acquire single-instance lock. On contention, publish a refused
+        # receipt with RETENTION_CONCURRENT_INVOCATION and exit non-zero.
+        try:
+            lock_fd = acquire_lock(config.lock_path)
+        except RetentionConfigError as error:
+            print(
+                json.dumps(
+                    {"status": "failed", "code": CODE_RETENTION_CONFIG_INVALID, "reason": str(error)},
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        if lock_fd is None:
+            try:
+                receipt = build_receipt(
+                    "refused",
+                    stamp,
+                    refusal_reason=CODE_RETENTION_CONCURRENT_INVOCATION,
+                    archive_gate=config.archive_gate,
+                )
+                publish_receipt(config, receipt)
+                _emit_stderr_diagnostic(receipt)
+            except Exception as pub_error:  # pragma: no cover — receipt best-effort
+                print(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "code": CODE_RETENTION_CONCURRENT_INVOCATION,
+                            "reason": f"receipt publication failed: {pub_error}",
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+            return 1
+
         try:
             reference_time = (
                 now
@@ -1334,10 +1380,12 @@ def main(
             return 0
         return 1
     finally:
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        release_timeseries_lifecycle_lock(lifecycle_fd)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -41,6 +41,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
+    unlink_no_follow_durable,
 )
 
 
@@ -300,3 +301,42 @@ def test_met_evidence_lane_reports_a_structured_evidence_code(
 
     assert excinfo.value.error_code.startswith("PRODUCTION_MET_EVIDENCE_")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_unlink_no_follow_durable_fsyncs_parent(tmp_path: Path) -> None:
+    target = tmp_path / "sidecar.json"
+    target.write_text("x", encoding="utf-8")
+    unlink_no_follow_durable(target)
+    assert not target.exists()
+
+
+def test_unlink_no_follow_durable_fsync_failure_is_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sidecar.json"
+    target.write_text("x", encoding="utf-8")
+
+    def boom(_fd: int) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr("packages.common.safe_fs.os.fsync", boom)
+    with pytest.raises(SafeFilesystemError) as raised:
+        unlink_no_follow_durable(target)
+    assert raised.value.kind == "indeterminate"
+
+
+def test_unlink_no_follow_durable_parent_identity_failure_is_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sidecar.json"
+    target.write_text("x", encoding="utf-8")
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise SafeFilesystemError("parent changed")
+
+    monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", boom)
+    with pytest.raises(SafeFilesystemError) as raised:
+        unlink_no_follow_durable(target)
+    assert raised.value.kind == "indeterminate"

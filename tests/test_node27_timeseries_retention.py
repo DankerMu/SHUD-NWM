@@ -2057,7 +2057,7 @@ def test_service_bootstraps_log_dir() -> None:
 
 def test_timer_calendar_matches_fixture() -> None:
     timer_text = _TIMER_PATH.read_text(encoding="utf-8")
-    assert "OnCalendar=*-*-* 05:15:00 UTC" in timer_text
+    assert "OnCalendar=*-*-* 06:36:00 UTC" in timer_text
     assert "Unit=nhms-node27-timeseries-retention.service" in timer_text
     assert "WantedBy=timers.target" in timer_text
 

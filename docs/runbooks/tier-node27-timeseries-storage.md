@@ -103,13 +103,20 @@ in #1370's live evidence, not a recurring procedure.
 | Order | Timer                                        | OnCalendar         | Rationale |
 |-------|----------------------------------------------|--------------------|-----------|
 | 1     | `nhms-node27-resource-governance.timer`      | `04:10:00 UTC` daily | Governance audit captures unit/timer state and filesystem headroom before the mutating lanes run. |
-| 2     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression runs after governance so the previous-day receipt is already captured. |
-| 3     | `nhms-node27-timeseries-retention.timer`     | `05:15:00 UTC` daily | Irreversible `drop_chunks`; runs last so the day's compression work and the governance snapshot both precede it. |
+| 2     | `nhms-node27-timeseries-compression.timer`   | `04:25:00 UTC` daily | Terminal-chunk compression then sequential cold residency. One 04:25 timer, no second cold-residency timer. Service wall 7842 s exceeds both wrappers plus systemd margin. |
+| 3     | `nhms-node27-timeseries-retention.timer`     | `06:36:00 UTC` daily | Irreversible `drop_chunks`; starts after the worst-case sequential compression+cold service window (04:25 + 7842 s = 06:35:42). Lifecycle lock remains the overlap backstop. |
 
 The ordering is an evidence-ordering and quiet-window choice, not a gate.
 Retention consults no receipt produced by the other two timers — the
 archive-completeness freshness dependency that once ordered this table died
-with the archive lane (#1370). Check what is actually enabled on the box with
+with the archive lane (#1370). Cold residency does not get its own timer:
+the 04:25 compression oneshot runs compression first, then
+`scripts/node27_cold_residency_once.sh --enforce`. The lifecycle mutex
+`/tmp/nhms-node27-timeseries-lifecycle.lock` is acquired before any
+lane-local flock. Catalog location, container bind and host path have
+fixed production defaults; `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` has
+no default and is mandatory for `--enforce` (Issue #1895 fills the live
+value). Check what is actually enabled on the box with
 `systemctl --user list-timers` before relying on the table.
 
 ### Live-state notes (verified 2026-08-01)
@@ -1614,7 +1621,9 @@ so the fix is a bounded override window rather than a manual
 `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**
-`#1352` resized them to `3600000` ms / `3900` s / `3940` s against measured
+`#1352` resized the compression statement/wrapper pair to `3600000` ms /
+`3900` s. The sequential compression-then-cold oneshot wall is `7842` s
+(`3900 + 3901 + 40 + 1`) against measured
 node-27 numbers: compressing `hydro.river_timeseries` chunk
 `_hyper_3_32_chunk` (268 GB) took 1607 s on 2026-08-10, i.e. **~6.0 s/GB**, and
 `chunk_compression_stats` puts steady-state weekly chunks of that hypertable at
@@ -2561,7 +2570,8 @@ commented placeholder; run it only after the two manual receipts in §8.4
    The service and timer files are installed under
    `~/.config/systemd/user/` from the checked-in
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
-   cadence stays `OnCalendar=*-*-* 05:15:00 UTC` — do not retune it here.
+   cadence stays `OnCalendar=*-*-* 06:36:00 UTC` — do not retune it here;
+   that is after the worst-case sequential compression+cold service window.
 
    **The timer lane obeys ONLY the env file's
    `NODE27_TIMESERIES_RETENTION_ENFORCE` value**: every tick starts a fresh
@@ -2572,7 +2582,7 @@ commented placeholder; run it only after the two manual receipts in §8.4
    short of editing that file or disabling the timer.
 
 4. Verify the per-tick receipt rotation once a SECOND tick has run — wait for
-   the next 05:15 UTC firing, or force one with
+   the next 06:36 UTC firing, or force one with
    `systemctl --user start nhms-node27-timeseries-retention.service`
    (**that forced start is a real enforcing tick: with `ENFORCE=1` resident in
    the env file it irreversibly drops up to

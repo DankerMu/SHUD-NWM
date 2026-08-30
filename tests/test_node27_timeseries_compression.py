@@ -136,7 +136,7 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
 
     assert config.compress_timeout_ms == 3_600_000
     assert config.wrapper_wall_seconds == 3_900
-    assert config.systemd_wall_seconds == 3_940
+    assert config.systemd_wall_seconds == 7_842
     assert compression._CLEANUP_MARGIN_SECONDS == 60
     assert compression._SYSTEMD_MARGIN_SECONDS == 40
     # Leg 1: statement timeout (seconds, rounded up) + cleanup margin fits the
@@ -152,9 +152,11 @@ def test_compress_timeout_preserves_outer_cleanup_budgets(tmp_path: Path) -> Non
         config.wrapper_wall_seconds
         >= compression._ceil_div(config.compress_timeout_ms, 1000) + 300
     )
-    # Leg 2: wrapper wall + kill-after margin is exactly the declared systemd
-    # wall — nothing runs between the wrapper dying and systemd giving up.
-    assert config.wrapper_wall_seconds + compression._SYSTEMD_MARGIN_SECONDS == config.systemd_wall_seconds
+    # Leg 2: the sequential compression-then-cold oneshot wall must exceed
+    # compression wrapper + cold wrapper + 40 s systemd margin (7841). Equality
+    # is not enough; the committed default is 7842.
+    assert config.wrapper_wall_seconds + compression._SYSTEMD_MARGIN_SECONDS < config.systemd_wall_seconds
+    assert config.systemd_wall_seconds > 3_900 + 3_901 + 40
 
 
 @pytest.mark.parametrize(
@@ -190,7 +192,7 @@ def test_empty_budget_chain_variables_take_the_defaults(tmp_path: Path) -> None:
     assert (config.compress_timeout_ms, config.wrapper_wall_seconds, config.systemd_wall_seconds) == (
         3_600_000,
         3_900,
-        3_940,
+        7_842,
     )
 
 
@@ -1320,7 +1322,7 @@ def test_schema_rejects_refused_lock_with_mutation_evidence() -> None:
 _DEFAULT_BUDGET = {
     "compress_timeout_ms": 3_600_000,
     "wrapper_wall_seconds": 3_900,
-    "systemd_wall_seconds": 3_940,
+    "systemd_wall_seconds": 7_842,
 }
 _NON_DEFAULT_BUDGET = {
     "compress_timeout_ms": 1_800_000,
@@ -1609,7 +1611,7 @@ def test_raising_the_compress_timeout_without_dropping_the_bound_fails_closed(
         # Raised ceiling with the catch-up bound: the sanctioned combination.
         (7_200_000, 7_500, 7_540, "1"),
         # Default ceiling with the #1237 capacity bound: the normal régime.
-        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 3_940, "4"),
+        (_DEFAULT_BUDGET["compress_timeout_ms"], 3_900, 7_842, "4"),
         # Below the default with a high bound: leg 3 only guards raising.
         (1_800_000, 1_900, 1_940, "4"),
     ],
@@ -1936,7 +1938,10 @@ def test_compressed_sibling_lookup_matches_timescaledb_210_catalog() -> None:
 def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> None:
     service_text = _SYSTEMD_SERVICE_PATH.read_text(encoding="utf-8")
     exec_lines = [line for line in service_text.splitlines() if line.startswith("ExecStart=")]
-    assert exec_lines == ["ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce"]
+    assert exec_lines == [
+        "ExecStart=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce",
+        "ExecStart=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce",
+    ]
     assert "node27_timeseries_compression_supervisor.py" not in service_text
     # The unit's real wall must be the runner's DECLARED default systemd wall,
     # which in turn must be the default wrapper wall plus the kill-after
@@ -1946,7 +1951,7 @@ def test_systemd_service_enforces_but_manual_wrapper_defaults_to_dry_run() -> No
     assert len(timeout_start_lines) == 1
     unit_wall_seconds = int(timeout_start_lines[0].split("=", 1)[1])
     assert unit_wall_seconds == compression._DEFAULT_SYSTEMD_WALL_SECONDS
-    assert unit_wall_seconds == compression._DEFAULT_WRAPPER_WALL_SECONDS + compression._SYSTEMD_MARGIN_SECONDS
+    assert unit_wall_seconds == 7_842
 
     wrapper_text = _WRAPPER_PATH.read_text(encoding="utf-8")
     assert (

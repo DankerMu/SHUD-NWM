@@ -1,0 +1,233 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-15T04:25:30Z",
+  "mode": "enforce",
+  "outcome": "clean",
+  "state": "complete_target",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "watermark": "2026-07-11T12:00:00Z",
+  "lag_seconds": 604800,
+  "cutoff": "2026-07-04T12:00:00Z",
+  "per_tick_bound": 1,
+  "max_members": 64,
+  "budget": {
+    "statement_timeout_ms": 3600000,
+    "wrapper_wall_seconds": 3901,
+    "compression_wrapper_wall_seconds": 3900,
+    "systemd_wall_seconds": 7842,
+    "cleanup_margin_seconds": 300,
+    "systemd_margin_seconds": 40
+  },
+  "cluster": {
+    "server_version": "15.2",
+    "timescaledb_version": "2.10.2",
+    "application_name": "nhms-ts-cold-residency",
+    "observed": true
+  },
+  "target": {
+    "catalog_name": "nhms_cold",
+    "catalog_location": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "container_bind": "/data/GHDC/nhms-cold-tablespace",
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "device_identity": "md0",
+    "observed": true
+  },
+  "inventory": {
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "observed": true,
+    "hypertables": {
+      "hydro.river_timeseries": {
+        "schema": "hydro",
+        "name": "river_timeseries",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "run_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 5,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      },
+      "met.forcing_station_timeseries": {
+        "schema": "met",
+        "name": "forcing_station_timeseries",
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "forcing_version_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 4,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      }
+    }
+  },
+  "capacity": {
+    "approved": true,
+    "before_compression_total_bytes": 1000,
+    "retained_source_bytes": 8192,
+    "cold_free_bytes": 2000,
+    "cold_reserve_bytes": 100,
+    "required_cold_bytes": 1100,
+    "cold_headroom_bytes": 900,
+    "hot_free_bytes": 500,
+    "wal_reserve_bytes": 1,
+    "required_hot_bytes": 1,
+    "hot_headroom_bytes": 499,
+    "blockers": []
+  },
+  "selected": [
+    {
+      "durable": {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "origin_oid": 10,
+        "origin_schema": "_timescaledb_internal",
+        "origin_name": "_hyper_1_1_chunk",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "outcome": "migrated",
+      "reconciliation": "complete_target",
+      "plan_kind": "migrate",
+      "shell_sql_executed": true,
+      "commit_ack_lost": false,
+      "replayed": false,
+      "rank": 0,
+      "before": {
+        "durable": {
+          "hypertable_schema": "hydro",
+          "hypertable_name": "river_timeseries",
+          "origin_oid": 10,
+          "origin_schema": "_timescaledb_internal",
+          "origin_name": "_hyper_1_1_chunk",
+          "range_start": "2026-06-27T12:00:00Z",
+          "range_end": "2026-07-04T12:00:00Z"
+        },
+        "compressed": {
+          "oid": 20,
+          "schema": "_timescaledb_internal",
+          "name": "compress_hyper_2_2_chunk"
+        },
+        "is_compressed": true,
+        "residency": "all_source",
+        "blocker": null,
+        "members": [
+          {
+            "kind": "origin_heap",
+            "oid": 10,
+            "schema": "_timescaledb_internal",
+            "name": "_hyper_1_1_chunk",
+            "relkind": "r",
+            "tablespace": "pg_default",
+            "bytes": 8192
+          }
+        ],
+        "origin_shell_incomplete": true
+      },
+      "after": {
+        "durable": {
+          "hypertable_schema": "hydro",
+          "hypertable_name": "river_timeseries",
+          "origin_oid": 10,
+          "origin_schema": "_timescaledb_internal",
+          "origin_name": "_hyper_1_1_chunk",
+          "range_start": "2026-06-27T12:00:00Z",
+          "range_end": "2026-07-04T12:00:00Z"
+        },
+        "compressed": {
+          "oid": 21,
+          "schema": "_timescaledb_internal",
+          "name": "compress_hyper_2_3_chunk"
+        },
+        "is_compressed": true,
+        "residency": "already_target",
+        "blocker": null,
+        "members": [
+          {
+            "kind": "origin_heap",
+            "oid": 10,
+            "schema": "_timescaledb_internal",
+            "name": "_hyper_1_1_chunk",
+            "relkind": "r",
+            "tablespace": "nhms_cold",
+            "bytes": 8192
+          }
+        ],
+        "origin_shell_incomplete": false
+      },
+      "intermediate": {},
+      "before_parity": {
+        "row_count": 24,
+        "non_null_counts": {
+          "run_id": 24,
+          "valid_time": 24
+        },
+        "checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "inventory_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "after_parity": {
+        "row_count": 24,
+        "non_null_counts": {
+          "run_id": 24,
+          "valid_time": 24
+        },
+        "checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "inventory_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "timing": {
+        "total_ms": 240,
+        "heap_lock_wait_ms": 8,
+        "revalidation_ms": 15,
+        "shell_move_ms": 40,
+        "decompress_ms": 70,
+        "recompress_ms": 80,
+        "commit_ms": 5,
+        "fresh_reconciliation_ms": 12
+      }
+    }
+  ],
+  "deferred": [],
+  "skipped": [],
+  "per_table_totals": {
+    "hydro.river_timeseries": {
+      "selected": 1,
+      "migrated": 1,
+      "already_cold": 0,
+      "deferred": 0
+    },
+    "met.forcing_station_timeseries": {
+      "selected": 0,
+      "migrated": 0,
+      "already_cold": 0,
+      "deferred": 0
+    }
+  },
+  "config_observed": true
+}

@@ -234,7 +234,7 @@ required_hot = operator WAL reserve
 Retained source bytes are recorded but do not inflate free space or get counted
 as pre-commit reclamation. The probe used explicit one-byte reserves solely to
 exercise exact boundary arithmetic; these are **not production values**.
-#1893 owns operator-configured production reserves and full-rewrite timeouts.
+Issue #1893 owns operator-configured production reserves and full-rewrite timeouts.
 
 | Case | Decision | Headroom | Mutation proof |
 |---|---|---:|---|

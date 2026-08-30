@@ -1,0 +1,60 @@
+# Node-27 timeseries cold-residency runner (issue #1893 / OpenSpec:
+# compressed-chunk-cold-tablespace-tiering).
+#
+# Copy to node27-cold-residency.env and chmod 0600. Do not create a live env
+# file in this repository. Reserve byte values are mandatory and have no
+# Python, wrapper, or example-template default; Issue #1895 fills measured
+# live values before install.
+#
+# Copy/fill/install boundary:
+#   1. cp infra/env/node27-cold-residency.example /home/nwm/NWM/infra/env/node27-cold-residency.env
+#   2. fill DATABASE_URL, NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES and
+#      NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES
+#   3. chmod 0600 /home/nwm/NWM/infra/env/node27-cold-residency.env
+#   4. Issue #1895 installs the unit after #1894 creates nhms_cold
+
+NODE27_COLD_RESIDENCY_REPO_ROOT=/home/nwm/NWM
+
+# Node-27 primary Postgres (writer role — residency is DDL).
+# Default application_name is `nhms-ts-cold-residency` (libpq
+# fallback_application_name). To override, append ?application_name=<name>.
+DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+
+# Chunk-selection lag in seconds. Unset falls through to
+# NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS, then the compression contract
+# default 604800. Do not invent a second lag.
+#NODE27_COLD_RESIDENCY_LAG_SECONDS=604800
+
+# Maximum groups mutated per tick. Already-cold observations do not consume
+# this bound.
+NODE27_COLD_RESIDENCY_PER_TICK_BOUND=1
+
+# Maximum members (heaps/indexes/TOAST) per residency group.
+NODE27_COLD_RESIDENCY_MAX_MEMBERS=64
+
+# --- Timeout budget chain ----------------------------------------------------
+# Each wrapper wall must exceed its max statement wall + 300 s cleanup margin.
+# The shared compression oneshot wall must exceed compression wrapper + cold
+# wrapper + 40 s systemd margin. Defaults:
+#   statement 3600000 ms -> 3600 s
+#   cold wrapper 3901 s
+#   compression wrapper 3900 s
+#   service 3900 + 3901 + 40 + 1 = 7842 s (must exceed, not equal)
+NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS=3600000
+NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS=3901
+NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=7842
+
+# Mandatory positive reserve bytes. Leave unassigned here; fill in the live
+# 0600 env file. Empty / zero / negative / non-integral values refuse
+# pre-connect.
+#NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES=
+#NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES=
+
+# Absolute paths. Receipt, intent sidecar and both lock files must be disjoint.
+NODE27_COLD_RESIDENCY_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_cold_residency.json
+NODE27_COLD_RESIDENCY_LOCK_PATH=/tmp/nhms-node27-timeseries-cold-residency.lock
+
+# Catalog/bind/host expected values have fixed production defaults
+# (container path / host bind / host path). Device identity has no default
+# and is mandatory for --enforce; Issue #1895 fills the live value.
+#NODE27_COLD_RESIDENCY_DEVICE_IDENTITY=

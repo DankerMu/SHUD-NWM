@@ -14,6 +14,12 @@ from typing import Any
 
 from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
+from packages.common.node27_timeseries_lifecycle_lock import (
+    LifecycleLockContended,
+    LifecycleLockError,
+    refuse_lifecycle_lock_env_override,
+    timeseries_lifecycle_lock,
+)
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 CONNECT_TIMEOUT_SECONDS = 5
@@ -143,6 +149,34 @@ def produce_recovery_receipt(
     if re.fullmatch(r"[0-9a-f]{40}", mutation_head_sha) is None:
         raise DecompressionError("mutation SHA is invalid")
     started_at = _iso_now()
+    try:
+        refuse_lifecycle_lock_env_override(os.environ)
+        with timeseries_lifecycle_lock():
+            return _produce_recovery_receipt_locked(
+                database_url=database_url,
+                mutation_head_sha=mutation_head_sha,
+                receipt_path=receipt_path,
+                connect=connect,
+                target=target,
+                expected_database=expected_database,
+                started_at=started_at,
+            )
+    except LifecycleLockContended as error:
+        raise DecompressionError("timeseries lifecycle lock is held") from error
+    except LifecycleLockError as error:
+        raise DecompressionError("timeseries lifecycle lock is unsafe") from error
+
+
+def _produce_recovery_receipt_locked(
+    *,
+    database_url: str,
+    mutation_head_sha: str,
+    receipt_path: Path,
+    connect: Callable[[str], Any],
+    target: Mapping[str, str],
+    expected_database: str,
+    started_at: str,
+) -> dict[str, Any]:
     connection: Any | None = None
     possible_mutation = False
     try:

@@ -47,8 +47,8 @@ NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 #
 # The runner refuses to open a database connection if any of the three legs is
 # violated, and the wrapper refuses to launch on a non-positive-integer wall. The
-# defaults clear leg 1 with real headroom (3600 + 300 = 3900) and satisfy
-# leg 2 exactly (3900 + 40 = 3940).
+# defaults clear leg 1 with real headroom (3600 + 300 = 3900). The sequential
+# compression-then-cold oneshot wall is 7842 (3900 + 3901 + 40 + 1).
 #
 # The "+ 60" in leg 1 is the enforced FLOOR, not a sizing recipe. A tick also
 # pays for the watermark lookup, two 10 s git probes, catalog enumeration, a
@@ -82,8 +82,12 @@ NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900
 #   printf '[Service]\nTimeoutStartSec=%s\n' "$SYSTEMD_WALL" > \
 #     /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
 #   systemctl daemon-reload
-# The committed unit ships TimeoutStartSec=3940, matching the default below.
-NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=3940
+# The committed unit ships TimeoutStartSec=7842 so one sequential compression
+# then cold-residency oneshot can cover both wrapper walls plus the 40 s
+# systemd margin (3900 + 3901 + 40 + 1). Keep the compression wrapper wall at 3900;
+# the shared service wall is owned by the sequential lifecycle, not by
+# compression alone.
+NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=7842
 #
 # Per-tick bound during a catch-up: MANDATORY, not a hint. The invariant above
 # bounds ONE chunk's budget, so a second chunk in the same tick still dies on

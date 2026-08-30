@@ -41,6 +41,12 @@ from packages.common.evidence_io import (
     inspect_bounded_file_no_follow,
     normalized_absolute_path,
 )
+from packages.common.node27_timeseries_lifecycle_lock import (
+    LifecycleLockError,
+    acquire_timeseries_lifecycle_lock,
+    refuse_lifecycle_lock_env_override,
+    release_timeseries_lifecycle_lock,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -100,8 +106,8 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 #          — raising the per-chunk ceiling is the runbook §4.5 catch-up
 #            manoeuvre, which is only sound one chunk at a time (issue #1351).
 # The defaults clear leg 1 with the 300 s of non-compress budget a real tick
-# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor) and satisfy leg 2
-# exactly (3900 + 40 = 3940).
+# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor). The sequential
+# compression-then-cold oneshot wall is 7842 (3900 + 3901 + 40 + 1).
 #
 # The invariant bounds ONE chunk's budget, not a whole tick: a tick may
 # compress up to ``per_tick_bound`` chunks under the same wrapper wall, so a
@@ -117,7 +123,7 @@ _QUERY_TIMEOUT_MS = 60_000
 _DEFAULT_COMPRESS_TIMEOUT_MS = 3_600_000
 _MIN_COMPRESS_TIMEOUT_MS = 1_000
 _DEFAULT_WRAPPER_WALL_SECONDS = 3_900
-_DEFAULT_SYSTEMD_WALL_SECONDS = 3_940
+_DEFAULT_SYSTEMD_WALL_SECONDS = 7_842
 _CLEANUP_MARGIN_SECONDS = 60
 _SYSTEMD_MARGIN_SECONDS = 40
 _CONNECT_TIMEOUT_SECONDS = 10
@@ -339,6 +345,10 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise CompressionConfigError("DATABASE_URL must be set")
+    try:
+        refuse_lifecycle_lock_env_override(env)
+    except LifecycleLockError as error:
+        raise CompressionConfigError(str(error)) from error
     return CompressionConfig(
         database_url=database_url,
         lag_seconds=lag_seconds,
@@ -1196,17 +1206,17 @@ def main(
         _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
         return 1
     try:
-        lock_fd = acquire_lock(config.lock_path)
-    except CompressionConfigError as error:
+        lifecycle_fd = acquire_timeseries_lifecycle_lock()
+    except LifecycleLockError as error:
         _replace_stale_with_failure(
             config,
             now_utc=now,
-            stage="acquire_lock",
+            stage="lifecycle_lock",
             head_sha=frozen_head_sha,
         )
         _emit_stderr_diagnostic("failed", str(error))
         return 1
-    if lock_fd is None:
+    if lifecycle_fd is None:
         receipt = build_refused_lock_receipt(config, now_utc=now, head_sha=frozen_head_sha)
         try:
             publish_receipt(config, receipt)
@@ -1225,7 +1235,38 @@ def main(
             return 1
         _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
         return 0
+    lock_fd: int | None = None
     try:
+        try:
+            lock_fd = acquire_lock(config.lock_path)
+        except CompressionConfigError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="acquire_lock",
+                head_sha=frozen_head_sha,
+            )
+            _emit_stderr_diagnostic("failed", str(error))
+            return 1
+        if lock_fd is None:
+            receipt = build_refused_lock_receipt(config, now_utc=now, head_sha=frozen_head_sha)
+            try:
+                publish_receipt(config, receipt)
+            except SafeFilesystemError as error:
+                _replace_stale_with_failure(
+                    config,
+                    now_utc=now,
+                    stage="publish_refused_lock",
+                    head_sha=frozen_head_sha,
+                )
+                _emit_stderr_diagnostic(
+                    "failed",
+                    f"receipt publication error: {error}",
+                    dsn=config.database_url,
+                )
+                return 1
+            _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
+            return 0
         try:
             receipt = build_receipt(
                 config,
@@ -1286,10 +1327,12 @@ def main(
             return 1
         return 0 if receipt["outcome"] == "clean" else 1
     finally:
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        release_timeseries_lifecycle_lock(lifecycle_fd)
 
 
 if __name__ == "__main__":

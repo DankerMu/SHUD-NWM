@@ -115,7 +115,24 @@ reported as success.
 #### Scenario: Rewrite capacity is budgeted on both devices
 
 - **WHEN** preflight sizes a shell-first migration
-- **THEN** it reserves cold-device headroom for the full uncompressed rewrite plus rollback margin, and hot-device headroom for the original compressed group retained until commit plus bounded PGDATA/WAL growth; insufficient headroom on either device blocks before mutation
+- **THEN** `required_cold = before_compression_total_bytes + cold_reserve_bytes`
+  and `required_hot = wal_reserve_bytes`; exact equality is admitted, either
+  device being one byte short blocks before movement SQL, and
+  `retained_source_bytes` is recorded because the original compressed group
+  remains hot until commit but neither credits cold free space nor adds a second
+  hot-free requirement
+
+#### Scenario: Each group uses a fresh free-space observation
+
+- **WHEN** one enforce tick plans more than one residency-group rewrite
+- **THEN** it samples cold and hot free bytes immediately before each group's
+  capacity decision, so a prior rewrite's consumption can block a later group;
+  no run-start or previous-group free-space snapshot is reused
+
+#### Scenario: Production reserve configuration is explicit
+
+- **WHEN** either production cold-reserve or WAL-reserve byte input is absent, empty, non-integral, zero, or negative
+- **THEN** the runner refuses before connecting for mutation, and no Python, wrapper, environment example, or disposable-probe observation supplies an implicit production default
 
 #### Scenario: Expanded bytes never land on the hot tablespace
 
@@ -135,12 +152,41 @@ reported as success.
 #### Scenario: Target-chunk parity cannot be hidden by sibling rows
 
 - **WHEN** migration parity is checked before, inside and after the transaction
-- **THEN** count, aggregate and deterministic checksum are computed over exactly the origin chunk's half-open `[range_start, range_end)` window and all business columns, so an unrelated same-table chunk cannot offset or hide target data loss. The #1892 isolated probe proves this on its four-column fixture; #1893 SHALL derive and validate every live business column for both production hypertables from the production schema before mutation and SHALL NOT treat the fixture four-column token as that inventory
+- **THEN** count, per-column non-null counts and deterministic multiset checksum
+  are computed over exactly the origin chunk's half-open `[range_start,
+  range_end)` window and every non-dropped user column in validated physical
+  order, so an unrelated same-table chunk cannot offset or hide target data loss;
+  PostgreSQL returns one bounded aggregate row and the production client never
+  fetches or materializes all business rows
+
+#### Scenario: Locked parity and inventory are freshly revalidated
+
+- **WHEN** stable group heap locks have been acquired and the preflight inventory
+  or target-window data changed after selection
+- **THEN** the moving transaction re-derives both allowlisted inventories and the
+  exact target-window parity, compares them with preflight descriptors/digests/
+  parity, and aborts before the first movement SQL on any drift; its parity read
+  lock remains held through commit
+
+#### Scenario: Production parity inventory is schema-derived and bound
+
+- **WHEN** the runner starts a dry-run or enforce observation
+- **THEN** it derives both allowlisted hypertables' complete non-dropped user-column
+  inventories from the live PostgreSQL catalogs, validates from the Timescale catalog that `valid_time` is the sole open time
+  dimension and has PostgreSQL type `timestamptz`, records name/type/nullability/generation descriptors
+  and their digest, and generates parity from that exact inventory before any
+  mutation; a missing, extra, reordered, unsupported, or drifted column fails
+  closed, and production code never imports the #1892 four-column fixture helper
+  or accepts an unvalidated caller list
 
 #### Scenario: Catalog and filesystem identity disagree
 
-- **WHEN** catalog location, container bind source, host mount/device, directory writability, or the configured target identity disagree
-- **THEN** movement fails closed before the first relation statement; the isolated probe injects at least one safe mismatch and proves zero SQL mutation rather than accepting a same-value observation as drift coverage
+- **WHEN** catalog location, current container bind source, host mount/device,
+  directory writability, or configured expected target identity disagree
+- **THEN** movement fails closed before the first relation statement; bind/host/
+  device observations must come from a required real inspector and cannot be
+  synthesized by echoing expected config values, while the isolated oracle
+  injects at least one safe mismatch and proves zero movement SQL
 
 #### Scenario: Pinned engine identity drifts
 
@@ -190,8 +236,42 @@ SHALL enter recovery handling rather than ordinary movement.
 
 #### Scenario: Bound and fairness hold
 
-- **WHEN** more eligible groups exist than the configured per-tick bound across both hypertables
-- **THEN** no more than the bound are mutated, every remainder is recorded as deferred, and stable ordering prevents one hypertable from starving indefinitely
+- **WHEN** more eligible hot-compressed groups exist than the configured per-tick bound across both hypertables
+- **THEN** bounded catalog reads assign oldest-first rank within each hypertable
+  and merge by `(per_hypertable_rank, range_end, hypertable_schema,
+  hypertable_name, origin_oid)`, so every nonempty hypertable contributes one
+  candidate before either contributes its next rank; no more than the bound are
+  mutated, every remainder is recorded as deferred, and no table is starved
+
+#### Scenario: No-op observations do not consume the mutation bound
+
+- **WHEN** already-cold groups appear before hot-compressed groups in stable order
+- **THEN** the runner records every observed no-op without issuing rewrite SQL or decrementing the per-tick mutation budget, so the same tick may still migrate up to its configured bound
+
+#### Scenario: One lifecycle mutex and one recurring trigger serialize mutation
+
+- **WHEN** compression, cold residency, retention, or manual decompression/replay starts
+- **THEN** it acquires `/tmp/nhms-node27-timeseries-lifecycle.lock` before any
+  lane-local or database relation lock, after verifying a no-follow regular file
+  owned by the effective user with mode 0600, and contention produces a
+  no-mutation refused/deferred result; the existing 04:25 compression timer invokes cold
+  residency only as its second sequential `ExecStart`, with no cold-residency
+  timer or asynchronous mutation lane
+
+#### Scenario: Sequential wall budgets are mechanically ordered
+
+- **WHEN** runner config, wrappers and the shared systemd oneshot are validated
+- **THEN** each wrapper wall exceeds its maximum statement wall plus cleanup
+  margin, the service wall exceeds the compression-wrapper wall plus
+  cold-residency-wrapper wall plus systemd margin, and the existing retention
+  timer begins after that worst-case service window; invalid or drifted literals
+  refuse before mutation and fail the static contract tests without changing the
+  retention window
+
+#### Scenario: Autopipe selection race is revalidated transactionally
+
+- **WHEN** autopipe or another writer changes a candidate after catalog selection without holding the lifecycle flock
+- **THEN** the runner's stable heap locks and in-transaction compression/window/group revalidation prevent stale movement and record only the freshly proven state
 
 #### Scenario: Already-cold rerun is idempotent
 
@@ -214,10 +294,20 @@ kind, OID/name, before/after tablespace and bytes, duration/wait, outcome, and
 any error/recovery status. Credentials and secret environment values SHALL
 never appear.
 
-Receipt publication SHALL be bounded, mode 0600 and atomic. A publication
-failure SHALL make the run non-success even when reconciliation proves a DB
-commit; the runner SHALL not repeat a database mutation merely to recreate the
-receipt.
+Receipt publication SHALL be bounded, mode 0600 and atomic. Before an enforce
+run issues its first movement SQL, it SHALL atomically write a same-directory
+intent sidecar and replace any prior public receipt with the same schema-valid
+`in_progress` payload bound to each selected group's complete preflight source
+snapshot: original compressed sibling/member identities, source residency,
+inventory digest, target-window parity, and actual capacity decision. The
+sidecar SHALL be authoritative while it exists. After fresh reconciliation,
+terminal publication SHALL atomically replace the public receipt before durably
+removing the sidecar by unlink plus parent-directory fsync and identity
+verification. A publication failure SHALL make the run non-success even
+when reconciliation proves a DB commit; the runner SHALL not repeat mutation to
+recreate evidence. Failure or indeterminate durability at either terminal step
+leaves the public intent or a truthful terminal plus the authoritative sidecar,
+never an older success presented as current.
 
 #### Scenario: Normal and no-op receipts prove parity
 
@@ -228,6 +318,51 @@ receipt.
 
 - **WHEN** a group is mixed, disappears, times out, loses commit acknowledgement, or cannot publish its terminal receipt
 - **THEN** the available evidence records a non-success/recovery state and no stale prior success is presented as current
+
+#### Scenario: Terminal publication fails after database commit
+
+- **WHEN** pre-mutation intent artifacts exist, the database commit is freshly
+  reconciled as complete target, and terminal receipt replacement or sidecar
+  removal fails or has indeterminate durability
+- **THEN** the process exits non-success and does not replay movement; either the
+  public receipt is still `in_progress`, or it is the truthful terminal while
+  the authoritative sidecar still requires startup reconciliation, so no older
+  success is current
+
+#### Scenario: Source-side intent recovery requires original evidence
+
+- **WHEN** startup observes a group resident at the source tablespace
+- **THEN** it may classify `complete_source` only when every current member,
+  original compressed sibling OID/name, inventory digest and target-window parity
+  match the pre-mutation snapshot stored in intent; absent before evidence or a
+  replacement sibling at source is `unknown`, never successful rollback
+
+#### Scenario: A later tick encounters unresolved intent
+
+- **WHEN** startup finds an authoritative intent sidecar from an earlier enforce
+  run, regardless of the public receipt contents
+- **THEN** it fresh-reconciles every named durable group and durably publishes a
+  recovery terminal before selecting new mutation; complete source or target may
+  close the intent, while any mixed/unknown result blocks the tick and the
+  unresolved sidecar is never overwritten by a new run
+
+#### Scenario: Early terminal errors invalidate stale success
+
+- **WHEN** config is valid enough to identify a safe receipt path and a later
+  head-freeze, lock-open, watermark, catalog, target-inspector, capacity,
+  transaction, or terminal-publication step fails
+- **THEN** the runner atomically publishes a schema-valid truthful non-success
+  tombstone or preserves authoritative intent before exit; it never leaves an
+  older success looking current and never fabricates unobserved engine,
+  inventory, target or capacity identity to satisfy the schema
+
+#### Scenario: Movement event identity is honest
+
+- **WHEN** failure occurs before the first origin shell/index `SET TABLESPACE`
+  statement, including timeout while acquiring heap locks or revalidation drift
+- **THEN** `shell_sql_executed` is false; it becomes true only after a movement
+  statement actually reaches the database, not merely because a plan contains
+  movement SQL
 
 #### Scenario: Receipt cannot leak credentials
 

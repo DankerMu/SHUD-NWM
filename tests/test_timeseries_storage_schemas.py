@@ -10,7 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 # #1370: the four archive-lane schemas retired with the lane itself
 # (ADR 0002 Revision 2026-08-11). Only the retention receipt schema survives.
-SCHEMA_BASES = ("timeseries_retention_receipt",)
+SCHEMA_BASES = ("timeseries_retention_receipt", "timeseries_cold_residency_receipt")
 
 
 def _validator() -> str:
@@ -162,3 +162,15 @@ def test_display_api_has_no_archive_resolver_dependency() -> None:
     for source in display_sources:
         content = source.read_text(encoding="utf-8")
         assert all(symbol not in content for symbol in forbidden), source
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["", ".noop", ".intent", ".partial", ".error"],
+)
+def test_cold_residency_receipt_examples_validate(tmp_path: Path, suffix: str) -> None:
+    name = "timeseries_cold_residency_receipt" if suffix == "" else f"timeseries_cold_residency_receipt{suffix}"
+    path = ROOT / "schemas" / "examples" / f"{name}.example.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    result = _validate_document(tmp_path, "timeseries_cold_residency_receipt", document)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -470,6 +470,58 @@ def unlink_no_follow(path: Path, *, containment_root: Path | None = None, missin
         os.close(parent_fd)
 
 
+def unlink_no_follow_durable(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
+    """Unlink a file, then fsync and re-verify the no-follow parent directory.
+
+    Unlike :func:`unlink_no_follow`, directory-fsync or parent-identity failure
+    after the unlink is ``kind="indeterminate"``: the pathname may already be
+    gone while durability is unproven.
+    """
+
+    target = _expand_path(path)
+    try:
+        parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    unlinked = False
+    try:
+        try:
+            entry_stat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return
+            raise
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Refusing to unlink symlink: {target}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Refusing to unlink directory with file unlink helper: {target}")
+        os.unlink(target.name, dir_fd=parent_fd)
+        unlinked = True
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Unlink of {target} completed but directory fsync failed: {error}",
+                kind="indeterminate",
+            ) from error
+        try:
+            _verify_fd_matches_path(parent_fd, parent_path)
+        except SafeFilesystemError as error:
+            raise SafeFilesystemError(
+                f"Unlink of {target} completed but parent identity changed: {error}",
+                kind="indeterminate",
+            ) from error
+    except SafeFilesystemError:
+        raise
+    except OSError as error:
+        kind = "indeterminate" if unlinked else "io"
+        raise SafeFilesystemError(f"Failed to unlink {target}: {error}", kind=kind) from error
+    finally:
+        os.close(parent_fd)
+
+
 def rmtree_no_follow(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
     """Remove a directory tree without following symlinks in the path or descendants."""
 
