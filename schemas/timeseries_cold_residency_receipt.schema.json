@@ -1,0 +1,631 @@
+{
+  "$defs": {
+    "budget": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_margin_seconds": {"maximum": 3600, "minimum": 60, "type": "integer"},
+        "compression_wrapper_wall_seconds": {"maximum": 86400, "minimum": 1, "type": "integer"},
+        "statement_timeout_ms": {"maximum": 86400000, "minimum": 1000, "type": "integer"},
+        "systemd_margin_seconds": {"maximum": 3600, "minimum": 40, "type": "integer"},
+        "systemd_wall_seconds": {"maximum": 172800, "minimum": 1, "type": "integer"},
+        "wrapper_wall_seconds": {"maximum": 86400, "minimum": 1, "type": "integer"}
+      },
+      "required": ["statement_timeout_ms", "wrapper_wall_seconds", "compression_wrapper_wall_seconds", "systemd_wall_seconds", "cleanup_margin_seconds", "systemd_margin_seconds"],
+      "type": "object"
+    },
+    "capacity": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {"type": "boolean"},
+        "before_compression_total_bytes": {"minimum": 0, "type": "integer"},
+        "blockers": {
+          "items": {"maxLength": 256, "minLength": 1, "type": "string"},
+          "maxItems": 16,
+          "type": "array"
+        },
+        "cold_free_bytes": {"minimum": 0, "type": "integer"},
+        "cold_headroom_bytes": {"type": "integer"},
+        "cold_reserve_bytes": {"minimum": 1, "type": "integer"},
+        "hot_free_bytes": {"minimum": 0, "type": "integer"},
+        "hot_headroom_bytes": {"type": "integer"},
+        "required_cold_bytes": {"minimum": 0, "type": "integer"},
+        "required_hot_bytes": {"minimum": 0, "type": "integer"},
+        "retained_source_bytes": {"minimum": 0, "type": "integer"},
+        "wal_reserve_bytes": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["approved", "before_compression_total_bytes", "retained_source_bytes", "cold_free_bytes", "cold_reserve_bytes", "required_cold_bytes", "cold_headroom_bytes", "hot_free_bytes", "wal_reserve_bytes", "required_hot_bytes", "hot_headroom_bytes", "blockers"],
+      "type": "object"
+    },
+    "cluster": {
+      "additionalProperties": false,
+      "properties": {
+        "application_name": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "observed": {"type": "boolean"},
+        "server_version": {"maxLength": 128, "minLength": 1, "type": ["string", "null"]},
+        "timescaledb_version": {"maxLength": 32, "minLength": 1, "type": ["string", "null"]}
+      },
+      "required": ["server_version", "timescaledb_version", "application_name", "observed"],
+      "type": "object"
+    },
+    "column_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "attnum": {"maximum": 10000, "minimum": 1, "type": "integer"},
+        "generated": {"maxLength": 8, "type": "string"},
+        "identity": {"maxLength": 8, "type": "string"},
+        "name": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "not_null": {"type": "boolean"},
+        "type_name": {"maxLength": 128, "minLength": 1, "type": "string"}
+      },
+      "required": ["attnum", "name", "type_name", "not_null", "identity", "generated"],
+      "type": "object"
+    },
+    "deferred_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "durable": {"$ref": "#/$defs/durable"},
+        "rank": {"maximum": 10000, "minimum": 0, "type": "integer"},
+        "reason": {"maxLength": 128, "minLength": 1, "type": "string"}
+      },
+      "required": ["durable", "reason"],
+      "type": "object"
+    },
+    "durable": {
+      "additionalProperties": false,
+      "properties": {
+        "hypertable_name": {"enum": ["river_timeseries", "forcing_station_timeseries"]},
+        "hypertable_schema": {"enum": ["hydro", "met"]},
+        "origin_name": {"maxLength": 128, "minLength": 1, "type": "string"},
+        "origin_oid": {"minimum": 1, "type": "integer"},
+        "origin_schema": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "range_end": {"format": "date-time", "type": "string"},
+        "range_start": {"format": "date-time", "type": "string"}
+      },
+      "required": ["hypertable_schema", "hypertable_name", "origin_oid", "origin_schema", "origin_name", "range_start", "range_end"],
+      "type": "object"
+    },
+    "error": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "reason": {"maxLength": 256, "minLength": 1, "type": "string"},
+        "stage": {"maxLength": 64, "minLength": 1, "type": "string"}
+      },
+      "required": ["class", "stage"],
+      "type": "object"
+    },
+    "group_observation": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": ["migrated", "already_cold", "rolled_back", "committed_ack_lost", "blocked", "refused", "mixed", "unknown", "complete_source", "complete_target"]
+              }
+            },
+            "required": ["outcome"]
+          },
+          "then": {"required": ["timing"]}
+        }
+      ],
+      "properties": {
+        "after": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/group_snapshot"}
+          ]
+        },
+        "after_parity": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/parity"}
+          ]
+        },
+        "before": {"$ref": "#/$defs/group_snapshot"},
+        "before_parity": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/parity"}
+          ]
+        },
+        "capacity": {"$ref": "#/$defs/capacity"},
+        "commit_ack_lost": {"type": "boolean"},
+        "durable": {"$ref": "#/$defs/durable"},
+        "error": {"$ref": "#/$defs/error"},
+        "intermediate": {"maxProperties": 16, "type": "object"},
+        "outcome": {
+          "enum": ["migrated", "already_cold", "planned", "blocked", "refused", "deferred", "rolled_back", "complete_source", "complete_target", "mixed", "unknown", "committed_ack_lost"]
+        },
+        "plan_kind": {"enum": ["migrate", "already_cold", "blocked"]},
+        "rank": {"maximum": 10000, "minimum": 0, "type": "integer"},
+        "reconciliation": {"enum": ["complete_source", "complete_target", "mixed", "unknown"]},
+        "replayed": {"const": false},
+        "shell_sql_executed": {"type": "boolean"},
+        "timing": {"$ref": "#/$defs/group_timing"}
+      },
+      "required": ["durable", "outcome", "reconciliation", "plan_kind", "shell_sql_executed"],
+      "type": "object"
+    },
+    "group_snapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "blocker": {"maxLength": 256, "type": ["string", "null"]},
+        "compressed": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "additionalProperties": false,
+              "properties": {
+                "name": {"maxLength": 128, "type": ["string", "null"]},
+                "oid": {"minimum": 1, "type": "integer"},
+                "schema": {"maxLength": 64, "type": ["string", "null"]}
+              },
+              "required": ["oid", "schema", "name"],
+              "type": "object"
+            }
+          ]
+        },
+        "durable": {"$ref": "#/$defs/durable"},
+        "is_compressed": {"type": "boolean"},
+        "members": {"items": {"$ref": "#/$defs/member"}, "maxItems": 4096, "minItems": 1, "type": "array"},
+        "origin_shell_incomplete": {"type": "boolean"},
+        "residency": {"enum": ["all_source", "all_target", "already_target", "mixed", "unknown"]}
+      },
+      "required": ["durable", "is_compressed", "residency", "members"],
+      "type": "object"
+    },
+    "group_timing": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "decompress_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "fresh_reconciliation_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "heap_lock_wait_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "recompress_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "revalidation_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "shell_move_ms": {"minimum": 0, "type": ["integer", "null"]},
+        "total_ms": {"minimum": 0, "type": ["integer", "null"]}
+      },
+      "required": ["total_ms", "heap_lock_wait_ms", "revalidation_ms", "shell_move_ms", "decompress_ms", "recompress_ms", "commit_ms", "fresh_reconciliation_ms"],
+      "type": "object"
+    },
+    "hypertable_inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {"items": {"$ref": "#/$defs/column_descriptor"}, "maxItems": 256, "minItems": 1, "type": "array"},
+        "digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "name": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "schema": {"maxLength": 64, "minLength": 1, "type": "string"}
+      },
+      "required": ["schema", "name", "digest", "columns"],
+      "type": "object"
+    },
+    "inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {"pattern": "^[0-9a-f]{64}$", "type": ["string", "null"]},
+        "hypertables": {
+          "anyOf": [
+            {"type": "null"},
+            {
+              "additionalProperties": false,
+              "properties": {"hydro.river_timeseries": {"$ref": "#/$defs/hypertable_inventory"}, "met.forcing_station_timeseries": {"$ref": "#/$defs/hypertable_inventory"}},
+              "required": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+              "type": "object"
+            }
+          ]
+        },
+        "observed": {"type": "boolean"}
+      },
+      "required": ["digest", "hypertables", "observed"],
+      "type": "object"
+    },
+    "member": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {"minimum": 0, "type": "integer"},
+        "heap_oid": {"minimum": 1, "type": ["integer", "null"]},
+        "kind": {"enum": ["origin_heap", "compressed_heap", "index", "toast_heap", "toast_index"]},
+        "name": {"maxLength": 128, "minLength": 1, "type": "string"},
+        "oid": {"minimum": 1, "type": "integer"},
+        "relkind": {"maxLength": 8, "minLength": 1, "type": "string"},
+        "schema": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "tablespace": {"maxLength": 64, "minLength": 1, "type": "string"},
+        "toast_oid": {"minimum": 1, "type": ["integer", "null"]}
+      },
+      "required": ["kind", "oid", "schema", "name", "relkind", "tablespace", "bytes"],
+      "type": "object"
+    },
+    "parity": {
+      "additionalProperties": false,
+      "properties": {
+        "checksum": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "inventory_digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "non_null_counts": {
+          "additionalProperties": {"minimum": 0, "type": "integer"},
+          "maxProperties": 256,
+          "type": "object"
+        },
+        "range_end": {"format": "date-time", "type": "string"},
+        "range_start": {"format": "date-time", "type": "string"},
+        "row_count": {"minimum": 0, "type": "integer"}
+      },
+      "required": ["row_count", "non_null_counts", "checksum", "inventory_digest", "range_start", "range_end"],
+      "type": "object"
+    },
+    "per_table_totals": {
+      "additionalProperties": false,
+      "properties": {"hydro.river_timeseries": {"$ref": "#/$defs/table_total"}, "met.forcing_station_timeseries": {"$ref": "#/$defs/table_total"}},
+      "required": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+      "type": "object"
+    },
+    "planned_source_snapshot": {
+      "allOf": [
+        {"$ref": "#/$defs/group_snapshot"},
+        {
+          "properties": {
+            "compressed": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {"maxLength": 128, "minLength": 1, "type": "string"},
+                "oid": {"minimum": 1, "type": "integer"},
+                "schema": {"maxLength": 64, "minLength": 1, "type": "string"}
+              },
+              "required": ["oid", "schema", "name"],
+              "type": "object"
+            },
+            "is_compressed": {"const": true},
+            "residency": {"const": "all_source"}
+          },
+          "required": ["compressed", "residency", "members"],
+          "type": "object"
+        }
+      ]
+    },
+    "recovery": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"authority": {"const": "sidecar"}}, "required": ["authority"]},
+          "then": {
+            "properties": {"sidecar_present": {"const": true}, "blocked_new_selection": {"const": true}},
+            "required": ["sidecar_present", "blocked_new_selection"]
+          }
+        },
+        {
+          "if": {"properties": {"authority": {"const": "pending_cleanup"}}, "required": ["authority"]},
+          "then": {
+            "properties": {"blocked_new_selection": {"const": true}, "cleanup_pending": {"const": true}},
+            "required": ["blocked_new_selection", "cleanup_pending"]
+          }
+        },
+        {
+          "if": {"properties": {"authority": {"const": "closed"}}, "required": ["authority"]},
+          "then": {
+            "properties": {
+              "classification": {"enum": ["complete_source", "complete_target"]},
+              "sidecar_present": {"const": false},
+              "blocked_new_selection": {"const": false},
+              "cleanup_pending": {"const": false}
+            },
+            "required": ["classification", "sidecar_present", "blocked_new_selection", "cleanup_pending"]
+          }
+        },
+        {
+          "if": {
+            "properties": {"classification": {"enum": ["mixed", "unknown"]}},
+            "required": ["classification"]
+          },
+          "then": {
+            "properties": {
+              "authority": {"enum": ["sidecar", "pending_cleanup"]},
+              "blocked_new_selection": {"const": true}
+            },
+            "required": ["authority", "blocked_new_selection"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "authority": {"const": "sidecar"},
+              "classification": {"enum": ["mixed", "unknown"]}
+            },
+            "required": ["authority", "classification"]
+          },
+          "then": {
+            "properties": {"cleanup_pending": {"const": false}},
+            "required": ["cleanup_pending"]
+          }
+        }
+      ],
+      "properties": {
+        "authority": {"enum": ["sidecar", "pending_cleanup", "closed"]},
+        "blocked_new_selection": {"type": "boolean"},
+        "classification": {"enum": ["complete_source", "complete_target", "mixed", "unknown"]},
+        "cleanup_pending": {"type": "boolean"},
+        "replayed": {"const": false},
+        "sidecar_present": {"type": "boolean"}
+      },
+      "required": ["classification", "sidecar_present", "replayed", "blocked_new_selection", "authority", "cleanup_pending"],
+      "type": "object"
+    },
+    "skipped_descriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "hypertable_name": {"maxLength": 64, "type": "string"},
+        "hypertable_schema": {"maxLength": 64, "type": "string"},
+        "reason": {"maxLength": 128, "minLength": 1, "type": "string"}
+      },
+      "required": ["reason"],
+      "type": "object"
+    },
+    "table_total": {
+      "additionalProperties": false,
+      "properties": {
+        "already_cold": {"maximum": 10000, "minimum": 0, "type": "integer"},
+        "deferred": {"maximum": 10000, "minimum": 0, "type": "integer"},
+        "migrated": {"maximum": 10000, "minimum": 0, "type": "integer"},
+        "selected": {"maximum": 10000, "minimum": 0, "type": "integer"}
+      },
+      "required": ["selected", "migrated", "already_cold", "deferred"],
+      "type": "object"
+    },
+    "target": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_location": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
+        "catalog_name": {"const": "nhms_cold"},
+        "container_bind": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
+        "device_identity": {"maxLength": 256, "type": ["string", "null"]},
+        "host_path": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
+        "observed": {"type": "boolean"}
+      },
+      "required": ["catalog_name", "catalog_location", "container_bind", "host_path", "device_identity", "observed"],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "config_observed": {"const": false}
+        },
+        "required": ["config_observed"]
+      },
+      "then": {
+        "properties": {
+          "budget": {"type": "null"},
+          "lag_seconds": {"type": "null"},
+          "max_members": {"type": "null"},
+          "per_tick_bound": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "config_observed": {"const": true}
+        },
+        "required": ["config_observed"]
+      },
+      "then": {
+        "properties": {
+          "budget": {"$ref": "#/$defs/budget"},
+          "lag_seconds": {"maximum": 315360000, "minimum": 1, "type": "integer"},
+          "max_members": {"maximum": 4096, "minimum": 1, "type": "integer"},
+          "per_tick_bound": {"maximum": 10000, "minimum": 1, "type": "integer"}
+        },
+        "required": ["lag_seconds", "per_tick_bound", "max_members", "budget"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"enum": ["clean", "no_op", "in_progress"]}
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "config_observed": {"const": true}
+        },
+        "required": ["config_observed"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"const": "in_progress"}
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "mode": {"const": "enforce"},
+          "recovery": {
+            "properties": {
+              "authority": {"const": "sidecar"},
+              "sidecar_present": {"const": true},
+              "blocked_new_selection": {"const": true},
+              "cleanup_pending": {"const": false}
+            },
+            "required": ["authority", "sidecar_present", "blocked_new_selection", "cleanup_pending"]
+          },
+          "selected": {
+            "items": {
+              "if": {
+                "properties": {
+                  "outcome": {"const": "planned"},
+                  "plan_kind": {"const": "migrate"}
+                },
+                "required": ["outcome", "plan_kind"]
+              },
+              "then": {
+                "properties": {"before": {"$ref": "#/$defs/planned_source_snapshot"}, "before_parity": {"$ref": "#/$defs/parity"}, "capacity": {"$ref": "#/$defs/capacity"}},
+                "required": ["before", "before_parity", "capacity"]
+              }
+            },
+            "type": "array"
+          },
+          "state": {"const": "in_progress"}
+        },
+        "required": ["watermark", "cutoff", "capacity", "recovery"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"const": "no_op"}
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "selected": {
+            "items": {
+              "properties": {
+                "outcome": {"enum": ["already_cold"]}
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "state": {"enum": ["idle", "complete_target"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"const": "clean"}
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "error": false,
+          "head_sha": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+          "state": {"enum": ["idle", "complete_target", "complete_source"]}
+        },
+        "required": ["watermark", "cutoff", "head_sha"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"const": "refused_lock"}
+        },
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "deferred": {"maxItems": 0},
+          "selected": {"maxItems": 0},
+          "skipped": {"maxItems": 0},
+          "state": {"const": "idle"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {"enum": ["failed", "partial", "recovery"]}
+        },
+        "required": ["outcome"]
+      },
+      "then": {"required": ["error"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"enum": ["mixed", "unknown"]}
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "outcome": {"enum": ["failed", "recovery", "partial"]}
+        },
+        "required": ["error"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recovery": {
+            "properties": {"authority": {"enum": ["sidecar", "pending_cleanup"]}},
+            "required": ["authority"]
+          }
+        },
+        "required": ["recovery"]
+      },
+      "then": {
+        "properties": {
+          "selected": {
+            "items": {
+              "if": {
+                "properties": {
+                  "plan_kind": {"const": "migrate"},
+                  "outcome": {"enum": ["planned", "migrated", "rolled_back", "committed_ack_lost", "blocked", "refused"]}
+                },
+                "required": ["plan_kind", "outcome"]
+              },
+              "then": {
+                "properties": {
+                  "before": {"$ref": "#/$defs/group_snapshot"},
+                  "before_parity": {"$ref": "#/$defs/parity"},
+                  "capacity": {"$ref": "#/$defs/capacity"}
+                },
+                "required": ["before", "before_parity", "capacity"]
+              }
+            },
+            "type": "array"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "budget": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/budget"}
+      ]
+    },
+    "capacity": {"$ref": "#/$defs/capacity"},
+    "cluster": {"$ref": "#/$defs/cluster"},
+    "config_observed": {"type": "boolean"},
+    "cutoff": {"format": "date-time", "type": "string"},
+    "deferred": {"items": {"$ref": "#/$defs/deferred_descriptor"}, "maxItems": 10000, "type": "array"},
+    "error": {"$ref": "#/$defs/error"},
+    "generated_at": {"format": "date-time", "type": "string"},
+    "head_observed": {"type": "boolean"},
+    "head_sha": {
+      "anyOf": [
+        {"type": "null"},
+        {"pattern": "^[0-9a-f]{40}$", "type": "string"}
+      ]
+    },
+    "inventory": {"$ref": "#/$defs/inventory"},
+    "lag_seconds": {"maximum": 315360000, "minimum": 1, "type": ["integer", "null"]},
+    "max_members": {"maximum": 4096, "minimum": 1, "type": ["integer", "null"]},
+    "mode": {"enum": ["dry-run", "enforce"]},
+    "outcome": {"enum": ["clean", "partial", "no_op", "in_progress", "refused_lock", "refused_config", "failed", "recovery"]},
+    "per_table_totals": {"$ref": "#/$defs/per_table_totals"},
+    "per_tick_bound": {"maximum": 10000, "minimum": 1, "type": ["integer", "null"]},
+    "recovery": {"$ref": "#/$defs/recovery"},
+    "schema_version": {"const": "1.0"},
+    "selected": {"items": {"$ref": "#/$defs/group_observation"}, "maxItems": 10000, "type": "array"},
+    "skipped": {"items": {"$ref": "#/$defs/skipped_descriptor"}, "maxItems": 10000, "type": "array"},
+    "state": {"enum": ["idle", "in_progress", "complete_source", "complete_target", "mixed", "unknown"]},
+    "target": {"$ref": "#/$defs/target"},
+    "watermark": {"format": "date-time", "type": "string"},
+    "worktree_dirty": {"type": "boolean"}
+  },
+  "required": ["schema_version", "generated_at", "mode", "outcome", "state", "head_sha", "lag_seconds", "per_tick_bound", "max_members", "budget", "config_observed", "cluster", "target", "inventory", "selected", "deferred", "skipped", "per_table_totals"],
+  "title": "NHMS Node-27 Timeseries Cold-Residency Runner Receipt",
+  "type": "object"
+}

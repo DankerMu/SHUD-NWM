@@ -8,7 +8,8 @@
   "budget": {
     "compress_timeout_ms": 3600000,
     "wrapper_wall_seconds": 3900,
-    "systemd_wall_seconds": 3940
+    "systemd_wall_seconds": 7842,
+    "cleanup_margin_seconds": 300
   },
   "mode": "enforce",
   "outcome": "refused_lock",

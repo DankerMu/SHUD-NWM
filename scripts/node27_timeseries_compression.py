@@ -41,6 +41,18 @@ from packages.common.evidence_io import (
     inspect_bounded_file_no_follow,
     normalized_absolute_path,
 )
+from packages.common.node27_timeseries_lifecycle_lock import (
+    LifecycleLockError,
+    acquire_timeseries_lifecycle_lock,
+    refuse_lifecycle_lock_env_override,
+    release_timeseries_lifecycle_lock,
+)
+from packages.common.node27_timeseries_sequential_budget import (
+    COMPRESSION_CLEANUP_MARGIN_SECONDS,
+    SequentialBudgetError,
+    resolve_runner_budget,
+    sequential_service_budget,
+)
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -100,8 +112,8 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 #          — raising the per-chunk ceiling is the runbook §4.5 catch-up
 #            manoeuvre, which is only sound one chunk at a time (issue #1351).
 # The defaults clear leg 1 with the 300 s of non-compress budget a real tick
-# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor) and satisfy leg 2
-# exactly (3900 + 40 = 3940).
+# needs (3600 + 300 = 3900, not the bare 3600 + 60 floor). The sequential
+# compression-then-cold oneshot wall is 7842 (3900 + 3901 + 40 + 1).
 #
 # The invariant bounds ONE chunk's budget, not a whole tick: a tick may
 # compress up to ``per_tick_bound`` chunks under the same wrapper wall, so a
@@ -116,10 +128,12 @@ HYPERTABLES: tuple[tuple[str, str], ...] = (
 _QUERY_TIMEOUT_MS = 60_000
 _DEFAULT_COMPRESS_TIMEOUT_MS = 3_600_000
 _MIN_COMPRESS_TIMEOUT_MS = 1_000
-_DEFAULT_WRAPPER_WALL_SECONDS = 3_900
-_DEFAULT_SYSTEMD_WALL_SECONDS = 3_940
-_CLEANUP_MARGIN_SECONDS = 60
-_SYSTEMD_MARGIN_SECONDS = 40
+_AUTHORITATIVE_BUDGET = sequential_service_budget()
+_DEFAULT_WRAPPER_WALL_SECONDS = _AUTHORITATIVE_BUDGET.compression_wrapper_wall_seconds
+_DEFAULT_SYSTEMD_WALL_SECONDS = _AUTHORITATIVE_BUDGET.service_wall_seconds
+# Stable runner seam, bound to the shared admission and receipt authority.
+_CLEANUP_MARGIN_SECONDS = COMPRESSION_CLEANUP_MARGIN_SECONDS
+_SYSTEMD_MARGIN_SECONDS = _AUTHORITATIVE_BUDGET.systemd_margin_seconds
 _CONNECT_TIMEOUT_SECONDS = 10
 # #1714: default pg_stat_activity attribution for this component. libpq
 # treats fallback_application_name as a default only, so an operator's
@@ -268,74 +282,45 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
     receipt_path = Path(str(receipt_raw))
     if not receipt_path.is_absolute():
         raise CompressionConfigError("receipt path must be absolute")
-    lag_seconds = _parse_positive_int(
-        env.get("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"),
-        name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
-        minimum=1,
-    )
-    per_tick_bound = _parse_positive_int(
-        env.get("NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"),
-        name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
-        minimum=1,
-    )
-    compress_timeout_ms = _parse_positive_int_with_default(
-        env,
-        "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS",
-        default=_DEFAULT_COMPRESS_TIMEOUT_MS,
-        minimum=_MIN_COMPRESS_TIMEOUT_MS,
-    )
-    wrapper_wall_seconds = _parse_positive_int_with_default(
-        env,
-        "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS",
-        default=_DEFAULT_WRAPPER_WALL_SECONDS,
-        minimum=1,
-    )
-    systemd_wall_seconds = _parse_positive_int_with_default(
-        env,
-        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS",
-        default=_DEFAULT_SYSTEMD_WALL_SECONDS,
-        minimum=1,
-    )
-    # Two-leg budget chain, fail closed before any DB connection is opened.
-    compress_timeout_seconds = _ceil_div(compress_timeout_ms, 1000)
-    leg_one = compress_timeout_seconds + _CLEANUP_MARGIN_SECONDS
-    if leg_one > wrapper_wall_seconds:
-        raise CompressionConfigError(
-            "compression budget chain violated (leg 1): "
-            f"ceil({compress_timeout_ms} ms / 1000) + {_CLEANUP_MARGIN_SECONDS} s cleanup margin = "
-            f"{compress_timeout_seconds} + {_CLEANUP_MARGIN_SECONDS} = {leg_one} s exceeds "
-            f"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS={wrapper_wall_seconds}"
-        )
-    leg_two = wrapper_wall_seconds + _SYSTEMD_MARGIN_SECONDS
-    if leg_two > systemd_wall_seconds:
-        raise CompressionConfigError(
-            "compression budget chain violated (leg 2): "
-            f"wrapper wall {wrapper_wall_seconds} s + {_SYSTEMD_MARGIN_SECONDS} s kill-after margin = "
-            f"{leg_two} s exceeds declared "
-            f"NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS={systemd_wall_seconds}"
-        )
-    # Leg 3 (issue #1351): raising the per-chunk ceiling above the default is
-    # the §4.5 catch-up manoeuvre, and that recipe is only sound at bound 1 —
-    # the invariant above bounds ONE chunk's budget, so a second chunk in the
-    # same tick still dies on the wrapper wall. A timeout at or below the
-    # default is the normal régime and does not trigger this leg.
-    if compress_timeout_ms > _DEFAULT_COMPRESS_TIMEOUT_MS and per_tick_bound > 1:
-        raise CompressionConfigError(
-            "compression catch-up window violated (leg 3): "
-            f"NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS={compress_timeout_ms} exceeds the "
-            f"{_DEFAULT_COMPRESS_TIMEOUT_MS} ms default, which is the runbook §4.5 catch-up recipe "
-            "and requires NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1, got "
-            f"{per_tick_bound}"
-        )
     if not lock_raw:
         raise CompressionConfigError("lock path must be set via --lock-path or NODE27_TIMESERIES_COMPRESSION_LOCK_PATH")
     lock_path = Path(str(lock_raw))
     if not lock_path.is_absolute():
         raise CompressionConfigError("lock path must be absolute")
     try:
+        refuse_lifecycle_lock_env_override(env)
+    except LifecycleLockError as error:
+        raise CompressionConfigError(str(error)) from error
+    try:
         assert_paths_disjoint(receipt_path, [lock_path], label="compression receipt")
     except BoundedEvidenceError as error:
         raise CompressionConfigError(str(error)) from error
+    lag_seconds = _parse_positive_int(
+        env.get("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"),
+        name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
+        minimum=1,
+    )
+    try:
+        resolved_budget = resolve_runner_budget(env, lane="compression")
+    except SequentialBudgetError as error:
+        raise CompressionConfigError(str(error)) from error
+    per_tick_raw = env.get("NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND")
+    per_tick_bound = (
+        resolved_budget.compression_per_tick_bound
+        if per_tick_raw is None or per_tick_raw == ""
+        else _parse_positive_int(
+            per_tick_raw,
+            name="NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND",
+            minimum=1,
+        )
+    )
+    compress_timeout_ms = resolved_budget.compression_statement_timeout_ms
+    wrapper_wall_seconds = resolved_budget.budget.compression_wrapper_wall_seconds
+    systemd_wall_seconds = resolved_budget.budget.service_wall_seconds
+    if per_tick_bound != resolved_budget.compression_per_tick_bound:
+        raise CompressionConfigError(
+            "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND disagrees with the resolved sequential budget"
+        )
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise CompressionConfigError("DATABASE_URL must be set")
@@ -725,6 +710,7 @@ def _budget(config: CompressionConfig) -> dict[str, int]:
         "compress_timeout_ms": config.compress_timeout_ms,
         "wrapper_wall_seconds": config.wrapper_wall_seconds,
         "systemd_wall_seconds": config.systemd_wall_seconds,
+        "cleanup_margin_seconds": _CLEANUP_MARGIN_SECONDS,
     }
 
 
@@ -1196,17 +1182,17 @@ def main(
         _emit_stderr_diagnostic("failed", str(error), dsn=config.database_url)
         return 1
     try:
-        lock_fd = acquire_lock(config.lock_path)
-    except CompressionConfigError as error:
+        lifecycle_fd = acquire_timeseries_lifecycle_lock()
+    except LifecycleLockError as error:
         _replace_stale_with_failure(
             config,
             now_utc=now,
-            stage="acquire_lock",
+            stage="lifecycle_lock",
             head_sha=frozen_head_sha,
         )
         _emit_stderr_diagnostic("failed", str(error))
         return 1
-    if lock_fd is None:
+    if lifecycle_fd is None:
         receipt = build_refused_lock_receipt(config, now_utc=now, head_sha=frozen_head_sha)
         try:
             publish_receipt(config, receipt)
@@ -1225,7 +1211,38 @@ def main(
             return 1
         _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
         return 0
+    lock_fd: int | None = None
     try:
+        try:
+            lock_fd = acquire_lock(config.lock_path)
+        except CompressionConfigError as error:
+            _replace_stale_with_failure(
+                config,
+                now_utc=now,
+                stage="acquire_lock",
+                head_sha=frozen_head_sha,
+            )
+            _emit_stderr_diagnostic("failed", str(error))
+            return 1
+        if lock_fd is None:
+            receipt = build_refused_lock_receipt(config, now_utc=now, head_sha=frozen_head_sha)
+            try:
+                publish_receipt(config, receipt)
+            except SafeFilesystemError as error:
+                _replace_stale_with_failure(
+                    config,
+                    now_utc=now,
+                    stage="publish_refused_lock",
+                    head_sha=frozen_head_sha,
+                )
+                _emit_stderr_diagnostic(
+                    "failed",
+                    f"receipt publication error: {error}",
+                    dsn=config.database_url,
+                )
+                return 1
+            _emit_stderr_diagnostic("refused_lock", "lock-contended", dsn=config.database_url)
+            return 0
         try:
             receipt = build_receipt(
                 config,
@@ -1286,10 +1303,12 @@ def main(
             return 1
         return 0 if receipt["outcome"] == "clean" else 1
     finally:
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        release_timeseries_lifecycle_lock(lifecycle_fd)
 
 
 if __name__ == "__main__":

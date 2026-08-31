@@ -800,6 +800,16 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "tests/cold_residency_fakes.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_publication.py",
+        ),
+    ),
+    PathTestRule(
         # A mock SHUD CLI nothing imports: workers/shud_runtime/runtime.py runs it
         # as `[sys.executable, <path>, *args]`, so the consumption edge is the
         # exact literal `"tests/mock_shud_omp.py"` in the consumer's source, not
@@ -1177,6 +1187,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the component-level fallback_application_name identity, so a diff
             # that drops or renames it would otherwise reach CI green.
             "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     PathTestRule(
@@ -1429,6 +1440,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # apps/api/routes/hydro_display.py. Kept as its own entry so the
             # "eight below" census stays true.
             "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -1459,6 +1471,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
             "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",
@@ -1555,6 +1568,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # coverage behaviour and read-path shape, not the component-level
             # fallback_application_name identity.
             "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     PathTestRule(
@@ -1609,6 +1623,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_node27_timeseries_compression_supervisor.py",
             "tests/test_node27_timeseries_decompression_replay.py",
+            "tests/test_node27_timeseries_lifecycle_lock.py",
         ),
     ),
     PathTestRule(
@@ -1778,7 +1793,215 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
             "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression.py",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_cold_residency.py",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_publication.py",
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_cold_residency_once.sh",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node27-timeseries-compression.service",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node27-timeseries-retention.timer",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/timeseries_compression_receipt.schema.json",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_compression_receipt.example.json",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/env/node27-timeseries-compression.example",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/env/node27-cold-residency.example",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
+        "docs/runbooks/tier-node27-timeseries-storage.md",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/timeseries_cold_residency_receipt.schema.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.noop.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.partial.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.error.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_timeseries_sequential_budget.py",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_budget_preflight.py",
+        (
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_timeseries_lifecycle_lock.py",
+        (
+            "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_node27_timeseries_decompression_replay.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_runtime.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_runtime_catalog.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_receipt.py",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_publication.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_timeseries_storage_schemas.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_target.py",
+        (
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_tick.py",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_publication.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_runtime_timing.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
         ),
     ),
     PathTestRule(

@@ -85,31 +85,9 @@ def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = No
                 next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
             except FileNotFoundError:
                 try:
-                    # Explicit base mode, never the implicit 0o777 (#1513).  Without
-                    # it the landed permission is `0o777 & ~umask`, decided by the
-                    # ambient environment rather than by this code: on a umask-0002
-                    # host that is 0o775, and `provider_atomic`'s fail-closed lock
-                    # gate refuses such a directory as a lock parent
-                    # (`0o775 & 0o022 != 0`).
-                    #
-                    # Deliberately NO follow-up `fchmod`, and never a chmod of an
-                    # already-existing component.  The kernel applies the umask to
-                    # an explicit mode exactly as it does to the implicit one, and
-                    # a umask can only CLEAR bits, so 0o755 alone already satisfies
-                    # the gate under every umask.  An `fchmod` would additionally
-                    # turn the umask-0077 case from 0o700 into 0o755 -- silently
-                    # widening private directories on the strictest hosts.  The
-                    # governing rule: the umask may further restrict a safe_fs
-                    # directory, it may never loosen it.
-                    #
-                    # ACL boundary.  When the parent carries a default POSIX ACL the
-                    # umask is ignored entirely and this mode argument clamps the
-                    # inherited ACL *mask* instead, degrading a `default:user:X:rwx`
-                    # grant to `#effective:r-x`.  No mode both clears the 0o022 bits
-                    # and preserves that mask -- the mask IS the group bits -- so
-                    # safe_fs must not be the creator of ACL-shared directories.  A
-                    # caller needing cross-uid write has to widen after creation,
-                    # the way `state_manager._ensure_copyback_state_parent` does.
+                    # Explicit 0o755 lets umask restrict but never widen a
+                    # safe_fs-created directory.  Never fchmod an existing path:
+                    # that would override a restrictive umask or inherited ACL.
                     os.mkdir(part, 0o755, dir_fd=fd)
                 except FileExistsError:
                     pass
@@ -312,6 +290,83 @@ def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> 
         os.close(parent_fd)
 
 
+def prove_named_entry_absent_durable(path: Path, *, containment_root: Path | None = None) -> None:
+    """Durably prove a named entry is absent through a pinned no-follow parent."""
+
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        try:
+            os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to stat {target}: {error}", kind="io") from error
+        else:
+            raise SafeFilesystemError(f"Named entry is still present: {target}")
+        _fsync_and_verify_parent(parent_fd, parent_path, target, proof="absence")
+        try:
+            os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise _indeterminate_proof_error(target, "absence", error) from error
+        raise SafeFilesystemError(f"Named entry reappeared after fsync: {target}", kind="indeterminate")
+    finally:
+        os.close(parent_fd)
+
+
+def read_bytes_durable_no_follow(
+    path: Path,
+    *,
+    max_bytes: int,
+    containment_root: Path | None = None,
+) -> bytes:
+    """Read one bounded regular file and durably prove that exact pathname entry."""
+
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    target = _expand_path(path)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    file_fd: int | None = None
+    try:
+        file_fd, before = _open_pinned_regular_entry(parent_fd, parent_path, target)
+        if before.st_size > max_bytes:
+            raise SafeFilesystemError(f"Target file exceeds byte ceiling: {target}")
+        raw = bytearray()
+        try:
+            while len(raw) <= max_bytes:
+                chunk = os.read(file_fd, min(1024 * 1024, max_bytes + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(file_fd)
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to read {target}: {error}", kind="io") from error
+        if (
+            len(raw) != before.st_size
+            or os.read(file_fd, 1)
+            or (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size)
+        ):
+            raise SafeFilesystemError(f"Target file changed while being read: {target}", kind="identity_changed")
+        _fsync_and_verify_parent(parent_fd, parent_path, target, proof="durable-read")
+        try:
+            current = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            raise _indeterminate_proof_error(target, "durable-read", error) from error
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise SafeFilesystemError(f"Target file changed after fsync: {target}", kind="indeterminate")
+        return bytes(raw)
+    finally:
+        _close_file_fd(file_fd)
+        os.close(parent_fd)
+
+
 def stat_no_follow(path: Path, *, containment_root: Path | None = None) -> os.stat_result:
     """Stat a filesystem entry without following symlinked parents or target."""
 
@@ -470,6 +525,57 @@ def unlink_no_follow(path: Path, *, containment_root: Path | None = None, missin
         os.close(parent_fd)
 
 
+def unlink_no_follow_durable(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
+    """Unlink a file, then fsync and re-verify the no-follow parent directory.
+
+    Parent fsync/identity failure after unlink is indeterminate because the
+    pathname may already be gone while durability remains unproven.
+    """
+
+    target = _expand_path(path)
+    try:
+        parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    unlinked = False
+    try:
+        try:
+            entry_stat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return
+            raise
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Refusing to unlink symlink: {target}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Refusing to unlink directory with file unlink helper: {target}")
+        os.unlink(target.name, dir_fd=parent_fd)
+        unlinked = True
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Unlink of {target} completed but directory fsync failed: {error}",
+                kind="indeterminate",
+            ) from error
+        try:
+            _verify_fd_matches_path(parent_fd, parent_path)
+        except SafeFilesystemError as error:
+            raise SafeFilesystemError(
+                f"Unlink of {target} completed but parent identity changed: {error}",
+                kind="indeterminate",
+            ) from error
+    except SafeFilesystemError:
+        raise
+    except OSError as error:
+        kind = "indeterminate" if unlinked else "io"
+        raise SafeFilesystemError(f"Failed to unlink {target}: {error}", kind=kind) from error
+    finally:
+        os.close(parent_fd)
+
+
 def rmtree_no_follow(path: Path, *, containment_root: Path | None = None, missing_ok: bool = False) -> None:
     """Remove a directory tree without following symlinks in the path or descendants."""
 
@@ -534,20 +640,9 @@ def rename_entry_no_follow(
     *,
     containment_root: Path | None = None,
 ) -> Path:
-    """Rename a directory entry through no-follow parent descriptors (``renameat``).
+    """Rename a named entry through no-follow parent descriptors.
 
-    Both parents are opened ``O_DIRECTORY|O_NOFOLLOW``, component-walked from the
-    containment root, and the rename itself is issued relative to those
-    descriptors, so a symlink at ``name`` is MOVED as a link and never followed
-    or inspected.  Source and destination must live on the same filesystem
-    (``EXDEV`` is a hard error; there is deliberately no fallback copy path).
-
-    Error contract (#1330): walk-stage refusals keep the kinds the shared walk
-    helpers assign (``kind="unsafe"`` for symlink / non-directory / containment
-    shapes), while an ``OSError`` raised by the ``renameat`` call itself is
-    wrapped ``kind="io"`` EXPLICITLY.  Callers use ``kind`` to decide whether a
-    failure is permanent (tampered geometry) or transient (ENOSPC/ESTALE/EIO on
-    NFS), so the class default ``kind="unsafe"`` must never be inherited here.
+    Walk refusals preserve their safety kind; rename I/O is ``kind="io"``.
     """
 
     _reject_unsafe_entry_name(name)
@@ -578,28 +673,10 @@ def remove_tree_allow_symlinks(
     containment_root: Path | None = None,
     missing_ok: bool = True,
 ) -> None:
-    """Remove a residue tree, unlinking symlink entries instead of refusing them.
+    """Remove a disposable residue tree without following symlinks.
 
-    Scope (#1330, #1615): this primitive exists for disposable residue /
-    quarantine trees whose contents are untrusted BY CONSTRUCTION — whatever a
-    killed attempt or an expired selected run workspace left behind, including
-    symlinks.  ``rmtree_no_follow``'s refuse-on-symlink policy stays the
-    correct one for trees where a symlink is evidence of tampering; here a
-    refusal would permanently lock the run at the hygiene hook (or permanently
-    lock an aged additional-root run workspace out of capacity recovery).
-
-    Symlinks are never followed: the LINK itself is unlinked through a dir-fd,
-    directories are entered only via ``O_DIRECTORY|O_NOFOLLOW`` descriptors, and
-    every other entry shape (regular file, FIFO, socket, device) is unlinked
-    through the dir-fd without ever being opened.  An absent ``name`` is a no-op
-    when ``missing_ok``; a ``name`` that is itself a symlink is unlinked as a
-    link rather than traversed.  Retention (#1615) reuses this helper for
-    selected additional-root run trees with ``containment_root=<resolved root>``
-    and ``missing_ok=False``; a symlinked ``runs/`` root stays refused upstream,
-    before any entry is passed here.
-
-    Error contract (#1330): traversal / unlink / rmdir ``OSError``s are wrapped
-    ``kind="io"``; walk-stage safety refusals keep ``kind="unsafe"``.
+    Symlink entries are unlinked rather than treated as tampering; traversal and
+    removal I/O is ``kind="io"``, while unsafe path walks retain their kind.
     """
 
     _reject_unsafe_entry_name(name)
@@ -658,6 +735,54 @@ def _remove_tree_contents_allow_symlinks_fd(dir_fd: int, path_label: Path) -> No
 def _reject_unsafe_entry_name(name: str) -> None:
     if name in {"", ".", ".."} or "/" in name or os.sep in name:
         raise SafeFilesystemError(f"Unsafe directory entry name: {name!r}")
+
+
+def _open_pinned_regular_entry(
+    parent_fd: int,
+    parent_path: Path,
+    target: Path,
+) -> tuple[int, os.stat_result]:
+    try:
+        _verify_fd_matches_path(parent_fd, parent_path)
+        expected = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(expected.st_mode):
+            raise SafeFilesystemError(f"Target file must not be a symlink: {target}")
+        if not stat.S_ISREG(expected.st_mode):
+            raise SafeFilesystemError(f"Target file must be a regular file: {target}")
+        file_fd = os.open(target.name, _READ_FLAGS, dir_fd=parent_fd)
+    except SafeFilesystemError:
+        raise
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SafeFilesystemError(f"Target file must not be a symlink: {target}") from error
+        raise SafeFilesystemError(f"Failed to open {target}: {error}", kind="io") from error
+    try:
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise SafeFilesystemError(f"Target file must be a regular file: {target}")
+        if (expected.st_dev, expected.st_ino) != (opened.st_dev, opened.st_ino):
+            raise SafeFilesystemError(f"Target file changed while being opened: {target}", kind="identity_changed")
+        _verify_fd_matches_path(parent_fd, parent_path)
+        return file_fd, opened
+    except Exception:
+        os.close(file_fd)
+        raise
+
+
+def _fsync_and_verify_parent(parent_fd: int, parent_path: Path, target: Path, *, proof: str) -> None:
+    try:
+        os.fsync(parent_fd)
+        _verify_fd_matches_path(parent_fd, parent_path)
+    except SafeFilesystemError as error:
+        raise _indeterminate_proof_error(target, proof, error) from error
+    except OSError as error:
+        raise _indeterminate_proof_error(target, proof, error) from error
+
+
+def _indeterminate_proof_error(target: Path, proof: str, error: BaseException) -> SafeFilesystemError:
+    return SafeFilesystemError(
+        f"{proof} proof for {target} is indeterminate after directory fsync: {error}", kind="indeterminate"
+    )
 
 
 def _open_parent_dir(

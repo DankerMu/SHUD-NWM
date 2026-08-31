@@ -8,7 +8,7 @@ fail() {
 
 COMPRESSION_ENV_FILE=${NODE27_TIMESERIES_COMPRESSION_ENV_FILE:-/home/nwm/NWM/infra/env/node27-timeseries-compression.env}
 COLD_ENV_FILE=${NODE27_COLD_RESIDENCY_ENV_FILE:-/home/nwm/NWM/infra/env/node27-cold-residency.env}
-PRECHECK_REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
+PRECHECK_REPO_ROOT=${NODE27_COLD_RESIDENCY_REPO_ROOT:-/home/nwm/NWM}
 readonly COMPRESSION_ENV_FILE COLD_ENV_FILE PRECHECK_REPO_ROOT
 
 case "$COMPRESSION_ENV_FILE" in
@@ -42,4 +42,4 @@ fi
 exec "$PRECHECK_PYTHON" -E "$PRECHECK_SCRIPT" \
   --compression-env "$COMPRESSION_ENV_FILE" \
   --cold-env "$COLD_ENV_FILE" \
-  --launch compression -- "$@"
+  --launch cold -- "$@"

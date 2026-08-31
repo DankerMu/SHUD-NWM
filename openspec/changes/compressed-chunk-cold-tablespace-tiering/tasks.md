@@ -20,22 +20,113 @@ Seams under test:
 
 - [x] 1.1 Create the expanded OpenSpec fixture, complete risk-pack selection, invariant matrix, boundary checklist, and pass one read-only fixture review plus strict validation.
 - [x] 1.2 Add an automated isolated-cluster integration probe that refuses the live container/port/paths, pins the exact node-27 image digest and PG/TimescaleDB versions, creates its own PGDATA/cold/hot storage, and always cleans up its container and directories.
-- [x] 1.3 Probe and record `timescaledb_experimental.move_chunk`, direct compressed-member ALTER, decompress-first, internal attach, two-transaction, and shell-first alternatives; freeze the single accepted shell-first transaction (lock/revalidate -> move origin shell/indexes -> decompress -> prove expanded cold -> recompress -> prove new complete cold group/parity -> commit/fresh readback), with every rejection and transient state evidenced.
+- [x] 1.3 Probe and record `timescaledb_experimental.move_chunk`, direct
+  compressed-member ALTER, decompress-first, internal attach, two-transaction,
+  and shell-first alternatives; freeze the single accepted shell-first
+  transaction (lock/revalidate -> move origin shell/indexes -> decompress ->
+  prove expanded cold -> recompress -> prove new complete cold group/parity ->
+  commit/fresh readback), with every rejection and transient state evidenced.
 - [x] 1.4 Prove normal lifecycle behavior in the isolated cluster: hot compression, complete cold move, cold read, cold decompression, replay write, recompression, repeated convergence, move-back, and `drop_chunks`, with row/value/checksum and member residency parity.
 - [x] 1.5 Prove boundary behavior: exact cutoff contract, empty chunk, no user index, multiple/quoted indexes, owned TOAST, already-target no-op, and same-window chunks in both business hypertables.
-- [x] 1.6 Prove failures and concurrency at shell-move, post-decompress and post-recompress stages: pinned image/server/extension drift, missing/wrong target, a safely injected catalog/path mismatch before mutation, bounded full-filesystem fault, cold expansion plus hot PGDATA/WAL headroom refusal, permission error, lock conflict, statement timeout, process/connection interruption at pre-commit and post-commit acknowledgement boundaries, relation disappearance, and injected mid-group failure; fresh readback plus target-window parity must prove original-sibling rollback or new-sibling committed target, otherwise yield an explicit mixed/unknown blocker without false success.
-- [x] 1.7 Commit `probe-1892-throwaway.md` with exact image/server/extension identity and digest, commands, target-window count/aggregate/all-business-column checksum, before/intermediate/after relation/index/TOAST residency and bytes, query/lifecycle results, lock/timeout/WAL observations, cleanup proof, accepted sequence and rejected alternatives; the probe's PASS predicate must machine-check every required row rather than merely record it.
-- [x] 1.8 Amend ADR 0002 and the tiering runbook: retire stale live-`ghdc` wording, distinguish the new DB-only tier from #1309/#1370 archive retirement, freeze the probe-supported sequence, require root `mdadm --detail` plus both-member SMART evidence, forbid hypertable attach, and state that PGDATA-only backup is incomplete.
-- [x] 1.9 Run `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`, focused local collection/contract tests, the pinned 2.10.2 integration suite on the isolated node-27 cluster, and `uv run ruff check .`; record exact results and no stranded container/directory/red-proof stash.
+- [x] 1.6 Prove failures and concurrency at shell-move, post-decompress and
+  post-recompress stages: pinned image/server/extension drift, missing/wrong
+  target, a safely injected catalog/path mismatch before mutation, bounded
+  full-filesystem fault, cold expansion plus hot PGDATA/WAL headroom refusal,
+  permission error, lock conflict, statement timeout, process/connection
+  interruption at pre-commit and post-commit acknowledgement boundaries,
+  relation disappearance, and injected mid-group failure; fresh readback plus
+  target-window parity must prove original-sibling rollback or new-sibling
+  committed target, otherwise yield an explicit mixed/unknown blocker without
+  false success.
+- [x] 1.7 Commit `probe-1892-throwaway.md` with exact image/server/extension
+  identity and digest, commands, target-window count/aggregate/all-business-column
+  checksum, before/intermediate/after relation/index/TOAST residency and bytes,
+  query/lifecycle results, lock/timeout/WAL observations, cleanup proof, accepted
+  sequence and rejected alternatives; the probe's PASS predicate must
+  machine-check every required row rather than merely record it.
+- [x] 1.8 Amend ADR 0002 and the tiering runbook: retire stale live-`ghdc`
+  wording, distinguish the new DB-only tier from #1309/#1370 archive retirement,
+  freeze the probe-supported sequence, require root `mdadm --detail` plus
+  both-member SMART evidence, forbid hypertable attach, and state that
+  PGDATA-only backup is incomplete.
+- [x] 1.9 Run `openspec validate compressed-chunk-cold-tablespace-tiering
+  --strict --no-interactive`, focused local collection/contract tests, the pinned
+  2.10.2 integration suite on the isolated node-27 cluster, and `uv run ruff
+  check .`; record exact results and no stranded container/directory/red-proof
+  stash.
 
 ## 2. #1893 — Implement bounded cold-residency convergence
 
-- [ ] 2.1 Implement one shared residency-group resolver and transactional move/reconciliation primitive using the #1892 sequence, complete OID/member mapping, stable lock order, finite local timeouts, and source/target/mixed/unknown outcomes. Before any production mutation, derive and validate the complete live business-column inventory for both hypertables from the production schema; the #1892 four-column fixture helper is not that inventory and must not be reused as a production parity API.
-- [ ] 2.2 Implement a dry-run-default runner and wrapper using the existing display business watermark and compression lag, catch-up selection, per-tick bound, deterministic cross-hypertable fairness, whole-run wall budget, and the existing lifecycle mutex/order.
-- [ ] 2.3 Define the receipt JSON Schema/example with exact head/config/cluster/target identity, complete before/after member residency and bytes, durations, result/deferred/error/recovery fields, atomic mode-0600 publication, redaction, and honest post-commit publication-failure handling.
-- [ ] 2.4 Add config and serialized systemd integration without adding a second unlocked lane or attaching the cold tablespace to a hypertable; assert systemd wall > wrapper wall > per-statement wall.
-- [ ] 2.5 Test normal migration, already-cold no-op, catch-up, exact cutoff, empty selection, bound/fairness, maximum member count, all legal states, selection races, partial recovery, capacity/lock/timeout/disappearance errors, and receipt-publication failure.
-- [ ] 2.6 Run focused unit/schema tests, the isolated PG 15.2 / TimescaleDB 2.10.2 integration suite, strict OpenSpec validation, and `uv run ruff check .`; attach normal/no-op/partial/error receipt examples.
+- [x] 2.1 Implement the production catalog/parity/transaction owner in
+  `packages/common/compressed_chunk_cold_runtime.py`, consuming the #1892 pure
+  contract and its sole shell-first sequence. It must resolve complete OID/member
+  mappings, perform read-only validation of the fixed target catalog/container/
+  host-path/device identity, lock in stable order, revalidate under finite local
+  timeouts, reconcile source/target/mixed/unknown outcomes, and derive every
+  non-dropped user column in physical order from both live hypertables before
+  any mutation.
+  It must validate that `valid_time` is the sole open Timescale dimension and has PostgreSQL type `timestamptz`, bind the inventory
+  descriptor/digest to window count/non-null counts/checksum, and never import
+  the probe-private four-column helper. Production parity must be a database-side
+  bounded single-row aggregate; client code must not fetch/materialize all rows.
+  After heap locks and before movement SQL, re-derive both inventories and the
+  target-window parity in the moving transaction and require exact preflight
+  equality.
+- [x] 2.2 Implement `scripts/node27_cold_residency.py` plus
+  `scripts/node27_cold_residency_once.sh`, dry-run by default, using the existing
+  display business watermark and compression lag. Scan bounded per-hypertable
+  catalog input, assign oldest-first rank within each hypertable, and merge all
+  catch-up candidates by stable `(per_hypertable_rank, range_end, hypertable,
+  origin_oid)` order. Record no-write `already_cold` observations without
+  consuming the mutation bound, enforce a positive per-tick mutation
+  bound and maximum member count, and apply finite statement/wrapper budgets.
+  Require positive `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES` and
+  `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` with no implicit Python, shell, or
+  example-template defaults; Issue #1895 supplies measured live values before
+  deployment. Freshly sample cold/hot free bytes immediately before every group;
+  never reuse one sample across multiple rewrites.
+- [x] 2.3 Define `schemas/timeseries_cold_residency_receipt.schema.json` and
+  normal/no-op/intent/partial/error examples. Bind exact head/config/cluster/
+  target identity from a required real inspector (expected config cannot be its
+  own observation), validated business-column inventory and per-window parity,
+  complete before/intermediate/after member residency and bytes, capacity
+  inputs/decision, durations, result/deferred/error/recovery fields, and stable
+  redaction. Before enforce mutation, atomically write a same-directory mode-0600
+  intent sidecar and replace the public receipt with the same schema-valid
+  `in_progress` payload. For every planned mutation, intent must include the
+  original compressed sibling/member snapshot, source residency, preflight
+  inventory/parity and actual per-group capacity decision so startup can prove
+  complete-source rollback rather than comparing an after-state to itself. The sidecar is authoritative until a freshly reconciled
+  terminal receipt is durably published and the sidecar is durably removed with
+  parent-directory fsync and identity verification. On
+  startup, an existing sidecar must be fresh-reconciled and terminally published
+  before new selection; mixed/unknown blocks the tick. Publication failure is
+  non-success, never triggers mutation replay, and cannot leave an older success
+  looking current.
+- [x] 2.4 Add `packages/common/node27_timeseries_lifecycle_lock.py` with fixed
+  mutex `/tmp/nhms-node27-timeseries-lifecycle.lock`. Compression, cold
+  residency, retention, and manual decompression/replay must acquire it before
+  any existing lane-local or database relation lock, assert the fixed file is a
+  no-follow regular file owned by the effective user with mode 0600, and release
+  it on every terminal path; autopipe remains outside the flock because it cannot write an eligible
+  compressed group and is fenced by transactional revalidation. Add cold
+  residency as the second sequential `ExecStart` of the existing compression
+  oneshot, after compression, using the existing 04:25 timer and no new timer.
+  Assert each wrapper wall exceeds its statement wall plus cleanup margin and the
+  one service wall exceeds both sequential wrapper walls plus the systemd margin.
+  Move the existing retention timer after that worst-case service window and
+  retain lifecycle-lock refusal as the runtime backstop. Do not change the
+  retention window and do not attach `nhms_cold` to a hypertable.
+- [x] 2.5 Test normal migration, already-cold no-op, catch-up, exact cutoff,
+  empty selection, bound/fairness, maximum member count, all legal states,
+  selection races, partial recovery, capacity/lock/timeout/disappearance errors,
+  multi-group free-space shrinkage, bounded single-row parity, locked inventory/
+  parity drift, real target-inspector failure, pre-movement SQL event identity,
+  unresolved-intent source/target startup, durable unlink failure, every early
+  error replacing stale success, and receipt-publication failure.
+- [x] 2.6 Run focused unit/schema tests, the isolated PG 15.2 / TimescaleDB 2.10.2
+  integration suite, strict OpenSpec validation, and `uv run ruff check .`;
+  attach normal/no-op/intent/partial/error receipt examples.
 
 ## 3. #1894 — Install and govern the fresh cold tablespace
 
@@ -49,7 +140,11 @@ Seams under test:
 
 ## 4. #1895 — Controlled node-27 rollout and closure
 
-- [ ] 4.1 Freeze exact reviewed HEAD and capture preflight: clean worktree, container config/image, cluster/catalog, every candidate/hot group identity/member residency/rows/checksum, both filesystems, timer/writer/lock state, backup readiness, root RAID/SMART evidence, API valid-times/publication and #1342 plans/latencies.
+- [ ] 4.1 Freeze exact reviewed HEAD and capture preflight: clean worktree,
+  container config/image, cluster/catalog, every candidate/hot group identity/
+  member residency/rows/checksum, both filesystems, timer/writer/lock state,
+  backup readiness, root RAID/SMART evidence, API valid-times/publication and
+  #1342 plans/latencies.
 - [ ] 4.2 Stop and drain autopipe/compression/residency/retention writers under the documented mutex/lock order; any active writer, conflicting lock, unknown health, insufficient worst-case rollback space, or identity mismatch is NO-GO.
 - [ ] 4.3 Establish the fresh `nhms_cold` bind/tablespace from #1894 and deploy #1893 at the exact reviewed SHA; prove catalog/bind/device identity, no hypertable attach, and new-chunk `pg_default` placement before moving data.
 - [ ] 4.4 Run a dry-run preview and bounded enforce to migrate the six baseline eligible compressed groups one at a time; after each group prove complete origin/compressed/index/TOAST residency, row/identity/checksum/query parity, duration/wait/bytes, and hot/cold filesystem reconciliation.

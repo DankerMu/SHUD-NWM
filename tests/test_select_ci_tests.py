@@ -527,6 +527,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # suite on the mvt rule as a one-hop importer through
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",
@@ -7932,6 +7933,7 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # anchor, pinned on the core suite (which is also the same-name owner).
     ("tests/retention_test_helpers.py", "tests/test_retention.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
+    ("tests/cold_residency_fakes.py", "tests/test_node27_cold_residency.py"),
     # The literal-path half (#1498): this pair exists only because
     # test_shud_runtime.py carries the exact string "tests/mock_shud_omp.py" and
     # runs it as a subprocess. It imports nothing from the module, so a
@@ -10191,6 +10193,13 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     # the closure guard above derives.
     assert SELECTOR_META_GUARD_TEST in selected
     assert selected != {SELECTOR_META_GUARD_TEST}
+
+
+def test_cold_residency_fakes_rule_selects_runtime_proof_suite() -> None:
+    selected = set(select_tests(["tests/cold_residency_fakes.py"], repo_root=Path(".")))
+
+    assert "tests/test_compressed_chunk_cold_runtime_proof.py" in selected
+    assert SELECTOR_META_GUARD_TEST in selected
 
 
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:

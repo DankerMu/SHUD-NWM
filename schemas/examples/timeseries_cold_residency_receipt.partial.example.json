@@ -1,0 +1,163 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-15T04:25:30Z",
+  "mode": "enforce",
+  "outcome": "partial",
+  "state": "complete_source",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "watermark": "2026-07-11T12:00:00Z",
+  "lag_seconds": 604800,
+  "cutoff": "2026-07-04T12:00:00Z",
+  "per_tick_bound": 1,
+  "max_members": 64,
+  "budget": {
+    "statement_timeout_ms": 3600000,
+    "wrapper_wall_seconds": 3901,
+    "compression_wrapper_wall_seconds": 3900,
+    "systemd_wall_seconds": 7842,
+    "cleanup_margin_seconds": 300,
+    "systemd_margin_seconds": 40
+  },
+  "cluster": {
+    "server_version": "15.2",
+    "timescaledb_version": "2.10.2",
+    "application_name": "nhms-ts-cold-residency",
+    "observed": true
+  },
+  "target": {
+    "catalog_name": "nhms_cold",
+    "catalog_location": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "container_bind": "/data/GHDC/nhms-cold-tablespace",
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "device_identity": "md0",
+    "observed": true
+  },
+  "inventory": {
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "observed": true,
+    "hypertables": {
+      "hydro.river_timeseries": {
+        "schema": "hydro",
+        "name": "river_timeseries",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "run_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 5,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      },
+      "met.forcing_station_timeseries": {
+        "schema": "met",
+        "name": "forcing_station_timeseries",
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "columns": [
+          {
+            "attnum": 1,
+            "name": "forcing_version_id",
+            "type_name": "text",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          },
+          {
+            "attnum": 4,
+            "name": "valid_time",
+            "type_name": "timestamp with time zone",
+            "not_null": true,
+            "identity": "",
+            "generated": ""
+          }
+        ]
+      }
+    }
+  },
+  "selected": [
+    {
+      "durable": {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "origin_oid": 10,
+        "origin_schema": "_timescaledb_internal",
+        "origin_name": "_hyper_1_1_chunk",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "outcome": "rolled_back",
+      "reconciliation": "complete_source",
+      "plan_kind": "migrate",
+      "shell_sql_executed": true,
+      "replayed": false,
+      "error": {
+        "class": "statement_timeout",
+        "stage": "decompress",
+        "reason": "statement_timeout"
+      },
+      "timing": {
+        "total_ms": 90,
+        "heap_lock_wait_ms": 8,
+        "revalidation_ms": 15,
+        "shell_move_ms": 40,
+        "decompress_ms": 20,
+        "recompress_ms": null,
+        "commit_ms": null,
+        "fresh_reconciliation_ms": 7
+      }
+    }
+  ],
+  "deferred": [
+    {
+      "durable": {
+        "hypertable_schema": "met",
+        "hypertable_name": "forcing_station_timeseries",
+        "origin_oid": 30,
+        "origin_schema": "_timescaledb_internal",
+        "origin_name": "_hyper_4_1_chunk",
+        "range_start": "2026-06-27T12:00:00Z",
+        "range_end": "2026-07-04T12:00:00Z"
+      },
+      "reason": "per_tick_bound",
+      "rank": 0
+    }
+  ],
+  "skipped": [],
+  "per_table_totals": {
+    "hydro.river_timeseries": {
+      "selected": 1,
+      "migrated": 0,
+      "already_cold": 0,
+      "deferred": 0
+    },
+    "met.forcing_station_timeseries": {
+      "selected": 0,
+      "migrated": 0,
+      "already_cold": 0,
+      "deferred": 1
+    }
+  },
+  "error": {
+    "class": "statement_timeout",
+    "stage": "decompress",
+    "reason": "statement_timeout"
+  },
+  "config_observed": true,
+  "recovery": {
+    "classification": "complete_source",
+    "sidecar_present": false,
+    "replayed": false,
+    "blocked_new_selection": false,
+    "authority": "closed",
+    "cleanup_pending": false  }
+}

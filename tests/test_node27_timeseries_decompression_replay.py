@@ -6,11 +6,13 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pytest import MonkeyPatch
 
 from packages.common import node27_container_contract as contract
 from scripts import node27_timeseries_decompression_replay as replay
@@ -78,9 +80,12 @@ def _responses(*, after_count: int = 7, after_compressed: bool = False) -> list[
     ]
 
 
-def test_fake_db_exact_decompression_publishes_structured_receipt(tmp_path: Path) -> None:
+def test_fake_db_exact_decompression_publishes_structured_receipt(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     connection = _FakeConnection(_responses())
     receipt_path = tmp_path / "recovery.json"
+    monkeypatch.setattr(replay, "timeseries_lifecycle_lock", lambda _path=None: nullcontext())
     receipt = replay.produce_recovery_receipt(
         database_url="opaque",
         mutation_head_sha="a" * 40,
@@ -100,9 +105,12 @@ def test_fake_db_exact_decompression_publishes_structured_receipt(tmp_path: Path
     assert mutation_calls == [(_CONTRACT_RELATION,)]
 
 
-def test_fake_db_post_state_mismatch_publishes_indeterminate_without_retry(tmp_path: Path) -> None:
+def test_fake_db_post_state_mismatch_publishes_indeterminate_without_retry(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     connection = _FakeConnection(_responses(after_count=6))
     receipt_path = tmp_path / "failed.json"
+    monkeypatch.setattr(replay, "timeseries_lifecycle_lock", lambda _path=None: nullcontext())
     with pytest.raises(replay.DecompressionError, match="producer failed"):
         replay.produce_recovery_receipt(
             database_url="opaque",
