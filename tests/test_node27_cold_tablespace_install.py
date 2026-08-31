@@ -16,9 +16,15 @@ from packages.common.node27_cold_tablespace_install import (
     InstallDependencies,
     run_install,
 )
+from scripts import node27_cold_tablespace_install as installer_cli
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 SHA = "a" * 40
+
+
+def test_cli_uses_the_public_installer_config_and_state_machine() -> None:
+    assert installer_cli.InstallConfig is InstallConfig
+    assert installer_cli.run_install is run_install
 
 
 class FakeConnection:

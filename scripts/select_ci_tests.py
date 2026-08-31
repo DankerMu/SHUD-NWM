@@ -796,6 +796,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/__init__.py",
         (
             "tests/test_integration_gate.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
             "tests/test_node27_timeseries_compression_capture.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
         ),
