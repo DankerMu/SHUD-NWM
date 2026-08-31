@@ -54,4 +54,9 @@
   facade and all seven new owner paths, and `uv run pytest -q tests/`; expect
   complete regression success without oracle weakening.
 - [x] 5.3 Run `uv run ruff check .`, entropy/large-file audit tests and script, strict single/all OpenSpec validation, changed Markdown lint and `git diff --check`; expect zero new violations.
-- [ ] 5.4 On node-27, capture the same focused suites at baseline SHA and frozen implementation SHA in detached worktrees without changing the active checkout; compare per-suite Linux results and record a durable receipt. Node-22 is not required because no Slurm/SHUD scheduling/runtime behavior changes.
+- [x] 5.4 On node-27, capture the same focused suites at baseline SHA and
+  frozen implementation SHA in detached worktrees without changing the active
+  checkout; compare per-suite Linux results and record a durable receipt.
+  Node-22 is not required because no Slurm/SHUD scheduling/runtime behavior
+  changes. Receipt subject: `83458463096c58497413ce69fc1f4370ba480c17`;
+  SHA-256: `51326c76865a7cd3013067895e7e1e028c60f2d741deb2effd9e426b9b033882`.
