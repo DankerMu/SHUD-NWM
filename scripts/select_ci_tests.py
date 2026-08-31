@@ -483,6 +483,8 @@ DIRECT_GRID_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
 FILE_JOURNAL_READ_STATE_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal.py",
     "tests/test_file_orchestration_migration.py",
+    "tests/test_scheduler_journal_retention_planning.py",
+    "tests/test_scheduler_journal_retention_archive.py",
     "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
     "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
     "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
@@ -589,6 +591,10 @@ FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
     "services/orchestrator/chain_repository_state.py",
     "services/orchestrator/file_orchestration_journal.py",
     "services/orchestrator/file_orchestration_migration.py",
+    "services/orchestrator/scheduler_journal_archive.py",
+    "services/orchestrator/scheduler_journal_restore.py",
+    "services/orchestrator/scheduler_journal_retention.py",
+    "services/orchestrator/scheduler_journal_retention_types.py",
     "services/orchestrator/cli.py",
     "services/orchestrator/scheduler.py",
     "services/orchestrator/scheduler_core.py",
@@ -845,6 +851,15 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # Shared journal-retention fixtures are top-level imported by both
+        # behavioral partitions, so fixture-only changes must execute each.
+        "tests/scheduler_journal_retention_fixtures.py",
+        (
+            "tests/test_scheduler_journal_retention_planning.py",
+            "tests/test_scheduler_journal_retention_archive.py",
+        ),
+    ),
+    PathTestRule(
         # The #1564 split-demote suites' shared fixture module. The four split
         # suites import it at file level, and the public operator-recovery cycle
         # tests import it through a local (function-scope) import, which the
@@ -969,13 +984,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         # Extended AT THE RULE SITE (#1192), not by editing the shared constant:
-        # safe_fs.py owns tests/test_safe_fs.py, but the constant also serves the
-        # seven journal patterns below, whose selection must not move. A separate
-        # stop_on_match rule for safe_fs.py would instead SHIFT selection --
-        # first match wins, so the journal closure would drop out entirely. The
-        # result here is the union: today's journal closure PLUS the helper's own
-        # suite, which a safe_fs-only change previously could not reach at all.
+        # safe_fs.py owns tests/test_safe_fs.py, while the journal mappings below
+        # retain the file-journal closure. A separate stop_on_match rule would
+        # shift selection because first match wins.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[0],
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # The dedicated no-clobber publication owner is used by archive
+        # publication and restore. It needs both its filesystem contract and
+        # the two journal-retention behavioral partitions.
+        "packages/common/safe_fs_publication.py",
         (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
         stop_on_match=True,
     ),
@@ -1015,6 +1035,26 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
+        (*FILE_JOURNAL_READ_STATE_TESTS, *ORCHESTRATOR_CLI_IMPORTER_TESTS),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[9],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[10],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11],
+        FILE_JOURNAL_READ_STATE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
         # #1748 recovery-CLI helper extraction.  Stop rule on
         # purpose: without it the broad `services/orchestrator/**` rule would
         # drag the full directory list for a module whose only production
@@ -1050,11 +1090,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # base.py's remaining non-gated importers are orchestration-layer suites
         # borrowing its cycle-identity helpers (cycle_id_for / format_cycle_time
         # / CycleDiscovery); those stay with the rules that own them (#1455
-        # `edge-consumer` routings). test_state_clone_cutover_hook.py is the one
-        # with no owning rule anywhere, so a base.py change would otherwise never
-        # run it. Narrow on purpose — only a base.py PR pays for it.
+        # `edge-consumer` routings). The archive contract independently rebuilds
+        # cycle identity through cycle_id_for, so its focused suite belongs here.
         "workers/data_adapters/base.py",
-        ("tests/test_state_clone_cutover_hook.py",),
+        (
+            "tests/test_state_clone_cutover_hook.py",
+            "tests/test_scheduler_journal_retention_archive.py",
+        ),
     ),
     PathTestRule(
         # #1455: the producer/cli/store/package surface has same-subject suites
@@ -1238,6 +1280,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_file_orchestration_journal.py",
             "tests/test_file_orchestration_journal_read_cache.py",
             "tests/test_file_orchestration_migration.py",
+            "tests/test_scheduler_journal_retention_planning.py",
+            "tests/test_scheduler_journal_retention_archive.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
             "tests/test_pipeline_persistence.py",
@@ -2129,6 +2173,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "scripts/governance/write_entropy_baseline.py",
         ("tests/test_entropy_audit_script.py",),
+    ),
+    PathTestRule(
+        # The checked-in node-22 executable is a compatibility CLI; its owner
+        # modules and split contract suites are routed explicitly because no
+        # same-name test file exists.
+        "scripts/node22_scheduler_journal_retention.py",
+        (
+            "tests/test_scheduler_journal_retention_planning.py",
+            "tests/test_scheduler_journal_retention_archive.py",
+        ),
     ),
     PathTestRule(
         "scripts/select_ci_tests.py",

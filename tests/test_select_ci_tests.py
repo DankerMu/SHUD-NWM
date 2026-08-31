@@ -328,6 +328,28 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     assert "tests/test_production_scheduler.py" in selected
 
 
+def test_select_tests_routes_scheduler_journal_owner_modules_to_split_contract_suites() -> None:
+    expected = {
+        "tests/test_scheduler_journal_retention_planning.py",
+        "tests/test_scheduler_journal_retention_archive.py",
+    }
+    for owner in (
+        "packages/common/safe_fs_publication.py",
+        "services/orchestrator/scheduler_journal_archive.py",
+        "services/orchestrator/scheduler_journal_restore.py",
+        "services/orchestrator/scheduler_journal_retention.py",
+        "services/orchestrator/scheduler_journal_retention_types.py",
+    ):
+        selected = select_tests([owner], repo_root=Path("."))
+        assert expected <= set(selected), owner
+
+    script_selected = select_tests(
+        ["scripts/node22_scheduler_journal_retention.py"],
+        repo_root=Path("."),
+    )
+    assert expected <= set(script_selected)
+
+
 def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_changes_to_focused_nodes() -> None:
     selected = select_tests(
         ["services/orchestrator/chain_types.py", "tests/test_orchestration_chain.py"],
@@ -420,6 +442,8 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_backfill_predecessor.py",
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_scheduler_generation.py",
+        "tests/test_scheduler_journal_retention_archive.py",
+        "tests/test_scheduler_journal_retention_planning.py",
         "tests/test_scheduler_lineage.py",
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
@@ -7992,6 +8016,11 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # derivation that loses the consumption edge empties this anchor and reds
     # here rather than quietly re-collapsing the module.
     ("tests/mock_shud_omp.py", "tests/test_shud_runtime.py"),
+    # The journal-retention contract split shares a fixture module at file scope.
+    (
+        "tests/scheduler_journal_retention_fixtures.py",
+        "tests/test_scheduler_journal_retention_planning.py",
+    ),
     # The #1564 split-demote suites' shared fixture module.
     (
         "tests/orchestrator_demote_reserved_job_helpers.py",
