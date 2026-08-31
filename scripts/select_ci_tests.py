@@ -803,6 +803,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/cold_residency_fakes.py",
         (
             "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_publication.py",

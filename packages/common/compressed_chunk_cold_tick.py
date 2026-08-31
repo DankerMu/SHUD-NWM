@@ -540,13 +540,18 @@ def run_tick(
         inspect_selected.append(planned)
 
     if not config.enforce:
-        outcome = "no_op" if not migrate_plan and not deferred else "clean"
-        if already_cold and not migrate_plan and not deferred:
-            outcome = "no_op"
+        if blocking_error is not None:
+            outcome = "failed"
+            state = blocking_state
+        else:
+            outcome = "no_op" if not migrate_plan and not deferred else "clean"
+            if already_cold and not migrate_plan and not deferred:
+                outcome = "no_op"
+            state = "idle"
         return build_receipt(
             mode="dry-run",
             outcome=outcome,
-            state="idle",
+            state=state,
             head_sha=head_sha,
             generated_at=now_utc,
             watermark=iso_now(watermark),

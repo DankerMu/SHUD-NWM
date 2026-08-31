@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,17 +18,48 @@ from packages.common.compressed_chunk_cold_receipt import (
     read_intent,
     read_public_receipt,
     remove_intent,
+    validate_receipt,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_cold_residency as runner
 from tests.cold_residency_fakes import FakeConnection, chunk, complete_relations
-from tests.test_node27_cold_residency import _ready
+from tests.test_node27_cold_residency import _base_env, _ready
 
 _ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
 _INTENT = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json").read_text())
 _TERMINAL = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.example.json").read_text())
+
+
+class FreshUnknownConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self._unknown_origin_name = ""
+        self._transitioned = False
+
+    def transition_to_uncompressed_on_reload(self, origin_name: str) -> None:
+        self._unknown_origin_name = origin_name
+
+    def dispatch(self, sql: str, params: object):
+        text = " ".join(sql.split())
+        if (
+            not self._transitioned
+            and "timescaledb_information.chunks" in text
+            and "range_end <=" not in text
+            and isinstance(params, tuple)
+            and params[-1] == self._unknown_origin_name
+        ):
+            current = self.chunks[self._unknown_origin_name]
+            self.chunks[self._unknown_origin_name] = replace(
+                current,
+                compressed_oid=None,
+                compressed_schema=None,
+                compressed_name=None,
+                is_compressed=False,
+            )
+            self._transitioned = True
+        return super().dispatch(sql, params)
 
 
 def test_intent_then_public_receipt_then_sidecar_removal(tmp_path: Path) -> None:
@@ -688,6 +720,152 @@ def test_pending_public_mixed_reconciliation_preserves_blocker(tmp_path: Path) -
     assert receipt["recovery"]["sidecar_present"] is False
     assert receipt["recovery"]["blocked_new_selection"] is True
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+
+
+@pytest.mark.parametrize(
+    ("blocker", "preceding_outcome"),
+    [
+        ("mixed", None),
+        ("unknown", None),
+        ("mixed", "planned"),
+        ("unknown", "planned"),
+        ("mixed", "already_cold"),
+        ("unknown", "already_cold"),
+        ("mixed", "deferred"),
+        ("unknown", "deferred"),
+    ],
+)
+def test_dry_run_fresh_blocker_returns_schema_valid_failure_without_movement(
+    tmp_path: Path,
+    blocker: str,
+    preceding_outcome: str | None,
+) -> None:
+    config = _ready(
+        runner.config_from_args(
+            runner._parser().parse_args([]),
+            _base_env(
+                tmp_path,
+                override={"NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "1" if preceding_outcome == "deferred" else "2"},
+            ),
+        )
+    )
+    connection = FreshUnknownConnection() if blocker == "unknown" else FakeConnection()
+    if preceding_outcome == "deferred":
+        planned = chunk(origin_oid=10, origin_name="_hyper_1_1_chunk")
+        deferred = chunk(
+            origin_oid=11,
+            origin_name="_hyper_1_2_chunk",
+            compressed_oid=21,
+            compressed_name="compress_21",
+        )
+        connection.load_group(planned, complete_relations())
+        connection.load_group(
+            deferred,
+            complete_relations(
+                origin_oid=11,
+                compressed_oid=21,
+                origin_name="_hyper_1_2_chunk",
+                compressed_name="compress_21",
+            ),
+        )
+        blocker_item = chunk(
+            origin_oid=12,
+            origin_name="_hyper_1_3_chunk",
+            compressed_oid=22,
+            compressed_name="compress_22",
+        )
+    elif preceding_outcome is not None:
+        preceding = chunk(origin_oid=10, origin_name="_hyper_1_1_chunk")
+        connection.load_group(
+            preceding,
+            complete_relations(origin_space="nhms_cold" if preceding_outcome == "already_cold" else "pg_default"),
+        )
+        blocker_item = chunk(
+            origin_oid=11,
+            origin_name="_hyper_1_2_chunk",
+            compressed_oid=21,
+            compressed_name="compress_21",
+            schema="met",
+            name="forcing_station_timeseries",
+        )
+    else:
+        blocker_item = chunk()
+    connection.load_group(
+        blocker_item,
+        complete_relations(
+            origin_oid=blocker_item.origin_oid,
+            compressed_oid=blocker_item.compressed_oid or 20,
+            origin_name=blocker_item.origin_name,
+            compressed_name=blocker_item.compressed_name or "compress_hyper_2_2_chunk",
+            other_space="nhms_cold" if blocker == "mixed" else None,
+        ),
+    )
+    if blocker == "unknown":
+        assert isinstance(connection, FreshUnknownConnection)
+        connection.transition_to_uncompressed_on_reload(blocker_item.origin_name)
+
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=lambda: connection,
+        fetch_watermark=lambda: _NOW,
+    )
+
+    assert receipt["mode"] == "dry-run"
+    assert receipt["outcome"] == "failed"
+    assert receipt["state"] == blocker
+    assert receipt["error"]["class"] == blocker
+    assert receipt["selected"][-1]["outcome"] == "blocked"
+    assert receipt["selected"][-1]["reconciliation"] == blocker
+    assert receipt["selected"][-1]["error"]["class"] == blocker
+    if preceding_outcome == "deferred":
+        assert receipt["deferred"] and receipt["deferred"][0]["reason"] == "per_tick_bound"
+    elif preceding_outcome is not None:
+        assert receipt["selected"][0]["outcome"] == preceding_outcome
+    assert validate_receipt(receipt) == receipt
+    assert not any(
+        token in sql
+        for sql, _params in connection.executed
+        for token in ("SET TABLESPACE", "decompress_chunk", "compress_chunk")
+    )
+
+
+@pytest.mark.parametrize("blocker", ["mixed", "unknown"])
+def test_dry_run_main_replaces_stale_success_for_fresh_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+) -> None:
+    config = _ready(runner.config_from_args(runner._parser().parse_args([]), _base_env(tmp_path)))
+    publish_receipt(config.receipt_path, _TERMINAL)
+    connection = FreshUnknownConnection() if blocker == "unknown" else FakeConnection()
+    connection.load_group(chunk(), complete_relations(other_space="nhms_cold" if blocker == "mixed" else None))
+    if blocker == "unknown":
+        assert isinstance(connection, FreshUnknownConnection)
+        connection.transition_to_uncompressed_on_reload("_hyper_1_1_chunk")
+    lifecycle_fd = os.open(tmp_path / "lifecycle.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    lane_fd = os.open(tmp_path / "lane.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    monkeypatch.setattr(runner, "config_from_args", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(runner, "_observe_head", lambda *_args, **_kwargs: ("a" * 40, True, False))
+    monkeypatch.setattr(runner, "fetch_display_watermark", lambda *_args, **_kwargs: _NOW)
+    monkeypatch.setattr(runner, "acquire_timeseries_lifecycle_lock", lambda *_args, **_kwargs: lifecycle_fd)
+    monkeypatch.setattr(runner, "acquire_lock", lambda *_args, **_kwargs: lane_fd)
+    monkeypatch.setattr(runner, "release_timeseries_lifecycle_lock", lambda fd: os.close(fd))
+
+    assert runner.main([], now_utc=_NOW, connect=lambda: connection) == 1
+
+    public = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert public["mode"] == "dry-run"
+    assert public["outcome"] == "failed"
+    assert public["state"] == blocker
+    assert public["error"]["class"] == blocker
+    assert validate_receipt(public) == public
+    assert not any(
+        token in sql
+        for sql, _params in connection.executed
+        for token in ("SET TABLESPACE", "decompress_chunk", "compress_chunk")
+    )
 
 
 def test_durable_public_read_refuses_path_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

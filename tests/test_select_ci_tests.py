@@ -10050,6 +10050,13 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     assert selected != {SELECTOR_META_GUARD_TEST}
 
 
+def test_cold_residency_fakes_rule_selects_runtime_proof_suite() -> None:
+    selected = set(select_tests(["tests/cold_residency_fakes.py"], repo_root=Path(".")))
+
+    assert "tests/test_compressed_chunk_cold_runtime_proof.py" in selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
     # through a local (function-scope) import in tests/test_orchestration_chain.py,
