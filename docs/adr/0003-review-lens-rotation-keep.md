@@ -2544,3 +2544,29 @@ unchanged under the recorded autonomous default. The cumulative aggregate still
 supplies no basis for an autonomous cut, and any reversal continues to require the
 existing attribution-schema, round-intent, and round-role repairs plus maintainer
 review.
+
+## Revisit 2026-08-31 (post #1893 / PR #1907) — keep; repeated invariant recheck is not rotation evidence
+
+After the PR #1907 accountability line, `loop_log_audit.py` reports **146**
+multi-round merged PRs and later-round catches **core=88 / rotated=296**, moving
+from `145 / 87 / 296` after PR #1901. PR #1907 therefore contributes one sample
+and the full `core +1 / rotated +0` delta.
+
+Round 1 used the standard six-lens mix and produced twelve verified findings.
+Round 2 retained that same six-lens set while checking the repaired durable
+publication and CI-evidence invariants. The one review-unique later-round catch
+was the invariant/state lens finding that fresh-scan dry-run blockers still built
+schema-invalid receipts and could leave stale success current. This repeated the
+Round 1 state-transition invariant in a sibling terminal branch, triggered a
+depth retro, and was closed by an explicit mode/state/ordering matrix. The other
+Round 2 finding—the missing tracked importer edge—was also caught by GitHub Unit
+Tests and is excluded from `gate_net_catch`. Round 3, base-synced Round 4, and both
+Phase 7 sweeps were clean.
+
+This is another real **pinned-core fix-propagation catch**, not evidence that an
+additive rotated free slot failed: Round 2 introduced no new lens. The cumulative
+`88 / 296` attribution therefore still cannot support an autonomous cut, and the
+previously recorded metric limitations remain: round intent and Phase 7 roles
+must be separated before the ratio can answer a causal rotation question.
+**Keep rotation** unchanged under the autonomous default; any reversal still
+requires the attribution-schema repairs and maintainer review.
