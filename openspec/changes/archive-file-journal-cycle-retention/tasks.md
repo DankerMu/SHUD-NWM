@@ -27,7 +27,7 @@ Non-goals: production enforcement activation; state-index/direct-record pruning;
 - [x] 4.2 Run `uv run pytest -q tests/test_scheduler_journal_retention.py tests/test_file_orchestration_journal.py tests/test_retention_frontier.py tests/test_state_manager_generation_history.py` with all scenarios passing.
 - [x] 4.3 Run `openspec validate archive-file-journal-cycle-retention --strict --no-interactive` successfully.
 - [ ] 4.4 On node-22, without `uv sync` or database access, run the checked-in script with `/scratch/frd_muziyao/NWM/.venv/bin/python` against the real journal in dry-run mode; retain a receipt proving zero hot mutation, current frontier/window inputs, candidate counts, and live/active exemptions.
-- [ ] 4.5 On node-22, use an isolated copy of one eligible production-shaped cycle to run enforce plus restore; retain manifest/archive/member digest evidence, pre/post cycle-query parity, and checksums proving `pipeline-jobs/` and `index-last.json` are unchanged. Do not enable the production timer or enforce against the live journal in this PR.
+- [x] 4.5 On node-22, use an isolated copy of one eligible production-shaped cycle to run enforce plus restore; retain manifest/archive/member digest evidence, pre/post cycle-query parity, and checksums proving `pipeline-jobs/` and `index-last.json` are unchanged. Do not enable the production timer or enforce against the live journal in this PR.
 
 ## 5. Review and Completion
 
