@@ -2527,3 +2527,20 @@ confuse an intentional depth recheck with a failed rotation experiment.
 strengthens the reason to keep the core pinned while leaving the additive rotation
 question untouched. Any reversal still requires the existing attribution-schema,
 round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-08-30 (post #1910 / PR #1915) — keep; single-round clean adds no rotation datum
+
+After the PR #1915 accountability line, `loop_log_audit.py` still reports **145**
+multi-round merged PRs and later-round catches **core=87 / rotated=296**. The
+counts are unchanged from the post-PR #1901 revisit because PR #1915 had one
+comprehensive round only: its six-lens Round 1 produced zero candidates, so no
+verifier batch, fix pass, or follow-up comprehensive round existed. Both
+implementation-head and final-head Phase 7 Gap Sweeps were also clean.
+
+This PR therefore supplies no observation about follow-up-round lens rotation. It
+proves that the behavior-neutral Basins package facade split closed in the first
+review pass, not that rotation was applied and found nothing. **Keep rotation**
+unchanged under the recorded autonomous default. The cumulative aggregate still
+supplies no basis for an autonomous cut, and any reversal continues to require the
+existing attribution-schema, round-intent, and round-role repairs plus maintainer
+review.
