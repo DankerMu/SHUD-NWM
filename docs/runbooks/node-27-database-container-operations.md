@@ -113,7 +113,71 @@ shred -u /tmp/nhms-db.env
 display API `active` 且本地 `:8080` 与公网 `https://test.nwm.ac.cn` 均 200；
 行数抽查（`met.met_station`、`core.river_segment`）与 `pg_database_size` 对得上。
 
-## 5. 口令轮换
+## 5. `nhms_cold` 安装契约（#1894；不得在本 issue live 执行）
+
+`nhms_cold` 仅是终态已压缩 chunk 的 DB 专用 tablespace，固定映射为：
+
+| Host | Container | Catalog |
+|---|---|---|
+| `/data/GHDC/nhms-cold-tablespace` | `/home/postgres/pgdata/tablespaces/nhms_cold` | `nhms_cold` |
+
+安装器 `scripts/node27_cold_tablespace_install.py` 默认 dry-run。它只在显式
+`--enforce`、所有 descriptor-bound RAID/SMART/备份/容量 gate 新鲜通过、且
+拓扑完全不存在时才允许改变容器或 catalog。完整且可读的既有拓扑是无写
+`already_ready`；任何部分、漂移或未知状态都是 NO-GO，绝不尝试猜测性修复。
+
+容器操作必须从 bounded inert `docker inspect` JSON 取得，并以 argv list 重建。
+重建前先将旧 `nhms-db` 停止并 rename，保留为回滚权威；带精确 Env 的恢复
+bundle 必须原子写入 mode 0600 私有路径，公开 receipt 只能保留字段名、摘要和
+非秘密配置。不得 shell-source inspect 或 env，也不得将 password、DSN、signed URL
+写入 stderr 或 receipt。新容器 bind ready 后才可执行：
+
+```sql
+CREATE TABLESPACE "nhms_cold"
+  LOCATION '/home/postgres/pgdata/tablespaces/nhms_cold';
+```
+
+随后 fresh readback 必须同时证明 catalog location、`pg_tblspc` target、当前 bind
+source、host device identity 和容器可写性；还必须证明两个业务 hypertable 没有
+attach `nhms_cold`，新 chunk 仍在 `pg_default`。不得 attach tablespace，不得在此
+步骤移动 chunk。
+
+失败 rollback 仅可删除 installer 自己创建且无 dependents 的 catalog/container state，
+然后恢复旧容器。只要 catalog、`pg_tblspc`、运行或 stopped container bind、path identity
+或 emptiness 有任一引用/不确定，就不得删 host directory，亦不得将空目录 bind 到仍有
+有效数据的 container path。
+
+### #1894 disposable Docker oracle（仅 node-27、绝不使用 live identity）
+
+此 oracle 不是 live install 命令；它只创建带 `nhms-1894-tablespace-` 前缀的唯一
+container/prior 名、由内核临时分配的非 `55432` loopback port，及一个唯一临时 work root。它在任何 Docker、
+filesystem 或 DB 操作前拒绝 `nhms-db`、`nhms-db-before`、`/data/GHDC`、
+`/home/nwm/NWM`、`/home/nwm/nhms-pgdata`、活动 checkout 和全部 #1892 前缀。真实测试唯一命令是：
+
+```bash
+NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
+```
+
+前提是 `nwm` 可对一个**已验证为 disposable**的唯一 root 使用免交互 sudo，先以 direct argv
+运行 checked-in `scripts/node27_cold_tablespace_root_evidence_setup.py --action prepare ...`；它必须创建
+root-owned approved mode `0640`、uid `0` 的 synthetic `mdadm`、两个 SMART PASS 与 backup inventory envelope。测试不会降低
+production parser 的 `expected_uid=0`、descriptor identity、hostname、command、subject/member 或 mode
+校验。若 `sudo -n` 或 root helper 不可用，marker 测试必须在 Docker mutation 前 skip/fail，并保留 actionable
+原因。测试 finally 必须检查 current/prior 均不存在、port 可 bind、并 identity-check 后删除 work root；清理失败即失败。
+
+每一次 `--enforce` mutation 和 rollback 前，安装器都必须以固定 argv
+`/usr/bin/systemctl --user --no-pager show <unit> -p ActiveState -p SubState -p Result`
+重新读取以下六个 unit：autopipe service/timer、timeseries-compression service/timer、
+timeseries-retention service/timer。仅 `ActiveState=inactive`、service `SubState=dead`
+或 timer `SubState=waiting`、且 `Result=success|n/a` 可通过；active、failed、unknown 或
+缺字段一律 NO-GO。#1894 不执行 stop/start：#1895 的人工执行顺序是先 drain 并确认上述
+六个 unit 全部静止，再运行 installer；若需要 rollback，先再次确认静止，删除仅限已证明
+installer-owned 的 replacement/catalog/path，rename/start prior `nhms-db`，最后 fresh
+inspect catalog、`pg_tblspc`、bind、device、writability 和 prior config equality，才恢复
+writer/timer 的原有启用状态。恢复或终态 receipt 发布失败时保留 private authority，绝不对
+已完整 target 猜测性 rollback。
+
+## 6. 口令轮换
 
 两个角色：`nhms`（应用写路径，**目前仍是 superuser**）与 `nhms_display_ro`（只读边界）。
 

@@ -688,6 +688,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_grid_stability_verification.py",
             "tests/test_integration_gate.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
             NODE22_ENTRYPOINT_INVARIANT_TEST,
         ),
     ),
@@ -2155,8 +2156,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1646: a pytest-config change must re-prove the thread-exception
         # policy (the file carries the exact filter and the no-timeout
         # decision) and still keep core smoke plus the selector meta-guard.
+        # #1894 additionally registers the dedicated disposable-Docker marker,
+        # whose gate contract is asserted without executing its real rows.
         "pyproject.toml",
-        (*CORE_SMOKE_TESTS, *THREAD_EXCEPTION_POLICY_TESTS, SELECTOR_META_GUARD_TEST),
+        (
+            *CORE_SMOKE_TESTS,
+            *THREAD_EXCEPTION_POLICY_TESTS,
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            SELECTOR_META_GUARD_TEST,
+        ),
     ),
     PathTestRule(
         # #1646: a dependency-lock change could add pytest-timeout, so the lock
@@ -2211,6 +2219,205 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_probe_compressed_chunk_cold_tablespace.py",
             "tests/test_probe_compressed_chunk_cold_tablespace_cleanup.py",
+        ),
+    ),
+    # #1894 installer owners are deliberately partitioned by safety boundary,
+    # not by same-stem test filename.  These rows attach their direct public
+    # contracts while the shared-library baseline remains additive below.
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_identity.py",
+        (
+            "tests/test_node27_cold_tablespace_identity.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_types.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_container.py",
+        (
+            "tests/test_node27_cold_tablespace_container.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_evidence.py",
+        (
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_host.py",
+        (
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_authority.py",
+        (
+            "tests/test_node27_cold_tablespace_authority.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_receipt.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_topology.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_engine.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_recovery.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_authority.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_install.py",
+        (
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_integration.py",
+        (
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_cold_tablespace_install.py",
+        (
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_cold_tablespace_root_evidence_setup.py",
+        (
+            *CORE_SMOKE_TESTS,
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/node27_cold_tablespace_install_receipt.schema.json",
+        ("tests/test_node27_cold_tablespace_install.py",),
+    ),
+    PathTestRule(
+        "schemas/examples/node27_cold_tablespace_install_receipt*.example.json",
+        ("tests/test_node27_cold_tablespace_install.py",),
+    ),
+    # The governance runtime consumes the installer evidence boundary.  Its own
+    # four modules share the same two public contract suites.
+    PathTestRule(
+        "packages/common/node27_cold_governance*.py",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_resource_governance.py",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/node27_cold_governance_receipt.schema.json",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/node27_cold_governance_receipt*.example.json",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/env/node27-resource-governance.example",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node27-resource-governance.service",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node27-resource-governance.timer",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_resource_governance_once.sh",
+        (
+            *CORE_SMOKE_TESTS,
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
         ),
     ),
     PathTestRule(

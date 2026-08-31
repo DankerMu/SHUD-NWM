@@ -130,13 +130,21 @@ Seams under test:
 
 ## 3. #1894 — Install and govern the fresh cold tablespace
 
-- [ ] 3.1 Implement dry-run-default installation/preflight for `nhms_cold` with fixed host/container paths, empty non-symlink directory, exact owner/mode/device, root RAID/SMART evidence freshness, capacity/rollback budget, and backup coverage gates.
-- [ ] 3.2 Implement exact raw-container config snapshot/diff/recreate/ready/rollback handling that preserves image, env, ports, mounts, limits and restart policy while adding only the cold bind and refusing empty-directory shadowing.
-- [ ] 3.3 Implement `CREATE TABLESPACE` and readback validation for catalog location, current container bind source, host device and writability; prove neither business hypertable is attached and new chunks remain in `pg_default`.
-- [ ] 3.4 Extend governance to sample `/home` and `/data/GHDC` together and separately report filesystem capacity, PGDATA, cold relation bytes, object-store and shared residual use, plus trend/threshold evidence.
-- [ ] 3.5 Detect dangling catalog/bind/filesystem identities, stopped-container stale mounts, degraded/rebuilding/unknown RAID fixtures, SMART failures, permission/capacity faults, and PGDATA-only backup gaps; all live-precondition failures are NO-GO.
-- [ ] 3.6 Document and test rollback that stops writers/timers, restores the prior container, verifies catalog/read paths, never deletes a referenced path, and never binds an empty directory over valid data.
-- [ ] 3.7 Run disposable install/rollback tests, healthy/degraded/rebuilding/unknown RAID/SMART fixtures, exact container identity diff tests, governance reconciliation tests, strict OpenSpec validation, focused pytest, and `uv run ruff check .`.
+- [x] 3.1 Implement dry-run-default installation/preflight for `nhms_cold` with fixed host/container paths, empty non-symlink directory, exact owner/mode/device, root RAID/SMART evidence freshness, capacity/rollback budget, and backup coverage gates.
+- [x] 3.2 Implement exact raw-container config snapshot/diff/recreate/ready/rollback handling that preserves image, env, ports, mounts, limits and restart policy while adding only the cold bind and refusing empty-directory shadowing.
+- [x] 3.3 Implement `CREATE TABLESPACE` and readback validation for catalog location, current container bind source, host device and writability; prove neither business hypertable is attached and new chunks remain in `pg_default`.
+- [x] 3.4 Extend governance to sample `/home` and `/data/GHDC` together and separately report filesystem capacity, PGDATA, cold relation bytes, object-store and shared residual use, plus trend/threshold evidence.
+- [x] 3.5 Detect dangling catalog/bind/filesystem identities, stopped-container stale mounts, degraded/rebuilding/unknown RAID fixtures, SMART failures, permission/capacity faults, and PGDATA-only backup gaps; all live-precondition failures are NO-GO.
+- [x] 3.6 Document and test rollback that stops writers/timers, restores the prior container, verifies catalog/read paths, never deletes a referenced path, and never binds an empty directory over valid data.
+- [ ] 3.7 Run disposable install/rollback tests with this minimum checked-in fixture matrix and verification set:
+  - pinned-image synthetic-mount container;
+  - `mdadm --detail` healthy `[UU]`, degraded, rebuilding, recovering/reshaping, missing/substituted-member, and unknown cases;
+  - two-member SMART PASS, one-member FAIL, and one-member unknown;
+  - correct/wrong/missing mount, symlink, nonempty, and wrong owner/mode/device paths;
+  - catalog absent, expected, drifted, and dangling `pg_tblspc` targets;
+  - PGDATA-only and PGDATA-plus-all-target backup inventories;
+  - stopped-container stale mount, rollback empty-shadow, and referenced-path deletion attempts;
+  - exact container config diff, installer normal/already-ready/NO-GO/progress/rollback/error receipts, governance healthy/drift receipts, selector ownership, strict OpenSpec, focused pytest, and `uv run ruff check .`.
 
 ## 4. #1895 — Controlled node-27 rollout and closure
 
@@ -157,7 +165,7 @@ Seams under test:
 
 - Public API / CLI / config: tasks 2.2, 2.4, 3.1-3.3; invalid/missing values -> pre-connect/pre-mutation refusal.
 - File IO / path / permissions / secrets: tasks 1.2, 2.3, 3.1-3.2; symlink/alias/mode/credential cases -> stable refusal/redaction and no unsafe overwrite.
-- Schema / evidence identity: tasks 1.7, 2.3, 4.8; each producer output -> schema validation plus independent semantic readback.
+- Schema / evidence identity: tasks 1.7, 2.3, 3.1-3.7, 4.8; installer private recovery authority and public installer/governance receipts -> schema validation, redaction/secret rejection, durable publication, and independent semantic readback.
 - Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.2-4.6; lock/timeout/full/interruption/race -> rollback or explicit recovery state.
 - Legacy/display compatibility: tasks 2.4, 3.3, 4.5-4.7; unchanged hot/new chunks, ingest, retention and display -> existing behavior and performance.
 - TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.4-4.7; exact 2.10.2 catalog/lifecycle and business-time boundaries -> real isolated/live oracle evidence.

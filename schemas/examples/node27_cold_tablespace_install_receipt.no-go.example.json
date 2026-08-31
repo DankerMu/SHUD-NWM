@@ -1,0 +1,84 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-31T12:00:00Z",
+  "mode": "dry-run",
+  "outcome": "no_go",
+  "state": "blocked",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tablespace": "nhms_cold",
+  "container": "nhms-db",
+  "path": {
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "container_path": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "exists": false,
+    "device_identity": null,
+    "owner_uid": null,
+    "owner_gid": null,
+    "mode": null,
+    "empty": null
+  },
+  "container_snapshot": {
+    "config_digest": null,
+    "environment_names": []
+  },
+  "evidence": {
+    "health": {
+      "healthy": false
+    },
+    "backup": {
+      "complete": false
+    },
+    "capacity": {
+      "approved": false
+    }
+  },
+  "readback": {
+    "approved": false,
+    "catalog_location": null,
+    "pg_tblspc_target": null,
+    "container_bind": null,
+    "device_identity": null,
+    "container_writable": null,
+    "hypertable_attached": false,
+    "new_chunk_tablespace": null
+  },
+  "ownership": {
+    "prior_container": null,
+    "installer_container_created": false,
+    "catalog_created": false,
+    "host_path_created": false,
+    "recovery_authority": false
+  },
+  "rollback": {
+    "attempted": false,
+    "prior_restored": false,
+    "host_path_removed": false,
+    "blockers": []
+  },
+  "blockers": [
+    "backup coverage is incomplete"
+  ],
+  "error": {
+    "class": "precondition",
+    "stage": "backup",
+    "reason": "inventory missing required target"
+  },
+  "identity": {
+    "kind": "production",
+    "container_name": "nhms-db",
+    "prior_container_name": "nhms-db-before",
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "container_path": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "tablespace": "nhms_cold",
+    "docker_bin": "/usr/bin/docker",
+    "host_port": 55432,
+    "work_root": null,
+    "image_id": null,
+    "image_ref": null
+  },
+  "authority": {
+    "state": "closed",
+    "phase": null,
+    "path_present": false
+  }
+}

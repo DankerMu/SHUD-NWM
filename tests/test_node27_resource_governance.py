@@ -94,6 +94,59 @@ def test_config_does_not_emit_database_url(monkeypatch: pytest.MonkeyPatch) -> N
     assert receipt["safety"]["database_url_redacted"] is True
 
 
+def test_optional_cold_governance_receipt_is_refusal_until_descriptor_evidence_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "cold-governance.json"
+    args = governance.build_parser().parse_args(
+        ["--cold-governance-receipt-path", str(output), "--cold-governance-head-sha", "a" * 40]
+    )
+    config = governance.config_from_args(args)
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {
+                "home": {"path": "/home", "total_bytes": 100, "free_bytes": 20, "used_bytes": 80},
+                "object_store_fs": {"path": "/data/GHDC", "total_bytes": 100, "free_bytes": 20, "used_bytes": 80},
+            },
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(governance, "collect_postgres", lambda _url: {"status": "skipped"})
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+
+    governance.build_receipt(config)
+
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "refusal"
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_governance_cli_accepts_descriptor_evidence_and_prior_trend_configuration(tmp_path: Path) -> None:
+    args = governance.build_parser().parse_args(
+        [
+            "--cold-governance-receipt-path", str(tmp_path / "receipt.json"),
+            "--cold-governance-evidence-hostname", "node27-test",
+            "--cold-governance-evidence-max-age-seconds", "300",
+            "--cold-governance-evidence-approved-mode", "0600",
+            "--cold-governance-mdadm-evidence-path", str(tmp_path / "mdadm.json"),
+            "--cold-governance-smart-evidence", f"/dev/sdb1={tmp_path / 'sdb.json'}",
+            "--cold-governance-smart-evidence", f"/dev/sdc1={tmp_path / 'sdc.json'}",
+            "--cold-governance-backup-evidence-path", str(tmp_path / "backup.json"),
+            "--cold-governance-prior-receipt-path", str(tmp_path / "prior.json"),
+            "--cold-governance-prior-receipt-max-age-seconds", "600",
+        ]
+    )
+
+    config = governance.config_from_args(args)
+
+    assert config.cold_governance_evidence_hostname == "node27-test"
+    assert config.cold_governance_evidence_approved_modes == (0o600,)
+    assert dict(config.cold_governance_smart_evidence_paths)["/dev/sdb1"] == tmp_path / "sdb.json"
+    assert config.cold_governance_prior_receipt_max_age_seconds == 600
+
+
 def test_quiet_flag_is_available_for_systemd_wrapper() -> None:
     args = governance.build_parser().parse_args(["--quiet"])
 
@@ -261,5 +314,3 @@ def test_collect_systemd_receipt_includes_retention_units(
     ):
         assert services[unit]["command"]["status"] == "ok"
         assert services[unit]["properties"].get("Id") == "stub"
-
-

@@ -98,6 +98,72 @@ units, wrappers and env templates no longer exist in the repository, and
 node-27 cleanup of any leftover installed units is the one-off step recorded
 in #1370's live evidence, not a recurring procedure.
 
+## #1894 cold-tablespace installation and governance contract (no live rollout)
+
+Issue #1894 introduces only the tested installation/preflight and audit contract for
+`nhms_cold`; it does not authorize a node-27 mutation, chunk movement, archive-lane
+revival, or a new timer. Live install, writer quiescence, migration, performance proof
+and any archive decision are explicitly #1895 work.
+
+The fixed identities are `nhms_cold`, host
+`/data/GHDC/nhms-cold-tablespace`, container
+`/home/postgres/pgdata/tablespaces/nhms_cold`, and production container `nhms-db`.
+The installer is dry-run by default. Enforce requires fresh root-owned, descriptor-bound
+`mdadm --detail` evidence for exactly two active members, descriptor-bound SMART PASS
+for each parsed member, complete backup inventory for PGDATA **and every external
+`pg_tblspc` target**, explicit capacity plus rollback headroom, and an empty non-symlink
+path with exact owner/mode/mount/device identity. `[UU]`, a payload claim of root,
+a successful mount, or PGDATA-only backup is not sufficient.
+
+A complete matching topology reports `already_ready` with no writes. Any catalog/bind/
+path partial, drift, dangling `pg_tblspc`, stale stopped-container mount, capacity shortfall
+or uncertain identity reports a schema-valid NO-GO and replaces a stale success receipt.
+No install step attaches `nhms_cold` to a hypertable; new chunks remain `pg_default`.
+
+Governance samples `/home` and `/data/GHDC` inside one recorded interval, retaining
+individual observation time and filesystem identity. It separately records total/free/used,
+PGDATA bytes, `nhms_cold` relation bytes, object-store bytes and residual shared use.
+Residual is `filesystem used - non-overlapping known categories`; it never recursively
+walks the shared `/data/GHDC` root and never clamps negative/overlapping residual to zero.
+Its strict mode-0600 receipt reports healthy, drift or refusal with health/backup/catalog/
+mount evidence but no credential, raw environment value or signed URL.
+
+Rollback restores the renamed exact prior container and removes only installer-owned,
+unreferenced state. A path remains untouched when a catalog dependency, `pg_tblspc`, current
+or stopped bind, nonempty directory, or identity uncertainty remains. This prevents empty
+path shadowing over live data. The installer writes a private mode-0600 recovery authority
+before the first host/container mutation, advances it after path creation, stop, rename,
+replacement creation and DDL, then publishes a public terminal receipt before durable
+authority removal. A new process dry-run reports `recovery_required`; enforce re-inspects
+catalog/path/current and stopped containers. It either proves the expected complete target
+and removes the authority, or restores only an owned incomplete target. Mixed/drifted or
+referenced topology keeps the authority and remains NO-GO.
+
+#1894 never stops these production writers. #1895 must first drain and observe inactive
+`nhms-node27-autopipe.{service,timer}`, `nhms-node27-timeseries-compression.{service,timer}`
+and `nhms-node27-timeseries-retention.{service,timer}`. The same fresh check repeats before
+rollback. After restoration, fresh inspect must prove the prior config, no cold bind, catalog
+state and path references before restoring original timer enablement. Governance has no
+shared-root walk: one audit interval samples `/home` and `/data/GHDC`, carries descriptor
+identities for RAID/SMART/backup, discovers all external `pg_tblspc` targets for backup scope,
+and binds optional prior receipt trend by no-follow mode-0600 identity.
+
+### Disposable installer oracle prerequisite
+
+#1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
+`nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
+`/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
+identity（port 由内核临时分配，且永不为 55432），且 `sudo -n` 可用；root setup helper 以 direct argv 写入 root-owned、reader group 可读的 mode-0640
+synthetic mdadm、双 SMART PASS 和 backup evidence（production parser 的 uid 0 / descriptor / command /
+hostname / subject 检查不降低）。然后仅运行：
+
+```bash
+NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
+```
+
+这不是 #1895 live rollout 授权。若 root setup 或 sudo 不可用，测试必须在 Docker mutation 前给出可行动
+skip/fail；不能用 `expected_uid=os.getuid()` 或任意 identity override 替代。
+
 ## Timer cadence order (UTC)
 
 | Order | Timer                                        | OnCalendar         | Rationale |

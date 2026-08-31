@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Node-27 Cold Tablespace Governance Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "normalized_path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "uid": {"type": "integer", "minimum": 0},
+        "gid": {"type": "integer", "minimum": 0},
+        "mode": {"type": "integer", "minimum": 0, "maximum": 511}
+      },
+      "required": ["sha256"]
+    },
+    "filesystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "identity": {"type": "string", "minLength": 1, "maxLength": 256},
+        "total_bytes": {"type": "integer", "minimum": 0},
+        "free_bytes": {"type": "integer", "minimum": 0},
+        "used_bytes": {"type": "integer", "minimum": 0},
+        "pgdata_bytes": {"type": "integer", "minimum": 0},
+        "nhms_cold_relation_bytes": {"type": "integer", "minimum": 0},
+        "object_store_bytes": {"type": "integer", "minimum": 0},
+        "residual_bytes": {"type": "integer"}
+      },
+      "required": ["path", "observed_at", "identity", "total_bytes", "free_bytes", "used_bytes", "pgdata_bytes", "nhms_cold_relation_bytes", "object_store_bytes", "residual_bytes"]
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "healthy": {"type": "boolean"},
+        "raid": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {"file_identity": {"$ref": "#/$defs/fileIdentity"}}
+        },
+        "reason": {"type": "string", "maxLength": 256},
+        "smart": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "device": {"type": "string", "minLength": 1},
+              "status": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+              "file_identity": {"$ref": "#/$defs/fileIdentity"}
+            },
+            "required": ["device", "status", "file_identity"]
+          }
+        }
+      },
+      "required": ["healthy"]
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "complete": {"type": "boolean"},
+        "file_identity": {"$ref": "#/$defs/fileIdentity"},
+        "missing_targets": {"type": "array", "items": {"type": "string", "maxLength": 512}},
+        "reason": {"type": "string", "maxLength": 256}
+      },
+      "required": ["complete"]
+    },
+    "mountInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current": {"type": "array", "items": {"type": ["string", "object"]}},
+        "stopped": {"type": "array", "items": {"type": ["string", "object"]}}
+      },
+      "required": ["current", "stopped"]
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tablespace": {"const": "nhms_cold"},
+        "location": {"type": ["string", "null"], "maxLength": 512},
+        "relations": {"type": "array", "items": {"type": "object"}}
+      },
+      "required": ["tablespace", "location", "relations"]
+    },
+    "trend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["baseline", "trend", "invalid"]},
+        "prior": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": "string", "minLength": 1, "maxLength": 512},
+            "device": {"type": "integer", "minimum": 0},
+            "inode": {"type": "integer", "minimum": 0},
+            "bytes": {"type": "integer", "minimum": 0},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "required": ["path", "device", "inode", "bytes", "sha256"]
+        },
+        "deltas": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "home_residual_bytes": {"type": "integer"},
+            "cold_residual_bytes": {"type": "integer"}
+          },
+          "required": ["home_residual_bytes", "cold_residual_bytes"]
+        },
+        "blockers": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 8}
+      },
+      "required": ["status", "prior", "deltas", "blockers"]
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "head_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "outcome": {"enum": ["healthy", "drift", "refusal"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "filesystems": {"type": "object", "additionalProperties": false, "properties": {"home": {"$ref": "#/$defs/filesystem"}, "cold": {"$ref": "#/$defs/filesystem"}}, "required": ["home", "cold"]},
+    "trend": {"$ref": "#/$defs/trend"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "health": {"$ref": "#/$defs/health"},
+        "backup": {"$ref": "#/$defs/backup"},
+        "mount_inventory": {"$ref": "#/$defs/mountInventory"},
+        "catalog": {"$ref": "#/$defs/catalog"},
+        "host_path": {"type": "object"}
+      },
+      "required": ["health", "backup", "mount_inventory", "catalog"]
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "home_residual_bytes": {"type": "integer"},
+        "cold_residual_bytes": {"type": "integer"},
+        "home_residual_minimum_bytes": {"type": "integer", "minimum": 0},
+        "cold_residual_minimum_bytes": {"type": "integer", "minimum": 0}
+      },
+      "required": ["home_residual_bytes", "cold_residual_bytes"]
+    },
+    "blockers": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 64}
+  },
+  "required": ["schema_version", "generated_at", "head_sha", "outcome", "started_at", "finished_at", "filesystems", "trend", "evidence", "thresholds", "blockers"],
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "healthy"}}},
+      "then": {
+        "properties": {
+          "blockers": {"maxItems": 0},
+          "evidence": {
+            "properties": {
+              "health": {"properties": {"healthy": {"const": true}, "smart": {"minItems": 2, "maxItems": 2, "items": {"properties": {"status": {"const": "PASS"}}}}}},
+              "backup": {"properties": {"complete": {"const": true}, "missing_targets": {"maxItems": 0}}},
+              "mount_inventory": {"properties": {"stopped": {"maxItems": 0}}},
+              "trend": {"properties": {"status": {"enum": ["baseline", "trend"]}, "blockers": {"maxItems": 0}}}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

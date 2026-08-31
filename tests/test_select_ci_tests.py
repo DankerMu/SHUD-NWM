@@ -56,6 +56,182 @@ from scripts.select_ci_tests import (
 )
 
 
+def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consumers() -> None:
+    expected = {
+        "packages/common/node27_cold_tablespace_identity.py": {
+            "tests/test_node27_cold_tablespace_identity.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        },
+        "packages/common/node27_cold_tablespace_types.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        },
+        "packages/common/node27_cold_tablespace_container.py": {
+            "tests/test_node27_cold_tablespace_container.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        },
+        "packages/common/node27_cold_tablespace_evidence.py": {
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+        },
+        "packages/common/node27_cold_tablespace_host.py": {
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+        },
+        "packages/common/node27_cold_tablespace_authority.py": {
+            "tests/test_node27_cold_tablespace_authority.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        },
+        "packages/common/node27_cold_tablespace_receipt.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        },
+        "packages/common/node27_cold_tablespace_topology.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        },
+        "packages/common/node27_cold_tablespace_engine.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        },
+        "packages/common/node27_cold_tablespace_recovery.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_authority.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+        },
+        "packages/common/node27_cold_tablespace_install.py": {
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        },
+        "packages/common/node27_cold_tablespace_integration.py": {
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+        },
+        "scripts/node27_cold_tablespace_install.py": {
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_dry_run.py",
+        },
+        "scripts/node27_cold_tablespace_root_evidence_setup.py": {
+            "tests/test_node27_cold_tablespace_cli.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+            "tests/test_node27_cold_tablespace_evidence.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+        },
+        "schemas/node27_cold_tablespace_install_receipt.schema.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.already-ready.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.error.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.no-go.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.pending-cleanup.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.progress.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "schemas/examples/node27_cold_tablespace_install_receipt.rollback.example.json": {
+            "tests/test_node27_cold_tablespace_install.py",
+        },
+        "packages/common/node27_cold_governance.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "packages/common/node27_cold_governance_cli.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "packages/common/node27_cold_governance_history.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "packages/common/node27_cold_governance_runtime.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "scripts/node27_resource_governance.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "schemas/node27_cold_governance_receipt.schema.json": {
+            "tests/test_node27_cold_governance.py",
+        },
+        "schemas/examples/node27_cold_governance_receipt.example.json": {
+            "tests/test_node27_cold_governance.py",
+        },
+        "schemas/examples/node27_cold_governance_receipt.drift.example.json": {
+            "tests/test_node27_cold_governance.py",
+        },
+        "pyproject.toml": {"tests/test_node27_cold_tablespace_marker_contract.py"},
+        "tests/conftest.py": {"tests/test_node27_cold_tablespace_marker_contract.py"},
+        "infra/env/node27-resource-governance.example": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "infra/systemd/nhms-node27-resource-governance.service": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "infra/systemd/nhms-node27-resource-governance.timer": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "scripts/node27_resource_governance_once.sh": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+    }
+
+    for producer, consumers in expected.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert consumers <= selected, f"{producer} lost focused consumers: {sorted(consumers - selected)}"
+
+
+def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
+    consumers = (
+        "tests/test_node27_cold_tablespace_identity.py",
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+        "tests/test_node27_cold_tablespace_root_evidence.py",
+        "tests/test_node27_cold_tablespace_cli.py",
+        "tests/test_node27_cold_tablespace_container.py",
+        "tests/test_node27_cold_tablespace_authority.py",
+        "tests/test_node27_cold_tablespace_evidence.py",
+        "tests/test_node27_cold_tablespace_host.py",
+        "tests/test_node27_cold_tablespace_install.py",
+        "tests/test_node27_cold_tablespace_recovery_contract.py",
+        "tests/test_node27_cold_tablespace_dry_run.py",
+        "tests/test_node27_cold_tablespace_integration.py",
+        "tests/test_node27_cold_governance.py",
+        "tests/test_node27_resource_governance.py",
+    )
+
+    for consumer in consumers:
+        assert consumer in select_tests([consumer], repo_root=Path(".")), consumer
+
+
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
     test_path = tmp_path / "tests" / "test_example.py"
     test_path.parent.mkdir()

@@ -25,6 +25,7 @@ def isolate_timeseries_lifecycle_lock(
     isolated = pathlib.Path(lock_dir / "lifecycle.lock")
     monkeypatch.setattr("packages.common.node27_timeseries_lifecycle_lock.LIFECYCLE_LOCK_PATH", isolated)
 
+
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -82,18 +83,33 @@ def pytest_configure(config: pytest.Config) -> None:
         "timescaledb_210: compression-semantics tests whose only valid oracle is a node-27 "
         "throwaway DB (TimescaleDB 2.10.2); CI's pg15-latest does not prove them",
     )
+    config.addinivalue_line(
+        "markers",
+        "node27_docker: disposable Docker oracle; opt in only with NHMS_RUN_NODE27_DOCKER=1",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     del config
     skip_reason = _integration_skip_reason()
     skip_integration = pytest.mark.skip(reason=skip_reason or "integration tests are explicitly enabled")
+    node27_docker_skip_reason = _node27_docker_skip_reason()
+    skip_node27_docker = pytest.mark.skip(
+        reason=node27_docker_skip_reason or "node-27 Docker oracle is explicitly enabled"
+    )
     e2e_skip_reason = _opt_in_skip_reason("e2e", "NHMS_RUN_E2E")
     grib_skip_reason = _opt_in_skip_reason("grib", "NHMS_RUN_GRIB")
     skip_e2e = pytest.mark.skip(reason=e2e_skip_reason or "e2e tests are explicitly enabled")
     skip_grib = pytest.mark.skip(reason=grib_skip_reason or "grib tests are explicitly enabled")
     for item in items:
-        if "integration" in item.keywords and skip_reason:
+        is_node27_docker = _is_node27_docker_keywords(item.keywords)
+        # A triple-marked disposable node runs its own PostgreSQL container and
+        # deliberately does not consume NHMS_INTEGRATION_DATABASE_URL.  Every
+        # other integration item retains the original gate exactly.
+        if is_node27_docker:
+            if node27_docker_skip_reason:
+                item.add_marker(skip_node27_docker)
+        elif "integration" in item.keywords and skip_reason:
             item.add_marker(skip_integration)
         if "e2e" in item.keywords and e2e_skip_reason:
             item.add_marker(skip_e2e)
@@ -211,6 +227,24 @@ def _integration_skip_reason() -> str | None:
             "NHMS_ALLOW_DATABASE_URL_INTEGRATION=1 is also set for compatibility"
         )
     return None
+
+
+def _is_node27_docker_keywords(keywords: object) -> bool:
+    """True only for the dedicated disposable-Docker triple marker."""
+
+    try:
+        return {"integration", "timescaledb_210", "node27_docker"}.issubset(keywords)
+    except TypeError:
+        return False
+
+
+def _node27_docker_skip_reason() -> str | None:
+    if _env_flag("NHMS_RUN_NODE27_DOCKER"):
+        return None
+    return (
+        "node27_docker tests require explicit opt-in with NHMS_RUN_NODE27_DOCKER=1; "
+        "run only on the node-27 disposable Docker oracle, never against nhms-db"
+    )
 
 
 def _opt_in_skip_reason(marker: str, env_var: str) -> str | None:

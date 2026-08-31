@@ -20,6 +20,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from packages.common.node27_cold_governance import (
+    GovernanceConfig,
+    build_cold_governance_receipt,
+    write_cold_governance_receipt,
+)
+from packages.common.node27_cold_governance_cli import (
+    add_cold_governance_arguments,
+    validate_cold_governance_arguments,
+)
+from packages.common.node27_cold_governance_runtime import ColdGovernanceRuntimeConfig, cold_governance_evidence
+
 SCHEMA_VERSION = "nhms.node27_resource_governance.audit.v1"
 
 DEFAULT_SERVICES = (
@@ -85,6 +96,23 @@ class AuditConfig:
     summary_path: Path | None
     services: tuple[str, ...]
     thresholds: AuditThresholds
+    cold_governance_receipt_path: Path | None = None
+    cold_governance_head_sha: str | None = None
+    cold_governance_home_residual_minimum_bytes: int = 0
+    cold_governance_cold_residual_minimum_bytes: int = 0
+    cold_governance_evidence_hostname: str | None = None
+    cold_governance_array_device: str = "/dev/md0"
+    cold_governance_evidence_max_age_seconds: int | None = None
+    cold_governance_evidence_owner_uid: int = 0
+    cold_governance_evidence_approved_modes: tuple[int, ...] = ()
+    cold_governance_mdadm_evidence_path: Path | None = None
+    cold_governance_smart_evidence_paths: tuple[tuple[str, Path], ...] = ()
+    cold_governance_backup_evidence_path: Path | None = None
+    cold_governance_mdadm_bin: str = "/usr/sbin/mdadm"
+    cold_governance_smartctl_bin: str = "/usr/sbin/smartctl"
+    cold_governance_backup_inventory_bin: str = "/usr/local/sbin/nhms-backup-inventory"
+    cold_governance_prior_receipt_path: Path | None = None
+    cold_governance_prior_receipt_max_age_seconds: int | None = None
 
 
 def _utc_now() -> str:
@@ -122,6 +150,17 @@ def _safe_resolve(path: Path | None) -> Path | None:
         return path.expanduser()
 
 
+def _filesystem_identity(path: Path) -> str | None:
+    """Return a local statvfs/device identity without scanning a shared root."""
+
+    try:
+        info = path.stat()
+        usage = os.statvfs(path)
+    except OSError:
+        return None
+    return f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{usage.f_fsid}"
+
+
 def _disk_usage(path: Path) -> dict[str, Any]:
     resolved = _safe_resolve(path)
     if resolved is None:
@@ -140,6 +179,7 @@ def _disk_usage(path: Path) -> dict[str, Any]:
         "total_pretty": _bytes_pretty(usage.total),
         "used_pretty": _bytes_pretty(usage.used),
         "free_pretty": _bytes_pretty(usage.free),
+        "device_identity": _filesystem_identity(resolved),
     }
 
 
@@ -211,6 +251,7 @@ def collect_filesystem(config: AuditConfig) -> dict[str, Any]:
         "home": _disk_usage(Path("/home")),
         "repo_root_fs": _disk_usage(config.repo_root),
         "object_store_fs": _disk_usage(config.object_store_root),
+        "cold": _disk_usage(Path("/data/GHDC")),
     }
     path_sizes: dict[str, Any] = {
         "repo_root": _du_bytes(config.repo_root),
@@ -398,6 +439,35 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
                 LIMIT 20
                 """,
             )
+            result["external_pg_tblspc_targets"] = _psycopg_rows(
+                cursor,
+                """
+                SELECT pg_tablespace_location(oid) AS target
+                FROM pg_tablespace
+                WHERE pg_tablespace_location(oid) <> ''
+                ORDER BY target
+                """,
+            )
+            result["cold_tablespace"] = _psycopg_rows(
+                cursor,
+                """
+                SELECT spcname AS tablespace, pg_tablespace_location(oid) AS location
+                FROM pg_tablespace
+                WHERE spcname = 'nhms_cold'
+                """,
+            )
+            result["cold_relation_by_tablespace"] = _psycopg_rows(
+                cursor,
+                """
+                SELECT n.nspname AS schema, c.relname AS relation, c.oid,
+                       pg_total_relation_size(c.oid) AS bytes
+                FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                JOIN pg_tablespace AS s ON s.oid = c.reltablespace
+                WHERE s.spcname = 'nhms_cold'
+                ORDER BY c.oid
+                """,
+            )
             try:
                 result["hypertables"] = _psycopg_rows(
                     cursor,
@@ -481,6 +551,57 @@ def _temp_bytes(postgres: Mapping[str, Any], name: str = "nhms") -> int:
         if row.get("datname") == name:
             return int(row.get("temp_bytes") or 0)
     return 0
+
+
+def _cold_governance_sample(
+    filesystem: Mapping[str, Any], postgres: Mapping[str, Any], *, path: str, observed_at: str
+) -> dict[str, Any]:
+    """Build one bounded category sample without recursively scanning shared roots."""
+
+    filesystems = filesystem.get("filesystems") if isinstance(filesystem.get("filesystems"), Mapping) else {}
+    path_sizes = filesystem.get("path_sizes") if isinstance(filesystem.get("path_sizes"), Mapping) else {}
+    source = filesystems.get("home") if path == "/home" else filesystems.get("cold")
+    source = source if isinstance(source, Mapping) else {}
+    pgdata = path_sizes.get("pgdata_root") if isinstance(path_sizes.get("pgdata_root"), Mapping) else {}
+    object_store_value = path_sizes.get("object_store_root")
+    object_store = object_store_value if isinstance(object_store_value, Mapping) else {}
+    cold_rows = postgres.get("cold_relation_by_tablespace", []) if isinstance(postgres, Mapping) else []
+    cold_bytes = sum(int(row.get("bytes") or 0) for row in cold_rows if isinstance(row, Mapping))
+    object_store_path = str(object_store.get("path") or "")
+    if object_store_path.startswith("/home/"):
+        object_store_on = "/home"
+    elif object_store_path.startswith("/data/GHDC/"):
+        object_store_on = "/data/GHDC"
+    else:
+        object_store_on = None
+    return {
+        "path": path,
+        "observed_at": observed_at,
+        "identity": str(source.get("device_identity") or source.get("path") or path),
+        "total_bytes": int(source.get("total_bytes") or 0),
+        "free_bytes": int(source.get("free_bytes") or 0),
+        "used_bytes": int(source.get("used_bytes") or 0),
+        "pgdata_bytes": int(pgdata.get("bytes") or 0) if path == "/home" else 0,
+        "nhms_cold_relation_bytes": cold_bytes if path == "/data/GHDC" else 0,
+        "object_store_bytes": int(object_store.get("bytes") or 0) if object_store_on == path else 0,
+    }
+
+
+def _cold_runtime_config(config: AuditConfig) -> ColdGovernanceRuntimeConfig:
+    return ColdGovernanceRuntimeConfig(
+        pgdata_root=config.pgdata_root,
+        evidence_hostname=config.cold_governance_evidence_hostname,
+        array_device=config.cold_governance_array_device,
+        evidence_max_age_seconds=config.cold_governance_evidence_max_age_seconds,
+        evidence_owner_uid=config.cold_governance_evidence_owner_uid,
+        evidence_approved_modes=config.cold_governance_evidence_approved_modes,
+        mdadm_evidence_path=config.cold_governance_mdadm_evidence_path,
+        smart_evidence_paths=config.cold_governance_smart_evidence_paths,
+        backup_evidence_path=config.cold_governance_backup_evidence_path,
+        mdadm_bin=config.cold_governance_mdadm_bin,
+        smartctl_bin=config.cold_governance_smartctl_bin,
+        backup_inventory_bin=config.cold_governance_backup_inventory_bin,
+    )
 
 
 def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) -> list[dict[str, Any]]:
@@ -661,6 +782,31 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
         },
     }
     receipt["recommendations"] = _recommendations(receipt, config.thresholds)
+    if config.cold_governance_receipt_path is not None:
+        audit_reference = datetime.now(UTC)
+        evidence = cold_governance_evidence(
+            _cold_runtime_config(config), postgres, observed_at=audit_reference
+        )
+        cold_receipt, cold_schema = build_cold_governance_receipt(
+            config=GovernanceConfig(
+                receipt_path=config.cold_governance_receipt_path,
+                head_sha=config.cold_governance_head_sha,
+                home_residual_minimum_bytes=config.cold_governance_home_residual_minimum_bytes,
+                cold_residual_minimum_bytes=config.cold_governance_cold_residual_minimum_bytes,
+                prior_receipt_path=config.cold_governance_prior_receipt_path,
+                prior_receipt_max_age_seconds=config.cold_governance_prior_receipt_max_age_seconds,
+            ),
+            started_at=started_at,
+            finished_at=receipt["finished_at"],
+            home=_cold_governance_sample(filesystem, postgres, path="/home", observed_at=receipt["finished_at"]),
+            cold=_cold_governance_sample(filesystem, postgres, path="/data/GHDC", observed_at=receipt["finished_at"]),
+            evidence=evidence,
+        )
+        write_cold_governance_receipt(config.cold_governance_receipt_path, cold_receipt, cold_schema)
+        receipt["cold_tablespace_governance"] = {
+            "outcome": cold_receipt["outcome"],
+            "receipt_path": str(config.cold_governance_receipt_path),
+        }
     return receipt
 
 
@@ -683,6 +829,16 @@ def _positive_bytes(raw: str, *, label: str) -> int:
     return value
 
 
+def _nonnegative_bytes(raw: str, *, label: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{label} must be an integer byte count") from error
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{label} must be non-negative")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=os.getenv("NODE27_GOVERNANCE_REPO_ROOT", "/home/nwm/NWM"))
@@ -698,6 +854,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
     parser.add_argument("--summary-path", default=os.getenv("NODE27_GOVERNANCE_SUMMARY_PATH"))
+    parser.add_argument(
+        "--cold-governance-receipt-path",
+        default=os.getenv("NODE27_COLD_GOVERNANCE_RECEIPT_PATH"),
+        help="Optional strict cold-tablespace governance receipt path.",
+    )
+    parser.add_argument("--cold-governance-head-sha", default=os.getenv("NODE27_COLD_GOVERNANCE_HEAD_SHA"))
+    parser.add_argument(
+        "--cold-governance-home-residual-minimum-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="cold-governance-home-residual-minimum-bytes"),
+        default=_nonnegative_bytes(
+            os.getenv("NODE27_COLD_GOVERNANCE_HOME_RESIDUAL_MINIMUM_BYTES", "0"),
+            label="NODE27_COLD_GOVERNANCE_HOME_RESIDUAL_MINIMUM_BYTES",
+        ),
+    )
+    parser.add_argument(
+        "--cold-governance-cold-residual-minimum-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="cold-governance-cold-residual-minimum-bytes"),
+        default=_nonnegative_bytes(
+            os.getenv("NODE27_COLD_GOVERNANCE_COLD_RESIDUAL_MINIMUM_BYTES", "0"),
+            label="NODE27_COLD_GOVERNANCE_COLD_RESIDUAL_MINIMUM_BYTES",
+        ),
+    )
+    add_cold_governance_arguments(parser)
     parser.add_argument("--service", dest="services", action="append", default=[])
     parser.add_argument(
         "--root-free-warn-bytes",
@@ -730,6 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
+    validate_cold_governance_arguments(args)
     thresholds = AuditThresholds(
         root_free_warn_bytes=args.root_free_warn_bytes,
         root_free_critical_bytes=args.root_free_critical_bytes,
@@ -739,6 +919,11 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
     summary_path = Path(args.summary_path).expanduser() if args.summary_path else None
+    cold_governance_receipt_path = (
+        Path(args.cold_governance_receipt_path).expanduser() if args.cold_governance_receipt_path else None
+    )
+    if cold_governance_receipt_path is not None and not cold_governance_receipt_path.is_absolute():
+        raise ValueError("cold governance receipt path must be absolute")
     return AuditConfig(
         repo_root=Path(args.repo_root).expanduser(),
         object_store_root=Path(args.object_store_root).expanduser(),
@@ -747,6 +932,23 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         summary_path=summary_path,
         services=tuple(args.services or DEFAULT_SERVICES),
         thresholds=thresholds,
+        cold_governance_receipt_path=cold_governance_receipt_path,
+        cold_governance_head_sha=args.cold_governance_head_sha,
+        cold_governance_home_residual_minimum_bytes=args.cold_governance_home_residual_minimum_bytes,
+        cold_governance_cold_residual_minimum_bytes=args.cold_governance_cold_residual_minimum_bytes,
+        cold_governance_evidence_hostname=args.cold_governance_evidence_hostname,
+        cold_governance_array_device=args.cold_governance_array_device,
+        cold_governance_evidence_max_age_seconds=args.cold_governance_evidence_max_age_seconds,
+        cold_governance_evidence_owner_uid=args.cold_governance_evidence_owner_uid,
+        cold_governance_evidence_approved_modes=tuple(args.cold_governance_evidence_approved_mode),
+        cold_governance_mdadm_evidence_path=args.cold_governance_mdadm_evidence_path,
+        cold_governance_smart_evidence_paths=tuple(args.cold_governance_smart_evidence),
+        cold_governance_backup_evidence_path=args.cold_governance_backup_evidence_path,
+        cold_governance_mdadm_bin=args.cold_governance_mdadm_bin,
+        cold_governance_smartctl_bin=args.cold_governance_smartctl_bin,
+        cold_governance_backup_inventory_bin=args.cold_governance_backup_inventory_bin,
+        cold_governance_prior_receipt_path=args.cold_governance_prior_receipt_path,
+        cold_governance_prior_receipt_max_age_seconds=args.cold_governance_prior_receipt_max_age_seconds,
     )
 
 

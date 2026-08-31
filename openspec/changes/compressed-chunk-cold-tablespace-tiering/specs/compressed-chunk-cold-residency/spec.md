@@ -399,14 +399,80 @@ chunks SHALL continue to default to `pg_default`.
 - **WHEN** a new time range creates a chunk after installation
 - **THEN** the chunk and its indexes use `pg_default`, and catalog inspection proves neither business hypertable has `nhms_cold` attached
 
+#### Scenario: Existing complete topology is an idempotent no-op
+
+- **WHEN** catalog location, live bind source, host device/identity, writability,
+  no-attach state and new-chunk placement already match the fixed contract
+- **THEN** dry-run and enforce report `already_ready` without recreating the
+  container, issuing DDL, replacing recovery authority, or changing the host
+  directory
+
+#### Scenario: Partial topology is not implicitly repaired
+
+- **WHEN** any subset of catalog, bind, host directory or container state exists
+  but the complete topology is absent or inconsistent
+- **THEN** the installer returns NO-GO with the observed identities and performs
+  no create, replace, delete or best-effort repair action
+
+#### Scenario: Private container recovery bundle never becomes public evidence
+
+- **WHEN** the current raw container config is captured before recreation
+- **THEN** exact secret-bearing environment and reconstructible fields are
+  atomically stored only in a mode-0600 private recovery bundle, while the public
+  receipt contains non-secret normalized fields and exact digests; command
+  substitution, shell evaluation, raw credentials and signed URLs are never
+  executed or serialized publicly
+
+#### Scenario: Rollback never shadows or deletes referenced data
+
+- **WHEN** recreation or tablespace readback fails after the prior container was
+  stopped and renamed
+- **THEN** rollback removes only installer-created catalog/container state,
+  restores the exact prior container, and refuses to bind an empty directory or
+  delete any host path until catalog dependencies, `pg_tblspc`, every current or
+  stopped-container bind, identity and emptiness checks prove it unreferenced
+
+### Requirement: Installer outcomes MUST carry schema-valid identity-bound receipts
+
+The installer MUST atomically publish a mode-0600 schema-valid receipt for
+every dry-run, enforce, already-ready, progress, rollback, NO-GO and error
+outcome. The receipt SHALL bind schema version, exact reviewed head SHA, fixed
+tablespace and host/container paths, observed image/config/mount digests, host
+path/device identity, root evidence file identities and freshness, parsed RAID/
+member SMART state, backup coverage, capacity and rollback headroom, catalog/
+bind/writability readback, mutation ownership, rollback status and stable
+redacted errors. It SHALL never include credentials or the private raw recovery
+bundle.
+
+#### Scenario: Precondition refusal replaces stale success truthfully
+
+- **WHEN** a safe receipt path is known and a path, health, backup, capacity,
+  container, catalog or readiness precondition fails
+- **THEN** the installer publishes a schema-valid NO-GO receipt containing only
+  observed evidence and performs zero live mutation; it never leaves an older
+  success looking current or fabricates missing observations
+
+#### Scenario: Interrupted mutation remains reconstructible
+
+- **WHEN** the installer exits after stopping/renaming the prior container or
+  creating installer-owned state but before terminal readback
+- **THEN** the private recovery bundle and public progress receipt identify every
+  owned mutation and the prior container reconstruction, so a later invocation
+  must finish rollback or prove complete target before admitting a new install
+
 ### Requirement: Production authorization MUST require root RAID, member health and complete backup coverage
 
 A production install or migration SHALL require fresh root-generated
-`mdadm --detail` evidence and SMART PASS evidence for both RAID member devices,
-with no degraded, rebuilding, recovering, missing or unknown state. `/proc/mdstat
-[UU]`, a successful mount, or unprivileged evidence alone SHALL be insufficient.
-It SHALL also require backup/readiness evidence that covers PGDATA and every
-external `pg_tblspc` target; a PGDATA-only backup SHALL block rollout.
+`mdadm --detail` evidence and SMART PASS evidence for exactly the two member
+devices parsed from that array evidence, with no degraded, rebuilding,
+recovering, reshaping, missing, substituted or unknown state. Each evidence
+file SHALL be a bounded descriptor-pinned regular file with mode/owner,
+capture-time, hostname, command and subject-device identity; freshness SHALL be
+checked against an explicit positive configured maximum age and the run's fixed
+UTC observation time. A self-reported root flag, `/proc/mdstat [UU]`, a
+successful mount, or unprivileged evidence alone SHALL be insufficient. It
+SHALL also require a descriptor-bound backup inventory that covers PGDATA and
+every external `pg_tblspc` target; a PGDATA-only backup SHALL block rollout.
 
 #### Scenario: Health evidence is incomplete or unhealthy
 
@@ -420,13 +486,24 @@ external `pg_tblspc` target; a PGDATA-only backup SHALL block rollout.
 
 ### Requirement: Governance MUST report hot and cold storage from one observation without category collapse
 
-Governance SHALL sample `/home` and `/data/GHDC` in one run and separately
-report filesystem total/free bytes, PGDATA bytes, cold-tablespace relation
-bytes, object-store bytes, and residual shared/third-party usage. It SHALL
-surface catalog/filesystem/bind divergence, dangling catalog or bind paths,
-stopped-container stale mounts, capacity/rollback-budget shortfall, and backup
-coverage gaps as explicit blockers. Thresholds SHALL derive from current
-measurements rather than historical constants.
+Governance SHALL sample `/home` and `/data/GHDC` inside one recorded audit
+interval, record each observation time, and separately report filesystem total/
+free bytes, PGDATA bytes, cold-tablespace relation bytes, object-store bytes,
+and residual shared/third-party usage. Residual usage SHALL be derived from
+filesystem-used bytes minus non-overlapping known categories rather than by a
+recursive walk of the shared device root. It SHALL surface catalog/filesystem/
+bind divergence, dangling catalog or bind paths, stopped-container stale mounts,
+negative or unreconcilable residuals, capacity/rollback-budget shortfall, stale
+health evidence, and backup coverage gaps as explicit blockers. Thresholds
+SHALL derive from current measurements rather than historical constants.
+
+Every governance outcome SHALL atomically publish a mode-0600 schema-valid
+receipt binding the schema version, exact head SHA, audit interval, both
+filesystem observation identities and times, separated categories, relation-by-
+tablespace catalog rows, current and stopped-container mount inventories, root
+evidence identities and parsed health, backup coverage, thresholds and all
+blockers. Credentials, raw secret-bearing environment values and signed URLs
+SHALL be redacted or rejected before serialization.
 
 #### Scenario: Same-time healthy sample is internally reconcilable
 
@@ -437,6 +514,22 @@ measurements rather than historical constants.
 
 - **WHEN** a catalog target lacks its live bind, a bind points at an unreferenced directory, a stopped container carries a stale mount, or measured category bytes cannot reconcile
 - **THEN** the receipt names the divergent identities and rollout remains blocked
+
+#### Scenario: Residual accounting cannot hide category overlap
+
+- **WHEN** known-category bytes exceed filesystem-used bytes, categories overlap,
+  or one filesystem sample falls outside the recorded audit interval
+- **THEN** governance records an unreconcilable blocker and never clamps a
+  negative residual to zero or presents the sample as healthy
+
+#### Scenario: Governance refusal is schema-valid and non-secret
+
+- **WHEN** catalog, bind, health, backup or capacity evidence is missing,
+  malformed, stale or divergent
+- **THEN** governance still publishes a schema-valid blocking receipt with
+  observed identities and stable redacted diagnostics, without including the
+  database URL, container environment credentials, signed URLs or raw secret
+  evidence
 
 ### Requirement: Live rollout MUST preserve data, hot placement, display behavior and performance
 

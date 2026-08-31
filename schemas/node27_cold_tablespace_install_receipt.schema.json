@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Node-27 Cold Tablespace Installer Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "class": {"type": "string", "minLength": 1, "maxLength": 64},
+        "stage": {"type": "string", "minLength": 1, "maxLength": 64},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "required": ["class", "stage", "reason"]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["production", "synthetic"]},
+        "container_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "prior_container_name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "host_path": {"type": "string", "pattern": "^/", "maxLength": 512},
+        "container_path": {"const": "/home/postgres/pgdata/tablespaces/nhms_cold"},
+        "tablespace": {"const": "nhms_cold"},
+        "docker_bin": {"const": "/usr/bin/docker"},
+        "host_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "work_root": {"type": ["string", "null"], "maxLength": 512},
+        "image_id": {"type": ["string", "null"], "maxLength": 256},
+        "image_ref": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "required": ["kind", "container_name", "prior_container_name", "host_path", "container_path", "tablespace", "docker_bin", "host_port", "work_root", "image_id", "image_ref"],
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "production"}}},
+          "then": {
+            "properties": {
+              "container_name": {"const": "nhms-db"},
+              "prior_container_name": {"const": "nhms-db-before"},
+              "host_path": {"const": "/data/GHDC/nhms-cold-tablespace"},
+              "host_port": {"const": 55432},
+              "work_root": {"const": null},
+              "image_id": {"const": null},
+              "image_ref": {"const": null}
+            }
+          },
+          "else": {
+            "properties": {
+              "container_name": {"pattern": "^nhms-1894-tablespace-"},
+              "prior_container_name": {"pattern": "^nhms-1894-tablespace-"},
+              "host_port": {"not": {"const": 55432}},
+              "work_root": {"type": "string", "pattern": "^/"},
+              "image_id": {"type": "string", "pattern": "^sha256:"},
+              "image_ref": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "path": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host_path": {"type": "string", "pattern": "^/", "maxLength": 512},
+        "container_path": {"const": "/home/postgres/pgdata/tablespaces/nhms_cold"},
+        "exists": {"type": "boolean"},
+        "device_identity": {"type": ["string", "null"], "maxLength": 256},
+        "owner_uid": {"type": ["integer", "null"], "minimum": 0},
+        "owner_gid": {"type": ["integer", "null"], "minimum": 0},
+        "mode": {"type": ["integer", "null"], "minimum": 0, "maximum": 511},
+        "empty": {"type": ["boolean", "null"]}
+      },
+      "required": ["host_path", "container_path", "exists", "device_identity", "owner_uid", "owner_gid", "mode", "empty"]
+    },
+    "readback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "approved": {"type": "boolean"},
+        "catalog_location": {"type": ["string", "null"], "maxLength": 512},
+        "pg_tblspc_target": {"type": ["string", "null"], "maxLength": 512},
+        "container_bind": {"type": ["string", "null"], "maxLength": 512},
+        "device_identity": {"type": ["string", "null"], "maxLength": 256},
+        "container_writable": {"type": ["boolean", "null"]},
+        "hypertable_attached": {"type": "boolean"},
+        "new_chunk_tablespace": {"type": ["string", "null"], "maxLength": 64}
+      },
+      "required": ["approved", "catalog_location", "pg_tblspc_target", "container_bind", "device_identity", "container_writable", "hypertable_attached", "new_chunk_tablespace"]
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["sidecar", "pending_cleanup", "closed"]},
+        "phase": {"type": ["string", "null"], "maxLength": 64},
+        "path_present": {"type": "boolean"}
+      },
+      "required": ["state", "phase", "path_present"],
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "closed"}}},
+          "then": {"properties": {"path_present": {"const": false}}}
+        },
+        {
+          "if": {"properties": {"state": {"enum": ["sidecar", "pending_cleanup"]}}},
+          "then": {"properties": {"path_present": {"const": true}}}
+        }
+      ]
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempted": {"type": "boolean"},
+        "prior_restored": {"type": "boolean"},
+        "host_path_removed": {"type": "boolean"},
+        "blockers": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 32}
+      },
+      "required": ["attempted", "prior_restored", "host_path_removed", "blockers"]
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "mode": {"enum": ["dry-run", "enforce"]},
+    "outcome": {"enum": ["dry_run", "installed", "already_ready", "no_go", "in_progress", "rollback", "pending_cleanup", "error"]},
+    "state": {"enum": ["preflight", "ready", "in_progress", "installed", "rollback", "blocked", "recovery_required", "pending_cleanup", "error"]},
+    "head_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "tablespace": {"const": "nhms_cold"},
+    "container": {"type": "string", "minLength": 1, "maxLength": 128},
+    "identity": {"$ref": "#/$defs/identity"},
+    "path": {"$ref": "#/$defs/path"},
+    "container_snapshot": {"type": "object", "additionalProperties": false, "properties": {"config_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "environment_names": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 256}}, "required": ["config_digest", "environment_names"]},
+    "evidence": {"type": "object", "additionalProperties": false, "properties": {"health": {"type": "object", "additionalProperties": true}, "backup": {"type": "object", "additionalProperties": true}, "capacity": {"type": "object", "additionalProperties": true}}, "required": ["health", "backup", "capacity"]},
+    "readback": {"$ref": "#/$defs/readback"},
+    "ownership": {"type": "object", "additionalProperties": false, "properties": {"prior_container": {"type": ["string", "null"], "maxLength": 128}, "installer_container_created": {"type": "boolean"}, "catalog_created": {"type": "boolean"}, "host_path_created": {"type": "boolean"}, "recovery_authority": {"type": "boolean"}}, "required": ["prior_container", "installer_container_created", "catalog_created", "host_path_created", "recovery_authority"]},
+    "authority": {"$ref": "#/$defs/authority"},
+    "rollback": {"$ref": "#/$defs/rollback"},
+    "blockers": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 64},
+    "error": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/error"}]}
+  },
+  "required": ["schema_version", "generated_at", "mode", "outcome", "state", "head_sha", "tablespace", "container", "identity", "path", "container_snapshot", "evidence", "readback", "ownership", "authority", "rollback", "blockers", "error"],
+  "allOf": [
+    {
+      "if": {"properties": {"authority": {"properties": {"state": {"const": "closed"}}}}},
+      "then": {"properties": {"ownership": {"properties": {"recovery_authority": {"const": false}}}}}
+    },
+    {
+      "if": {"properties": {"authority": {"properties": {"state": {"enum": ["sidecar", "pending_cleanup"]}}}}},
+      "then": {"properties": {"ownership": {"properties": {"recovery_authority": {"const": true}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "installed"}}},
+      "then": {"properties": {"mode": {"const": "enforce"}, "state": {"const": "installed"}, "readback": {"properties": {"approved": {"const": true}, "container_writable": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "already_ready"}}},
+      "then": {"properties": {"state": {"const": "ready"}, "readback": {"properties": {"approved": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "dry_run"}}},
+      "then": {"properties": {"mode": {"const": "dry-run"}, "state": {"const": "preflight"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "no_go"}}},
+      "then": {"properties": {"state": {"enum": ["blocked", "recovery_required"]}, "blockers": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "in_progress"}}},
+      "then": {"properties": {"mode": {"const": "enforce"}, "state": {"const": "in_progress"}, "authority": {"properties": {"state": {"const": "sidecar"}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "pending_cleanup"}}},
+      "then": {"properties": {"mode": {"const": "enforce"}, "state": {"const": "pending_cleanup"}, "authority": {"properties": {"state": {"enum": ["sidecar", "pending_cleanup"]}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "rollback"}}},
+      "then": {"properties": {"state": {"const": "rollback"}, "rollback": {"properties": {"attempted": {"const": true}}}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "error"}}},
+      "then": {"properties": {"state": {"const": "error"}, "error": {"$ref": "#/$defs/error"}}}
+    }
+  ]
+}

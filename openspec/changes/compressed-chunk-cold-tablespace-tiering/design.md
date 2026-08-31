@@ -257,21 +257,62 @@ mode, an exact raw-container config snapshot whose only intended change is the
 new bind, and post-create catalog/mount/device/write readback. It MUST NOT call
 `attach_tablespace` for either business hypertable.
 
-Production authorization requires root-generated `mdadm --detail` evidence,
-SMART PASS evidence for both member devices, no degraded/rebuild/unknown state,
-and backup readiness covering PGDATA plus every `pg_tblspc` target. `[UU]` or
-successful mount alone is insufficient. Missing or stale root evidence is a
-NO-GO, not a warning.
+Production authorization requires descriptor-bound root-owned evidence files:
+`mdadm --detail` for the named array and SMART results for exactly the two parsed
+member devices. The installer validates their regular-file identity, bounded
+content, capture time against an explicit positive maximum age, command/host/
+device identity, and parsed health; a self-reported `root=true`, `/proc/mdstat
+[UU]`, or a successful mount is insufficient. Both members must report SMART
+PASS and the array must have no degraded, rebuild, recovery, reshape, missing,
+spare-substitution, or unknown state. Backup readiness must cover PGDATA plus
+every external `pg_tblspc` target, and measured free space must cover the
+configured install plus rollback headroom. Missing, stale, malformed, or
+unhealthy evidence is a NO-GO, not a warning.
+
+The raw `docker inspect` document is bounded inert input, never shell source.
+Before mutation the installer atomically persists a mode-0600 private recovery
+bundle containing the exact secret-bearing environment and reconstructible
+container fields; public receipts contain only field names, normalized
+non-secret config, identities, and digests. Recreate argv is built directly
+without a shell and must preserve every supported Config/HostConfig field; any
+non-default field that cannot be reproduced exactly is a blocker. The old
+container is stopped and renamed, not destroyed, until catalog/bind/readiness
+proof closes installation. Rollback drops only installer-created catalog state
+with no dependents, removes only the identity-recorded new container, restores
+the renamed prior container, and removes an installer-created host directory
+only after catalog, every live bind, `pg_tblspc`, identity and emptiness checks
+prove it unreferenced. It never binds an empty directory over referenced data.
+
+Installer outcomes use one strict public receipt schema with normal, already-
+ready, NO-GO, progress, rollback and error examples. Every receipt is atomically
+published mode 0600 and binds the exact reviewed head, fixed path/catalog
+contract, observed container/image/config digests, host path/device identity,
+root evidence file identities and freshness, parsed RAID/SMART state, backup
+inventory, capacity/rollback decision, catalog/bind/writability readback,
+mutation ownership, rollback state and stable redacted errors. An existing
+complete topology is an idempotent no-write `already_ready`; any partial or
+drifted topology is NO-GO rather than an implicit repair.
 
 ### D8 — Governance reports both devices without collapsing categories
 
-A same-time governance sample reports `/home` and `/data/GHDC` totals/free
+One audit interval, identified by one started/finished timestamp pair, samples
+`/home` and `/data/GHDC` and reports each observation time plus totals/free
 bytes, PGDATA bytes, `nhms_cold` relation bytes, object-store bytes, and residual
-third-party/shared use separately. Catalog/mount/filesystem divergence,
-dangling catalog, dangling bind, stopped-container stale mount, and backup
-coverage gaps are explicit blockers. No fixed capacity number in this fixture
-is treated as current truth; live thresholds derive from measured rollback
-headroom and are recorded in the rollout receipt.
+third-party/shared use separately. Residual use is filesystem-used bytes minus
+non-overlapping known categories, not a recursive walk of the shared 14-TB
+root. Catalog/mount/filesystem divergence, dangling catalog, dangling bind,
+stopped-container stale mount, negative/unreconcilable residuals, capacity/
+rollback shortfall, stale health evidence, and backup coverage gaps are explicit
+blockers. No fixed capacity number in this fixture is current truth; live
+thresholds derive from measured rollback headroom.
+
+Governance emits a separate strict mode-0600 atomic receipt bound to the exact
+head, audit interval, filesystem observation identities, category accounting,
+relation-by-tablespace catalog rows, current and stopped-container mount
+inventories, root evidence identities/parsed health, backup coverage and every
+blocker. The normal example proves two-device reconciliation; a drift example
+proves catalog/filesystem/bind disagreement remains NO-GO. Credentials, raw
+secret-bearing environment values and signed URLs never enter either receipt.
 
 ### D9 — Rollout is bounded and independently reversible
 
