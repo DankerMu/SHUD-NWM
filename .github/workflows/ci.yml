@@ -241,9 +241,9 @@ jobs:
       - name: Run real database integration tests
         # #1688: `-vv -rs` only — node-level pass/skip reasons in the run log
         # so the seven residual-debt tests appear as PASSED rather than skips.
-        # Marker expression (`-m integration`), DSN, service, and suite
-        # selection are unchanged.
-        run: pytest -vv -rs -m integration
+        # The generic pg15-latest service is not the node-27 2.10.2 oracle:
+        # retain ordinary integration coverage but exclude only that explicit lane.
+        run: pytest -vv -rs -m "integration and not timescaledb_210"
 
   unit-test:
     name: Unit Tests (full)

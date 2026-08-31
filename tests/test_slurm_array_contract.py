@@ -52,6 +52,16 @@ _BRANCHED_ARRAY_TEMPLATES = [
     ("run_shud_forecast_array", _SHUD_TARGET_RUNTIME_COMMAND, _SHUD_CONSOLE_COMMAND),
     ("save_state_snapshot_array", _STATE_TARGET_RUNTIME_COMMAND, _STATE_CONSOLE_COMMAND),
 ]
+_PRODUCTION_ARRAY_JOB_TYPES = (
+    "produce_forcing_array",
+    "run_shud_forecast_array",
+    "parse_output_array",
+    "save_state_snapshot_array",
+)
+
+
+def _cohort_neutral_array_log_dir(tmp_path: Path, *, cycle_id: str, index_path: Path) -> Path:
+    return tmp_path / "workspace" / cycle_id / "array_logs" / index_path.stem
 
 
 def _write_profiles(tmp_path: Path) -> Path:
@@ -470,11 +480,18 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
         manifest,
         str(tmp_path / "manifest_index.json"),
     )
+    expected_log_dir = _cohort_neutral_array_log_dir(
+        tmp_path,
+        cycle_id="cycle_001",
+        index_path=tmp_path / "manifest_index.json",
+    )
 
     assert "#SBATCH --output=" in rendered
-    assert "/logs/%A_%a.out" in rendered
+    assert f"#SBATCH --output={expected_log_dir}/%A_%a.out" in rendered
     assert "#SBATCH --error=" in rendered
-    assert "/logs/%A_%a.err" in rendered
+    assert f"#SBATCH --error={expected_log_dir}/%A_%a.err" in rendered
+    assert str(expected_log_dir) in rendered
+    assert f"{manifest['run_id']}/logs" not in rendered
     assert "#SBATCH --cpus-per-task=8" in rendered
     assert "#SBATCH --account=friends" in rendered
     assert "#SBATCH --mem=32G" in rendered
@@ -486,6 +503,80 @@ def test_run_shud_forecast_template_uses_shared_logs_resources_manifest_contract
     # assertions above keep judging the raw rendering, as does the quoted
     # `<<'PY'` heredoc this template carries (bash folds nothing in there).
     assert _SHUD_CONSOLE_COMMAND in _join_line_continuations(rendered)
+
+
+@pytest.mark.parametrize("job_type", _PRODUCTION_ARRAY_JOB_TYPES)
+def test_production_array_templates_use_cohort_neutral_log_directory(tmp_path: Path, job_type: str) -> None:
+    index_path = tmp_path / "manifest_index.json"
+    manifest = {
+        **_render_manifest(tmp_path, job_type),
+        "run_id": "leader_run",
+        "manifest_index_path": str(index_path),
+    }
+
+    rendered = _gateway(tmp_path).render_template(job_type, manifest, str(index_path))
+
+    expected_log_dir = _cohort_neutral_array_log_dir(tmp_path, cycle_id="cycle_001", index_path=index_path)
+    output_lines = [
+        line
+        for line in rendered.splitlines()
+        if line.startswith("#SBATCH --output=") or line.startswith("#SBATCH --error=")
+    ]
+    mkdir_lines = [line.strip() for line in rendered.splitlines() if "mkdir" in line]
+
+    assert f"#SBATCH --output={expected_log_dir}/%A_%a.out" in rendered
+    assert f"#SBATCH --error={expected_log_dir}/%A_%a.err" in rendered
+    assert mkdir_lines
+    assert all(str(expected_log_dir) in line for line in mkdir_lines)
+    assert all("leader_run" not in line for line in output_lines)
+    assert all("leader_run" not in line for line in mkdir_lines)
+    assert "leader_run/logs" not in rendered
+    assert "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs" not in rendered
+
+
+def test_non_array_template_keeps_member_run_log_directory(tmp_path: Path) -> None:
+    rendered = _gateway(tmp_path).render_template(
+        "convert_canonical",
+        _render_manifest(tmp_path, "convert_canonical"),
+    )
+
+    assert f"#SBATCH --output={tmp_path / 'workspace'}/run_001/logs/%A.out" in rendered
+    assert 'mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"' in rendered
+
+
+@pytest.mark.parametrize("job_type", _PRODUCTION_ARRAY_JOB_TYPES)
+def test_production_array_templates_reject_mismatched_array_log_dir(tmp_path: Path, job_type: str) -> None:
+    index_path = tmp_path / "manifest_index.json"
+    leader_logs = tmp_path / "workspace" / "leader_run" / "logs"
+    manifest = {
+        **_render_manifest(tmp_path, job_type),
+        "run_id": "leader_run",
+        "manifest_index_path": str(index_path),
+        "array_log_dir": str(leader_logs),
+    }
+
+    with pytest.raises(GatewayManifestValidationError) as exc_info:
+        _gateway(tmp_path).render_template(job_type, manifest, str(index_path))
+
+    assert exc_info.value.details["field"] == "manifest.array_log_dir"
+    assert "leader_run/logs" not in str(exc_info.value)
+    assert "leader_run/logs" not in json.dumps(exc_info.value.details)
+
+
+def test_non_array_template_keeps_member_run_log_directory_with_mismatched_array_log_dir(
+    tmp_path: Path,
+) -> None:
+    rendered = _gateway(tmp_path).render_template(
+        "convert_canonical",
+        {
+            **_render_manifest(tmp_path, "convert_canonical"),
+            "array_log_dir": str(tmp_path / "workspace" / "leader_run" / "logs"),
+        },
+    )
+
+    assert f"#SBATCH --output={tmp_path / 'workspace'}/run_001/logs/%A.out" in rendered
+    assert 'mkdir -p "$WORKSPACE_ROOT/$NHMS_RUN_ID/logs"' in rendered
+    assert "#SBATCH --output=" + str(tmp_path / "workspace" / "leader_run" / "logs") not in rendered
 
 
 def test_download_source_cycle_cli_accepts_template_args(monkeypatch):
@@ -1004,6 +1095,22 @@ def test_manifest_index_rejects_symlink(tmp_path):
         load_manifest_entry(str(link), 0)
 
 
+def test_manifest_index_rejects_invalid_utf8(tmp_path):
+    path = tmp_path / "manifest_index.json"
+    path.write_bytes(b"[\xff\xfe]")
+
+    with pytest.raises(ManifestValidationError, match="UTF-8"):
+        load_manifest_entry(str(path), 0)
+
+
+def test_manifest_index_rejects_excessive_nesting(tmp_path):
+    path = tmp_path / "manifest_index.json"
+    path.write_bytes(("[" + '{"k":' * 20_000 + "1" + "}" * 20_000 + "]").encode("ascii"))
+
+    with pytest.raises(ManifestValidationError, match="nesting"):
+        load_manifest_entry(str(path), 0)
+
+
 def test_manifest_index_rejects_oversized_file(tmp_path):
     path = tmp_path / "manifest_index.json"
     with path.open("wb") as file:
@@ -1060,6 +1167,15 @@ def test_manifest_entry_rejects_path_traversal_manifest_path(tmp_path):
 
     with pytest.raises(ManifestValidationError, match="path traversal"):
         load_manifest_entry(str(path), 0)
+
+
+def test_load_manifest_index_returns_all_entries_within_bounds(tmp_path):
+    from packages.common.manifest_index import load_manifest_index
+
+    entries = load_manifest_index(str(_manifest_index(tmp_path)))
+
+    assert [entry["run_id"] for entry in entries] == ["run_001", "run_002"]
+    assert [entry["model_id"] for entry in entries] == ["model_001", "model_002"]
 
 
 def test_manifest_validation_returns_valid_entry(tmp_path):

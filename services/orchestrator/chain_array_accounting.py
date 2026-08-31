@@ -945,7 +945,10 @@ def build_reindexed_manifest(
 
 
 def array_task_status(raw_state: str) -> str:
-    normalized = raw_state.strip().upper().split()[0].rstrip("+")
+    tokens = raw_state.strip().upper().split()
+    if not tokens:
+        return "failed"
+    normalized = tokens[0].rstrip("+")
     if normalized == "COMPLETED":
         return "succeeded"
     if normalized == "CANCELLED":

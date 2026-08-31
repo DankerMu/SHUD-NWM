@@ -2478,3 +2478,69 @@ recall. **Keep rotation** unchanged under the recorded autonomous default. The
 cumulative aggregate still supplies no basis for an autonomous cut; any reversal
 continues to require the existing attribution-schema and round-role repairs plus
 maintainer review.
+
+## Revisit 2026-08-30 (post #1914 / PR #1916) — keep; pinned oracle-fix closure adds no rotation datum
+
+`loop_log_audit.py` now reports **144** multi-round merged PRs and later-round
+catches **core=86 / rotated=296**, moving from `143 / 86 / 296` after PR #1900.
+PR #1916 therefore adds one multi-round sample and zero to either numerator.
+
+Round 1 used the standard six-lens mix and produced one independently verified
+P2 test-evidence finding: the marker truth table omitted the
+`timescaledb_210`-only input, so a full-workflow expression could select that
+node-27-only shape while satisfying every existing semantic row. Round 2
+re-ran correctness, test-evidence, and integration against the exact mutation
+closure. All three lenses were already present in Round 1; Round 2 returned zero
+candidates, and the independent Phase 7 Gap Sweep was also clean.
+
+This was pinned fix verification, not a rotation experiment. The Round 2 lens set
+is a strict subset of Round 1 and introduces no new subject-matter lens. Its clean
+result proves closure for this PR but cannot distinguish whether a rotated free
+slot would add recall. **Keep rotation** unchanged under the recorded autonomous
+default. The cumulative aggregate still supplies no basis for an autonomous cut;
+any reversal continues to require the existing attribution-schema and round-role
+repairs plus maintainer review.
+
+## Revisit 2026-08-30 (post #1742/#1539 / PR #1901) — keep; pinned depth catch is not a rotation counterexample
+
+`loop_log_audit.py` now reports **145** multi-round merged PRs and later-round
+catches **core=87 / rotated=296**, moving from `144 / 86 / 296` after PR #1916.
+PR #1901 therefore contributes the full `core +1 / rotated +0` delta.
+
+The attribution is real but its interpretation is narrow. Round 1 used the
+standard six-lens mix and found four defects. Round 2 intentionally retained the
+Round 1 correctness lens while checking whether those fixes covered every carrier
+of the same scheduler-log provenance invariant. It found one P1 sibling recurrence:
+`production_closure` rendered the new neutral path but still pre-created and read
+the legacy leader-run lane around its direct raw-`sbatch` path. That repeat
+triggered the workflow's same-invariant depth retro and the canonical-path redesign;
+Round 3 and both final-head Gap Sweeps were clean.
+
+This is evidence that the **pinned core** earns fix-propagation recall: the lens
+that named the provenance invariant had to remain present to see the same invariant
+violated at a sibling submitter. It is not evidence against additive free-slot
+rotation, because Round 2 introduced no new lens and therefore applied no rotation
+treatment to compare. Reading `core +1 / rotated +0` as a cut signal would again
+confuse an intentional depth recheck with a failed rotation experiment.
+
+**Keep rotation** unchanged under the recorded autonomous default. This sample
+strengthens the reason to keep the core pinned while leaving the additive rotation
+question untouched. Any reversal still requires the existing attribution-schema,
+round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-08-30 (post #1910 / PR #1915) — keep; single-round clean adds no rotation datum
+
+After the PR #1915 accountability line, `loop_log_audit.py` still reports **145**
+multi-round merged PRs and later-round catches **core=87 / rotated=296**. The
+counts are unchanged from the post-PR #1901 revisit because PR #1915 had one
+comprehensive round only: its six-lens Round 1 produced zero candidates, so no
+verifier batch, fix pass, or follow-up comprehensive round existed. Both
+implementation-head and final-head Phase 7 Gap Sweeps were also clean.
+
+This PR therefore supplies no observation about follow-up-round lens rotation. It
+proves that the behavior-neutral Basins package facade split closed in the first
+review pass, not that rotation was applied and found nothing. **Keep rotation**
+unchanged under the recorded autonomous default. The cumulative aggregate still
+supplies no basis for an autonomous cut, and any reversal continues to require the
+existing attribution-schema, round-intent, and round-role repairs plus maintainer
+review.

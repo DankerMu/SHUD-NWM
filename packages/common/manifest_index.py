@@ -94,24 +94,37 @@ def serialize_manifest_index(entries: Sequence[Mapping[str, Any]], *, max_bytes:
     return bytes(payload)
 
 
-def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
+def _read_manifest_index_list(manifest_index_path: str) -> list[Any]:
     path = Path(manifest_index_path)
     try:
         raw = read_bytes_limited_no_follow(path, max_bytes=MAX_MANIFEST_INDEX_BYTES)
-        if len(raw) > MAX_MANIFEST_INDEX_BYTES:
-            raise ManifestValidationError(
-                "Manifest index file exceeds size limit",
-                {"manifest_index_path": manifest_index_path, "size_limit": MAX_MANIFEST_INDEX_BYTES},
-            )
-        data = json.loads(raw.decode("utf-8"))
     except (OSError, SafeFilesystemError) as exc:
         raise ManifestValidationError(
             f"Unable to safely read manifest index: {exc}",
             {"manifest_index_path": manifest_index_path, "error": str(exc)},
         ) from exc
+    if len(raw) > MAX_MANIFEST_INDEX_BYTES:
+        raise ManifestValidationError(
+            "Manifest index file exceeds size limit",
+            {"manifest_index_path": manifest_index_path, "size_limit": MAX_MANIFEST_INDEX_BYTES},
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ManifestValidationError(
+            "Manifest index is not valid UTF-8.",
+            {"manifest_index_path": manifest_index_path, "error": str(exc)},
+        ) from exc
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ManifestValidationError(
             "Manifest index is not valid JSON.",
+            {"manifest_index_path": manifest_index_path, "error": str(exc)},
+        ) from exc
+    except RecursionError as exc:
+        raise ManifestValidationError(
+            "Manifest index exceeds maximum JSON nesting.",
             {"manifest_index_path": manifest_index_path, "error": str(exc)},
         ) from exc
 
@@ -129,18 +142,10 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
                 "entry_limit": MAX_MANIFEST_INDEX_ENTRIES,
             },
         )
-    if not data:
-        raise ManifestValidationError(
-            "Manifest index is empty.",
-            {"manifest_index_path": manifest_index_path, "task_id": task_id},
-        )
-    if task_id < 0 or task_id >= len(data):
-        raise ManifestValidationError(
-            "Manifest task_id is out of range.",
-            {"manifest_index_path": manifest_index_path, "task_id": task_id, "entry_count": len(data)},
-        )
+    return data
 
-    entry = data[task_id]
+
+def _validate_manifest_entry(entry: Any, task_id: int, manifest_index_path: str) -> dict[str, Any]:
     if not isinstance(entry, Mapping):
         raise ManifestValidationError(
             "Manifest index entry must be an object.",
@@ -192,3 +197,47 @@ def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any
             {"manifest_index_path": manifest_index_path, "task_id": task_id, "entry_task_id": result["task_id"]},
         )
     return result
+
+
+def load_manifest_index(manifest_index_path: str) -> list[dict[str, Any]]:
+    data = _read_manifest_index_list(manifest_index_path)
+    if not data:
+        raise ManifestValidationError(
+            "Manifest index is empty.",
+            {"manifest_index_path": manifest_index_path},
+        )
+    return [_validate_manifest_entry(entry, index, manifest_index_path) for index, entry in enumerate(data)]
+
+
+def manifest_task_identities(manifest_index_path: str) -> dict[int, tuple[str, str]]:
+    """Return proven ``task_id -> (model_id, run_id)`` pairs from one bounded index read.
+
+    File-level failures raise ``ManifestValidationError``. A malformed individual
+    entry is skipped so callers can still join other proven members without
+    guessing the damaged row's identity.
+    """
+
+    data = _read_manifest_index_list(manifest_index_path)
+    identities: dict[int, tuple[str, str]] = {}
+    for index, raw_entry in enumerate(data):
+        try:
+            entry = _validate_manifest_entry(raw_entry, index, manifest_index_path)
+        except ManifestValidationError:
+            continue
+        identities[int(entry["task_id"])] = (str(entry["model_id"]), str(entry["run_id"]))
+    return identities
+
+
+def load_manifest_entry(manifest_index_path: str, task_id: int) -> dict[str, Any]:
+    data = _read_manifest_index_list(manifest_index_path)
+    if not data:
+        raise ManifestValidationError(
+            "Manifest index is empty.",
+            {"manifest_index_path": manifest_index_path, "task_id": task_id},
+        )
+    if task_id < 0 or task_id >= len(data):
+        raise ManifestValidationError(
+            "Manifest task_id is out of range.",
+            {"manifest_index_path": manifest_index_path, "task_id": task_id, "entry_count": len(data)},
+        )
+    return _validate_manifest_entry(data[task_id], task_id, manifest_index_path)
