@@ -2570,3 +2570,25 @@ previously recorded metric limitations remain: round intent and Phase 7 roles
 must be separated before the ratio can answer a causal rotation question.
 **Keep rotation** unchanged under the autonomous default; any reversal still
 requires the attribution-schema repairs and maintainer review.
+
+## Revisit 2026-08-31 (post #1911 / PR #1920) — keep; clean pinned-core recheck adds no rotation catch
+
+After the PR #1920 accountability line, `loop_log_audit.py` reports **147**
+multi-round merged PRs and later-round catches **core=88 / rotated=296**. The
+multi-round sample increases from 146, but neither catch count changes.
+
+Round 1 used the standard six-lens mix and produced one independently confirmed
+P1 selector-evidence finding. The same defect had already failed the initial PR
+CI, so it correctly contributes zero `gate_net_catch`. Round 2 retained the
+integration, test/evidence, and spec-compliance core lenses to verify that the
+additive selector route closed the exact tracked-importer gap without weakening
+the audit. It was clean. No free slot rotated in, and both Phase 7 sweeps were
+also clean.
+
+PR #1920 is therefore a fixed-core fix-validation sample, not a rotation
+experiment: `core +0 / rotated +0` says the repair closed cleanly but cannot
+estimate whether an additive rotated lens would have found more. The cumulative
+later-round catches still concentrate in rotated-in lenses (**296 versus 88**),
+so the recorded decision remains **keep rotation**. Any future reversal still
+requires the existing attribution-schema, round-intent, and round-role repairs
+plus maintainer review; a clean no-treatment round is not evidence for a cut.
