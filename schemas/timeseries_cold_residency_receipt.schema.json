@@ -285,13 +285,69 @@
     },
     "recovery": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"authority": {"const": "sidecar"}}, "required": ["authority"]},
+          "then": {
+            "properties": {"sidecar_present": {"const": true}, "blocked_new_selection": {"const": true}},
+            "required": ["sidecar_present", "blocked_new_selection"]
+          }
+        },
+        {
+          "if": {"properties": {"authority": {"const": "pending_cleanup"}}, "required": ["authority"]},
+          "then": {
+            "properties": {"blocked_new_selection": {"const": true}, "cleanup_pending": {"const": true}},
+            "required": ["blocked_new_selection", "cleanup_pending"]
+          }
+        },
+        {
+          "if": {"properties": {"authority": {"const": "closed"}}, "required": ["authority"]},
+          "then": {
+            "properties": {
+              "classification": {"enum": ["complete_source", "complete_target"]},
+              "sidecar_present": {"const": false},
+              "blocked_new_selection": {"const": false},
+              "cleanup_pending": {"const": false}
+            },
+            "required": ["classification", "sidecar_present", "blocked_new_selection", "cleanup_pending"]
+          }
+        },
+        {
+          "if": {
+            "properties": {"classification": {"enum": ["mixed", "unknown"]}},
+            "required": ["classification"]
+          },
+          "then": {
+            "properties": {
+              "authority": {"enum": ["sidecar", "pending_cleanup"]},
+              "blocked_new_selection": {"const": true}
+            },
+            "required": ["authority", "blocked_new_selection"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "authority": {"const": "sidecar"},
+              "classification": {"enum": ["mixed", "unknown"]}
+            },
+            "required": ["authority", "classification"]
+          },
+          "then": {
+            "properties": {"cleanup_pending": {"const": false}},
+            "required": ["cleanup_pending"]
+          }
+        }
+      ],
       "properties": {
+        "authority": {"enum": ["sidecar", "pending_cleanup", "closed"]},
         "blocked_new_selection": {"type": "boolean"},
         "classification": {"enum": ["complete_source", "complete_target", "mixed", "unknown"]},
+        "cleanup_pending": {"type": "boolean"},
         "replayed": {"const": false},
         "sidecar_present": {"type": "boolean"}
       },
-      "required": ["classification", "sidecar_present", "replayed"],
+      "required": ["classification", "sidecar_present", "replayed", "blocked_new_selection", "authority", "cleanup_pending"],
       "type": "object"
     },
     "skipped_descriptor": {
@@ -389,6 +445,15 @@
       "then": {
         "properties": {
           "mode": {"const": "enforce"},
+          "recovery": {
+            "properties": {
+              "authority": {"const": "sidecar"},
+              "sidecar_present": {"const": true},
+              "blocked_new_selection": {"const": true},
+              "cleanup_pending": {"const": false}
+            },
+            "required": ["authority", "sidecar_present", "blocked_new_selection", "cleanup_pending"]
+          },
           "selected": {
             "items": {
               "if": {
@@ -407,7 +472,7 @@
           },
           "state": {"const": "in_progress"}
         },
-        "required": ["watermark", "cutoff", "capacity"]
+        "required": ["watermark", "cutoff", "capacity", "recovery"]
       }
     },
     {
@@ -484,7 +549,42 @@
         "properties": {
           "outcome": {"enum": ["failed", "recovery", "partial"]}
         },
-        "required": ["error", "recovery"]
+        "required": ["error"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recovery": {
+            "properties": {"authority": {"enum": ["sidecar", "pending_cleanup"]}},
+            "required": ["authority"]
+          }
+        },
+        "required": ["recovery"]
+      },
+      "then": {
+        "properties": {
+          "selected": {
+            "items": {
+              "if": {
+                "properties": {
+                  "plan_kind": {"const": "migrate"},
+                  "outcome": {"enum": ["planned", "migrated", "rolled_back", "committed_ack_lost", "blocked", "refused"]}
+                },
+                "required": ["plan_kind", "outcome"]
+              },
+              "then": {
+                "properties": {
+                  "before": {"$ref": "#/$defs/group_snapshot"},
+                  "before_parity": {"$ref": "#/$defs/parity"},
+                  "capacity": {"$ref": "#/$defs/capacity"}
+                },
+                "required": ["before", "before_parity", "capacity"]
+              }
+            },
+            "type": "array"
+          }
+        }
       }
     }
   ],

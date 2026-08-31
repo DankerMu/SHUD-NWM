@@ -27,6 +27,8 @@ from packages.common.compressed_chunk_cold_residency import (
     classify_reconciliation,
     classify_residency,
     evaluate_capacity_preflight,
+    expanded_uncompressed_group_is_complete,
+    recompressed_group_is_complete,
     validate_catalog_path,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
@@ -106,13 +108,15 @@ class _AckLossConnection:
         self.commit_ack_lost = False
 
     def __getattr__(self, name: str) -> Any:
-        if self._unusable:
-            raise ColdRuntimeError("moving connection is unusable after lost commit acknowledgement")
+        self._require_usable()
         return getattr(self._connection, name)
 
-    def commit(self) -> None:
+    def _require_usable(self) -> None:
         if self._unusable:
             raise ColdRuntimeError("moving connection is unusable after lost commit acknowledgement")
+
+    def commit(self) -> None:
+        self._require_usable()
         self._connection.commit()
         self.commit_ack_lost = True
         self._unusable = True
@@ -123,14 +127,12 @@ class _AckLossConnection:
         raise CommitAckLost()
 
     def rollback(self) -> None:
-        if self._unusable:
-            raise ColdRuntimeError("moving connection is unusable after lost commit acknowledgement")
+        self._require_usable()
         self._connection.rollback()
 
     def close(self) -> None:
-        if self._unusable:
-            return
-        self._connection.close()
+        if not self._unusable:
+            self._connection.close()
 
 
 def _mapping_rows(cursor: Any) -> list[dict[str, Any]]:
@@ -139,10 +141,7 @@ def _mapping_rows(cursor: Any) -> list[dict[str, Any]]:
     names = [item[0] for item in cursor.description]
     converted: list[dict[str, Any]] = []
     for row in cursor.fetchall():
-        if isinstance(row, Mapping):
-            converted.append(dict(row))
-        else:
-            converted.append(dict(zip(names, row, strict=False)))
+        converted.append(dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False)))
     return converted
 
 
@@ -153,10 +152,7 @@ def execute_on(connection: Any, sql: str, params: Any = None) -> list[dict[str, 
 
 
 def bind_execute(connection: Any) -> Callable[..., list[Mapping[str, Any]]]:
-    def _execute(sql: str, params: Any = None) -> list[Mapping[str, Any]]:
-        return execute_on(connection, sql, params)
-
-    return _execute
+    return lambda sql, params=None: execute_on(connection, sql, params)
 
 
 def _binder(connection: Any) -> Callable[..., list[Mapping[str, Any]]]:
@@ -323,6 +319,23 @@ def _require_complete_group(group: ResidencyGroup, *, max_members: int) -> None:
         raise ColdRuntimeError("group exceeds maximum member count", error_class="max_members", stage="group")
 
 
+def _capacity_matches(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+    return all(
+        expected.get(key) == actual.get(key)
+        for key in (
+            "approved",
+            "before_compression_total_bytes",
+            "retained_source_bytes",
+            "cold_free_bytes",
+            "cold_reserve_bytes",
+            "required_cold_bytes",
+            "hot_free_bytes",
+            "wal_reserve_bytes",
+            "required_hot_bytes",
+        )
+    )
+
+
 def _revalidate_locked(
     execute: Callable[..., list[Mapping[str, Any]]],
     *,
@@ -335,12 +348,9 @@ def _revalidate_locked(
     max_members: int,
 ) -> tuple[CatalogChunk, ResidencyGroup, WindowParity]:
     current = _reload_chunk(execute, selected)
-    if (
-        current.origin_oid != selected.origin_oid
-        or current.range_start != selected.range_start
-        or current.range_end != selected.range_end
-        or current.hypertable_schema != selected.hypertable_schema
-        or current.hypertable_name != selected.hypertable_name
+    if any(
+        getattr(current, field) != getattr(selected, field)
+        for field in ("origin_oid", "range_start", "range_end", "hypertable_schema", "hypertable_name")
     ):
         raise ColdRuntimeError("durable identity drifted under lock", error_class="selection_race", stage="revalidate")
     eligibility = classify_eligibility(
@@ -405,41 +415,8 @@ def _fresh_observer(
         _close(fresh)
 
 
-def _observation(
-    *,
-    outcome: str,
-    reconciliation: str,
-    plan_kind: str,
-    shell_sql_executed: bool,
-    before: ResidencyGroup,
-    after: ResidencyGroup | None,
-    before_parity: WindowParity | None,
-    after_parity: WindowParity | None,
-    intermediate: Mapping[str, Any] | None = None,
-    capacity: Mapping[str, Any] | None = None,
-    error_class: str | None = None,
-    stage: str | None = None,
-    reason: str | None = None,
-    commit_ack_lost: bool = False,
-    timing: Mapping[str, int | None] | None = None,
-) -> MoveObservation:
-    return build_move_observation(
-        outcome=outcome,
-        reconciliation=reconciliation,
-        plan_kind=plan_kind,
-        shell_sql_executed=shell_sql_executed,
-        before=before,
-        after=after,
-        before_parity=before_parity,
-        after_parity=after_parity,
-        intermediate=intermediate,
-        capacity=capacity,
-        error_class=error_class,
-        stage=stage,
-        reason=reason,
-        commit_ack_lost=commit_ack_lost,
-        timing=timing,
-    )
+def _observation(**kwargs: Any) -> MoveObservation:
+    return build_move_observation(**kwargs)
 
 
 def _sqlstate(error: BaseException) -> str | None:
@@ -541,6 +518,9 @@ def migrate_residency_group(
     wal_reserve_bytes: int,
     config: RuntimeConfig | None = None,
     lose_commit_ack: bool = False,
+    expected_before: ResidencyGroup | None = None,
+    expected_before_parity: WindowParity | None = None,
+    expected_capacity: Mapping[str, Any] | None = None,
 ) -> MoveObservation:
     """Execute the sole accepted shell-first sequence, or refuse before movement SQL."""
 
@@ -548,6 +528,10 @@ def migrate_residency_group(
         raise ColdRuntimeError("accepted sequence drifted", error_class="sequence", stage="plan")
     runtime = config or RuntimeConfig()
     started = runtime.clock()
+    before: ResidencyGroup | None = None
+    before_parity: WindowParity | None = None
+    current: CatalogChunk | None = None
+    capacity = None
     observer = connect()
     try:
         execute = _binder(observer)
@@ -557,6 +541,14 @@ def migrate_residency_group(
         before = collect_residency_group(execute, current)
         _require_complete_group(before, max_members=runtime.max_members)
         before_parity = _parity_for(execute, inventories, current)
+        if expected_before is not None:
+            _require_same_group(expected_before, before)
+        if expected_before_parity is not None and before_parity.as_dict() != expected_before_parity.as_dict():
+            raise ColdRuntimeError(
+                "observer preflight parity drifted from persisted intent",
+                error_class="selection_race",
+                stage="preflight",
+            )
         plan = build_shell_first_plan(
             before,
             lock_timeout=runtime.lock_timeout,
@@ -601,6 +593,12 @@ def migrate_residency_group(
             wal_reserve_bytes=wal_reserve_bytes,
             retained_source_bytes=retained_source_bytes(before),
         )
+        if expected_capacity is not None and not _capacity_matches(expected_capacity, capacity.as_dict()):
+            raise ColdRuntimeError(
+                "observer preflight capacity drifted from persisted intent",
+                error_class="capacity",
+                stage="preflight",
+            )
         if not capacity.approved:
             return _observation(
                 outcome="refused",
@@ -617,8 +615,30 @@ def migrate_residency_group(
                 reason="; ".join(capacity.blockers),
                 timing=inspect_timing,
             )
+    except ColdRuntimeError as error:
+        if expected_before is None:
+            raise
+        dummy = expected_before
+        dummy_parity = expected_before_parity
+        return _observation(
+            outcome="blocked",
+            reconciliation="unknown" if error.error_class != "capacity" else "complete_source",
+            plan_kind="blocked",
+            shell_sql_executed=False,
+            before=dummy,
+            after=dummy,
+            before_parity=dummy_parity,
+            after_parity=dummy_parity,
+            capacity=None if expected_capacity is None else dict(expected_capacity),
+            error_class=error.error_class,
+            stage=error.stage,
+            reason=str(error),
+            timing=inspect_timing_payload(started, runtime.clock()),
+        )
     finally:
         _close(observer)
+    if current is None or before is None or before_parity is None or capacity is None:
+        raise ColdRuntimeError("preflight did not bind a source preimage", error_class="runtime", stage="preflight")
 
     return _run_shell_first(
         connect=connect,
@@ -704,9 +724,10 @@ def _run_shell_first(
         expanded = collect_residency_group(execute, expanded_chunk)
         timer.stop()
         intermediate["after_decompress"] = snapshot_group(expanded)
-        if any(member.tablespace != COLD_TABLESPACE_NAME for member in expanded.members):
+        _require_complete_group(expanded, max_members=runtime.max_members)
+        if not expanded_uncompressed_group_is_complete(expanded):
             raise ColdRuntimeError(
-                "expanded origin group is not fully cold",
+                "expanded origin group is incomplete, blocked, or not fully cold",
                 error_class="mixed",
                 stage="prove_expanded_cold",
             )
@@ -717,9 +738,9 @@ def _run_shell_first(
         complete_chunk = _reload_chunk(execute, locked_chunk)
         complete = collect_residency_group(execute, complete_chunk)
         _require_complete_group(complete, max_members=runtime.max_members)
-        if classify_residency(complete.members) != "already_target":
+        if not recompressed_group_is_complete(complete):
             raise ColdRuntimeError(
-                "recompressed group is not fully cold",
+                "recompressed group is missing a complete cold compressed sibling",
                 error_class="mixed",
                 stage="prove_complete_cold",
             )

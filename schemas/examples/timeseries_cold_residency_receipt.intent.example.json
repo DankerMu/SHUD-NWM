@@ -191,5 +191,12 @@
       "deferred": 0
     }
   },
-  "config_observed": true
+  "config_observed": true,
+  "recovery": {
+    "classification": "complete_source",
+    "sidecar_present": true,
+    "replayed": false,
+    "blocked_new_selection": true,
+    "authority": "sidecar",
+    "cleanup_pending": false  }
 }

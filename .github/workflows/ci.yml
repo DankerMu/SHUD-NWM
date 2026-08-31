@@ -76,6 +76,7 @@ jobs:
               - 'instructions/agents/shared.md'
               - 'scripts/run_qhh_cycle.sbatch'
               - 'scripts/diagnostic/qhh/README.md'
+              - 'docs/runbooks/tier-node27-timeseries-storage.md'
               # #1860: the checked-in calibration declaration is a non-Python
               # producer whose package/publication consumers and selector
               # meta-guard must run on a declaration-only PR. Exact literal
@@ -185,7 +186,14 @@ jobs:
               echo "Validating $example against $schema ..."
               check-jsonschema --schemafile "$schema" "$example"
             else
-              echo "WARNING: No schema found for $example (expected $schema)"
+              family=$(echo "$base" | sed -E 's/\.(noop|intent|partial|error)$//')
+              family_schema="schemas/${family}.schema.json"
+              if [ "$family" != "$base" ] && [ -f "$family_schema" ]; then
+                echo "Validating $example against $family_schema ..."
+                check-jsonschema --schemafile "$family_schema" "$example"
+              else
+                echo "WARNING: No schema found for $example (expected $schema)"
+              fi
             fi
           done
 

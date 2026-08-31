@@ -380,11 +380,29 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         + " LOCATION "
         + quote_literal("/home/postgres/pgdata/tablespaces/nhms_cold"),
     )
-    execute(connection, "CREATE SCHEMA hydro")
     execute(connection, "CREATE SCHEMA met")
+    execute(connection, "CREATE SCHEMA hydro")
     execute(connection, "CREATE TYPE hydro.river_variable AS ENUM ('q_down', 'y_stage')")
     execute(connection, "CREATE TYPE hydro.river_unit AS ENUM ('m3/s', 'm')")
     execute(connection, "CREATE TYPE hydro.river_quality_flag AS ENUM ('ok', 'qc_warning')")
+    execute(
+        connection,
+        """
+        CREATE TABLE met.forcing_station_timeseries (
+          forcing_version_id TEXT NOT NULL,
+          basin_version_id TEXT NOT NULL,
+          station_id TEXT NOT NULL,
+          valid_time TIMESTAMPTZ NOT NULL,
+          source_id TEXT NOT NULL,
+          variable TEXT NOT NULL,
+          value DOUBLE PRECISION NOT NULL,
+          unit TEXT NOT NULL,
+          native_resolution TEXT,
+          quality_flag TEXT NOT NULL DEFAULT 'ok',
+          PRIMARY KEY (forcing_version_id, station_id, variable, valid_time)
+        )
+        """,
+    )
     execute(
         connection,
         """
@@ -411,24 +429,6 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         )
         """,
     )
-    execute(
-        connection,
-        """
-        CREATE TABLE met.forcing_station_timeseries (
-          forcing_version_id TEXT NOT NULL,
-          basin_version_id TEXT NOT NULL,
-          station_id TEXT NOT NULL,
-          valid_time TIMESTAMPTZ NOT NULL,
-          source_id TEXT NOT NULL,
-          variable TEXT NOT NULL,
-          value DOUBLE PRECISION NOT NULL,
-          unit TEXT NOT NULL,
-          native_resolution TEXT,
-          quality_flag TEXT NOT NULL DEFAULT 'ok',
-          PRIMARY KEY (forcing_version_id, station_id, variable, valid_time)
-        )
-        """,
-    )
     compression_settings = {
         ("hydro", "river_timeseries"): (
             "timescaledb.compress = true, "
@@ -447,7 +447,10 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
     assert "timescaledb.compress_segmentby = 'run_id, river_network_version_id, river_segment_id'" in migration
     assert "timescaledb.compress_segmentby = 'forcing_version_id, station_id'" in migration
     assert migration.count("timescaledb.compress_orderby = 'variable, valid_time'") == 2
-    for (schema, table), options in compression_settings.items():
+    for (schema, table), options in (
+        (("met", "forcing_station_timeseries"), compression_settings[("met", "forcing_station_timeseries")]),
+        (("hydro", "river_timeseries"), compression_settings[("hydro", "river_timeseries")]),
+    ):
         execute(
             connection,
             "SELECT create_hypertable(%s, 'valid_time', chunk_time_interval => interval '7 days')",

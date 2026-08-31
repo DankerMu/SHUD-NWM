@@ -142,8 +142,10 @@ against the committed `.example` templates as of 2026-08-01:
   value. #1237 neither judged nor changed the lag.
 - **DB retention timer.** Not enabled as of the 2026-08-01 verification;
   enabled on 2026-08-14 (issue #1369 operator decision) at the committed
-  05:15 UTC daily cadence with the archive gate `disabled` — since #1370 the
-  only value the runner accepts. That bringup's four live receipts ARE
+  06:36 UTC daily cadence with the archive gate `disabled` — since #1370 the
+  only value the runner accepts. The 05:15 UTC figure below is the historical
+  bringup cadence recorded in the 2026-08-14 receipts, not the current unit.
+  That bringup's four live receipts ARE
   committed under
   `docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention/`
   (`retention-dryrun-20260814T095619Z.json`,
@@ -1615,10 +1617,10 @@ check cannot flake on autovacuum or parallel-worker noise.
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
 automated lane, and because selection is oldest-first (`ORDER BY range_end
 ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. Since `#1156` the
-three walls are operator-configurable through the single compression env file,
-so the fix is a bounded override window rather than a manual
-`statement_timeout = 0` DDL.
+tick and burns the whole tick, blocking everything behind it. The two mode-0600
+lane env files are one sequential assembly input: the shared preflight reads
+both as inert data before compression or cold residency starts. A catch-up is a
+bounded two-file override window, not a manual `statement_timeout = 0` DDL.
 
 **The defaults already cover the steady state — check before you override.**
 `#1352` resized the compression statement/wrapper pair to `3600000` ms /
@@ -1634,26 +1636,29 @@ chunk that measures beyond that envelope — first estimate it as
 `pg_total_relation_size / 1 GB × 6 s` and compare against the 3600 s ceiling.
 
 **Runner wall ≠ supervisor wall.** This section tunes the *recurring runner*
-lane: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`, consumed by
-`scripts/node27_timeseries_compression_once.sh` as the `timeout` DURATION, plus
+lane: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`, resolved by the
+shared preflight and passed to its pinned `/usr/bin/timeout` launch, plus
 `nhms-node27-timeseries-compression.service`'s `TimeoutStartSec`. The
 `--wall-seconds 900` on `nhms-node27-timeseries-compression-replay.service` and
 the supervisor's own hard wall (§4.0.1) are a *different* lane with a different
 knob; nothing here changes them, and they do not follow this env file.
 
-**The four values** (one env file,
-`/home/nwm/NWM/infra/env/node27-timeseries-compression.env`, mode 0600):
+**The paired declarations** (both files mode 0600):
 
-|variable|catch-up value|rule|receipt echo (schema 2.1+)|
+|file and variable|catch-up value|rule|receipt echo (schema 2.1+)|
 |---|---|---|---|
-|`NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (e.g. `5400000` for a 900 GB chunk at ~6.0 s/GB)|minimum 1000; must exceed the `3600000` default or there is nothing to override|`budget.compress_timeout_ms`|
-|`NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|`ceil(COMPRESS_TIMEOUT_MS/1000) + 60` is the enforced **floor**, not the sizing recipe — budget real headroom, `+300` or more (e.g. `5700`)|leg 1 of the invariant|`budget.wrapper_wall_seconds`|
-|`NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS`|`WRAPPER_WALL_SECONDS + 40` or more (e.g. `5740`)|leg 2; a **declared** value — it must equal the drop-in you actually installed|`budget.systemd_wall_seconds`|
-|`NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|leg 3: raising the timeout above `3600000` with a bound above `1` is refused outright; the invariant bounds ONE chunk's budget, so a second chunk in the same tick still dies on the wall|`per_tick_bound`|
+|compression env: `NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS`|measured chunk duration × ~1.5, in ms (for example `5400000`)|minimum 1000; above `3600000` requires bound `1`|`budget.compress_timeout_ms`|
+|compression env: `NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS`|at least `ceil(timeout_ms/1000)+300` (for example `5700`)|actual compression wrapper; defaults to `3900`|`budget.wrapper_wall_seconds`|
+|compression env: `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND`|`1`|mandatory when the compression timeout is raised|`per_tick_bound`|
+|both envs: their `...SYSTEMD_WALL_SECONDS` declarations|the same larger integer, strictly above compression wrapper + cold wrapper + `40` (for example `9642` for `5700 + 3901 + 40 + 1`)|must agree exactly and match the already-installed larger drop-in|`budget.systemd_wall_seconds`|
+|cold env: `NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS`|usually retain `3901`|at least `ceil(cold_timeout_ms/1000)+300`|cold receipt budget|
 
-The runner refuses to open a database connection if any of the three legs is
-violated, and the wrapper refuses to launch on a non-positive-integer wall.
-Both refusals are structured JSON on stderr.
+The shared preflight rejects a malformed, duplicate, unsafe, mismatched or
+insufficient pair before either DB runner launches. It reads both files once as
+inert descriptor-bound maps, builds the child environment from that exact read,
+and emits no secret values. Thin wrappers never source either lane env; Python
+runners cross-check the exported assembly values rather than guessing a sibling
+wall.
 
 **Every tick's receipt records the configuration that tick resolved** (issue
 `#1351`, receipt `schema_version` `"2.1"`): the `budget` object plus
@@ -1666,9 +1671,9 @@ Read each field for what it is worth:
   tick — the timeout as the per-chunk `SET statement_timeout`, the bound as the
   selection cap.
 - `budget.wrapper_wall_seconds` is **parsed and invariant-checked** by the
-  Python, but enforced by `scripts/node27_timeseries_compression_once.sh`,
-  which reads its own copy of the variable; the receipt shows what the runner
-  read, not what `timeout` was actually given.
+  Python runner and is also the exact value the shared preflight passes to its
+  pinned `timeout` process from the same inert env-file read; the receipt shows
+  what the runner received through that assembled child environment.
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
   read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
   the receipt only proves what the env file declared. Check 2 below
@@ -1679,73 +1684,76 @@ The only receipt without a `budget` block is the config tombstone
 (`outcome: "failed"`, `failure.stage: "config"`), written when the
 configuration was refused and no budget was ever in force.
 
-**Why `+60` is a floor and not a size.** Leg 1 is the *minimum* the runner will
-accept; it is not a measurement of what a tick costs outside `compress_chunk`.
-A single catch-up tick also pays for the display-watermark resolution, two
-10-second `git` lineage probes, the catalog enumeration (`fetch_chunks`), a
-chunk size measurement before *and* after the compress, and — on the error
-path — a reconcile probe. Every one of those DB legs is a 10-second connect
-plus a statement capped at 60 seconds (`_QUERY_TIMEOUT_MS`), and those caps are
-genuinely reachable under lock contention on this node (§8.6 documents the same
-60-second catalog/measurement cap being hit by concurrent
-`compress_chunk`/`decompress_chunk` work). Worst case that is roughly 300
-seconds of non-compress budget, so a wall sized at `compress + 60` can `TERM`
-the tick *after* a successful compress, during measurement or reconcile, and
-lose the receipt. Size the wall at `ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or
-more for a catch-up; the example row above (`5400000` ms → `5700` → `5740`)
-uses that shape.
+**Why `+300` is the enforced cleanup contract.** A catch-up tick pays for the
+display-watermark resolution, two 10-second `git` lineage probes, catalog
+enumeration, size measurements before and after compression, reconciliation,
+receipt publication and process cleanup. The non-compress budget can reach
+roughly 300 seconds under lock contention. Therefore the resolver requires
+`ceil(COMPRESS_TIMEOUT_MS/1000) + 300` or more, and applies the same 300-second
+floor to cold residency. The shared service wall must then be strictly larger
+than both actual wrappers plus 40 seconds.
 
-**Mandatory ordering.** The steps are ordered against a specific failure mode
-(`b21e2453`): a tick that passes the Python check against a *declared* systemd
-wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
+**Mandatory ordering.** The preflight validates declarations; it cannot inspect
+systemd's actual `TimeoutStartSec`. The steps therefore prevent a larger env
+pair from reaching a smaller real service wall.
 
-1. **systemd drop-in FIRST, then reload.** Before touching the env file:
-
-   ```bash
-   mkdir -p ~/.config/systemd/user/nhms-node27-timeseries-compression.service.d
-   printf '[Service]\nTimeoutStartSec=5740\n' > \
-     ~/.config/systemd/user/nhms-node27-timeseries-compression.service.d/override.conf
-   systemctl --user daemon-reload
-   systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
-   ```
-
-   The last line must report the new wall; the committed unit ships
-   `TimeoutStartSec=3940` and the repository is not edited for a catch-up.
-   This tier has **no system-level unit** (see the install section: "Do NOT
-   install system-level (root) units for this tier"): a root/system-scope
-   variant of any command in this section (`systemctl` without `--user`, or a
-   drop-in under `/etc/systemd/system`) succeeds silently against the *system*
-   manager while the real user unit is untouched — never use system scope here.
-2. **Stop and mask the timer for the whole window**, and keep the other
-   compression lanes out of it:
+1. **Stop and mask the timer first** for the full window, and keep replay or
+   supervisor lanes out of it:
 
    ```bash
    systemctl --user stop nhms-node27-timeseries-compression.timer
    systemctl --user mask nhms-node27-timeseries-compression.timer
+   systemctl --user stop nhms-node27-timeseries-compression.service
    ```
 
-   A scheduled tick inside the window would read the override env, run to the
-   raised wall, and also overwrite the default receipt path. Do **not** start
-   `nhms-node27-timeseries-compression-replay.service` or any supervisor
-   compression task while the override is in place: those children re-enter the
-   *same* wrapper and fall back to this *same* default env file
-   (`CHILD_ENV_ALLOWLIST` carries no `..._ENV_FILE`), yet their own
-   `--wall-seconds 900` / `TimeoutStartSec=920` are untouched by this
-   procedure — that is the `TERM`-mid-DDL shape reproduced in another lane.
-3. **Snapshot the env file, then set the four values** (table above), keeping
-   mode 0600 and `nwm:nwm` ownership. The content snapshot is what the cleanup
-   check in step 4 diffs against, so it must be taken *before* the first edit:
+2. **Install the matching larger systemd drop-in before changing either env.**
+   Choose a shared wall strictly greater than both wrappers plus 40; for a
+   `5400000` ms compression timeout, wrapper `5700`, unchanged cold wrapper
+   `3901`, use `9642` seconds.
+
+   ```bash
+   DROPIN_DIR="$HOME/.config/systemd/user/nhms-node27-timeseries-compression.service.d"
+   DROPIN_BACKUP="$HOME/node27-timeseries-compression-override.pre-catchup"
+   test ! -e "$DROPIN_BACKUP" || {
+     printf '%s\n' "existing catch-up drop-in backup: $DROPIN_BACKUP" >&2
+     exit 1
+   }
+   mkdir -p "$DROPIN_DIR"
+   if test -e "$DROPIN_DIR/override.conf"; then
+     cp -p "$DROPIN_DIR/override.conf" "$DROPIN_BACKUP"
+   fi
+   printf '[Service]\nTimeoutStartSec=9642\n' > "$DROPIN_DIR/override.conf"
+   systemctl --user daemon-reload
+   systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   ```
+
+   Verify the displayed wall before any env edit. The committed default is
+   `TimeoutStartSec=7842`; no process introspects this setting. This is a
+   user-scope unit: do not use a system-scope drop-in or `systemctl` without
+   `--user`.
+
+3. **Snapshot both env files, then edit them coherently.** Keep mode 0600 and
+   ownership, and never print either DSN.
 
    ```bash
    cp -p /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
      ~/node27-compression-env.pre-catchup
-   stat -c '%a %U:%G' ~/node27-compression-env.pre-catchup   # 600 nwm:nwm
+   cp -p /home/nwm/NWM/infra/env/node27-cold-residency.env \
+     ~/node27-cold-residency-env.pre-catchup
    ```
 
-   `cp -p` preserves the 0600/`nwm:nwm` mode — the snapshot holds the same DSN
-   as the live file, so it is a secret and stays under `~nwm`. Also record
-   `stat -c '%a %U:%G'` on the live file before and after the edit; never print
-   the DSN.
+   Set compression timeout `5400000`, compression wrapper `5700`, and
+   compression bound `1`; set `NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=9642`
+   in the compression env **and**
+   `NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=9642` in the cold env. Cold
+   wrapper may remain `3901`. Run the shared preflight before the dry run:
+
+   ```bash
+   /home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py \
+     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
+     --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check
+   ```
+
 4. **Dry-run, then enforce, then clean up — in that order.** Run 4a and 4b
    inside a `tmux`/`screen` session (same convention as §4.3.3): the enforcing
    tick can run ~30 minutes, and an ssh hangup on a bare foreground invocation
@@ -1756,37 +1764,47 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    # a. dry-run tick: confirm the selection set is the intended chunk
    /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh \
      --receipt-path /home/nwm/node27-compression-catchup-dryrun.json
-   # b. the single enforcing tick, distinct receipt path (the lock path is
-   #    deliberately shared, so a stray timer tick still cannot overlap)
+   # b. the single enforcing tick, distinct receipt path. The lifecycle lock
+   #    remains only an overlap backstop; it does not replace the stopped/masked
+   #    timer or the ordered service-wall change above.
    /home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce \
      --receipt-path /home/nwm/node27-compression-catchup-enforce.json
    ```
 
-   Cleanup order is as hard a requirement as the setup order, and it is the
-   mirror image: **delete the env override FIRST**, then unmask and start the
-   timer (`systemctl --user unmask/start`), then remove the user-scope drop-in
-   and `systemctl --user daemon-reload`, then confirm the
-   next default tick writes to the default receipt path (the catch-up receipts
-   were per-invocation `--receipt-path` files; nothing restores itself).
-   Removing the drop-in or unmasking the timer while the env override is still
-   in place leaves exactly the b21e2453 configuration — a tick that passes the
-   Python leg-2 check against a declared 5740 and then hits the real 3940
-   mid-DDL — and it re-arms the replay-lane hazard from step 2. **The catch-up
-   is not finished while any override residue exists**; verify with all three
-   checks below — the two configuration checks first, and stamp `CLEANUP_AT`
-   as you start them:
+   Cleanup is fail-safe: stop the service if it remains active, restore **both**
+   env declarations coherently while it cannot run, run the shared preflight on
+   the restored pair, then remove or restore the drop-in and reload. Only after
+   `TimeoutStartUSec` verifies the default `7842`-second wall may the timer be
+   unmasked and started. There must be no interval in which the service can
+   launch with an env wrapper wall larger than the installed systemd wall.
 
    ```bash
-   # record the instant cleanup completed — check 3's freshness anchor.
-   # Write it down: check 3 runs after the next 04:25 UTC tick, likely in
-   # another shell session.
-   CLEANUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ); echo "$CLEANUP_AT"
-   # env file byte-identical to the pre-window snapshot (no output = clean)
-   diff ~/node27-compression-env.pre-catchup \
+   DROPIN_DIR="$HOME/.config/systemd/user/nhms-node27-timeseries-compression.service.d"
+   DROPIN_BACKUP="$HOME/node27-timeseries-compression-override.pre-catchup"
+   systemctl --user stop nhms-node27-timeseries-compression.service || true
+   cp -p ~/node27-compression-env.pre-catchup \
      /home/nwm/NWM/infra/env/node27-timeseries-compression.env
-   # real systemd wall back to the committed 3940 s
+   cp -p ~/node27-cold-residency-env.pre-catchup \
+     /home/nwm/NWM/infra/env/node27-cold-residency.env
+   /home/nwm/NWM/.venv/bin/python /home/nwm/NWM/scripts/node27_timeseries_budget_preflight.py \
+     --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
+     --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check
+   if test -e "$DROPIN_BACKUP"; then
+     cp -p "$DROPIN_BACKUP" "$DROPIN_DIR/override.conf"
+   else
+     rm -f "$DROPIN_DIR/override.conf"
+   fi
+   systemctl --user daemon-reload
    systemctl --user show -p TimeoutStartUSec nhms-node27-timeseries-compression.service
+   systemctl --user unmask nhms-node27-timeseries-compression.timer
+   systemctl --user start nhms-node27-timeseries-compression.timer
+   CLEANUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ); printf '%s\n' "$CLEANUP_AT"
    ```
+
+   Do not remove the larger drop-in or unmask the timer while either larger env
+   declaration remains. The catch-up is unfinished while any override residue
+   exists. A wall longer than the normal timer window must be run manually
+   outside that window; retention remains scheduled at 06:36 UTC.
 
    Both checks read the *intended* configuration. The third check reads what a
    real tick **resolved**: after the first default timer tick following the
@@ -1871,7 +1889,7 @@ wall and then hits a smaller *real* one, taking `TERM` mid-DDL.
    assert budget == {
        "compress_timeout_ms": 3600000,
        "wrapper_wall_seconds": 3900,
-       "systemd_wall_seconds": 3940,
+       "systemd_wall_seconds": 7842,
    }, "catch-up budget still in force"
    assert receipt.get("per_tick_bound") == 4, "catch-up budget still in force"
    PY
@@ -1896,8 +1914,8 @@ provenance and no bounded lock, and it is what this section exists to avoid.
 
 **What a wall leaves behind, and how to clear it.** Whichever of the three
 walls trips — the `statement_timeout` on the DDL, the real systemd
-`TimeoutStartSec` taking `TERM` mid-DDL, or `/usr/bin/timeout` inside
-`scripts/node27_timeseries_compression_once.sh` — the tick exits nonzero, and
+`TimeoutStartSec` taking `TERM` mid-DDL, or the shared preflight's pinned
+`/usr/bin/timeout` — the tick exits nonzero, and
 because `nhms-node27-timeseries-compression.service` is `Type=oneshot` with no
 `Restart=`, the unit is left `failed/failed` with `MainPID=0`. It stays that way
 until the next timer tick overwrites the state, or until an operator runs
@@ -2477,7 +2495,7 @@ Related documents:
 Live enablement of the retention unit was originally a §6.3 follow-up
 (issue #856) and stayed deferred while the archive gates could still be
 satisfied. **Operator decision 2026-08-14 (issue #1369): the timer is
-enabled, running daily at 05:15 UTC** — the committed `OnCalendar` value is
+enabled, running daily at 06:36 UTC** — the committed `OnCalendar` value is
 unchanged — with the archive gate set to `disabled` under
 [`docs/adr/0002-node27-timeseries-hot-cold-tiering.md`](../adr/0002-node27-timeseries-hot-cold-tiering.md)
 Revision 2026-08-11. Step 3 below is therefore a real step now, not a
@@ -2687,14 +2705,15 @@ the window.
 
 **Superseding decision (2026-08-14, issue #1369):** the archive lane is
 retired, so the gate is switched to `disabled` and the timer is enabled at
-its committed 05:15 UTC cadence. The bringup order is fixed: set the env
+its committed 06:36 UTC cadence. The bringup order is fixed: set the env
 mode with `ENFORCE=0` → manual dry-run receipt → **blast-radius inventory
 (the query below) over the full backlog**, reviewed against the LIVE
 `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` → `ENFORCE=1`
 manual tick (≤ per-tick bound) → `enable --now` the timer → capture
 `list-timers` → after the second tick confirm two distinctly timestamped
 receipts coexist (step 4). That bringup ran on 2026-08-14: the timer is
-enabled at 05:15 UTC daily, the whole 6-chunk backlog was ground down (5
+enabled at the then-live 05:15 UTC daily cadence (historical; the committed
+unit is now 06:36 UTC), the whole 6-chunk backlog was ground down (5
 candidates in the first enforce plus the 1 deferred remainder in the next
 tick, leaving `deferred_remainder: []`), and its four live receipts are
 committed under

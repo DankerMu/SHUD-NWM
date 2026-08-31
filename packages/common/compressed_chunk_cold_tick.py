@@ -7,13 +7,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 from packages.common.compressed_chunk_cold_receipt import (
+    authority_from_document,
     build_receipt,
     iso_now,
     named_groups_from_intent,
     observation_payload,
+    prove_sidecar_absent,
+    public_authority_blocks_selection,
+    public_closed_authority,
     publish_intent,
     publish_receipt,
     read_intent,
+    read_public_receipt,
+    read_public_receipt_durable,
+    recovery_payload,
     remove_intent,
     sidecar_present,
     stable_error,
@@ -133,6 +140,42 @@ def before_from_intent_item(item: Mapping[str, Any]) -> tuple[Any | None, Window
     return residency_group_from_snapshot(before_payload), window_parity_from_dict(parity_payload)
 
 
+def _recovery_required() -> ColdRuntimeError:
+    return ColdRuntimeError(
+        "durable recovery authority blocks dry-run",
+        error_class="recovery_required",
+        stage="startup",
+    )
+
+
+def _authority_document(config: Any, *, public: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+    if sidecar_present(config.intent_path):
+        return read_intent(config.intent_path), True
+    public = read_public_receipt_durable(config.receipt_path) if public is None else dict(public)
+    if not public_authority_blocks_selection(public):
+        raise ColdRuntimeError(
+            "pending cleanup authority is missing reconstructible before evidence",
+            error_class="corrupt_intent",
+            stage="startup",
+        )
+    prove_sidecar_absent(config.intent_path)
+    return public, False
+
+
+def _closed_authority_gate(config: Any) -> dict[str, Any]:
+    """Return one exact durable closed receipt after proving sidecar absence."""
+
+    public = read_public_receipt_durable(config.receipt_path)
+    if not public_closed_authority(public):
+        raise ColdRuntimeError(
+            "public receipt changed while proving closed authority",
+            error_class="publication_indeterminate",
+            stage="startup",
+        )
+    prove_sidecar_absent(config.intent_path)
+    return public
+
+
 def recover_intent(
     config: Any,
     *,
@@ -147,9 +190,10 @@ def recover_intent(
     application_name: str,
     cleanup_margin_seconds: int,
     systemd_margin_seconds: int,
+    public_authority: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     del application_name
-    intent = read_intent(config.intent_path)
+    intent, sidecar_exists = _authority_document(config, public=public_authority)
     named = named_groups_from_intent(intent)
     selected_items = intent.get("selected")
     if not isinstance(selected_items, list) or len(selected_items) != len(named):
@@ -192,6 +236,11 @@ def recover_intent(
         elif observation.reconciliation == "complete_source" and terminal_state == "complete_target":
             terminal_state = "complete_source"
     closed_state = terminal_state if terminal_state in {"complete_source", "complete_target"} else "complete_target"
+    classification = (
+        terminal_state
+        if blocking
+        else ("complete_source" if terminal_state == "complete_source" else "complete_target")
+    )
     receipt = build_receipt(
         mode="enforce",
         outcome="failed" if blocking else "clean",
@@ -219,22 +268,41 @@ def recover_intent(
         deferred=[],
         skipped=[],
         error=error,
-        recovery={
-            "classification": (
-                terminal_state
-                if blocking
-                else ("complete_source" if terminal_state == "complete_source" else "complete_target")
-            ),
-            "sidecar_present": True,
-            "replayed": False,
-            "blocked_new_selection": blocking,
-        },
+        recovery=recovery_payload(
+            classification=classification,
+            sidecar_present=sidecar_exists,
+            blocked_new_selection=True,
+            authority="sidecar" if sidecar_exists else "pending_cleanup",
+            cleanup_pending=True if not sidecar_exists else (False if blocking else True),
+        ),
     )
     if blocking:
+        publish_receipt(config.receipt_path, receipt)
         return receipt, "blocked"
-    publish_receipt(config.receipt_path, receipt)
-    remove_intent(config.intent_path)
-    return receipt, "closed"
+    pending = dict(receipt)
+    pending["recovery"] = recovery_payload(
+        classification=classification,
+        sidecar_present=sidecar_exists,
+        blocked_new_selection=True,
+        authority="pending_cleanup",
+        cleanup_pending=True,
+    )
+    publish_receipt(config.receipt_path, pending)
+    if sidecar_exists:
+        remove_intent(config.intent_path)
+    prove_sidecar_absent(config.intent_path)
+    # Bind the exact pending authority before replacing it with closed.
+    read_public_receipt_durable(config.receipt_path)
+    closed = dict(receipt)
+    closed["recovery"] = recovery_payload(
+        classification=classification,
+        sidecar_present=False,
+        blocked_new_selection=False,
+        authority="closed",
+        cleanup_pending=False,
+    )
+    publish_receipt(config.receipt_path, closed)
+    return closed, "closed"
 
 
 def planned_observation(
@@ -309,10 +377,16 @@ def run_tick(
     cutoff = compute_cutoff(watermark, config.lag_seconds)
     observer = connect()
     try:
-        from packages.common.compressed_chunk_cold_runtime import bind_execute, engine_versions, load_inventories
+        from packages.common.compressed_chunk_cold_runtime import (
+            assert_engine_versions,
+            bind_execute,
+            engine_versions,
+            load_inventories,
+        )
 
         execute = bind_execute(observer)
         server_version, timescaledb_version = engine_versions(execute)
+        assert_engine_versions(server_version, timescaledb_version)
         inventories = load_inventories(observer)
         target = preflight_target_identity(
             execute,
@@ -336,8 +410,11 @@ def run_tick(
         "systemd_margin_seconds": systemd_margin_seconds,
     }
 
-    if sidecar_present(config.intent_path):
-        recovered, status = recover_intent(
+    sidecar_exists = sidecar_present(config.intent_path)
+    if sidecar_exists:
+        if not config.enforce:
+            raise _recovery_required()
+        recovered, _status = recover_intent(
             config,
             connect=connect,
             inventories=inventories,
@@ -351,8 +428,60 @@ def run_tick(
             cleanup_margin_seconds=cleanup_margin_seconds,
             systemd_margin_seconds=systemd_margin_seconds,
         )
-        if status == "blocked" or config.enforce:
+        return recovered
+
+    public_receipt = read_public_receipt(config.receipt_path)
+    if public_receipt is not None and authority_from_document(public_receipt) is not None:
+        # A concurrent sidecar resurrection wins over the public authority.
+        if sidecar_present(config.intent_path):
+            if not config.enforce:
+                raise _recovery_required()
+            return recover_intent(
+                config,
+                connect=connect,
+                inventories=inventories,
+                generated_at=now_utc,
+                head_sha=head_sha,
+                watermark=watermark,
+                cutoff=cutoff,
+                cluster=cluster,
+                target=target_document,
+                application_name=application_name,
+                cleanup_margin_seconds=cleanup_margin_seconds,
+                systemd_margin_seconds=systemd_margin_seconds,
+            )[0]
+        durable_public = read_public_receipt_durable(config.receipt_path)
+        prove_sidecar_absent(config.intent_path)
+        if public_authority_blocks_selection(durable_public):
+            if not config.enforce:
+                raise _recovery_required()
+            recovered, _status = recover_intent(
+                config,
+                connect=connect,
+                inventories=inventories,
+                generated_at=now_utc,
+                head_sha=head_sha,
+                watermark=watermark,
+                cutoff=cutoff,
+                cluster=cluster,
+                target=target_document,
+                application_name=application_name,
+                cleanup_margin_seconds=cleanup_margin_seconds,
+                systemd_margin_seconds=systemd_margin_seconds,
+                public_authority=durable_public,
+            )
             return recovered
+        if public_closed_authority(durable_public):
+            # Proved closed authority permits this same enforce tick to discover
+            # candidates.  Dry-run has no cleanup ownership, but this proof is
+            # read-only and does not alter the public terminal.
+            public_receipt = durable_public
+        elif config.enforce:
+            raise ColdRuntimeError(
+                "public recovery authority is contradictory",
+                error_class="publication",
+                stage="startup",
+            )
 
     ranked = ranked_candidates(
         connect,
@@ -434,19 +563,12 @@ def run_tick(
             deferred=deferred,
             skipped=[],
             error=blocking_error,
-            recovery=None
-            if blocking_error is None
-            else {
-                "classification": blocking_state if blocking_state in {"mixed", "unknown"} else "unknown",
-                "sidecar_present": False,
-                "replayed": False,
-                "blocked_new_selection": True,
-            },
+            recovery=None,
         )
 
     selected = list(already_cold)
     if blocking_error is not None:
-        return build_receipt(
+        blocked = build_receipt(
             mode="enforce",
             outcome="failed",
             state=blocking_state,
@@ -466,13 +588,10 @@ def run_tick(
             deferred=deferred,
             skipped=[],
             error=blocking_error,
-            recovery={
-                "classification": blocking_state if blocking_state in {"mixed", "unknown"} else "unknown",
-                "sidecar_present": False,
-                "replayed": False,
-                "blocked_new_selection": True,
-            },
+            recovery=None,
         )
+        publish_receipt(config.receipt_path, blocked)
+        return blocked
 
     mutated: list[dict[str, Any]] = list(already_cold)
     last_capacity: Mapping[str, Any] | None = None
@@ -515,6 +634,13 @@ def run_tick(
             selected=intent_selected,
             deferred=deferred,
             skipped=[],
+            recovery=recovery_payload(
+                classification="complete_source",
+                sidecar_present=True,
+                blocked_new_selection=True,
+                authority="sidecar",
+                cleanup_pending=False,
+            ),
         )
         publish_intent(config.intent_path, intent)
         publish_receipt(config.receipt_path, intent)
@@ -545,6 +671,9 @@ def run_tick(
             cold_reserve_bytes=config.cold_reserve_bytes,
             wal_reserve_bytes=config.wal_reserve_bytes,
             config=runtime_config(config),
+            expected_before=inspect.before,
+            expected_before_parity=inspect.before_parity,
+            expected_capacity=capacity.as_dict(),
         )
         payload = observation_payload(observation)
         payload["durable"] = durable_from_chunk(chunk)
@@ -620,6 +749,13 @@ def run_tick(
             selected=[*intent_selected, *pending],
             deferred=deferred,
             skipped=[],
+            recovery=recovery_payload(
+                classification="complete_source",
+                sidecar_present=True,
+                blocked_new_selection=True,
+                authority="sidecar",
+                cleanup_pending=False,
+            ),
         )
         publish_intent(config.intent_path, progress)
         publish_receipt(config.receipt_path, progress)
@@ -668,18 +804,51 @@ def run_tick(
         error=blocking_error,
         recovery=None
         if blocking_error is None
-        else {
-            "classification": (
+        else recovery_payload(
+            classification=(
                 blocking_state
                 if blocking_state in {"mixed", "unknown", "complete_source", "complete_target"}
                 else "unknown"
             ),
-            "sidecar_present": sidecar_present(config.intent_path),
-            "replayed": False,
-            "blocked_new_selection": blocking_state in {"mixed", "unknown"},
-        },
+            sidecar_present=sidecar_present(config.intent_path),
+            blocked_new_selection=True,
+            authority="sidecar" if sidecar_present(config.intent_path) else "pending_cleanup",
+            cleanup_pending=False if blocking_state in {"mixed", "unknown"} else True,
+        ),
     )
-    publish_receipt(config.receipt_path, receipt)
-    if sidecar_present(config.intent_path) and blocking_state not in {"mixed", "unknown"}:
+    if blocking_state in {"mixed", "unknown"}:
+        # A post-mutation reconcile retains its intent sidecar as authoritative.
+        # A fresh scan reaches the earlier blocker return before any intent exists.
+        publish_receipt(config.receipt_path, receipt)
+        return receipt
+    pending = dict(receipt)
+    pending["recovery"] = recovery_payload(
+        classification=(
+            blocking_state
+            if blocking_error and blocking_state in {"mixed", "unknown", "complete_source", "complete_target"}
+            else ("complete_target" if receipt["outcome"] == "clean" else "complete_source")
+        ),
+        sidecar_present=sidecar_present(config.intent_path),
+        blocked_new_selection=True,
+        authority="pending_cleanup",
+        cleanup_pending=True,
+    )
+    publish_receipt(config.receipt_path, pending)
+    if sidecar_present(config.intent_path):
         remove_intent(config.intent_path)
-    return receipt
+    prove_sidecar_absent(config.intent_path)
+    read_public_receipt_durable(config.receipt_path)
+    closed = dict(receipt)
+    closed["recovery"] = recovery_payload(
+        classification=(
+            blocking_state
+            if blocking_error and blocking_state in {"complete_source", "complete_target"}
+            else ("complete_target" if receipt["outcome"] == "clean" else "complete_source")
+        ),
+        sidecar_present=False,
+        blocked_new_selection=False,
+        authority="closed",
+        cleanup_pending=False,
+    )
+    publish_receipt(config.receipt_path, closed)
+    return closed

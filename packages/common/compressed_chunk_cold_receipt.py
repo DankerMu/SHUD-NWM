@@ -26,7 +26,14 @@ from packages.common.evidence_io import (
     reject_secret_material,
 )
 from packages.common.redaction import redact_payload, redact_text
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, unlink_no_follow_durable
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    prove_named_entry_absent_durable,
+    read_bytes_durable_no_follow,
+    stat_no_follow,
+    unlink_no_follow_durable,
+)
 
 SCHEMA_VERSION = "1.0"
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas/timeseries_cold_residency_receipt.schema.json"
@@ -59,7 +66,10 @@ def canonical_bytes(payload: Mapping[str, Any]) -> bytes:
 def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     document = json.loads(canonical_bytes(payload).decode("utf-8"))
     jsonschema.validate(document, load_receipt_schema(), format_checker=_FORMAT_CHECKER)
-    if document.get("outcome") == "in_progress":
+    recovery = document.get("recovery") if isinstance(document.get("recovery"), Mapping) else None
+    if document.get("outcome") == "in_progress" or (
+        recovery and recovery.get("authority") in {"sidecar", "pending_cleanup"}
+    ):
         _require_intent_evidence(document)
     return document
 
@@ -94,13 +104,131 @@ def sidecar_present(path: Path) -> bool:
     return sidecar_status(path) == "present"
 
 
+def _proof_error(*, message: str, stage: str, error: SafeFilesystemError) -> ColdReceiptError:
+    return ColdReceiptError(
+        message,
+        error_class="publication_indeterminate" if error.kind == "indeterminate" else "publication",
+        stage=stage,
+    )
+
+
+def prove_sidecar_absent(path: Path) -> None:
+    """Durably prove intent-sidecar absence through the shared pinned-fd primitive."""
+
+    try:
+        prove_named_entry_absent_durable(path)
+    except SafeFilesystemError as error:
+        raise _proof_error(
+            message="intent sidecar absence is unproven",
+            stage="prove_sidecar_absent",
+            error=error,
+        ) from error
+
+
+def authority_from_document(document: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(document, Mapping):
+        return None
+    recovery = document.get("recovery")
+    if not isinstance(recovery, Mapping):
+        return None
+    authority = recovery.get("authority")
+    return str(authority) if isinstance(authority, str) else None
+
+
+def public_authority_blocks_selection(document: Mapping[str, Any] | None) -> bool:
+    recovery = document.get("recovery") if isinstance(document, Mapping) else None
+    return bool(isinstance(recovery, Mapping) and recovery.get("blocked_new_selection") is True)
+
+
+def public_closed_authority(document: Mapping[str, Any] | None) -> bool:
+    recovery = document.get("recovery") if isinstance(document, Mapping) else None
+    return bool(
+        isinstance(recovery, Mapping)
+        and recovery.get("authority") == "closed"
+        and recovery.get("sidecar_present") is False
+        and recovery.get("cleanup_pending") is False
+        and recovery.get("blocked_new_selection") is False
+    )
+
+
+def read_public_receipt(path: Path) -> dict[str, Any] | None:
+    try:
+        stat_no_follow(path)
+    except FileNotFoundError:
+        return None
+    except SafeFilesystemError as error:
+        raise ColdReceiptError(
+            "public receipt is corrupt or unreadable",
+            error_class="publication",
+            stage="startup",
+        ) from error
+    return _decode_public_receipt(_read_public_receipt_bytes(path))
+
+
+def read_public_receipt_durable(path: Path) -> dict[str, Any]:
+    """Return the schema-valid public authority from the exact durably proven bytes."""
+
+    try:
+        raw = read_bytes_durable_no_follow(path, max_bytes=MAX_RECEIPT_BYTES)
+    except SafeFilesystemError as error:
+        raise _proof_error(
+            message="public receipt durability is unproven",
+            stage="read_public_receipt_durable",
+            error=error,
+        ) from error
+    return _decode_public_receipt(raw)
+
+
+def _read_public_receipt_bytes(path: Path) -> bytes:
+    try:
+        inspect_bounded_file_no_follow(path, max_bytes=MAX_RECEIPT_BYTES, label="cold residency receipt")
+        return read_bounded_bytes_no_follow(path, max_bytes=MAX_RECEIPT_BYTES, label="cold residency receipt")
+    except (BoundedEvidenceError, OSError) as error:
+        raise ColdReceiptError(
+            "public receipt is corrupt or unreadable",
+            error_class="publication",
+            stage="startup",
+        ) from error
+
+
+def _decode_public_receipt(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ColdReceiptError(
+            "public receipt is corrupt or unreadable",
+            error_class="publication",
+            stage="startup",
+        ) from error
+    if not isinstance(payload, dict):
+        raise ColdReceiptError(
+            "public receipt is corrupt or unreadable",
+            error_class="publication",
+            stage="startup",
+        )
+    try:
+        return validate_receipt(payload)
+    except (jsonschema.ValidationError, BoundedEvidenceError, ColdReceiptError) as error:
+        raise ColdReceiptError(
+            "public receipt is corrupt or unreadable",
+            error_class="publication",
+            stage="startup",
+        ) from error
+
+
 def _require_intent_evidence(document: Mapping[str, Any]) -> None:
+    recovery = document.get("recovery") if isinstance(document.get("recovery"), Mapping) else None
+    authority_relevant = bool(
+        recovery and recovery.get("authority") in {"sidecar", "pending_cleanup"}
+    )
     inventory = document.get("inventory") if isinstance(document.get("inventory"), Mapping) else {}
     hypertables = inventory.get("hypertables") if isinstance(inventory, Mapping) else None
     for item in document.get("selected") or []:
         if not isinstance(item, Mapping):
             continue
-        if item.get("outcome") != "planned" or item.get("plan_kind") != "migrate":
+        if item.get("plan_kind") != "migrate":
+            continue
+        if not authority_relevant and item.get("outcome") != "planned":
             continue
         before = item.get("before")
         parity = item.get("before_parity")
@@ -325,6 +453,24 @@ def accumulate_totals(
 
 def stable_error(*, error_class: str, stage: str, reason: str) -> dict[str, str]:
     return {"class": error_class, "stage": stage, "reason": redact_text(reason)}
+
+
+def recovery_payload(
+    *,
+    classification: str,
+    sidecar_present: bool,
+    blocked_new_selection: bool,
+    authority: str,
+    cleanup_pending: bool,
+) -> dict[str, Any]:
+    return {
+        "classification": classification,
+        "sidecar_present": sidecar_present,
+        "replayed": False,
+        "blocked_new_selection": blocked_new_selection,
+        "authority": authority,
+        "cleanup_pending": cleanup_pending,
+    }
 
 
 def build_receipt(

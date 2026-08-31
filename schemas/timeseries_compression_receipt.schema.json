@@ -164,7 +164,8 @@
       "properties": {
         "compress_timeout_ms": {"type": "integer", "minimum": 1000},
         "wrapper_wall_seconds": {"type": "integer", "minimum": 1},
-        "systemd_wall_seconds": {"type": "integer", "minimum": 1}
+        "systemd_wall_seconds": {"type": "integer", "minimum": 1},
+        "cleanup_margin_seconds": {"type": "integer", "minimum": 1}
       }
     },
     "selected_descriptor": {

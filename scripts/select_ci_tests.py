@@ -1792,7 +1792,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
             "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression.py",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
         ),
     ),
     PathTestRule(
@@ -1803,12 +1812,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_publication.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
         ),
     ),
     PathTestRule(
         "scripts/node27_cold_residency_once.sh",
         (
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
             "tests/test_node27_wrapper_pythonpath.py",
         ),
     ),
@@ -1817,6 +1829,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
         ),
     ),
     PathTestRule(
@@ -1827,8 +1842,46 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "schemas/timeseries_compression_receipt.schema.json",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_compression_receipt.example.json",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+        ),
+    ),
+    PathTestRule(
+        "infra/env/node27-timeseries-compression.example",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
         "infra/env/node27-cold-residency.example",
-        ("tests/test_node27_cold_residency.py",),
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
+    ),
+    PathTestRule(
+        "docs/runbooks/tier-node27-timeseries-storage.md",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+        ),
     ),
     PathTestRule(
         "schemas/timeseries_cold_residency_receipt.schema.json",
@@ -1845,6 +1898,53 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.noop.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.partial.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_cold_residency_receipt.error.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_cold_residency.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_timeseries_sequential_budget.py",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_budget_preflight.py",
+        (
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_wrapper_pythonpath.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/node27_timeseries_lifecycle_lock.py",
         (
             "tests/test_node27_timeseries_lifecycle_lock.py",
@@ -1858,6 +1958,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/compressed_chunk_cold_runtime.py",
         (
             "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
         ),

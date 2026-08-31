@@ -167,13 +167,20 @@ def complete_relations(
     origin_space: str = "pg_default",
     other_space: str | None = None,
     extra_indexes: int = 0,
+    toast_bias: int = 0,
 ) -> tuple[CatalogRelation, ...]:
     compressed_space = other_space or origin_space
     internal = "_timescaledb_internal"
+    # Derive toast OIDs from a ×100 base so several fixtures grouped in one
+    # fake (origin_oid 10/11/30/31 with compressed_oid 20/21/40/41) never
+    # collide with each other's heap/index OIDs. `toast_bias` remains
+    # available for explicit separation.
+    origin_toast = origin_oid * 100 + 20 + toast_bias
+    compressed_toast = compressed_oid * 100 + 20 + toast_bias
     members = [
-        rel(origin_oid, internal, origin_name, "r", origin_space, 8192, toast_oid=origin_oid + 20),
+        rel(origin_oid, internal, origin_name, "r", origin_space, 8192, toast_oid=origin_toast),
         rel(origin_oid + 5, internal, f"{origin_oid}_pkey", "i", origin_space, 16384, heap_oid=origin_oid),
-        rel(compressed_oid, internal, compressed_name, "r", compressed_space, 4096, toast_oid=compressed_oid + 20),
+        rel(compressed_oid, internal, compressed_name, "r", compressed_space, 4096, toast_oid=compressed_toast),
         rel(
             compressed_oid + 5,
             internal,
@@ -183,25 +190,25 @@ def complete_relations(
             8192,
             heap_oid=compressed_oid,
         ),
-        rel(origin_oid + 20, "pg_toast", f"pg_toast_{origin_oid}", "t", origin_space, 32768),
+        rel(origin_toast, "pg_toast", f"pg_toast_{origin_oid}", "t", origin_space, 32768),
         rel(
-            origin_oid + 21,
+            origin_toast + 1,
             "pg_toast",
             f"pg_toast_{origin_oid}_index",
             "i",
             origin_space,
             8192,
-            heap_oid=origin_oid + 20,
+            heap_oid=origin_toast,
         ),
-        rel(compressed_oid + 20, "pg_toast", f"pg_toast_{compressed_oid}", "t", compressed_space, 16384),
+        rel(compressed_toast, "pg_toast", f"pg_toast_{compressed_oid}", "t", compressed_space, 16384),
         rel(
-            compressed_oid + 21,
+            compressed_toast + 1,
             "pg_toast",
             f"pg_toast_{compressed_oid}_index",
             "i",
             compressed_space,
             8192,
-            heap_oid=compressed_oid + 20,
+            heap_oid=compressed_toast,
         ),
     ]
     for index in range(extra_indexes):
@@ -300,9 +307,11 @@ class FakeConnection:
         self.after_lock_hook: Any = None
         self.origin_oids: set[int] = set()
         self.parent_oids: dict[tuple[str, str], int] = {
-            ("hydro", "river_timeseries"): 1001,
-            ("met", "forcing_station_timeseries"): 2001,
+            ("met", "forcing_station_timeseries"): 1001,
+            ("hydro", "river_timeseries"): 2001,
         }
+        self.after_decompress_hook: Any = None
+        self.after_recompress_hook: Any = None
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -378,7 +387,9 @@ class FakeConnection:
             oids = list(params[0])
             rows = []
             for oid in oids:
-                relation = self.relations[oid]
+                relation = self.relations.get(oid)
+                if relation is None:
+                    continue
                 rows.append(
                     {
                         "oid": relation.oid,
@@ -493,6 +504,7 @@ class FakeConnection:
             for item in list(self.chunks.values()):
                 if item.origin_name not in sql:
                     continue
+                was_compressed = item.compressed_oid
                 self.chunks[item.origin_name] = CatalogChunk(
                     item.hypertable_schema,
                     item.hypertable_name,
@@ -506,23 +518,28 @@ class FakeConnection:
                     item.range_end,
                     False,
                 )
-                keep_heaps = {item.origin_oid, item.origin_oid + 20}
+                compressed_owner = was_compressed
+                compressed_toast = (compressed_owner * 100 + 20) if compressed_owner else None
                 for oid, relation in list(self.relations.items()):
                     owner = relation.oid if relation.relkind in {"r", "t"} else relation.heap_oid
-                    if owner in {item.compressed_oid, (item.compressed_oid or 0) + 20}:
+                    if owner == compressed_owner or (compressed_toast and owner == compressed_toast):
                         self.relations.pop(oid, None)
                         continue
-                    if owner in keep_heaps:
-                        self.relations[oid] = CatalogRelation(
-                            relation.oid,
-                            relation.schema,
-                            relation.name,
-                            relation.relkind,
-                            "nhms_cold",
-                            relation.bytes,
-                            relation.toast_oid,
-                            relation.heap_oid,
-                        )
+                    if not (owner == item.origin_oid or owner == item.origin_oid * 100 + 20):
+                        continue
+                    self.relations[oid] = CatalogRelation(
+                        relation.oid,
+                        relation.schema,
+                        relation.name,
+                        relation.relkind,
+                        "nhms_cold",
+                        relation.bytes,
+                        relation.toast_oid,
+                        relation.heap_oid,
+                    )
+            if self.after_decompress_hook is not None:
+                self.after_decompress_hook(self)
+            return
         if "compress_chunk" in sql:
             for item in list(self.chunks.values()):
                 if item.origin_name not in sql:
@@ -548,19 +565,19 @@ class FakeConnection:
                     "r",
                     "nhms_cold",
                     4096,
-                    toast_oid=new_oid + 100,
+                    toast_oid=new_oid * 100 + 20,
                 )
-                self.relations[new_oid + 100] = rel(
-                    new_oid + 100, "pg_toast", f"pg_toast_{new_oid}", "t", "nhms_cold", 16384
+                self.relations[new_oid * 100 + 20] = rel(
+                    new_oid * 100 + 20, "pg_toast", f"pg_toast_{new_oid}", "t", "nhms_cold", 16384
                 )
-                self.relations[new_oid + 101] = rel(
-                    new_oid + 101,
+                self.relations[new_oid * 100 + 21] = rel(
+                    new_oid * 100 + 21,
                     "pg_toast",
                     f"pg_toast_{new_oid}_index",
                     "i",
                     "nhms_cold",
                     8192,
-                    heap_oid=new_oid + 100,
+                    heap_oid=new_oid * 100 + 20,
                 )
                 self.relations[new_oid + 5] = rel(
                     new_oid + 5,
@@ -571,3 +588,5 @@ class FakeConnection:
                     8192,
                     heap_oid=new_oid,
                 )
+            if self.after_recompress_hook is not None:
+                self.after_recompress_hook(self)

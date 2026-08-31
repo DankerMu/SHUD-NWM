@@ -33,13 +33,17 @@ NODE27_COLD_RESIDENCY_PER_TICK_BOUND=1
 NODE27_COLD_RESIDENCY_MAX_MEMBERS=64
 
 # --- Timeout budget chain ----------------------------------------------------
-# Each wrapper wall must exceed its max statement wall + 300 s cleanup margin.
-# The shared compression oneshot wall must exceed compression wrapper + cold
-# wrapper + 40 s systemd margin. Defaults:
-#   statement 3600000 ms -> 3600 s
-#   cold wrapper 3901 s
-#   compression wrapper 3900 s
-#   service 3900 + 3901 + 40 + 1 = 7842 s (must exceed, not equal)
+# This is the second half of the sequential assembly input. The preflight reads
+# this file and node27-timeseries-compression.env together before either runner.
+# Each wrapper must cover ceil(statement timeout/1000)+300 seconds; the shared
+# service declaration must be STRICTLY greater than compression wrapper + cold
+# wrapper + 40. Defaults are cold 3600000 ms/3901 s, compression 3900 s, and
+# shared service 7842 s (=3900+3901+40+1).
+#
+# During a compression catch-up, retain this cold wall unless it needs changing,
+# but set the same larger shared declaration here and in the compression env.
+# Install and verify the matching larger systemd drop-in FIRST; the preflight
+# validates declarations only and cannot introspect TimeoutStartSec.
 NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS=3600000
 NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS=3901
 NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=7842

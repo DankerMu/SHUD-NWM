@@ -78,6 +78,9 @@ def test_intent_replacement_sibling_is_unknown(tmp_path: Path) -> None:
     assert receipt["recovery"]["blocked_new_selection"] is True
     assert sidecar_status(sidecar) == "present"
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+    public = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert public["outcome"] == "failed"
+    assert public["recovery"]["authority"] == "sidecar"
 
 
 def test_intent_without_before_evidence_fails_schema(tmp_path: Path) -> None:
@@ -151,6 +154,43 @@ def test_second_group_refuses_when_free_space_shrinks(tmp_path: Path, monkeypatc
     moved = [sql for sql, _params in connection.executed if "SET TABLESPACE" in sql]
     assert moved
     assert all("_hyper_1_2_chunk" not in sql for sql in moved)
+
+
+def test_intent_preimage_drift_before_runtime_refuses_movement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _base_env(tmp_path)
+    config = _ready(runner.config_from_args(_args(enforce=True), env))
+    connection = FakeConnection()
+    item = chunk()
+    connection.load_group(item, complete_relations())
+    original_inspect = __import__(
+        "packages.common.compressed_chunk_cold_tick", fromlist=["inspect_residency_group"]
+    ).inspect_residency_group
+    calls = {"n": 0}
+
+    def inspect_then_replace(*args: object, **kwargs: object):
+        observation = original_inspect(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            extra = complete_relations(extra_indexes=1)[-1]
+            connection.relations[extra.oid] = extra
+        return observation
+
+    monkeypatch.setattr("packages.common.compressed_chunk_cold_tick.inspect_residency_group", inspect_then_replace)
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    assert receipt["outcome"] == "failed"
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+    sidecar = intent_path_for(config.receipt_path)
+    if sidecar.exists():
+        intent = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert intent["selected"][0]["before"]["compressed"]["oid"] == 20
 
 
 def test_lock_refusal_does_not_fabricate_observed_identity(
@@ -420,6 +460,7 @@ def _load_two_groups(connection: FakeConnection) -> None:
             compressed_oid=21,
             origin_name="_hyper_1_2_chunk",
             compressed_name="compress_21",
+            toast_bias=1000,
         ),
     )
     connection.compression_bytes["_hyper_1_1_chunk"] = 1000
@@ -474,6 +515,7 @@ def test_group1_progress_is_durable_before_group2_and_startup_classifies_indepen
     assert recovered["selected"][0]["before"]["compressed"]["oid"] == 20
     assert recovered["selected"][1]["before"]["compressed"]["oid"] == 21
     assert sidecar_status(sidecar) == "absent"
+    assert recovered["recovery"]["authority"] == "closed"
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
     first_capacity = intent["selected"][0]["capacity"]
     second_capacity = intent["selected"][1]["capacity"]

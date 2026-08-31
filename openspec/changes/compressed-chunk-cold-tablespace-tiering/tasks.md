@@ -57,7 +57,7 @@ Seams under test:
 
 ## 2. #1893 — Implement bounded cold-residency convergence
 
-- [x] 2.1 Implement the production catalog/parity/transaction owner in
+- [ ] 2.1 Implement the production catalog/parity/transaction owner in
   `packages/common/compressed_chunk_cold_runtime.py`, consuming the #1892 pure
   contract and its sole shell-first sequence. It must resolve complete OID/member
   mappings, perform read-only validation of the fixed target catalog/container/
@@ -72,7 +72,7 @@ Seams under test:
   After heap locks and before movement SQL, re-derive both inventories and the
   target-window parity in the moving transaction and require exact preflight
   equality.
-- [x] 2.2 Implement `scripts/node27_cold_residency.py` plus
+- [ ] 2.2 Implement `scripts/node27_cold_residency.py` plus
   `scripts/node27_cold_residency_once.sh`, dry-run by default, using the existing
   display business watermark and compression lag. Scan bounded per-hypertable
   catalog input, assign oldest-first rank within each hypertable, and merge all
@@ -85,7 +85,7 @@ Seams under test:
   example-template defaults; Issue #1895 supplies measured live values before
   deployment. Freshly sample cold/hot free bytes immediately before every group;
   never reuse one sample across multiple rewrites.
-- [x] 2.3 Define `schemas/timeseries_cold_residency_receipt.schema.json` and
+- [ ] 2.3 Define `schemas/timeseries_cold_residency_receipt.schema.json` and
   normal/no-op/intent/partial/error examples. Bind exact head/config/cluster/
   target identity from a required real inspector (expected config cannot be its
   own observation), validated business-column inventory and per-window parity,
@@ -103,7 +103,7 @@ Seams under test:
   before new selection; mixed/unknown blocks the tick. Publication failure is
   non-success, never triggers mutation replay, and cannot leave an older success
   looking current.
-- [x] 2.4 Add `packages/common/node27_timeseries_lifecycle_lock.py` with fixed
+- [ ] 2.4 Add `packages/common/node27_timeseries_lifecycle_lock.py` with fixed
   mutex `/tmp/nhms-node27-timeseries-lifecycle.lock`. Compression, cold
   residency, retention, and manual decompression/replay must acquire it before
   any existing lane-local or database relation lock, assert the fixed file is a
@@ -117,14 +117,14 @@ Seams under test:
   Move the existing retention timer after that worst-case service window and
   retain lifecycle-lock refusal as the runtime backstop. Do not change the
   retention window and do not attach `nhms_cold` to a hypertable.
-- [x] 2.5 Test normal migration, already-cold no-op, catch-up, exact cutoff,
+- [ ] 2.5 Test normal migration, already-cold no-op, catch-up, exact cutoff,
   empty selection, bound/fairness, maximum member count, all legal states,
   selection races, partial recovery, capacity/lock/timeout/disappearance errors,
   multi-group free-space shrinkage, bounded single-row parity, locked inventory/
   parity drift, real target-inspector failure, pre-movement SQL event identity,
   unresolved-intent source/target startup, durable unlink failure, every early
   error replacing stale success, and receipt-publication failure.
-- [x] 2.6 Run focused unit/schema tests, the isolated PG 15.2 / TimescaleDB 2.10.2
+- [ ] 2.6 Run focused unit/schema tests, the isolated PG 15.2 / TimescaleDB 2.10.2
   integration suite, strict OpenSpec validation, and `uv run ruff check .`;
   attach normal/no-op/intent/partial/error receipt examples.
 

@@ -753,6 +753,44 @@ def origin_shell_is_not_complete(group: ResidencyGroup, *, target: str = COLD_TA
     return any(member.tablespace != target for member in group.members)
 
 
+def _owned_toast_complete(group: ResidencyGroup, heap: ResidencyMember) -> bool:
+    if heap.toast_oid is None:
+        return True
+    toast = next((member for member in group.members if member.oid == heap.toast_oid), None)
+    if toast is None or toast.kind != "toast_heap":
+        return False
+    return any(member.kind == "toast_index" and member.heap_oid == toast.oid for member in group.members)
+
+
+def expanded_uncompressed_group_is_complete(group: ResidencyGroup, *, target: str = COLD_TABLESPACE_NAME) -> bool:
+    if group.blocker or not group.members:
+        return False
+    if group.is_compressed or group.compressed_oid is not None:
+        return False
+    if any(member.kind == "compressed_heap" for member in group.members):
+        return False
+    origin = next((member for member in group.members if member.kind == "origin_heap"), None)
+    if origin is None or origin.tablespace != target:
+        return False
+    if not _owned_toast_complete(group, origin):
+        return False
+    return all(member.tablespace == target for member in group.members)
+
+
+def recompressed_group_is_complete(group: ResidencyGroup, *, target: str = COLD_TABLESPACE_NAME) -> bool:
+    if group.blocker or not group.members:
+        return False
+    if not group.is_compressed or group.compressed_oid is None:
+        return False
+    origin = next((member for member in group.members if member.kind == "origin_heap"), None)
+    compressed = next((member for member in group.members if member.kind == "compressed_heap"), None)
+    if origin is None or compressed is None or compressed.oid != group.compressed_oid:
+        return False
+    if not _owned_toast_complete(group, origin) or not _owned_toast_complete(group, compressed):
+        return False
+    return classify_residency(group.members, target=target) == "already_target"
+
+
 def same_window_groups_are_separate(left: ResidencyGroup, right: ResidencyGroup) -> bool:
     left_oids = {member.oid for member in left.members}
     right_oids = {member.oid for member in right.members}

@@ -1,100 +1,45 @@
 #!/bin/sh
 set -eu
 
-CALLER_PYTHONPATH=${PYTHONPATH-}
-CALLER_PYTHON_OVERRIDE=${NODE27_TIMESERIES_COMPRESSION_PYTHON-}
-CALLER_SCRIPT_OVERRIDE=${NODE27_TIMESERIES_COMPRESSION_SCRIPT-}
-readonly CALLER_PYTHONPATH CALLER_PYTHON_OVERRIDE CALLER_SCRIPT_OVERRIDE
-ENV_FILE=${NODE27_TIMESERIES_COMPRESSION_ENV_FILE:-/home/nwm/NWM/infra/env/node27-timeseries-compression.env}
-
-case "$ENV_FILE" in
-  /*) ;;
-  *) echo '{"status":"failed","reason":"wrapper paths must be absolute"}' >&2; exit 1 ;;
-esac
-
-if [ ! -f "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
-  echo '{"status":"failed","reason":"env file must be a regular non-symlink file"}' >&2
-  exit 1
-fi
-[ "$(stat -c '%a' "$ENV_FILE")" = 600 ] || {
-  echo '{"status":"failed","reason":"env file must have mode 0600"}' >&2
+fail() {
+  printf '%s\n' "{\"status\":\"failed\",\"reason\":\"$1\"}" >&2
   exit 1
 }
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
 
-# Wrapper wall (issue #1156). Same env file, same name, same empty-string
-# handling as the runner's Python-side default injection, so the two sides
-# cannot drift. `*[!0-9]*` rejects negatives, decimals and whitespace;
-# fail closed rather than launch the runner unbounded or with a bogus wall.
-WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-3900}
-case "$WALL" in
-  ''|*[!0-9]*) echo '{"status":"failed","reason":"wrapper wall must be a positive integer"}' >&2; exit 1 ;;
-esac
-[ "$WALL" -ge 1 ] || { echo '{"status":"failed","reason":"wrapper wall must be a positive integer"}' >&2; exit 1; }
+COMPRESSION_ENV_FILE=${NODE27_TIMESERIES_COMPRESSION_ENV_FILE:-/home/nwm/NWM/infra/env/node27-timeseries-compression.env}
+COLD_ENV_FILE=${NODE27_COLD_RESIDENCY_ENV_FILE:-/home/nwm/NWM/infra/env/node27-cold-residency.env}
+PRECHECK_REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
+readonly COMPRESSION_ENV_FILE COLD_ENV_FILE PRECHECK_REPO_ROOT
 
-REPO_ROOT=${NODE27_TIMESERIES_COMPRESSION_REPO_ROOT:-/home/nwm/NWM}
-case "$REPO_ROOT" in
-  *:*) echo '{"status":"failed","reason":"repository root must not contain a path-list delimiter"}' >&2; exit 1 ;;
+case "$COMPRESSION_ENV_FILE" in
   /*) ;;
-  *) echo '{"status":"failed","reason":"repository root must be absolute"}' >&2; exit 1 ;;
+  *) fail "wrapper paths must be absolute" ;;
 esac
-PYTHON_BIN=${CALLER_PYTHON_OVERRIDE:-$REPO_ROOT/.venv/bin/python}
-SCRIPT=${CALLER_SCRIPT_OVERRIDE:-$REPO_ROOT/scripts/node27_timeseries_compression.py}
-case "$PYTHON_BIN:$SCRIPT" in
+case "$COLD_ENV_FILE" in
+  /*) ;;
+  *) fail "wrapper paths must be absolute" ;;
+esac
+case "$PRECHECK_REPO_ROOT" in
+  *:*) fail "repository root must not contain a path-list delimiter" ;;
+  /*) ;;
+  *) fail "wrapper paths must be absolute" ;;
+esac
+
+PRECHECK_PYTHON=$PRECHECK_REPO_ROOT/.venv/bin/python
+PRECHECK_SCRIPT=$PRECHECK_REPO_ROOT/scripts/node27_timeseries_budget_preflight.py
+case "$PRECHECK_PYTHON:$PRECHECK_SCRIPT" in
   /*:/*) ;;
-  *) echo '{"status":"failed","reason":"wrapper paths must be absolute"}' >&2; exit 1 ;;
+  *) fail "wrapper paths must be absolute" ;;
 esac
-[ -x "$PYTHON_BIN" ] || {
-  echo '{"status":"failed","reason":"python executable is unavailable"}' >&2
-  exit 1
-}
-if [ ! -f "$SCRIPT" ] || [ -L "$SCRIPT" ]; then
-  echo '{"status":"failed","reason":"compression entrypoint is unavailable or a symlink"}' >&2
-  exit 1
+[ -f "$PRECHECK_PYTHON" ] && [ -x "$PRECHECK_PYTHON" ] || fail "python executable is unavailable"
+if [ ! -f "$PRECHECK_SCRIPT" ] || [ -L "$PRECHECK_SCRIPT" ]; then
+  fail "sequential budget preflight is unavailable or a symlink"
 fi
 
-if [ -n "$CALLER_PYTHONPATH" ]; then
-  PYTHONPATH="$REPO_ROOT:$CALLER_PYTHONPATH"
-else
-  PYTHONPATH="$REPO_ROOT"
-fi
-export PYTHONPATH
-
-[ -x /usr/bin/timeout ] || {
-  echo '{"status":"failed","reason":"timeout launcher is unavailable"}' >&2
-  exit 1
-}
-
-if ! "$PYTHON_BIN" -c '
-import importlib.machinery
-import os
-import sys
-
-root = os.path.realpath(sys.argv[1])
-script = os.path.realpath(sys.argv[2])
-expected_namespace = os.path.join(root, "scripts")
-search_path = list(sys.path)
-if not sys.flags.safe_path:
-    search_path[0] = os.path.dirname(script)
-spec = importlib.machinery.PathFinder.find_spec("scripts", search_path)
-locations = (
-    []
-    if spec is None or spec.submodule_search_locations is None
-    else [os.path.realpath(path) for path in spec.submodule_search_locations]
-)
-valid = (
-    spec is not None
-    and spec.origin is None
-    and locations
-    and all(path == expected_namespace for path in locations)
-)
-raise SystemExit(0 if valid else 1)
-' "$REPO_ROOT" "$SCRIPT"; then
-  echo '{"status":"failed","reason":"scripts import origin is outside repository root"}' >&2
-  exit 1
-fi
-
-exec /usr/bin/timeout --signal=TERM --kill-after=30s "${WALL}s" "$PYTHON_BIN" "$SCRIPT" "$@"
+# The preflight reads the lane files as inert descriptor-bound data and builds
+# the runner environment itself.  -E ignores caller PYTHONPATH for preflight
+# imports while retaining it for the final runner environment it constructs.
+exec "$PRECHECK_PYTHON" -E "$PRECHECK_SCRIPT" \
+  --compression-env "$COMPRESSION_ENV_FILE" \
+  --cold-env "$COLD_ENV_FILE" \
+  --launch compression -- "$@"

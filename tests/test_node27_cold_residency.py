@@ -37,6 +37,13 @@ def _base_env(tmp_path: Path, *, override: dict[str, str | None] | None = None) 
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
         "NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "1",
+        "NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS": "3600000",
+        "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "4",
+        "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "3900",
+        "NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS": "7842",
+        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
+        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
+        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
     }
     if override:
         for key, value in override.items():
@@ -84,10 +91,16 @@ def test_budget_literals_are_mechanically_ordered() -> None:
     assert runner._DEFAULT_SYSTEMD_WALL_SECONDS > sequential
     service = (_ROOT / "infra/systemd/nhms-node27-timeseries-compression.service").read_text(encoding="utf-8")
     assert "TimeoutStartSec=7842" in service
+    from packages.common.node27_timeseries_sequential_budget import sequential_service_budget
+
+    authority = sequential_service_budget()
+    assert authority.service_wall_seconds == 7_842
     wrapper = (_ROOT / "scripts/node27_cold_residency_once.sh").read_text(encoding="utf-8")
-    assert "WALL=${NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS:-3901}" in wrapper
+    assert "--launch cold" in wrapper
+    assert "node27_timeseries_budget_preflight.py" in wrapper
     compression_wrapper = (_ROOT / "scripts/node27_timeseries_compression_once.sh").read_text(encoding="utf-8")
-    assert "WALL=${NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS:-3900}" in compression_wrapper
+    assert "--launch compression" in compression_wrapper
+    assert "node27_timeseries_budget_preflight.py" in compression_wrapper
 
 
 def test_no_new_cold_residency_timer_exists() -> None:
@@ -147,11 +160,34 @@ def test_receipt_lock_and_sidecar_must_be_disjoint(tmp_path: Path) -> None:
 
 
 def test_service_wall_equality_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(runner.ColdResidencyConfigError, match="exceed"):
+    with pytest.raises(runner.ColdResidencyConfigError, match="service wall"):
         runner.config_from_args(
             _args(),
             _base_env(tmp_path, override={"NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7841"}),
         )
+
+
+def test_divergent_explicit_sibling_wall_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(runner.ColdResidencyConfigError, match="service wall"):
+        runner.config_from_args(
+            _args(),
+            _base_env(tmp_path, override={"NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS": "4000"}),
+        )
+
+
+def test_suffix_receipt_examples_select_base_schema_and_semantic_tests() -> None:
+    from scripts.select_ci_tests import select_tests
+
+    for name in (
+        "timeseries_cold_residency_receipt.example.json",
+        "timeseries_cold_residency_receipt.noop.example.json",
+        "timeseries_cold_residency_receipt.intent.example.json",
+        "timeseries_cold_residency_receipt.partial.example.json",
+        "timeseries_cold_residency_receipt.error.example.json",
+    ):
+        selected = select_tests([f"schemas/examples/{name}"], repo_root=_ROOT)
+        assert "tests/test_timeseries_storage_schemas.py" in selected
+        assert "tests/test_node27_cold_residency.py" in selected
 
 
 def test_lag_reuses_compression_contract_without_changing_default(tmp_path: Path) -> None:
@@ -341,6 +377,71 @@ def test_no_hypertable_attach_sql_in_production_modules() -> None:
         assert "import packages.common.compressed_chunk_cold_probe" not in text
 
 
+def test_recovery_schema_rejects_contradictory_authority_and_missing_evidence() -> None:
+    terminal = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.example.json").read_text())
+    contradictory = json.loads(json.dumps(terminal))
+    contradictory["recovery"]["authority"] = "closed"
+    contradictory["recovery"]["sidecar_present"] = True
+    with pytest.raises(Exception):
+        validate_receipt(contradictory)
+
+    pending_without_preimage = json.loads(
+        (_ROOT / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json").read_text()
+    )
+    pending_without_preimage["recovery"]["authority"] = "pending_cleanup"
+    pending_without_preimage["recovery"]["sidecar_present"] = False
+    pending_without_preimage["recovery"]["cleanup_pending"] = True
+    pending_without_preimage["selected"][0].pop("before")
+    with pytest.raises(Exception):
+        validate_receipt(pending_without_preimage)
+
+
+@pytest.mark.parametrize("classification", ["mixed", "unknown"])
+def test_schema_rejects_closed_mixed_or_unknown_authority(classification: str) -> None:
+    payload = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.example.json").read_text())
+    payload["outcome"] = "failed"
+    payload["state"] = classification
+    payload["error"] = {"class": classification, "stage": "startup"}
+    payload["recovery"]["classification"] = classification
+    with pytest.raises(Exception):
+        validate_receipt(payload)
+
+
+@pytest.mark.parametrize("classification", ["mixed", "unknown"])
+def test_schema_allows_blocked_pending_mixed_or_unknown_authority(classification: str) -> None:
+    payload = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json").read_text())
+    payload["outcome"] = "failed"
+    payload["state"] = classification
+    payload["error"] = {"class": classification, "stage": "startup"}
+    payload["recovery"] = {
+        "classification": classification,
+        "sidecar_present": False,
+        "replayed": False,
+        "blocked_new_selection": True,
+        "authority": "pending_cleanup",
+        "cleanup_pending": True,
+    }
+    validate_receipt(payload)
+
+
+def test_in_progress_receipt_requires_sidecar_recovery_authority() -> None:
+    payload = json.loads(
+        (_ROOT / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json").read_text(encoding="utf-8")
+    )
+    payload.pop("recovery")
+    with pytest.raises(Exception):
+        validate_receipt(payload)
+
+    payload = json.loads(
+        (_ROOT / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json").read_text(encoding="utf-8")
+    )
+    payload["recovery"]["authority"] = "pending_cleanup"
+    payload["recovery"]["sidecar_present"] = False
+    payload["recovery"]["cleanup_pending"] = True
+    with pytest.raises(Exception):
+        validate_receipt(payload)
+
+
 def test_schema_examples_are_valid() -> None:
     for name in (
         "timeseries_cold_residency_receipt.example.json",
@@ -365,6 +466,20 @@ def test_example_template_requires_unassigned_device_identity() -> None:
     assert "fixed production defaults" in text
     runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
     assert "NODE27_COLD_RESIDENCY_DEVICE_IDENTITY" in runbook
+    assert "TimeoutStartSec=7842" in runbook
+    assert '"systemd_wall_seconds": 7842' in runbook
+    living = "\n".join(
+        line
+        for line in runbook.splitlines()
+        if "historical" not in line.lower() and "receipts that" not in line.lower()
+    )
+    assert "TimeoutStartSec=3940" not in living
+    assert "TimeoutStartSec=5740" not in living
+    assert "OnCalendar=*-*-* 05:15:00 UTC" not in living
+    assert "node27-cold-residency.env" in living
+    assert "node27_timeseries_budget_preflight.py" in living
+    assert "TimeoutStartSec=9642" in living
+    assert "06:36 UTC" in living
 
 
 def test_ci_selector_owns_timing_module() -> None:
@@ -386,3 +501,146 @@ def test_production_expected_container_name_is_fixed_nhms_db(tmp_path: Path) -> 
     assert runtime_config(config).expected_container_name == "nhms-db"
     source = (_ROOT / "scripts/node27_cold_residency.py").read_text(encoding="utf-8")
     assert "NODE27_COLD_RESIDENCY_CONTAINER_NAME" not in source
+
+
+def test_fresh_scan_mixed_then_hot_blocks_later_movement(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, override={"NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "2"})
+    config = _ready(runner.config_from_args(_args(enforce=True), env))
+    connection = FakeConnection()
+    mixed = chunk(origin_oid=10, origin_name="_hyper_1_1_chunk")
+    hot = chunk(
+        origin_oid=11,
+        origin_name="_hyper_1_2_chunk",
+        compressed_oid=21,
+        compressed_name="compress_21",
+        schema="met",
+        name="forcing_station_timeseries",
+    )
+    connection.load_group(mixed, complete_relations(other_space="nhms_cold"))
+    connection.load_group(
+        hot,
+        complete_relations(
+            origin_oid=11,
+            compressed_oid=21,
+            origin_name="_hyper_1_2_chunk",
+            compressed_name="compress_21",
+        ),
+    )
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    assert receipt["outcome"] == "failed"
+    assert receipt["state"] == "mixed"
+    public = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    assert public["outcome"] == "failed"
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+
+
+def test_four_hot_groups_bound_two_enforces_rank0_fairness(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, override={"NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "2"})
+    config = _ready(runner.config_from_args(_args(enforce=True), env))
+    connection = FakeConnection()
+    groups = (
+        chunk(origin_oid=10, origin_name="_hyper_1_1_chunk", range_end=CUTOFF),
+        chunk(origin_oid=11, origin_name="_hyper_1_2_chunk", compressed_oid=21, compressed_name="compress_21"),
+        chunk(
+            schema="met",
+            name="forcing_station_timeseries",
+            origin_oid=30,
+            origin_name="_hyper_2_1_chunk",
+            compressed_oid=40,
+            compressed_name="compress_40",
+        ),
+        chunk(
+            schema="met",
+            name="forcing_station_timeseries",
+            origin_oid=31,
+            origin_name="_hyper_2_2_chunk",
+            compressed_oid=41,
+            compressed_name="compress_41",
+        ),
+    )
+    for item in groups:
+        connection.load_group(
+            item,
+            complete_relations(
+                origin_oid=item.origin_oid,
+                compressed_oid=item.compressed_oid or 20,
+                origin_name=item.origin_name,
+                compressed_name=item.compressed_name or "compress_hyper_2_2_chunk",
+            ),
+        )
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    migrated = [item for item in receipt["selected"] if item["outcome"] == "migrated"]
+    deferred = receipt["deferred"]
+    assert len(migrated) == 2
+    schemas = {item["durable"]["hypertable_schema"] for item in migrated}
+    assert schemas == {"hydro", "met"}
+    assert all(item["rank"] == 0 for item in migrated)
+    assert all(item["reason"] == "per_tick_bound" for item in deferred)
+    assert {item["rank"] for item in deferred} == {1}
+    moved = [sql for sql, _params in connection.executed if "SET TABLESPACE" in sql]
+    assert any("_hyper_1_1_chunk" in sql for sql in moved)
+    assert any("_hyper_2_1_chunk" in sql for sql in moved)
+    assert all("_hyper_1_2_chunk" not in sql for sql in moved)
+    assert all("_hyper_2_2_chunk" not in sql for sql in moved)
+
+
+def test_four_hot_groups_bound_two_dry_run_observes_all(tmp_path: Path) -> None:
+    env = _base_env(tmp_path, override={"NODE27_COLD_RESIDENCY_PER_TICK_BOUND": "2"})
+    config = _ready(runner.config_from_args(_args(), env))
+    connection = FakeConnection()
+    groups = (
+        chunk(origin_oid=10, origin_name="_hyper_1_1_chunk"),
+        chunk(origin_oid=11, origin_name="_hyper_1_2_chunk", compressed_oid=21, compressed_name="compress_21"),
+        chunk(
+            schema="met",
+            name="forcing_station_timeseries",
+            origin_oid=30,
+            origin_name="_hyper_2_1_chunk",
+            compressed_oid=40,
+            compressed_name="compress_40",
+        ),
+        chunk(
+            schema="met",
+            name="forcing_station_timeseries",
+            origin_oid=31,
+            origin_name="_hyper_2_2_chunk",
+            compressed_oid=41,
+            compressed_name="compress_41",
+        ),
+    )
+    for item in groups:
+        connection.load_group(
+            item,
+            complete_relations(
+                origin_oid=item.origin_oid,
+                compressed_oid=item.compressed_oid or 20,
+                origin_name=item.origin_name,
+                compressed_name=item.compressed_name or "compress_hyper_2_2_chunk",
+            ),
+        )
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    planned = [item for item in receipt["selected"] if item["outcome"] == "planned"]
+    deferred = receipt["deferred"]
+    assert len(planned) == 2
+    assert {item["durable"]["hypertable_schema"] for item in planned} == {"hydro", "met"}
+    assert {item["rank"] for item in deferred} == {1}
+    assert all(item["reason"] == "per_tick_bound" for item in deferred)
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)

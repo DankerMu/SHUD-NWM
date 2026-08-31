@@ -142,7 +142,8 @@
     "classification": "mixed",
     "sidecar_present": true,
     "replayed": false,
-    "blocked_new_selection": true
-  },
+    "blocked_new_selection": true,
+    "authority": "sidecar",
+    "cleanup_pending": false  },
   "config_observed": true
 }

@@ -32,30 +32,21 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 
 # --- Timeout budget chain (issue #1156) -------------------------------------
-# Three layers, one source of truth. Leaving a variable unset OR empty selects
-# the default shown below; the wrapper's shell default (${VAR:-3900}) treats
-# the empty string the same way, so both sides agree.
+# The two lane env files are one sequential assembly input. The shared preflight
+# reads both as data before either runner starts; do not edit one declaration in
+# isolation. Unset or empty wall/statement declarations resolve to the defaults
+# below, but every explicit value must be a canonical positive decimal.
 #
-#   leg 1: ceil(COMPRESS_TIMEOUT_MS / 1000) + 60 s cleanup margin
-#          <= WRAPPER_WALL_SECONDS
-#   leg 2: WRAPPER_WALL_SECONDS + 40 s kill-after margin
-#          <= SYSTEMD_WALL_SECONDS
-#   leg 3: raising COMPRESS_TIMEOUT_MS above the 3600000 default while
-#          PER_TICK_BOUND > 1 is refused outright, pre-connect. The invariant
-#          bounds ONE chunk's budget, so a raised per-chunk ceiling is only
-#          sound one chunk per tick (runbook section 4.5 catch-up recipe).
+#   compression wrapper >= ceil(COMPRESS_TIMEOUT_MS / 1000) + 300 s cleanup
+#   cold wrapper >= ceil(COLD_STATEMENT_TIMEOUT_MS / 1000) + 300 s cleanup
+#   shared service wall > compression wrapper + cold wrapper + 40 s margin
 #
-# The runner refuses to open a database connection if any of the three legs is
-# violated, and the wrapper refuses to launch on a non-positive-integer wall. The
-# defaults clear leg 1 with real headroom (3600 + 300 = 3900). The sequential
-# compression-then-cold oneshot wall is 7842 (3900 + 3901 + 40 + 1).
-#
-# The "+ 60" in leg 1 is the enforced FLOOR, not a sizing recipe. A tick also
-# pays for the watermark lookup, two 10 s git probes, catalog enumeration, a
-# size measurement before and after the compress, and a reconcile probe on the
-# error path — each a 10 s connect plus a statement capped at 60 s, i.e. up to
-# ~300 s of non-compress budget under lock contention. Size the wrapper wall at
-# ceil(COMPRESS_TIMEOUT_MS/1000) + 300 or more, which is what the defaults do.
+# Defaults: compression statement 3600000 ms, wrapper 3900 s; cold statement
+# 3600000 ms, wrapper 3901 s; shared service 7842 s (=3900+3901+40+1).
+# The 300-second compression cleanup contract is operational: watermark,
+# probes, catalog, measurements, reconcile, receipt and process cleanup all
+# consume time outside compress_chunk. Raising COMPRESS_TIMEOUT_MS above
+# 3600000 requires PER_TICK_BOUND=1.
 #
 # Per-chunk `SET statement_timeout` for compress_chunk, in milliseconds.
 # Default 3600000 = 60 minutes. Minimum 1000.
@@ -73,20 +64,11 @@ NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=3600000
 # scripts/node27_timeseries_compression_once.sh. Default 3900.
 NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900
 #
-# DECLARED systemd wall. The runner cannot read the unit file, so this is a
-# cross-check of what you have actually deployed, not a control. Whenever you
-# change it you MUST also install the matching systemd drop-in FIRST and
-# reload, otherwise a timer tick passes the Python leg-2 check and then hits
-# the smaller real wall mid-DDL:
-#   mkdir -p /etc/systemd/system/nhms-node27-timeseries-compression.service.d
-#   printf '[Service]\nTimeoutStartSec=%s\n' "$SYSTEMD_WALL" > \
-#     /etc/systemd/system/nhms-node27-timeseries-compression.service.d/override.conf
-#   systemctl daemon-reload
-# The committed unit ships TimeoutStartSec=7842 so one sequential compression
-# then cold-residency oneshot can cover both wrapper walls plus the 40 s
-# systemd margin (3900 + 3901 + 40 + 1). Keep the compression wrapper wall at 3900;
-# the shared service wall is owned by the sequential lifecycle, not by
-# compression alone.
+# Shared service declaration, mirrored exactly in node27-cold-residency.env.
+# This is a declaration checked by the shared preflight; it does not inspect
+# systemd. For catch-up, install a matching larger systemd drop-in FIRST, reload
+# and verify it, then atomically set the same larger declaration in BOTH lane
+# env files before starting the service. The committed unit is 7842 seconds.
 NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=7842
 #
 # Per-tick bound during a catch-up: MANDATORY, not a hint. The invariant above

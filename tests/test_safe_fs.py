@@ -39,6 +39,8 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
     ensure_directory_no_follow,
+    prove_named_entry_absent_durable,
+    read_bytes_durable_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
     unlink_no_follow_durable,
@@ -339,4 +341,76 @@ def test_unlink_no_follow_durable_parent_identity_failure_is_indeterminate(
     monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", boom)
     with pytest.raises(SafeFilesystemError) as raised:
         unlink_no_follow_durable(target)
+    assert raised.value.kind == "indeterminate"
+
+
+def test_durable_absence_proof_fsyncs_and_rechecks_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "sidecar.json"
+    calls: list[int] = []
+    original_fsync = os.fsync
+
+    def record_fsync(fd: int) -> None:
+        calls.append(fd)
+        original_fsync(fd)
+
+    monkeypatch.setattr("packages.common.safe_fs.os.fsync", record_fsync)
+    prove_named_entry_absent_durable(target)
+    assert len(calls) == 1
+
+
+def test_durable_absence_proof_parent_recheck_failure_is_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sidecar.json"
+    calls = {"count": 0}
+    safe_fs = __import__("packages.common.safe_fs", fromlist=["_verify_fd_matches_path"])
+    original_verify = safe_fs._verify_fd_matches_path
+
+    def fail_after_fsync(*args: object, **kwargs: object) -> None:
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise SafeFilesystemError("parent changed")
+        original_verify(*args, **kwargs)
+
+    monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", fail_after_fsync)
+    with pytest.raises(SafeFilesystemError) as raised:
+        prove_named_entry_absent_durable(target)
+    assert raised.value.kind == "indeterminate"
+
+
+def test_durable_read_fsyncs_and_returns_the_proven_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "receipt.json"
+    target.write_bytes(b"{\"receipt\":true}\n")
+    calls: list[int] = []
+    original_fsync = os.fsync
+
+    def record_fsync(fd: int) -> None:
+        calls.append(fd)
+        original_fsync(fd)
+
+    monkeypatch.setattr("packages.common.safe_fs.os.fsync", record_fsync)
+    assert read_bytes_durable_no_follow(target, max_bytes=1024) == b"{\"receipt\":true}\n"
+    assert len(calls) == 1
+
+
+def test_durable_read_parent_recheck_failure_is_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "receipt.json"
+    target.write_text("{}\n", encoding="utf-8")
+    calls = {"count": 0}
+    safe_fs = __import__("packages.common.safe_fs", fromlist=["_verify_fd_matches_path"])
+    original_verify = safe_fs._verify_fd_matches_path
+
+    def fail_after_fsync(*args: object, **kwargs: object) -> None:
+        calls["count"] += 1
+        if calls["count"] == 3:
+            raise SafeFilesystemError("parent changed")
+        original_verify(*args, **kwargs)
+
+    monkeypatch.setattr("packages.common.safe_fs._verify_fd_matches_path", fail_after_fsync)
+    with pytest.raises(SafeFilesystemError) as raised:
+        read_bytes_durable_no_follow(target, max_bytes=1024)
     assert raised.value.kind == "indeterminate"

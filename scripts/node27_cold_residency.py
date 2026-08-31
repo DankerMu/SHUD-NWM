@@ -28,7 +28,9 @@ from packages.common.compressed_chunk_cold_receipt import (
     assert_publication_paths_disjoint,
     build_receipt,
     intent_path_for,
+    public_authority_blocks_selection,
     publish_receipt,
+    read_public_receipt,
     sidecar_present,
     sidecar_status,
     stable_error,
@@ -53,6 +55,11 @@ from packages.common.node27_timeseries_lifecycle_lock import (
     refuse_lifecycle_lock_env_override,
     release_timeseries_lifecycle_lock,
 )
+from packages.common.node27_timeseries_sequential_budget import (
+    SequentialBudgetError,
+    resolve_runner_budget,
+    sequential_service_budget,
+)
 from packages.common.safe_fs import ensure_directory_no_follow, open_directory_no_follow
 
 SCHEMA_VERSION = "1.0"
@@ -61,12 +68,13 @@ _CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CATALOG_ROWS = 10_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
 _DEFAULT_PER_TICK_BOUND = 1
+_AUTHORITATIVE_BUDGET = sequential_service_budget()
 _CLEANUP_MARGIN_SECONDS = 300
-_SYSTEMD_MARGIN_SECONDS = 40
+_SYSTEMD_MARGIN_SECONDS = _AUTHORITATIVE_BUDGET.systemd_margin_seconds
 _DEFAULT_STATEMENT_TIMEOUT_MS = 3_600_000
-_DEFAULT_WRAPPER_WALL_SECONDS = 3_901
-_DEFAULT_COMPRESSION_WRAPPER_WALL_SECONDS = 3_900
-_DEFAULT_SYSTEMD_WALL_SECONDS = 7_842
+_DEFAULT_WRAPPER_WALL_SECONDS = _AUTHORITATIVE_BUDGET.cold_wrapper_wall_seconds
+_DEFAULT_COMPRESSION_WRAPPER_WALL_SECONDS = _AUTHORITATIVE_BUDGET.compression_wrapper_wall_seconds
+_DEFAULT_SYSTEMD_WALL_SECONDS = _AUTHORITATIVE_BUDGET.service_wall_seconds
 _COMPRESSION_LAG_DEFAULT = 604800
 
 
@@ -256,30 +264,14 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         default=_DEFAULT_PER_TICK_BOUND,
         minimum=1,
     )
-    statement_timeout_ms = _parse_positive_int_with_default(
-        env,
-        "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS",
-        default=_DEFAULT_STATEMENT_TIMEOUT_MS,
-        minimum=1000,
-    )
-    wrapper_wall_seconds = _parse_positive_int_with_default(
-        env,
-        "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS",
-        default=_DEFAULT_WRAPPER_WALL_SECONDS,
-        minimum=1,
-    )
-    compression_wrapper_wall_seconds = _parse_positive_int_with_default(
-        env,
-        "NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS",
-        default=_DEFAULT_COMPRESSION_WRAPPER_WALL_SECONDS,
-        minimum=1,
-    )
-    systemd_wall_seconds = _parse_positive_int_with_default(
-        env,
-        "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS",
-        default=_DEFAULT_SYSTEMD_WALL_SECONDS,
-        minimum=1,
-    )
+    try:
+        resolved_budget = resolve_runner_budget(env, lane="cold")
+    except SequentialBudgetError as error:
+        raise ColdResidencyConfigError(str(error)) from error
+    statement_timeout_ms = resolved_budget.cold_statement_timeout_ms
+    wrapper_wall_seconds = resolved_budget.budget.cold_wrapper_wall_seconds
+    compression_wrapper_wall_seconds = resolved_budget.budget.compression_wrapper_wall_seconds
+    systemd_wall_seconds = resolved_budget.budget.service_wall_seconds
     max_members = _parse_positive_int_with_default(
         env,
         "NODE27_COLD_RESIDENCY_MAX_MEMBERS",
@@ -296,15 +288,6 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         name="NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES",
         minimum=1,
     )
-    statement_seconds = _ceil_div(statement_timeout_ms, 1000)
-    if statement_seconds + _CLEANUP_MARGIN_SECONDS > wrapper_wall_seconds:
-        raise ColdResidencyConfigError(
-            "cold-residency budget chain violated: wrapper wall must exceed statement wall plus cleanup margin"
-        )
-    if compression_wrapper_wall_seconds + wrapper_wall_seconds + _SYSTEMD_MARGIN_SECONDS >= systemd_wall_seconds:
-        raise ColdResidencyConfigError(
-            "cold-residency budget chain violated: service wall must exceed both wrapper walls plus systemd margin"
-        )
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise ColdResidencyConfigError("DATABASE_URL must be set")
@@ -698,7 +681,9 @@ def main(
                 stage=getattr(error, "stage", "runtime"),
                 dsn=config.database_url,
             )
-            if not sidecar_present(config.intent_path):
+            if not sidecar_present(config.intent_path) and not public_authority_blocks_selection(
+                read_public_receipt(config.receipt_path)
+            ):
                 try:
                     _publish_tombstone(
                         config,
@@ -721,7 +706,9 @@ def main(
             return 1
         except Exception as error:
             _emit_stderr(status="failed", error_class="runtime", stage="runner", dsn=config.database_url)
-            if not sidecar_present(config.intent_path):
+            if not sidecar_present(config.intent_path) and not public_authority_blocks_selection(
+                read_public_receipt(config.receipt_path)
+            ):
                 try:
                     _publish_tombstone(
                         config,
@@ -737,7 +724,10 @@ def main(
                 except ColdReceiptError:
                     pass
             return 1
-        if not config.enforce or not sidecar_present(config.intent_path):
+        if not config.enforce or (
+            not sidecar_present(config.intent_path)
+            and not public_authority_blocks_selection(read_public_receipt(config.receipt_path))
+        ):
             try:
                 if not sidecar_present(config.receipt_path) or receipt.get("outcome") != "in_progress":
                     publish_receipt(config.receipt_path, receipt)

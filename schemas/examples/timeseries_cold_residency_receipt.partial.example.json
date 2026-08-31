@@ -152,5 +152,12 @@
     "stage": "decompress",
     "reason": "statement_timeout"
   },
-  "config_observed": true
+  "config_observed": true,
+  "recovery": {
+    "classification": "complete_source",
+    "sidecar_present": false,
+    "replayed": false,
+    "blocked_new_selection": false,
+    "authority": "closed",
+    "cleanup_pending": false  }
 }

@@ -780,11 +780,6 @@ def retained_source_bytes(group: ResidencyGroup) -> int:
     return int(sum(member.bytes for member in group.members))
 
 
-def parent_access_share_sql() -> tuple[str, ...]:
-    ordered = sorted(ALLOWED_HYPERTABLES)
-    return tuple(f"LOCK TABLE {qualified_ident(schema, name)} IN ACCESS SHARE MODE" for schema, name in ordered)
-
-
 def relation_oid(execute: Execute, schema: str, name: str) -> int:
     rows = execute(RELATION_OID_SQL, (schema, name))
     if not rows:
@@ -793,14 +788,13 @@ def relation_oid(execute: Execute, schema: str, name: str) -> int:
 
 
 def lock_allowlisted_parents(execute: Execute) -> tuple[str, ...]:
-    statements = parent_access_share_sql()
-    oid_order = [relation_oid(execute, schema, name) for schema, name in sorted(ALLOWED_HYPERTABLES)]
-    if oid_order != sorted(oid_order):
-        raise ColdRuntimeError(
-            "allowlisted hypertable OID order drifted from identity order",
-            error_class="inventory_drift",
-            stage="revalidate",
-        )
+    ordered = sorted(
+        ((relation_oid(execute, schema, name), schema, name) for schema, name in ALLOWED_HYPERTABLES),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    statements = tuple(
+        f"LOCK TABLE {qualified_ident(schema, name)} IN ACCESS SHARE MODE" for _oid, schema, name in ordered
+    )
     for statement in statements:
         execute(statement)
     return statements

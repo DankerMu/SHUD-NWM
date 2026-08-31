@@ -327,11 +327,58 @@ def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
     ]
     parents = [idx for idx, statement in enumerate(sql) if "ACCESS SHARE" in statement]
     assert heaps and parents and max(heaps) < min(parents)
+    assert "forcing_station_timeseries" in share[0]
+    assert "river_timeseries" in share[1]
     assert "SET TABLESPACE" in joined
     assert "decompress_chunk" in joined
     assert "compress_chunk" in joined
     assert not any("compress_hyper_2_2_chunk" in statement and "SET TABLESPACE" in statement for statement in sql)
     assert not any("pg_toast" in statement and "SET TABLESPACE" in statement for statement in sql)
+
+
+def test_production_met_before_hydro_parent_oids_lock_ascending() -> None:
+    connection, item = _loaded(FakeConnection())
+    assert connection.parent_oids[("met", "forcing_station_timeseries")] < connection.parent_oids[
+        ("hydro", "river_timeseries")
+    ]
+    observation = migrate_residency_group(
+        connect=_connect(connection),
+        chunk=item,
+        inventories=bound_inventories(),
+        watermark=WATERMARK,
+        lag_seconds=LAG,
+        cold_free_bytes=10_000,
+        hot_free_bytes=10_000,
+        cold_reserve_bytes=100,
+        wal_reserve_bytes=1,
+        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+    )
+    assert observation.outcome == "migrated"
+    share = [statement for statement, _params in connection.executed if "ACCESS SHARE" in statement]
+    assert "met" in share[0] and "hydro" in share[1]
+
+
+def test_hydro_oid_before_met_still_locks_by_actual_oid() -> None:
+    connection, item = _loaded(FakeConnection())
+    connection.parent_oids = {
+        ("hydro", "river_timeseries"): 1001,
+        ("met", "forcing_station_timeseries"): 2001,
+    }
+    observation = migrate_residency_group(
+        connect=_connect(connection),
+        chunk=item,
+        inventories=bound_inventories(),
+        watermark=WATERMARK,
+        lag_seconds=LAG,
+        cold_free_bytes=10_000,
+        hot_free_bytes=10_000,
+        cold_reserve_bytes=100,
+        wal_reserve_bytes=1,
+        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+    )
+    assert observation.outcome == "migrated"
+    share = [statement for statement, _params in connection.executed if "ACCESS SHARE" in statement]
+    assert "hydro" in share[0] and "met" in share[1]
 
 
 def test_capacity_one_byte_short_refuses_before_movement_sql() -> None:

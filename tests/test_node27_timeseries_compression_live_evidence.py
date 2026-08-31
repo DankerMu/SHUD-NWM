@@ -7169,6 +7169,7 @@ def test_load_receipt_accepts_a_2_1_receipt_carrying_budget(tmp_path: Path) -> N
             "compress_timeout_ms": 3_600_000,
             "wrapper_wall_seconds": 3_900,
             "systemd_wall_seconds": 3_940,
+            "cleanup_margin_seconds": 300,
         },
     }
     ref = _json_ref(tmp_path, "receipt-2.1.json", receipt)
