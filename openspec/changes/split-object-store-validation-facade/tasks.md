@@ -29,7 +29,13 @@
 ## 4. Structural and Scope Gates
 
 - [x] 4.1 Prove all eight production files are `<1000` lines, `.large-file-guard.json` is byte-identical with no added/removed exclusion, entropy has no new gate-eligible finding, and the normal commit hook accepts the staged change.
-- [x] 4.2 Confirm the diff contains no #1903 validator/error/test/fixture-byte change, Basins package or test-corpus split, selector/CI/docs route change, schema/status/blocker/redaction behavior refactor, DB/frontend/Slurm scheduling/SHUD change, or dependency.
+- [x] 4.2 Confirm the diff contains no #1903 validator/error/test/fixture-byte
+  change, Basins package or test-corpus split, CI workflow/docs route change,
+  schema/status/blocker/redaction behavior refactor, DB/frontend/Slurm
+  scheduling/SHUD change, or dependency. Diagnosed minimal selector-route
+  deviation: add `tests/test_object_store_validation_facade_contract.py` to
+  the existing `services/production_closure/**` rule so the historical facade
+  and seven split owners run their direct compatibility oracle.
 
 ## 5. Evidence Floor
 
@@ -42,6 +48,10 @@
   `tests/test_publish_scheduler_file_registry.py`; expect no failures and
   recorded local per-suite semantics, allowing only existing platform-specific
   skips.
-- [x] 5.2 Run fresh standalone/packaged CLI and importer smokes, `uv run pytest -q tests/test_select_ci_tests.py` unchanged with all seven new owner paths, and `uv run pytest -q tests/`; expect complete regression success without oracle weakening.
+- [x] 5.2 Run fresh standalone/packaged CLI and importer smokes,
+  `uv run pytest -q tests/test_select_ci_tests.py` with the diagnosed minimal
+  `services/production_closure/**` route addition covering the historical
+  facade and all seven new owner paths, and `uv run pytest -q tests/`; expect
+  complete regression success without oracle weakening.
 - [x] 5.3 Run `uv run ruff check .`, entropy/large-file audit tests and script, strict single/all OpenSpec validation, changed Markdown lint and `git diff --check`; expect zero new violations.
 - [ ] 5.4 On node-27, capture the same focused suites at baseline SHA and frozen implementation SHA in detached worktrees without changing the active checkout; compare per-suite Linux results and record a durable receipt. Node-22 is not required because no Slurm/SHUD scheduling/runtime behavior changes.

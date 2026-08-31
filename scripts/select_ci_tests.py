@@ -1491,6 +1491,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_slurm_gateway_ops_dependency_closure.py",
             "tests/test_slurm_gateway_ops_dependency_hardening.py",
             "tests/test_production_object_store_validation.py",
+            # #1911: every historical-facade and split-owner change must run the
+            # direct compatibility contract oracle, not merely the production
+            # behavior suite that happens to exercise portions of the facade.
+            "tests/test_object_store_validation_facade_contract.py",
             "tests/test_production_slurm_validation.py",
             "tests/test_production_scale_validation.py",
             "tests/test_production_e2e_validation.py",
