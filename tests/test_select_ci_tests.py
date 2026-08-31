@@ -1125,6 +1125,58 @@ def test_shared_auth_owners_select_their_focused_contract_suites() -> None:
         )
 
 
+OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST = "tests/test_object_store_validation_facade_contract.py"
+OBJECT_STORE_VALIDATION_OWNER_PATHS: tuple[str, ...] = (
+    "services/production_closure/object_store_validation.py",
+    "services/production_closure/object_store_validation_contracts.py",
+    "services/production_closure/object_store_validation_path_safety.py",
+    "services/production_closure/object_store_validation_fixture.py",
+    "services/production_closure/object_store_validation_manifest.py",
+    "services/production_closure/object_store_validation_runtime.py",
+    "services/production_closure/object_store_validation_consumption.py",
+    "services/production_closure/object_store_validation_evidence.py",
+)
+
+
+@pytest.mark.parametrize("owner_path", OBJECT_STORE_VALIDATION_OWNER_PATHS)
+def test_object_store_validation_owner_routes_to_the_facade_contract_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_path: str,
+) -> None:
+    # #1911: the historical facade and every split owner must select the direct
+    # compatibility oracle. The in-memory mutant proves the target arrives from
+    # the production-closure route rather than coincidental same-name routing.
+    assert Path(owner_path).is_file(), f"owner path is not tracked: {owner_path}"
+
+    selected = set(select_tests([owner_path], repo_root=Path(".")))
+    assert OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST in selected, (
+        f"{owner_path}: facade contract oracle not selected (got {sorted(selected)})"
+    )
+
+    mutated_rules = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(
+                target
+                for target in rule.tests
+                if target != OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST
+            ),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == "services/production_closure/**"
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert len(mutated_rules) == len(PATH_TEST_RULES)
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutated_rules)
+
+    mutated_selection = set(select_tests([owner_path], repo_root=Path(".")))
+    assert OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST not in mutated_selection, (
+        f"{owner_path}: contract oracle bypasses the production-closure route"
+    )
+
+
 def test_rollout_owner_producers_select_the_static_deployment_contract() -> None:
     """#1684 EVID-05/F green rows: every rollout producer reaches the static
     deployment contract suite (the runbook and env examples previously selected
