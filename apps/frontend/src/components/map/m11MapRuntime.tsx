@@ -122,6 +122,7 @@ export function useM11MapSourceError(resetKey: string) {
 export function M11MapStatusOverlays({
   loading,
   boundaryLoading,
+  basinBoundaryOverlayEnabled,
   basinCount,
   basinFeatureCount,
   skippedBasinGeometryCount,
@@ -133,6 +134,7 @@ export function M11MapStatusOverlays({
 }: {
   loading: boolean
   boundaryLoading: boolean
+  basinBoundaryOverlayEnabled: boolean
   basinCount: number
   basinFeatureCount: number
   skippedBasinGeometryCount: number
@@ -144,7 +146,7 @@ export function M11MapStatusOverlays({
 }) {
   return (
     <>
-      {!loading && !boundaryLoading && basinCount > 0 && basinFeatureCount === 0 ? (
+      {basinBoundaryOverlayEnabled && !loading && !boundaryLoading && basinCount > 0 && basinFeatureCount === 0 ? (
         <M11MapStatusNotice testId="m11-basin-layer-unavailable" topClassName="top-20">
           {skippedBasinGeometryCount > 0
             ? '当前可见流域边界超过客户端渲染预算，地图不会注册过大的边界源。'
