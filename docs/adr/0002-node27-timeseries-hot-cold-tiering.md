@@ -673,7 +673,7 @@ and those gates; this amendment only freezes the policy.
 
 ### #1894 installation/rollback/governance refinement (2026-08-31)
 
-#1894 fixes the host/container admission boundary before any #1895 live action.
+Issue #1894 fixes the host/container admission boundary before any #1895 live action.
 The installer is dry-run by default; enforce is valid only after fresh descriptor-bound
 root evidence (regular file, approved owner/mode, capture time, hostname, exact command
 and subject identity), exact two-member `mdadm --detail`, two distinct SMART PASS files,

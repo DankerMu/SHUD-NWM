@@ -139,7 +139,7 @@ catalog/path/current and stopped containers. It either proves the expected compl
 and removes the authority, or restores only an owned incomplete target. Mixed/drifted or
 referenced topology keeps the authority and remains NO-GO.
 
-#1894 never stops these production writers. #1895 must first drain and observe inactive
+Issue #1894 never stops these production writers. #1895 must first drain and observe inactive
 `nhms-node27-autopipe.{service,timer}`, `nhms-node27-timeseries-compression.{service,timer}`
 and `nhms-node27-timeseries-retention.{service,timer}`. The same fresh check repeats before
 rollback. After restoration, fresh inspect must prove the prior config, no cold bind, catalog
@@ -150,7 +150,7 @@ and binds optional prior receipt trend by no-follow mode-0600 identity.
 
 ### Disposable installer oracle prerequisite
 
-#1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
+Issue #1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
 `nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
 `/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
 identity（port 由内核临时分配，且永不为 55432）。先从 exact-SHA image 量测默认 `postgres`
