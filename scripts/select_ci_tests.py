@@ -364,7 +364,13 @@ QHH_CYCLE_SBATCH = "scripts/run_qhh_cycle.sbatch"
 NODE22_ENTRYPOINT_INVARIANT_TEST = "tests/test_node22_entrypoint_invariant.py"
 NODE22_SLURM_GATEWAY_UNIT = "infra/systemd/nhms-slurm-gateway.service"
 NODE22_RETENTION_UNIT = "infra/systemd/nhms-scheduler-evidence-retention.service"
+NODE22_JOURNAL_RETENTION_SERVICE = "infra/systemd/nhms-scheduler-journal-retention.service"
+NODE22_JOURNAL_RETENTION_TIMER = "infra/systemd/nhms-scheduler-journal-retention.timer"
 NODE22_REPAIR_SCRIPT = "scripts/ops/node22_repair_placeholder_hydro_uris.py"
+JOURNAL_RETENTION_TESTS = (
+    "tests/test_scheduler_journal_retention_planning.py",
+    "tests/test_scheduler_journal_retention_archive.py",
+)
 
 # #1860: the checked-in calibration declaration is a non-Python producer with no
 # mechanically derivable import closure, so the route must be explicit and test
@@ -2139,11 +2145,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, NODE22_ENTRYPOINT_INVARIANT_TEST),
     ),
     PathTestRule(
-        # #1571: the retention unit's single exact ExecStart (deferred-venv
-        # interpreter + absolute script) is uniquely asserted by the node-22
-        # owner. Same collect-only conversion as the gateway unit.
+        # #1571: the evidence-retention unit's single exact ExecStart is
+        # uniquely asserted by the node-22 owner.
         NODE22_RETENTION_UNIT,
         (NODE22_ENTRYPOINT_INVARIANT_TEST,),
+    ),
+    PathTestRule(
+        # The journal archive service and timer jointly define one mutation
+        # entrypoint. Each changed unit must run its active-runtime invariant
+        # and both archive/retention behavioral partitions.
+        NODE22_JOURNAL_RETENTION_SERVICE,
+        (NODE22_ENTRYPOINT_INVARIANT_TEST, *JOURNAL_RETENTION_TESTS),
+    ),
+    PathTestRule(
+        NODE22_JOURNAL_RETENTION_TIMER,
+        (NODE22_ENTRYPOINT_INVARIANT_TEST, *JOURNAL_RETENTION_TESTS),
     ),
     PathTestRule(
         # #1571: the repair script's usage string is uniquely asserted by the

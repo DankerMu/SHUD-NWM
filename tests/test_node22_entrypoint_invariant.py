@@ -1,19 +1,4 @@
-"""Static contract: active node-22 entrypoints preserve the deferred .venv.
-
-Before the maintenance cutover, the active checkout may use only its exact
-interpreter/wrapper or ``uv run --no-sync`` observation; environment-updating
-uv, ``--active``, and system Python substitutes are forbidden. Detached
-worktrees remain bounded pin evidence, never the e2e/grib oracle.
-
-The e2e/grib oracle is node-27 under ``set -euo pipefail``: its executable 3.11
-guard precedes ``uv run --no-sync pytest | tee``. Every ``||`` or fail-fast
-disable turns the static seam red, preserving non-zero status through receipt
-piping.
-
-Explicit exclusions are node-27-only surfaces, isolated rollback-worktree sync,
-and heading/whole-document-marked historical records; none is current node-22
-guidance.
-"""
+"""Static contract: active node-22 entrypoints preserve the deferred .venv."""
 
 from __future__ import annotations
 
@@ -39,10 +24,7 @@ def test_retention_unit_uses_exact_interpreter_and_absolute_script() -> None:
     execstart = [
         line.strip() for line in unit.splitlines() if line.strip().startswith("ExecStart=")
     ]
-    # Exactly one ExecStart: the full exact directive (deferred-venv
-    # interpreter + absolute script path, Checklist §2, robust to working-dir
-    # drift). Any wrong-first/correct-later pair or extra ExecStart is a
-    # violation — only the complete directive is acceptable.
+    # Exactly one complete ExecStart; extra or partial directives fail.
     expected = (
         f"ExecStart={NODE22_VENV_PY} "
         f"{NODE22_ACTIVE}/scripts/node22_scheduler_evidence_retention.py"
@@ -50,6 +32,25 @@ def test_retention_unit_uses_exact_interpreter_and_absolute_script() -> None:
     assert execstart == [expected], (
         f"retention ExecStart must be exactly the exact directive; got: {execstart}"
     )
+
+
+def test_scheduler_journal_retention_units_pin_the_active_runtime_and_schedule() -> None:
+    service = _read("infra/systemd/nhms-scheduler-journal-retention.service")
+    timer = _read("infra/systemd/nhms-scheduler-journal-retention.timer")
+    fields = (
+        "Type=oneshot", f"WorkingDirectory={NODE22_ACTIVE}",
+        f"EnvironmentFile={NODE22_ACTIVE}/infra/env/compute.scheduler-dbfree.env",
+        f"ExecStart={NODE22_VENV_PY} {NODE22_ACTIVE}/scripts/node22_scheduler_journal_retention.py",
+        "TimeoutStartSec=1800", "OnCalendar=*-*-* 04:45:00 UTC",
+        "RandomizedDelaySec=15m", "Persistent=true",
+        "Unit=nhms-scheduler-journal-retention.service", "WantedBy=default.target",
+    )
+    joined = f"{service}\n{timer}"
+    assert all(field in joined and field not in joined.replace(field, "", 1) for field in fields)
+    assert service.count("ExecStart=") == 1 and "uv" not in service.lower()
+    assert re.search(r"(?<![./])python3?(?:\s|$)", service) is None
+    assert "uv" in service.replace("Type=oneshot", "ExecStart=uv run python").lower()
+    assert re.search(r"(?<![./])python3?(?:\s|$)", service.replace(NODE22_VENV_PY, "python3"))
 
 
 def test_slurm_gateway_unit_uses_exact_interpreter() -> None:
@@ -580,6 +581,8 @@ def test_node22_active_surfaces_have_no_bare_system_python() -> None:
         "docs/runbooks/current-production-ops.md",
         "docs/runbooks/failed-basin-retry.md",
         "infra/systemd/nhms-scheduler-evidence-retention.service",
+        "infra/systemd/nhms-scheduler-journal-retention.service",
+        "infra/systemd/nhms-scheduler-journal-retention.timer",
         "infra/systemd/nhms-slurm-gateway.service",
         "scripts/ops/node22_repair_placeholder_hydro_uris.py",
     ]
@@ -937,6 +940,8 @@ def test_instruction_roots_contain_command_contract() -> None:
 def test_sibling_scan_no_new_bare_uv_on_governed_node22_surfaces() -> None:
     governed = [
         "infra/systemd/nhms-scheduler-evidence-retention.service",
+        "infra/systemd/nhms-scheduler-journal-retention.service",
+        "infra/systemd/nhms-scheduler-journal-retention.timer",
         "infra/systemd/nhms-slurm-gateway.service",
         "docs/runbooks/current-production-ops.md",
         "docs/runbooks/failed-basin-retry.md",
@@ -987,11 +992,7 @@ def test_sibling_scan_no_new_bare_uv_on_governed_node22_surfaces() -> None:
 
 # --- 8. explicit non-findings stay classified (not asserted as violations) ---
 
-
 def test_historical_and_generic_surfaces_not_overreached() -> None:
-    # forcing-copyback-backfill is explicitly historical; qhh-continuous has a
-    # superseded marker; source-latency/slurm-backlog are generic-host. These
-    # are intentionally not converted in this PR, so they may still contain
-    # bare uv — the scan above only governs the explicit surfaces.
+    # Historical/generic surfaces may still contain bare uv; this scan does not.
     historical = _read("docs/runbooks/forcing-copyback-backfill.md")
     assert "historical" in historical or "归档" in historical

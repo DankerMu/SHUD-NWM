@@ -129,6 +129,8 @@ def verify_and_restore(
         archive_sha = archive_owner._verify_archive(
             archive_path,
             manifest=manifest,
+            source_id=canonical_source,
+            cycle_time=cycle_time,
             max_members=MAX_ARCHIVE_CYCLE_MEMBERS,
             max_archive_bytes=MAX_ARCHIVE_BYTES,
         )

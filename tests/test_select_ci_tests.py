@@ -1306,6 +1306,19 @@ def test_shared_auth_owner_rules_red_when_removed(
         )
 
 
+def test_journal_retention_systemd_units_select_invariant_and_retention_contracts() -> None:
+    expected = {
+        NODE22_ENTRYPOINT_INVARIANT_TEST,
+        "tests/test_scheduler_journal_retention_planning.py",
+        "tests/test_scheduler_journal_retention_archive.py",
+    }
+    for unit in (
+        "infra/systemd/nhms-scheduler-journal-retention.service",
+        "infra/systemd/nhms-scheduler-journal-retention.timer",
+    ):
+        assert expected <= set(select_tests([unit], repo_root=Path("."))), unit
+
+
 def test_node22_systemd_units_select_the_owner_without_collect_only() -> None:
     # #1571 local-repair: before the exact rules the two systemd units matched
     # no PATH_TEST_RULES entry and (being infra/** non-python) selected nothing

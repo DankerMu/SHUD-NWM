@@ -16,7 +16,10 @@ from scripts import node22_scheduler_journal_retention as entrypoint
 from services.orchestrator import scheduler_journal_archive as archive
 from services.orchestrator import scheduler_journal_restore as restore
 from services.orchestrator import scheduler_journal_retention as retention
-from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from services.orchestrator.file_orchestration_journal import (
+    FileJournalRetentionMember,
+    FileOrchestrationJournalRepository,
+)
 from tests.scheduler_journal_retention_fixtures import (
     NOW,
     OLD_CYCLE,
@@ -67,6 +70,70 @@ def test_verify_stage_restore_is_no_clobber_and_preserves_public_query_parity(tm
             cycle="2026050100",
             stage_root=tmp_path / "second-stage",
         )
+
+
+def test_verify_restore_cli_reports_structured_refusal(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    result = entrypoint.main(
+        [
+            "verify-restore",
+            "--journal-root",
+            str(tmp_path / "missing-journal"),
+            "--archive-root",
+            str(tmp_path / "missing-archive"),
+            "--source-id",
+            "gfs",
+            "--cycle",
+            "2026050100",
+            "--stage-root",
+            str(tmp_path / "stage"),
+        ]
+    )
+
+    assert result == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "journal_root_unavailable",
+        "schema_version": retention.SCHEMA_VERSION,
+        "status": "blocked",
+    }
+
+
+def test_verify_restore_cli_restores_archive_and_returns_structured_success(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    members = _seed_cycle(config.journal_root, continuation=True, pipeline_event=True)
+    assert retention.run_retention(
+        config,
+        now=NOW,
+        frontier=_frontier(),
+        receipt_reservation=_reservation(config),
+    )["counts"]["archived"] == 1
+
+    result = entrypoint.main(
+        [
+            "verify-restore",
+            "--journal-root",
+            str(config.journal_root),
+            "--archive-root",
+            str(config.archive_root),
+            "--source-id",
+            "gfs",
+            "--cycle",
+            "2026050100",
+            "--stage-root",
+            str(tmp_path / "stage"),
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "restored"
+    assert payload["source_id"] == "gfs"
+    assert payload["cycle_time"] == "2026-05-01T00:00:00Z"
+    assert set(payload["restored_paths"]) == {
+        path.relative_to(config.journal_root).as_posix() for path in members
+    }
 
 
 def test_flat_direct_live_authority_retains_hot_slice(tmp_path: Path) -> None:
@@ -202,6 +269,60 @@ def test_same_size_replacement_before_unlink_refuses_hot_removal(
     assert payload["cycles"][0]["status"] == "blocked"
     assert payload["cycles"][0]["reason"] == "member_identity_changed"
     assert all(path.exists() for path in members)
+
+
+def test_case_alias_member_is_rejected_before_archive_publication_or_hot_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    hot_members = _seed_cycle(config.journal_root)
+    alias_path = config.journal_root / "latest" / "GFS" / "2026050100" / "model_alias.json"
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    alias_path.write_bytes(hot_members[0].read_bytes())
+    alias_member = FileJournalRetentionMember(
+        relative_path=alias_path.relative_to(config.journal_root).as_posix(),
+        size_bytes=alias_path.stat().st_size,
+    )
+    members = tuple(
+        FileJournalRetentionMember(
+            relative_path=path.relative_to(config.journal_root).as_posix(),
+            size_bytes=path.stat().st_size,
+        )
+        for path in hot_members
+    ) + (alias_member,)
+    calls = 0
+
+    def archive_tool_must_not_run(**_kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("case-alias member reached archive toolchain")
+
+    monkeypatch.setattr(archive, "_run_archive_toolchain", archive_tool_must_not_run)
+    repository = FileOrchestrationJournalRepository(config.journal_root)
+    assert repository.query_pipeline_jobs_by_cycle(cycle_id_for("GFS", OLD_CYCLE))
+
+    def publish_reason() -> str:
+        with pytest.raises(retention.RetentionFailure) as raised:
+            archive.publish_archive(
+                config,
+                source_id="gfs",
+                cycle_time=OLD_CYCLE,
+                now=NOW,
+                frontier=_frontier(),
+                members=members,
+            )
+        return raised.value.reason
+
+    assert publish_reason() == "archive_manifest_identity_mismatch"
+    assert publish_reason() == "archive_manifest_identity_mismatch"
+    cycle_archive_root = config.archive_root / "gfs" / "2026050100"
+    assert calls == 0
+    assert not cycle_archive_root.exists()
+    assert not (cycle_archive_root / archive._PUBLICATION_MARKER).exists()
+    assert not _archive_path(config).exists()
+    assert not _manifest_path(config).exists()
+    assert all(path.exists() for path in [*hot_members, alias_path])
 
 
 def test_incomplete_bundle_is_not_adopted_or_unlinked(tmp_path: Path) -> None:

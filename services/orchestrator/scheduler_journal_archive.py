@@ -81,16 +81,24 @@ def _member_metadata(
     root: Path,
     members: Sequence[FileJournalRetentionMember],
     *,
+    source_id: str,
+    cycle_time: datetime,
     max_members: int,
     max_bytes: int,
 ) -> list[dict[str, Any]]:
+    """Bind every hot byte candidate to the requested canonical cycle before tar."""
+
     if len(members) > max_members:
         raise RetentionFailure("archive_member_limit_exceeded")
     total = 0
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for member in members:
-        relative = _safe_member_relative_path(member.relative_path)
+        relative = _validated_cycle_member_path(
+            relative=member.relative_path,
+            source_id=source_id,
+            cycle_time=cycle_time,
+        )
         if relative in seen:
             raise RetentionFailure("archive_member_invalid")
         seen.add(relative)
@@ -371,6 +379,8 @@ def _verify_archive(
     path: Path,
     *,
     manifest: Mapping[str, Any],
+    source_id: str,
+    cycle_time: datetime,
     max_members: int,
     max_archive_bytes: int,
 ) -> str:
@@ -389,7 +399,20 @@ def _verify_archive(
     for member in expected_members:
         if not isinstance(member, Mapping):
             raise RetentionFailure("archive_manifest_invalid")
-        expected_paths.append(_safe_member_relative_path(str(member.get("path") or "")))
+        try:
+            expected_paths.append(
+                _validated_cycle_member_path(
+                    relative=str(member.get("path") or ""),
+                    source_id=source_id,
+                    cycle_time=cycle_time,
+                )
+            )
+        except RetentionFailure as error:
+            # Restore/adopt seams already have an archive. Keep the established
+            # verification classification while using the same identity parser.
+            if error.reason in {"archive_manifest_identity_mismatch", "archive_member_path_unsafe"}:
+                raise RetentionFailure("archive_verification_failed") from error
+            raise
     if len(set(expected_paths)) != len(expected_paths):
         raise RetentionFailure("archive_manifest_invalid")
     actual_paths = _archive_listing(path, max_members=max_members)
@@ -559,6 +582,8 @@ def _archive_matches(
     archive_sha256 = _verify_archive(
         archive_path,
         manifest=manifest,
+        source_id=source_id,
+        cycle_time=cycle_time,
         max_members=config.max_cycle_members,
         max_archive_bytes=config.max_archive_bytes,
     )
@@ -642,6 +667,8 @@ def _recoverable_publication_manifest(
         _verify_archive(
             archive_path,
             manifest=marker_manifest,
+            source_id=source_id,
+            cycle_time=cycle_time,
             max_members=config.max_cycle_members,
             max_archive_bytes=config.max_archive_bytes,
         )
@@ -821,6 +848,8 @@ def _publish_archive(
     member_data = _member_metadata(
         config.journal_root,
         members,
+        source_id=source_id,
+        cycle_time=cycle_time,
         max_members=config.max_cycle_members,
         max_bytes=config.max_cycle_bytes,
     )
@@ -854,6 +883,8 @@ def _publish_archive(
         archive_sha256 = _verify_archive(
             temporary_archive,
             manifest={**expected, "archive_sha256": None},
+            source_id=source_id,
+            cycle_time=cycle_time,
             max_members=config.max_cycle_members,
             max_archive_bytes=config.max_archive_bytes,
         )
@@ -868,6 +899,8 @@ def _publish_archive(
         _verify_archive(
             temporary_archive,
             manifest=manifest,
+            source_id=source_id,
+            cycle_time=cycle_time,
             max_members=config.max_cycle_members,
             max_archive_bytes=config.max_archive_bytes,
         )
