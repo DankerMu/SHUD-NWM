@@ -25,6 +25,9 @@ from _pytest.mark.expression import Expression, Scanner, TokenType
 import scripts.select_ci_tests as _prod_module
 from scripts.select_ci_tests import (
     BACKEND_PYTHON_SOURCE_PREFIXES,
+    BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
+    BASINS_PACKAGE_HELPERS_PATH,
+    BASINS_PACKAGE_PUBLICATION_TESTS,
     CALIBRATION_OVERRIDES_PATH,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
@@ -8123,6 +8126,279 @@ def test_retention_owner_reds_when_a_partition_is_removed(
     assert removed not in selected
 
 
+# ---------------------------------------------------------------------------
+# #1912: the Basins package publication corpus
+#
+# The 3,582-line `tests/test_basins_package_publication.py` monolith became six
+# collectible partitions plus one non-collectible helper, all below the 1,000-line
+# structural limit. Physical ownership moved; the 88 publication cases and their
+# oracles did not. That makes the two routing boundaries the only thing standing
+# between a partitioned corpus and a silently blind PR lane: the retained core path
+# still exists and still passes, while five sixths of the corpus would sit unrun on
+# every `workers/model_registry/**` change.
+#
+# Unlike #1872's retention partitions, the retained core here is NOT recoverable
+# through same-name derivation either — the production owner is `basins_package.py`,
+# which derives `tests/test_basins_package.py` — so all six edges, core included,
+# are rule-only and all six are pinned per-edge below.
+# ---------------------------------------------------------------------------
+
+BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN = "workers/model_registry/**"
+# A real production owner inside the directory rule, not the directory glob itself:
+# the same-name derivation must not be able to hand back a publication suite.
+BASINS_PUBLICATION_OWNER_PRODUCTION_FILE = "workers/model_registry/basins_package.py"
+
+
+def _tracked_basins_publication_suites() -> set[str]:
+    """The tracked six, derived from the tree — never from the selector tuple.
+
+    Pathspecs name the frozen owners one by one rather than globbing `tests/**basins*`,
+    so corpus growth is a decision and not an accident: a new partition only joins the
+    derivation when it is named HERE (or under the `_publication*` family it already
+    belongs to) AND added to the authority tuple — the equality assertion in the first
+    row below reddens whichever half is missed. The helper is deliberately outside this
+    domain: it is not suite-shaped, so a `test_*`-prefixed rename of it would appear here
+    and the collectibility row would catch it.
+    """
+
+    return {
+        *_tracked_python_files("tests/test_basins_package_publication.py"),
+        *_tracked_python_files("tests/test_basins_package_publication_*.py"),
+        *_tracked_python_files("tests/test_basins_migration_report.py"),
+        *_tracked_python_files("tests/test_basins_package_forcing_identity.py"),
+    }
+
+
+def _basins_publication_owner_selection() -> set[str]:
+    return set(select_tests([BASINS_PUBLICATION_OWNER_PRODUCTION_FILE], repo_root=Path(".")))
+
+
+def _basins_helper_selection() -> set[str]:
+    return set(select_tests([BASINS_PACKAGE_HELPERS_PATH], repo_root=Path(".")))
+
+
+def test_basins_publication_suite_count_is_the_frozen_six() -> None:
+    # The partition contract is "exactly six collectible suites". A seventh collectible
+    # owner adds no requirement (design.md D1) and an eighth file would be a silent
+    # routing gap until the tree-derived equality below caught it — this pin catches it
+    # at the count, naming the drifted set, before any route assertion can pass vacuously.
+    tracked = _tracked_basins_publication_suites()
+
+    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 6
+    assert len(tracked) == 6, f"tracked publication suites drifted from six: {sorted(tracked)}"
+    assert sorted(BASINS_PACKAGE_PUBLICATION_TESTS) == sorted(tracked)
+
+
+def test_basins_publication_authority_tuple_is_sorted_and_explicit() -> None:
+    # The authority is an explicit sorted tuple, never import-time derived: derivation
+    # would run `git ls-files` in the process CWD and break `--repo-root` callers (the
+    # MAPPING_BUILDER_TESTS precedent). Sortedness is asserted because the tuple's order
+    # is what makes rule diffs and selection listings reviewable.
+    assert list(BASINS_PACKAGE_PUBLICATION_TESTS) == sorted(BASINS_PACKAGE_PUBLICATION_TESTS)
+    assert len(set(BASINS_PACKAGE_PUBLICATION_TESTS)) == len(BASINS_PACKAGE_PUBLICATION_TESTS)
+    assert all(path.startswith("tests/") and path.endswith(".py") for path in BASINS_PACKAGE_PUBLICATION_TESTS)
+
+
+def test_basins_publication_partitions_are_collectible_and_the_helper_is_not() -> None:
+    # Routing to a non-collectible file is the #1453 defect: ci.yml's `check=True` renders
+    # pytest's exit-5 as a red carrying zero assertion information. Each of the six must be
+    # a real pytest-collectible suite, and the helper must collect nothing — otherwise the
+    # corpus is not partitioned, it is duplicated or shimmed.
+    for suite in BASINS_PACKAGE_PUBLICATION_TESTS:
+        assert Path(suite).is_file(), f"publication partition missing from the tree: {suite}"
+        assert is_test_suite_path(suite), f"{suite} is routed but pytest would not collect it by name"
+
+    assert Path(BASINS_PACKAGE_HELPERS_PATH).is_file()
+    assert not is_test_suite_path(BASINS_PACKAGE_HELPERS_PATH)
+    helper_tree = _parse_tracked(BASINS_PACKAGE_HELPERS_PATH)
+    assert not [
+        node.name
+        for node in helper_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ], "the Basins publication helper defines a test_* callable"
+
+
+def test_basins_publication_core_is_a_real_suite_not_a_reexport_shim() -> None:
+    # The historical path must own its own cases. A `from ... import *` compatibility
+    # module would keep the path alive while RE-collecting other partitions' functions,
+    # duplicating suffixes (breaking the "collected exactly once" contract) instead of
+    # retaining core coverage — the shape a "make the old path green" shortcut produces.
+    core = "tests/test_basins_package_publication.py"
+    assert core in BASINS_PACKAGE_PUBLICATION_TESTS
+
+    tree = _parse_tracked(core)
+    tests = [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")]
+    assert tests, f"{core} defines no test function: it became a re-export shim"
+    source = Path(core).read_text(encoding="utf-8")
+    assert "import *" not in source, f"{core} re-exports another module's cases"
+
+
+def test_basins_publication_every_partition_imports_the_helper_at_module_scope() -> None:
+    # Module-scope import is what makes helper-only selection load-bearing (and what keeps
+    # the routing independent of import order): a partition that imports lazily inside a
+    # test body would break at runtime, in the PR lane, with a rule that still looks right.
+    for suite in BASINS_PACKAGE_PUBLICATION_TESTS:
+        names = _top_level_imported_module_names(suite, _parse_tracked(suite))
+        assert "tests.basins_package_helpers" in names, f"{suite} does not import the helper at module scope"
+    assert "tests.basins_package_helpers" in _top_level_imported_module_names(
+        "tests/test_basins_package.py", _parse_tracked("tests/test_basins_package.py")
+    ), "the sibling suite lost its redirected helper import"
+
+
+def test_basins_publication_helper_importer_closure_derives_the_exact_seven() -> None:
+    # Independent of the rule table: derive who actually imports the helper from the
+    # tracked tree and require the routed consumer tuple to equal it. A partition that
+    # stops importing the helper while staying routed (dead edge) and a new importer suite
+    # that nobody routes (missing edge) both redden here.
+    derived = _non_gated_top_level_importer_tests("tests.basins_package_helpers")
+
+    assert derived == set(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS), (
+        "Basins helper consumer set drifted: "
+        f"derived={sorted(derived)} routed={sorted(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS)}"
+    )
+    assert len(derived) == 7
+
+
+def test_basins_publication_model_registry_owner_selects_all_six_partitions() -> None:
+    # The green production-owner route: a `workers/model_registry/**` change must run the
+    # whole publication corpus, not the retained core alone.
+    selected = _basins_publication_owner_selection()
+
+    missing = sorted(set(BASINS_PACKAGE_PUBLICATION_TESTS) - selected)
+    assert not missing, f"{BASINS_PUBLICATION_OWNER_PRODUCTION_FILE} stopped selecting partitions {missing}"
+    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 6
+
+
+def test_basins_publication_owner_rule_preserves_its_pre_existing_targets() -> None:
+    # "Replace the single core target with all six" must not mean "swap the corpus for
+    # something else": every target the rule carried before #1912 is still carried, so the
+    # partitioning removed no existing coverage. The frozen names below are the pre-#1912
+    # rule content on master, kept as a literal so this guard cannot be satisfied by
+    # re-reading the mutated rule.
+    pre_existing = (
+        "tests/test_model_registration.py",
+        "tests/test_model_registry_basin_versions.py",
+        "tests/test_model_registry_list_basins.py",
+        "tests/test_basins_discovery.py",
+        "tests/test_basins_package.py",
+        "tests/test_basins_registry_import.py",
+        "tests/test_basins_reingest.py",
+        "tests/test_direct_grid_variant_registration.py",
+        "tests/test_hhe_mvt_binding.py",
+        "tests/test_production_object_store_validation.py",
+        "tests/test_publish_scheduler_file_registry.py",
+        "tests/test_qhh_production_bootstrap.py",
+        "tests/test_qhh_scripts_static.py",
+    )
+    rule = next(
+        rule for rule in PATH_TEST_RULES if rule.pattern == BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN
+    )
+
+    assert set(pre_existing) <= set(rule.tests), sorted(set(pre_existing) - set(rule.tests))
+    assert set(BASINS_PACKAGE_PUBLICATION_TESTS) <= set(rule.tests)
+    # The rule's publication targets are exactly the tracked corpus: a partially-listed
+    # corpus, a stale rule entry whose file left the tree, and a seventh partition with no
+    # rule entry all redden here. Like every other tree-derived guard in this file
+    # (`_tracked_mapping_builder_suites`, `_tracked_tests_support_modules`), it reads the
+    # TRACKED tree — so it is evaluated at commit time, when the partitions are staged.
+    assert set(rule.tests) & _tracked_basins_publication_suites() == set(BASINS_PACKAGE_PUBLICATION_TESTS)
+
+
+@pytest.mark.parametrize("removed", BASINS_PACKAGE_PUBLICATION_TESTS)
+def test_basins_publication_owner_reds_when_a_partition_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    # The fracture pin, all six edges (retained core included, which #1872 could not
+    # assert for its own core): rebuilding the model-registry rule WITHOUT one partition
+    # must drop exactly that partition from the production-owner selection. Passing this
+    # row is what proves each of the six is load-bearing rather than decorative.
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(rule.pattern == BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN for rule in patched), "owner rule not found"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    selected = select_tests([BASINS_PUBLICATION_OWNER_PRODUCTION_FILE], repo_root=Path("."))
+
+    # Only the removed edge disappears: the mutation drops exactly one partition, so the
+    # row cannot be satisfied by a mutation that empties the whole route.
+    assert removed not in selected
+    survivors = sorted(set(BASINS_PACKAGE_PUBLICATION_TESTS) - {removed})
+    assert all(suite in selected for suite in survivors), survivors
+    # The retained core is NOT same-name derivable from this production owner (that
+    # derivation yields tests/test_basins_package.py), so its edge is genuinely rule-only
+    # and this row is a real fracture pin rather than the #1872 core's benign case.
+    if removed == "tests/test_basins_package_publication.py":
+        assert _same_name_test_for_basins_owner() == "tests/test_basins_package.py"
+
+
+def _same_name_test_for_basins_owner() -> str:
+    from scripts.select_ci_tests import _same_name_backend_python_test
+
+    derived = _same_name_backend_python_test(BASINS_PUBLICATION_OWNER_PRODUCTION_FILE)
+    assert derived is not None
+    return derived
+
+
+@pytest.mark.parametrize("removed", BASINS_PACKAGE_HELPERS_CONSUMER_TESTS)
+def test_basins_publication_helper_route_reds_when_a_consumer_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    # The helper's seven consumer edges are each load-bearing: with the exact rule rebuilt
+    # WITHOUT one consumer, a helper-only diff drops that suite and keeps the rest (plus
+    # the selector's own meta-guard rider, which the support-module branch adds and this
+    # rule must not duplicate).
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == BASINS_PACKAGE_HELPERS_PATH
+        else rule
+        for rule in SUPPORT_MODULE_TEST_RULES
+    )
+    assert any(rule.pattern == BASINS_PACKAGE_HELPERS_PATH for rule in patched), "helper rule not found"
+    monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", patched)
+
+    selected = select_tests([BASINS_PACKAGE_HELPERS_PATH], repo_root=Path("."))
+
+    assert removed not in selected
+    # Only the removed edge disappears — the other six consumers and the branch's
+    # meta-guard rider survive the mutation, so the row cannot be satisfied by a
+    # patch that empties the rule.
+    survivors = sorted(set(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS) - {removed})
+    assert all(suite in selected for suite in survivors), survivors
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_basins_publication_helper_route_selects_exactly_seven_consumers_plus_the_rider() -> None:
+    # Exact-set pin on the green table: helper routing adds the six partitions plus the
+    # sibling suite and nothing else of its own; the meta-guard is the support-module
+    # branch's rider, not a rule target.
+    rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == BASINS_PACKAGE_HELPERS_PATH)
+    selected = _basins_helper_selection()
+
+    assert sorted(rule.tests) == sorted(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS)
+    assert SELECTOR_META_GUARD_TEST not in rule.tests, "the rider must stay the branch's, not the rule's"
+    assert selected == set(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS) | {SELECTOR_META_GUARD_TEST}
+
+
 # Modules whose additions had to be placed with `stop_on_match` in mind: an
 # earlier stop rule owns each of these paths, so a narrow rule appended at the
 # end of PATH_TEST_RULES would never fire for them. Each addition therefore
@@ -8245,6 +8521,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # The #1809 gateway-reconcile split's two shared fixture modules.
     ("tests/gateway_reconcile_helpers.py", "tests/test_gateway_reconcile_file_cohort_comment.py"),
     ("tests/gateway_reconcile_writer_helpers.py", "tests/test_gateway_reconcile_idempotency_barrier.py"),
+    # #1912: the Basins publication corpus's shared helper. All six partitions plus the
+    # sibling packaging suite import it at module scope; the retained core is a valid
+    # anchor for the same reason #1872 pinned the retention core.
+    ("tests/basins_package_helpers.py", "tests/test_basins_package_publication.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
