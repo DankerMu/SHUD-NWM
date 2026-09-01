@@ -2,7 +2,15 @@
 
 Fixture level: **expanded** (agrees with issue #1912). Repair intensity: **high** because collection identity, monkeypatch oracles and targeted-CI ownership can silently disappear during a large physical move. Project profile: NHMS.
 
-At baseline `d93efaecc01c6f0dfedc5546b9b50a9e4726cbd9`, `tests/test_basins_package_publication.py` is 3,582 lines, defines 80 test functions and collects 88 unique nodes. The sorted baseline full node-ID digest is `f609688b6b6df4e870ef1add8afa56f009a06ef3b819257b19018731f186c138`; after removing the module prefix, the stable sorted suffix digest is `f8d203d5d6637541201300d0d0be3b5863c670904a556e18fd12e94801ed6787` on both baseline and partitioned layouts. Source digest is `c9833641a0e5379044e49ebf610f81668cd2ca3b62a9bb3ac3c642a0aaf30670`. Its only sibling helper importer is `tests/test_basins_package.py`.
+At baseline `d93efaecc01c6f0dfedc5546b9b50a9e4726cbd9`,
+`tests/test_basins_package_publication.py` is 3,582 lines, defines 80 test functions and
+collects 88 unique nodes. The sorted baseline full node-ID digest is
+`f609688b6b6df4e870ef1add8afa56f009a06ef3b819257b19018731f186c138`; after removing
+the module prefix, the stable sorted suffix digest is
+`f8d203d5d6637541201300d0d0be3b5863c670904a556e18fd12e94801ed6787` on both
+baseline and partitioned layouts. Source digest is
+`c9833641a0e5379044e49ebf610f81668cd2ca3b62a9bb3ac3c642a0aaf30670`. Its only
+sibling helper importer is `tests/test_basins_package.py`.
 
 ## Goals / Non-Goals
 
@@ -38,27 +46,71 @@ The current core/refusal/failure/TOCTOU/migration sections are 512–847 lines b
 
 ### D2: One non-collectible helper owns only shared test support
 
-`tests/basins_package_helpers.py` owns the baseline import surface and lines 3242–3417 helpers: `_write_valid_inventory`, `_object_store_env`, canonical required-file builder, manifest helpers, CLI wrapper, valid model builder and identity snapshot. Every consuming partition imports support at module scope. The helper contains no `test_*` definitions and contributes zero collected nodes. `tests/test_basins_package.py` imports its two existing helpers from this owner.
+`tests/basins_package_helpers.py` owns the baseline import surface and lines 3242–3417
+helpers: `_write_valid_inventory`, `_object_store_env`, canonical required-file builder,
+manifest helpers, CLI wrapper, valid model builder and identity snapshot. Every consuming
+partition imports support at module scope. The helper contains no `test_*` definitions
+and contributes zero collected nodes. `tests/test_basins_package.py` imports its two
+existing helpers from this owner.
 
-Alternative rejected: duplicating helpers risks fixture drift; `conftest.py` makes private package fixtures repository-wide; retaining helper definitions in a collectible suite couples all partitions to collection order and defeats helper-only routing.
+Alternative rejected: duplicating helpers risks fixture drift; `conftest.py` makes
+private package fixtures repository-wide; retaining helper definitions in a collectible
+suite couples all partitions to collection order and defeats helper-only routing.
 
 ### D3: Compare stable node suffixes and normalized definitions
 
-Moved node prefixes necessarily change. Stable identity is everything after the first `::`; pre/post sorted suffix sets must contain exactly 88 unique entries and remain byte-identical. A second comparator maps all 80 baseline functions to one post owner and compares normalized AST, decorators, parameter values/IDs, fixture arguments and monkeypatch target literals. Import rewiring and source locations are the only permitted mechanical differences; test bodies/oracles are not edited.
+Moved node prefixes necessarily change. Stable identity is everything after the first
+`::`; pre/post sorted suffix sets must contain exactly 88 unique entries and remain
+byte-identical. A second comparator maps all 80 baseline functions to one post owner and
+compares normalized AST, decorators, parameter values/IDs, fixture arguments and
+monkeypatch target literals. Import rewiring and source locations are the only permitted
+mechanical differences; test bodies/oracles are not edited.
 
 ### D4: Make both selector boundaries explicit and biting
 
-A `BASINS_PACKAGE_PUBLICATION_TESTS` tuple in `scripts/select_ci_tests.py` is the single six-partition route authority. The existing `workers/model_registry/**` rule includes all six so any Basins package production-owner change runs the whole corpus. All six edges, including retained core, are rule-only for a `workers/model_registry/basins_package.py` change: same-name derivation yields `tests/test_basins_package.py`, not the publication core. `SUPPORT_MODULE_TEST_RULES` maps `tests/basins_package_helpers.py` to exactly the six partitions plus `tests/test_basins_package.py`; the selector's existing meta-guard rider remains additive. Meta-tests derive the tracked six-file set, assert both routes and remove every one of the six owner edges and seven helper edges one at a time to construct RED before restoring GREEN.
+A `BASINS_PACKAGE_PUBLICATION_TESTS` tuple in `scripts/select_ci_tests.py` is the single
+six-partition route authority. The existing `workers/model_registry/**` rule includes
+all six so any Basins package production-owner change runs the whole corpus. All six
+edges, including retained core, are rule-only for a
+`workers/model_registry/basins_package.py` change: same-name derivation yields
+`tests/test_basins_package.py`, not the publication core. `SUPPORT_MODULE_TEST_RULES`
+maps `tests/basins_package_helpers.py` to exactly the six partitions plus
+`tests/test_basins_package.py`; the selector's existing meta-guard rider remains
+additive. Meta-tests derive the tracked six-file set, assert both routes and remove every
+one of the six owner edges and seven helper edges one at a time to construct RED before
+restoring GREEN.
 
 ### D5: Update current commands, not history
 
-Every live validation command that uses the historical core path as publication coverage uses the explicit six-file list: the M9 closeout block, the #148 regression block and the `NHMS_RUN_BASINS_SMOKE` block. The opt-in command therefore still executes `test_real_basins_package_smoke_opt_in` after that node moves to `tests/test_basins_migration_report.py`. Historical M9 result bullets and archived OpenSpec evidence remain byte-identical and continue to describe the then-current monolith.
+Every live validation command that uses the historical core path as publication coverage
+uses the explicit six-file list: the M9 closeout block, the #148 regression block and the
+`NHMS_RUN_BASINS_SMOKE` block. The opt-in command therefore still executes
+`test_real_basins_package_smoke_opt_in` after that node moves to
+`tests/test_basins_migration_report.py`. Historical M9 result bullets and archived
+OpenSpec evidence remain byte-identical and continue to describe the then-current
+monolith.
 
 ### D6: Keep the current validation matrix under the same structural guard
 
-The required command update exposed a pre-existing structural blocker: `docs/VALIDATION.md` is 1,242 lines on baseline `master`, is not grandfathered by `.large-file-guard.json`, and any staged edit is rejected. The smallest coherent closure moves the complete M10 #147–#152 production-closure family into new current authority `docs/validation/production-closure.md`, using heading identity rather than mutable line coordinates: from baseline line 172 `## M10 #147 Production Slurm Closure` through the blank line immediately before baseline line 842 `## M19 Production Readiness Proof` (670 lines). The root content remainder is 572 baseline lines before six short stubs.
+The required command update exposed a pre-existing structural blocker:
+`docs/VALIDATION.md` is 1,242 lines on baseline `master`, is not grandfathered by
+`.large-file-guard.json`, and any staged edit is rejected. The smallest coherent closure
+moves the complete M10 #147–#152 production-closure family into new current authority
+`docs/validation/production-closure.md`, using heading identity rather than mutable line
+coordinates: from baseline line 172 `## M10 #147 Production Slurm Closure` through the
+blank line immediately before baseline line 842 `## M19 Production Readiness Proof`
+(670 lines). The root content remainder is 572 baseline lines before six short stubs.
 
-The root matrix retains each of the six original `## M10 ...` heading texts byte-identically as link stubs, preserving their GitHub anchor slugs, and remains the index plus non-M10 validation matrix. The moved M10 block is byte-identical except for the already-required #1912 six-file publication command expansion and self-lint path changes from `docs/VALIDATION.md` to `docs/validation/production-closure.md`; no other evidence or prose is rewritten. Commands outside that family are updated in place only where task 3.4 requires the six publication suites. `docs/governance/DOC_STATUS.md` recognizes both `docs/VALIDATION.md` and `docs/validation/**` as current validation matrices. Both resulting current documents stay below 1,000 lines; no exclusion, content compression or history rewrite is used.
+The root matrix retains each of the six original `## M10 ...` heading texts
+byte-identically as link stubs, preserving their GitHub anchor slugs, and remains the
+index plus non-M10 validation matrix. The moved M10 block is byte-identical except for
+the already-required #1912 six-file publication command expansion and self-lint path
+changes from `docs/VALIDATION.md` to `docs/validation/production-closure.md`; no other
+evidence or prose is rewritten. Commands outside that family are updated in place only
+where task 3.4 requires the six publication suites. `docs/governance/DOC_STATUS.md`
+recognizes both `docs/VALIDATION.md` and `docs/validation/**` as current validation
+matrices. Both resulting current documents stay below 1,000 lines; no exclusion, content
+compression or history rewrite is used.
 
 Alternative rejected: dropping the required command update leaves current authority stale; adding a guard exclusion or bypass violates the issue; moving arbitrary line ranges obscures ownership. The M10 family is already one contiguous responsibility boundary with six named lanes.
 
@@ -120,7 +172,10 @@ Alternative rejected: dropping the required command update leaves current author
 
 ## Migration Plan
 
-Capture baseline contracts, mechanically generate the frozen owner files/helper, compare before any semantic edit, update routing/current docs, verify, and merge as a test-layout-only change. Rollback is reverting the PR. After merge and post-merge closure, #1913 becomes unblocked; no production migration is required.
+Capture baseline contracts, mechanically generate the frozen owner files/helper, compare
+before any semantic edit, update routing/current docs, verify, and merge as a
+test-layout-only change. Rollback is reverting the PR. After merge and post-merge
+closure, #1913 becomes unblocked; no production migration is required.
 
 ## Open Questions
 

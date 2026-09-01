@@ -2,7 +2,13 @@
 
 ### Requirement: Basins package publication tests remain complete under physical partitioning
 
-The repository SHALL partition the Basins package publication pytest corpus into exactly six collectible modules and one non-collectible helper whose individual line counts are below 1,000, without changing `.large-file-guard.json` or retaining a collectible compatibility shim. Every baseline case SHALL be collected exactly once after partitioning: module prefixes may change, but all 88 unique `::test_name[param-id]` suffixes and all 80 normalized test bodies, decorators, fixture arguments, parameter values/IDs, assertions, skips and monkeypatch targets MUST remain equivalent.
+The repository SHALL partition the Basins package publication pytest corpus into exactly
+six collectible modules and one non-collectible helper whose individual line counts are
+below 1,000, without changing `.large-file-guard.json` or retaining a collectible
+compatibility shim. Every baseline case SHALL be collected exactly once after
+partitioning: module prefixes may change, but all 88 unique `::test_name[param-id]`
+suffixes and all 80 normalized test bodies, decorators, fixture arguments, parameter
+values/IDs, assertions, skips and monkeypatch targets MUST remain equivalent.
 
 #### Scenario: collection identity and test oracles are preserved one-to-one
 
