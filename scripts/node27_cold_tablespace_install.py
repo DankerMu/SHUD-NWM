@@ -254,7 +254,7 @@ def dependencies_from_args(args: argparse.Namespace, config: InstallConfig) -> I
         return _connect(args.database_url)
 
     def inspect_target() -> Mapping[str, Any]:
-        return inspect_running_target(docker)
+        return inspect_running_target(docker, expected_uid=config.expected_uid, expected_gid=config.expected_gid)
 
     def ensure_host_path() -> Mapping[str, Any]:
         return create_fresh_host_path(

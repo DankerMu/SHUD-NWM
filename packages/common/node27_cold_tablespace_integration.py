@@ -641,14 +641,24 @@ def _cold_bind_refs(
     return tuple(current), tuple(stopped)
 
 
-def _target(config: IntegrationConfig, *, runner: Callable[..., subprocess.CompletedProcess[str]]) -> dict[str, Any]:
+def _target(
+    config: IntegrationConfig,
+    *,
+    capability: RootEvidenceCapability,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> dict[str, Any]:
+    observed = _host_path(config)
+    if observed["uid"] != capability.runtime_uid or observed["gid"] != capability.runtime_gid:
+        raise ColdTablespaceIntegrationError(
+            "cold tablespace host owner differs from the proven runtime identity"
+        )
     _checked(
         runner,
         (
             config.docker_bin,
             "exec",
             "--user",
-            "postgres",
+            f"{capability.runtime_uid}:{capability.runtime_gid}",
             config.container_name,
             "test",
             "-w",
@@ -661,6 +671,9 @@ def _target(config: IntegrationConfig, *, runner: Callable[..., subprocess.Compl
         "container_bind": str(config.identity.host_path),
         "host_path": str(config.identity.host_path),
         "device_identity": "synthetic-device",
+        "host_mode": observed["mode"],
+        "host_uid": observed["uid"],
+        "host_gid": observed["gid"],
         "writable": True,
     }
 
@@ -715,7 +728,9 @@ def dependencies(
         docker=_docker_action(resources, runner=runner),
         connect=connection_factory,
         connect_readonly=connection_factory,
-        inspect_target=lambda: _target(config, runner=runner),
+        inspect_target=lambda: _target(
+            config, capability=resources.require_capability(), runner=runner
+        ),
         current_bind_references=lambda: _cold_bind_refs(config, runner=runner)[0],
         stopped_bind_references=lambda: _cold_bind_refs(config, runner=runner)[1],
         pg_tblspc_references=pg_refs,

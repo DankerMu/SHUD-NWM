@@ -436,9 +436,22 @@ def inspect_storage_evidence(
     )
 
 
-def inspect_running_target(docker: DockerBoundary) -> dict[str, Any]:
-    """Read one contract's current bind plus in-container writability."""
+def inspect_running_target(
+    docker: DockerBoundary, *, expected_uid: int, expected_gid: int
+) -> dict[str, Any]:
+    """Read one contract's current bind plus in-container writability.
 
+    Writability must be proven as the exact numeric uid:gid that owns the host
+    cold path and is expected by the installer config.  Never resolve a passwd
+    name that may map to a different image default UID.
+    """
+
+    if isinstance(expected_uid, bool) or isinstance(expected_gid, bool):
+        raise ColdHostError("expected uid/gid must be non-negative integers")
+    if not isinstance(expected_uid, int) or not isinstance(expected_gid, int):
+        raise ColdHostError("expected uid/gid must be non-negative integers")
+    if expected_uid < 0 or expected_gid < 0:
+        raise ColdHostError("expected uid/gid must be non-negative integers")
     identity = docker.identity
     inspect = docker.inspect(identity.container_name)
     mounts = inspect.get("Mounts")
@@ -454,12 +467,16 @@ def inspect_running_target(docker: DockerBoundary) -> dict[str, Any]:
     if len(matches) != 1:
         raise ColdHostError("current container does not have exactly one cold bind")
     host = inspect_host_path(identity=identity)
+    if host["uid"] != expected_uid or host["gid"] != expected_gid:
+        raise ColdHostError(
+            "cold tablespace host owner differs from the expected runtime identity"
+        )
     writable = docker.action(
         (
             identity.docker_bin,
             "exec",
             "--user",
-            "postgres",
+            f"{expected_uid}:{expected_gid}",
             identity.container_name,
             "test",
             "-w",

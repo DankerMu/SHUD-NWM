@@ -121,6 +121,10 @@ def _capability_runner(
             if stale_runtime_helper:
                 exists = exists or "runtime-identity" in name
             return _result(0 if exists else 1)
+        if argv[1] == "exec":
+            user = argv[argv.index("--user") + 1] if "--user" in argv else None
+            uid, gid = (runtime_identity or user or "").split(":", maxsplit=1)
+            return _result(0 if (uid, gid) == ("1005", "1005") else 1)
         if argv[1] == "run":
             user = argv[argv.index("--user") + 1] if "--user" in argv else None
             script = argv[-1]
@@ -473,6 +477,98 @@ def test_proven_host_runtime_identity_controls_disposable_container_and_cold_pat
     assert root_argv[-3:-1] == ("1005", "1005")
     assert "1000" not in root_argv[-3:]
     config.work_root.rmdir()
+
+
+_RUNTIME_HOST_OWNER = {
+    "exists": True,
+    "is_symlink": False,
+    "is_directory": True,
+    "entry_count": 0,
+    "uid": 1005,
+    "gid": 1005,
+    "mode": 0o700,
+    "mount_device": "synthetic",
+    "device_identity": "synthetic-device",
+    "free_bytes": 1_000_000,
+}
+
+
+def test_integration_target_writability_is_proven_as_runtime_numeric_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0017", host_port=55494)
+    resources = IntegrationResources(
+        config=config,
+        capability=RootEvidenceCapability(
+            strategy="sudo",
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
+            image_id=PINNED_IMAGE_ID,
+            image_ref=PINNED_IMAGE_REF,
+            image_default_user="postgres",
+            root_proof="sudo-noninteractive",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.common.node27_cold_tablespace_integration._host_path", lambda config: dict(_RUNTIME_HOST_OWNER)
+    )
+    seen: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], *, timeout: int = 90):
+        seen.append(argv)
+        if argv[1] == "exec":
+            user = argv[argv.index("--user") + 1]
+            return _result(0 if user == "1005:1005" else 1)
+        return _result(0, "[]\n")
+
+    deps = dependencies(resources, runner=runner)
+    observed = deps.inspect_target()
+
+    assert observed["writable"] is True
+    assert observed["host_uid"] == 1005
+    assert observed["host_gid"] == 1005
+    exec_argv = next(command for command in seen if command[1] == "exec")
+    assert exec_argv[exec_argv.index("--user") + 1] == "1005:1005"
+    assert "postgres" not in exec_argv
+
+
+def test_integration_target_refuses_runtime_owner_mismatch_before_docker_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0018", host_port=55494)
+    resources = IntegrationResources(
+        config=config,
+        capability=RootEvidenceCapability(
+            strategy="sudo",
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
+            image_id=PINNED_IMAGE_ID,
+            image_ref=PINNED_IMAGE_REF,
+            image_default_user="postgres",
+            root_proof="sudo-noninteractive",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.common.node27_cold_tablespace_integration._host_path",
+        lambda config: {**_RUNTIME_HOST_OWNER, "uid": 999, "gid": 999},
+    )
+    seen: list[tuple[str, ...]] = []
+
+    def runner(argv: tuple[str, ...], *, timeout: int = 90):
+        seen.append(argv)
+        if argv[1] == "exec":
+            return _result(0)
+        return _result(0, "[]\n")
+
+    deps = dependencies(resources, runner=runner)
+    with pytest.raises(ColdTablespaceIntegrationError, match="owner"):
+        deps.inspect_target()
+
+    assert not any(command[1] == "exec" for command in seen)
 
 
 def test_prepare_resources_forces_an_owned_work_root_to_mode_0700(tmp_path: Path) -> None:

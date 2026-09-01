@@ -131,6 +131,52 @@ def test_cli_builds_declared_dependencies_and_reaches_run_install(tmp_path: Path
     assert "recovery_exists" not in installer_cli.InstallDependencies.__dataclass_fields__
 
 
+def test_cli_target_wiring_passes_config_expected_uid_gid_into_running_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_inspect_running_target(docker, *, expected_uid, expected_gid):
+        captured["expected_uid"] = expected_uid
+        captured["expected_gid"] = expected_gid
+        return {
+            "container_name": "nhms-db",
+            "container_bind": "/data/GHDC/nhms-cold-tablespace",
+            "host_path": "/data/GHDC/nhms-cold-tablespace",
+            "device_identity": "8:11:1",
+            "writable": True,
+            "host_mode": 0o700,
+            "host_uid": expected_uid,
+            "host_gid": expected_gid,
+        }
+
+    monkeypatch.setattr(installer_cli, "inspect_running_target", fake_inspect_running_target)
+    monkeypatch.setattr(installer_cli, "SystemdBoundary", lambda: SimpleNamespace(inspect_quiescence=lambda _units: {}))
+    args = _args(
+        tmp_path,
+        "--evidence-hostname",
+        "node27-test",
+        "--evidence-max-age-seconds",
+        "300",
+        "--evidence-approved-mode",
+        "600",
+        "--mdadm-evidence",
+        str(tmp_path / "mdadm.json"),
+        "--smart-evidence",
+        f"/dev/sdb1={tmp_path / 'sdb.json'}",
+        "--backup-evidence",
+        str(tmp_path / "backup.json"),
+    )
+    config = installer_cli.config_from_args(args)
+    dependencies = installer_cli.dependencies_from_args(
+        args,
+        config,
+    )
+    dependencies.inspect_target()
+
+    assert captured == {"expected_uid": 999, "expected_gid": 999}
+
+
 def test_cli_requires_descriptor_evidence_configuration_before_constructing_live_dependencies(tmp_path: Path) -> None:
     args = _args(tmp_path)
     config = installer_cli.config_from_args(args)

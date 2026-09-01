@@ -17,6 +17,7 @@ from packages.common.node27_cold_tablespace_host import (
     EvidencePaths,
     SystemdBoundary,
     inspect_host_path,
+    inspect_running_target,
     inspect_storage_evidence,
 )
 
@@ -165,3 +166,82 @@ def test_docker_action_uses_direct_argv_and_does_not_expose_stderr(monkeypatch: 
 
     assert result == {"returncode": 0}
     assert seen == [["/usr/bin/docker", "stop", "nhms-db"]]
+
+
+def _running_target_docker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    host_uid: int = 1005,
+    host_gid: int = 1005,
+    seen: list[list[str]] | None = None,
+) -> DockerBoundary:
+    docker = DockerBoundary()
+    identity = docker.identity
+    monkeypatch.setattr(
+        "packages.common.node27_cold_tablespace_host.inspect_host_path",
+        lambda **kwargs: {
+            "exists": True,
+            "is_symlink": False,
+            "is_directory": True,
+            "entry_count": 0,
+            "uid": host_uid,
+            "gid": host_gid,
+            "mode": 0o700,
+            "mount_device": "8:11",
+            "device_identity": "8:11:1",
+            "free_bytes": 1_000_000,
+        },
+    )
+    monkeypatch.setattr(
+        docker,
+        "inspect",
+        lambda name: {
+            "Mounts": [
+                {
+                    "Source": str(identity.host_path),
+                    "Destination": identity.container_path,
+                }
+            ]
+        },
+    )
+    if seen is not None:
+        monkeypatch.setattr(docker, "action", lambda argv: seen.append(list(argv)) or {"returncode": 0})
+    return docker
+
+
+def test_inspect_running_target_uses_expected_numeric_runtime_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    docker = _running_target_docker(monkeypatch, seen=seen)
+
+    observed = inspect_running_target(docker, expected_uid=1005, expected_gid=1005)
+
+    assert observed["writable"] is True
+    assert observed["host_uid"] == 1005
+    assert observed["host_gid"] == 1005
+    exec_argv = seen[0]
+    assert exec_argv[exec_argv.index("--user") + 1] == "1005:1005"
+    assert "postgres" not in exec_argv
+
+
+def test_inspect_running_target_refuses_host_owner_mismatch_before_docker_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    docker = _running_target_docker(monkeypatch, host_uid=999, host_gid=999, seen=seen)
+
+    with pytest.raises(ColdHostError, match="owner"):
+        inspect_running_target(docker, expected_uid=1005, expected_gid=1005)
+
+    assert seen == []
+
+
+def test_inspect_running_target_refuses_ambiguous_or_negative_expected_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker = _running_target_docker(monkeypatch)
+
+    for bad_uid, bad_gid in ((True, 1005), (1005, True), (-1, 1005), (1005, -1)):
+        with pytest.raises(ColdHostError, match="non-negative"):
+            inspect_running_target(docker, expected_uid=bad_uid, expected_gid=bad_gid)
