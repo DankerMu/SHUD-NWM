@@ -37,5 +37,5 @@
 - [x] 4.2 Run `uv run pytest -q tests/test_select_ci_tests.py` plus selector exact-set/mutation proofs; expect all assertions GREEN after each mutation is restored.
 - [x] 4.3 Run affected Basins/object-store/scheduler consumers and `uv run pytest -q`; expect no regression or production-source drift.
 - [x] 4.4 Run ruff for every changed/new Python file, entropy report/hard structural checks, strict single/all OpenSpec, Markdown lint and `git diff --check`; expect zero new violations.
-- [ ] 4.5 On node-27, run frozen-SHA six-suite focused backend receipt and compare baseline/frozen collection/pass/skip; no DB/display mutation is required. Node-22 is not applicable.
+- [x] 4.5 On node-27, run frozen-SHA six-suite focused backend receipt and compare baseline/frozen collection/pass/skip; no DB/display mutation is required. Node-22 is not applicable.
 - [x] 4.6 Confirm final diff contains only test layout/helper, sibling import, selector metadata/meta-tests, root/M10 current validation ownership, DOC_STATUS routing and this OpenSpec change; explicitly exclude #1903, registry corpus, database filter and production behavior.
