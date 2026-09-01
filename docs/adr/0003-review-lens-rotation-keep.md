@@ -2592,3 +2592,31 @@ later-round catches still concentrate in rotated-in lenses (**296 versus 88**),
 so the recorded decision remains **keep rotation**. Any future reversal still
 requires the existing attribution-schema, round-intent, and round-role repairs
 plus maintainer review; a clean no-treatment round is not evidence for a cut.
+
+## Revisit 2026-09-01 (post #1757 / PR #1924) — keep; two clean core-subset rounds add no rotation datum
+
+After the PR #1924 accountability line, `loop_log_audit.py` reports **148**
+multi-round merged PRs and later-round catches **core=88 / rotated=296**. The
+sample increases from 147, while neither catch count changes.
+
+Round 1 used the standard six-lens high-risk mix and produced three independently
+confirmed findings: two test/evidence gaps and one source-case compatibility
+ordering defect. Round 2 retained invariant/state, correctness, test/evidence and
+security/performance—all already present in Round 1—and returned zero candidates.
+A later Phase 7 sweep found two semantic defects in crash recovery and lock-error
+receipt boundaries; after those fixes, Round 3 re-ran the same four-lens core
+subset and returned zero candidates. The completion-head Phase 7 sweep was also
+clean.
+
+This PR therefore supplies a pinned closure sample, not an additive rotation
+experiment. Its Phase 7 catches are deliberately recorded as a separate workflow
+role (`round: 0`, `phase: phase7-gap-sweep`) and do not enter the later-round
+core/rotated attribution. Rounds 2 and 3 introduced no free-slot lens, so their
+`core +0 / rotated +0` result proves the repaired invariants closed cleanly but
+cannot estimate rotation's causal value.
+
+The cumulative attribution still strongly favours keeping the additive policy,
+but the existing caveats remain load-bearing: the metric must distinguish round
+intent, core-subset verification and Phase 7 roles before it can support an
+autonomous reversal. **Keep rotation** unchanged; any cut still requires those
+schema/role repairs plus maintainer review.
