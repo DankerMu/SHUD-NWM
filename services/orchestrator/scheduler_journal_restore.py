@@ -14,6 +14,7 @@ from packages.common.safe_fs import (
 from packages.common.safe_fs_publication import write_bytes_no_follow_exclusive
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_journal_archive as archive_owner
+from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 from services.orchestrator.scheduler_journal_retention import _path_under, _safe_existing_directory
 from services.orchestrator.scheduler_journal_retention_types import (
@@ -119,67 +120,84 @@ def verify_and_restore(
         cycle_time=cycle_time,
     )
     repository = FileOrchestrationJournalRepository(journal)
-    with repository.open_retention_cycle(source_id=canonical_source, cycle_time=cycle_time) as window:
-        if window.status == "busy":
-            raise RetentionFailure("in_flight")
-        stage = _safe_stage_root(stage, journal=journal, archive_root=archive_root)
-        manifest = archive_owner._read_manifest(manifest_path)
-        if not archive_owner._manifest_identity_matches(manifest, source_id=canonical_source, cycle_time=cycle_time):
-            raise RetentionFailure("archive_manifest_identity_mismatch")
-        archive_sha = archive_owner._verify_archive(
-            archive_path,
-            manifest=manifest,
-            source_id=canonical_source,
-            cycle_time=cycle_time,
-            max_members=MAX_ARCHIVE_CYCLE_MEMBERS,
-            max_archive_bytes=MAX_ARCHIVE_BYTES,
-        )
-        if archive_sha != manifest.get("archive_sha256"):
-            raise RetentionFailure("archive_digest_mismatch")
-        members = archive_owner._validated_manifest_members(
-            manifest,
-            source_id=canonical_source,
-            cycle_time=cycle_time,
-            max_members=MAX_ARCHIVE_CYCLE_MEMBERS,
-        )
-        staged_content: list[tuple[str, bytes]] = []
-        total = 0
-        for member in members:
-            relative = str(member["path"])
-            size = int(member["size_bytes"])
-            digest = str(member["sha256"])
-            total += size
-            if total > MAX_ARCHIVE_CYCLE_BYTES:
-                raise RetentionFailure("archive_cycle_byte_limit_exceeded")
-            actual_size, actual_digest, content = archive_owner._stream_archive_member(
+    try:
+        with repository.open_retention_cycle(source_id=canonical_source, cycle_time=cycle_time) as window:
+            if window.status == "busy":
+                raise RetentionFailure("in_flight")
+            stage = _safe_stage_root(stage, journal=journal, archive_root=archive_root)
+            manifest = archive_owner._read_manifest(manifest_path)
+            if not archive_owner._manifest_identity_matches(
+                manifest,
+                source_id=canonical_source,
+                cycle_time=cycle_time,
+            ):
+                raise RetentionFailure("archive_manifest_identity_mismatch")
+            archive_sha = archive_owner._verify_archive(
                 archive_path,
-                relative,
-                max_bytes=size,
-                collect_content=True,
+                manifest=manifest,
+                source_id=canonical_source,
+                cycle_time=cycle_time,
+                max_members=MAX_ARCHIVE_CYCLE_MEMBERS,
+                max_archive_bytes=MAX_ARCHIVE_BYTES,
             )
-            if actual_size != size or actual_digest != digest:
-                raise RetentionFailure("archive_verification_failed")
-            staged_content.append((relative, content))
-        if len({relative for relative, _content in staged_content}) != len(staged_content):
-            raise RetentionFailure("archive_manifest_invalid")
-        # All destination and stage checks happen under the flock.  Do them all
-        # before the first no-clobber write so ordinary refusals make zero writes.
-        for relative, _content in staged_content:
-            stage_target = stage / relative
-            destination = journal / relative
-            if archive_owner._entry_state(stage_target, root=stage) != "absent":
-                raise RetentionFailure("stage_clobber")
-            if archive_owner._entry_state(destination, root=journal) != "absent":
-                raise RetentionFailure("restore_clobber")
-        for relative, content in staged_content:
-            atomic_write_bytes_no_follow(
-                stage / relative,
-                content,
-                containment_root=stage,
-                require_durable_replace=True,
+            if archive_sha != manifest.get("archive_sha256"):
+                raise RetentionFailure("archive_digest_mismatch")
+            members = archive_owner._validated_manifest_members(
+                manifest,
+                source_id=canonical_source,
+                cycle_time=cycle_time,
+                max_members=MAX_ARCHIVE_CYCLE_MEMBERS,
             )
-        for relative, content in staged_content:
-            write_bytes_no_follow_exclusive(journal / relative, content, containment_root=journal)
+            staged_content: list[tuple[str, bytes]] = []
+            total = 0
+            for member in members:
+                relative = str(member["path"])
+                size = int(member["size_bytes"])
+                digest = str(member["sha256"])
+                total += size
+                if total > MAX_ARCHIVE_CYCLE_BYTES:
+                    raise RetentionFailure("archive_cycle_byte_limit_exceeded")
+                actual_size, actual_digest, content = archive_owner._stream_archive_member(
+                    archive_path,
+                    relative,
+                    max_bytes=size,
+                    collect_content=True,
+                )
+                if actual_size != size or actual_digest != digest:
+                    raise RetentionFailure("archive_verification_failed")
+                staged_content.append((relative, content))
+            if len({relative for relative, _content in staged_content}) != len(staged_content):
+                raise RetentionFailure("archive_manifest_invalid")
+            # All destination and stage checks happen under the flock.  Do them all
+            # before the first no-clobber write so ordinary refusals make zero writes.
+            for relative, _content in staged_content:
+                stage_target = stage / relative
+                destination = journal / relative
+                if archive_owner._entry_state(stage_target, root=stage) != "absent":
+                    raise RetentionFailure("stage_clobber")
+                if archive_owner._entry_state(destination, root=journal) != "absent":
+                    raise RetentionFailure("restore_clobber")
+            for relative, content in staged_content:
+                atomic_write_bytes_no_follow(
+                    stage / relative,
+                    content,
+                    containment_root=stage,
+                    require_durable_replace=True,
+                )
+            for relative, content in staged_content:
+                write_bytes_no_follow_exclusive(journal / relative, content, containment_root=journal)
+    except OrchestratorError as error:
+        if error.error_code != "FILE_JOURNAL_WRITE_FAILED" or error.details.get("surface") not in {
+            "cycle_lock",
+            "journal_root",
+        }:
+            raise
+        reason = (
+            "journal_root_unavailable"
+            if error.details.get("surface") == "journal_root"
+            else "cycle_lock_unavailable"
+        )
+        raise RetentionFailure(reason) from error
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "restored",

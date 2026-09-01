@@ -18,9 +18,11 @@ from packages.common.safe_fs import (
 )
 from packages.common.safe_fs_publication import write_bytes_no_follow_exclusive
 from services.orchestrator import scheduler_journal_archive as archive
+from services.orchestrator.chain_types import OrchestratorError
 from services.orchestrator.file_orchestration_journal import (
     MAX_FILE_JOURNAL_DISCOVERED_FILES,
     MAX_FILE_JOURNAL_SCAN_DEPTH,
+    FileJournalRetentionDiscovery,
     FileJournalRetentionMember,
     FileOrchestrationJournalRepository,
 )
@@ -44,6 +46,7 @@ from services.orchestrator.scheduler_journal_retention_types import (
     ReceiptReservation,
     RetentionFailure,
     SchedulerJournalRetentionConfig,
+    _canonical_json,
     _iso,
     _utc,
 )
@@ -51,7 +54,6 @@ from services.orchestrator.scheduler_journal_retention_types import (
 # Compatibility seams stay here while implementations are owned by the archive module.
 _publish_archive = archive.publish_archive
 _validated_manifest_members = archive.validated_manifest_members
-_canonical_json = archive._canonical_json
 
 
 def _valid_archive_limit(value: int) -> bool:
@@ -337,7 +339,13 @@ def run_retention(
         max_files=config.max_files,
         max_depth=config.max_depth,
     )
-    discovery = repository.discover_retention_cycles(max_files=config.max_files, max_depth=config.max_depth)
+    try:
+        discovery = repository.discover_retention_cycles(max_files=config.max_files, max_depth=config.max_depth)
+    except OrchestratorError as error:
+        if error.error_code != "FILE_JOURNAL_WRITE_FAILED":
+            raise
+        preflight_blockers.append("journal_root_unavailable")
+        discovery = FileJournalRetentionDiscovery(status="blocked", reason="journal_root_unavailable")
     rows: list[dict[str, Any]] = []
     if discovery.status != "ok":
         preflight_blockers.append(discovery.reason or "discovery_blocked")
@@ -354,7 +362,9 @@ def run_retention(
                 )
             )
     else:
-        for source_id, cycle_time in discovery.cycles:
+        remaining = list(discovery.cycles)
+        while remaining:
+            source_id, cycle_time = remaining.pop(0)
             if cycle_time >= cutoff:
                 rows.append(
                     _cycle_row(
@@ -375,86 +385,122 @@ def run_retention(
                     )
                 )
                 continue
-            with repository.open_retention_cycle(source_id=source_id, cycle_time=cycle_time) as window:
-                inspection = window.inspect()
-                if inspection.status == "busy":
-                    rows.append(
-                        _cycle_row(
-                            source_id=source_id,
-                            cycle_time=cycle_time,
-                            status="skipped",
-                            reason="in_flight",
-                        )
-                    )
-                    continue
-                if inspection.status != "eligible":
-                    rows.append(
-                        _cycle_row(
-                            source_id=source_id,
-                            cycle_time=cycle_time,
-                            status="skipped" if inspection.status == "live" else "blocked",
-                            reason=inspection.reason,
-                            members=inspection.members,
-                        )
-                    )
-                    continue
-                if config.dry_run or not config.enabled:
-                    rows.append(
-                        _cycle_row(
-                            source_id=source_id,
-                            cycle_time=cycle_time,
-                            status="planned",
-                            reason="dry_run" if config.dry_run else "retention_disabled",
-                            members=inspection.members,
-                        )
-                    )
-                    continue
-                try:
-                    identity = _publish_archive(
-                        config,
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                        now=now,
-                        frontier=frontier,
-                        members=inspection.members,
-                    )
-                    manifest_members = _validated_manifest_members(
-                        identity.manifest,
-                        source_id=source_id,
-                        cycle_time=cycle_time,
-                        max_members=config.max_cycle_members,
-                    )
-                    removal = window.remove_members(
-                        tuple(
-                            FileJournalRetentionMember(
-                                relative_path=str(member["path"]),
-                                size_bytes=int(member["size_bytes"]),
-                                sha256=str(member["sha256"]),
+            try:
+                with repository.open_retention_cycle(source_id=source_id, cycle_time=cycle_time) as window:
+                    inspection = window.inspect()
+                    if inspection.status == "busy":
+                        rows.append(
+                            _cycle_row(
+                                source_id=source_id,
+                                cycle_time=cycle_time,
+                                status="skipped",
+                                reason="in_flight",
                             )
-                            for member in manifest_members
                         )
-                    )
-                    rows.append(
-                        _cycle_row(
+                        continue
+                    if inspection.status != "eligible":
+                        rows.append(
+                            _cycle_row(
+                                source_id=source_id,
+                                cycle_time=cycle_time,
+                                status="skipped" if inspection.status == "live" else "blocked",
+                                reason=inspection.reason,
+                                members=inspection.members,
+                            )
+                        )
+                        continue
+                    if config.dry_run or not config.enabled:
+                        rows.append(
+                            _cycle_row(
+                                source_id=source_id,
+                                cycle_time=cycle_time,
+                                status="planned",
+                                reason="dry_run" if config.dry_run else "retention_disabled",
+                                members=inspection.members,
+                            )
+                        )
+                        continue
+                    try:
+                        identity = _publish_archive(
+                            config,
                             source_id=source_id,
                             cycle_time=cycle_time,
-                            status="archived" if removal.status == "removed" else removal.status,
-                            reason=removal.reason,
+                            now=now,
+                            frontier=frontier,
                             members=inspection.members,
-                            archive_sha256=identity.archive_sha256,
-                            removed_paths=removal.removed_paths,
                         )
-                    )
-                except RetentionFailure as error:
+                        manifest_members = _validated_manifest_members(
+                            identity.manifest,
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                            max_members=config.max_cycle_members,
+                        )
+                        removal = window.remove_members(
+                            tuple(
+                                FileJournalRetentionMember(
+                                    relative_path=str(member["path"]),
+                                    size_bytes=int(member["size_bytes"]),
+                                    sha256=str(member["sha256"]),
+                                )
+                                for member in manifest_members
+                            )
+                        )
+                        rows.append(
+                            _cycle_row(
+                                source_id=source_id,
+                                cycle_time=cycle_time,
+                                status="archived" if removal.status == "removed" else removal.status,
+                                reason=removal.reason,
+                                members=inspection.members,
+                                archive_sha256=identity.archive_sha256,
+                                removed_paths=removal.removed_paths,
+                            )
+                        )
+                    except RetentionFailure as error:
+                        rows.append(
+                            _cycle_row(
+                                source_id=source_id,
+                                cycle_time=cycle_time,
+                                status="blocked",
+                                reason=error.reason,
+                                members=inspection.members,
+                            )
+                        )
+            except OrchestratorError as error:
+                if error.error_code != "FILE_JOURNAL_WRITE_FAILED":
+                    raise
+                surface = error.details.get("surface")
+                if surface == "journal_root":
+                    preflight_blockers.append("journal_root_unavailable")
                     rows.append(
                         _cycle_row(
                             source_id=source_id,
                             cycle_time=cycle_time,
                             status="blocked",
-                            reason=error.reason,
-                            members=inspection.members,
+                            reason="journal_root_unavailable",
                         )
                     )
+                    for later_source, later_cycle in remaining:
+                        rows.append(
+                            _cycle_row(
+                                source_id=later_source,
+                                cycle_time=later_cycle,
+                                status="blocked",
+                                reason="journal_root_unavailable",
+                            )
+                        )
+                    remaining.clear()
+                    continue
+                if surface != "cycle_lock":
+                    raise
+                rows.append(
+                    _cycle_row(
+                        source_id=source_id,
+                        cycle_time=cycle_time,
+                        status="blocked",
+                        reason="cycle_lock_unavailable",
+                    )
+                )
     rows.sort(key=lambda row: (row["source_id"], row["cycle_time"]))
     listed_rows = rows[:MAX_RECEIPT_CYCLES]
     return {

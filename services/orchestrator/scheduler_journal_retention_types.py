@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 SCHEMA_VERSION = "nhms.node22_scheduler_journal_retention.v1"
 MANIFEST_SCHEMA_VERSION = "nhms.node22_scheduler_journal_archive_manifest.v1"
@@ -77,3 +78,24 @@ def _iso(value: datetime) -> str:
 
 def _cycle_stamp(value: datetime) -> str:
     return _utc(value).strftime("%Y%m%d%H")
+
+
+def _canonical_json(payload: Mapping[str, Any]) -> bytes:
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _stable_archive_identity(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Marker-bound completion identity: bytes/members, not retry provenance."""
+
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "source_id": manifest.get("source_id"),
+        "cycle_time": manifest.get("cycle_time"),
+        "mode": manifest.get("mode"),
+        "archive_sha256": manifest.get("archive_sha256"),
+        "members": manifest.get("members"),
+    }
+
+
+def _stable_archive_identity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return _canonical_json(_stable_archive_identity(left)) == _canonical_json(_stable_archive_identity(right))

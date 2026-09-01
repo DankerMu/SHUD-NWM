@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import threading
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from tests.scheduler_journal_retention_fixtures import (
     OLD_CYCLE,
     _bytes,
     _config,
+    _cycle_lock_path,
     _fixture_path,
     _frontier,
     _job,
@@ -284,3 +285,44 @@ def test_matching_archive_retries_partial_cleanup_and_conflict_blocks(
     conflict = retention.run_retention(config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config))
     assert conflict["cycles"][0]["reason"] == "archive_conflict"
     assert all(path.exists() for path in paths)
+
+
+def test_non_regular_cycle_lock_blocks_one_cycle_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.orchestrator.chain_types import OrchestratorError
+
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    earlier = datetime(2026, 4, 1, tzinfo=UTC)
+    later = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    earlier_members = _seed_cycle(config.journal_root, cycle=earlier)
+    failing_members = _seed_cycle(config.journal_root)
+    later_members = _seed_cycle(config.journal_root, cycle=later)
+    lock_path = _cycle_lock_path(config.journal_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
+
+    payload = retention.run_retention(config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config))
+    rows = {row["cycle_time"]: row for row in payload["cycles"]}
+    assert rows["2026-04-01T00:00:00Z"]["status"] == "archived"
+    assert rows["2026-05-01T00:00:00Z"]["status"] == "blocked"
+    assert rows["2026-05-01T00:00:00Z"]["reason"] == "cycle_lock_unavailable"
+    assert rows["2026-05-01T12:00:00Z"]["status"] == "archived"
+    assert all(not path.exists() for path in [*earlier_members, *later_members])
+    assert all(path.exists() for path in failing_members)
+
+    def fail_root(self: FileOrchestrationJournalRepository) -> None:
+        raise OrchestratorError(
+            "FILE_JOURNAL_WRITE_FAILED",
+            "failed to create file orchestration journal root",
+            {"surface": "journal_root"},
+        )
+
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_ensure_root_unlocked", fail_root)
+    global_payload = retention.run_retention(
+        config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config)
+    )
+    assert global_payload["schema_version"] == retention.SCHEMA_VERSION
+    assert global_payload["cycles"] or global_payload["preflight_blockers"]
+    assert "failed to create file orchestration journal root" not in json.dumps(global_payload)

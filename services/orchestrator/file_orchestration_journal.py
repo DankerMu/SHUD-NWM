@@ -10138,7 +10138,7 @@ class FileOrchestrationJournalRepository:
             raise OrchestratorError(
                 "FILE_JOURNAL_WRITE_FAILED",
                 "failed to acquire file orchestration journal cycle lock",
-                {"error_type": type(error).__name__},
+                {"error_type": type(error).__name__, "surface": "cycle_lock"},
             ) from error
         finally:
             if lock_fd is not None:
@@ -10264,7 +10264,7 @@ class FileOrchestrationJournalRepository:
             raise OrchestratorError(
                 "FILE_JOURNAL_WRITE_FAILED",
                 "failed to create file orchestration journal root",
-                {"error_type": type(error).__name__},
+                {"error_type": type(error).__name__, "surface": "journal_root"},
             ) from error
 
 

@@ -43,8 +43,10 @@ from services.orchestrator.scheduler_journal_retention_types import (
     ArchiveIdentity,
     RetentionFailure,
     SchedulerJournalRetentionConfig,
+    _canonical_json,
     _cycle_stamp,
     _iso,
+    _stable_archive_identity_matches,
 )
 
 _ARCHIVE_TIMEOUT_SECONDS = 300
@@ -479,10 +481,6 @@ def _manifest_payload(
     }
 
 
-def _canonical_json(payload: Mapping[str, Any]) -> bytes:
-    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-
 def _read_manifest(path: Path) -> dict[str, Any]:
     try:
         content = read_bytes_durable_no_follow(
@@ -664,14 +662,17 @@ def _recoverable_publication_manifest(
     if set(names) - {ARCHIVE_NAME, MANIFEST_NAME}:
         raise RetentionFailure("archive_conflict")
     if archive_state == "regular":
-        _verify_archive(
-            archive_path,
-            manifest=marker_manifest,
-            source_id=source_id,
-            cycle_time=cycle_time,
-            max_members=config.max_cycle_members,
-            max_archive_bytes=config.max_archive_bytes,
-        )
+        try:
+            _verify_archive(
+                archive_path,
+                manifest=marker_manifest,
+                source_id=source_id,
+                cycle_time=cycle_time,
+                max_members=config.max_cycle_members,
+                max_archive_bytes=config.max_archive_bytes,
+            )
+        except RetentionFailure as error:
+            raise RetentionFailure("archive_conflict") from error
     if manifest_state == "regular":
         try:
             final_manifest_bytes = read_bytes_durable_no_follow(
@@ -681,7 +682,11 @@ def _recoverable_publication_manifest(
             )
         except (OSError, SafeFilesystemError) as error:
             raise RetentionFailure("archive_conflict") from error
-        if final_manifest_bytes != _canonical_json(marker_manifest):
+        try:
+            stored = json.loads(final_manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RetentionFailure("archive_conflict") from error
+        if not isinstance(stored, Mapping) or not _stable_archive_identity_matches(stored, marker_manifest):
             raise RetentionFailure("archive_conflict")
     return marker_manifest
 
@@ -708,7 +713,7 @@ def _existing_archive_identity(
             source_id=source_id,
             cycle_time=cycle_time,
         )
-        if marker_manifest is not None and _canonical_json(marker_manifest) != _canonical_json(identity.manifest):
+        if marker_manifest is not None and not _stable_archive_identity_matches(marker_manifest, identity.manifest):
             raise RetentionFailure("archive_conflict")
         return identity
     if archive_state == "unsafe" or manifest_state == "unsafe":
@@ -844,6 +849,11 @@ def _publish_archive(
     existing = _existing_archive_identity(config, source_id=source_id, cycle_time=cycle_time)
     if existing is not None:
         return existing
+    reserved_manifest = _recoverable_publication_manifest(
+        config,
+        source_id=source_id,
+        cycle_time=cycle_time,
+    )
     _require_gnu_tar()
     member_data = _member_metadata(
         config.journal_root,
@@ -862,6 +872,11 @@ def _publish_archive(
         archive_sha256=None,
         mode="enforce",
     )
+    if reserved_manifest is not None:
+        reserved_expected = {**reserved_manifest, "archive_sha256": None}
+        if not _stable_archive_identity_matches(reserved_expected, expected):
+            raise RetentionFailure("archive_conflict")
+        expected = reserved_expected
     bundle_root = _bundle_root(config, source_id=source_id, cycle_time=cycle_time)
     final_bundle = bundle_root / _BUNDLE_DIRECTORY
     try:
@@ -889,6 +904,12 @@ def _publish_archive(
             max_archive_bytes=config.max_archive_bytes,
         )
         manifest = {**expected, "archive_sha256": archive_sha256}
+        if reserved_manifest is not None:
+            if reserved_manifest.get("archive_sha256") not in {None, archive_sha256}:
+                raise RetentionFailure("archive_conflict")
+            if not _stable_archive_identity_matches(reserved_manifest, manifest):
+                raise RetentionFailure("archive_conflict")
+            manifest = reserved_manifest if reserved_manifest.get("archive_sha256") == archive_sha256 else manifest
         atomic_write_bytes_no_follow(
             temporary_bundle / MANIFEST_NAME,
             _canonical_json(manifest),
@@ -923,11 +944,11 @@ def _publish_archive(
                 source_id=source_id,
                 cycle_time=cycle_time,
             )
-            if reserved_manifest is None or _canonical_json(reserved_manifest) != _canonical_json(manifest):
+            if reserved_manifest is None or not _stable_archive_identity_matches(reserved_manifest, manifest):
                 raise RetentionFailure("archive_conflict") from error
-            # The marker binds this recovery to the exact already verified
-            # archive digest and member bytes, so the temporary pair may safely
-            # fill absent slots without ever clobbering a present one.
+            # Recover with the original marker provenance. Retry now/frontier is
+            # operational evidence, not a new archive identity.
+            manifest = reserved_manifest
             try:
                 if _directory_state(final_bundle, root=config.archive_root) == "absent":
                     make_directory_no_follow_exclusive(final_bundle, containment_root=config.archive_root)

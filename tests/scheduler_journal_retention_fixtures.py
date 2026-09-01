@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -228,3 +228,38 @@ def _archive_path(config: SchedulerJournalRetentionConfig, *, source_id: str = "
 
 def _direct_record(job: dict[str, Any]) -> dict[str, Any]:
     return _record(str(job["source_id"]), datetime.fromisoformat(str(job["cycle_time"])), job)
+
+
+def _later_frontier() -> FrontierReadResult:
+    return FrontierReadResult(
+        status="ok",
+        active_lower_bound=datetime(2026, 7, 1, tzinfo=UTC),
+        source="receipt:later_pass",
+        receipt_path="/receipts/later-pass.json",
+        receipt_started_at=NOW + timedelta(hours=1),
+    )
+
+
+def _cycle_lock_path(journal_root: Path, *, source_id: str = "gfs", stamp: str = "2026050100") -> Path:
+    return journal_root / ".locks" / source_id / f"{stamp}.lock"
+
+
+def _install_cli_env(
+    monkeypatch: Any,
+    config: SchedulerJournalRetentionConfig,
+    *,
+    enabled: bool,
+    dry_run: bool,
+) -> None:
+    for name, value in {
+        "NHMS_SCHEDULER_ALLOWED_ROOTS": str(config.journal_root.parent),
+        "NHMS_SCHEDULER_JOURNAL_ROOT": str(config.journal_root),
+        "NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT": str(config.archive_root),
+        "NHMS_SCHEDULER_EVIDENCE_ROOT": str(config.evidence_root),
+        "NHMS_SCHEDULER_LOOKBACK_HOURS": "96",
+        "NHMS_SCHEDULER_CYCLE_LAG_HOURS": "16",
+        "NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC": "0,12",
+        "NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED": "true" if enabled else "false",
+        "NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN": "true" if dry_run else "false",
+    }.items():
+        monkeypatch.setenv(name, value)

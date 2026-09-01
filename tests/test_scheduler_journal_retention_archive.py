@@ -25,9 +25,12 @@ from tests.scheduler_journal_retention_fixtures import (
     OLD_CYCLE,
     _archive_path,
     _config,
+    _cycle_lock_path,
     _direct_record,
     _frontier,
+    _install_cli_env,
     _job,
+    _later_frontier,
     _manifest_path,
     _reservation,
     _seed_cycle,
@@ -756,3 +759,238 @@ def test_config_from_env_requires_scheduler_timing_and_strict_roots(
     missing, blockers = retention.config_from_env(entrypoint.build_parser().parse_args([]))
     assert missing is None
     assert blockers == ["nhms_scheduler_lookback_hours_missing"]
+
+
+def _interrupt_after_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    published: str | None,
+) -> tuple[Any, Any]:
+    original_publish = archive._publish_bundle_directory
+    original_move = archive.move_regular_file_no_follow_exclusive
+
+    def fail_after_reservation(**kwargs: Any) -> None:
+        archive.write_bytes_no_follow_exclusive(
+            kwargs["bundle_root"] / archive._PUBLICATION_MARKER,
+            archive._publication_payload(manifest=kwargs["manifest"]),
+            containment_root=kwargs["archive_root"],
+            require_durable_create=True,
+        )
+        raise retention.RetentionFailure("archive_publish_failed")
+
+    def fail_after_requested_publish(*args: Any, **kwargs: Any) -> Path:
+        moved = original_move(*args, **kwargs)
+        if str(args[3]) == published:
+            raise retention.RetentionFailure("archive_publish_failed")
+        return moved
+
+    if published is None:
+        monkeypatch.setattr(archive, "_publish_bundle_directory", fail_after_reservation)
+    else:
+        monkeypatch.setattr(archive, "move_regular_file_no_follow_exclusive", fail_after_requested_publish)
+    return original_publish, original_move
+
+
+@pytest.mark.parametrize("published", [None, archive.ARCHIVE_NAME, archive.MANIFEST_NAME])
+def test_marker_bound_retry_keeps_original_provenance_when_later_frontier_differs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    published: str | None,
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    members = _seed_cycle(config.journal_root)
+    original_publish, original_move = _interrupt_after_marker(monkeypatch, published)
+    first = retention.run_retention(config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config))
+    assert first["cycles"][0]["reason"] == "archive_publish_failed"
+    marker = config.archive_root / "gfs" / "2026050100" / archive._PUBLICATION_MARKER
+    original = json.loads(marker.read_text(encoding="utf-8"))["manifest"]
+    assert original["created_at"] == "2026-08-31T12:00:00Z"
+    assert original["frontier"]["receipt_path"] == "/receipts/pass.json"
+    monkeypatch.setattr(archive, "_publish_bundle_directory", original_publish)
+    monkeypatch.setattr(archive, "move_regular_file_no_follow_exclusive", original_move)
+
+    second = retention.run_retention(
+        config,
+        now=NOW + timedelta(hours=1),
+        frontier=_later_frontier(),
+        receipt_reservation=_reservation(config),
+    )
+
+    final = json.loads(_manifest_path(config).read_text(encoding="utf-8"))
+    assert second["counts"]["archived"] == 1
+    assert all(not path.exists() for path in members)
+    assert final["created_at"] == original["created_at"]
+    assert final["frontier"] == original["frontier"]
+    assert final["archive_sha256"] == original["archive_sha256"]
+    assert final["members"] == original["members"]
+
+
+@pytest.mark.parametrize("published", [None, archive.ARCHIVE_NAME, archive.MANIFEST_NAME])
+def test_marker_bound_stable_identity_mismatch_conflicts_without_hot_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    published: str | None,
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    members = _seed_cycle(config.journal_root)
+    original_publish, original_move = _interrupt_after_marker(monkeypatch, published)
+    first = retention.run_retention(config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config))
+    assert first["cycles"][0]["reason"] == "archive_publish_failed"
+    marker = config.archive_root / "gfs" / "2026050100" / archive._PUBLICATION_MARKER
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["manifest"]["members"][0]["sha256"] = "0" * 64
+    marker.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(archive, "_publish_bundle_directory", original_publish)
+    monkeypatch.setattr(archive, "move_regular_file_no_follow_exclusive", original_move)
+
+    second = retention.run_retention(
+        config,
+        now=NOW + timedelta(hours=1),
+        frontier=_later_frontier(),
+        receipt_reservation=_reservation(config),
+    )
+
+    assert second["cycles"][0]["reason"] == "archive_conflict"
+    assert all(path.exists() for path in members)
+    assert not _manifest_path(config).exists() or published == archive.MANIFEST_NAME
+
+
+def test_complete_pair_retry_with_later_frontier_still_adopts_residual_subset(tmp_path: Path) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    members = _seed_cycle(config.journal_root, continuation=True, pipeline_event=True)
+    first = retention.run_retention(config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config))
+    assert first["counts"]["archived"] == 1
+    original = json.loads(_manifest_path(config).read_text(encoding="utf-8"))
+    restored = restore.verify_and_restore(
+        journal_root=config.journal_root,
+        archive_root=config.archive_root,
+        source_id="gfs",
+        cycle="2026050100",
+        stage_root=tmp_path / "stage",
+    )
+    (config.journal_root / restored["restored_paths"][0]).unlink()
+
+    retry = retention.run_retention(
+        config,
+        now=NOW + timedelta(hours=1),
+        frontier=_later_frontier(),
+        receipt_reservation=_reservation(config),
+    )
+
+    assert retry["counts"]["archived"] == 1
+    assert json.loads(_manifest_path(config).read_text(encoding="utf-8")) == original
+    assert all(not path.exists() for path in members)
+
+
+def test_restore_cli_maps_non_regular_lock_to_structured_refusal(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    members = _seed_cycle(config.journal_root)
+    assert retention.run_retention(
+        config, now=NOW, frontier=_frontier(), receipt_reservation=_reservation(config)
+    )["counts"]["archived"] == 1
+    lock_path = _cycle_lock_path(config.journal_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists() or lock_path.is_symlink():
+        lock_path.unlink()
+    lock_path.mkdir()
+    stage = tmp_path / "stage"
+
+    result = entrypoint.main(
+        [
+            "verify-restore",
+            "--journal-root",
+            str(config.journal_root),
+            "--archive-root",
+            str(config.archive_root),
+            "--source-id",
+            "gfs",
+            "--cycle",
+            "2026050100",
+            "--stage-root",
+            str(stage),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert payload == {
+        "reason": "cycle_lock_unavailable",
+        "schema_version": retention.SCHEMA_VERSION,
+        "status": "blocked",
+    }
+    assert not stage.exists()
+    assert all(not path.exists() for path in members)
+
+
+@pytest.mark.parametrize("enabled,dry_run", [(False, True), (True, True)])
+def test_default_and_dry_run_cli_receipt_lock_failure_and_continue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    enabled: bool,
+    dry_run: bool,
+) -> None:
+    config = _config(tmp_path, enabled=enabled, dry_run=dry_run)
+    earlier = datetime(2026, 4, 1, tzinfo=UTC)
+    later = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    earlier_members = _seed_cycle(config.journal_root, cycle=earlier)
+    failing_members = _seed_cycle(config.journal_root)
+    later_members = _seed_cycle(config.journal_root, cycle=later)
+    lock_path = _cycle_lock_path(config.journal_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
+    _install_cli_env(monkeypatch, config, enabled=enabled, dry_run=dry_run)
+    monkeypatch.setattr(retention, "read_latest_pass_frontier", lambda *_args, **_kwargs: _frontier())
+
+    result = entrypoint.main([])
+    payload = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(payload["receipt_path"]).read_text(encoding="utf-8"))
+    rows = {row["cycle_time"]: row for row in payload["cycles"]}
+
+    assert result == 2
+    assert payload["receipt_path"]
+    assert receipt["receipt_status"] == "final"
+    assert rows["2026-04-01T00:00:00Z"]["status"] == "planned"
+    assert rows["2026-05-01T00:00:00Z"] == {
+        **rows["2026-05-01T00:00:00Z"],
+        "status": "blocked",
+        "reason": "cycle_lock_unavailable",
+    }
+    assert rows["2026-05-01T12:00:00Z"]["status"] == "planned"
+    assert "failed to acquire" not in capsys.readouterr().out
+    assert all(path.exists() for path in [*earlier_members, *failing_members, *later_members])
+
+
+def test_enforce_cli_finalizes_receipt_and_continues_after_cycle_lock_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path, enabled=True, dry_run=False)
+    earlier = datetime(2026, 4, 1, tzinfo=UTC)
+    later = datetime(2026, 5, 1, 12, tzinfo=UTC)
+    earlier_members = _seed_cycle(config.journal_root, cycle=earlier)
+    failing_members = _seed_cycle(config.journal_root)
+    later_members = _seed_cycle(config.journal_root, cycle=later)
+    lock_path = _cycle_lock_path(config.journal_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
+    _install_cli_env(monkeypatch, config, enabled=True, dry_run=False)
+    monkeypatch.setattr(retention, "read_latest_pass_frontier", lambda *_args, **_kwargs: _frontier())
+
+    result = entrypoint.main([])
+    payload = json.loads(capsys.readouterr().out)
+    receipt = json.loads(Path(payload["receipt_path"]).read_text(encoding="utf-8"))
+    rows = {row["cycle_time"]: row for row in payload["cycles"]}
+
+    assert result == 2
+    assert receipt["receipt_status"] == "final"
+    assert rows["2026-04-01T00:00:00Z"]["status"] == "archived"
+    assert rows["2026-05-01T00:00:00Z"]["status"] == "blocked"
+    assert rows["2026-05-01T00:00:00Z"]["reason"] == "cycle_lock_unavailable"
+    assert rows["2026-05-01T12:00:00Z"]["status"] == "archived"
+    assert all(not path.exists() for path in [*earlier_members, *later_members])
+    assert all(path.exists() for path in failing_members)
+    assert "FILE_JOURNAL_WRITE_FAILED" not in Path(payload["receipt_path"]).read_text(encoding="utf-8")
