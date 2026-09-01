@@ -199,6 +199,19 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert "seg.stream_type IS NULL" in hydro_sql
 
 
+def test_national_hydro_tile_fairly_caps_rows_before_the_shared_mvt_budget() -> None:
+    hydro_sql = postgis_tile_sql("hydro-national")
+    single_run_sql = postgis_tile_sql("hydro")
+
+    assert "national_ranked AS" in hydro_sql
+    assert "PARTITION BY river_network_version_id" in hydro_sql
+    assert "ORDER BY network_rank, value DESC NULLS LAST," in hydro_sql
+    assert "tile_feature_rank <= :feature_limit" in hydro_sql
+    assert "tile_coordinate_rank <= :collection_coordinate_limit" in hydro_sql
+    assert hydro_sql.index("national_budget_window AS") < hydro_sql.index("budget_stats AS")
+    assert "national_budget_window AS" not in single_run_sql
+
+
 def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: Any) -> None:
     monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
     tile = TileInput(

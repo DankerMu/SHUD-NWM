@@ -937,6 +937,57 @@ def postgis_tile_sql(layer: str) -> str:
         f"CASE WHEN COUNT(*) FILTER (WHERE {condition}) > 0 THEN '{name}' END"
         for name, condition in required_property_checks.items()
     )
+    if layer == "hydro-national":
+        eligibility_ctes = """
+        preeligible AS (
+            SELECT *
+            FROM bounded_rows
+            WHERE source_coordinate_count <= :feature_coordinate_limit
+              AND source_coordinate_dimensions <= :max_coordinate_dimensions
+        ),
+        -- The low-zoom stream/rank filter above deliberately keeps every
+        -- selected local trunk. A nationwide tile can still cross the shared
+        -- MVT budget after a cohort expands. Bound it here instead of turning
+        -- a renderable overview tile into HTTP 413. `network_rank` interleaves
+        -- each network's strongest remaining segment before its second one, so
+        -- a large basin cannot evict every smaller basin from the same tile.
+        national_ranked AS (
+            SELECT preeligible.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY river_network_version_id
+                       ORDER BY value DESC NULLS LAST, river_segment_id
+                   ) AS network_rank
+            FROM preeligible
+        ),
+        national_budget_window AS (
+            SELECT national_ranked.*,
+                   ROW_NUMBER() OVER (
+                       ORDER BY network_rank, value DESC NULLS LAST,
+                                river_network_version_id, river_segment_id
+                   ) AS tile_feature_rank,
+                   SUM(source_coordinate_count) OVER (
+                       ORDER BY network_rank, value DESC NULLS LAST,
+                                river_network_version_id, river_segment_id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   ) AS tile_coordinate_rank
+            FROM national_ranked
+        ),
+        eligible AS (
+            SELECT *
+            FROM national_budget_window
+            WHERE tile_feature_rank <= :feature_limit
+              AND tile_coordinate_rank <= :collection_coordinate_limit
+        )
+        """
+    else:
+        eligibility_ctes = """
+        eligible AS (
+            SELECT *
+            FROM bounded_rows
+            WHERE source_coordinate_count <= :feature_coordinate_limit
+              AND source_coordinate_dimensions <= :max_coordinate_dimensions
+        )
+        """
     tile_row_columns = ",\n                       ".join(_mvt_public_tile_columns(layer))
     return f"""
         WITH bounds AS (
@@ -959,12 +1010,7 @@ def postgis_tile_sql(layer: str) -> str:
         source_stats AS (
             SELECT CASE WHEN EXISTS (SELECT 1 FROM bounded_rows) THEN 1 ELSE 0 END AS source_feature_count
         ),
-        eligible AS (
-            SELECT *
-            FROM bounded_rows
-            WHERE source_coordinate_count <= :feature_coordinate_limit
-              AND source_coordinate_dimensions <= :max_coordinate_dimensions
-        ),
+        {eligibility_ctes},
         prefilter_stats AS (
             SELECT COUNT(*) AS intersecting_feature_count,
                    COALESCE(SUM(source_coordinate_count), 0) AS intersecting_coordinate_count,
@@ -1114,6 +1160,8 @@ _NATIONAL_DISCHARGE_METADATA = {
     # 干流概化：postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK
     # 渐进保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z7 顶 85%、z8 顶 96%、z>=9 全量），
     # 并按 zoom 加粗 ST_SimplifyPreserveTopology 容差，使每个 zoom 都落入预算（含 z7/z8 密集流域）。
+    # 若概化后的全国同一 tile 仍超限，则按每个河网的主干优先顺序确定性裁剪至预算内，返回
+    # 可渲染 tile 而非 413。
     # min_zoom=3 对齐前端初始全国视图 zoom=3.35，使默认（未放大）也能看到主干河道。
     "min_zoom": 3,
     # 全国瓦片自带 basin_id（LEFT JOIN core.basin_version），点击河段即可直接定位流域取曲线，
