@@ -104,10 +104,26 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
             "tests/test_node27_cold_tablespace_recovery_contract.py",
             "tests/test_node27_cold_tablespace_integration.py",
         },
+        "packages/common/node27_cold_tablespace_pending.py": {
+            "tests/test_node27_cold_tablespace_pending_action.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_cold_tablespace_authority.py",
+        },
+        "packages/common/node27_cold_tablespace_observation.py": {
+            "tests/test_node27_cold_tablespace_pending_action.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        },
         "packages/common/node27_cold_tablespace_recovery.py": {
             "tests/test_node27_cold_tablespace_install.py",
             "tests/test_node27_cold_tablespace_authority.py",
             "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_pending_action.py",
         },
         "packages/common/node27_cold_tablespace_install.py": {
             "tests/test_node27_cold_tablespace_install.py",
@@ -161,6 +177,10 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
             "tests/test_node27_cold_tablespace_install.py",
         },
         "packages/common/node27_cold_governance.py": {
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        },
+        "packages/common/node27_cold_governance_collection.py": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
         },
@@ -228,12 +248,15 @@ def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting(
         "tests/test_node27_cold_tablespace_recovery_contract.py",
         "tests/test_node27_cold_tablespace_dry_run.py",
         "tests/test_node27_cold_tablespace_integration.py",
+        "tests/test_node27_cold_tablespace_pending_action.py",
         "tests/test_node27_cold_governance.py",
         "tests/test_node27_resource_governance.py",
     )
 
     for consumer in consumers:
-        assert consumer in select_tests([consumer], repo_root=Path(".")), consumer
+        selected = set(select_tests([consumer], repo_root=Path(".")))
+        assert consumer in selected, consumer
+        assert SELECTOR_META_GUARD_TEST in selected, consumer
 
 
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:

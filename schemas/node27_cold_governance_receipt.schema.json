@@ -26,16 +26,55 @@
       "properties": {
         "path": {"type": "string", "minLength": 1, "maxLength": 512},
         "observed_at": {"type": "string", "format": "date-time"},
-        "identity": {"type": "string", "minLength": 1, "maxLength": 256},
-        "total_bytes": {"type": "integer", "minimum": 0},
-        "free_bytes": {"type": "integer", "minimum": 0},
-        "used_bytes": {"type": "integer", "minimum": 0},
-        "pgdata_bytes": {"type": "integer", "minimum": 0},
-        "nhms_cold_relation_bytes": {"type": "integer", "minimum": 0},
-        "object_store_bytes": {"type": "integer", "minimum": 0},
-        "residual_bytes": {"type": "integer"}
+        "identity": {"type": ["string", "null"], "maxLength": 256},
+        "status": {"enum": ["ok", "unavailable"]},
+        "blockers": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 16},
+        "total_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "free_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "used_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "reserved_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "pgdata_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "nhms_cold_relation_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "object_store_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "residual_bytes": {"type": ["integer", "null"]}
       },
-      "required": ["path", "observed_at", "identity", "total_bytes", "free_bytes", "used_bytes", "pgdata_bytes", "nhms_cold_relation_bytes", "object_store_bytes", "residual_bytes"]
+      "required": ["path", "observed_at", "identity", "status", "blockers", "total_bytes", "free_bytes", "used_bytes", "reserved_bytes", "pgdata_bytes", "nhms_cold_relation_bytes", "object_store_bytes", "residual_bytes"],
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "ok"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "identity": {"type": "string", "minLength": 1, "maxLength": 256},
+              "blockers": {"maxItems": 0},
+              "total_bytes": {"type": "integer", "minimum": 0},
+              "free_bytes": {"type": "integer", "minimum": 0},
+              "used_bytes": {"type": "integer", "minimum": 0},
+              "reserved_bytes": {"type": "integer", "minimum": 0},
+              "pgdata_bytes": {"type": "integer", "minimum": 0},
+              "nhms_cold_relation_bytes": {"type": "integer", "minimum": 0},
+              "object_store_bytes": {"type": "integer", "minimum": 0},
+              "residual_bytes": {"type": "integer"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "unavailable"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "identity": {"type": ["string", "null"], "maxLength": 256},
+              "blockers": {"minItems": 1},
+              "total_bytes": {"type": "null"},
+              "free_bytes": {"type": "null"},
+              "used_bytes": {"type": "null"},
+              "reserved_bytes": {"type": "null"},
+              "pgdata_bytes": {"type": "null"},
+              "nhms_cold_relation_bytes": {"type": "null"},
+              "object_store_bytes": {"type": "null"},
+              "residual_bytes": {"type": "null"}
+            }
+          }
+        }
+      ]
     },
     "health": {
       "type": "object",
@@ -151,8 +190,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "home_residual_bytes": {"type": "integer"},
-        "cold_residual_bytes": {"type": "integer"},
+        "home_residual_bytes": {"type": ["integer", "null"]},
+        "cold_residual_bytes": {"type": ["integer", "null"]},
         "home_residual_minimum_bytes": {"type": "integer", "minimum": 0},
         "cold_residual_minimum_bytes": {"type": "integer", "minimum": 0}
       },
@@ -167,14 +206,20 @@
       "then": {
         "properties": {
           "blockers": {"maxItems": 0},
+          "filesystems": {
+            "properties": {
+              "home": {"properties": {"status": {"const": "ok"}}},
+              "cold": {"properties": {"status": {"const": "ok"}}}
+            }
+          },
           "evidence": {
             "properties": {
               "health": {"properties": {"healthy": {"const": true}, "smart": {"minItems": 2, "maxItems": 2, "items": {"properties": {"status": {"const": "PASS"}}}}}},
               "backup": {"properties": {"complete": {"const": true}, "missing_targets": {"maxItems": 0}}},
-              "mount_inventory": {"properties": {"stopped": {"maxItems": 0}}},
-              "trend": {"properties": {"status": {"enum": ["baseline", "trend"]}, "blockers": {"maxItems": 0}}}
+              "mount_inventory": {"properties": {"stopped": {"maxItems": 0}}}
             }
-          }
+          },
+          "trend": {"properties": {"status": {"enum": ["baseline", "trend"]}, "blockers": {"maxItems": 0}}}
         }
       }
     }

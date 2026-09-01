@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common.node27_cold_tablespace_pending import pending_is_consistent
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -162,6 +163,14 @@ def _validate(document: object) -> dict[str, Any]:
         raise AuthorityError("recovery authority ownership is malformed")
     if not _phase_ownership_is_consistent(value["phase"], ownership):
         raise AuthorityError("recovery authority phase and ownership are inconsistent")
+    pending = value.get("pending_action")
+    if pending is None and "pending_action" not in value:
+        value["pending_action"] = None
+        pending = None
+    if pending is not None and not isinstance(pending, str):
+        raise AuthorityError("recovery authority pending action is malformed")
+    if not pending_is_consistent(value["phase"], ownership, pending):
+        raise AuthorityError("recovery authority pending action is inconsistent")
     if not isinstance(prior.get("config_digest"), str) or len(prior["config_digest"]) != 64:
         raise AuthorityError("recovery authority prior config digest is invalid")
     if not isinstance(expected.get("config_digest"), str) or len(expected["config_digest"]) != 64:
@@ -210,7 +219,13 @@ def read_authority(path: Path) -> dict[str, Any]:
     return _validate(document)
 
 
-def advance_authority(document: Mapping[str, Any], *, phase: str, **ownership_update: bool) -> dict[str, Any]:
+def advance_authority(
+    document: Mapping[str, Any],
+    *,
+    phase: str,
+    pending_action: str | None | object = ...,
+    **ownership_update: bool,
+) -> dict[str, Any]:
     current = _validate(document)
     if phase not in _PHASES:
         raise AuthorityError("recovery authority phase is invalid")
@@ -223,6 +238,8 @@ def advance_authority(document: Mapping[str, Any], *, phase: str, **ownership_up
         raise AuthorityError("recovery authority phase and ownership are inconsistent")
     current["phase"] = phase
     current["ownership"] = ownership
+    if pending_action is not ...:
+        current["pending_action"] = pending_action
     now = datetime.now(UTC)
     created = _timestamp(current["created_at"])
     current["updated_at"] = _iso(now if now >= created else created)

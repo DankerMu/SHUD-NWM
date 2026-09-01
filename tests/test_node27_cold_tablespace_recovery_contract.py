@@ -37,6 +37,7 @@ def _authority(*, phase: str, **ownership: bool) -> dict:
         "expected": {
             "cold_bind": "/data/GHDC/nhms-cold-tablespace:/home/postgres/pgdata/tablespaces/nhms_cold:rw",
             "config_digest": replacement.config_digest,
+            "resolved_image_id": before.resolved_image_id,
         },
         "path": {"device_identity": "8:11:1", "uid": 999, "gid": 999, "mode": 0o700},
         "ownership": {
@@ -94,9 +95,14 @@ def test_recovery_closes_each_early_persisted_phase_without_replaying_install(
         assert result.receipt["container_snapshot"] == {
             "config_digest": observed.config_digest,
             "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+            "resolved_image_id": observed.resolved_image_id,
         }
     else:
-        assert result.receipt["container_snapshot"] == {"config_digest": None, "environment_names": []}
+        assert result.receipt["container_snapshot"] == {
+            "config_digest": None,
+            "environment_names": [],
+            "resolved_image_id": None,
+        }
 
 
 def test_dry_run_with_authority_checks_it_before_inspection_and_publishes_recovery_required(tmp_path: Path) -> None:
@@ -321,6 +327,7 @@ def test_terminal_pending_cleanup_complete_target_installed_receipt_reports_live
     assert result.receipt["container_snapshot"] == {
         "config_digest": live.config_digest,
         "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+        "resolved_image_id": live.resolved_image_id,
     }
     assert "do-not-leak" not in json.dumps(result.receipt)
     assert not config.recovery_path.exists()

@@ -71,6 +71,8 @@ def read_prior_receipt(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         sample = filesystems.get(label)
         if not isinstance(sample, Mapping) or sample.get("path") != expected_path:
             raise GovernanceHistoryError("prior governance receipt filesystem identity differs")
+        if sample.get("status") not in (None, "ok"):
+            raise GovernanceHistoryError("prior governance receipt observation is unavailable")
         if not isinstance(sample.get("residual_bytes"), int):
             raise GovernanceHistoryError("prior governance receipt residual is missing")
     _parse(document.get("finished_at"))
@@ -111,6 +113,8 @@ def build_trend(
             previous = prior_filesystems.get(label)
             if not isinstance(current, Mapping) or not isinstance(previous, Mapping):
                 raise GovernanceHistoryError("trend filesystem observation is missing")
+            if current.get("status") not in (None, "ok") or previous.get("status") not in (None, "ok"):
+                raise GovernanceHistoryError("trend observation is unavailable")
             if current.get("identity") != previous.get("identity"):
                 raise GovernanceHistoryError("trend filesystem identity drifted")
             current_residual = current.get("residual_bytes")

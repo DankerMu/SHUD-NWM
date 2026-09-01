@@ -52,29 +52,50 @@ def _parse(value: str) -> datetime:
 
 
 def _normalized(sample: Mapping[str, Any], *, label: str) -> dict[str, Any]:
-    required = (
-        "path",
-        "observed_at",
-        "identity",
+    status = sample.get("status", "ok")
+    blockers = sample.get("blockers")
+    named = [str(item) for item in blockers] if isinstance(blockers, list) else []
+    identity_fields = ("path", "observed_at")
+    byte_keys = (
         "total_bytes",
         "free_bytes",
         "used_bytes",
+        "reserved_bytes",
         "pgdata_bytes",
         "nhms_cold_relation_bytes",
         "object_store_bytes",
+        "residual_bytes",
     )
+    if status != "ok":
+        identity_value = sample.get("identity")
+        values = {
+            "path": sample.get("path") if isinstance(sample.get("path"), str) and sample.get("path") else label,
+            "observed_at": (
+                sample.get("observed_at") if isinstance(sample.get("observed_at"), str) else "1970-01-01T00:00:00Z"
+            ),
+            "identity": identity_value if isinstance(identity_value, str) and identity_value else None,
+            "status": "unavailable",
+            "blockers": named or [f"{label} observation is unavailable"],
+        }
+        for key in byte_keys:
+            values[key] = None
+        return values
+    required = ("path", "observed_at", "identity", *byte_keys[:-1])
     missing = [key for key in required if key not in sample]
     if missing:
         raise ValueError(f"{label} sample is missing required fields")
     values: dict[str, Any] = {key: sample[key] for key in required}
     if not all(
-        isinstance(values[key], int) and not isinstance(values[key], bool) and values[key] >= 0 for key in required[3:]
+            isinstance(values[key], int) and not isinstance(values[key], bool) and values[key] >= 0
+            for key in byte_keys[:-1]
     ):
         raise ValueError(f"{label} byte fields must be non-negative integers")
-    if not all(isinstance(values[key], str) and values[key] for key in required[:3]):
+    if not all(isinstance(values[key], str) and values[key] for key in identity_fields + ("identity",)):
         raise ValueError(f"{label} identity fields are invalid")
     known = values["pgdata_bytes"] + values["nhms_cold_relation_bytes"] + values["object_store_bytes"]
     values["residual_bytes"] = values["used_bytes"] - known
+    values["status"] = "ok"
+    values["blockers"] = []
     return values
 
 
@@ -98,13 +119,20 @@ def reconcile_filesystems(
         blockers.append("home sample path differs")
     if cold_value["path"] != "/data/GHDC":
         blockers.append("cold sample path differs")
-    if home_value["identity"] == cold_value["identity"]:
+    if (
+        home_value["status"] == "ok"
+        and cold_value["status"] == "ok"
+        and home_value["identity"] == cold_value["identity"]
+    ):
         blockers.append("home and cold filesystem identities must be separately observed")
     for label, value, minimum in (
         ("home", home_value, home_residual_minimum_bytes),
         ("cold", cold_value, cold_residual_minimum_bytes),
     ):
-        if value["total_bytes"] != value["used_bytes"] + value["free_bytes"]:
+        if value["status"] != "ok":
+            blockers.extend(value.get("blockers") or [f"{label} observation is unavailable"])
+            continue
+        if value["total_bytes"] != value["used_bytes"] + value["free_bytes"] + value["reserved_bytes"]:
             blockers.append(f"{label} filesystem capacity is unreconcilable")
         if value["residual_bytes"] < 0:
             blockers.append(f"{label} residual is negative or categories overlap")
@@ -116,6 +144,8 @@ def reconcile_filesystems(
         if finish < start:
             blockers.append("audit interval is invalid")
         for label, value in (("home", home_value), ("cold", cold_value)):
+            if value["status"] != "ok":
+                continue
             observed = _parse(value["observed_at"])
             if observed < start or observed > finish:
                 blockers.append(f"{label} sample lies outside audit interval")
@@ -223,6 +253,14 @@ def _topology_blockers(evidence: Mapping[str, Any]) -> list[str]:
     return blockers
 
 
+def _sample_observation_blockers(sample: Mapping[str, Any], *, label: str) -> list[str]:
+    blockers = sample.get("blockers")
+    named = [str(item) for item in blockers] if isinstance(blockers, list) else []
+    if sample.get("status") not in (None, "ok"):
+        named.append(f"{label} observation is unavailable")
+    return named
+
+
 def build_cold_governance_receipt(
     *,
     config: GovernanceConfig,
@@ -232,6 +270,10 @@ def build_cold_governance_receipt(
     cold: Mapping[str, Any],
     evidence: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    observation_blockers = [
+        *_sample_observation_blockers(home, label="home"),
+        *_sample_observation_blockers(cold, label="cold"),
+    ]
     reconciliation = reconcile_filesystems(
         home,
         cold,
@@ -247,8 +289,23 @@ def build_cold_governance_receipt(
         prior_path=config.prior_receipt_path,
         max_age_seconds=config.prior_receipt_max_age_seconds,
     )
-    blockers = [*reconciliation.blockers, *_evidence_blockers(evidence), *topology, *trend.blockers]
-    outcome = "healthy" if not blockers else "drift" if reconciliation.blockers or topology else "refusal"
+    blockers = [
+        *observation_blockers,
+        *reconciliation.blockers,
+        *_evidence_blockers(evidence),
+        *topology,
+        *trend.blockers,
+    ]
+    observation_unavailable = any(
+        reconciliation.filesystems[label].get("status") != "ok" for label in ("home", "cold")
+    )
+    outcome = (
+        "healthy"
+        if not blockers
+        else "drift"
+        if (reconciliation.blockers or topology) and not observation_unavailable
+        else "refusal"
+    )
     safe_evidence = redact_payload(dict(evidence))
     receipt = {
         "schema_version": "1.0",

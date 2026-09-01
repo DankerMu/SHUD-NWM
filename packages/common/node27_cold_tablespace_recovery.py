@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from packages.common.compressed_chunk_cold_residency import quote_ident
@@ -12,19 +11,35 @@ from packages.common.node27_cold_tablespace_authority import (
     AuthorityError,
     advance_authority,
     authority_exists,
-    private_snapshot_digest,
     read_authority,
-    remove_authority,
-    write_authority,
 )
-from packages.common.node27_cold_tablespace_container import ContainerSnapshot, normalize_raw_inspect
-from packages.common.node27_cold_tablespace_identity import ColdTablespaceIdentity
+from packages.common.node27_cold_tablespace_container import ContainerSnapshot
+from packages.common.node27_cold_tablespace_observation import (
+    NamedObservationError,
+    _adopt_pending_post,
+    _arm_action,
+    _classify_authority_pending,
+    _named_prior_matches,
+    _read_recovery,
+    _reconnect_after_container_transition,
+    _record_rollback_progress,
+    authority_matches_identity,
+    authority_payload,
+    expected_snapshot_matches,
+    inspect_named,
+    inspect_named_optional,
+    phase_hook,
+    prior_config_matches,
+    remove_recovery,
+    terminal_close,
+    write_recovery,
+)
+from packages.common.node27_cold_tablespace_pending import INSTALL_ACTIONS
 from packages.common.node27_cold_tablespace_receipt import (
     container_snapshot_payload,
     no_go,
     path_payload,
     publish_with_dependencies,
-    render,
     set_authority_receipt,
 )
 from packages.common.node27_cold_tablespace_topology import (
@@ -45,233 +60,21 @@ from packages.common.node27_cold_tablespace_types import (
 )
 from packages.common.redaction import redact_text
 
-
-def authority_payload(
-    *, config: InstallConfig, now_iso: str, snapshot: ContainerSnapshot, path_observed: Mapping[str, Any]
-) -> dict[str, Any]:
-    identity = config.identity
-    return {
-        "schema_version": "1.0",
-        "phase": "prepared",
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "head_sha": config.head_sha,
-        "identity": identity.public_payload(),
-        "prior_name": identity.prior_container_name,
-        "prior": {
-            "container_id": snapshot.container_id,
-            "config_digest": snapshot.config_digest,
-            "private_snapshot": snapshot.private_payload(),
-            "private_snapshot_digest": private_snapshot_digest(snapshot.private_payload()),
-        },
-        "expected": {
-            "cold_bind": identity.cold_bind,
-            "config_digest": snapshot.with_cold_bind(identity=identity).config_digest,
-        },
-        "path": {
-            "device_identity": path_observed.get("device_identity"),
-            "uid": config.expected_uid,
-            "gid": config.expected_gid,
-            "mode": config.expected_mode,
-        },
-        "ownership": {
-            "host_path_created": False,
-            "prior_stopped": False,
-            "prior_renamed": False,
-            "installer_container_created": False,
-            "catalog_created": False,
-        },
-    }
-
-
-def write_recovery(path: Path, document: Mapping[str, Any]) -> dict[str, Any]:
-    try:
-        return write_authority(path, document)
-    except AuthorityError as error:
-        raise RuntimeError("private recovery authority publication failed") from error
-
-
-def _read_recovery(path: Path) -> dict[str, Any]:
-    try:
-        return read_authority(path)
-    except AuthorityError as error:
-        raise RuntimeError("private recovery authority is unavailable") from error
-
-
-def remove_recovery(path: Path, deps: InstallDependencies) -> None:
-    try:
-        if deps.remove_recovery is None:
-            remove_authority(path)
-        else:
-            deps.remove_recovery(path)
-    except AuthorityError as error:
-        raise RuntimeError("private recovery authority removal failed") from error
-
-
-def phase_hook(deps: InstallDependencies, phase: str) -> None:
-    if deps.after_phase is not None:
-        deps.after_phase(phase)
-
-
-def authority_matches_identity(authority: Mapping[str, Any], identity: ColdTablespaceIdentity) -> bool:
-    return (
-        authority.get("identity") == identity.public_payload()
-        and authority.get("prior_name") == identity.prior_container_name
-    )
-
-
-def _private_config(authority: Mapping[str, Any]) -> dict[str, Any] | None:
-    prior = authority.get("prior") if isinstance(authority.get("prior"), Mapping) else {}
-    private = prior.get("private_snapshot")
-    if not isinstance(private, Mapping) or prior.get("private_snapshot_digest") != private_snapshot_digest(private):
-        return None
-    expected = dict(private)
-    expected.pop("container_id", None)
-    expected.pop("name", None)
-    return expected
-
-
-def prior_config_matches(
-    authority: Mapping[str, Any], snapshot: ContainerSnapshot, identity: ColdTablespaceIdentity
-) -> bool:
-    prior = authority.get("prior") if isinstance(authority.get("prior"), Mapping) else {}
-    expected = _private_config(authority)
-    return bool(
-        expected is not None
-        and prior.get("config_digest") == snapshot.config_digest
-        and expected == snapshot.config_payload()
-        and snapshot.name == identity.container_name
-        and not has_cold_bind(snapshot, identity)
-    )
-
-
-def expected_snapshot_matches(
-    authority: Mapping[str, Any], snapshot: ContainerSnapshot, identity: ColdTablespaceIdentity
-) -> bool:
-    expected = authority.get("expected") if isinstance(authority.get("expected"), Mapping) else {}
-    return expected.get("config_digest") == snapshot.config_digest and expected.get("cold_bind") == identity.cold_bind
-
-
-def inspect_named(deps: InstallDependencies, name: str, identity: ColdTablespaceIdentity) -> ContainerSnapshot:
-    """Freshly inspect an explicit name; never alias renamed prior to current."""
-
-    if deps.inspect_named_container is not None:
-        return normalize_raw_inspect(dict(deps.inspect_named_container(name)))
-    if name == identity.container_name:
-        return normalize_raw_inspect(dict(deps.inspect_container()))
-    raise RuntimeError("named container inspection boundary is unavailable")
-
-
-def _record_rollback_progress(
-    config: InstallConfig,
-    authority: Mapping[str, Any],
-    **ownership_update: bool,
-) -> dict[str, Any]:
-    """Durably record each completed rollback mutation before the next one.
-
-    ``terminal_pending_cleanup`` is the only phase that admits every truthful
-    subset of remaining installer-owned resources.  A later retry therefore
-    resumes only what remains instead of treating an already-removed path or
-    replacement as evidence of an external race.
-    """
-
-    return write_recovery(
-        config.recovery_path,
-        advance_authority(authority, phase="terminal_pending_cleanup", **ownership_update),
-    )
-
-def terminal_close(
-    *,
-    config: InstallConfig,
-    schema: Mapping[str, Any],
-    deps: InstallDependencies,
-    receipt: dict[str, Any],
-    authority: Mapping[str, Any],
-    outcome: str,
-    state: str,
-) -> InstallResult:
-    """Publish terminal-sidecar evidence, then prove durable unlink, then close.
-
-    The first receipt cannot lie about authority absence.  If unlink or final
-    closed publication fails, a schema-valid pending-cleanup receipt retains the
-    sidecar authority for a future no-mutation closure pass.
-    """
-
-    pending = write_recovery(config.recovery_path, advance_authority(authority, phase="terminal_pending_cleanup"))
-    set_authority_receipt(receipt, pending)
-    receipt.update({"outcome": outcome, "state": state})
-    try:
-        first = publish_with_dependencies(config.receipt_path, receipt, schema, deps)
-    except Exception:
-        # The durable authority is already terminal-pending.  Return a
-        # schema-valid in-memory pending receipt instead of trying rollback or
-        # claiming closure when the first terminal publication is unavailable.
-        pending_receipt = dict(render(receipt, schema))
-        pending_receipt.update({"outcome": "pending_cleanup", "state": "pending_cleanup"})
-        pending_receipt["authority"] = {
-            "state": "pending_cleanup",
-            "phase": "terminal_pending_cleanup",
-            "path_present": True,
-        }
-        pending_receipt["ownership"] = {**pending_receipt["ownership"], "recovery_authority": True}
-        return InstallResult("pending_cleanup", pending_receipt, dict(schema))
-    try:
-        remove_recovery(config.recovery_path, deps)
-    except Exception:
-        pending_receipt = dict(first)
-        pending_receipt.update({"outcome": "pending_cleanup", "state": "pending_cleanup"})
-        pending_receipt["authority"] = {
-            "state": "pending_cleanup",
-            "phase": "terminal_pending_cleanup",
-            "path_present": True,
-        }
-        try:
-            published = publish_with_dependencies(config.receipt_path, pending_receipt, schema, deps)
-        except Exception:
-            published = first
-        return InstallResult("pending_cleanup", published, dict(schema))
-    closed = dict(first)
-    closed["authority"] = {"state": "closed", "phase": None, "path_present": False}
-    closed["ownership"] = {**closed["ownership"], "recovery_authority": False}
-    try:
-        published = publish_with_dependencies(config.receipt_path, closed, schema, deps)
-    except Exception:
-        # A final receipt failure must not leave a prior terminal receipt claiming
-        # closure.  Restore the private authority first, then publish pending.
-        write_recovery(config.recovery_path, pending)
-        pending_receipt = dict(first)
-        pending_receipt.update({"outcome": "pending_cleanup", "state": "pending_cleanup"})
-        pending_receipt["authority"] = {
-            "state": "pending_cleanup",
-            "phase": "terminal_pending_cleanup",
-            "path_present": True,
-        }
-        try:
-            published = publish_with_dependencies(config.receipt_path, pending_receipt, schema, deps)
-        except Exception:
-            published = first
-        return InstallResult("pending_cleanup", published, dict(schema))
-    return InstallResult(outcome, published, dict(schema))
-
-
-def _named_prior_matches(
-    authority: Mapping[str, Any], prior: ContainerSnapshot, identity: ColdTablespaceIdentity
-) -> bool:
-    expected = _private_config(authority)
-    return expected is not None and prior.name == identity.prior_container_name and prior.config_payload() == expected
-
-
-def _reconnect_after_container_transition(connection: Any, deps: InstallDependencies) -> Any:
-    """Discard a session killed by replacement removal/restore before readback."""
-
-    try:
-        connection.close()
-    except Exception:
-        pass
-    fresh = deps.connect()
-    if fresh is None:
-        raise RuntimeError("fresh post-restore database observation is unavailable")
-    return fresh
+__all__ = [
+    "NamedObservationError",
+    "authority_matches_identity",
+    "authority_payload",
+    "expected_snapshot_matches",
+    "inspect_named",
+    "inspect_named_optional",
+    "phase_hook",
+    "prior_config_matches",
+    "reconcile",
+    "remove_recovery",
+    "rollback",
+    "terminal_close",
+    "write_recovery",
+]
 
 
 def rollback(
@@ -299,6 +102,7 @@ def rollback(
             if topology != "expected" or deps.catalog_dependents() != 0:
                 raise RuntimeError("installer-created catalog is mixed or has dependents")
             require_fresh_quiescence(deps)
+            authority = _arm_action(config, authority, "drop_catalog")
             connection.execute(f"DROP TABLESPACE {quote_ident(identity.tablespace)}")
             authority = _record_rollback_progress(config, authority, catalog_created=False)
             ownership = authority["ownership"]
@@ -311,6 +115,7 @@ def rollback(
         # loss cannot make a later recovery replay an already-finished step.
         if bool(ownership["installer_container_created"]):
             require_fresh_quiescence(deps)
+            authority = _arm_action(config, authority, "remove_replacement")
             deps.docker((identity.docker_bin, "rm", "-f", identity.container_name))
             container_transitioned = True
             authority = _record_rollback_progress(config, authority, installer_container_created=False)
@@ -323,11 +128,9 @@ def rollback(
             if not _named_prior_matches(authority, prior, identity):
                 raise RuntimeError("renamed prior configuration is not reconstructible")
             require_fresh_quiescence(deps)
+            authority = _arm_action(config, authority, "rename_prior_back")
             deps.docker((identity.docker_bin, "rename", identity.prior_container_name, identity.container_name))
             container_transitioned = True
-            # Rename preserves the observed instance identity, so the freshly
-            # observed prior remains truthful for the renamed-back current name;
-            # the restart branch below replaces it with a post-start observation.
             restored_snapshot = prior
             authority = _record_rollback_progress(config, authority, prior_renamed=False)
             ownership = authority["ownership"]
@@ -337,6 +140,7 @@ def rollback(
             if not prior_config_matches(authority, prior, identity):
                 raise RuntimeError("stopped prior configuration differs")
             require_fresh_quiescence(deps)
+            authority = _arm_action(config, authority, "start_prior")
             deps.docker((identity.docker_bin, "start", identity.container_name))
             container_transitioned = True
             require_ready_sql_read_path(deps)
@@ -369,6 +173,7 @@ def rollback(
                 blockers.append("host path removal boundary is unavailable")
             else:
                 require_fresh_quiescence(deps)
+                authority = _arm_action(config, authority, "remove_host_path")
                 host_path_removed = deps.remove_host_path() is True
                 if host_path_removed:
                     authority = _record_rollback_progress(config, authority, host_path_created=False)
@@ -406,6 +211,8 @@ def rollback(
             outcome="rollback",
             state="rollback",
         )
+    except InstallInterrupted:
+        raise
     except Exception as error:
         receipt.update(
             {
@@ -499,6 +306,7 @@ def _early_path_cleanup(
         set_authority_receipt(receipt, authority, state="pending_cleanup")
         return no_go(config=config, schema=schema, now=now, receipt=receipt, blockers=blockers, deps=deps)
     require_fresh_quiescence(deps)
+    authority = _arm_action(config, authority, "remove_host_path")
     if deps.remove_host_path() is not True:
         set_authority_receipt(receipt, authority, state="pending_cleanup")
         return no_go(
@@ -612,6 +420,7 @@ def _early_recovery(
                 blocker="stopped prior cannot be safely restored",
             )
         require_fresh_quiescence(deps)
+        authority = _arm_action(config, authority, "start_prior")
         deps.docker((identity.docker_bin, "start", identity.container_name))
         require_ready_sql_read_path(deps)
         authority = _record_rollback_progress(config, authority, prior_stopped=False)
@@ -652,9 +461,11 @@ def _early_recovery(
                 blocker="renamed prior cannot be safely restored",
             )
         require_fresh_quiescence(deps)
+        authority = _arm_action(config, authority, "rename_prior_back")
         deps.docker((identity.docker_bin, "rename", identity.prior_container_name, identity.container_name))
         authority = _record_rollback_progress(config, authority, prior_renamed=False)
         require_fresh_quiescence(deps)
+        authority = _arm_action(config, authority, "start_prior")
         deps.docker((identity.docker_bin, "start", identity.container_name))
         require_ready_sql_read_path(deps)
         authority = _record_rollback_progress(config, authority, prior_stopped=False)
@@ -704,7 +515,9 @@ def _pending_cleanup(
         and has_cold_bind(snapshot, identity)
         and expected_snapshot_matches(authority, snapshot, identity)
     ):
-        receipt["readback"] = readback(connection, deps, identity)
+        receipt["readback"] = readback(
+            connection, deps, identity, expected_device_identity=config.expected_device_identity
+        )
         if receipt["readback"]["approved"]:
             receipt["container_snapshot"] = container_snapshot_payload(snapshot)
             return terminal_close(
@@ -716,6 +529,15 @@ def _pending_cleanup(
                 outcome="installed",
                 state="installed",
             )
+        set_authority_receipt(receipt, authority, state="pending_cleanup")
+        return no_go(
+            config=config,
+            schema=schema,
+            now=now,
+            receipt=receipt,
+            blockers=["terminal pending-cleanup readiness or readback is unavailable"],
+            deps=deps,
+        )
     if topology == "absent" and not bool(ownership["prior_renamed"]) and not bool(ownership["prior_stopped"]):
         if prior_config_matches(authority, snapshot, identity):
             return _early_path_cleanup(
@@ -729,6 +551,15 @@ def _pending_cleanup(
                 prior_restored=True,
                 restored_snapshot=snapshot,
             )
+    if topology == "absent":
+        return rollback(
+            config=config,
+            schema=schema,
+            deps=deps,
+            connection=connection,
+            receipt=receipt,
+            authority=authority,
+        )
     set_authority_receipt(receipt, authority, state="pending_cleanup")
     return no_go(
         config=config,
@@ -804,16 +635,214 @@ def reconcile(
     try:
         phase = authority["phase"]
         ownership = authority["ownership"]
+        pending_action = authority.get("pending_action")
+        if pending_action:
+            topology_hint = None
+            if pending_action in {"create_catalog", "drop_catalog"}:
+                require_ready_sql_read_path(deps)
+                connection = _connect_observation(deps)
+                topology_hint, _location, _target = catalog_topology(connection, config.identity)
+            try:
+                pending_class = _classify_authority_pending(
+                    config=config, deps=deps, authority=authority, topology=topology_hint
+                )
+            except NamedObservationError:
+                set_authority_receipt(receipt, authority)
+                return no_go(
+                    config=config,
+                    schema=schema,
+                    now=now,
+                    receipt=receipt,
+                    blockers=["pending action observation is unavailable"],
+                    deps=deps,
+                )
+            if pending_class == "mixed":
+                set_authority_receipt(receipt, authority)
+                return no_go(
+                    config=config,
+                    schema=schema,
+                    now=now,
+                    receipt=receipt,
+                    blockers=["pending action topology is mixed or unknown"],
+                    deps=deps,
+                )
+            if pending_class == "post":
+                authority = _adopt_pending_post(config, authority, str(pending_action))
+                phase = authority["phase"]
+                ownership = authority["ownership"]
+                pending_action = None
+            elif pending_action in INSTALL_ACTIONS:
+                if pending_action == "create_catalog":
+                    authority = write_recovery(
+                        config.recovery_path,
+                        advance_authority(authority, phase=str(authority["phase"]), pending_action=None),
+                    )
+                    if connection is None:
+                        connection = _connect_observation(deps)
+                    return rollback(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        connection=connection,
+                        receipt=receipt,
+                        authority=authority,
+                    )
+                authority = write_recovery(
+                    config.recovery_path,
+                    advance_authority(authority, phase=str(authority["phase"]), pending_action=None),
+                )
+                phase = authority["phase"]
+                if phase in {"prepared", "path_created", "prior_stopped", "prior_renamed"}:
+                    return _early_recovery(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        now=now,
+                        receipt=receipt,
+                        authority=authority,
+                        connection=None if phase in {"prior_stopped", "prior_renamed"} else _connect_observation(deps),
+                    )
+                if connection is None:
+                    connection = _connect_observation(deps)
+                return rollback(
+                    config=config,
+                    schema=schema,
+                    deps=deps,
+                    connection=connection,
+                    receipt=receipt,
+                    authority=authority,
+                )
+            else:
+                if pending_action in {"rename_prior_back", "start_prior"}:
+                    return _early_recovery(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        now=now,
+                        receipt=receipt,
+                        authority=authority,
+                        connection=None,
+                        phase_override="prior_renamed" if pending_action == "rename_prior_back" else "prior_stopped",
+                    )
+                if pending_action == "drop_catalog" and connection is None:
+                    connection = _connect_observation(deps)
+                return rollback(
+                    config=config,
+                    schema=schema,
+                    deps=deps,
+                    connection=connection if connection is not None else _connect_observation(deps),
+                    receipt=receipt,
+                    authority=authority,
+                )
         # A stopped or renamed prior has no PostgreSQL listener.  Restore its
         # container/read path first; only then open the required fresh catalog
         # observation.  A terminal-pending authority can retain either flag if
         # a rollback was interrupted after an earlier durable cleanup step.
         early_phase = phase if phase in {"prior_stopped", "prior_renamed"} else None
         if phase == "terminal_pending_cleanup":
-            if bool(ownership["prior_renamed"]):
-                early_phase = "prior_renamed"
-            elif bool(ownership["prior_stopped"]):
-                early_phase = "prior_stopped"
+            try:
+                current = inspect_named_optional(deps, config.identity.container_name, config.identity)
+            except NamedObservationError:
+                set_authority_receipt(receipt, authority)
+                return no_go(
+                    config=config,
+                    schema=schema,
+                    now=now,
+                    receipt=receipt,
+                    blockers=["terminal pending-cleanup observation is unavailable"],
+                    deps=deps,
+                )
+            if (
+                current is not None
+                and expected_snapshot_matches(authority, current, config.identity)
+                and has_cold_bind(current, config.identity)
+            ):
+                try:
+                    require_ready_sql_read_path(deps)
+                    connection = _connect_observation(deps)
+                    return _pending_cleanup(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        now=now,
+                        receipt=receipt,
+                        authority=authority,
+                        connection=connection,
+                    )
+                except Exception:
+                    set_authority_receipt(receipt, authority)
+                    return no_go(
+                        config=config,
+                        schema=schema,
+                        now=now,
+                        receipt=receipt,
+                        blockers=["terminal pending-cleanup readiness or readback is unavailable"],
+                        deps=deps,
+                    )
+            if current is None:
+                if bool(ownership["prior_renamed"]):
+                    early_phase = "prior_renamed"
+                elif bool(ownership["prior_stopped"]):
+                    early_phase = "prior_stopped"
+                else:
+                    return _early_path_cleanup(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        now=now,
+                        receipt=receipt,
+                        authority=authority,
+                        connection=None,
+                        prior_restored=False,
+                    )
+            elif prior_config_matches(authority, current, config.identity):
+                if bool(ownership["prior_renamed"]):
+                    set_authority_receipt(receipt, authority)
+                    return no_go(
+                        config=config,
+                        schema=schema,
+                        now=now,
+                        receipt=receipt,
+                        blockers=["terminal pending-cleanup topology is mixed or unknown"],
+                        deps=deps,
+                    )
+                if bool(ownership["prior_stopped"]):
+                    early_phase = "prior_stopped"
+                else:
+                    try:
+                        require_ready_sql_read_path(deps)
+                        connection = _connect_observation(deps)
+                    except Exception:
+                        set_authority_receipt(receipt, authority)
+                        return no_go(
+                            config=config,
+                            schema=schema,
+                            now=now,
+                            receipt=receipt,
+                            blockers=["terminal pending-cleanup readiness or readback is unavailable"],
+                            deps=deps,
+                        )
+                    return _early_path_cleanup(
+                        config=config,
+                        schema=schema,
+                        deps=deps,
+                        now=now,
+                        receipt=receipt,
+                        authority=authority,
+                        connection=connection,
+                        prior_restored=True,
+                        restored_snapshot=current,
+                    )
+            else:
+                set_authority_receipt(receipt, authority)
+                return no_go(
+                    config=config,
+                    schema=schema,
+                    now=now,
+                    receipt=receipt,
+                    blockers=["terminal pending-cleanup topology is mixed or unknown"],
+                    deps=deps,
+                )
         if early_phase is not None:
             # The pre-transition receipt carries the path identity used for any
             # later removal check.  Do not replace it with a fresh path payload
@@ -870,7 +899,9 @@ def reconcile(
             and has_cold_bind(snapshot, config.identity)
             and expected_snapshot_matches(authority, snapshot, config.identity)
         ):
-            receipt["readback"] = readback(connection, deps, config.identity)
+            receipt["readback"] = readback(
+                connection, deps, config.identity, expected_device_identity=config.expected_device_identity
+            )
             if receipt["readback"]["approved"]:
                 receipt["container_snapshot"] = container_snapshot_payload(snapshot)
                 return terminal_close(
@@ -913,6 +944,11 @@ def reconcile(
     except InstallInterrupted:
         raise
     except Exception as error:
+        try:
+            if authority_exists(config.recovery_path):
+                authority = read_authority(config.recovery_path)
+        except Exception:
+            pass
         receipt["error"] = {"class": "recovery", "stage": "startup", "reason": redact_text(type(error).__name__)}
         set_authority_receipt(receipt, authority)
         return no_go(

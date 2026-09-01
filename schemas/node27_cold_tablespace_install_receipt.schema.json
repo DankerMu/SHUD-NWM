@@ -131,7 +131,7 @@
     "container": {"type": "string", "minLength": 1, "maxLength": 128},
     "identity": {"$ref": "#/$defs/identity"},
     "path": {"$ref": "#/$defs/path"},
-    "container_snapshot": {"type": "object", "additionalProperties": false, "properties": {"config_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "environment_names": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 256}}, "required": ["config_digest", "environment_names"]},
+    "container_snapshot": {"type": "object", "additionalProperties": false, "properties": {"config_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "environment_names": {"type": "array", "items": {"type": "string", "maxLength": 128}, "maxItems": 256}, "resolved_image_id": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"}}, "required": ["config_digest", "environment_names", "resolved_image_id"]},
     "evidence": {"type": "object", "additionalProperties": false, "properties": {"health": {"type": "object", "additionalProperties": true}, "backup": {"type": "object", "additionalProperties": true}, "capacity": {"type": "object", "additionalProperties": true}}, "required": ["health", "backup", "capacity"]},
     "readback": {"$ref": "#/$defs/readback"},
     "ownership": {"type": "object", "additionalProperties": false, "properties": {"prior_container": {"type": ["string", "null"], "maxLength": 128}, "installer_container_created": {"type": "boolean"}, "catalog_created": {"type": "boolean"}, "host_path_created": {"type": "boolean"}, "recovery_authority": {"type": "boolean"}}, "required": ["prior_container", "installer_container_created", "catalog_created", "host_path_created", "recovery_authority"]},
@@ -152,11 +152,11 @@
     },
     {
       "if": {"properties": {"outcome": {"const": "installed"}}},
-      "then": {"properties": {"mode": {"const": "enforce"}, "state": {"const": "installed"}, "readback": {"properties": {"approved": {"const": true}, "container_writable": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
+      "then": {"properties": {"mode": {"const": "enforce"}, "state": {"const": "installed"}, "container_snapshot": {"properties": {"resolved_image_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}, "readback": {"properties": {"approved": {"const": true}, "container_writable": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
     },
     {
       "if": {"properties": {"outcome": {"const": "already_ready"}}},
-      "then": {"properties": {"state": {"const": "ready"}, "readback": {"properties": {"approved": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
+      "then": {"properties": {"state": {"const": "ready"}, "container_snapshot": {"properties": {"resolved_image_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}}}, "readback": {"properties": {"approved": {"const": true}, "hypertable_attached": {"const": false}, "new_chunk_tablespace": {"const": "pg_default"}}}}}
     },
     {
       "if": {"properties": {"outcome": {"const": "dry_run"}}},

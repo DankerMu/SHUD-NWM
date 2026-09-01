@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ from packages.common.node27_cold_tablespace_install import (
     InstallDependencies,
     run_install,
 )
+from packages.common.node27_cold_tablespace_receipt import no_go, receipt_template
 from packages.common.redaction import redact_database_dsn, redact_text
 
 _CONNECT_TIMEOUT_SECONDS = 5
@@ -106,6 +108,10 @@ def config_from_args(args: argparse.Namespace) -> InstallConfig:
         raise ValueError("expected uid/gid must be non-negative")
     if not args.expected_device_identity:
         raise ValueError("expected device identity is required")
+    if args.head_sha is not None and (
+        not isinstance(args.head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", args.head_sha)
+    ):
+        raise ValueError("head SHA is malformed")
     return InstallConfig(
         enforce=args.enforce,
         receipt_path=args.receipt_path,
@@ -180,12 +186,15 @@ class _PsycopgConnection:
         self._connection = connection
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> list[Mapping[str, Any]]:
-        with self._connection.cursor() as cursor:
-            cursor.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
-            cursor.execute(sql, tuple(params))
-            if cursor.description is None:
-                return []
-            return [dict(row) for row in cursor.fetchall()]
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(f"SET statement_timeout = '{_STATEMENT_TIMEOUT}'")
+                cursor.execute(sql, tuple(params))
+                if cursor.description is None:
+                    return []
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as error:
+            raise RuntimeError(redact_text(type(error).__name__)) from error
 
     def close(self) -> None:
         self._connection.close()
@@ -289,6 +298,7 @@ def dependencies_from_args(args: argparse.Namespace, config: InstallConfig) -> I
         inspect_backup=inspect_backup,
         inspect_container=lambda: docker.inspect(config.identity.container_name),
         inspect_named_container=docker.inspect,
+        inspect_named_container_optional=docker.inspect_optional,
         docker=docker.action,
         connect=connect,
         connect_readonly=connect,
@@ -303,6 +313,35 @@ def dependencies_from_args(args: argparse.Namespace, config: InstallConfig) -> I
         wait_ready=wait_ready,
         inspect_quiescence=lambda: systemd.inspect_quiescence(WRITER_TIMER_UNITS),
         now=lambda: datetime.now(UTC),
+        ready_timeout_seconds=90.0,
+    )
+
+
+def _publish_pre_engine_no_go(args: argparse.Namespace, reason: str) -> None:
+    receipt_path = getattr(args, "receipt_path", None)
+    if not isinstance(receipt_path, Path) or not receipt_path.is_absolute():
+        return
+    config = InstallConfig(
+        enforce=bool(getattr(args, "enforce", False)),
+        receipt_path=receipt_path,
+        recovery_path=getattr(args, "recovery_path", receipt_path),
+        head_sha="0" * 40,
+        expected_uid=max(int(getattr(args, "expected_uid", 0) or 0), 0),
+        expected_gid=max(int(getattr(args, "expected_gid", 0) or 0), 0),
+        expected_mode=int(getattr(args, "expected_mode", 0o700) or 0o700),
+        expected_device_identity=str(getattr(args, "expected_device_identity", None) or "unavailable"),
+        install_required_bytes=max(int(getattr(args, "install_required_bytes", 1) or 1), 1),
+        rollback_headroom_bytes=max(int(getattr(args, "rollback_headroom_bytes", 1) or 1), 1),
+        identity=PRODUCTION_IDENTITY,
+    )
+    schema = InstallConfig.load_schema()
+    receipt = receipt_template(config, outcome="no_go", state="blocked")
+    no_go(
+        config=config,
+        schema=schema,
+        now=datetime.now(UTC),
+        receipt=receipt,
+        blockers=[redact_text(reason) or "pre-engine configuration is invalid"],
     )
 
 
@@ -313,6 +352,11 @@ def main(argv: list[str] | None = None) -> int:
         dependencies = dependencies_from_args(args, config)
         result = run_install(config, dependencies)
     except (ColdHostError, RuntimeError, ValueError, argparse.ArgumentTypeError) as error:
+        try:
+            _publish_pre_engine_no_go(args, str(error))
+        except Exception:
+            print(json.dumps({"outcome": "no_go", "reason": redact_text(str(error))}, sort_keys=True), file=sys.stderr)
+            return 2
         print(json.dumps({"outcome": "no_go", "reason": redact_text(str(error))}, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result.receipt, sort_keys=True))

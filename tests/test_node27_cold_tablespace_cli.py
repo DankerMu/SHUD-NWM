@@ -107,6 +107,9 @@ def test_cli_builds_declared_dependencies_and_reaches_run_install(tmp_path: Path
         def inspect(self, _name: str) -> dict:
             return {}
 
+        def inspect_optional(self, _name: str) -> dict | None:
+            return None
+
         def action(self, _argv: tuple[str, ...]) -> dict:
             return {"returncode": 0}
 
@@ -257,6 +260,140 @@ def test_cli_refuses_invalid_paths_and_publishes_no_live_adapter_claim(tmp_path:
         )
         == 2
     )
+
+
+def test_cli_pre_engine_malformed_head_sha_replaces_stale_success_with_schema_valid_no_go(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps({"outcome": "installed", "leak": "postgresql://user:password@host/db"}),
+        encoding="utf-8",
+    )
+    receipt.chmod(0o600)
+    argv = [
+        "--receipt-path",
+        str(receipt),
+        "--recovery-path",
+        str(tmp_path / "recovery.json"),
+        "--head-sha",
+        "not-a-sha",
+        "--expected-uid",
+        "999",
+        "--expected-gid",
+        "999",
+        "--expected-mode",
+        "700",
+        "--expected-device-identity",
+        "8:11:1",
+        "--install-required-bytes",
+        "100",
+        "--rollback-headroom-bytes",
+        "200",
+        "--evidence-hostname",
+        "node27-test",
+        "--evidence-max-age-seconds",
+        "300",
+        "--evidence-approved-mode",
+        "600",
+        "--mdadm-evidence",
+        str(tmp_path / "mdadm.json"),
+        "--smart-evidence",
+        f"/dev/sdb1={tmp_path / 'sdb.json'}",
+        "--backup-evidence",
+        str(tmp_path / "backup.json"),
+    ]
+
+    assert installer_cli.main(argv) == 2
+    saved = json.loads(receipt.read_text(encoding="utf-8"))
+    output = capsys.readouterr()
+    assert saved["outcome"] == "no_go"
+    assert saved["identity"]["container_name"] == "nhms-db"
+    assert "password" not in json.dumps(saved)
+    assert "password" not in output.out + output.err
+    assert receipt.stat().st_mode & 0o777 == 0o600
+    jsonschema.validate(saved, installer_cli.InstallConfig.load_schema())
+
+
+def test_cli_forty_non_hex_head_sha_replaces_stale_success_with_schema_valid_no_go(
+    tmp_path: Path, capsys
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps({"outcome": "installed", "secret": "token-value"}), encoding="utf-8")
+    receipt.chmod(0o600)
+    argv = [
+        "--receipt-path",
+        str(receipt),
+        "--recovery-path",
+        str(tmp_path / "recovery.json"),
+        "--head-sha",
+        "G" * 40,
+        "--expected-uid",
+        "999",
+        "--expected-gid",
+        "999",
+        "--expected-mode",
+        "700",
+        "--expected-device-identity",
+        "8:11:1",
+        "--install-required-bytes",
+        "100",
+        "--rollback-headroom-bytes",
+        "200",
+        "--evidence-hostname",
+        "node27-test",
+        "--evidence-max-age-seconds",
+        "300",
+        "--evidence-approved-mode",
+        "600",
+        "--mdadm-evidence",
+        str(tmp_path / "mdadm.json"),
+        "--smart-evidence",
+        f"/dev/sdb1={tmp_path / 'sdb.json'}",
+        "--backup-evidence",
+        str(tmp_path / "backup.json"),
+    ]
+
+    assert installer_cli.main(argv) == 2
+    saved = json.loads(receipt.read_text(encoding="utf-8"))
+    assert saved["outcome"] == "no_go"
+    assert "token-value" not in json.dumps(saved)
+    assert "resolved_image_id" in saved["container_snapshot"]
+    jsonschema.validate(saved, installer_cli.InstallConfig.load_schema())
+
+
+def test_cli_missing_evidence_hostname_replaces_stale_success_without_engine_deps(
+    tmp_path: Path, capsys
+) -> None:
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps({"outcome": "installed", "secret": "token-value"}), encoding="utf-8")
+    receipt.chmod(0o600)
+    argv = [
+        "--receipt-path",
+        str(receipt),
+        "--recovery-path",
+        str(tmp_path / "recovery.json"),
+        "--head-sha",
+        "a" * 40,
+        "--expected-uid",
+        "999",
+        "--expected-gid",
+        "999",
+        "--expected-mode",
+        "700",
+        "--expected-device-identity",
+        "8:11:1",
+        "--install-required-bytes",
+        "100",
+        "--rollback-headroom-bytes",
+        "200",
+    ]
+
+    assert installer_cli.main(argv) == 2
+    saved = json.loads(receipt.read_text(encoding="utf-8"))
+    assert saved["outcome"] == "no_go"
+    assert "token-value" not in json.dumps(saved)
+    jsonschema.validate(saved, installer_cli.InstallConfig.load_schema())
 
 
 def test_cli_source_has_no_environment_or_argument_identity_override_surface() -> None:

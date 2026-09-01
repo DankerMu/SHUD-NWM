@@ -2310,11 +2310,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "packages/common/node27_cold_tablespace_pending.py",
+        (
+            "tests/test_node27_cold_tablespace_pending_action.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_node27_cold_tablespace_authority.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_cold_tablespace_observation.py",
+        (
+            "tests/test_node27_cold_tablespace_pending_action.py",
+            "tests/test_node27_cold_tablespace_install.py",
+            "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/node27_cold_tablespace_recovery.py",
         (
             "tests/test_node27_cold_tablespace_install.py",
             "tests/test_node27_cold_tablespace_authority.py",
             "tests/test_node27_cold_tablespace_recovery_contract.py",
+            "tests/test_node27_cold_tablespace_pending_action.py",
         ),
     ),
     PathTestRule(
@@ -2369,8 +2391,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "schemas/examples/node27_cold_tablespace_install_receipt*.example.json",
         ("tests/test_node27_cold_tablespace_install.py",),
     ),
+    PathTestRule(
+        "packages/common/node27_cold_governance_collection.py",
+        (
+            "tests/test_node27_cold_governance.py",
+            "tests/test_node27_resource_governance.py",
+        ),
+    ),
     # The governance runtime consumes the installer evidence boundary.  Its own
-    # four modules share the same two public contract suites.
+    # modules share the same two public contract suites.
     PathTestRule(
         "packages/common/node27_cold_governance*.py",
         (

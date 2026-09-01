@@ -19,6 +19,7 @@
   },
   "container_snapshot": {
     "config_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resolved_image_id": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
     "environment_names": [
       "PGDATA",
       "POSTGRES_PASSWORD"

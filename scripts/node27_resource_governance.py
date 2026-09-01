@@ -11,14 +11,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 from packages.common.node27_cold_governance import (
     GovernanceConfig,
@@ -28,6 +26,19 @@ from packages.common.node27_cold_governance import (
 from packages.common.node27_cold_governance_cli import (
     add_cold_governance_arguments,
     validate_cold_governance_arguments,
+)
+from packages.common.node27_cold_governance_collection import (
+    bytes_pretty as _bytes_pretty,
+)
+from packages.common.node27_cold_governance_collection import (
+    cold_governance_sample as _cold_governance_sample,
+)
+from packages.common.node27_cold_governance_collection import (
+    collect_filesystem,
+    collect_postgres,
+)
+from packages.common.node27_cold_governance_collection import (
+    run_command as _run_command,
 )
 from packages.common.node27_cold_governance_runtime import ColdGovernanceRuntimeConfig, cold_governance_evidence
 
@@ -48,27 +59,6 @@ DEFAULT_SERVICES = (
     "nhms-node27-timeseries-retention.service",
     "nhms-node27-timeseries-retention.timer",
 )
-DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
-    "data",
-    ".nhms-runs",
-    ".nhms-work",
-    ".pgdata",
-    "artifacts",
-    ".venv",
-    ".conda-pkgs",
-    "apps/frontend/dist.bak-20260615-234427",
-    "apps/frontend/dist.bak-20260615-235046",
-)
-DEFAULT_OBJECT_STORE_RELATIVE_SIZE_TARGETS = (
-    "raw",
-    "runs",
-    "forcing",
-    "states",
-    "scheduler",
-    ".reset-quarantine",
-    ".reset-receipts",
-)
-
 GIB = 1024**3
 MIB = 1024**2
 
@@ -129,157 +119,6 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-def _bytes_pretty(value: int | float | None) -> str | None:
-    if value is None:
-        return None
-    amount = float(value)
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    for unit in units:
-        if abs(amount) < 1024 or unit == units[-1]:
-            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
-        amount /= 1024
-    return f"{amount:.1f} TiB"
-
-
-def _safe_resolve(path: Path | None) -> Path | None:
-    if path is None:
-        return None
-    try:
-        return path.expanduser().resolve(strict=False)
-    except OSError:
-        return path.expanduser()
-
-
-def _filesystem_identity(path: Path) -> str | None:
-    """Return a local statvfs/device identity without scanning a shared root."""
-
-    try:
-        info = path.stat()
-        usage = os.statvfs(path)
-    except OSError:
-        return None
-    return f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{usage.f_fsid}"
-
-
-def _disk_usage(path: Path) -> dict[str, Any]:
-    resolved = _safe_resolve(path)
-    if resolved is None:
-        return {"path": str(path), "status": "unavailable"}
-    try:
-        usage = shutil.disk_usage(resolved)
-    except OSError as error:
-        return {"path": str(resolved), "status": "unavailable", "error": str(error)}
-    return {
-        "path": str(resolved),
-        "status": "ok",
-        "total_bytes": usage.total,
-        "used_bytes": usage.used,
-        "free_bytes": usage.free,
-        "used_pct": round(100.0 * usage.used / usage.total, 3) if usage.total else None,
-        "total_pretty": _bytes_pretty(usage.total),
-        "used_pretty": _bytes_pretty(usage.used),
-        "free_pretty": _bytes_pretty(usage.free),
-        "device_identity": _filesystem_identity(resolved),
-    }
-
-
-def _run_command(args: Sequence[str], *, timeout: int = 20) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as error:
-        return {"status": "unavailable", "error": str(error), "args": list(args)}
-    except subprocess.TimeoutExpired:
-        return {"status": "timeout", "args": list(args), "timeout_sec": timeout}
-    return {
-        "status": "ok" if completed.returncode == 0 else "failed",
-        "return_code": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-        "args": list(args),
-    }
-
-
-def _du_bytes(path: Path) -> dict[str, Any]:
-    resolved = _safe_resolve(path)
-    if resolved is None:
-        return {"path": str(path), "status": "unavailable"}
-    if not resolved.exists():
-        return {"path": str(resolved), "status": "missing"}
-    first = _run_command(["du", "-s", "-B1", str(resolved)])
-    if first["status"] == "ok" and first.get("stdout"):
-        try:
-            bytes_value = int(str(first["stdout"]).split()[0])
-        except (IndexError, ValueError):
-            bytes_value = None
-        if bytes_value is not None:
-            return {
-                "path": str(resolved),
-                "status": "ok",
-                "bytes": bytes_value,
-                "pretty": _bytes_pretty(bytes_value),
-            }
-    fallback = _run_command(["du", "-sk", str(resolved)])
-    if fallback["status"] == "ok" and fallback.get("stdout"):
-        try:
-            kib_value = int(str(fallback["stdout"]).split()[0])
-        except (IndexError, ValueError):
-            kib_value = None
-        if kib_value is not None:
-            bytes_value = kib_value * 1024
-            return {
-                "path": str(resolved),
-                "status": "ok",
-                "bytes": bytes_value,
-                "pretty": _bytes_pretty(bytes_value),
-            }
-    return {
-        "path": str(resolved),
-        "status": "unavailable",
-        "error": fallback.get("stderr") or first.get("stderr") or "du_failed",
-    }
-
-
-def collect_filesystem(config: AuditConfig) -> dict[str, Any]:
-    filesystems = {
-        "root": _disk_usage(Path("/")),
-        "home": _disk_usage(Path("/home")),
-        "repo_root_fs": _disk_usage(config.repo_root),
-        "object_store_fs": _disk_usage(config.object_store_root),
-        "cold": _disk_usage(Path("/data/GHDC")),
-    }
-    path_sizes: dict[str, Any] = {
-        "repo_root": _du_bytes(config.repo_root),
-        "object_store_root": _du_bytes(config.object_store_root),
-    }
-    if config.pgdata_root is not None:
-        path_sizes["pgdata_root"] = _du_bytes(config.pgdata_root)
-        path_sizes["pg_wal"] = _du_bytes(config.pgdata_root / "pg_wal")
-    for relative in DEFAULT_REPO_RELATIVE_SIZE_TARGETS:
-        path_sizes[f"repo/{relative}"] = _du_bytes(config.repo_root / relative)
-    for relative in DEFAULT_OBJECT_STORE_RELATIVE_SIZE_TARGETS:
-        path_sizes[f"object-store/{relative}"] = _du_bytes(config.object_store_root / relative)
-    for label, path in {
-        "autopipe_logs": Path("/home/nwm/autopipe-logs"),
-        "download_logs": Path("/home/nwm/node27-download-logs"),
-        "raw_retention_logs": Path("/home/nwm/node27-raw-retention-logs"),
-        "autopipe_work": Path("/home/nwm/autopipe-work"),
-        "tmp": Path("/tmp"),
-    }.items():
-        path_sizes[label] = _du_bytes(path)
-    return {
-        "filesystems": filesystems,
-        "path_sizes": path_sizes,
-        "inode_usage": _run_command(["df", "-ih", "/", "/home"]),
-        "journal_disk_usage": _run_command(["journalctl", "--disk-usage"]),
-    }
-
-
 def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
     collected: dict[str, Any] = {}
     for service in services:
@@ -318,219 +157,6 @@ def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
     return {"services": collected, "timers": timers}
 
 
-def _psycopg_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
-    cursor.execute(sql)
-    return [dict(row) for row in cursor.fetchall()]
-
-
-def collect_postgres(database_url: str | None) -> dict[str, Any]:
-    if not database_url:
-        return {"status": "skipped", "reason": "database_url_missing"}
-    try:
-        import psycopg2
-        import psycopg2.extras
-    except Exception as error:  # pragma: no cover - environment dependent
-        return {"status": "blocked", "reason": "psycopg2_unavailable", "error": str(error)}
-    try:
-        connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
-    except Exception as error:
-        return {"status": "blocked", "reason": "connection_failed", "error": str(error)}
-    result: dict[str, Any] = {"status": "ok"}
-    try:
-        connection.autocommit = True
-        with connection.cursor() as cursor:
-            cursor.execute("SET statement_timeout = '20s'")
-            result["database_sizes"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT datname,
-                       pg_database_size(datname) AS bytes,
-                       pg_size_pretty(pg_database_size(datname)) AS pretty
-                FROM pg_database
-                ORDER BY pg_database_size(datname) DESC
-                """,
-            )
-            result["settings"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT name, setting, unit
-                FROM pg_settings
-                WHERE name IN (
-                  'shared_buffers','work_mem','maintenance_work_mem','effective_cache_size',
-                  'max_connections','temp_buffers','wal_buffers','max_wal_size','min_wal_size',
-                  'wal_keep_size','checkpoint_timeout','autovacuum','autovacuum_max_workers',
-                  'autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor',
-                  'autovacuum_naptime','track_counts','log_temp_files'
-                )
-                ORDER BY name
-                """,
-            )
-            result["connections_by_state"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT usename, state, count(*) AS count,
-                       max(now() - state_change) AS max_state_age
-                FROM pg_stat_activity
-                GROUP BY usename, state
-                ORDER BY count DESC, usename, state
-                """,
-            )
-            result["stat_database"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT datname, numbackends, xact_commit, xact_rollback,
-                       temp_files, temp_bytes, pg_size_pretty(temp_bytes) AS temp_bytes_pretty,
-                       conflicts, deadlocks
-                FROM pg_stat_database
-                ORDER BY temp_bytes DESC
-                """,
-            )
-            result["largest_relations"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT n.nspname AS schema, c.relname AS relation, c.relkind,
-                       pg_total_relation_size(c.oid) AS total_bytes,
-                       pg_size_pretty(pg_total_relation_size(c.oid)) AS total_pretty,
-                       pg_relation_size(c.oid) AS table_bytes,
-                       pg_indexes_size(c.oid) AS indexes_bytes,
-                       COALESCE(s.n_live_tup, 0) AS n_live_tup,
-                       COALESCE(s.n_dead_tup, 0) AS n_dead_tup,
-                       s.last_autovacuum, s.last_autoanalyze, s.autovacuum_count
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
-                WHERE c.relkind IN ('r','p','m')
-                  AND n.nspname NOT IN ('pg_catalog','information_schema')
-                ORDER BY pg_total_relation_size(c.oid) DESC
-                LIMIT 40
-                """,
-            )
-            result["largest_indexes"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT ns.nspname AS schema, idx.relname AS index_name,
-                       tbl_ns.nspname AS table_schema, tbl.relname AS table_name,
-                       pg_relation_size(idx.oid) AS size_bytes,
-                       pg_size_pretty(pg_relation_size(idx.oid)) AS size_pretty,
-                       ix.indisunique, ix.indisprimary
-                FROM pg_class idx
-                JOIN pg_index ix ON ix.indexrelid = idx.oid
-                JOIN pg_class tbl ON tbl.oid = ix.indrelid
-                JOIN pg_namespace ns ON ns.oid = idx.relnamespace
-                JOIN pg_namespace tbl_ns ON tbl_ns.oid = tbl.relnamespace
-                WHERE ns.nspname NOT IN ('pg_catalog','information_schema')
-                ORDER BY pg_relation_size(idx.oid) DESC
-                LIMIT 30
-                """,
-            )
-            result["dead_tuple_hotspots"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT schemaname, relname, n_live_tup, n_dead_tup,
-                       CASE WHEN n_live_tup+n_dead_tup > 0
-                            THEN round(100.0*n_dead_tup/(n_live_tup+n_dead_tup), 2)
-                            ELSE 0 END AS dead_pct,
-                       pg_total_relation_size(relid) AS total_bytes,
-                       pg_size_pretty(pg_total_relation_size(relid)) AS total_pretty,
-                       last_autovacuum, autovacuum_count
-                FROM pg_stat_user_tables
-                WHERE n_dead_tup > 100000
-                ORDER BY n_dead_tup DESC
-                LIMIT 20
-                """,
-            )
-            result["external_pg_tblspc_targets"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT pg_tablespace_location(oid) AS target
-                FROM pg_tablespace
-                WHERE pg_tablespace_location(oid) <> ''
-                ORDER BY target
-                """,
-            )
-            result["cold_tablespace"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT spcname AS tablespace, pg_tablespace_location(oid) AS location
-                FROM pg_tablespace
-                WHERE spcname = 'nhms_cold'
-                """,
-            )
-            result["cold_relation_by_tablespace"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT n.nspname AS schema, c.relname AS relation, c.oid,
-                       pg_total_relation_size(c.oid) AS bytes
-                FROM pg_class AS c
-                JOIN pg_namespace AS n ON n.oid = c.relnamespace
-                JOIN pg_tablespace AS s ON s.oid = c.reltablespace
-                WHERE s.spcname = 'nhms_cold'
-                ORDER BY c.oid
-                """,
-            )
-            try:
-                result["hypertables"] = _psycopg_rows(
-                    cursor,
-                    """
-                    SELECT h.hypertable_schema, h.hypertable_name, h.num_chunks,
-                           h.compression_enabled,
-                           r.job_id AS retention_job_id,
-                           r.config AS retention_config,
-                           c.job_id AS compression_job_id,
-                           c.config AS compression_config
-                    FROM timescaledb_information.hypertables h
-                    LEFT JOIN timescaledb_information.jobs r
-                      ON r.hypertable_schema = h.hypertable_schema
-                     AND r.hypertable_name = h.hypertable_name
-                     AND r.proc_name = 'policy_retention'
-                    LEFT JOIN timescaledb_information.jobs c
-                      ON c.hypertable_schema = h.hypertable_schema
-                     AND c.hypertable_name = h.hypertable_name
-                     AND c.proc_name = 'policy_compression'
-                    ORDER BY h.hypertable_schema, h.hypertable_name
-                    """,
-                )
-                rel_expr = "((quote_ident(chunk_schema) || '.' || quote_ident(chunk_name))::regclass)"
-                result["hypertable_size_breakdown"] = _psycopg_rows(
-                    cursor,
-                    f"""
-                    SELECT hypertable_schema, hypertable_name, count(*) AS chunks,
-                           sum(pg_relation_size({rel_expr})) AS table_bytes,
-                           sum(pg_indexes_size({rel_expr})) AS indexes_bytes,
-                           sum(pg_total_relation_size({rel_expr})) AS total_bytes,
-                           pg_size_pretty(sum(pg_relation_size({rel_expr}))) AS table_pretty,
-                           pg_size_pretty(sum(pg_indexes_size({rel_expr}))) AS indexes_pretty,
-                           pg_size_pretty(sum(pg_total_relation_size({rel_expr}))) AS total_pretty,
-                           min(range_start) AS min_range_start,
-                           max(range_end) AS max_range_end
-                    FROM timescaledb_information.chunks
-                    GROUP BY hypertable_schema, hypertable_name
-                    ORDER BY sum(pg_total_relation_size({rel_expr})) DESC NULLS LAST
-                    """,
-                )
-                result["largest_chunks"] = _psycopg_rows(
-                    cursor,
-                    f"""
-                    SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
-                           pg_total_relation_size({rel_expr}) AS total_bytes,
-                           pg_size_pretty(pg_total_relation_size({rel_expr})) AS total_pretty,
-                           pg_relation_size({rel_expr}) AS table_bytes,
-                           pg_indexes_size({rel_expr}) AS indexes_bytes,
-                           range_start, range_end
-                    FROM timescaledb_information.chunks
-                    ORDER BY pg_total_relation_size({rel_expr}) DESC
-                    LIMIT 20
-                    """,
-                )
-            except Exception as error:
-                result["timescale_status"] = {"status": "blocked", "error": str(error)}
-    except Exception as error:
-        result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
-    finally:
-        connection.close()
-    return result
-
-
 def _first_database_size(postgres: Mapping[str, Any], name: str = "nhms") -> int | None:
     for row in postgres.get("database_sizes", []) or []:
         if row.get("datname") == name:
@@ -551,40 +177,6 @@ def _temp_bytes(postgres: Mapping[str, Any], name: str = "nhms") -> int:
         if row.get("datname") == name:
             return int(row.get("temp_bytes") or 0)
     return 0
-
-
-def _cold_governance_sample(
-    filesystem: Mapping[str, Any], postgres: Mapping[str, Any], *, path: str, observed_at: str
-) -> dict[str, Any]:
-    """Build one bounded category sample without recursively scanning shared roots."""
-
-    filesystems = filesystem.get("filesystems") if isinstance(filesystem.get("filesystems"), Mapping) else {}
-    path_sizes = filesystem.get("path_sizes") if isinstance(filesystem.get("path_sizes"), Mapping) else {}
-    source = filesystems.get("home") if path == "/home" else filesystems.get("cold")
-    source = source if isinstance(source, Mapping) else {}
-    pgdata = path_sizes.get("pgdata_root") if isinstance(path_sizes.get("pgdata_root"), Mapping) else {}
-    object_store_value = path_sizes.get("object_store_root")
-    object_store = object_store_value if isinstance(object_store_value, Mapping) else {}
-    cold_rows = postgres.get("cold_relation_by_tablespace", []) if isinstance(postgres, Mapping) else []
-    cold_bytes = sum(int(row.get("bytes") or 0) for row in cold_rows if isinstance(row, Mapping))
-    object_store_path = str(object_store.get("path") or "")
-    if object_store_path.startswith("/home/"):
-        object_store_on = "/home"
-    elif object_store_path.startswith("/data/GHDC/"):
-        object_store_on = "/data/GHDC"
-    else:
-        object_store_on = None
-    return {
-        "path": path,
-        "observed_at": observed_at,
-        "identity": str(source.get("device_identity") or source.get("path") or path),
-        "total_bytes": int(source.get("total_bytes") or 0),
-        "free_bytes": int(source.get("free_bytes") or 0),
-        "used_bytes": int(source.get("used_bytes") or 0),
-        "pgdata_bytes": int(pgdata.get("bytes") or 0) if path == "/home" else 0,
-        "nhms_cold_relation_bytes": cold_bytes if path == "/data/GHDC" else 0,
-        "object_store_bytes": int(object_store.get("bytes") or 0) if object_store_on == path else 0,
-    }
 
 
 def _cold_runtime_config(config: AuditConfig) -> ColdGovernanceRuntimeConfig:

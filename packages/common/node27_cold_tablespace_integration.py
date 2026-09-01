@@ -725,6 +725,9 @@ def dependencies(
         ),
         inspect_container=lambda: inspect_container(config, config.container_name, runner=runner),
         inspect_named_container=lambda name: inspect_container(config, name, runner=runner),
+        inspect_named_container_optional=lambda name: (
+            inspect_container(config, name, runner=runner) if name in resources.known_containers else None
+        ),
         docker=_docker_action(resources, runner=runner),
         connect=connection_factory,
         connect_readonly=connection_factory,
@@ -746,6 +749,7 @@ def dependencies(
         },
         now=lambda: datetime.now(UTC),
         after_phase=after_phase,
+        ready_timeout_seconds=90.0,
     )
 
 

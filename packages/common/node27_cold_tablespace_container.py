@@ -41,6 +41,7 @@ class ContainerSnapshot:
     container_id: str
     name: str
     image: str
+    resolved_image_id: str
     environment: tuple[str, ...]
     command: tuple[str, ...]
     entrypoint: tuple[str, ...] | None
@@ -72,6 +73,7 @@ class ContainerSnapshot:
     extra_hosts: tuple[str, ...]
     masked_paths: tuple[str, ...]
     readonly_paths: tuple[str, ...]
+    running: bool | None = None
 
     @property
     def config_digest(self) -> str:
@@ -84,6 +86,7 @@ class ContainerSnapshot:
 
         return {
             "image": self.image,
+            "resolved_image_id": self.resolved_image_id,
             "environment": list(self.environment),
             "command": list(self.command),
             "entrypoint": None if self.entrypoint is None else list(self.entrypoint),
@@ -125,6 +128,7 @@ class ContainerSnapshot:
     def public_payload(self) -> dict[str, Any]:
         private = self.private_payload()
         private.pop("environment")
+        private.pop("running", None)
         private["environment_names"] = sorted(item.split("=", 1)[0] for item in self.environment)
         private["config_digest"] = self.config_digest
         return private
@@ -268,14 +272,27 @@ def _normalized_ports(raw: object) -> tuple[tuple[str, tuple[tuple[str, str], ..
     return tuple(result)
 
 
+def _normalized_bind(bind: str) -> str:
+    pieces = bind.split(":")
+    if any(not piece for piece in pieces) or len(pieces) not in {2, 3}:
+        raise ContainerContractError("HostConfig.Binds contains unsupported bind syntax")
+    source, destination = pieces[0], pieces[1]
+    if len(pieces) == 2:
+        return f"{source}:{destination}:rw"
+    mode = pieces[2]
+    if mode in {"rw", "ro"}:
+        return bind
+    raise ContainerContractError("HostConfig.Binds contains unsupported bind options")
+
+
 def _normalized_binds(raw: object) -> tuple[str, ...]:
     binds = _strings(raw, label="HostConfig.Binds")
     assert binds is not None
-    for bind in binds:
-        pieces = bind.split(":")
-        if len(pieces) != 3 or not all(pieces):
-            raise ContainerContractError("HostConfig.Binds contains unsupported bind syntax")
-    return tuple(sorted(binds))
+    normalized = tuple(sorted(_normalized_bind(bind) for bind in binds))
+    identities = tuple(item.rsplit(":", 1)[0] for item in normalized)
+    if len(set(identities)) != len(identities):
+        raise ContainerContractError("HostConfig.Binds contains duplicate bind identities")
+    return normalized
 
 
 def _unique_string_tuple(value: object, *, label: str) -> tuple[str, ...]:
@@ -325,6 +342,38 @@ def _normalized_memory_swap(raw: object, *, memory: int) -> int:
     return swap
 
 
+_SHA256_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _resolved_image_id(document: Mapping[str, Any], config: Mapping[str, Any]) -> str:
+    raw = document.get("Image")
+    if not isinstance(raw, str) or not _SHA256_ID.fullmatch(raw):
+        raise ContainerContractError("document-level Image must be a sha256 identity")
+    image_ref = config.get("Image")
+    if not isinstance(image_ref, str) or not image_ref:
+        raise ContainerContractError("Config.Image must be a reconstructible image reference")
+    return raw
+
+
+def _normalized_stop_timeout(config: Mapping[str, Any], host: Mapping[str, Any]) -> int:
+    config_raw = config.get("StopTimeout")
+    host_raw = host.get("StopTimeout")
+    if config_raw not in (None, 0) and host_raw not in (None, 0) and config_raw != host_raw:
+        raise ContainerContractError("Config.StopTimeout conflicts with HostConfig.StopTimeout")
+    if config_raw not in (None, 0):
+        return _int(config_raw, label="Config.StopTimeout")
+    return _int(host_raw or 0, label="HostConfig.StopTimeout")
+
+
+def _running_state(document: Mapping[str, Any]) -> bool | None:
+    state = document.get("State")
+    if not isinstance(state, Mapping) or "Running" not in state:
+        return None
+    running = state.get("Running")
+    if type(running) is not bool:
+        raise ContainerContractError("State.Running must be a boolean when present")
+    return running
+
 
 def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) -> ContainerSnapshot:
     """Normalize bounded raw inspect data without executing or shell-parsing it."""
@@ -352,6 +401,7 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
                 "Labels",
                 "StopSignal",
                 "Healthcheck",
+                "StopTimeout",
             }
         ),
         label="Config",
@@ -407,6 +457,7 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
         container_id=_string(document.get("Id"), label="Id"),
         name=_string(document.get("Name"), label="Name").lstrip("/"),
         image=_string(config.get("Image"), label="Config.Image"),
+        resolved_image_id=_resolved_image_id(document, config),
         environment=tuple(sorted(_strings(config.get("Env"), label="Config.Env") or ())),
         command=tuple(_strings(config.get("Cmd"), label="Config.Cmd") or ()),
         entrypoint=_strings(config.get("Entrypoint"), label="Config.Entrypoint", allow_none=True),
@@ -434,7 +485,7 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
             host.get("MemorySwap"), memory=_int(host.get("Memory") or 0, label="HostConfig.Memory")
         ),
         shm_size=_int(host.get("ShmSize") or 0, label="HostConfig.ShmSize"),
-        stop_timeout=_int(host.get("StopTimeout") or 0, label="HostConfig.StopTimeout"),
+        stop_timeout=_normalized_stop_timeout(config, host),
         readonly_rootfs=bool(host.get("ReadonlyRootfs") or False),
         cap_add=tuple(sorted(_strings(host.get("CapAdd") or [], label="HostConfig.CapAdd") or ())),
         cap_drop=tuple(sorted(_strings(host.get("CapDrop") or [], label="HostConfig.CapDrop") or ())),
@@ -455,6 +506,7 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
         extra_hosts=tuple(sorted(_strings(host.get("ExtraHosts") or [], label="HostConfig.ExtraHosts") or ())),
         masked_paths=_normalized_masked_paths(host.get("MaskedPaths")),
         readonly_paths=_normalized_readonly_paths(host.get("ReadonlyPaths")),
+        running=_running_state(document),
     )
 
 
@@ -545,7 +597,7 @@ def build_recreate_argv(
         raise ContainerContractError(
             "DeviceRequests cannot be reproduced exactly with the supported direct argv contract"
         )
-    argv.append(snapshot.image)
+    argv.append(snapshot.resolved_image_id)
     argv.extend(snapshot.command)
     return tuple(argv)
 
@@ -564,6 +616,12 @@ def diff_container_config(
     """Accept a new runtime container ID but no config drift beyond one bind."""
 
     validate_identity_for_action(identity)
+    if before.resolved_image_id != after.resolved_image_id:
+        return ContainerDiff(
+            approved=False,
+            changed_fields=("resolved_image_id",),
+            blockers=("resolved image identity drifted",),
+        )
     before_payload = before.config_payload()
     after_payload = after.config_payload()
     changed = tuple(sorted(key for key in before_payload if before_payload[key] != after_payload.get(key)))

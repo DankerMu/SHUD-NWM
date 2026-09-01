@@ -7,6 +7,7 @@ point at node-27 production identities.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 from collections.abc import Callable
@@ -42,6 +43,7 @@ from packages.common.node27_cold_tablespace_integration import (
     start_prior,
     validate_isolated_config,
 )
+from packages.common.node27_cold_tablespace_types import InstallDependencies
 
 
 def test_disposable_oracle_defaults_to_1892_pin_and_separate_identity(tmp_path: Path) -> None:
@@ -866,8 +868,8 @@ def test_real_post_recreate_failure_rolls_back_only_owned_state(tmp_path: Path) 
 @pytest.mark.integration
 @pytest.mark.timescaledb_210
 @pytest.mark.node27_docker
-@pytest.mark.parametrize("phase", ("prior_stopped", "prior_renamed", "replacement_created"))
-def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: Path, phase: str) -> None:
+@pytest.mark.parametrize("action", ("stop", "rename", "run"))
+def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: Path, action: str) -> None:
     pytest.importorskip("psycopg2")
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0003")
     try:
@@ -883,10 +885,6 @@ def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: 
         receipt_path = config.work_root / "receipts" / "interrupted.json"
         recovery_path = config.work_root / "receipts" / "interrupted.recovery.json"
 
-        def interrupt(observed_phase: str) -> None:
-            if observed_phase == phase:
-                raise InstallInterrupted("test interruption")
-
         settings = dict(
             enforce=True,
             receipt_path=receipt_path,
@@ -900,14 +898,26 @@ def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: 
             rollback_headroom_bytes=1,
             identity=config.identity,
         )
+        base_deps = dependencies(resources, health=health)
+        original_docker = base_deps.docker
+
+        def docker(argv: tuple[str, ...]):
+            result = original_docker(argv)
+            if argv[1] == action:
+                raise InstallInterrupted(f"after {action} before confirm")
+            return result
+
+        interrupted_deps = InstallDependencies(**{**base_deps.__dict__, "docker": docker})
         with pytest.raises(InstallInterrupted):
-            run_install(InstallConfig(**settings), dependencies(resources, health=health, after_phase=interrupt))
+            run_install(InstallConfig(**settings), interrupted_deps)
         assert recovery_path.exists()
+        authority = json.loads(recovery_path.read_text(encoding="utf-8"))
+        assert authority.get("pending_action")
         actions_before = list(resources.actions)
         recovered = run_install(InstallConfig(**settings), dependencies(resources, health=health))
         assert recovered.outcome == "rollback", recovered.receipt
         recovery_actions = resources.actions[len(actions_before) :]
-        assert not any(action[1] == "run" for action in recovery_actions)
+        assert not any(item[1] == "run" for item in recovery_actions)
         after = normalize_raw_inspect(inspect_container(config, config.container_name))
         assert after.config_payload() == before.config_payload()
         assert config.identity.cold_bind not in after.binds
@@ -917,6 +927,52 @@ def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: 
         finally:
             connection.close()
         assert not recovery_path.exists()
+    finally:
+        if resources is not None:
+            cleanup(resources)
+
+
+@pytest.mark.integration
+@pytest.mark.timescaledb_210
+@pytest.mark.node27_docker
+def test_real_terminal_unlink_retry_closes_installed_without_docker_replay(tmp_path: Path) -> None:
+    pytest.importorskip("psycopg2")
+    config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0005")
+    try:
+        capability = require_root_evidence_capability(config)
+    except ColdTablespaceIntegrationError as error:
+        pytest.skip(str(error))
+    resources: IntegrationResources | None = None
+    try:
+        resources = prepare_resources(config, capability=capability)
+        health = root_evidence_ready(resources)
+        start_prior(resources)
+        bootstrap_business_tables(config)
+        receipt_path = config.work_root / "receipts" / "unlink.json"
+        recovery_path = config.work_root / "receipts" / "unlink.recovery.json"
+        settings = dict(
+            enforce=True,
+            receipt_path=receipt_path,
+            recovery_path=recovery_path,
+            head_sha="a" * 40,
+            expected_uid=resources.require_capability().runtime_uid,
+            expected_gid=resources.require_capability().runtime_gid,
+            expected_mode=0o700,
+            expected_device_identity="synthetic-device",
+            install_required_bytes=1,
+            rollback_headroom_bytes=1,
+            identity=config.identity,
+        )
+        first_deps = dependencies(resources, health=health)
+        first_deps.remove_recovery = lambda _path: (_ for _ in ()).throw(RuntimeError("unlink failed"))
+        first = run_install(InstallConfig(**settings), first_deps)
+        assert first.outcome == "pending_cleanup", first.receipt
+        assert recovery_path.exists()
+        actions_before = list(resources.actions)
+        second = run_install(InstallConfig(**settings), dependencies(resources, health=health))
+        assert second.outcome == "installed", second.receipt
+        assert not recovery_path.exists()
+        assert not any(item[1] in {"stop", "rename", "run", "rm"} for item in resources.actions[len(actions_before) :])
     finally:
         if resources is not None:
             cleanup(resources)

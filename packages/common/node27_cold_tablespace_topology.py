@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
 from packages.common.node27_cold_tablespace_container import (
     ContainerSnapshot,
     diff_container_config,
@@ -23,7 +24,7 @@ from packages.common.node27_cold_tablespace_receipt import (
     optional_string,
     path_payload,
 )
-from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies
+from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies, InstallInterrupted
 
 WRITER_TIMER_UNITS = (
     "nhms-node27-autopipe.service",
@@ -183,7 +184,26 @@ def require_ready_sql_read_path(deps: InstallDependencies) -> None:
 
     if deps.wait_ready is None:
         raise RuntimeError("container readiness/SQL read-path boundary is unavailable")
-    deps.wait_ready()
+    import time
+
+    timeout = float(getattr(deps, "ready_timeout_seconds", 0.0) or 0.0)
+    monotonic = deps.monotonic or time.monotonic
+    sleeper = deps.sleep or time.sleep
+    deadline = monotonic() + timeout
+    last: Exception | None = None
+    while True:
+        try:
+            deps.wait_ready()
+            return
+        except InstallInterrupted:
+            raise
+        except Exception as error:
+            last = error
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            sleeper(min(0.5, remaining))
+    raise RuntimeError("container readiness/SQL read-path boundary is unavailable") from last
 
 
 def installer_current_bind_reference(identity: ColdTablespaceIdentity, reference: str) -> bool:
@@ -251,10 +271,20 @@ def new_chunk_default(connection: Any) -> str | None:
     return optional_string(observed[0].get("tablespace")) if observed else None
 
 
-def readback(connection: Any, deps: InstallDependencies, identity: ColdTablespaceIdentity) -> dict[str, Any]:
+def readback(
+    connection: Any,
+    deps: InstallDependencies,
+    identity: ColdTablespaceIdentity,
+    *,
+    expected_device_identity: str | None = None,
+) -> dict[str, Any]:
     _topology, location, target = catalog_topology(connection, identity)
     observed = dict(deps.inspect_target())
     writable = observed.get("writable") if isinstance(observed.get("writable"), bool) else None
+    observed_device = optional_string(observed.get("device_identity"))
+    device_ok = (
+        bool(observed_device) if expected_device_identity is None else observed_device == expected_device_identity
+    )
     return {
         "approved": bool(
             location == identity.container_path
@@ -262,7 +292,7 @@ def readback(connection: Any, deps: InstallDependencies, identity: ColdTablespac
             and observed.get("container_name") == identity.container_name
             and observed.get("container_bind") == str(identity.host_path)
             and observed.get("host_path") == str(identity.host_path)
-            and observed.get("device_identity")
+            and device_ok
             and writable is True
             and not attached_to_cold(connection, identity)
             and new_chunk_default(connection) == "pg_default"
@@ -320,6 +350,12 @@ def inspect_preconditions(
         blockers.extend(capacity.blockers)
     if snapshot.name != identity.container_name or not snapshot.image:
         blockers.append("container identity differs from the immutable contract")
+    expected_image = identity.image_id or PINNED_IMAGE_ID
+    if snapshot.resolved_image_id != expected_image or snapshot.image != expected_image:
+        blockers.append("resolved image identity differs from the pinned production image")
+    expected_user = f"{config.expected_uid}:{config.expected_gid}"
+    if snapshot.user and snapshot.user != expected_user:
+        blockers.append("runtime Config.User differs from the expected numeric identity")
     return snapshot, path, tuple(dict.fromkeys(blockers))
 
 
@@ -356,6 +392,8 @@ def topology_blockers(
     snapshot: ContainerSnapshot,
     identity: ColdTablespaceIdentity,
     receipt: dict[str, Any],
+    *,
+    expected_device_identity: str | None = None,
 ) -> tuple[tuple[str, ...], str, bool]:
     topology, _location, _target = catalog_topology(connection, identity)
     bind = has_cold_bind(snapshot, identity)
@@ -376,7 +414,9 @@ def topology_blockers(
         blockers.append("another current container has a cold bind")
     complete_ready = False
     if topology == "expected" and bind:
-        receipt["readback"] = readback(connection, deps, identity)
+        receipt["readback"] = readback(
+            connection, deps, identity, expected_device_identity=expected_device_identity
+        )
         if receipt["readback"]["approved"]:
             complete_ready = True
         else:

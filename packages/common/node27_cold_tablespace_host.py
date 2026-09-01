@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.compressed_chunk_cold_target import run_bounded_command
 from packages.common.node27_cold_tablespace_container import MAX_INSPECT_BYTES
 from packages.common.node27_cold_tablespace_evidence import (
@@ -117,30 +118,56 @@ class DockerBoundary:
         return self._identity
 
     def inspect(self, container: str) -> Mapping[str, Any]:
-        document = self._json((self._docker_bin, "inspect", container))
+        document = self._json((self._docker_bin, "inspect", container), timeout=5)
         if not isinstance(document, list) or len(document) != 1 or not isinstance(document[0], Mapping):
             raise ColdHostError("docker inspect did not return exactly one object")
         return document[0]
 
+    def inspect_optional(self, container: str) -> Mapping[str, Any] | None:
+        names = self._container_names()
+        if container not in names:
+            return None
+        return self.inspect(container)
+
+    def _container_names(self) -> tuple[str, ...]:
+        result = run_bounded_command(
+            (self._docker_bin, "ps", "-a", "--format", "{{.Names}}"), max_bytes=MAX_INSPECT_BYTES, timeout=5
+        )
+        if result.returncode != 0:
+            raise ColdHostError("Docker container inventory is unavailable")
+        return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+    def _action_timeout(self, argv: tuple[str, ...]) -> int:
+        if len(argv) >= 3 and argv[1] == "stop":
+            raw = self.inspect(argv[2])
+            config = raw.get("Config") if isinstance(raw.get("Config"), Mapping) else {}
+            host = raw.get("HostConfig") if isinstance(raw.get("HostConfig"), Mapping) else {}
+            value = config.get("StopTimeout") if isinstance(config, Mapping) else None
+            if value in (None, 0):
+                value = host.get("StopTimeout") if isinstance(host, Mapping) else None
+            if value in (None, 0):
+                return 90
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 3600:
+                raise ColdHostError("observed StopTimeout is malformed")
+            return value + 90
+        return 90
+
     def action(self, argv: tuple[str, ...]) -> Mapping[str, Any]:
         if not argv or argv[0] != self._docker_bin:
             raise ColdHostError("Docker action did not use the trusted absolute path")
-        result = run_bounded_command(argv, max_bytes=MAX_INSPECT_BYTES)
+        timeout = self._action_timeout(argv)
+        try:
+            result = run_bounded_command(argv, max_bytes=MAX_INSPECT_BYTES, timeout=timeout)
+        except ColdRuntimeError as error:
+            raise ColdHostError("Docker action timed out") from error
         if result.returncode != 0:
             raise ColdHostError("Docker action failed")
         return {"returncode": result.returncode}
 
     def current_and_stopped_cold_binds(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        result = run_bounded_command(
-            (self._docker_bin, "ps", "-a", "--format", "{{.Names}}"), max_bytes=MAX_INSPECT_BYTES
-        )
-        if result.returncode != 0:
-            raise ColdHostError("Docker container inventory is unavailable")
         current: list[str] = []
         stopped: list[str] = []
-        for name in (line.strip() for line in result.stdout.splitlines()):
-            if not name:
-                continue
+        for name in self._container_names():
             inspect = self.inspect(name)
             state = inspect.get("State")
             running = bool(state.get("Running")) if isinstance(state, Mapping) else False
@@ -159,8 +186,11 @@ class DockerBoundary:
                 (current if running else stopped).append(identity)
         return tuple(current), tuple(stopped)
 
-    def _json(self, argv: Sequence[str]) -> Any:
-        result = run_bounded_command(tuple(argv), max_bytes=MAX_INSPECT_BYTES)
+    def _json(self, argv: Sequence[str], *, timeout: int = 5) -> Any:
+        try:
+            result = run_bounded_command(tuple(argv), max_bytes=MAX_INSPECT_BYTES, timeout=timeout)
+        except ColdRuntimeError as error:
+            raise ColdHostError("Docker inspection timed out") from error
         if result.returncode != 0:
             raise ColdHostError("Docker inspection failed")
         try:
@@ -471,6 +501,11 @@ def inspect_running_target(
         raise ColdHostError(
             "cold tablespace host owner differs from the expected runtime identity"
         )
+    config = inspect.get("Config") if isinstance(inspect.get("Config"), Mapping) else {}
+    observed_user = config.get("User") if isinstance(config, Mapping) else None
+    expected_user = f"{expected_uid}:{expected_gid}"
+    if isinstance(observed_user, str) and observed_user and observed_user != expected_user:
+        raise ColdHostError("runtime Config.User differs from the expected numeric identity")
     writable = docker.action(
         (
             identity.docker_bin,

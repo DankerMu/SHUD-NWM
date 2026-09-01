@@ -11,8 +11,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from packages.common.compressed_chunk_cold_residency import quote_ident, quote_literal
-from packages.common.node27_cold_tablespace_container import ContainerContractError, build_recreate_argv
-from packages.common.node27_cold_tablespace_identity import IdentityContractError, validate_identity_for_action
+from packages.common.node27_cold_tablespace_authority import advance_authority, authority_exists, read_authority
+from packages.common.node27_cold_tablespace_container import build_recreate_argv
+from packages.common.node27_cold_tablespace_identity import validate_identity_for_action
 from packages.common.node27_cold_tablespace_receipt import (
     container_snapshot_payload,
     no_go,
@@ -50,6 +51,15 @@ from packages.common.node27_cold_tablespace_types import (
 from packages.common.redaction import redact_text
 
 
+def _arm(
+    *, config: InstallConfig, authority: Mapping[str, Any], action: str
+) -> dict[str, Any]:
+    return write_recovery(
+        config.recovery_path,
+        advance_authority(authority, phase=str(authority["phase"]), pending_action=action),
+    )
+
+
 def _connect_observation(deps: InstallDependencies, *, readonly: bool) -> Any:
     connection = deps.connect_readonly() if readonly and deps.connect_readonly is not None else deps.connect()
     if connection is None:
@@ -58,11 +68,18 @@ def _connect_observation(deps: InstallDependencies, *, readonly: bool) -> Any:
 
 
 def _advance(
-    *, config: InstallConfig, authority: Mapping[str, Any], phase: str, deps: InstallDependencies, **ownership: bool
+    *,
+    config: InstallConfig,
+    authority: Mapping[str, Any],
+    phase: str,
+    deps: InstallDependencies,
+    pending_action: str | None = None,
+    **ownership: bool,
 ) -> dict[str, Any]:
-    from packages.common.node27_cold_tablespace_authority import advance_authority
-
-    advanced = write_recovery(config.recovery_path, advance_authority(authority, phase=phase, **ownership))
+    advanced = write_recovery(
+        config.recovery_path,
+        advance_authority(authority, phase=phase, pending_action=pending_action, **ownership),
+    )
     phase_hook(deps, phase)
     return advanced
 
@@ -121,6 +138,7 @@ def _create_path_if_needed(
             deps=deps,
         )
     require_fresh_quiescence(deps)
+    authority = _arm(config=config, authority=authority, action="create_host_path")
     created = dict(deps.ensure_host_path())
     from packages.common.node27_cold_tablespace_receipt import path_payload
 
@@ -154,12 +172,15 @@ def _replace_container(
 ) -> dict[str, Any]:
     identity = config.identity
     require_fresh_quiescence(deps)
+    authority = _arm(config=config, authority=authority, action="stop_prior")
     deps.docker((identity.docker_bin, "stop", identity.container_name))
     authority = _advance(config=config, authority=authority, phase="prior_stopped", deps=deps, prior_stopped=True)
     require_fresh_quiescence(deps)
+    authority = _arm(config=config, authority=authority, action="rename_prior")
     deps.docker((identity.docker_bin, "rename", identity.container_name, identity.prior_container_name))
     authority = _advance(config=config, authority=authority, phase="prior_renamed", deps=deps, prior_renamed=True)
     require_fresh_quiescence(deps)
+    authority = _arm(config=config, authority=authority, action="create_replacement")
     deps.docker(build_recreate_argv(snapshot, identity=identity))
     return _advance(
         config=config,
@@ -175,6 +196,7 @@ def _install_catalog(
 ) -> dict[str, Any]:
     require_fresh_quiescence(deps)
     identity = config.identity
+    authority = _arm(config=config, authority=authority, action="create_catalog")
     connection.execute(
         f"CREATE TABLESPACE {quote_ident(identity.tablespace)} LOCATION {quote_literal(identity.container_path)}"
     )
@@ -206,7 +228,12 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
         connection = _connect_observation(deps, readonly=not config.enforce)
         snapshot, path_observed, precondition_blockers = inspect_preconditions(config, deps, receipt, connection)
         topology_errors, topology, complete_ready = topology_blockers(
-            connection, deps, snapshot, config.identity, receipt
+            connection,
+            deps,
+            snapshot,
+            config.identity,
+            receipt,
+            expected_device_identity=config.expected_device_identity,
         )
         bind_present = has_cold_bind(snapshot, config.identity)
         path_blockers = path_admission_blockers(config, path_observed, complete_ready=complete_ready)
@@ -215,21 +242,6 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
             return _complete_existing(config=config, schema=schema, deps=deps, receipt=receipt)
         if blockers:
             return no_go(config=config, schema=schema, now=now_value, receipt=receipt, blockers=blockers, deps=deps)
-        if not config.enforce:
-            return InstallResult(
-                "dry_run",
-                publish_with_dependencies(config.receipt_path, receipt, schema, deps),
-                dict(schema),
-            )
-        if topology != "absent" or bind_present:
-            return no_go(
-                config=config,
-                schema=schema,
-                now=now_value,
-                receipt=receipt,
-                blockers=["partial or drifted topology is present"],
-                deps=deps,
-            )
         if not config.enforce:
             return InstallResult(
                 "dry_run",
@@ -274,17 +286,22 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
 
         authority = _replace_container(config=config, deps=deps, authority=authority, snapshot=snapshot)
         set_authority_receipt(receipt, authority)
+        stale = connection
+        connection = None
+        try:
+            stale.close()
+        except Exception:
+            pass
         require_ready_sql_read_path(deps)
-        # The prior PostgreSQL connection died with the old container.  Reopen
-        # after readiness so DDL/readback never use a stale session.
-        connection.close()
         connection = _connect_observation(deps, readonly=False)
         after, _changed = validate_after_container(snapshot, dict(deps.inspect_container()), config.identity)
         if not has_cold_bind(after, config.identity):
             raise RuntimeError("recreated container omitted the required cold bind")
         target = dict(deps.inspect_target())
         if target.get("container_bind") != str(config.identity.host_path) or target.get("writable") is not True:
-            receipt["readback"] = readback(connection, deps, config.identity)
+            receipt["readback"] = readback(
+                connection, deps, config.identity, expected_device_identity=config.expected_device_identity
+            )
             receipt["blockers"] = ["container cold bind is not ready or writable"]
             return rollback(
                 config=config, schema=schema, deps=deps, connection=connection, receipt=receipt, authority=authority
@@ -292,7 +309,9 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
 
         authority = _install_catalog(config=config, deps=deps, connection=connection, authority=authority)
         set_authority_receipt(receipt, authority)
-        receipt["readback"] = readback(connection, deps, config.identity)
+        receipt["readback"] = readback(
+            connection, deps, config.identity, expected_device_identity=config.expected_device_identity
+        )
         if not receipt["readback"]["approved"]:
             receipt["blockers"] = ["catalog/bind/path/writability/no-attach/default-placement readback failed"]
             return rollback(
@@ -312,7 +331,19 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
         # Test-only process-like interruption leaves the durable authority and
         # topology untouched for the next invocation to reconcile.
         raise
-    except (ContainerContractError, IdentityContractError, ValueError, RuntimeError) as error:
+    except Exception as error:
+        if authority is None:
+            try:
+                if authority_exists(config.recovery_path):
+                    authority = read_authority(config.recovery_path)
+            except Exception:
+                authority = None
+        else:
+            try:
+                if authority_exists(config.recovery_path):
+                    authority = read_authority(config.recovery_path)
+            except Exception:
+                pass
         receipt["error"] = {
             "class": "installer",
             "stage": "enforce" if config.enforce else "inspection",
@@ -321,7 +352,10 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
         receipt["blockers"] = list(
             dict.fromkeys((*receipt["blockers"], "installer precondition or enforcement failed"))
         )
-        if config.enforce and authority is not None and connection is not None:
+        pending = authority.get("pending_action") if isinstance(authority, Mapping) else None
+        if authority is not None:
+            set_authority_receipt(receipt, authority)
+        if config.enforce and authority is not None and not pending and connection is not None:
             return rollback(
                 config=config, schema=schema, deps=deps, connection=connection, receipt=receipt, authority=authority
             )

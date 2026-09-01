@@ -97,3 +97,38 @@ def test_authority_refuses_unsafe_mode_unknown_phase_and_malformed_document(tmp_
     path.chmod(0o644)
     with pytest.raises(AuthorityError, match="mode"):
         read_authority(path)
+
+
+def test_legacy_authority_without_pending_action_reads_as_none(tmp_path: Path) -> None:
+    path = tmp_path / "authority.json"
+    document = _authority()
+    assert "pending_action" not in document
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+
+    loaded = read_authority(path)
+
+    assert loaded.get("pending_action") is None
+
+
+def test_newly_written_authority_records_nullable_pending_action(tmp_path: Path) -> None:
+    path = tmp_path / "authority.json"
+
+    written = write_authority(path, _authority())
+
+    assert "pending_action" in written
+    assert written["pending_action"] is None
+    assert json.loads(path.read_text(encoding="utf-8"))["pending_action"] is None
+
+
+def test_authority_rejects_unknown_or_inconsistent_pending_action(tmp_path: Path) -> None:
+    path = tmp_path / "authority.json"
+    unknown = _authority()
+    unknown["pending_action"] = "reboot_host"
+    with pytest.raises(AuthorityError, match="pending"):
+        write_authority(path, unknown)
+
+    inconsistent = _authority()
+    inconsistent["pending_action"] = "create_catalog"
+    with pytest.raises(AuthorityError, match="pending"):
+        write_authority(path, inconsistent)

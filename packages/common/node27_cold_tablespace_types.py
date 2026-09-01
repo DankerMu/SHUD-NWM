@@ -74,10 +74,14 @@ class InstallDependencies:
     inspect_quiescence: Callable[[], Mapping[str, Any]] | None = None
     connect_readonly: Callable[[], Any] | None = None
     inspect_named_container: Callable[[str], Mapping[str, Any]] | None = None
+    inspect_named_container_optional: Callable[[str], Mapping[str, Any] | None] | None = None
     remove_recovery: Callable[[Path], None] | None = None
     before_receipt_publish: Callable[[Path, Mapping[str, Any]], None] | None = None
     wait_ready: Callable[[], None] | None = None
     after_phase: Callable[[str], None] | None = None
+    sleep: Callable[[float], None] | None = None
+    monotonic: Callable[[], float] | None = None
+    ready_timeout_seconds: float = 0.0
     action_log: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
 

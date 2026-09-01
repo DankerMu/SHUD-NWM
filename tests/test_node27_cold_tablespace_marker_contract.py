@@ -38,6 +38,7 @@ def test_real_oracle_has_all_three_opt_in_markers_but_local_identity_tests_remai
         "test_real_disposable_cluster_installs_through_run_install",
         "test_real_post_recreate_failure_rolls_back_only_owned_state",
         "test_real_interrupted_replacement_recovers_without_install_replay",
+        "test_real_terminal_unlink_retry_closes_installed_without_docker_replay",
     )
 
     for name in real_names:
@@ -56,7 +57,7 @@ def test_real_oracle_has_all_three_opt_in_markers_but_local_identity_tests_remai
     assert isinstance(parametrized.args[1], ast.Tuple)
     assert tuple(
         item.value for item in parametrized.args[1].elts if isinstance(item, ast.Constant)
-    ) == ("prior_stopped", "prior_renamed", "replacement_created")
+    ) == ("stop", "rename", "run")
     assert marked["test_disposable_oracle_defaults_to_1892_pin_and_separate_identity"] == set()
 
 
@@ -77,7 +78,7 @@ def test_real_oracle_collects_five_opt_in_nodes() -> None:
     )
     assert isinstance(parametrized.args[1], ast.Tuple)
     assert len(parametrized.args[1].elts) == 3
-    assert 1 + 1 + len(parametrized.args[1].elts) == 5
+    assert 1 + 1 + 1 + len(parametrized.args[1].elts) == 6
 
 
 def test_real_oracle_imports_the_public_state_machine_and_forbids_legacy_bypass_symbols() -> None:

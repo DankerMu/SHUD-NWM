@@ -156,16 +156,146 @@ def test_systemd_boundary_requires_all_writer_timer_units_to_be_drained(monkeypa
 
 def test_docker_action_uses_direct_argv_and_does_not_expose_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
+    kwargs_seen: list[dict] = []
 
-    def fake(argv, **_kwargs):
+    def fake(argv, **kwargs):
         seen.append(list(argv))
+        kwargs_seen.append(kwargs)
+        if argv[1] == "inspect":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "sha256:test",
+                            "Name": "/nhms-db",
+                            "Config": {},
+                            "HostConfig": {},
+                            "Mounts": [],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="POSTGRES_PASSWORD=secret")
 
     monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", fake)
     result = DockerBoundary().action(("/usr/bin/docker", "stop", "nhms-db"))
 
     assert result == {"returncode": 0}
-    assert seen == [["/usr/bin/docker", "stop", "nhms-db"]]
+    assert ["/usr/bin/docker", "stop", "nhms-db"] in seen
+    stop_timeouts = [item.get("timeout", 5) for item, argv in zip(kwargs_seen, seen) if argv[1] == "stop"]
+    assert stop_timeouts and stop_timeouts[0] >= 90
+
+
+def test_docker_stop_uses_observed_stop_timeout_plus_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict] = []
+
+    def fake(argv, **kwargs):
+        seen.append({"argv": list(argv), **kwargs})
+        if argv[1] == "inspect":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "sha256:test",
+                            "Name": "/nhms-db",
+                            "Config": {"StopTimeout": 300, "Image": "timescale/timescaledb-ha:pg15-latest"},
+                            "HostConfig": {},
+                            "Image": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+                            "Mounts": [],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", fake)
+    docker = DockerBoundary()
+    docker.action(("/usr/bin/docker", "stop", "nhms-db"))
+    stop = next(item for item in seen if item["argv"][1] == "stop")
+    inspect = next(item for item in seen if item["argv"][1] == "inspect")
+    assert inspect.get("timeout", 5) == 5
+    assert stop["timeout"] >= 390
+
+
+def test_docker_action_timeout_after_possible_mutation_retains_pending_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
+
+    def fake(argv, **kwargs):
+        if argv[1] == "inspect":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "sha256:test",
+                            "Name": "/nhms-db",
+                            "Config": {"StopTimeout": 10},
+                            "HostConfig": {},
+                            "Mounts": [],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        raise ColdRuntimeError("target inspector timed out", error_class="target_identity", stage="target_identity")
+
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", fake)
+    with pytest.raises(ColdHostError, match="timed out"):
+        DockerBoundary().action(("/usr/bin/docker", "stop", "nhms-db"))
+
+
+def test_docker_stop_refuses_when_stop_timeout_cannot_be_observed(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake(argv, **kwargs):
+        seen.append(list(argv))
+        if argv[1] == "inspect":
+            return SimpleNamespace(returncode=1, stdout="", stderr="no such container")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", fake)
+    with pytest.raises(ColdHostError, match="StopTimeout|inspect|failed"):
+        DockerBoundary().action(("/usr/bin/docker", "stop", "nhms-db"))
+    assert not any(item[1] == "stop" for item in seen)
+
+
+def test_inspect_running_target_refuses_uid_only_config_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    docker = _running_target_docker(monkeypatch, seen=seen, config_user="1005")
+    with pytest.raises(ColdHostError, match="User"):
+        inspect_running_target(docker, expected_uid=1005, expected_gid=1005)
+    assert seen == []
+
+
+def test_inspect_running_target_refuses_config_user_mismatch_before_writable_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    docker = _running_target_docker(monkeypatch, seen=seen)
+    monkeypatch.setattr(
+        docker,
+        "inspect",
+        lambda name: {
+            "Config": {"User": "postgres"},
+            "Mounts": [
+                {
+                    "Source": str(docker.identity.host_path),
+                    "Destination": docker.identity.container_path,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ColdHostError, match="User"):
+        inspect_running_target(docker, expected_uid=1005, expected_gid=1005)
+
+    assert seen == []
 
 
 def _running_target_docker(
@@ -173,6 +303,7 @@ def _running_target_docker(
     *,
     host_uid: int = 1005,
     host_gid: int = 1005,
+    config_user: str | None = None,
     seen: list[list[str]] | None = None,
 ) -> DockerBoundary:
     docker = DockerBoundary()
@@ -196,6 +327,7 @@ def _running_target_docker(
         docker,
         "inspect",
         lambda name: {
+            "Config": {"User": config_user if config_user is not None else f"{host_uid}:{host_gid}"},
             "Mounts": [
                 {
                     "Source": str(identity.host_path),
@@ -229,7 +361,9 @@ def test_inspect_running_target_refuses_host_owner_mismatch_before_docker_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[list[str]] = []
-    docker = _running_target_docker(monkeypatch, host_uid=999, host_gid=999, seen=seen)
+    docker = _running_target_docker(
+        monkeypatch, host_uid=999, host_gid=999, config_user="1005:1005", seen=seen
+    )
 
     with pytest.raises(ColdHostError, match="owner"):
         inspect_running_target(docker, expected_uid=1005, expected_gid=1005)

@@ -19,7 +19,8 @@
   },
   "container_snapshot": {
     "config_digest": null,
-    "environment_names": []
+    "environment_names": [],
+    "resolved_image_id": null
   },
   "evidence": {
     "health": {

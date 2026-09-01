@@ -58,7 +58,7 @@ def receipt_template(config: InstallConfig, *, outcome: str, state: str) -> dict
         "container": identity.container_name,
         "identity": identity.public_payload(),
         "path": empty_path(identity),
-        "container_snapshot": {"config_digest": None, "environment_names": []},
+        "container_snapshot": {"config_digest": None, "environment_names": [], "resolved_image_id": None},
         "evidence": {"health": {}, "backup": {}, "capacity": {}},
         "readback": {
             "approved": False,
@@ -177,7 +177,11 @@ def container_snapshot_payload(snapshot: ContainerSnapshot) -> dict[str, Any]:
     """
 
     public = snapshot.public_payload()
-    return {"config_digest": snapshot.config_digest, "environment_names": public["environment_names"]}
+    return {
+        "config_digest": snapshot.config_digest,
+        "environment_names": public["environment_names"],
+        "resolved_image_id": snapshot.resolved_image_id,
+    }
 
 
 def set_authority_receipt(receipt: dict[str, Any], authority: Mapping[str, Any], *, state: str = "sidecar") -> None:
@@ -216,6 +220,9 @@ def example_receipt(*, outcome: str, head_sha: str) -> dict[str, Any]:
     )
     receipt = receipt_template(config, outcome=outcome, state=state)
     if outcome in {"installed", "already_ready"}:
+        receipt["container_snapshot"]["resolved_image_id"] = (
+            "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+        )
         receipt["readback"] = {
             "approved": True,
             "catalog_location": PRODUCTION_IDENTITY.container_path,

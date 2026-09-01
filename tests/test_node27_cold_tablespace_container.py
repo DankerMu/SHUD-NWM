@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID, PINNED_IMAGE_REF
 from packages.common.node27_cold_tablespace_container import (
     COLD_BIND,
     COLD_CONTAINER_PATH,
@@ -22,8 +23,9 @@ def _inspect(*, env: list[str] | None = None, include_unsupported: bool = False)
     payload = {
         "Id": "sha256:container-before",
         "Name": "/nhms-db",
+        "Image": PINNED_IMAGE_ID,
         "Config": {
-            "Image": "timescale/timescaledb-ha:pg15-latest",
+            "Image": PINNED_IMAGE_ID,
             "Env": env or ["POSTGRES_PASSWORD=ultra-secret", "POSTGRES_USER=nhms", "PGDATA=/home/postgres/pgdata/data"],
             "Cmd": ["postgres"],
             "Entrypoint": None,
@@ -90,7 +92,8 @@ def test_recreate_argv_preserves_exact_supported_nondefault_configuration_and_ad
     assert ("--cpus", "2") == tuple(argv[argv.index("--cpus") : argv.index("--cpus") + 2])
     assert ("--restart", "unless-stopped") == tuple(argv[argv.index("--restart") : argv.index("--restart") + 2])
     assert COLD_BIND in argv
-    assert argv[-2:] == ("timescale/timescaledb-ha:pg15-latest", "postgres")
+    assert argv[-2:] == (PINNED_IMAGE_ID, "postgres")
+    assert PINNED_IMAGE_REF not in argv
     assert not any("/bin/sh" in item or "$(" in item for item in argv)
 
 
@@ -106,6 +109,11 @@ def test_normalized_public_snapshot_excludes_secret_values_but_private_snapshot_
     assert public["environment_names"] == ["PGDATA", "POSTGRES_PASSWORD", "POSTGRES_USER"]
     assert "ultra-secret" in rendered_private
     assert public["config_digest"] == snapshot.config_digest
+    assert snapshot.image == PINNED_IMAGE_ID
+    assert snapshot.resolved_image_id == PINNED_IMAGE_ID
+    assert public["resolved_image_id"] == PINNED_IMAGE_ID
+    assert private["resolved_image_id"] == PINNED_IMAGE_ID
+    assert "ultra-secret" not in json.dumps(public)
 
 
 def test_exact_diff_accepts_only_cold_bind_and_rejects_image_env_port_resource_or_mount_drift() -> None:
@@ -137,6 +145,14 @@ def test_exact_diff_accepts_only_cold_bind_and_rejects_image_env_port_resource_o
     changed = _inspect()
     changed["HostConfig"]["Binds"].append("/tmp/extra:/extra:rw")
     assert diff_container_config(before, normalize_raw_inspect(changed)).approved is False
+
+    same_ref_different_id = _inspect()
+    same_ref_different_id["Image"] = "sha256:" + "0" * 64
+    same_ref_different_id["HostConfig"]["Binds"].append(COLD_BIND)
+    drifted = normalize_raw_inspect(same_ref_different_id)
+    assert drifted.image == PINNED_IMAGE_ID
+    assert drifted.resolved_image_id != before.resolved_image_id
+    assert diff_container_config(before, drifted).approved is False
 
 
 def test_nondefault_healthcheck_or_multi_argument_entrypoint_blocks_exact_recreation() -> None:
@@ -377,3 +393,103 @@ def test_nondefault_or_malformed_masked_paths_are_refused(masked: list[str]) -> 
 
 def test_cold_bind_is_exact_fixed_host_to_container_mapping() -> None:
     assert COLD_BIND == f"{COLD_HOST_PATH}:{COLD_CONTAINER_PATH}:rw"
+
+
+def test_real_two_segment_default_rw_binds_normalize_recreate_and_diff() -> None:
+    raw = _inspect()
+    raw["HostConfig"]["Binds"] = [
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data",
+        "/home/ghdc/nwm/Basins:/data/GHDC:rw",
+        "/home/nwm/nhms-evidence:/var/lib/postgresql/evidence",
+    ]
+    snapshot = normalize_raw_inspect(raw)
+    argv = build_recreate_argv(snapshot, replacement_name="nhms-db")
+    volumes = [argv[index + 1] for index, item in enumerate(argv) if item in {"-v", "--volume"}]
+
+    assert "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data:rw" in snapshot.binds
+    assert "/home/nwm/nhms-evidence:/var/lib/postgresql/evidence:rw" in snapshot.binds
+    assert "/home/ghdc/nwm/Basins:/data/GHDC:rw" in snapshot.binds
+    assert all(":" in bind for bind in volumes)
+    after_raw = _inspect()
+    after_raw["Id"] = "sha256:container-after"
+    after_raw["HostConfig"]["Binds"] = [
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data",
+        "/home/ghdc/nwm/Basins:/data/GHDC:rw",
+        "/home/nwm/nhms-evidence:/var/lib/postgresql/evidence",
+        COLD_BIND,
+    ]
+    after = normalize_raw_inspect(after_raw)
+    assert diff_container_config(snapshot, after).approved is True
+    assert after.binds != snapshot.binds
+    assert set(after.binds) - set(snapshot.binds) == {COLD_BIND}
+
+
+def test_live_three_two_segment_binds_only_differ_by_cold_bind() -> None:
+    raw = _inspect()
+    raw["HostConfig"]["Binds"] = [
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data",
+        "/home/ghdc/nwm:/data/GHDC",
+        "/home/nwm/nhms-evidence:/var/lib/postgresql/evidence",
+    ]
+    before = normalize_raw_inspect(raw)
+    after_raw = _inspect()
+    after_raw["Id"] = "sha256:container-after"
+    after_raw["HostConfig"]["Binds"] = [
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data",
+        "/home/ghdc/nwm:/data/GHDC",
+        "/home/nwm/nhms-evidence:/var/lib/postgresql/evidence",
+        COLD_BIND,
+    ]
+    after = normalize_raw_inspect(after_raw)
+    diff = diff_container_config(before, after)
+    assert diff.approved is True
+    assert diff.changed_fields == ("binds",)
+
+
+def test_unsupported_bind_option_and_duplicate_or_empty_binds_are_refused() -> None:
+    raw = _inspect()
+    raw["HostConfig"]["Binds"] = ["/home/nwm/nhms-pgdata:/home/postgres/pgdata/data:rw,Z"]
+    with pytest.raises(ContainerContractError, match="bind"):
+        normalize_raw_inspect(raw)
+
+    raw = _inspect()
+    raw["HostConfig"]["Binds"] = [
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data",
+        "/home/nwm/nhms-pgdata:/home/postgres/pgdata/data:rw",
+    ]
+    with pytest.raises(ContainerContractError, match="bind"):
+        normalize_raw_inspect(raw)
+
+
+def test_config_stop_timeout_is_modeled_and_conflicting_hostconfig_is_refused() -> None:
+    raw = _inspect()
+    raw["Config"]["StopTimeout"] = 300
+    raw["HostConfig"].pop("StopTimeout", None)
+    snapshot = normalize_raw_inspect(raw)
+    argv = build_recreate_argv(snapshot, replacement_name="nhms-db")
+    assert snapshot.stop_timeout == 300
+    assert ("--stop-timeout", "300") == tuple(argv[argv.index("--stop-timeout") : argv.index("--stop-timeout") + 2])
+
+    conflict = _inspect()
+    conflict["Config"]["StopTimeout"] = 300
+    conflict["HostConfig"]["StopTimeout"] = 10
+    with pytest.raises(ContainerContractError, match="StopTimeout"):
+        normalize_raw_inspect(conflict)
+
+
+def test_non_sha_document_image_is_refused() -> None:
+    raw = _inspect()
+    raw["Image"] = "timescale/timescaledb-ha:pg15-latest"
+    with pytest.raises(ContainerContractError, match="sha256"):
+        normalize_raw_inspect(raw)
+
+
+def test_tag_only_config_image_normalizes_but_preflight_must_refuse_it() -> None:
+    raw = _inspect()
+    raw["Config"]["Image"] = PINNED_IMAGE_REF
+    snapshot = normalize_raw_inspect(raw)
+    assert snapshot.image == PINNED_IMAGE_REF
+    assert snapshot.resolved_image_id == PINNED_IMAGE_ID
+    argv = build_recreate_argv(snapshot, replacement_name="nhms-db")
+    assert argv[-2] == PINNED_IMAGE_ID
+    assert snapshot.image != argv[-2]

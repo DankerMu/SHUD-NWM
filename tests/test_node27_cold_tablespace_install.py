@@ -104,12 +104,20 @@ def _backup(*, complete: bool = True) -> dict:
     }
 
 
-def _inspect(*, cold_bind: bool = False, name: str = "nhms-db", container_id: str = "sha256:old") -> dict:
+def _inspect(
+    *,
+    cold_bind: bool = False,
+    name: str = "nhms-db",
+    container_id: str = "sha256:old",
+    running: bool = True,
+) -> dict:
     return {
         "Id": container_id,
         "Name": f"/{name}",
+        "Image": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+        "State": {"Running": running},
         "Config": {
-            "Image": "timescale/timescaledb-ha:pg15-latest",
+            "Image": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
             "Env": ["POSTGRES_PASSWORD=do-not-leak", "POSTGRES_USER=nhms"],
             "Cmd": ["postgres"],
             "Entrypoint": None,
@@ -156,7 +164,7 @@ def _inspect(*, cold_bind: bool = False, name: str = "nhms-db", container_id: st
 
 def _dependencies(connection: FakeConnection, *, cold_bind: bool = False) -> InstallDependencies:
     actions: list[tuple[str, tuple[str, ...]]] = []
-    state = {"current": "nhms-db", "prior": None, "cold_bind": cold_bind, "next_id": 1}
+    state = {"current": "nhms-db", "prior": None, "cold_bind": cold_bind, "next_id": 1, "running": True}
 
     def inspect(name: str) -> dict:
         if name == state["current"]:
@@ -164,15 +172,25 @@ def _dependencies(connection: FakeConnection, *, cold_bind: bool = False) -> Ins
                 cold_bind=bool(state["cold_bind"]),
                 name=name,
                 container_id=f"sha256:current-{state['next_id']}",
+                running=bool(state["running"]),
             )
         if name == state["prior"]:
-            return _inspect(cold_bind=False, name=name, container_id="sha256:old")
+            return _inspect(cold_bind=False, name=name, container_id="sha256:old", running=False)
         raise RuntimeError(f"missing synthetic container {name}")
+
+    def inspect_optional(name: str) -> dict | None:
+        if name in {state["current"], state["prior"]} and name is not None:
+            return inspect(name)
+        return None
 
     def docker(argv: tuple[str, ...]) -> dict:
         actions.append(("docker", argv))
         command = argv[1]
         if command == "stop":
+            state["running"] = False
+            return {"returncode": 0}
+        if command == "start":
+            state["running"] = True
             return {"returncode": 0}
         if command == "rename":
             source, target = argv[2:4]
@@ -186,6 +204,7 @@ def _dependencies(connection: FakeConnection, *, cold_bind: bool = False) -> Ins
         if command == "run":
             state["current"] = "nhms-db"
             state["cold_bind"] = True
+            state["running"] = True
             state["next_id"] += 1
             return {"returncode": 0}
         if command == "rm":
@@ -212,6 +231,7 @@ def _dependencies(connection: FakeConnection, *, cold_bind: bool = False) -> Ins
         inspect_backup=lambda *_targets: _backup(),
         inspect_container=lambda: inspect("nhms-db"),
         inspect_named_container=inspect,
+        inspect_named_container_optional=inspect_optional,
         docker=docker,
         connect=lambda: connection,
         inspect_target=target,
@@ -440,7 +460,6 @@ def test_enforce_refuses_to_proceed_after_recreate_without_sql_readiness_boundar
     assert result.receipt["authority"]["state"] == "sidecar"
     assert not any(sql.startswith("CREATE TABLESPACE") for sql, _params in connection.calls)
     assert any(argv[1] == "run" for _kind, argv in deps.action_log)
-    assert any(argv[1] == "rm" for _kind, argv in deps.action_log)
     assert config.recovery_path.exists()
 
 
@@ -465,6 +484,22 @@ def test_post_recreate_config_drift_rolls_back_before_ddl(tmp_path: Path) -> Non
     assert result.outcome == "rollback"
     assert not any(sql.startswith("CREATE TABLESPACE") for sql, _params in connection.calls)
     assert any(argv[1:3] == ("rename", "nhms-db-before") for _kind, argv in deps.action_log)
+
+
+def test_production_non_pinned_resolved_image_refuses_before_mutation(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    raw = _inspect()
+    raw["Image"] = "sha256:" + "1" * 64
+    deps.inspect_container = lambda: raw
+    deps.inspect_named_container = lambda _name: raw
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "no_go", result.receipt
+    assert deps.action_log == []
+    assert not any(sql.startswith("CREATE TABLESPACE") for sql, _params in connection.calls)
 
 
 def test_enforce_persists_private_recovery_before_stop_rename_then_creates_catalog_after_bind_ready(
@@ -543,10 +578,12 @@ def test_installed_receipt_reports_live_recreated_snapshot_and_in_progress_keeps
     assert progress["snapshot"] == {
         "config_digest": before.config_digest,
         "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+        "resolved_image_id": before.resolved_image_id,
     }
     assert result.receipt["container_snapshot"] == {
         "config_digest": after.config_digest,
         "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+        "resolved_image_id": after.resolved_image_id,
     }
     assert result.receipt["container_snapshot"]["config_digest"] != before.config_digest
     assert "do-not-leak" not in json.dumps(result.receipt)
@@ -611,9 +648,14 @@ def test_readback_requires_catalog_bind_device_writable_no_attach_and_pg_default
 
     result = run_install(config, deps)
 
-    assert result.outcome in {"rollback", "error"}
+    assert result.outcome == "rollback", result.receipt
+    assert result.receipt["state"] == "rollback"
+    assert result.receipt["authority"] == {"state": "closed", "phase": None, "path_present": False}
+    assert not config.recovery_path.exists()
     assert result.receipt["readback"]["approved"] is False
     assert any("writable" in item for item in result.receipt["blockers"])
+    assert not any(str(sql).startswith(("CREATE TABLESPACE", "DROP TABLESPACE")) for sql, _params in connection.calls)
+    assert [argv[1] for _kind, argv in deps.action_log] == ["stop", "rename", "run", "rm", "rename", "start"]
 
 
 def test_malformed_recovery_authority_blocks_a_new_enforce_run_without_mutation(tmp_path: Path) -> None:
@@ -694,6 +736,7 @@ def _recovery_authority(*, phase: str, **ownership: bool) -> dict:
         "expected": {
             "cold_bind": f"{COLD_HOST_PATH}:{COLD_CONTAINER_PATH}:rw",
             "config_digest": replacement.config_digest,
+            "resolved_image_id": before.resolved_image_id,
         },
         "path": {"device_identity": "8:11:1", "uid": 999, "gid": 999, "mode": 0o700},
         "ownership": {
@@ -725,9 +768,11 @@ def test_recovery_complete_target_is_idempotent_and_removes_authority_after_term
     result = run_install(config, deps)
 
     assert result.outcome == "installed"
+    live = normalize_raw_inspect(deps.inspect_container())
     assert result.receipt["container_snapshot"] == {
-        "config_digest": normalize_raw_inspect(deps.inspect_container()).config_digest,
+        "config_digest": live.config_digest,
         "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+        "resolved_image_id": live.resolved_image_id,
     }
     assert "do-not-leak" in private_before
     assert "do-not-leak" not in json.dumps(result.receipt)
