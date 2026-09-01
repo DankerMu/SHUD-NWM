@@ -105,6 +105,14 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 - WHEN the evidence payload fits within `max_evidence_bytes`
 - THEN the artifact carries full candidate detail and contains neither `limit.pre_limit_status` nor `limit.candidate_lists`.
 
+#### Scenario: completed audit detail is summarized before the bounded fallback
+
+- WHEN a normal pass payload exceeds `max_evidence_bytes` only because it repeats terminal skipped-candidate history or retention entry inventories
+- THEN the writer MAY summarize terminal `skipped_candidates` to their bounded identity/reason rows and replace retention entry lists with their existing count/frontier summary
+- AND non-terminal skipped candidates retain their complete evidence
+- AND the pass status remains its computed non-blocked status, no `limit` block is introduced, and `evidence_compaction` records the normal-detail projection
+- AND if that projection still exceeds the bound, the existing fail-closed bounded fallback applies unchanged.
+
 #### Scenario: terminal limit compaction remains the fail-closed floor
 
 - WHEN even the summarized-and-dropped payload exceeds the bound and the existing terminal limit-compaction tier rewrites the `limit` block to its reason-only form
@@ -357,4 +365,3 @@ Readiness root discovery and scheduler pass-evidence retention SHALL use one sha
 
 - **WHEN** an operator supplies one scheduler evidence file explicitly instead of a root
 - **THEN** readiness validates that selected file through the existing content contract without applying root-discovery filename filtering
-

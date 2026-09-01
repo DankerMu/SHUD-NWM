@@ -133,6 +133,26 @@ def _serialized_evidence_within_limit(
             return without_circuit, serialized
         payload = without_circuit
 
+    # A finished candidate cannot be acted on by this pass any more, so retaining
+    # its complete journal history only makes the receipt grow with historical
+    # success.  Likewise, retention's per-file inventory is useful while the
+    # cleanup runs, but repeating thousands of unchanged ``skipped`` entries in
+    # every scheduler receipt can make an otherwise admissible pass fail closed.
+    #
+    # This is deliberately a *pre-fallback* projection: it keeps the original
+    # pass status, preserves non-terminal/in-flight skip evidence verbatim, and
+    # records exactly which normal-detail blocks were summarized.  If this
+    # bounded projection still does not fit, the existing fail-closed evidence
+    # fallback below remains authoritative.
+    admission_compacted = _compact_admissible_pass_payload(payload)
+    if admission_compacted is not None:
+        serialized = _serialize_evidence_json_if_within_limit(
+            admission_compacted,
+            max_evidence_bytes=context.max_evidence_bytes,
+        )
+        if serialized is not None:
+            return admission_compacted, serialized
+
     bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
     bounded_payload = _fit_bounded_evidence_payload(
         bounded_payload,
@@ -268,6 +288,65 @@ def _fit_bounded_evidence_payload(
             return bounded_payload
 
     return bounded_payload
+
+
+def _compact_admissible_pass_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Summarize only completed audit detail before the fail-closed fallback.
+
+    The scheduler has already consumed ``skipped_candidates`` and ``retention``
+    by the time this writer-side projection runs.  Therefore it cannot weaken
+    cancellation, retry, frontier, or deletion behavior.  It exists solely to
+    keep a normal pass receipt within its fixed size contract.
+    """
+
+    compacted = dict(payload)
+    compacted_terminal_skips = 0
+    skipped_candidates = payload.get("skipped_candidates")
+    if isinstance(skipped_candidates, Sequence) and not isinstance(skipped_candidates, str | bytes | bytearray):
+        compacted_skips: list[Any] = []
+        for row in skipped_candidates:
+            if _is_terminal_skipped_candidate(row):
+                compacted_skips.append(_bounded_candidate_summary(row))
+                compacted_terminal_skips += 1
+            else:
+                compacted_skips.append(row)
+        if compacted_terminal_skips:
+            compacted["skipped_candidates"] = compacted_skips
+
+    retention_entry_counts = _retention_entry_counts(payload.get("retention"))
+    if retention_entry_counts:
+        compacted["retention"] = _compact_retention(payload.get("retention"))
+
+    if not compacted_terminal_skips and not retention_entry_counts:
+        return None
+
+    evidence_compaction: dict[str, Any] = {
+        "status": "applied",
+        "reason": "pre_write_size_pressure",
+    }
+    if compacted_terminal_skips:
+        evidence_compaction["terminal_skipped_candidates_compacted"] = compacted_terminal_skips
+    if retention_entry_counts:
+        evidence_compaction["retention_entry_counts_compacted"] = retention_entry_counts
+    compacted["evidence_compaction"] = evidence_compaction
+    return compacted
+
+
+def _is_terminal_skipped_candidate(row: Any) -> bool:
+    """Whether a skipped row is a completed terminal outcome, never in-flight work."""
+
+    return isinstance(row, Mapping) and str(row.get("reason") or "").startswith("terminal_")
+
+
+def _retention_entry_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    counts: dict[str, int] = {}
+    for field_name in ("planned", "deleted", "skipped", "failed"):
+        entries = value.get(field_name)
+        if isinstance(entries, Sequence) and not isinstance(entries, str | bytes | bytearray) and entries:
+            counts[field_name] = len(entries)
+    return counts
 
 
 def _summarize_bounded_candidate_lists(payload: dict[str, Any]) -> None:
