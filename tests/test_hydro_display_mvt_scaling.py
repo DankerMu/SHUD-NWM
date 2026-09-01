@@ -8,6 +8,7 @@ from typing import Any
 
 from apps.api.routes import hydro_display
 from services.tiles.mvt import (
+    NATIONAL_DISCHARGE_QUERY_VERSION,
     TileInput,
     TileResponse,
     layer_metadata,
@@ -56,7 +57,10 @@ def test_national_source_generations_change_with_data_identity() -> None:
     )
     second = _Session([{**first.rows[0], "run_id": "run_b"}])
 
-    assert national_discharge_source_version(first) != national_discharge_source_version(second)
+    first_version = national_discharge_source_version(first)
+
+    assert first_version.startswith(f"hydro-national:{NATIONAL_DISCHARGE_QUERY_VERSION}:")
+    assert first_version != national_discharge_source_version(second)
     assert "ROW_NUMBER() OVER" in first.sql
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in first.sql
     assert "AND mi.active_flag" in first.sql
@@ -197,6 +201,19 @@ def test_national_queries_filter_stream_type_before_geometry_materialization() -
     assert "LEAST(" in hydro_sql
     assert "nsm.max_stream_type" in hydro_sql
     assert "seg.stream_type IS NULL" in hydro_sql
+
+
+def test_national_hydro_tile_fairly_caps_rows_before_the_shared_mvt_budget() -> None:
+    hydro_sql = postgis_tile_sql("hydro-national")
+    single_run_sql = postgis_tile_sql("hydro")
+
+    assert "national_ranked AS" in hydro_sql
+    assert "PARTITION BY river_network_version_id" in hydro_sql
+    assert "ORDER BY network_rank, value DESC NULLS LAST," in hydro_sql
+    assert "tile_feature_rank <= :feature_limit" in hydro_sql
+    assert "tile_coordinate_rank <= :collection_coordinate_limit" in hydro_sql
+    assert hydro_sql.index("national_budget_window AS") < hydro_sql.index("budget_stats AS")
+    assert "national_budget_window AS" not in single_run_sql
 
 
 def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: Any) -> None:
