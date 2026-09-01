@@ -31,6 +31,7 @@ from packages.common.node27_cold_tablespace_recovery import (
 from packages.common.node27_cold_tablespace_topology import (
     has_cold_bind,
     inspect_preconditions,
+    path_admission_blockers,
     path_decision,
     quiescence_blockers,
     readback,
@@ -203,13 +204,31 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
 
         connection = _connect_observation(deps, readonly=not config.enforce)
         snapshot, path_observed, precondition_blockers = inspect_preconditions(config, deps, receipt, connection)
-        topology_errors, topology = topology_blockers(connection, deps, snapshot, config.identity, receipt)
-        blockers = tuple(dict.fromkeys((*precondition_blockers, *topology_errors)))
+        topology_errors, topology, complete_ready = topology_blockers(
+            connection, deps, snapshot, config.identity, receipt
+        )
         bind_present = has_cold_bind(snapshot, config.identity)
-        if topology == "expected" and bind_present and receipt["readback"]["approved"] and not blockers:
+        path_blockers = path_admission_blockers(config, path_observed, complete_ready=complete_ready)
+        blockers = tuple(dict.fromkeys((*precondition_blockers, *topology_errors, *path_blockers)))
+        if complete_ready and not blockers:
             return _complete_existing(config=config, schema=schema, deps=deps, receipt=receipt)
         if blockers:
             return no_go(config=config, schema=schema, now=now_value, receipt=receipt, blockers=blockers, deps=deps)
+        if not config.enforce:
+            return InstallResult(
+                "dry_run",
+                publish_with_dependencies(config.receipt_path, receipt, schema, deps),
+                dict(schema),
+            )
+        if topology != "absent" or bind_present:
+            return no_go(
+                config=config,
+                schema=schema,
+                now=now_value,
+                receipt=receipt,
+                blockers=["partial or drifted topology is present"],
+                deps=deps,
+            )
         if not config.enforce:
             return InstallResult(
                 "dry_run",

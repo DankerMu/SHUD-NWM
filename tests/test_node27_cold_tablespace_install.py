@@ -288,6 +288,97 @@ def test_already_ready_topology_is_no_write_even_in_enforce_mode(tmp_path: Path)
     assert not config.recovery_path.exists()
 
 
+def test_already_ready_allows_postgres_version_subtree_with_no_write(tmp_path: Path) -> None:
+    connection = FakeConnection(topology="ready")
+    deps = _dependencies(connection, cold_bind=True)
+    resident = _path_observation()
+    resident["entry_count"] = 1
+    deps.inspect_path = lambda: resident
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "already_ready", result.receipt
+    assert result.receipt["path"]["empty"] is False
+    jsonschema.validate(_read(config.receipt_path), result.schema)
+    assert not deps.action_log
+    assert not any(sql.startswith("CREATE TABLESPACE") for sql, _params in connection.calls)
+    assert not config.recovery_path.exists()
+
+
+@pytest.mark.parametrize(
+    "deviation",
+    (
+        {"uid": 998},
+        {"gid": 998},
+        {"mode": 0o755},
+        {"device_identity": "8:11:2"},
+        {"is_symlink": True, "is_directory": False},
+        {"entry_count": None},
+    ),
+)
+def test_already_ready_refuses_nonempty_resident_path_with_any_gate_violation(
+    tmp_path: Path, deviation: dict[str, object]
+) -> None:
+    connection = FakeConnection(topology="ready")
+    deps = _dependencies(connection, cold_bind=True)
+    resident = _path_observation()
+    resident["entry_count"] = 1
+    resident.update(deviation)
+    deps.inspect_path = lambda: resident
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "no_go", result.receipt
+    assert not deps.action_log
+
+
+def test_absent_topology_with_nonempty_path_is_rejected_as_fresh(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    resident = _path_observation()
+    resident["entry_count"] = 1
+    deps.inspect_path = lambda: resident
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "no_go", result.receipt
+    assert any("empty" in blocker for blocker in result.receipt["blockers"])
+    assert not deps.action_log
+
+
+def test_partial_topology_with_nonempty_path_is_no_go_without_mutation(tmp_path: Path) -> None:
+    connection = FakeConnection(topology="drifted")
+    deps = _dependencies(connection, cold_bind=True)
+    resident = _path_observation()
+    resident["entry_count"] = 1
+    deps.inspect_path = lambda: resident
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "no_go", result.receipt
+    assert any("topology" in blocker for blocker in result.receipt["blockers"])
+    assert not deps.action_log
+
+
+def test_dry_run_complete_resident_topology_is_no_write_already_ready(tmp_path: Path) -> None:
+    connection = FakeConnection(topology="ready")
+    deps = _dependencies(connection, cold_bind=True)
+    resident = _path_observation()
+    resident["entry_count"] = 1
+    deps.inspect_path = lambda: resident
+    config = _config(tmp_path, enforce=False)
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "already_ready", result.receipt
+    assert result.receipt["path"]["empty"] is False
+    assert not deps.action_log
+
+
 def test_enforce_discovers_existing_external_tablespaces_before_accepting_backup_scope(tmp_path: Path) -> None:
     connection = FakeConnection()
     deps = _dependencies(connection)

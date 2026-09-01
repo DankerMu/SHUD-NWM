@@ -14,6 +14,7 @@ from packages.common.node27_cold_tablespace_evidence import (
     PathObservation,
     assess_fresh_path,
     assess_install_capacity,
+    assess_resident_path,
     parse_backup_inventory,
     parse_mdadm_evidence,
     parse_smart_evidence,
@@ -245,6 +246,51 @@ def test_fresh_path_contract_rejects_every_unsafe_shape(
 
     assert decision.approved is approved, label
     assert (not decision.blockers) is approved
+
+
+_RESIDENT_OK = dict(uid=999, gid=999, mode=0o700, mount_device="8:11", device_identity="8:11:1", free_bytes=1_000)
+
+
+def _resident_path(*, entry_count: int | None = 1, **overrides) -> PathObservation:
+    values = dict(_RESIDENT_OK, entry_count=entry_count, **overrides)
+    return PathObservation(
+        exists=values.pop("exists", True),
+        is_symlink=values.pop("is_symlink", False),
+        is_directory=values.pop("is_directory", True),
+        **values,
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "observation", "approved"),
+    [
+        ("resident-version-subtree", _resident_path(), True),
+        ("resident-many", _resident_path(entry_count=3), True),
+        ("resident-none-count", _resident_path(entry_count=None), False),
+        ("resident-negative-count", _resident_path(entry_count=-1), False),
+        ("resident-symlink", _resident_path(is_symlink=True, is_directory=False), False),
+        ("resident-not-directory", _resident_path(is_directory=False), False),
+        ("resident-missing", _resident_path(exists=False, entry_count=None), False),
+        ("resident-wrong-owner", _resident_path(uid=998), False),
+        ("resident-wrong-mode", _resident_path(mode=0o755), False),
+        ("resident-wrong-device", _resident_path(device_identity="8:11:2"), False),
+        ("resident-no-mount", _resident_path(mount_device=None), False),
+    ],
+)
+def test_resident_path_contract_accepts_postgres_version_subtree_and_rejects_unsafe_shapes(
+    label: str, observation: PathObservation, approved: bool
+) -> None:
+    decision = assess_resident_path(
+        observation,
+        expected_uid=999,
+        expected_gid=999,
+        expected_mode=0o700,
+        expected_device_identity="8:11:1",
+    )
+
+    assert decision.approved is approved, label
+    if not approved:
+        assert decision.blockers
 
 
 def test_install_capacity_requires_install_and_rollback_headroom() -> None:

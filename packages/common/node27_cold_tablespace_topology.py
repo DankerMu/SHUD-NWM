@@ -10,7 +10,12 @@ from packages.common.node27_cold_tablespace_container import (
     diff_container_config,
     normalize_raw_inspect,
 )
-from packages.common.node27_cold_tablespace_evidence import PathObservation, assess_fresh_path, assess_install_capacity
+from packages.common.node27_cold_tablespace_evidence import (
+    PathObservation,
+    assess_fresh_path,
+    assess_install_capacity,
+    assess_resident_path,
+)
 from packages.common.node27_cold_tablespace_identity import ColdTablespaceIdentity
 from packages.common.node27_cold_tablespace_receipt import optional_int, optional_string, path_payload
 from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies
@@ -105,6 +110,16 @@ def path_observation(observed: Mapping[str, Any]) -> PathObservation:
 
 def path_decision(config: InstallConfig, observed: Mapping[str, Any]):
     return assess_fresh_path(
+        path_observation(observed),
+        expected_uid=config.expected_uid,
+        expected_gid=config.expected_gid,
+        expected_mode=config.expected_mode,
+        expected_device_identity=config.expected_device_identity,
+    )
+
+
+def resident_path_decision(config: InstallConfig, observed: Mapping[str, Any]):
+    return assess_resident_path(
         path_observation(observed),
         expected_uid=config.expected_uid,
         expected_gid=config.expected_gid,
@@ -292,14 +307,6 @@ def inspect_preconditions(
         },
     }
     blockers: list[str] = []
-    decision = path_decision(config, path)
-    if not decision.approved:
-        if config.enforce and not path_observation(path).exists:
-            creatable, path_blockers = missing_path_is_creatable(config, path)
-            if not creatable:
-                blockers.extend(path_blockers)
-        else:
-            blockers.extend(decision.blockers)
     for observed, label in ((health, "root storage health is not proven"), (backup, "backup coverage is incomplete")):
         if observed.get("healthy" if observed is health else "complete") is not True:
             values = observed.get("blockers")
@@ -314,13 +321,40 @@ def inspect_preconditions(
     return snapshot, path, tuple(dict.fromkeys(blockers))
 
 
+def path_admission_blockers(
+    config: InstallConfig,
+    observed: Mapping[str, Any],
+    *,
+    complete_ready: bool,
+) -> tuple[str, ...]:
+    """Choose the resident or fresh host-path gate for the observed topology state.
+
+    A complete ready topology (exact catalog, exact current bind, approved
+    readback) admits PostgreSQL's deterministic version subtree with a nonzero
+    observed entry count.  Every other topology keeps the fresh contract:
+    existing paths must be empty, and an absent path must be a creatable pinned
+    parent (enforce) or must fail closed (dry-run).
+    """
+
+    if complete_ready:
+        decision = resident_path_decision(config, observed)
+        return decision.blockers
+    decision = path_decision(config, observed)
+    if decision.approved:
+        return ()
+    if config.enforce and not path_observation(observed).exists:
+        creatable, path_blockers = missing_path_is_creatable(config, observed)
+        return () if creatable else path_blockers
+    return decision.blockers
+
+
 def topology_blockers(
     connection: Any,
     deps: InstallDependencies,
     snapshot: ContainerSnapshot,
     identity: ColdTablespaceIdentity,
     receipt: dict[str, Any],
-) -> tuple[tuple[str, ...], str]:
+) -> tuple[tuple[str, ...], str, bool]:
     topology, _location, _target = catalog_topology(connection, identity)
     bind = has_cold_bind(snapshot, identity)
     current_refs = tuple(deps.current_bind_references())
@@ -338,9 +372,12 @@ def topology_blockers(
     unexpected_current = tuple(ref for ref in current_refs if not installer_current_bind_reference(identity, ref))
     if unexpected_current:
         blockers.append("another current container has a cold bind")
+    complete_ready = False
     if topology == "expected" and bind:
         receipt["readback"] = readback(connection, deps, identity)
-        if not receipt["readback"]["approved"]:
+        if receipt["readback"]["approved"]:
+            complete_ready = True
+        else:
             blockers.append("complete topology readback drifted")
     elif topology != "absent" or bind:
         blockers.append("partial or drifted topology is present")
@@ -348,7 +385,7 @@ def topology_blockers(
         blockers.append("dangling pg_tblspc reference is present")
     if topology == "absent" and tuple(deps.current_bind_references()):
         blockers.append("dangling current container bind is present")
-    return tuple(dict.fromkeys(blockers)), topology
+    return tuple(dict.fromkeys(blockers)), topology, complete_ready
 
 
 def rollback_path_state(

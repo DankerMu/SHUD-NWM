@@ -433,14 +433,14 @@ def parse_backup_inventory(
     )
 
 
-def assess_fresh_path(
+def _shared_path_gates(
     observation: PathObservation,
     *,
     expected_uid: int,
     expected_gid: int,
     expected_mode: int,
     expected_device_identity: str,
-) -> PathDecision:
+) -> list[str]:
     blockers: list[str] = []
     if not observation.exists:
         blockers.append("host path is missing")
@@ -448,8 +448,6 @@ def assess_fresh_path(
         blockers.append("host path must not be a symlink")
     if not observation.is_directory:
         blockers.append("host path must be a directory")
-    if observation.entry_count != 0:
-        blockers.append("fresh host path must be empty")
     if observation.uid != expected_uid or observation.gid != expected_gid:
         blockers.append("host path owner identity differs")
     if observation.mode != expected_mode:
@@ -460,6 +458,58 @@ def assess_fresh_path(
         blockers.append("host path mount identity is unavailable")
     if observation.free_bytes is None or observation.free_bytes < 0:
         blockers.append("host path capacity observation is unavailable")
+    return blockers
+
+
+def assess_fresh_path(
+    observation: PathObservation,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    expected_mode: int,
+    expected_device_identity: str,
+) -> PathDecision:
+    blockers = _shared_path_gates(
+        observation,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        expected_mode=expected_mode,
+        expected_device_identity=expected_device_identity,
+    )
+    if observation.entry_count != 0:
+        blockers.append("fresh host path must be empty")
+    return PathDecision(approved=not blockers, blockers=tuple(blockers))
+
+
+def assess_resident_path(
+    observation: PathObservation,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    expected_mode: int,
+    expected_device_identity: str,
+) -> PathDecision:
+    """Admit a PostgreSQL-owned nonempty host path only when it is a live resident.
+
+    A fresh install requires an empty path; a complete ready topology owns the
+    directory through PostgreSQL, which deterministically creates a version
+    subtree (``PG_15_...``).  The entry count must still be observed as a
+    non-negative number, but a nonzero count is not itself a failure.  Catalog,
+    exact bind, and approved readback are the authority that selects this gate;
+    this assessment never whitelists directory names.
+    """
+
+    blockers = _shared_path_gates(
+        observation,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        expected_mode=expected_mode,
+        expected_device_identity=expected_device_identity,
+    )
+    if observation.entry_count is None:
+        blockers.append("resident host path entry count was not observed")
+    elif observation.entry_count < 0:
+        blockers.append("resident host path entry count is negative")
     return PathDecision(approved=not blockers, blockers=tuple(blockers))
 
 
