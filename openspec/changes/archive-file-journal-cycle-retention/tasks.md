@@ -31,5 +31,5 @@ Non-goals: production enforcement activation; state-index/direct-record pruning;
 
 ## 5. Review and Completion
 
-- [ ] 5.1 Complete high-risk cross-review of file/path safety, concurrent writer exclusion, canonical live-row preservation, archive idempotency/recovery, evidence coverage, and #1775 history-anchor compatibility; close every blocking finding.
+- [x] 5.1 Complete high-risk cross-review of file/path safety, concurrent writer exclusion, canonical live-row preservation, archive idempotency/recovery, evidence coverage, and #1775 history-anchor compatibility; close every blocking finding.
 - [ ] 5.2 Confirm every acceptance scenario and Evidence Floor item on the frozen final head, with no weakened tests/specs and no untracked `red-proof` stash.
