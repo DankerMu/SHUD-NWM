@@ -296,10 +296,41 @@ def test_resident_path_contract_accepts_postgres_version_subtree_and_rejects_uns
 def test_install_capacity_requires_install_and_rollback_headroom() -> None:
     exact = assess_install_capacity(free_bytes=300, install_required_bytes=100, rollback_headroom_bytes=200)
     short = assess_install_capacity(free_bytes=299, install_required_bytes=100, rollback_headroom_bytes=200)
+    zero = assess_install_capacity(free_bytes=0, install_required_bytes=100, rollback_headroom_bytes=200)
+    missing = assess_install_capacity(free_bytes=None, install_required_bytes=100, rollback_headroom_bytes=200)
 
     assert exact.approved is True
+    assert exact.free_bytes == 300
+    assert exact.install_required_bytes == 100
+    assert exact.rollback_headroom_bytes == 200
+    assert exact.required_bytes == 300
+    assert exact.blockers == ()
+
     assert short.approved is False
+    assert short.free_bytes == 299
     assert short.required_bytes == 300
+    assert short.blockers == ("cold filesystem lacks install plus rollback headroom",)
+
+    assert zero.approved is False
+    assert zero.free_bytes == 0
+    assert zero.required_bytes == 300
+    assert zero.blockers == ("cold filesystem lacks install plus rollback headroom",)
+
+    assert missing.approved is False
+    assert missing.free_bytes is None
+    assert missing.required_bytes == 300
+    assert missing.blockers == ("host path capacity observation is unavailable",)
+
+
+def test_install_capacity_rejects_negative_observed_and_config_bytes() -> None:
+    with pytest.raises(ValueError, match="capacity values must be non-negative"):
+        assess_install_capacity(free_bytes=-1, install_required_bytes=100, rollback_headroom_bytes=200)
+    with pytest.raises(ValueError, match="capacity values must be non-negative"):
+        assess_install_capacity(free_bytes=300, install_required_bytes=-1, rollback_headroom_bytes=200)
+    with pytest.raises(ValueError, match="capacity values must be non-negative"):
+        assess_install_capacity(free_bytes=300, install_required_bytes=100, rollback_headroom_bytes=-1)
+    with pytest.raises(ValueError, match="capacity values must be non-negative"):
+        assess_install_capacity(free_bytes=None, install_required_bytes=-1, rollback_headroom_bytes=200)
 
 
 def test_single_smart_evidence_cannot_be_reused_for_both_member_identities(tmp_path: Path) -> None:

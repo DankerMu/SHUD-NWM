@@ -280,6 +280,80 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _assert_capacity_no_go_without_mutation(
+    result,
+    connection: FakeConnection,
+    deps: InstallDependencies,
+    config: InstallConfig,
+    *,
+    free_bytes: int | None,
+    blocker: str,
+) -> dict[str, Any]:
+    receipt = _read(config.receipt_path)
+    capacity = result.receipt["evidence"]["capacity"]
+    assert result.outcome == "no_go"
+    assert result.receipt["state"] == "blocked"
+    assert receipt["outcome"] == "no_go"
+    assert receipt["state"] == "blocked"
+    assert capacity["free_bytes"] == free_bytes
+    assert capacity["install_required_bytes"] == 100
+    assert capacity["rollback_headroom_bytes"] == 200
+    assert capacity["required_bytes"] == 300
+    assert capacity["approved"] is False
+    assert capacity["blockers"] == [blocker]
+    assert result.receipt["blockers"] == [blocker]
+    assert result.receipt["error"] is None
+    assert result.receipt["authority"] == {"state": "closed", "phase": None, "path_present": False}
+    assert result.receipt["ownership"]["recovery_authority"] is False
+    assert not config.recovery_path.exists()
+    assert deps.action_log == []
+    assert not any(sql.startswith(("CREATE TABLESPACE", "DROP TABLESPACE")) for sql, _params in connection.calls)
+    jsonschema.validate(receipt, result.schema)
+    return capacity
+
+
+def test_enforce_zero_free_bytes_preserves_measured_capacity_and_named_blocker(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    observed = _path_observation()
+    observed["free_bytes"] = 0
+    deps.inspect_path = lambda: observed
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    _assert_capacity_no_go_without_mutation(
+        result,
+        connection,
+        deps,
+        config,
+        free_bytes=0,
+        blocker="cold filesystem lacks install plus rollback headroom",
+    )
+
+
+def test_enforce_missing_free_bytes_is_named_unavailable_without_mutation(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    observed = _path_observation()
+    observed["free_bytes"] = None
+    deps.inspect_path = lambda: observed
+    config = _config(tmp_path, enforce=True)
+
+    result = run_install(config, deps)
+
+    capacity = _assert_capacity_no_go_without_mutation(
+        result,
+        connection,
+        deps,
+        config,
+        free_bytes=None,
+        blocker="host path capacity observation is unavailable",
+    )
+    assert "cold filesystem lacks install plus rollback headroom" not in capacity["blockers"]
+    assert "cold filesystem lacks install plus rollback headroom" not in result.receipt["blockers"]
+
+
 def test_dry_run_default_never_connects_or_mutates_and_publishes_schema_valid_receipt(tmp_path: Path) -> None:
     connection = FakeConnection()
     deps = _dependencies(connection)

@@ -322,7 +322,7 @@ def inspect_preconditions(
     receipt["path"] = path_payload(identity, path)
     receipt["container_snapshot"] = container_snapshot_payload(snapshot)
     capacity = assess_install_capacity(
-        free_bytes=optional_int(path.get("free_bytes")) or -1,
+        free_bytes=optional_int(path.get("free_bytes")),
         install_required_bytes=config.install_required_bytes,
         rollback_headroom_bytes=config.rollback_headroom_bytes,
     )

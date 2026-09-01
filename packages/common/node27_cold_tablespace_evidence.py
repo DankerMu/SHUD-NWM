@@ -135,7 +135,7 @@ class PathDecision:
 
 @dataclass(frozen=True)
 class CapacityDecision:
-    free_bytes: int
+    free_bytes: int | None
     install_required_bytes: int
     rollback_headroom_bytes: int
     required_bytes: int
@@ -515,14 +515,19 @@ def assess_resident_path(
 
 def assess_install_capacity(
     *,
-    free_bytes: int,
+    free_bytes: int | None,
     install_required_bytes: int,
     rollback_headroom_bytes: int,
 ) -> CapacityDecision:
-    if min(free_bytes, install_required_bytes, rollback_headroom_bytes) < 0:
+    if min(install_required_bytes, rollback_headroom_bytes) < 0:
+        raise ValueError("capacity values must be non-negative")
+    if free_bytes is not None and free_bytes < 0:
         raise ValueError("capacity values must be non-negative")
     required = install_required_bytes + rollback_headroom_bytes
-    blockers = () if free_bytes >= required else ("cold filesystem lacks install plus rollback headroom",)
+    if free_bytes is None:
+        blockers = ("host path capacity observation is unavailable",)
+    else:
+        blockers = () if free_bytes >= required else ("cold filesystem lacks install plus rollback headroom",)
     return CapacityDecision(
         free_bytes=free_bytes,
         install_required_bytes=install_required_bytes,
