@@ -1,0 +1,12 @@
+[Unit]
+Description=NHMS node-22 scheduler journal-cycle cold retention
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node22_scheduler_journal_retention.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800

@@ -2574,6 +2574,80 @@ jialingjiang，而这两个流域各已有 73 条 published run。
 （另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
 与 NFS `/ghdc/data` 不是同一个文件系统。）
 
+### 5.8 node-22 file-journal cycle cold archive（未启用）
+
+`nhms-scheduler-journal-retention.timer` 是独立的 user-systemd oneshot：只会读取并在
+明确启用后归档 `NHMS_SCHEDULER_JOURNAL_ROOT` 内的 `latest/`、`journal/` 和
+`pipeline-events/` 的完整 `(source_id, cycle)` 切片。它**不会**扫描、改写或删除
+`pipeline-jobs/`、`reconcile-inventory/`、`.locks/` 或 state-index；它也不会给 tar
+archive 加透明读取层或自动恢复器。
+
+本 PR 安装的默认配置为 `ENABLED=false`、`DRY_RUN=true`，timer 文件本身也是 inert，
+不会安装或 enable 任何生产 unit。首次部署**不得覆盖**已有的 untracked
+`infra/env/compute.scheduler-dbfree.env`。先保留现场 0600 文件，按模板仅合并并逐项核对以下四个
+retention key：`NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED=false`、
+`NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN=true`、
+`NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS=90`、
+`NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=.../journal-archive`。unit 的安装与任何 dry-run
+均为后续已授权操作；本 PR 不执行 SSH、安装、start 或 enable。node-22 维护窗口前如获授权，
+必须使用已激活解释器，禁止环境重建命令：
+
+```bash
+# 在 node-22 的 /scratch/frd_muziyao/NWM 执行；先编辑既有 0600 env，
+# 保留所有现场 key，只合并上面四个 retention key。
+grep '^NHMS_SCHEDULER_JOURNAL_RETENTION_' infra/env/compute.scheduler-dbfree.env
+install -m 0644 infra/systemd/nhms-scheduler-journal-retention.service \
+  ~/.config/systemd/user/nhms-scheduler-journal-retention.service
+install -m 0644 infra/systemd/nhms-scheduler-journal-retention.timer \
+  ~/.config/systemd/user/nhms-scheduler-journal-retention.timer
+systemctl --user daemon-reload
+/scratch/frd_muziyao/NWM/.venv/bin/python \
+  /scratch/frd_muziyao/NWM/scripts/node22_scheduler_journal_retention.py
+```
+
+receipt 写在 `<NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT>/retention/`。先看
+`preflight_blockers`（空才有安全证明）、`frontier`（必须是 fresh `status=ok`）、
+`discovery`（必须完整而非 blocked），再看每 cycle 的 `status` / `reason`：
+
+- `planned`：dry-run 识别了完整成员列表和字节数，未创建 archive、未删热文件；
+- `archived`：已验证 archive/manifest 后才删除 manifest 绑定的热成员；
+- `live_row`、`pipeline_frontier_exempt`、`in_flight`：分别表示可恢复 scheduler 行、
+  当前 frontier 窗口和 writer 锁争用，均为保留而非故障；
+- `blocked`：前置窗口、frontier、发现、成员完整性、archive 冲突或工具验证没有证明安全，
+  不得绕过；修根因后重跑。已发布 archive 而只删掉部分成员可安全重跑；冲突 archive 必须
+  人工比较 manifest/digest，绝不覆盖。
+
+**后续启用不属于本 PR。** 只有在 live-tree dry-run receipt 和隔离副本 enforce/restore
+演练都由操作负责人审阅后，才可在独立变更中先将 `ENABLED=true` 且仍保留
+`DRY_RUN=true` 观察，再设置 `DRY_RUN=false` 并明确 `systemctl --user enable --now`
+timer。没有 scheduler-wide idle 条件；每一个 cycle 由既有 flock 非阻塞串行，锁忙直接跳过。
+
+恢复始终是离线、单 cycle 操作：先停止或排除该 cycle 的 writer，保存 archive 前的
+`query_pipeline_jobs_by_cycle` 输出，然后验证、stage 并 no-clobber restore，最后比对查询：
+
+```bash
+# 写入隔离 staging 根；目标热文件已存在、路径逃逸、symlink 或 digest 不同都会拒绝。
+/scratch/frd_muziyao/NWM/.venv/bin/python \
+  /scratch/frd_muziyao/NWM/scripts/node22_scheduler_journal_retention.py verify-restore \
+  --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" \
+  --archive-root "$NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT" \
+  --source-id gfs --cycle 2026050100 \
+  --stage-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal-restore-stage
+
+/scratch/frd_muziyao/NWM/.venv/bin/python - <<'PY'
+import json, os
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from workers.data_adapters.base import parse_cycle_time
+root = os.environ["NHMS_SCHEDULER_JOURNAL_ROOT"]
+repo = FileOrchestrationJournalRepository(root)
+print(json.dumps(repo.query_pipeline_jobs_by_cycle("gfs_2026050100"), sort_keys=True))
+PY
+```
+
+将最后的 JSON 与 archive 前捕获的 cycle query 作逐字节或结构化等价比对，确认每个 restored
+member 的 manifest SHA-256；确认 `pipeline-jobs/` 与 state-index 的前后 checksum 不变后，才
+重新允许 writer。恢复不编辑 direct records、inventory 或 state-index。
+
 ## 6. 如何判断是否卡住
 
 先分清三种状态：

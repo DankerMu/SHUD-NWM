@@ -45,6 +45,11 @@ from packages.common.safe_fs import (
     rmtree_no_follow,
     unlink_no_follow_durable,
 )
+from packages.common.safe_fs_publication import (
+    make_directory_no_follow_exclusive,
+    move_regular_file_no_follow_exclusive,
+    write_bytes_no_follow_exclusive,
+)
 
 
 def test_directory_identity_is_stable_across_different_input_strings(
@@ -303,6 +308,97 @@ def test_met_evidence_lane_reports_a_structured_evidence_code(
 
     assert excinfo.value.error_code.startswith("PRODUCTION_MET_EVIDENCE_")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_make_directory_no_follow_exclusive_creates_once_and_refuses_existing(tmp_path: Path) -> None:
+    target = tmp_path / "bundle"
+
+    assert make_directory_no_follow_exclusive(target) == target
+    assert target.is_dir()
+    with pytest.raises(FileExistsError):
+        make_directory_no_follow_exclusive(target)
+
+
+def test_make_directory_no_follow_exclusive_reports_post_create_fsync_as_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "bundle"
+    original_fsync = os.fsync
+
+    def fail_parent_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected directory fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr("packages.common.safe_fs_publication.os.fsync", fail_parent_fsync)
+    with pytest.raises(SafeFilesystemError) as raised:
+        make_directory_no_follow_exclusive(target)
+    assert raised.value.kind == "indeterminate"
+    assert target.is_dir()
+
+
+def test_exclusive_regular_move_is_no_clobber(tmp_path: Path) -> None:
+    source_parent = tmp_path / "source"
+    destination_parent = tmp_path / "destination"
+    source_parent.mkdir()
+    destination_parent.mkdir()
+    source = source_parent / "archive"
+    source.write_bytes(b"cold-bytes")
+
+    moved = move_regular_file_no_follow_exclusive(source_parent, "archive", destination_parent, "archive")
+
+    assert moved == destination_parent / "archive"
+    assert not source.exists()
+    assert moved.read_bytes() == b"cold-bytes"
+    source.write_bytes(b"other-bytes")
+    with pytest.raises(FileExistsError):
+        move_regular_file_no_follow_exclusive(source_parent, "archive", destination_parent, "archive")
+
+
+def test_exclusive_regular_move_keeps_source_when_destination_durability_is_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_parent = tmp_path / "source"
+    destination_parent = tmp_path / "destination"
+    source_parent.mkdir()
+    destination_parent.mkdir()
+    source = source_parent / "archive"
+    source.write_bytes(b"cold-bytes")
+    original_fsync = os.fsync
+
+    def fail_destination_fsync(fd: int) -> None:
+        if os.fstat(fd).st_ino == destination_parent.stat().st_ino:
+            raise OSError("injected destination fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr("packages.common.safe_fs_publication.os.fsync", fail_destination_fsync)
+    with pytest.raises(SafeFilesystemError) as raised:
+        move_regular_file_no_follow_exclusive(source_parent, "archive", destination_parent, "archive")
+
+    assert raised.value.kind == "indeterminate"
+    assert source.read_bytes() == b"cold-bytes"
+    assert (destination_parent / "archive").read_bytes() == b"cold-bytes"
+
+
+def test_exclusive_write_requires_durable_parent_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "receipt.json"
+    original_fsync = os.fsync
+
+    def fail_parent_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected directory fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr("packages.common.safe_fs_publication.os.fsync", fail_parent_fsync)
+    with pytest.raises(SafeFilesystemError) as raised:
+        write_bytes_no_follow_exclusive(target, b"{}\n", require_durable_create=True)
+    assert raised.value.kind == "indeterminate"
+    assert target.read_bytes() == b"{}\n"
 
 
 def test_unlink_no_follow_durable_fsyncs_parent(tmp_path: Path) -> None:

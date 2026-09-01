@@ -251,7 +251,6 @@ def write_bytes_no_follow_exclusive(
         os.close(parent_fd)
     return target
 
-
 def open_file_no_follow(path: Path, *, containment_root: Path | None = None) -> int:
     """Open a file for reading without following symlinked parents or target."""
 

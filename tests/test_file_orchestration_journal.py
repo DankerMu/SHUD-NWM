@@ -371,6 +371,53 @@ def _direct_forcing_context_record(
     )
 
 
+def test_retention_cycle_seam_discovers_complete_hot_union_and_holds_nonblocking_lock(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    job = _source_job(
+        cycle_time,
+        source_id="gfs",
+        job_id="job_fcst_gfs_2026050100_model_a_forecast",
+    )
+    job["status"] = "succeeded"
+    _write_json(
+        journal_root / "latest/gfs/2026050100/model_a.json",
+        _latest_view(cycle_time=cycle_time, jobs=[job]),
+    )
+    _write_jsonl(
+        journal_root / "journal/gfs/2026050100.jsonl",
+        [_journal_record(record_type="pipeline_job", source_id="gfs", cycle_time=cycle_time, payload=job)],
+    )
+    _write_jsonl(journal_root / "journal/gfs/2026050100.1.jsonl", [])
+    _write_jsonl(journal_root / "pipeline-events/gfs/2026050100.jsonl", [])
+    direct_record = _journal_record(
+        record_type="pipeline_job",
+        source_id="gfs",
+        cycle_time=cycle_time,
+        payload=job,
+    )
+    _write_json(journal_root / f"pipeline-jobs/{job['job_id']}.json", direct_record)
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    discovery = repository.discover_retention_cycles(max_files=16, max_depth=32)
+    assert discovery.status == "ok"
+    assert discovery.cycles == (("gfs", cycle_time),)
+    with repository.open_retention_cycle(source_id="gfs", cycle_time=cycle_time) as locked:
+        inspection = locked.inspect()
+        assert inspection.status == "eligible"
+        assert [member.relative_path for member in inspection.members] == [
+            "journal/gfs/2026050100.1.jsonl",
+            "journal/gfs/2026050100.jsonl",
+            "latest/gfs/2026050100/model_a.json",
+            "pipeline-events/gfs/2026050100.jsonl",
+        ]
+        with FileOrchestrationJournalRepository(journal_root).open_retention_cycle(
+            source_id="gfs", cycle_time=cycle_time
+        ) as busy:
+            assert busy.status == "busy"
+
+
 def test_file_orchestration_journal_read_contract_active_completed_and_contexts(tmp_path: Path) -> None:
     cycle_time = _dt("2026-06-28T00:00:00Z")
     journal_root = tmp_path / "journal"
