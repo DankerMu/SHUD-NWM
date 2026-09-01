@@ -10,7 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from packages.common.node27_cold_tablespace_integration import default_config, root_evidence_setup_argv
+from packages.common import node27_cold_tablespace_evidence as evidence
+from packages.common.node27_cold_tablespace_evidence import (
+    EvidencePolicy,
+    parse_backup_inventory,
+    verify_root_storage_evidence,
+)
+from packages.common.node27_cold_tablespace_integration import (
+    IntegrationResources,
+    RootEvidenceCapability,
+    default_config,
+    root_evidence_setup_argv,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _HELPER = _ROOT / "scripts/node27_cold_tablespace_root_evidence_setup.py"
@@ -51,6 +62,10 @@ def _arguments(tmp_path: Path, *, hostname: str):
             "timescale/timescaledb-ha:pg15-latest",
             "--hostname",
             hostname,
+            "--postgres-uid",
+            "1000",
+            "--postgres-gid",
+            "1000",
             "--reader-gid",
             str(os.getgid()),
         ]
@@ -59,7 +74,19 @@ def _arguments(tmp_path: Path, *, hostname: str):
 
 def test_root_evidence_setup_uses_direct_sudo_argv_and_preserves_root_owner_contract(tmp_path: Path) -> None:
     config = default_config(work_root=tmp_path / "nhms-1894-tablespace-deadbeef")
-    argv = root_evidence_setup_argv(config, action="prepare")
+    resources = IntegrationResources(
+        config=config,
+        capability=RootEvidenceCapability(
+            strategy="sudo",
+            postgres_uid=1000,
+            postgres_gid=1000,
+            image_id=config.image_id,
+            image_ref=config.image_ref,
+            image_default_user="postgres",
+            root_proof="sudo-noninteractive",
+        ),
+    )
+    argv = root_evidence_setup_argv(resources, action="prepare")
     source = _HELPER.read_text(encoding="utf-8")
 
     assert argv[:2] == ("/usr/bin/sudo", "-n")
@@ -68,6 +95,61 @@ def test_root_evidence_setup_uses_direct_sudo_argv_and_preserves_root_owner_cont
     assert "expected_uid=os.getuid" not in source
     assert "args.reader_gid" in source
     assert "path.chmod(0o640)" in source
+
+
+def test_host_rendered_documents_preserve_production_parser_contract_after_root_seal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _helper_module()
+    args = _arguments(tmp_path, hostname=f"nhms-1894-{socket.gethostname()}")
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1000)
+
+    args.work_root.mkdir(mode=0o700)
+    args.work_root.chmod(0o700)
+    module._validate_render(args)
+    module._render_evidence(args)
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    module._validate(args)
+    monkeypatch.setattr(module.os, "chown", lambda _path, _uid, _gid: None)
+    module._seal_evidence(args)
+    original_fstat = evidence.os.fstat
+
+    class RootOwnedStat:
+        def __init__(self, observed) -> None:
+            self._observed = observed
+            self.st_uid = 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._observed, name)
+
+    monkeypatch.setattr(evidence.os, "fstat", lambda fd: RootOwnedStat(original_fstat(fd)))
+
+    policy = EvidencePolicy(
+        expected_hostname=args.hostname,
+        array_device="/dev/md0",
+        max_age_seconds=300,
+        expected_uid=0,
+        approved_modes=(0o640,),
+        mdadm_argv=("/usr/sbin/mdadm", "--detail", "/dev/md0"),
+        smartctl_prefix=("/usr/sbin/smartctl",),
+        backup_argv=("/usr/local/sbin/nhms-backup-inventory", "--json"),
+        expected_pgdata=str(args.pgdata),
+    )
+    health = verify_root_storage_evidence(
+        args.evidence_root / "mdadm.json",
+        {device: args.evidence_root / f"smart-{Path(device).name}.json" for device in ("/dev/sdb1", "/dev/sdc1")},
+        policy=policy,
+        now=module.datetime.now(module.UTC),
+    )
+    backup = parse_backup_inventory(
+        args.evidence_root / "backup.json",
+        policy=policy,
+        external_targets=("/home/postgres/pgdata/tablespaces/nhms_cold",),
+        now=module.datetime.now(module.UTC),
+    )
+
+    assert health.healthy is True
+    assert backup.complete is True
 
 
 @pytest.mark.parametrize("hostname", ("nhms-1894-wrong-host", "wrong-host"))
@@ -108,6 +190,6 @@ def test_root_evidence_helper_has_only_explicit_owned_actions() -> None:
 
     assert any(
         {item.value for item in choice.elts if isinstance(item, ast.Constant)}
-        == {"prepare", "create-cold-path", "cleanup"}
+        == {"prepare", "render", "seal", "create-cold-path", "cleanup"}
         for choice in choices
     )

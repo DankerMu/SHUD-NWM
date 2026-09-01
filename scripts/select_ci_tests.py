@@ -2336,6 +2336,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "packages/common/node27_cold_tablespace_root_capability.py",
+        (
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+        ),
+    ),
+    PathTestRule(
         "scripts/node27_cold_tablespace_install.py",
         (
             "tests/test_node27_cold_tablespace_cli.py",

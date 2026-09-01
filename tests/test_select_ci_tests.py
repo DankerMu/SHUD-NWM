@@ -120,6 +120,10 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
             "tests/test_node27_cold_tablespace_marker_contract.py",
             "tests/test_node27_cold_tablespace_root_evidence.py",
         },
+        "packages/common/node27_cold_tablespace_root_capability.py": {
+            "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_cold_tablespace_root_evidence.py",
+        },
         "scripts/node27_cold_tablespace_install.py": {
             "tests/test_node27_cold_tablespace_cli.py",
             "tests/test_node27_cold_tablespace_install.py",

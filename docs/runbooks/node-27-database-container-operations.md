@@ -158,12 +158,17 @@ filesystem 或 DB 操作前拒绝 `nhms-db`、`nhms-db-before`、`/data/GHDC`、
 NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
 ```
 
-前提是 `nwm` 可对一个**已验证为 disposable**的唯一 root 使用免交互 sudo，先以 direct argv
-运行 checked-in `scripts/node27_cold_tablespace_root_evidence_setup.py --action prepare ...`；它必须创建
-root-owned approved mode `0640`、uid `0` 的 synthetic `mdadm`、两个 SMART PASS 与 backup inventory envelope。测试不会降低
-production parser 的 `expected_uid=0`、descriptor identity、hostname、command、subject/member 或 mode
-校验。若 `sudo -n` 或 root helper 不可用，marker 测试必须在 Docker mutation 前 skip/fail，并保留 actionable
-原因。测试 finally 必须检查 current/prior 均不存在、port 可 bind、并 identity-check 后删除 work root；清理失败即失败。
+前提是先量测 exact-SHA image 的默认 `postgres` uid/gid（不得把 `999` 或 `1000` 当作第二权威）。
+root capability 可为免交互 `sudo -n`，或在 sudo 不可用时由 exact-SHA image 的 isolated
+`--user 0:0` helper 证明；后者仅可使用唯一 ownership-prefixed helper name、`--network none`、一个
+owned work-root 到 `/nhms-owned` 的 RW bind，且不得携带 port、Docker socket、checkout 或 live path。
+宿主 Python 只在该 owned root render synthetic documents；image 内不得执行项目 Python，只可 root seal
+PGDATA、证据目录及四个 evidence 文件为 measured postgres / `root:reader_gid` ownership 和既定 mode。
+证据仍须是 root-owned approved mode `0640`、uid `0` 的 synthetic `mdadm`、两个 SMART PASS 与 backup
+inventory envelope，production parser 的 `expected_uid=0`、descriptor identity、hostname、command、subject/member
+或 mode 校验不降低。测试 finally 必须先证明 current/prior/root-helper 均不存在及 port 可 bind；cleanup 仅可
+删除 `pgdata`、`cold`、`evidence`、`receipts`、`postgres.env` 这些已知 child，未知 child 一律 refusal，随后宿主机
+只能删除已经为空的 work root。清理失败即失败。此文不声明 node-27 remote PASS。
 
 每一次 `--enforce` mutation 和 rollback 前，安装器都必须以固定 argv
 `/usr/bin/systemctl --user --no-pager show <unit> -p ActiveState -p SubState -p Result`

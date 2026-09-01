@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import stat
 import subprocess
@@ -41,6 +40,14 @@ from packages.common.node27_cold_tablespace_identity import (
     assert_disposable_absent,
     make_disposable_identity,
     validate_identity_for_action,
+)
+from packages.common.node27_cold_tablespace_root_capability import (
+    KNOWN_WORK_ROOT_CHILDREN,
+    RootCapabilityError,
+    RootEvidenceCapability,
+    assert_root_helpers_absent,
+    pinned_image_root_argv,
+    probe_root_evidence_capability,
 )
 from packages.common.node27_cold_tablespace_types import InstallDependencies
 
@@ -92,10 +99,16 @@ class IntegrationConfig:
 @dataclass
 class IntegrationResources:
     config: IntegrationConfig
+    capability: RootEvidenceCapability | None = None
     created_work_root: bool = False
     known_containers: set[str] = field(default_factory=set)
     env_path: Path | None = None
     actions: list[tuple[str, ...]] = field(default_factory=list)
+
+    def require_capability(self) -> RootEvidenceCapability:
+        if self.capability is None:
+            raise ColdTablespaceIntegrationError("root evidence capability was not established before resources")
+        return self.capability
 
 
 def default_config(*, work_root: Path | None = None, host_port: int | None = None) -> IntegrationConfig:
@@ -182,9 +195,13 @@ def _prepare_absence(config: IntegrationConfig, *, runner: Callable[..., subproc
 
 
 def prepare_resources(
-    config: IntegrationConfig, *, runner: Callable[..., subprocess.CompletedProcess[str]] = _run
+    config: IntegrationConfig,
+    *,
+    capability: RootEvidenceCapability | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
 ) -> IntegrationResources:
     validate_isolated_config(config)
+    resolved_capability = capability or require_root_evidence_capability(config, runner=runner)
     _prepare_absence(config, runner=runner)
     root = config.work_root
     root.mkdir(parents=True, mode=0o700)
@@ -195,7 +212,7 @@ def prepare_resources(
     for child in (root / "pgdata", root / "receipts"):
         child.mkdir(mode=0o700)
         child.chmod(0o700)
-    resources = IntegrationResources(config=config, created_work_root=True)
+    resources = IntegrationResources(config=config, capability=resolved_capability, created_work_root=True)
     env_path = root / "postgres.env"
     env_path.write_text(
         "POSTGRES_USER=postgres\n"
@@ -210,17 +227,12 @@ def prepare_resources(
     return resources
 
 
-def root_evidence_setup_argv(config: IntegrationConfig, *, action: str) -> tuple[str, ...]:
-    """Direct argv for the checked-in root helper; never shell-substitute it."""
-
-    if action not in {"prepare", "create-cold-path", "cleanup"}:
+def _resource_args(resources: IntegrationResources, *, action: str) -> tuple[str, ...]:
+    config = resources.config
+    capability = resources.require_capability()
+    if action not in {"prepare", "render", "seal", "create-cold-path", "cleanup"}:
         raise ColdTablespaceIntegrationError("root evidence helper action is invalid")
-    helper = Path(__file__).resolve().parents[2] / "scripts/node27_cold_tablespace_root_evidence_setup.py"
     return (
-        "/usr/bin/sudo",
-        "-n",
-        sys.executable,
-        os.fspath(helper),
         "--action",
         action,
         "--work-root",
@@ -238,22 +250,70 @@ def root_evidence_setup_argv(config: IntegrationConfig, *, action: str) -> tuple
         "--host-port",
         str(config.host_port),
         "--image-id",
-        config.image_id,
+        capability.image_id,
         "--image-ref",
-        config.image_ref,
+        capability.image_ref,
         "--hostname",
         f"nhms-1894-{socket.gethostname()}",
+        "--postgres-uid",
+        str(capability.postgres_uid),
+        "--postgres-gid",
+        str(capability.postgres_gid),
         "--reader-gid",
         str(os.getgid()),
     )
 
 
-def require_root_evidence_capability(*, runner: Callable[..., subprocess.CompletedProcess[str]] = _run) -> None:
-    """Check noninteractive root setup before any disposable filesystem/Docker action."""
+def root_evidence_setup_argv(resources: IntegrationResources, *, action: str) -> tuple[str, ...]:
+    """Direct sudo argv for the checked-in root helper; never shell-substitute it."""
 
-    probe = runner(("/usr/bin/sudo", "-n", "true"), timeout=15)
-    if probe.returncode != 0:
-        raise ColdTablespaceIntegrationError("sudo -n is unavailable for root-owned disposable evidence setup")
+    helper = Path(__file__).resolve().parents[2] / "scripts/node27_cold_tablespace_root_evidence_setup.py"
+    return ("/usr/bin/sudo", "-n", sys.executable, os.fspath(helper), *_resource_args(resources, action=action))
+
+
+def host_evidence_render_argv(resources: IntegrationResources) -> tuple[str, ...]:
+    """Host Python renders inert evidence only; it is never run in the image."""
+
+    helper = Path(__file__).resolve().parents[2] / "scripts/node27_cold_tablespace_root_evidence_setup.py"
+    return (sys.executable, os.fspath(helper), *_resource_args(resources, action="render"))
+
+
+def require_root_evidence_capability(
+    config: IntegrationConfig, *, runner: Callable[..., subprocess.CompletedProcess[str]] = _run
+) -> RootEvidenceCapability:
+    """Measure exact image identity before resources, then prefer sudo or prove isolated image root."""
+
+    try:
+        return probe_root_evidence_capability(config.identity, runner=runner)
+    except RootCapabilityError as error:
+        raise ColdTablespaceIntegrationError(str(error)) from error
+
+
+def _root_action(
+    resources: IntegrationResources,
+    *,
+    action: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    capability = resources.require_capability()
+    if capability.strategy == "sudo":
+        _checked(runner, root_evidence_setup_argv(resources, action=action), timeout=60)
+        return
+    try:
+        argv = pinned_image_root_argv(
+            resources.config.identity,
+            capability=capability,
+            work_root=resources.config.work_root,
+            reader_gid=os.getgid(),
+            action=action,
+        )
+        _checked(runner, argv, timeout=60)
+    except RootCapabilityError as error:
+        raise ColdTablespaceIntegrationError(str(error)) from error
+    try:
+        assert_root_helpers_absent(resources.config.identity, runner=runner)
+    except RootCapabilityError as error:
+        raise ColdTablespaceIntegrationError(str(error)) from error
 
 
 def root_evidence_ready(
@@ -261,11 +321,15 @@ def root_evidence_ready(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = _run,
 ) -> dict[str, Any]:
-    """Require root helper before Docker mutation and parse its exact evidence."""
+    """Render synthetic documents on the host, seal as root, then parse exact evidence."""
 
     config = resources.config
-    require_root_evidence_capability(runner=runner)
-    _checked(runner, root_evidence_setup_argv(config, action="prepare"), timeout=60)
+    capability = resources.require_capability()
+    if capability.strategy == "pinned_image":
+        _checked(runner, host_evidence_render_argv(resources), timeout=60)
+        _root_action(resources, action="prepare", runner=runner)
+    else:
+        _root_action(resources, action="prepare", runner=runner)
     policy = EvidencePolicy(
         expected_hostname=f"nhms-1894-{socket.gethostname()}",
         array_device="/dev/md0",
@@ -326,7 +390,9 @@ def root_evidence_ready(
     }
 
 
-def initial_container_argv(config: IntegrationConfig) -> tuple[str, ...]:
+def initial_container_argv(resources: IntegrationResources) -> tuple[str, ...]:
+    config = resources.config
+    capability = resources.require_capability()
     validate_isolated_config(config)
     return (
         config.docker_bin,
@@ -335,7 +401,7 @@ def initial_container_argv(config: IntegrationConfig) -> tuple[str, ...]:
         "--name",
         config.container_name,
         "--user",
-        "999:999",
+        f"{capability.postgres_uid}:{capability.postgres_gid}",
         "--env-file",
         str(config.work_root / "postgres.env"),
         "--restart",
@@ -356,9 +422,10 @@ def initial_container_argv(config: IntegrationConfig) -> tuple[str, ...]:
 def start_prior(
     resources: IntegrationResources, *, runner: Callable[..., subprocess.CompletedProcess[str]] = _run
 ) -> Mapping[str, Any]:
-    _checked(runner, initial_container_argv(resources.config))
+    argv = initial_container_argv(resources)
+    _checked(runner, argv)
     resources.known_containers.add(resources.config.container_name)
-    resources.actions.append(initial_container_argv(resources.config))
+    resources.actions.append(argv)
     wait_for_sql(resources.config)
     raw = inspect_container(resources.config, resources.config.container_name, runner=runner)
     used = raw.get("Image")
@@ -501,19 +568,21 @@ def _host_path(config: IntegrationConfig) -> dict[str, Any]:
 
 
 def _ensure_host_path(
-    config: IntegrationConfig, *, runner: Callable[..., subprocess.CompletedProcess[str]]
+    resources: IntegrationResources, *, runner: Callable[..., subprocess.CompletedProcess[str]]
 ) -> dict[str, Any]:
+    config = resources.config
+    capability = resources.require_capability()
     path = config.identity.host_path
     if path.exists():
         raise ColdTablespaceIntegrationError("synthetic cold path unexpectedly already exists")
-    _checked(runner, root_evidence_setup_argv(config, action="create-cold-path"), timeout=60)
+    _root_action(resources, action="create-cold-path", runner=runner)
     observed = _host_path(config)
     if (
         observed["exists"] is not True
         or observed["is_symlink"] is not False
         or observed["entry_count"] != 0
-        or observed["uid"] != 999
-        or observed["gid"] != 999
+        or observed["uid"] != capability.postgres_uid
+        or observed["gid"] != capability.postgres_gid
         or observed["mode"] != 0o700
     ):
         raise ColdTablespaceIntegrationError("root-created synthetic cold path differs from installer contract")
@@ -652,7 +721,7 @@ def dependencies(
         pg_tblspc_references=pg_refs,
         catalog_dependents=catalog_dependents,
         inspect_host_path_for_rollback=lambda: _host_path(config),
-        ensure_host_path=lambda: _ensure_host_path(config, runner=runner),
+        ensure_host_path=lambda: _ensure_host_path(resources, runner=runner),
         remove_host_path=lambda: _remove_host_path(config),
         wait_ready=lambda: wait_for_sql(config),
         inspect_quiescence=lambda: {
@@ -742,29 +811,50 @@ def cleanup(
     config = resources.config
     validate_isolated_config(config)
     failures: list[str] = []
+    containers_absent = True
     for name in (config.container_name, config.prior_container_name):
         result = runner((config.docker_bin, "rm", "-f", name), timeout=60)
         if result.returncode not in {0, 1}:
+            containers_absent = False
             failures.append(f"docker rm failed for {name}")
         inspected = runner((config.docker_bin, "inspect", name), timeout=20)
         if inspected.returncode == 0:
+            containers_absent = False
             failures.append(f"container remains after cleanup: {name}")
+    port_free = True
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", config.host_port))
     except OSError:
+        port_free = False
         failures.append("disposable PostgreSQL port remains bound")
     root = config.work_root
+    helpers_absent = False
+    try:
+        assert_root_helpers_absent(config.identity, runner=runner)
+    except RootCapabilityError:
+        failures.append("owned root helper remains after cleanup")
+    else:
+        helpers_absent = True
     if root.exists():
         try:
-            shutil.rmtree(root)
+            children = {child.name for child in root.iterdir()}
         except OSError:
-            # Root evidence/PGDATA can be intentionally root-owned.  Retry only
-            # through the same checked-in direct-argv helper that created it.
-            try:
-                _checked(runner, root_evidence_setup_argv(config, action="cleanup"), timeout=60)
-            except Exception:
-                failures.append("owned disposable work root removal failed")
+            failures.append("owned disposable work root cannot be inventoried")
+        else:
+            unknown = children - KNOWN_WORK_ROOT_CHILDREN
+            if unknown:
+                failures.append("owned disposable work root has unknown children")
+            elif containers_absent and port_free and helpers_absent:
+                try:
+                    _root_action(resources, action="cleanup", runner=runner)
+                except ColdTablespaceIntegrationError:
+                    failures.append("owned disposable work root removal failed")
+                else:
+                    try:
+                        root.rmdir()
+                    except OSError:
+                        failures.append("owned disposable work root was not empty after cleanup")
     if root.exists():
         failures.append("owned disposable work root remains")
     if failures:

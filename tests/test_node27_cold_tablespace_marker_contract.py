@@ -60,6 +60,26 @@ def test_real_oracle_has_all_three_opt_in_markers_but_local_identity_tests_remai
     assert marked["test_disposable_oracle_defaults_to_1892_pin_and_separate_identity"] == set()
 
 
+def test_real_oracle_collects_five_opt_in_nodes() -> None:
+    tree = ast.parse(_ORACLE_TEST.read_text(encoding="utf-8"), filename=str(_ORACLE_TEST))
+    interrupted = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_real_interrupted_replacement_recovers_without_install_replay"
+    )
+    parametrized = next(
+        decorator
+        for decorator in interrupted.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == "parametrize"
+    )
+    assert isinstance(parametrized.args[1], ast.Tuple)
+    assert len(parametrized.args[1].elts) == 3
+    assert 1 + 1 + len(parametrized.args[1].elts) == 5
+
+
 def test_real_oracle_imports_the_public_state_machine_and_forbids_legacy_bypass_symbols() -> None:
     tree = ast.parse(_ORACLE_TEST.read_text(encoding="utf-8"), filename=str(_ORACLE_TEST))
     source = _ORACLE_TEST.read_text(encoding="utf-8")

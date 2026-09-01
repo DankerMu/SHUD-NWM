@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,11 +41,10 @@ def _iso_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _write(path: Path, document: dict, *, gid: int) -> None:
+def _write(path: Path, document: dict) -> None:
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
     path.write_text(encoded, encoding="utf-8")
-    os.chown(path, 0, gid)
-    path.chmod(0o640)
+    path.chmod(0o600)
 
 
 def _envelope(*, hostname: str, argv: list[str], subject: dict, output: str) -> dict:
@@ -58,9 +58,7 @@ def _envelope(*, hostname: str, argv: list[str], subject: dict, output: str) -> 
     }
 
 
-def _validate(args: argparse.Namespace) -> None:
-    if os.geteuid() != 0:
-        raise RuntimeError("root evidence setup must run as uid 0 through sudo -n")
+def _validate_identity(args: argparse.Namespace) -> None:
     try:
         make_disposable_identity(
             container_name=args.container_name,
@@ -79,12 +77,43 @@ def _validate(args: argparse.Namespace) -> None:
         raise RuntimeError("synthetic PGDATA must be directly under the owned work root")
     if args.evidence_root.parent != args.work_root:
         raise RuntimeError("synthetic evidence root must be directly under the owned work root")
+    if args.cold_path.parent != args.work_root:
+        raise RuntimeError("synthetic cold path must be directly under the owned work root")
+    if min(args.postgres_uid, args.postgres_gid, args.reader_gid) <= 0:
+        raise RuntimeError("synthetic ownership identities must be positive")
 
 
-def _write_evidence(args: argparse.Namespace) -> None:
-    args.evidence_root.mkdir(mode=0o750, exist_ok=True)
-    os.chown(args.evidence_root, 0, args.reader_gid)
-    args.evidence_root.chmod(0o750)
+def _validate(args: argparse.Namespace) -> None:
+    if os.geteuid() != 0:
+        raise RuntimeError("root evidence setup must run as uid 0 through sudo -n")
+    _validate_identity(args)
+
+
+def _validate_render(args: argparse.Namespace) -> None:
+    if os.geteuid() == 0:
+        raise RuntimeError("synthetic evidence render must run as the unprivileged host user")
+    _validate_identity(args)
+    try:
+        root_info = args.work_root.stat(follow_symlinks=False)
+    except OSError as error:
+        raise RuntimeError("synthetic evidence render root is unavailable") from error
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or stat.S_ISLNK(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("synthetic evidence render root is not the exact owned work root")
+    if args.evidence_root.exists() or args.evidence_root.is_symlink():
+        raise RuntimeError("synthetic evidence render root is not absent")
+    children = {path.name for path in args.work_root.iterdir()}
+    allowed = {"pgdata", "receipts", "postgres.env"}
+    if children - allowed:
+        raise RuntimeError("synthetic evidence render root has unexpected children")
+
+
+def _render_evidence(args: argparse.Namespace) -> None:
+    args.evidence_root.mkdir(mode=0o700)
     mdadm_output = "\n".join(
         (
             "/dev/md0:",
@@ -108,7 +137,6 @@ def _write_evidence(args: argparse.Namespace) -> None:
             subject={"array_device": "/dev/md0"},
             output=mdadm_output,
         ),
-        gid=args.reader_gid,
     )
     for device in ("/dev/sdb1", "/dev/sdc1"):
         _write(
@@ -119,7 +147,6 @@ def _write_evidence(args: argparse.Namespace) -> None:
                 subject={"device": device},
                 output="SMART overall-health self-assessment test result: PASSED",
             ),
-            gid=args.reader_gid,
         )
     backup = _envelope(
         hostname=args.hostname,
@@ -131,13 +158,29 @@ def _write_evidence(args: argparse.Namespace) -> None:
         output="synthetic disposable backup inventory complete",
     )
     backup["covered_paths"] = [str(args.pgdata), "/home/postgres/pgdata/tablespaces/nhms_cold"]
-    _write(args.evidence_root / "backup.json", backup, gid=args.reader_gid)
+    _write(args.evidence_root / "backup.json", backup)
 
 
 def _prepare_pgdata(args: argparse.Namespace) -> None:
     args.pgdata.mkdir(mode=0o700, exist_ok=True)
     os.chown(args.pgdata, args.postgres_uid, args.postgres_gid)
     args.pgdata.chmod(0o700)
+
+
+def _seal_evidence(args: argparse.Namespace) -> None:
+    args.evidence_root.mkdir(mode=0o750, exist_ok=True)
+    root_info = args.evidence_root.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
+        raise RuntimeError("synthetic evidence root is unavailable for root sealing")
+    os.chown(args.evidence_root, 0, args.reader_gid)
+    args.evidence_root.chmod(0o750)
+    for name in ("mdadm.json", "smart-sdb1.json", "smart-sdc1.json", "backup.json"):
+        path = args.evidence_root / name
+        info = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1:
+            raise RuntimeError("synthetic evidence file is unavailable for root sealing")
+        os.chown(path, 0, args.reader_gid)
+        path.chmod(0o640)
 
 
 def _create_cold_path(args: argparse.Namespace) -> None:
@@ -152,15 +195,32 @@ def _cleanup(args: argparse.Namespace) -> None:
     root = args.work_root
     if not root.name.startswith(INTEGRATION_PREFIX) or root.parent == root:
         raise RuntimeError("root cleanup identity is unsafe")
-    if root.exists():
-        shutil.rmtree(root)
-    if root.exists():
-        raise RuntimeError("root cleanup could not prove work root absence")
+    if not root.exists():
+        return
+    known = {"pgdata", "cold", "evidence", "receipts", "postgres.env"}
+    children = {path.name for path in root.iterdir()}
+    if children - known:
+        raise RuntimeError("root cleanup refuses unknown owned-root child")
+    for name in ("pgdata", "cold", "evidence", "receipts"):
+        path = root / name
+        if path.exists():
+            if not path.is_dir() or path.is_symlink():
+                raise RuntimeError("root cleanup child is not a safe directory")
+            shutil.rmtree(path)
+    env_path = root / "postgres.env"
+    if env_path.exists():
+        if not env_path.is_file() or env_path.is_symlink():
+            raise RuntimeError("root cleanup environment child is unsafe")
+        env_path.unlink()
+    if any(root.iterdir()):
+        raise RuntimeError("root cleanup could not empty owned work root")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--action", choices=("prepare", "create-cold-path", "cleanup"), required=True)
+    parser.add_argument(
+        "--action", choices=("prepare", "render", "seal", "create-cold-path", "cleanup"), required=True
+    )
     parser.add_argument("--work-root", type=_absolute, required=True)
     parser.add_argument("--cold-path", type=_absolute, required=True)
     parser.add_argument("--pgdata", type=_absolute, required=True)
@@ -171,8 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-id", required=True)
     parser.add_argument("--image-ref", required=True)
     parser.add_argument("--hostname", required=True)
-    parser.add_argument("--postgres-uid", type=int, default=999)
-    parser.add_argument("--postgres-gid", type=int, default=999)
+    parser.add_argument("--postgres-uid", type=int, required=True)
+    parser.add_argument("--postgres-gid", type=int, required=True)
     parser.add_argument("--reader-gid", type=int, required=True)
     return parser
 
@@ -180,14 +240,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        _validate(args)
-        if args.action == "prepare":
-            _prepare_pgdata(args)
-            _write_evidence(args)
-        elif args.action == "create-cold-path":
-            _create_cold_path(args)
+        if args.action == "render":
+            _validate_render(args)
+            _render_evidence(args)
         else:
-            _cleanup(args)
+            _validate(args)
+            if args.action == "prepare":
+                _prepare_pgdata(args)
+                _render_evidence(args)
+                _seal_evidence(args)
+            elif args.action == "seal":
+                _seal_evidence(args)
+            elif args.action == "create-cold-path":
+                _create_cold_path(args)
+            else:
+                _cleanup(args)
     except (OSError, RuntimeError, ValueError) as error:
         raise SystemExit(f"root evidence setup refused: {error}") from error
     return 0

@@ -153,16 +153,21 @@ and binds optional prior receipt trend by no-follow mode-0600 identity.
 #1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
 `nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
 `/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
-identity（port 由内核临时分配，且永不为 55432），且 `sudo -n` 可用；root setup helper 以 direct argv 写入 root-owned、reader group 可读的 mode-0640
-synthetic mdadm、双 SMART PASS 和 backup evidence（production parser 的 uid 0 / descriptor / command /
-hostname / subject 检查不降低）。然后仅运行：
+identity（port 由内核临时分配，且永不为 55432）。先从 exact-SHA image 量测默认 `postgres`
+uid/gid，不得以 `999` 或 `1000` 代替该量测。root capability 可用 `sudo -n`；若不可用，才可由 exact-SHA
+image 的 isolated `--user 0:0` helper fallback。fallback 仅有一个 owned-root → `/nhms-owned` RW bind、唯一
+ownership-prefixed helper name 与 `--network none`，不得有 port、live path、Docker socket 或 checkout bind；image
+内不执行项目 Python，宿主 Python 只 render owned-root 内文件，image root 只 seal。它写入 root-owned、reader
+group 可读的 mode-0640 synthetic mdadm、双 SMART PASS 和 backup evidence（production parser 的 uid 0 /
+descriptor / command / hostname / subject 检查不降低）。cleanup 先证明 current/prior/helper absence 和 port free，
+只删 `pgdata`、`cold`、`evidence`、`receipts`、`postgres.env`；未知 child 必须拒绝，宿主只移除已空 root。然后仅运行：
 
 ```bash
 NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
 ```
 
-这不是 #1895 live rollout 授权。若 root setup 或 sudo 不可用，测试必须在 Docker mutation 前给出可行动
-skip/fail；不能用 `expected_uid=os.getuid()` 或任意 identity override 替代。
+这不是 #1895 live rollout 授权，也不声明 node-27 remote PASS。若 sudo 与 exact-image root fallback 均不可用，
+测试必须在 Docker mutation 前给出可行动 skip/fail；不能用 `expected_uid=os.getuid()` 或任意 identity override 替代。
 
 ## Timer cadence order (UTC)
 
