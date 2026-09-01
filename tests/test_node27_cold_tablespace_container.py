@@ -231,7 +231,7 @@ def test_unreconstructible_nondefault_host_configuration_blocks_before_replaceme
     raw = _inspect()
     raw["HostConfig"][field] = value
 
-    with pytest.raises(ContainerContractError, match="unsupported non-default"):
+    with pytest.raises(ContainerContractError, match="unsupported non-default|MaskedPaths"):
         normalize_raw_inspect(raw)
 
 
@@ -250,6 +250,129 @@ def test_rollback_plan_does_not_remove_an_uncreated_installer_container() -> Non
     )
 
     assert plan.remove_installer_container is False
+
+
+_CAPTURED_MASKED_PATHS = [
+    "/proc/asound",
+    "/proc/acpi",
+    "/proc/interrupts",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/latency_stats",
+    "/proc/timer_list",
+    "/proc/timer_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/sys/firmware",
+    "/sys/devices/virtual/powercap",
+    "/sys/devices/system/cpu/cpu0/thermal_throttle",
+    "/sys/devices/system/cpu/cpu1/thermal_throttle",
+    "/sys/devices/system/cpu/cpu2/thermal_throttle",
+    "/sys/devices/system/cpu/cpu3/thermal_throttle",
+]
+_CAPTURED_READONLY_PATHS = ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"]
+_SYNTHETIC_MEMORY = 536_870_912
+_SYNTHETIC_MEMORY_SWAP = 1_073_741_824
+
+
+def _captured_host_defaults(*, memory: int = _SYNTHETIC_MEMORY, memory_swap: int = _SYNTHETIC_MEMORY_SWAP) -> dict:
+    raw = _inspect()
+    raw["HostConfig"]["Memory"] = memory
+    raw["HostConfig"]["MemorySwap"] = memory_swap
+    raw["HostConfig"]["MaskedPaths"] = list(_CAPTURED_MASKED_PATHS)
+    raw["HostConfig"]["ReadonlyPaths"] = list(_CAPTURED_READONLY_PATHS)
+    return raw
+
+
+def test_captured_docker_28_hostconfig_defaults_are_reconstructed_without_secrets() -> None:
+    snapshot = normalize_raw_inspect(_captured_host_defaults())
+    argv = build_recreate_argv(snapshot, replacement_name="nhms-db")
+    public = json.dumps(snapshot.public_payload())
+    private = json.dumps(snapshot.private_payload())
+
+    assert snapshot.memory == _SYNTHETIC_MEMORY
+    assert snapshot.memory_swap == _SYNTHETIC_MEMORY_SWAP
+    assert snapshot.masked_paths == tuple(_CAPTURED_MASKED_PATHS)
+    assert snapshot.readonly_paths == tuple(_CAPTURED_READONLY_PATHS)
+    assert ("--memory", str(_SYNTHETIC_MEMORY)) == tuple(argv[argv.index("--memory") : argv.index("--memory") + 2])
+    assert ("--memory-swap", str(_SYNTHETIC_MEMORY_SWAP)) == tuple(
+        argv[argv.index("--memory-swap") : argv.index("--memory-swap") + 2]
+    )
+    assert "--masked-path" not in argv and "--read-only-path" not in argv
+    assert "ultra-secret" not in public
+    assert "ultra-secret" in private
+    assert snapshot.public_payload()["memory_swap"] == _SYNTHETIC_MEMORY_SWAP
+    assert snapshot.public_payload()["masked_paths"] == list(_CAPTURED_MASKED_PATHS)
+    assert snapshot.private_payload()["readonly_paths"] == list(_CAPTURED_READONLY_PATHS)
+
+
+def test_zero_memory_and_swap_emit_neither_memory_flag() -> None:
+    snapshot = normalize_raw_inspect(_captured_host_defaults(memory=0, memory_swap=0))
+    argv = build_recreate_argv(snapshot, replacement_name="nhms-db")
+
+    assert snapshot.memory == 0
+    assert snapshot.memory_swap == 0
+    assert "--memory" not in argv
+    assert "--memory-swap" not in argv
+
+
+def test_altered_memory_swap_or_derived_paths_fail_exact_diff() -> None:
+    before = normalize_raw_inspect(_captured_host_defaults())
+    after_raw = _captured_host_defaults()
+    after_raw["Id"] = "sha256:container-after"
+    after_raw["HostConfig"]["Binds"].append(COLD_BIND)
+    after = normalize_raw_inspect(after_raw)
+    assert diff_container_config(before, after).approved is True
+
+    swapped = _captured_host_defaults()
+    swapped["HostConfig"]["MemorySwap"] = _SYNTHETIC_MEMORY_SWAP + 1
+    assert diff_container_config(before, normalize_raw_inspect(swapped)).approved is False
+
+    missing_paths = _captured_host_defaults()
+    missing_paths["HostConfig"].pop("MaskedPaths")
+    missing_paths["HostConfig"].pop("ReadonlyPaths")
+    assert diff_container_config(before, normalize_raw_inspect(missing_paths)).approved is False
+
+    readonly_changed = _captured_host_defaults()
+    readonly_changed["HostConfig"]["ReadonlyPaths"] = ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys"]
+    with pytest.raises(ContainerContractError, match="ReadonlyPaths"):
+        normalize_raw_inspect(readonly_changed)
+
+
+@pytest.mark.parametrize(
+    ("memory", "memory_swap", "match"),
+    (
+        (0, _SYNTHETIC_MEMORY_SWAP, "MemorySwap"),
+        (_SYNTHETIC_MEMORY, -1, "MemorySwap"),
+        (_SYNTHETIC_MEMORY, _SYNTHETIC_MEMORY - 1, "MemorySwap"),
+    ),
+)
+def test_inconsistent_or_negative_memory_swap_is_refused(memory: int, memory_swap: int, match: str) -> None:
+    raw = _captured_host_defaults(memory=memory, memory_swap=memory_swap)
+
+    with pytest.raises(ContainerContractError, match=match):
+        snapshot = normalize_raw_inspect(raw)
+        build_recreate_argv(snapshot, replacement_name="nhms-db")
+
+
+@pytest.mark.parametrize(
+    "masked",
+    (
+        ["/custom/masked-path"],
+        [path for path in _CAPTURED_MASKED_PATHS if path != "/proc/interrupts"],
+        [
+            *(_CAPTURED_MASKED_PATHS[:12]),
+            "/sys/devices/system/cpu/cpu0/thermal_throttle",
+            "/sys/devices/system/cpu/cpu2/thermal_throttle",
+        ],
+    ),
+)
+def test_nondefault_or_malformed_masked_paths_are_refused(masked: list[str]) -> None:
+    raw = _captured_host_defaults()
+    raw["HostConfig"]["MaskedPaths"] = masked
+
+    with pytest.raises(ContainerContractError, match="MaskedPaths"):
+        normalize_raw_inspect(raw)
 
 
 def test_cold_bind_is_exact_fixed_host_to_container_mapping() -> None:

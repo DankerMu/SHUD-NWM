@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +54,7 @@ class ContainerSnapshot:
     restart_policy: tuple[str, int]
     nano_cpus: int
     memory: int
+    memory_swap: int
     shm_size: int
     stop_timeout: int
     readonly_rootfs: bool
@@ -68,6 +70,8 @@ class ContainerSnapshot:
     device_requests: tuple[Any, ...]
     tmpfs: tuple[tuple[str, str], ...]
     extra_hosts: tuple[str, ...]
+    masked_paths: tuple[str, ...]
+    readonly_paths: tuple[str, ...]
 
     @property
     def config_digest(self) -> str:
@@ -93,6 +97,7 @@ class ContainerSnapshot:
             "restart_policy": {"Name": self.restart_policy[0], "MaximumRetryCount": self.restart_policy[1]},
             "nano_cpus": self.nano_cpus,
             "memory": self.memory,
+            "memory_swap": self.memory_swap,
             "shm_size": self.shm_size,
             "stop_timeout": self.stop_timeout,
             "readonly_rootfs": self.readonly_rootfs,
@@ -108,6 +113,8 @@ class ContainerSnapshot:
             "device_requests": list(self.device_requests),
             "tmpfs": dict(self.tmpfs),
             "extra_hosts": list(self.extra_hosts),
+            "masked_paths": list(self.masked_paths),
+            "readonly_paths": list(self.readonly_paths),
         }
 
     def private_payload(self) -> dict[str, Any]:
@@ -175,21 +182,28 @@ def _int(value: object, *, label: str) -> int:
     return value
 
 
-_DOCKER_DEFAULT_MASKED_PATHS = frozenset(
-    {
-        "/proc/asound",
-        "/proc/acpi",
-        "/proc/kcore",
-        "/proc/keys",
-        "/proc/latency_stats",
-        "/proc/timer_list",
-        "/proc/timer_stats",
-        "/proc/sched_debug",
-        "/proc/scsi",
-        "/sys/firmware",
-    }
+_DOCKER_DEFAULT_MASKED_BASE = (
+    "/proc/asound",
+    "/proc/acpi",
+    "/proc/interrupts",
+    "/proc/kcore",
+    "/proc/keys",
+    "/proc/latency_stats",
+    "/proc/timer_list",
+    "/proc/timer_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
+    "/sys/firmware",
+    "/sys/devices/virtual/powercap",
 )
-_DOCKER_DEFAULT_READONLY_PATHS = frozenset({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"})
+_CPU_THERMAL_PATH = re.compile(r"^/sys/devices/system/cpu/cpu(?P<index>0|[1-9][0-9]*)/thermal_throttle$")
+_DOCKER_DEFAULT_READONLY_PATHS = (
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+)
 
 
 def _known_default_config(key: str, item: object) -> bool:
@@ -213,10 +227,6 @@ def _known_default_host(key: str, item: object) -> bool:
         return item == [0, 0]
     if key == "LogConfig":
         return item == {"Type": "json-file", "Config": {}}
-    if key == "MaskedPaths":
-        return isinstance(item, list) and frozenset(item) == _DOCKER_DEFAULT_MASKED_PATHS
-    if key == "ReadonlyPaths":
-        return isinstance(item, list) and frozenset(item) == _DOCKER_DEFAULT_READONLY_PATHS
     return False
 
 
@@ -268,6 +278,54 @@ def _normalized_binds(raw: object) -> tuple[str, ...]:
     return tuple(sorted(binds))
 
 
+def _unique_string_tuple(value: object, *, label: str) -> tuple[str, ...]:
+    items = _strings(value, label=label) or ()
+    if len(set(items)) != len(items):
+        raise ContainerContractError(f"{label} contains duplicate paths")
+    return items
+
+
+def _normalized_masked_paths(raw: object) -> tuple[str, ...]:
+    # Docker 28.2.2 derives these isolation paths from the daemon; they are not
+    # reconstructed as CLI flags.  Recreate still requires exact observed equality.
+    if raw in (None, []):
+        return ()
+    paths = _unique_string_tuple(raw, label="HostConfig.MaskedPaths")
+    base_count = len(_DOCKER_DEFAULT_MASKED_BASE)
+    if paths[:base_count] != _DOCKER_DEFAULT_MASKED_BASE:
+        raise ContainerContractError("HostConfig.MaskedPaths does not match the Docker default isolation shape")
+    thermal: list[int] = []
+    for path in paths[base_count:]:
+        matched = _CPU_THERMAL_PATH.fullmatch(path)
+        if matched is None:
+            raise ContainerContractError("HostConfig.MaskedPaths contains a non-default isolation path")
+        thermal.append(int(matched.group("index")))
+    if thermal != list(range(len(thermal))):
+        raise ContainerContractError("HostConfig.MaskedPaths CPU thermal paths are not contiguous from cpu0")
+    return paths
+
+
+def _normalized_readonly_paths(raw: object) -> tuple[str, ...]:
+    # Docker 28.2.2 derives these isolation paths from the daemon; they are not
+    # reconstructed as CLI flags.  Recreate still requires exact observed equality.
+    if raw in (None, []):
+        return ()
+    paths = _unique_string_tuple(raw, label="HostConfig.ReadonlyPaths")
+    if paths != _DOCKER_DEFAULT_READONLY_PATHS:
+        raise ContainerContractError("HostConfig.ReadonlyPaths does not match the Docker default isolation set")
+    return paths
+
+
+def _normalized_memory_swap(raw: object, *, memory: int) -> int:
+    if raw in (None, 0):
+        return 0
+    swap = _int(raw, label="HostConfig.MemorySwap")
+    if memory <= 0 or swap < memory:
+        raise ContainerContractError("HostConfig.MemorySwap requires a compatible Memory contract")
+    return swap
+
+
+
 def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) -> ContainerSnapshot:
     """Normalize bounded raw inspect data without executing or shell-parsing it."""
 
@@ -312,6 +370,7 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
                 "RestartPolicy",
                 "NanoCpus",
                 "Memory",
+                "MemorySwap",
                 "ShmSize",
                 "StopTimeout",
                 "ReadonlyRootfs",
@@ -327,6 +386,8 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
                 "DeviceRequests",
                 "Tmpfs",
                 "ExtraHosts",
+                "MaskedPaths",
+                "ReadonlyPaths",
             }
         ),
         label="HostConfig",
@@ -369,6 +430,9 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
         ),
         nano_cpus=_int(host.get("NanoCpus") or 0, label="HostConfig.NanoCpus"),
         memory=_int(host.get("Memory") or 0, label="HostConfig.Memory"),
+        memory_swap=_normalized_memory_swap(
+            host.get("MemorySwap"), memory=_int(host.get("Memory") or 0, label="HostConfig.Memory")
+        ),
         shm_size=_int(host.get("ShmSize") or 0, label="HostConfig.ShmSize"),
         stop_timeout=_int(host.get("StopTimeout") or 0, label="HostConfig.StopTimeout"),
         readonly_rootfs=bool(host.get("ReadonlyRootfs") or False),
@@ -389,6 +453,8 @@ def normalize_raw_inspect(raw: object, *, max_bytes: int = MAX_INSPECT_BYTES) ->
             )
         ),
         extra_hosts=tuple(sorted(_strings(host.get("ExtraHosts") or [], label="HostConfig.ExtraHosts") or ())),
+        masked_paths=_normalized_masked_paths(host.get("MaskedPaths")),
+        readonly_paths=_normalized_readonly_paths(host.get("ReadonlyPaths")),
     )
 
 
@@ -430,6 +496,10 @@ def build_recreate_argv(
         _docker_option(argv, "--cpus", _cpu_text(snapshot.nano_cpus))
     if snapshot.memory:
         _docker_option(argv, "--memory", str(snapshot.memory))
+    if snapshot.memory_swap:
+        if snapshot.memory <= 0 or snapshot.memory_swap < snapshot.memory:
+            raise ContainerContractError("HostConfig.MemorySwap requires a compatible Memory contract")
+        _docker_option(argv, "--memory-swap", str(snapshot.memory_swap))
     if snapshot.shm_size:
         _docker_option(argv, "--shm-size", str(snapshot.shm_size))
     if snapshot.readonly_rootfs:
