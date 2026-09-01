@@ -2620,3 +2620,25 @@ but the existing caveats remain load-bearing: the metric must distinguish round
 intent, core-subset verification and Phase 7 roles before it can support an
 autonomous reversal. **Keep rotation** unchanged; any cut still requires those
 schema/role repairs plus maintainer review.
+
+## Revisit 2026-09-01 (post #1894 / PR #1930) — keep; clean follow-ups add no rotation catch
+
+After the PR #1930 accountability line, `loop_log_audit.py` reports **149**
+multi-round merged PRs and later-round catches **core=88 / rotated=296**. The
+sample increases from 148, while neither catch count changes.
+
+Round 1 used the standard six-lens high-risk mix and produced eleven independently
+confirmed fixes. Round 2 retained four of those core lenses and returned zero
+candidates. A later Phase 7 Gap Sweep found one measured-zero semantic defect;
+it is deliberately recorded as `round: 0` with the `phase7-gap-sweep` role, so it
+does not masquerade as lens-rotation evidence. After the numeric-invariant repair,
+Round 3 used two focused core/invariant lenses and returned zero candidates; the
+frozen-head Phase 7 rerun was also clean.
+
+PR #1930 therefore supplies another closure sample, not an additive rotation
+experiment. `core +0 / rotated +0` proves the known installer, recovery and
+numeric-evidence invariants closed under re-review, but cannot estimate whether a
+rotated free slot would have found more. The cumulative attribution remains
+`296 versus 88`, so **keep rotation** is unchanged under the recorded autonomous
+default. Any reversal still requires the existing attribution-schema,
+round-intent and Phase 7 role repairs plus maintainer review.
