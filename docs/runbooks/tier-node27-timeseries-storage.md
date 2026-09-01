@@ -154,7 +154,9 @@ and binds optional prior receipt trend by no-follow mode-0600 identity.
 `nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
 `/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
 identity（port 由内核临时分配，且永不为 55432）。先从 exact-SHA image 量测默认 `postgres`
-uid/gid，不得以 `999` 或 `1000` 代替该量测。root capability 可用 `sudo -n`；若不可用，才可由 exact-SHA
+uid/gid，不得以 `999` 或 `1000` 代替该量测；该对只是 image identity evidence。synthetic container `--user`、
+host PGDATA 与 cold path owner 必须等于已证明的 host observer effective uid/gid，且 exact image 必须能以该
+numeric identity 运行；不得把 image default 当成 runtime owner。root capability 可用 `sudo -n`；若不可用，才可由 exact-SHA
 image 的 isolated `--user 0:0` helper fallback。fallback 仅有一个 owned-root → `/nhms-owned` RW bind、唯一
 ownership-prefixed helper name 与 `--network none`，不得有 port、live path、Docker socket 或 checkout bind；image
 内不执行项目 Python，宿主 Python 只 render owned-root 内文件，image root 只 seal。它写入 root-owned、reader

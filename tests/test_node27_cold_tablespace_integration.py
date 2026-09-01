@@ -97,6 +97,9 @@ def _capability_runner(
     helper_exists: bool = False,
     post_helper_exists: bool = False,
     helper_returncode: int = 0,
+    runtime_identity: str | None = None,
+    runtime_returncode: int | None = None,
+    stale_runtime_helper: bool = False,
 ) -> tuple[Callable[..., SimpleNamespace], list[tuple[str, ...]]]:
     seen: list[tuple[str, ...]] = []
     inspections: dict[str, int] = {}
@@ -115,9 +118,18 @@ def _capability_runner(
             name = argv[-1]
             inspections[name] = inspections.get(name, 0) + 1
             exists = helper_exists or (post_helper_exists and inspections[name] > 1)
+            if stale_runtime_helper:
+                exists = exists or "runtime-identity" in name
             return _result(0 if exists else 1)
         if argv[1] == "run":
+            user = argv[argv.index("--user") + 1] if "--user" in argv else None
             script = argv[-1]
+            if user not in {None, "0:0"}:
+                uid, gid = (runtime_identity or user).split(":", maxsplit=1)
+                return _result(
+                    helper_returncode if runtime_returncode is None else runtime_returncode,
+                    uid + "\n" + gid + "\n",
+                )
             if "id -un" in script:
                 uid, gid = postgres_identity.split(":", maxsplit=1)
                 return _result(helper_returncode, uid + "\n" + gid + "\n")
@@ -130,16 +142,22 @@ def _capability_runner(
     return runner, seen
 
 
-def test_root_capability_falls_back_to_exact_pinned_image_before_resources(tmp_path: Path) -> None:
+def test_root_capability_falls_back_to_exact_pinned_image_before_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0006", host_port=55494)
     runner, seen = _capability_runner()
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.geteuid", lambda: 1005)
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.getegid", lambda: 1005)
 
     capability = require_root_evidence_capability(config, runner=runner)
 
     assert capability == RootEvidenceCapability(
         strategy="pinned_image",
-        postgres_uid=1000,
-        postgres_gid=1000,
+        image_postgres_uid=1000,
+        image_postgres_gid=1000,
+        runtime_uid=1005,
+        runtime_gid=1005,
         image_id=PINNED_IMAGE_ID,
         image_ref=PINNED_IMAGE_REF,
         image_default_user="postgres",
@@ -148,11 +166,20 @@ def test_root_capability_falls_back_to_exact_pinned_image_before_resources(tmp_p
     assert not config.work_root.exists()
     assert all(str(config.work_root) not in command for command in seen)
     assert not any(config.container_name in command or config.prior_container_name in command for command in seen)
+    assert any("--user" in command and command[command.index("--user") + 1] == "1005:1005" for command in seen)
+    assert not any(
+        command[1] == "run" and "--user" in command and command[command.index("--user") + 1] == "1000:1000"
+        for command in seen
+    )
 
 
-def test_root_capability_refuses_stale_root_action_helper_before_any_run(tmp_path: Path) -> None:
+def test_root_capability_refuses_stale_root_action_helper_before_any_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0015", host_port=55494)
     seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.geteuid", lambda: 1005)
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.getegid", lambda: 1005)
 
     def runner(argv: tuple[str, ...], *, timeout: int = 90):
         seen.append(argv)
@@ -183,8 +210,10 @@ def test_fallback_cleanup_refuses_unknown_child_and_requires_root_helper_post_ab
         config=config,
         capability=RootEvidenceCapability(
             strategy="pinned_image",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -217,8 +246,10 @@ def test_fallback_cleanup_removes_only_known_children_and_the_owned_work_root(tm
         config=config,
         capability=RootEvidenceCapability(
             strategy="pinned_image",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -256,8 +287,10 @@ def test_fallback_cleanup_rejects_a_stranded_root_helper_after_work_root_removal
         config=config,
         capability=RootEvidenceCapability(
             strategy="pinned_image",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -309,23 +342,62 @@ def test_root_capability_refuses_ambiguous_pinned_image_probe_before_resources(
     assert not any(config.container_name in command or config.prior_container_name in command for command in seen)
 
 
-def test_root_capability_retains_noninteractive_sudo_and_measures_the_pinned_image(tmp_path: Path) -> None:
+def test_root_capability_retains_noninteractive_sudo_and_measures_the_pinned_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0008", host_port=55494)
     runner, seen = _capability_runner(sudo_returncode=0)
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.geteuid", lambda: 1005)
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.getegid", lambda: 1005)
 
     capability = require_root_evidence_capability(config, runner=runner)
 
     assert capability.strategy == "sudo"
-    assert (capability.postgres_uid, capability.postgres_gid) == (1000, 1000)
-    assert sum(command[1] == "run" for command in seen) == 1
+    assert (capability.image_postgres_uid, capability.image_postgres_gid) == (1000, 1000)
+    assert (capability.runtime_uid, capability.runtime_gid) == (1005, 1005)
+    assert any("--user" in command and command[command.index("--user") + 1] == "1005:1005" for command in seen)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "host", "message"),
+    (
+        ({"runtime_identity": "1000:1000"}, (1005, 1005), "runtime identity"),
+        ({"runtime_returncode": 1}, (1005, 1005), "runtime identity"),
+        ({"stale_runtime_helper": True}, (1005, 1005), "helper name"),
+        ({}, (0, 1005), "runtime identity"),
+    ),
+)
+def test_root_capability_refuses_unproven_or_privileged_runtime_identity_before_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    host: tuple[int, int],
+    message: str,
+) -> None:
+    config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0016", host_port=55494)
+    runner, seen = _capability_runner(**kwargs)
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.geteuid", lambda: host[0])
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_root_capability.os.getegid", lambda: host[1])
+
+    with pytest.raises(ColdTablespaceIntegrationError, match=message):
+        require_root_evidence_capability(config, runner=runner)
+
+    assert not config.work_root.exists()
+    if host[0] == 0 or kwargs.get("stale_runtime_helper"):
+        assert not any(
+            command[1] == "run" and "--user" in command and command[command.index("--user") + 1] != "0:0"
+            for command in seen
+        )
 
 
 def test_pinned_image_root_action_uses_one_owned_bind_no_port_and_fixed_script(tmp_path: Path) -> None:
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0009", host_port=55494)
     capability = RootEvidenceCapability(
         strategy="pinned_image",
-        postgres_uid=1000,
-        postgres_gid=1000,
+        image_postgres_uid=1000,
+        image_postgres_gid=1000,
+        runtime_uid=1005,
+        runtime_gid=1005,
         image_id=PINNED_IMAGE_ID,
         image_ref=PINNED_IMAGE_REF,
         image_default_user="postgres",
@@ -356,14 +428,16 @@ def test_pinned_image_root_action_uses_one_owned_bind_no_port_and_fixed_script(t
     config.work_root.rmdir()
 
 
-def test_measured_image_identity_controls_disposable_container_and_cold_path_contract(tmp_path: Path) -> None:
+def test_proven_host_runtime_identity_controls_disposable_container_and_cold_path_contract(tmp_path: Path) -> None:
     config = default_config(work_root=tmp_path / f"{INTEGRATION_PREFIX}c1ea0010", host_port=55494)
     resources = IntegrationResources(
         config=config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -372,10 +446,33 @@ def test_measured_image_identity_controls_disposable_container_and_cold_path_con
     )
 
     argv = initial_container_argv(resources)
-    assert argv[argv.index("--user") + 1] == "1000:1000"
+    assert argv[argv.index("--user") + 1] == "1005:1005"
     helper_argv = root_evidence_setup_argv(resources, action="create-cold-path")
-    assert helper_argv[helper_argv.index("--postgres-uid") + 1] == "1000"
-    assert helper_argv[helper_argv.index("--postgres-gid") + 1] == "1000"
+    assert helper_argv[helper_argv.index("--runtime-uid") + 1] == "1005"
+    assert helper_argv[helper_argv.index("--runtime-gid") + 1] == "1005"
+    assert "--postgres-uid" not in helper_argv
+    config.work_root.mkdir(mode=0o700)
+    config.work_root.chmod(0o700)
+    root_argv = pinned_image_root_argv(
+        config.identity,
+        capability=RootEvidenceCapability(
+            strategy="pinned_image",
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
+            image_id=PINNED_IMAGE_ID,
+            image_ref=PINNED_IMAGE_REF,
+            image_default_user="postgres",
+            root_proof="pinned-image-user-0:0",
+        ),
+        work_root=config.work_root,
+        reader_gid=os.getgid(),
+        action="create-cold-path",
+    )
+    assert root_argv[-3:-1] == ("1005", "1005")
+    assert "1000" not in root_argv[-3:]
+    config.work_root.rmdir()
 
 
 def test_prepare_resources_forces_an_owned_work_root_to_mode_0700(tmp_path: Path) -> None:
@@ -396,8 +493,10 @@ def test_prepare_resources_forces_an_owned_work_root_to_mode_0700(tmp_path: Path
         config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -417,8 +516,10 @@ def test_cleanup_requires_checked_container_absence_and_port_release(tmp_path: P
         config=config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -434,7 +535,7 @@ def test_cleanup_requires_checked_container_absence_and_port_release(tmp_path: P
         return SimpleNamespace(returncode=1 if argv[1] == "inspect" else 0, stdout="", stderr="")
 
     assert cleanup(resources, runner=runner) == {"container_absent": True, "work_root_absent": True}
-    assert sum(command[1] == "inspect" for command in seen) == 5
+    assert sum(command[1] == "inspect" for command in seen) == 6
 
 
 def test_cleanup_fails_when_post_remove_inspect_still_finds_an_owned_container(tmp_path: Path) -> None:
@@ -443,8 +544,10 @@ def test_cleanup_fails_when_post_remove_inspect_still_finds_an_owned_container(t
         config=config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -467,8 +570,10 @@ def test_cleanup_does_not_remove_an_owned_root_before_container_absence(tmp_path
         config=config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=PINNED_IMAGE_ID,
             image_ref=PINNED_IMAGE_REF,
             image_default_user="postgres",
@@ -500,8 +605,10 @@ def test_cleanup_fails_when_the_disposable_port_cannot_be_rebound(tmp_path: Path
             config=config,
             capability=RootEvidenceCapability(
                 strategy="sudo",
-                postgres_uid=1000,
-                postgres_gid=1000,
+                image_postgres_uid=1000,
+                image_postgres_gid=1000,
+                runtime_uid=1005,
+                runtime_gid=1005,
                 image_id=PINNED_IMAGE_ID,
                 image_ref=PINNED_IMAGE_REF,
                 image_default_user="postgres",
@@ -552,8 +659,8 @@ def test_real_disposable_cluster_installs_through_run_install(tmp_path: Path) ->
             receipt_path=receipt_path,
             recovery_path=recovery_path,
             head_sha="a" * 40,
-            expected_uid=resources.require_capability().postgres_uid,
-            expected_gid=resources.require_capability().postgres_gid,
+            expected_uid=resources.require_capability().runtime_uid,
+            expected_gid=resources.require_capability().runtime_gid,
             expected_mode=0o700,
             expected_device_identity="synthetic-device",
             install_required_bytes=1,
@@ -623,8 +730,8 @@ def test_real_post_recreate_failure_rolls_back_only_owned_state(tmp_path: Path) 
                 receipt_path=receipt_path,
                 recovery_path=recovery_path,
                 head_sha="a" * 40,
-                expected_uid=resources.require_capability().postgres_uid,
-                expected_gid=resources.require_capability().postgres_gid,
+                expected_uid=resources.require_capability().runtime_uid,
+                expected_gid=resources.require_capability().runtime_gid,
                 expected_mode=0o700,
                 expected_device_identity="synthetic-device",
                 install_required_bytes=1,
@@ -686,8 +793,8 @@ def test_real_interrupted_replacement_recovers_without_install_replay(tmp_path: 
             receipt_path=receipt_path,
             recovery_path=recovery_path,
             head_sha="a" * 40,
-            expected_uid=resources.require_capability().postgres_uid,
-            expected_gid=resources.require_capability().postgres_gid,
+            expected_uid=resources.require_capability().runtime_uid,
+            expected_gid=resources.require_capability().runtime_gid,
             expected_mode=0o700,
             expected_device_identity="synthetic-device",
             install_required_bytes=1,

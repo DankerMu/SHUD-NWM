@@ -79,7 +79,7 @@ def _validate_identity(args: argparse.Namespace) -> None:
         raise RuntimeError("synthetic evidence root must be directly under the owned work root")
     if args.cold_path.parent != args.work_root:
         raise RuntimeError("synthetic cold path must be directly under the owned work root")
-    if min(args.postgres_uid, args.postgres_gid, args.reader_gid) <= 0:
+    if min(args.runtime_uid, args.runtime_gid, args.reader_gid) <= 0:
         raise RuntimeError("synthetic ownership identities must be positive")
 
 
@@ -163,7 +163,7 @@ def _render_evidence(args: argparse.Namespace) -> None:
 
 def _prepare_pgdata(args: argparse.Namespace) -> None:
     args.pgdata.mkdir(mode=0o700, exist_ok=True)
-    os.chown(args.pgdata, args.postgres_uid, args.postgres_gid)
+    os.chown(args.pgdata, args.runtime_uid, args.runtime_gid)
     args.pgdata.chmod(0o700)
 
 
@@ -187,7 +187,7 @@ def _create_cold_path(args: argparse.Namespace) -> None:
     if args.cold_path.exists() or args.cold_path.is_symlink():
         raise RuntimeError("synthetic cold path is not absent")
     args.cold_path.mkdir(mode=0o700)
-    os.chown(args.cold_path, args.postgres_uid, args.postgres_gid)
+    os.chown(args.cold_path, args.runtime_uid, args.runtime_gid)
     args.cold_path.chmod(0o700)
 
 
@@ -231,8 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-id", required=True)
     parser.add_argument("--image-ref", required=True)
     parser.add_argument("--hostname", required=True)
-    parser.add_argument("--postgres-uid", type=int, required=True)
-    parser.add_argument("--postgres-gid", type=int, required=True)
+    parser.add_argument("--runtime-uid", type=int, required=True)
+    parser.add_argument("--runtime-gid", type=int, required=True)
     parser.add_argument("--reader-gid", type=int, required=True)
     return parser
 

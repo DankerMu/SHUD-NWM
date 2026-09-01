@@ -62,10 +62,10 @@ def _arguments(tmp_path: Path, *, hostname: str):
             "timescale/timescaledb-ha:pg15-latest",
             "--hostname",
             hostname,
-            "--postgres-uid",
-            "1000",
-            "--postgres-gid",
-            "1000",
+            "--runtime-uid",
+            "1005",
+            "--runtime-gid",
+            "1005",
             "--reader-gid",
             str(os.getgid()),
         ]
@@ -78,8 +78,10 @@ def test_root_evidence_setup_uses_direct_sudo_argv_and_preserves_root_owner_cont
         config=config,
         capability=RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=1000,
-            postgres_gid=1000,
+            image_postgres_uid=1000,
+            image_postgres_gid=1000,
+            runtime_uid=1005,
+            runtime_gid=1005,
             image_id=config.image_id,
             image_ref=config.image_ref,
             image_default_user="postgres",
@@ -90,9 +92,13 @@ def test_root_evidence_setup_uses_direct_sudo_argv_and_preserves_root_owner_cont
     source = _HELPER.read_text(encoding="utf-8")
 
     assert argv[:2] == ("/usr/bin/sudo", "-n")
+    assert argv[argv.index("--runtime-uid") + 1] == "1005"
+    assert argv[argv.index("--runtime-gid") + 1] == "1005"
+    assert "--postgres-uid" not in argv
     assert "shell=True" not in source
     assert "os.geteuid() != 0" in source
     assert "expected_uid=os.getuid" not in source
+    assert "args.runtime_uid" in source
     assert "args.reader_gid" in source
     assert "path.chmod(0o640)" in source
 

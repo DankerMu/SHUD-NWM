@@ -255,10 +255,10 @@ def _resource_args(resources: IntegrationResources, *, action: str) -> tuple[str
         capability.image_ref,
         "--hostname",
         f"nhms-1894-{socket.gethostname()}",
-        "--postgres-uid",
-        str(capability.postgres_uid),
-        "--postgres-gid",
-        str(capability.postgres_gid),
+        "--runtime-uid",
+        str(capability.runtime_uid),
+        "--runtime-gid",
+        str(capability.runtime_gid),
         "--reader-gid",
         str(os.getgid()),
     )
@@ -401,7 +401,7 @@ def initial_container_argv(resources: IntegrationResources) -> tuple[str, ...]:
         "--name",
         config.container_name,
         "--user",
-        f"{capability.postgres_uid}:{capability.postgres_gid}",
+        f"{capability.runtime_uid}:{capability.runtime_gid}",
         "--env-file",
         str(config.work_root / "postgres.env"),
         "--restart",
@@ -581,8 +581,8 @@ def _ensure_host_path(
         observed["exists"] is not True
         or observed["is_symlink"] is not False
         or observed["entry_count"] != 0
-        or observed["uid"] != capability.postgres_uid
-        or observed["gid"] != capability.postgres_gid
+        or observed["uid"] != capability.runtime_uid
+        or observed["gid"] != capability.runtime_gid
         or observed["mode"] != 0o700
     ):
         raise ColdTablespaceIntegrationError("root-created synthetic cold path differs from installer contract")

@@ -158,12 +158,13 @@ filesystem 或 DB 操作前拒绝 `nhms-db`、`nhms-db-before`、`/data/GHDC`、
 NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
 ```
 
-前提是先量测 exact-SHA image 的默认 `postgres` uid/gid（不得把 `999` 或 `1000` 当作第二权威）。
+前提是先量测 exact-SHA image 的默认 `postgres` uid/gid（不得把 `999` 或 `1000` 当作第二权威）；该对只是 image identity evidence。
+synthetic container `--user`、host PGDATA 与 cold path owner 必须等于已证明的 host observer effective uid/gid，且 exact image 必须能以该 numeric identity 运行；不得把 image default 当成 runtime owner。
 root capability 可为免交互 `sudo -n`，或在 sudo 不可用时由 exact-SHA image 的 isolated
 `--user 0:0` helper 证明；后者仅可使用唯一 ownership-prefixed helper name、`--network none`、一个
 owned work-root 到 `/nhms-owned` 的 RW bind，且不得携带 port、Docker socket、checkout 或 live path。
 宿主 Python 只在该 owned root render synthetic documents；image 内不得执行项目 Python，只可 root seal
-PGDATA、证据目录及四个 evidence 文件为 measured postgres / `root:reader_gid` ownership 和既定 mode。
+PGDATA/cold 为 proven host runtime owner、证据目录及四个 evidence 文件为 `root:reader_gid` ownership 和既定 mode。
 证据仍须是 root-owned approved mode `0640`、uid `0` 的 synthetic `mdadm`、两个 SMART PASS 与 backup
 inventory envelope，production parser 的 `expected_uid=0`、descriptor identity、hostname、command、subject/member
 或 mode 校验不降低。测试 finally 必须先证明 current/prior/root-helper 均不存在及 port 可 bind；cleanup 仅可

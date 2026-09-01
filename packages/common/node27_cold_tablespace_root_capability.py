@@ -1,9 +1,11 @@
 """Exact-image root capability for the isolated #1894 Docker oracle.
 
-This synthetic-only boundary proves the image and its unprivileged PostgreSQL
-identity before any owned work root exists.  When noninteractive sudo is not
-available, it additionally proves that the exact image can execute an isolated
-root helper.  It never mounts a live path, checkout, Docker socket, or port.
+This synthetic-only boundary proves the image, its default PostgreSQL identity,
+and the host observer runtime identity before any owned work root exists.  Image
+default uid/gid is evidence only.  Container runtime and host PGDATA/cold owners
+must equal the proven host euid/egid.  When noninteractive sudo is not available,
+it additionally proves that the exact image can execute an isolated root helper.
+It never mounts a live path, checkout, Docker socket, or port.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from packages.common.node27_cold_tablespace_identity import (
 )
 
 _ROOT_HELPER_PREFIX = f"{INTEGRATION_PREFIX}root-"
+_ROOT_HELPER_PURPOSES = ("identity", "runtime-identity", "root-probe", "root-action")
 _POSITIVE_IDENTITY = re.compile(r"^[1-9][0-9]*\n[1-9][0-9]*\n?$")
 KNOWN_WORK_ROOT_CHILDREN = frozenset({"pgdata", "cold", "evidence", "receipts", "postgres.env"})
 
@@ -36,8 +39,10 @@ class RootEvidenceCapability:
     """Measured root authority and exact-image evidence without secrets."""
 
     strategy: Literal["sudo", "pinned_image"]
-    postgres_uid: int
-    postgres_gid: int
+    image_postgres_uid: int
+    image_postgres_gid: int
+    runtime_uid: int
+    runtime_gid: int
     image_id: str
     image_ref: str
     image_default_user: str
@@ -70,7 +75,7 @@ def _run(
 def root_helper_name(identity: ColdTablespaceIdentity, *, purpose: str) -> str:
     _require_synthetic(identity)
     token = identity.container_name.removeprefix(INTEGRATION_PREFIX)
-    if purpose not in {"identity", "root-probe", "root-action"} or not token:
+    if purpose not in _ROOT_HELPER_PURPOSES or not token:
         raise RootCapabilityError("root helper identity is invalid")
     return f"{_ROOT_HELPER_PREFIX}{purpose}-{token}"
 
@@ -95,7 +100,7 @@ def _require_helper_absent(
 def assert_root_helpers_absent(identity: ColdTablespaceIdentity, *, runner: Callable[..., Any]) -> None:
     """Require absence of every ownership-prefixed image helper before cleanup."""
 
-    for purpose in ("identity", "root-probe", "root-action"):
+    for purpose in _ROOT_HELPER_PURPOSES:
         _require_helper_absent(identity, purpose=purpose, runner=runner)
 
 
@@ -131,7 +136,8 @@ def _capability_argv(
     identity: ColdTablespaceIdentity,
     *,
     purpose: str,
-    as_root: bool,
+    user: str | None,
+    script: str,
 ) -> tuple[str, ...]:
     assert identity.image_id is not None
     prefix: tuple[str, ...] = (
@@ -143,44 +149,90 @@ def _capability_argv(
         "--network",
         "none",
     )
-    if as_root:
-        prefix += ("--user", "0:0")
+    if user is not None:
+        prefix += ("--user", user)
     return (
         *prefix,
         "--entrypoint",
         "/bin/sh",
         identity.image_id,
         "-ceu",
-        'test "$(id -un)" = postgres; id -u; id -g' if not as_root else "id -u; id -g",
+        script,
     )
+
+
+def _run_identity_helper(
+    identity: ColdTablespaceIdentity,
+    *,
+    purpose: str,
+    user: str | None,
+    script: str,
+    runner: Callable[..., Any],
+    label: str,
+) -> str:
+    _require_helper_absent(identity, purpose=purpose, runner=runner)
+    argv = _capability_argv(identity, purpose=purpose, user=user, script=script)
+    try:
+        result = _run(runner, argv, timeout=30, label=label)
+    except RootCapabilityError:
+        _require_helper_absent(identity, purpose=purpose, runner=runner)
+        raise
+    _require_helper_absent(identity, purpose=purpose, runner=runner)
+    return str(result.stdout)
 
 
 def _measure_default_postgres_identity(
     identity: ColdTablespaceIdentity, *, runner: Callable[..., Any]
 ) -> tuple[int, int]:
-    purpose = "identity"
-    _require_helper_absent(identity, purpose=purpose, runner=runner)
-    argv = _capability_argv(identity, purpose=purpose, as_root=False)
-    try:
-        result = _run(runner, argv, timeout=30, label="pinned image postgres identity helper")
-    except RootCapabilityError:
-        _require_helper_absent(identity, purpose=purpose, runner=runner)
-        raise
-    _require_helper_absent(identity, purpose=purpose, runner=runner)
-    return _parse_positive_identity(str(result.stdout), label="pinned image postgres identity")
+    output = _run_identity_helper(
+        identity,
+        purpose="identity",
+        user=None,
+        script='test "$(id -un)" = postgres; id -u; id -g',
+        runner=runner,
+        label="pinned image postgres identity helper",
+    )
+    return _parse_positive_identity(output, label="pinned image postgres identity")
+
+
+def _host_runtime_identity() -> tuple[int, int]:
+    uid = os.geteuid()
+    gid = os.getegid()
+    if min(uid, gid) <= 0:
+        raise RootCapabilityError("host observer runtime identity is not a positive unprivileged pair")
+    return uid, gid
+
+
+def _prove_runtime_identity(
+    identity: ColdTablespaceIdentity,
+    *,
+    runtime_uid: int,
+    runtime_gid: int,
+    runner: Callable[..., Any],
+) -> None:
+    output = _run_identity_helper(
+        identity,
+        purpose="runtime-identity",
+        user=f"{runtime_uid}:{runtime_gid}",
+        script="id -u; id -g",
+        runner=runner,
+        label="pinned image runtime identity helper",
+    )
+    measured = _parse_positive_identity(output, label="pinned image runtime identity")
+    if measured != (runtime_uid, runtime_gid):
+        raise RootCapabilityError("pinned image runtime identity differs")
 
 
 def _prove_image_root(identity: ColdTablespaceIdentity, *, runner: Callable[..., Any]) -> None:
-    purpose = "root-probe"
-    _require_helper_absent(identity, purpose=purpose, runner=runner)
-    argv = _capability_argv(identity, purpose=purpose, as_root=True)
-    try:
-        result = _run(runner, argv, timeout=30, label="pinned image root capability helper")
-    except RootCapabilityError:
-        _require_helper_absent(identity, purpose=purpose, runner=runner)
-        raise
-    _require_helper_absent(identity, purpose=purpose, runner=runner)
-    if str(result.stdout) != "0\n0\n":
+    output = _run_identity_helper(
+        identity,
+        purpose="root-probe",
+        user="0:0",
+        script="id -u; id -g",
+        runner=runner,
+        label="pinned image root capability helper",
+    )
+    if output != "0\n0\n":
         raise RootCapabilityError("pinned image root identity differs")
 
 
@@ -200,8 +252,15 @@ def probe_root_evidence_capability(
     default_user = _image_default_user(identity, runner=runner)
     if default_user != "postgres":
         raise RootCapabilityError("pinned image default postgres identity differs")
+    runtime_uid, runtime_gid = _host_runtime_identity()
     assert_root_helpers_absent(identity, runner=runner)
-    postgres_uid, postgres_gid = _measure_default_postgres_identity(identity, runner=runner)
+    image_postgres_uid, image_postgres_gid = _measure_default_postgres_identity(identity, runner=runner)
+    _prove_runtime_identity(
+        identity,
+        runtime_uid=runtime_uid,
+        runtime_gid=runtime_gid,
+        runner=runner,
+    )
     try:
         sudo = runner(("/usr/bin/sudo", "-n", "true"), timeout=15)
     except Exception as error:  # noqa: BLE001 - sudo process boundary
@@ -210,8 +269,10 @@ def probe_root_evidence_capability(
         assert_root_helpers_absent(identity, runner=runner)
         return RootEvidenceCapability(
             strategy="sudo",
-            postgres_uid=postgres_uid,
-            postgres_gid=postgres_gid,
+            image_postgres_uid=image_postgres_uid,
+            image_postgres_gid=image_postgres_gid,
+            runtime_uid=runtime_uid,
+            runtime_gid=runtime_gid,
             image_id=identity.image_id,
             image_ref=identity.image_ref,
             image_default_user=default_user,
@@ -221,8 +282,10 @@ def probe_root_evidence_capability(
     assert_root_helpers_absent(identity, runner=runner)
     return RootEvidenceCapability(
         strategy="pinned_image",
-        postgres_uid=postgres_uid,
-        postgres_gid=postgres_gid,
+        image_postgres_uid=image_postgres_uid,
+        image_postgres_gid=image_postgres_gid,
+        runtime_uid=runtime_uid,
+        runtime_gid=runtime_gid,
         image_id=identity.image_id,
         image_ref=identity.image_ref,
         image_default_user=default_user,
@@ -290,7 +353,14 @@ def pinned_image_root_argv(
         or capability.image_ref != identity.image_ref
         or capability.image_default_user != "postgres"
         or capability.root_proof != "pinned-image-user-0:0"
-        or min(capability.postgres_uid, capability.postgres_gid, reader_gid) <= 0
+        or min(
+            capability.image_postgres_uid,
+            capability.image_postgres_gid,
+            capability.runtime_uid,
+            capability.runtime_gid,
+            reader_gid,
+        )
+        <= 0
         or identity.work_root != work_root
     ):
         raise RootCapabilityError("pinned root helper lacks the measured exact-image capability")
@@ -313,7 +383,7 @@ def pinned_image_root_argv(
         "-ceu",
         _root_action_script(action),
         "nhms-root-action",
-        str(capability.postgres_uid),
-        str(capability.postgres_gid),
+        str(capability.runtime_uid),
+        str(capability.runtime_gid),
         str(reader_gid),
     )
