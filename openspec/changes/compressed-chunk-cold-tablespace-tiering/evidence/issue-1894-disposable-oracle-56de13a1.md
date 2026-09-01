@@ -6,8 +6,8 @@
 - PR: #1930
 - Branch: `feat/issue-1894-cold-tablespace-install`
 - Exact tested code commit:
-  `2daf5118f096686795f0d3badd66f0b9b11e8ebb`
-- Oracle checkout: `/tmp/nhms-issue1894-oracle-2daf5118` on node-27
+  `56de13a154347a351e5848a0e5922c87999ac29b`
+- Oracle checkout: `/tmp/nhms-issue1894-oracle-56de13a1` on node-27
 - Runtime: Python 3.11.15, PostgreSQL 15.2, TimescaleDB 2.10.2
 - Pinned image:
   `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
@@ -30,7 +30,9 @@ later semantic code change requires a new exact-SHA oracle.
     reuse refusal.
 - Path, mount and capacity:
   - correct/wrong/missing mount, absent/nonempty/symlink/wrong owner, mode or
-    device path, resident PostgreSQL subtree, capacity and rollback headroom.
+    device path, resident PostgreSQL subtree, capacity and rollback headroom;
+  - measured zero is preserved as insufficient capacity, missing remains nullable
+    and named unavailable, and negative values reject without clamp.
 - Catalog, bind and placement:
   - absent/expected/drifted catalog, dangling current/stopped bind and
     `pg_tblspc` target, no hypertable attach, new chunks in `pg_default`.
@@ -65,7 +67,7 @@ later semantic code change requires a new exact-SHA oracle.
 uv run pytest -q
 ```
 
-- PASS: 15634 passed, 218 skipped, one existing ecCodes version warning.
+- PASS: 15637 passed, 218 skipped, one existing ecCodes version warning.
 
 ```text
 uv run pytest -q \
@@ -75,7 +77,7 @@ uv run pytest -q \
   tests/test_select_ci_tests.py
 ```
 
-- PASS: 715 passed, 6 skipped.
+- PASS: 718 passed, 6 skipped.
 
 Additional gates:
 
@@ -97,12 +99,12 @@ Collection at the exact checkout selected six nodes and deselected 33:
 
 ```text
 NHMS_RUN_NODE27_DOCKER=1 uv run --directory \
-  /tmp/nhms-issue1894-oracle-2daf5118 pytest -vv -rs \
+  /tmp/nhms-issue1894-oracle-56de13a1 pytest -vv -rs \
   -m "integration and timescaledb_210 and node27_docker" \
-  /tmp/nhms-issue1894-oracle-2daf5118/tests/test_node27_cold_tablespace_integration.py
+  /tmp/nhms-issue1894-oracle-56de13a1/tests/test_node27_cold_tablespace_integration.py
 ```
 
-Result: **6 passed, 33 deselected in 182.71 seconds**.
+Result: **6 passed, 33 deselected in 173.65 seconds**.
 
 - `test_real_disposable_cluster_installs_through_run_install`
   - installed through the production core state machine;
@@ -126,7 +128,7 @@ Result: **6 passed, 33 deselected in 182.71 seconds**.
 Wrapper terminal result:
 
 ```text
-oracle_sha=2daf5118f096686795f0d3badd66f0b9b11e8ebb
+oracle_sha=56de13a154347a351e5848a0e5922c87999ac29b
 pytest_rc=0
 integrity_rc=0
 ```
@@ -161,8 +163,8 @@ writing a strict production governance receipt:
   status=ok
   identity=253:1:11491905541504749415
   total=1780170539008
-  used=1099824996352
-  free=589842321408
+  used=1163974393856
+  free=525692923904
   reserved=90503221248
   arithmetic=ok
 
@@ -206,8 +208,25 @@ raised one candidate by treating the 2026-08-02 external snapshot's historical
 tag-shaped `Config.Image` as current. Fresh node-27 inspect showed both current
 image fields already carry the pinned digest. The reviewer re-adjudicated the
 candidate as **REFUTED / stale-domain**: accepting tag-to-digest config drift
-would violate #1894's exact reproduction rule. Final invariant-audit verdict:
+would violate #1894's exact reproduction rule. That invariant-audit verdict was
 **clean; remaining findings none**.
+
+The fresh Phase 7 Gap Sweep later found one P2 measured-zero boundary:
+`optional_int(free_bytes) or -1` made observed zero indistinguishable from a
+missing capacity observation. A same-invariant depth retro required a full
+numeric truthiness inventory and central repair. At final semantic head
+`56de13a1`:
+
+- capacity decision carries `int | null` free bytes;
+- zero remains measured data and receives the insufficient-headroom blocker;
+- missing remains null and receives the distinct unavailable blocker;
+- negative and bool/malformed observations remain fail-closed;
+- exact run_install tests prove durable payload, no generic error, no authority,
+  no Docker and no DDL.
+
+The repeated Phase 6.2 audit and comprehensive Round 3 both finished clean with
+zero candidates. The six-node oracle and read-only governance accounting in this
+document were then rerun against the exact final semantic SHA above.
 
 ## Process deviations and routed follow-up
 
