@@ -11,14 +11,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
+
+from packages.common.node27_cold_governance import (
+    GovernanceConfig,
+    build_cold_governance_receipt,
+    write_cold_governance_receipt,
+)
+from packages.common.node27_cold_governance_cli import (
+    add_cold_governance_arguments,
+    validate_cold_governance_arguments,
+)
+from packages.common.node27_cold_governance_collection import (
+    bytes_pretty as _bytes_pretty,
+)
+from packages.common.node27_cold_governance_collection import (
+    cold_governance_sample as _cold_governance_sample,
+)
+from packages.common.node27_cold_governance_collection import (
+    collect_filesystem,
+    collect_postgres,
+)
+from packages.common.node27_cold_governance_collection import (
+    run_command as _run_command,
+)
+from packages.common.node27_cold_governance_runtime import ColdGovernanceRuntimeConfig, cold_governance_evidence
 
 SCHEMA_VERSION = "nhms.node27_resource_governance.audit.v1"
 
@@ -37,27 +59,6 @@ DEFAULT_SERVICES = (
     "nhms-node27-timeseries-retention.service",
     "nhms-node27-timeseries-retention.timer",
 )
-DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
-    "data",
-    ".nhms-runs",
-    ".nhms-work",
-    ".pgdata",
-    "artifacts",
-    ".venv",
-    ".conda-pkgs",
-    "apps/frontend/dist.bak-20260615-234427",
-    "apps/frontend/dist.bak-20260615-235046",
-)
-DEFAULT_OBJECT_STORE_RELATIVE_SIZE_TARGETS = (
-    "raw",
-    "runs",
-    "forcing",
-    "states",
-    "scheduler",
-    ".reset-quarantine",
-    ".reset-receipts",
-)
-
 GIB = 1024**3
 MIB = 1024**2
 
@@ -85,6 +86,23 @@ class AuditConfig:
     summary_path: Path | None
     services: tuple[str, ...]
     thresholds: AuditThresholds
+    cold_governance_receipt_path: Path | None = None
+    cold_governance_head_sha: str | None = None
+    cold_governance_home_residual_minimum_bytes: int = 0
+    cold_governance_cold_residual_minimum_bytes: int = 0
+    cold_governance_evidence_hostname: str | None = None
+    cold_governance_array_device: str = "/dev/md0"
+    cold_governance_evidence_max_age_seconds: int | None = None
+    cold_governance_evidence_owner_uid: int = 0
+    cold_governance_evidence_approved_modes: tuple[int, ...] = ()
+    cold_governance_mdadm_evidence_path: Path | None = None
+    cold_governance_smart_evidence_paths: tuple[tuple[str, Path], ...] = ()
+    cold_governance_backup_evidence_path: Path | None = None
+    cold_governance_mdadm_bin: str = "/usr/sbin/mdadm"
+    cold_governance_smartctl_bin: str = "/usr/sbin/smartctl"
+    cold_governance_backup_inventory_bin: str = "/usr/local/sbin/nhms-backup-inventory"
+    cold_governance_prior_receipt_path: Path | None = None
+    cold_governance_prior_receipt_max_age_seconds: int | None = None
 
 
 def _utc_now() -> str:
@@ -99,144 +117,6 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return str(value)
-
-
-def _bytes_pretty(value: int | float | None) -> str | None:
-    if value is None:
-        return None
-    amount = float(value)
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    for unit in units:
-        if abs(amount) < 1024 or unit == units[-1]:
-            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
-        amount /= 1024
-    return f"{amount:.1f} TiB"
-
-
-def _safe_resolve(path: Path | None) -> Path | None:
-    if path is None:
-        return None
-    try:
-        return path.expanduser().resolve(strict=False)
-    except OSError:
-        return path.expanduser()
-
-
-def _disk_usage(path: Path) -> dict[str, Any]:
-    resolved = _safe_resolve(path)
-    if resolved is None:
-        return {"path": str(path), "status": "unavailable"}
-    try:
-        usage = shutil.disk_usage(resolved)
-    except OSError as error:
-        return {"path": str(resolved), "status": "unavailable", "error": str(error)}
-    return {
-        "path": str(resolved),
-        "status": "ok",
-        "total_bytes": usage.total,
-        "used_bytes": usage.used,
-        "free_bytes": usage.free,
-        "used_pct": round(100.0 * usage.used / usage.total, 3) if usage.total else None,
-        "total_pretty": _bytes_pretty(usage.total),
-        "used_pretty": _bytes_pretty(usage.used),
-        "free_pretty": _bytes_pretty(usage.free),
-    }
-
-
-def _run_command(args: Sequence[str], *, timeout: int = 20) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as error:
-        return {"status": "unavailable", "error": str(error), "args": list(args)}
-    except subprocess.TimeoutExpired:
-        return {"status": "timeout", "args": list(args), "timeout_sec": timeout}
-    return {
-        "status": "ok" if completed.returncode == 0 else "failed",
-        "return_code": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
-        "args": list(args),
-    }
-
-
-def _du_bytes(path: Path) -> dict[str, Any]:
-    resolved = _safe_resolve(path)
-    if resolved is None:
-        return {"path": str(path), "status": "unavailable"}
-    if not resolved.exists():
-        return {"path": str(resolved), "status": "missing"}
-    first = _run_command(["du", "-s", "-B1", str(resolved)])
-    if first["status"] == "ok" and first.get("stdout"):
-        try:
-            bytes_value = int(str(first["stdout"]).split()[0])
-        except (IndexError, ValueError):
-            bytes_value = None
-        if bytes_value is not None:
-            return {
-                "path": str(resolved),
-                "status": "ok",
-                "bytes": bytes_value,
-                "pretty": _bytes_pretty(bytes_value),
-            }
-    fallback = _run_command(["du", "-sk", str(resolved)])
-    if fallback["status"] == "ok" and fallback.get("stdout"):
-        try:
-            kib_value = int(str(fallback["stdout"]).split()[0])
-        except (IndexError, ValueError):
-            kib_value = None
-        if kib_value is not None:
-            bytes_value = kib_value * 1024
-            return {
-                "path": str(resolved),
-                "status": "ok",
-                "bytes": bytes_value,
-                "pretty": _bytes_pretty(bytes_value),
-            }
-    return {
-        "path": str(resolved),
-        "status": "unavailable",
-        "error": fallback.get("stderr") or first.get("stderr") or "du_failed",
-    }
-
-
-def collect_filesystem(config: AuditConfig) -> dict[str, Any]:
-    filesystems = {
-        "root": _disk_usage(Path("/")),
-        "home": _disk_usage(Path("/home")),
-        "repo_root_fs": _disk_usage(config.repo_root),
-        "object_store_fs": _disk_usage(config.object_store_root),
-    }
-    path_sizes: dict[str, Any] = {
-        "repo_root": _du_bytes(config.repo_root),
-        "object_store_root": _du_bytes(config.object_store_root),
-    }
-    if config.pgdata_root is not None:
-        path_sizes["pgdata_root"] = _du_bytes(config.pgdata_root)
-        path_sizes["pg_wal"] = _du_bytes(config.pgdata_root / "pg_wal")
-    for relative in DEFAULT_REPO_RELATIVE_SIZE_TARGETS:
-        path_sizes[f"repo/{relative}"] = _du_bytes(config.repo_root / relative)
-    for relative in DEFAULT_OBJECT_STORE_RELATIVE_SIZE_TARGETS:
-        path_sizes[f"object-store/{relative}"] = _du_bytes(config.object_store_root / relative)
-    for label, path in {
-        "autopipe_logs": Path("/home/nwm/autopipe-logs"),
-        "download_logs": Path("/home/nwm/node27-download-logs"),
-        "raw_retention_logs": Path("/home/nwm/node27-raw-retention-logs"),
-        "autopipe_work": Path("/home/nwm/autopipe-work"),
-        "tmp": Path("/tmp"),
-    }.items():
-        path_sizes[label] = _du_bytes(path)
-    return {
-        "filesystems": filesystems,
-        "path_sizes": path_sizes,
-        "inode_usage": _run_command(["df", "-ih", "/", "/home"]),
-        "journal_disk_usage": _run_command(["journalctl", "--disk-usage"]),
-    }
 
 
 def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
@@ -277,190 +157,6 @@ def collect_systemd(services: Iterable[str]) -> dict[str, Any]:
     return {"services": collected, "timers": timers}
 
 
-def _psycopg_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
-    cursor.execute(sql)
-    return [dict(row) for row in cursor.fetchall()]
-
-
-def collect_postgres(database_url: str | None) -> dict[str, Any]:
-    if not database_url:
-        return {"status": "skipped", "reason": "database_url_missing"}
-    try:
-        import psycopg2
-        import psycopg2.extras
-    except Exception as error:  # pragma: no cover - environment dependent
-        return {"status": "blocked", "reason": "psycopg2_unavailable", "error": str(error)}
-    try:
-        connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
-    except Exception as error:
-        return {"status": "blocked", "reason": "connection_failed", "error": str(error)}
-    result: dict[str, Any] = {"status": "ok"}
-    try:
-        connection.autocommit = True
-        with connection.cursor() as cursor:
-            cursor.execute("SET statement_timeout = '20s'")
-            result["database_sizes"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT datname,
-                       pg_database_size(datname) AS bytes,
-                       pg_size_pretty(pg_database_size(datname)) AS pretty
-                FROM pg_database
-                ORDER BY pg_database_size(datname) DESC
-                """,
-            )
-            result["settings"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT name, setting, unit
-                FROM pg_settings
-                WHERE name IN (
-                  'shared_buffers','work_mem','maintenance_work_mem','effective_cache_size',
-                  'max_connections','temp_buffers','wal_buffers','max_wal_size','min_wal_size',
-                  'wal_keep_size','checkpoint_timeout','autovacuum','autovacuum_max_workers',
-                  'autovacuum_vacuum_scale_factor','autovacuum_analyze_scale_factor',
-                  'autovacuum_naptime','track_counts','log_temp_files'
-                )
-                ORDER BY name
-                """,
-            )
-            result["connections_by_state"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT usename, state, count(*) AS count,
-                       max(now() - state_change) AS max_state_age
-                FROM pg_stat_activity
-                GROUP BY usename, state
-                ORDER BY count DESC, usename, state
-                """,
-            )
-            result["stat_database"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT datname, numbackends, xact_commit, xact_rollback,
-                       temp_files, temp_bytes, pg_size_pretty(temp_bytes) AS temp_bytes_pretty,
-                       conflicts, deadlocks
-                FROM pg_stat_database
-                ORDER BY temp_bytes DESC
-                """,
-            )
-            result["largest_relations"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT n.nspname AS schema, c.relname AS relation, c.relkind,
-                       pg_total_relation_size(c.oid) AS total_bytes,
-                       pg_size_pretty(pg_total_relation_size(c.oid)) AS total_pretty,
-                       pg_relation_size(c.oid) AS table_bytes,
-                       pg_indexes_size(c.oid) AS indexes_bytes,
-                       COALESCE(s.n_live_tup, 0) AS n_live_tup,
-                       COALESCE(s.n_dead_tup, 0) AS n_dead_tup,
-                       s.last_autovacuum, s.last_autoanalyze, s.autovacuum_count
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
-                WHERE c.relkind IN ('r','p','m')
-                  AND n.nspname NOT IN ('pg_catalog','information_schema')
-                ORDER BY pg_total_relation_size(c.oid) DESC
-                LIMIT 40
-                """,
-            )
-            result["largest_indexes"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT ns.nspname AS schema, idx.relname AS index_name,
-                       tbl_ns.nspname AS table_schema, tbl.relname AS table_name,
-                       pg_relation_size(idx.oid) AS size_bytes,
-                       pg_size_pretty(pg_relation_size(idx.oid)) AS size_pretty,
-                       ix.indisunique, ix.indisprimary
-                FROM pg_class idx
-                JOIN pg_index ix ON ix.indexrelid = idx.oid
-                JOIN pg_class tbl ON tbl.oid = ix.indrelid
-                JOIN pg_namespace ns ON ns.oid = idx.relnamespace
-                JOIN pg_namespace tbl_ns ON tbl_ns.oid = tbl.relnamespace
-                WHERE ns.nspname NOT IN ('pg_catalog','information_schema')
-                ORDER BY pg_relation_size(idx.oid) DESC
-                LIMIT 30
-                """,
-            )
-            result["dead_tuple_hotspots"] = _psycopg_rows(
-                cursor,
-                """
-                SELECT schemaname, relname, n_live_tup, n_dead_tup,
-                       CASE WHEN n_live_tup+n_dead_tup > 0
-                            THEN round(100.0*n_dead_tup/(n_live_tup+n_dead_tup), 2)
-                            ELSE 0 END AS dead_pct,
-                       pg_total_relation_size(relid) AS total_bytes,
-                       pg_size_pretty(pg_total_relation_size(relid)) AS total_pretty,
-                       last_autovacuum, autovacuum_count
-                FROM pg_stat_user_tables
-                WHERE n_dead_tup > 100000
-                ORDER BY n_dead_tup DESC
-                LIMIT 20
-                """,
-            )
-            try:
-                result["hypertables"] = _psycopg_rows(
-                    cursor,
-                    """
-                    SELECT h.hypertable_schema, h.hypertable_name, h.num_chunks,
-                           h.compression_enabled,
-                           r.job_id AS retention_job_id,
-                           r.config AS retention_config,
-                           c.job_id AS compression_job_id,
-                           c.config AS compression_config
-                    FROM timescaledb_information.hypertables h
-                    LEFT JOIN timescaledb_information.jobs r
-                      ON r.hypertable_schema = h.hypertable_schema
-                     AND r.hypertable_name = h.hypertable_name
-                     AND r.proc_name = 'policy_retention'
-                    LEFT JOIN timescaledb_information.jobs c
-                      ON c.hypertable_schema = h.hypertable_schema
-                     AND c.hypertable_name = h.hypertable_name
-                     AND c.proc_name = 'policy_compression'
-                    ORDER BY h.hypertable_schema, h.hypertable_name
-                    """,
-                )
-                rel_expr = "((quote_ident(chunk_schema) || '.' || quote_ident(chunk_name))::regclass)"
-                result["hypertable_size_breakdown"] = _psycopg_rows(
-                    cursor,
-                    f"""
-                    SELECT hypertable_schema, hypertable_name, count(*) AS chunks,
-                           sum(pg_relation_size({rel_expr})) AS table_bytes,
-                           sum(pg_indexes_size({rel_expr})) AS indexes_bytes,
-                           sum(pg_total_relation_size({rel_expr})) AS total_bytes,
-                           pg_size_pretty(sum(pg_relation_size({rel_expr}))) AS table_pretty,
-                           pg_size_pretty(sum(pg_indexes_size({rel_expr}))) AS indexes_pretty,
-                           pg_size_pretty(sum(pg_total_relation_size({rel_expr}))) AS total_pretty,
-                           min(range_start) AS min_range_start,
-                           max(range_end) AS max_range_end
-                    FROM timescaledb_information.chunks
-                    GROUP BY hypertable_schema, hypertable_name
-                    ORDER BY sum(pg_total_relation_size({rel_expr})) DESC NULLS LAST
-                    """,
-                )
-                result["largest_chunks"] = _psycopg_rows(
-                    cursor,
-                    f"""
-                    SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
-                           pg_total_relation_size({rel_expr}) AS total_bytes,
-                           pg_size_pretty(pg_total_relation_size({rel_expr})) AS total_pretty,
-                           pg_relation_size({rel_expr}) AS table_bytes,
-                           pg_indexes_size({rel_expr}) AS indexes_bytes,
-                           range_start, range_end
-                    FROM timescaledb_information.chunks
-                    ORDER BY pg_total_relation_size({rel_expr}) DESC
-                    LIMIT 20
-                    """,
-                )
-            except Exception as error:
-                result["timescale_status"] = {"status": "blocked", "error": str(error)}
-    except Exception as error:
-        result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
-    finally:
-        connection.close()
-    return result
-
-
 def _first_database_size(postgres: Mapping[str, Any], name: str = "nhms") -> int | None:
     for row in postgres.get("database_sizes", []) or []:
         if row.get("datname") == name:
@@ -481,6 +177,23 @@ def _temp_bytes(postgres: Mapping[str, Any], name: str = "nhms") -> int:
         if row.get("datname") == name:
             return int(row.get("temp_bytes") or 0)
     return 0
+
+
+def _cold_runtime_config(config: AuditConfig) -> ColdGovernanceRuntimeConfig:
+    return ColdGovernanceRuntimeConfig(
+        pgdata_root=config.pgdata_root,
+        evidence_hostname=config.cold_governance_evidence_hostname,
+        array_device=config.cold_governance_array_device,
+        evidence_max_age_seconds=config.cold_governance_evidence_max_age_seconds,
+        evidence_owner_uid=config.cold_governance_evidence_owner_uid,
+        evidence_approved_modes=config.cold_governance_evidence_approved_modes,
+        mdadm_evidence_path=config.cold_governance_mdadm_evidence_path,
+        smart_evidence_paths=config.cold_governance_smart_evidence_paths,
+        backup_evidence_path=config.cold_governance_backup_evidence_path,
+        mdadm_bin=config.cold_governance_mdadm_bin,
+        smartctl_bin=config.cold_governance_smartctl_bin,
+        backup_inventory_bin=config.cold_governance_backup_inventory_bin,
+    )
 
 
 def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) -> list[dict[str, Any]]:
@@ -661,6 +374,31 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
         },
     }
     receipt["recommendations"] = _recommendations(receipt, config.thresholds)
+    if config.cold_governance_receipt_path is not None:
+        audit_reference = datetime.now(UTC)
+        evidence = cold_governance_evidence(
+            _cold_runtime_config(config), postgres, observed_at=audit_reference
+        )
+        cold_receipt, cold_schema = build_cold_governance_receipt(
+            config=GovernanceConfig(
+                receipt_path=config.cold_governance_receipt_path,
+                head_sha=config.cold_governance_head_sha,
+                home_residual_minimum_bytes=config.cold_governance_home_residual_minimum_bytes,
+                cold_residual_minimum_bytes=config.cold_governance_cold_residual_minimum_bytes,
+                prior_receipt_path=config.cold_governance_prior_receipt_path,
+                prior_receipt_max_age_seconds=config.cold_governance_prior_receipt_max_age_seconds,
+            ),
+            started_at=started_at,
+            finished_at=receipt["finished_at"],
+            home=_cold_governance_sample(filesystem, postgres, path="/home", observed_at=receipt["finished_at"]),
+            cold=_cold_governance_sample(filesystem, postgres, path="/data/GHDC", observed_at=receipt["finished_at"]),
+            evidence=evidence,
+        )
+        write_cold_governance_receipt(config.cold_governance_receipt_path, cold_receipt, cold_schema)
+        receipt["cold_tablespace_governance"] = {
+            "outcome": cold_receipt["outcome"],
+            "receipt_path": str(config.cold_governance_receipt_path),
+        }
     return receipt
 
 
@@ -683,6 +421,16 @@ def _positive_bytes(raw: str, *, label: str) -> int:
     return value
 
 
+def _nonnegative_bytes(raw: str, *, label: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{label} must be an integer byte count") from error
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{label} must be non-negative")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=os.getenv("NODE27_GOVERNANCE_REPO_ROOT", "/home/nwm/NWM"))
@@ -698,6 +446,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL"))
     parser.add_argument("--summary-path", default=os.getenv("NODE27_GOVERNANCE_SUMMARY_PATH"))
+    parser.add_argument(
+        "--cold-governance-receipt-path",
+        default=os.getenv("NODE27_COLD_GOVERNANCE_RECEIPT_PATH"),
+        help="Optional strict cold-tablespace governance receipt path.",
+    )
+    parser.add_argument("--cold-governance-head-sha", default=os.getenv("NODE27_COLD_GOVERNANCE_HEAD_SHA"))
+    parser.add_argument(
+        "--cold-governance-home-residual-minimum-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="cold-governance-home-residual-minimum-bytes"),
+        default=_nonnegative_bytes(
+            os.getenv("NODE27_COLD_GOVERNANCE_HOME_RESIDUAL_MINIMUM_BYTES", "0"),
+            label="NODE27_COLD_GOVERNANCE_HOME_RESIDUAL_MINIMUM_BYTES",
+        ),
+    )
+    parser.add_argument(
+        "--cold-governance-cold-residual-minimum-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="cold-governance-cold-residual-minimum-bytes"),
+        default=_nonnegative_bytes(
+            os.getenv("NODE27_COLD_GOVERNANCE_COLD_RESIDUAL_MINIMUM_BYTES", "0"),
+            label="NODE27_COLD_GOVERNANCE_COLD_RESIDUAL_MINIMUM_BYTES",
+        ),
+    )
+    add_cold_governance_arguments(parser)
     parser.add_argument("--service", dest="services", action="append", default=[])
     parser.add_argument(
         "--root-free-warn-bytes",
@@ -730,6 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> AuditConfig:
+    validate_cold_governance_arguments(args)
     thresholds = AuditThresholds(
         root_free_warn_bytes=args.root_free_warn_bytes,
         root_free_critical_bytes=args.root_free_critical_bytes,
@@ -739,6 +511,11 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
     summary_path = Path(args.summary_path).expanduser() if args.summary_path else None
+    cold_governance_receipt_path = (
+        Path(args.cold_governance_receipt_path).expanduser() if args.cold_governance_receipt_path else None
+    )
+    if cold_governance_receipt_path is not None and not cold_governance_receipt_path.is_absolute():
+        raise ValueError("cold governance receipt path must be absolute")
     return AuditConfig(
         repo_root=Path(args.repo_root).expanduser(),
         object_store_root=Path(args.object_store_root).expanduser(),
@@ -747,6 +524,23 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         summary_path=summary_path,
         services=tuple(args.services or DEFAULT_SERVICES),
         thresholds=thresholds,
+        cold_governance_receipt_path=cold_governance_receipt_path,
+        cold_governance_head_sha=args.cold_governance_head_sha,
+        cold_governance_home_residual_minimum_bytes=args.cold_governance_home_residual_minimum_bytes,
+        cold_governance_cold_residual_minimum_bytes=args.cold_governance_cold_residual_minimum_bytes,
+        cold_governance_evidence_hostname=args.cold_governance_evidence_hostname,
+        cold_governance_array_device=args.cold_governance_array_device,
+        cold_governance_evidence_max_age_seconds=args.cold_governance_evidence_max_age_seconds,
+        cold_governance_evidence_owner_uid=args.cold_governance_evidence_owner_uid,
+        cold_governance_evidence_approved_modes=tuple(args.cold_governance_evidence_approved_mode),
+        cold_governance_mdadm_evidence_path=args.cold_governance_mdadm_evidence_path,
+        cold_governance_smart_evidence_paths=tuple(args.cold_governance_smart_evidence),
+        cold_governance_backup_evidence_path=args.cold_governance_backup_evidence_path,
+        cold_governance_mdadm_bin=args.cold_governance_mdadm_bin,
+        cold_governance_smartctl_bin=args.cold_governance_smartctl_bin,
+        cold_governance_backup_inventory_bin=args.cold_governance_backup_inventory_bin,
+        cold_governance_prior_receipt_path=args.cold_governance_prior_receipt_path,
+        cold_governance_prior_receipt_max_age_seconds=args.cold_governance_prior_receipt_max_age_seconds,
     )
 
 

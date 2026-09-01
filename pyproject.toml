@@ -85,6 +85,7 @@ markers = [
     "real_disk: requires node-27 DATABASE_URL and OBJECT_STORE_ROOT, excluded from pure CI",
     "grib: requires real GRIB2 decode + eccodes-version-matched fixtures; run on node-27, excluded from pure CI",
     "timescaledb_210: compression-semantics tests whose only valid oracle is a node-27 throwaway DB (TimescaleDB 2.10.2)",
+    "node27_docker: explicitly opted-in disposable Docker oracle on node-27; requires NHMS_RUN_NODE27_DOCKER=1",
 ]
 
 [tool.setuptools.packages.find]

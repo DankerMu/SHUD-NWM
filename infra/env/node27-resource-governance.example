@@ -10,6 +10,34 @@ NODE27_GOVERNANCE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-pgdata
 NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 
+# Optional #1894 strict dual-device receipt. Leave both unset until #1895 has
+# supplied fresh descriptor-bound RAID/SMART/backup/capacity evidence; no
+# production safety threshold is silently invented by this template.
+# NODE27_COLD_GOVERNANCE_RECEIPT_PATH=/home/nwm/node27-resource-governance-logs/cold-governance.json
+# NODE27_COLD_GOVERNANCE_HEAD_SHA=<reviewed-40-hex-sha>
+# Measured non-negative residual minimums; zero is accounting-only and is the
+# template default until #1895 records the live rollback budget.
+# NODE27_COLD_GOVERNANCE_HOME_RESIDUAL_MINIMUM_BYTES=0
+# NODE27_COLD_GOVERNANCE_COLD_RESIDUAL_MINIMUM_BYTES=0
+# Descriptor-bound evidence must be configured together before governance can
+# publish healthy. The root-produced JSON envelope command/hostname/subject is
+# validated; never shell-source these paths.
+# NODE27_COLD_GOVERNANCE_EVIDENCE_HOSTNAME=node-27
+# NODE27_COLD_GOVERNANCE_ARRAY_DEVICE=/dev/md0
+# NODE27_COLD_GOVERNANCE_EVIDENCE_MAX_AGE_SECONDS=900
+# NODE27_COLD_GOVERNANCE_EVIDENCE_OWNER_UID=0
+# NODE27_COLD_GOVERNANCE_EVIDENCE_APPROVED_MODE=0600
+# NODE27_COLD_GOVERNANCE_MDADM_EVIDENCE_PATH=/absolute/mdadm.json
+# NODE27_COLD_GOVERNANCE_SMART_EVIDENCE=/dev/sdb1=/absolute/sdb1-smart.json,/dev/sdc1=/absolute/sdc1-smart.json
+# NODE27_COLD_GOVERNANCE_BACKUP_EVIDENCE_PATH=/absolute/backup.json
+# NODE27_COLD_GOVERNANCE_MDADM_BIN=/usr/sbin/mdadm
+# NODE27_COLD_GOVERNANCE_SMARTCTL_BIN=/usr/sbin/smartctl
+# NODE27_COLD_GOVERNANCE_BACKUP_INVENTORY_BIN=/usr/local/sbin/nhms-backup-inventory
+# Optional prior receipt trend: require a bounded, mode-0600, schema-valid
+# predecessor identity; invalid/stale history makes the next receipt refusal.
+# NODE27_COLD_GOVERNANCE_PRIOR_RECEIPT_PATH=/absolute/prior.json
+# NODE27_COLD_GOVERNANCE_PRIOR_RECEIPT_MAX_AGE_SECONDS=900
+
 # Use a node-27-local DB account. Read-only display credentials are enough for
 # the audit path; do not use this env for ingest or cleanup writes.
 DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms

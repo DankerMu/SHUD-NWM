@@ -671,6 +671,31 @@ incomplete once any external `pg_tblspc` target exists; backup readiness
 must cover PGDATA and every tablespace location. #1894 owns the installer
 and those gates; this amendment only freezes the policy.
 
+### #1894 installation/rollback/governance refinement (2026-08-31)
+
+Issue #1894 fixes the host/container admission boundary before any #1895 live action.
+The installer is dry-run by default; enforce is valid only after fresh descriptor-bound
+root evidence (regular file, approved owner/mode, capture time, hostname, exact command
+and subject identity), exact two-member `mdadm --detail`, two distinct SMART PASS files,
+complete PGDATA-plus-external-`pg_tblspc` backup inventory, and explicit install plus
+rollback capacity headroom. Self-described root, `[UU]`, mount success, missing/stale
+or unknown evidence are blockers.
+
+Before recreation it saves a mode-0600 private recovery authority containing exact secret-bearing
+container Env and reconstructible config. The public receipt is separately strict, atomic and
+mode 0600; it carries only redacted field names, identities and digests. Raw inspect stays inert
+JSON and recreate is direct argv, preserving every supported non-default config field or refusing.
+The prior container is stopped and renamed, never destroyed before post-create catalog/bind/device/
+writability/no-attach/new-chunk-`pg_default` readback proves success.
+
+Rollback deletes only installer-owned catalog/container/path state. It restores the exact prior
+container and cannot remove the host path while catalog dependents, `pg_tblspc`, current or stopped
+container binds, nonempty content, or identity uncertainty remain. A directory must never be bound
+empty over existing valid container data. Dual-device governance samples `/home` and `/data/GHDC`
+within one audit interval, calculates residual by arithmetic rather than recursively scanning the
+shared root, and publishes healthy/drift/refusal evidence without secrets. #1895 alone authorizes
+live execution and performance/archive closure.
+
 ### Lifecycle contract measured by the isolated probe
 
 Legal state flow is `hot-uncompressed -> hot-compressed -> cold-compressed

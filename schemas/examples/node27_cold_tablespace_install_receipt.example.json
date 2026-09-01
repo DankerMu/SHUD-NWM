@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-31T12:00:00Z",
+  "mode": "enforce",
+  "outcome": "installed",
+  "state": "installed",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tablespace": "nhms_cold",
+  "container": "nhms-db",
+  "path": {
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "container_path": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "exists": true,
+    "device_identity": "8:11:1",
+    "owner_uid": 999,
+    "owner_gid": 999,
+    "mode": 448,
+    "empty": true
+  },
+  "container_snapshot": {
+    "config_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resolved_image_id": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+    "environment_names": [
+      "PGDATA",
+      "POSTGRES_PASSWORD",
+      "POSTGRES_USER"
+    ]
+  },
+  "evidence": {
+    "health": {
+      "healthy": true,
+      "raid": {
+        "state": "clean"
+      },
+      "smart": [
+        {
+          "device": "/dev/sdb1",
+          "status": "PASS"
+        },
+        {
+          "device": "/dev/sdc1",
+          "status": "PASS"
+        }
+      ]
+    },
+    "backup": {
+      "complete": true,
+      "missing_targets": []
+    },
+    "capacity": {
+      "free_bytes": 1000,
+      "required_bytes": 300,
+      "approved": true,
+      "blockers": []
+    }
+  },
+  "readback": {
+    "approved": true,
+    "catalog_location": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "pg_tblspc_target": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "container_bind": "/data/GHDC/nhms-cold-tablespace",
+    "device_identity": "8:11:1",
+    "container_writable": true,
+    "hypertable_attached": false,
+    "new_chunk_tablespace": "pg_default"
+  },
+  "ownership": {
+    "prior_container": "nhms-db-before",
+    "installer_container_created": true,
+    "catalog_created": true,
+    "host_path_created": false,
+    "recovery_authority": false
+  },
+  "rollback": {
+    "attempted": false,
+    "prior_restored": false,
+    "host_path_removed": false,
+    "blockers": []
+  },
+  "blockers": [],
+  "error": null,
+  "identity": {
+    "kind": "production",
+    "container_name": "nhms-db",
+    "prior_container_name": "nhms-db-before",
+    "host_path": "/data/GHDC/nhms-cold-tablespace",
+    "container_path": "/home/postgres/pgdata/tablespaces/nhms_cold",
+    "tablespace": "nhms_cold",
+    "docker_bin": "/usr/bin/docker",
+    "host_port": 55432,
+    "work_root": null,
+    "image_id": null,
+    "image_ref": null
+  },
+  "authority": {
+    "state": "closed",
+    "phase": null,
+    "path_present": false
+  }
+}
