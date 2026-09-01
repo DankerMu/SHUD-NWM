@@ -136,7 +136,7 @@ Seams under test:
 - [x] 3.4 Extend governance to sample `/home` and `/data/GHDC` together and separately report filesystem capacity, PGDATA, cold relation bytes, object-store and shared residual use, plus trend/threshold evidence.
 - [x] 3.5 Detect dangling catalog/bind/filesystem identities, stopped-container stale mounts, degraded/rebuilding/unknown RAID fixtures, SMART failures, permission/capacity faults, and PGDATA-only backup gaps; all live-precondition failures are NO-GO.
 - [x] 3.6 Document and test rollback that stops writers/timers, restores the prior container, verifies catalog/read paths, never deletes a referenced path, and never binds an empty directory over valid data.
-- [ ] 3.7 Run disposable install/rollback tests with this minimum checked-in fixture matrix and verification set:
+- [x] 3.7 Run disposable install/rollback tests with this minimum checked-in fixture matrix and verification set:
   - pinned-image synthetic-mount container;
   - `mdadm --detail` healthy `[UU]`, degraded, rebuilding, recovering/reshaping, missing/substituted-member, and unknown cases;
   - two-member SMART PASS, one-member FAIL, and one-member unknown;
