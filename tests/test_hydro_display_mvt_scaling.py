@@ -8,6 +8,7 @@ from typing import Any
 
 from apps.api.routes import hydro_display
 from services.tiles.mvt import (
+    NATIONAL_DISCHARGE_QUERY_VERSION,
     TileInput,
     TileResponse,
     layer_metadata,
@@ -56,7 +57,10 @@ def test_national_source_generations_change_with_data_identity() -> None:
     )
     second = _Session([{**first.rows[0], "run_id": "run_b"}])
 
-    assert national_discharge_source_version(first) != national_discharge_source_version(second)
+    first_version = national_discharge_source_version(first)
+
+    assert first_version.startswith(f"hydro-national:{NATIONAL_DISCHARGE_QUERY_VERSION}:")
+    assert first_version != national_discharge_source_version(second)
     assert "ROW_NUMBER() OVER" in first.sql
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in first.sql
     assert "AND mi.active_flag" in first.sql

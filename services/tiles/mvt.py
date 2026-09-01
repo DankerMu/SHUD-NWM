@@ -34,11 +34,13 @@ MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
-# Bumped to v3 by #1341: the national discharge query shape changed (surrogate-key
-# fact predicates + transitional text pushdown conjuncts). The tile cache key does
-# not hash the SQL, so deploying a new shape without moving this generation would
-# keep serving pre-switch cached tiles and split the fleet between stale and fresh.
-NATIONAL_DISCHARGE_QUERY_VERSION = "surrogate-key-identity-v3"
+# Bumped to v4: the national discharge query now applies a deterministic
+# fair-per-network budget before MVT encoding. The tile cache key does not hash
+# the SQL, so deploying a new shape without moving this generation would keep
+# serving pre-switch cached tiles and split the fleet between stale and fresh.
+# The inventory digest below separately changes whenever an active network/run
+# changes, including when a new basin is registered.
+NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v4"
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
