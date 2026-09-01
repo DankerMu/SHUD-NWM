@@ -9,6 +9,7 @@ import jsonschema
 import pytest
 
 from packages.common.node27_cold_tablespace_authority import private_snapshot_digest
+from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
 from packages.common.node27_cold_tablespace_identity import PRODUCTION_IDENTITY
 from packages.common.node27_cold_tablespace_install import InstallConfig, run_install
 from tests.test_node27_cold_tablespace_install import NOW, SHA, FakeConnection, _config, _dependencies, _inspect
@@ -88,6 +89,14 @@ def test_recovery_closes_each_early_persisted_phase_without_replaying_install(
         assert expected in actions
     assert not any(action[0] == "run" for action in actions)
     assert not config.recovery_path.exists()
+    if phase in {"prepared", "prior_stopped", "prior_renamed"}:
+        observed = normalize_raw_inspect(deps.inspect_container())
+        assert result.receipt["container_snapshot"] == {
+            "config_digest": observed.config_digest,
+            "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+        }
+    else:
+        assert result.receipt["container_snapshot"] == {"config_digest": None, "environment_names": []}
 
 
 def test_dry_run_with_authority_checks_it_before_inspection_and_publishes_recovery_required(tmp_path: Path) -> None:
@@ -295,6 +304,27 @@ def test_missing_readiness_boundary_after_recovery_transition_retains_authority(
     assert result.receipt["authority"]["state"] == "sidecar"
     assert config.recovery_path.exists()
     assert any(argv[1:3] == ("start", "nhms-db") for _kind, argv in deps.action_log)
+
+
+def test_terminal_pending_cleanup_complete_target_installed_receipt_reports_live_replacement(
+    tmp_path: Path,
+) -> None:
+    connection = FakeConnection(topology="ready")
+    deps = _dependencies(connection, cold_bind=True)
+    config = _config(tmp_path, enforce=True)
+    _write_authority(config, _authority(phase="terminal_pending_cleanup"))
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "installed", result.receipt
+    live = normalize_raw_inspect(deps.inspect_container())
+    assert result.receipt["container_snapshot"] == {
+        "config_digest": live.config_digest,
+        "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+    }
+    assert "do-not-leak" not in json.dumps(result.receipt)
+    assert not config.recovery_path.exists()
+    assert not deps.action_log
 
 
 def test_first_terminal_receipt_failure_retains_authority_without_rollback(tmp_path: Path) -> None:

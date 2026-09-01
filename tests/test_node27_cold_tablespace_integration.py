@@ -769,13 +769,16 @@ def test_real_disposable_cluster_installs_through_run_install(tmp_path: Path) ->
         assert not recovery_path.exists()
         after_snapshot = normalize_raw_inspect(inspect_container(config, config.container_name))
         assert diff_container_config(before_snapshot, after_snapshot, identity=config.identity).approved
-        assert result.receipt["container_snapshot"]["environment_names"]
+        assert result.receipt["container_snapshot"]["config_digest"] == after_snapshot.config_digest
+        assert sorted(
+            item.split("=", 1)[0] for item in after_snapshot.environment
+        ) == result.receipt["container_snapshot"]["environment_names"]
         assert config.password not in receipt_path.read_text(encoding="utf-8")
         assert any(action[1] == "run" for action in resources.actions)
         assert_new_chunk_pg_default(config)
 
         assert stat_mode(receipt_path) == 0o600
-        after_digest = result.receipt["container_snapshot"]["config_digest"]
+        after_digest = after_snapshot.config_digest
         after_id = after_snapshot.container_id
         actions_before_again = list(resources.actions)
         again = run_install(InstallConfig(**settings), dependencies(resources, health=health))

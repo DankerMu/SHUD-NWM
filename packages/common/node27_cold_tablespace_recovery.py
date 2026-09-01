@@ -20,6 +20,7 @@ from packages.common.node27_cold_tablespace_authority import (
 from packages.common.node27_cold_tablespace_container import ContainerSnapshot, normalize_raw_inspect
 from packages.common.node27_cold_tablespace_identity import ColdTablespaceIdentity
 from packages.common.node27_cold_tablespace_receipt import (
+    container_snapshot_payload,
     no_go,
     path_payload,
     publish_with_dependencies,
@@ -290,6 +291,7 @@ def rollback(
     prior_restored = False
     host_path_removed = False
     container_transitioned = False
+    restored_snapshot: ContainerSnapshot | None = None
     try:
         require_fresh_quiescence(deps)
         topology, _location, _target = catalog_topology(connection, identity)
@@ -323,6 +325,10 @@ def rollback(
             require_fresh_quiescence(deps)
             deps.docker((identity.docker_bin, "rename", identity.prior_container_name, identity.container_name))
             container_transitioned = True
+            # Rename preserves the observed instance identity, so the freshly
+            # observed prior remains truthful for the renamed-back current name;
+            # the restart branch below replaces it with a post-start observation.
+            restored_snapshot = prior
             authority = _record_rollback_progress(config, authority, prior_renamed=False)
             ownership = authority["ownership"]
 
@@ -334,8 +340,10 @@ def rollback(
             deps.docker((identity.docker_bin, "start", identity.container_name))
             container_transitioned = True
             require_ready_sql_read_path(deps)
-            if not prior_config_matches(authority, inspect_named(deps, identity.container_name, identity), identity):
+            restored = inspect_named(deps, identity.container_name, identity)
+            if not prior_config_matches(authority, restored, identity):
                 raise RuntimeError("restored prior container config/read path differs")
+            restored_snapshot = restored
             prior_restored = True
             authority = _record_rollback_progress(config, authority, prior_stopped=False)
             ownership = authority["ownership"]
@@ -381,6 +389,8 @@ def rollback(
                 "blockers": list(dict.fromkeys((*receipt["blockers"], *blockers))),
             }
         )
+        if restored_snapshot is not None:
+            receipt["container_snapshot"] = container_snapshot_payload(restored_snapshot)
         if blockers:
             set_authority_receipt(receipt, authority, state="pending_cleanup")
             receipt.update({"outcome": "pending_cleanup", "state": "pending_cleanup"})
@@ -431,9 +441,12 @@ def _early_path_cleanup(
     authority: Mapping[str, Any],
     connection: Any | None,
     prior_restored: bool,
+    restored_snapshot: ContainerSnapshot | None = None,
 ) -> InstallResult:
     """Remove only the recorded fresh path after a fresh post-restore survey."""
 
+    if restored_snapshot is not None:
+        receipt["container_snapshot"] = container_snapshot_payload(restored_snapshot)
     if connection is None:
         if bool(authority["ownership"]["host_path_created"]):
             raise RuntimeError("fresh recovery catalog observation is unavailable")
@@ -563,6 +576,7 @@ def _early_recovery(
                 blocker="prepared prior container or topology cannot be safely confirmed",
             )
         receipt["rollback"] = {"attempted": True, "prior_restored": False, "host_path_removed": False, "blockers": []}
+        receipt["container_snapshot"] = container_snapshot_payload(current)
         return terminal_close(
             config=config,
             schema=schema,
@@ -603,9 +617,8 @@ def _early_recovery(
         authority = _record_rollback_progress(config, authority, prior_stopped=False)
         connection = _connect_observation(deps)
         topology, _location, _target = catalog_topology(connection, identity)
-        if topology != "absent" or not prior_config_matches(
-            authority, inspect_named(deps, identity.container_name, identity), identity
-        ):
+        restored = inspect_named(deps, identity.container_name, identity)
+        if topology != "absent" or not prior_config_matches(authority, restored, identity):
             return _retain_early_authority(
                 config=config,
                 schema=schema,
@@ -624,6 +637,7 @@ def _early_recovery(
             authority=authority,
             connection=connection,
             prior_restored=True,
+            restored_snapshot=restored,
         )
     if phase == "prior_renamed":
         prior = inspect_named(deps, identity.prior_container_name, identity)
@@ -646,9 +660,8 @@ def _early_recovery(
         authority = _record_rollback_progress(config, authority, prior_stopped=False)
         connection = _connect_observation(deps)
         topology, _location, _target = catalog_topology(connection, identity)
-        if topology != "absent" or not prior_config_matches(
-            authority, inspect_named(deps, identity.container_name, identity), identity
-        ):
+        restored = inspect_named(deps, identity.container_name, identity)
+        if topology != "absent" or not prior_config_matches(authority, restored, identity):
             return _retain_early_authority(
                 config=config,
                 schema=schema,
@@ -667,6 +680,7 @@ def _early_recovery(
             authority=authority,
             connection=connection,
             prior_restored=True,
+            restored_snapshot=restored,
         )
     raise RuntimeError("recovery early phase is invalid")
 
@@ -692,6 +706,7 @@ def _pending_cleanup(
     ):
         receipt["readback"] = readback(connection, deps, identity)
         if receipt["readback"]["approved"]:
+            receipt["container_snapshot"] = container_snapshot_payload(snapshot)
             return terminal_close(
                 config=config,
                 schema=schema,
@@ -712,6 +727,7 @@ def _pending_cleanup(
                 authority=authority,
                 connection=connection,
                 prior_restored=True,
+                restored_snapshot=snapshot,
             )
     set_authority_receipt(receipt, authority, state="pending_cleanup")
     return no_go(
@@ -856,6 +872,7 @@ def reconcile(
         ):
             receipt["readback"] = readback(connection, deps, config.identity)
             if receipt["readback"]["approved"]:
+                receipt["container_snapshot"] = container_snapshot_payload(snapshot)
                 return terminal_close(
                     config=config,
                     schema=schema,

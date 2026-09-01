@@ -14,6 +14,7 @@ from packages.common.compressed_chunk_cold_residency import quote_ident, quote_l
 from packages.common.node27_cold_tablespace_container import ContainerContractError, build_recreate_argv
 from packages.common.node27_cold_tablespace_identity import IdentityContractError, validate_identity_for_action
 from packages.common.node27_cold_tablespace_receipt import (
+    container_snapshot_payload,
     no_go,
     now_iso,
     publish_with_dependencies,
@@ -297,6 +298,7 @@ def run_install(config: InstallConfig, deps: InstallDependencies) -> InstallResu
             return rollback(
                 config=config, schema=schema, deps=deps, connection=connection, receipt=receipt, authority=authority
             )
+        receipt["container_snapshot"] = container_snapshot_payload(after)
         return terminal_close(
             config=config,
             schema=schema,

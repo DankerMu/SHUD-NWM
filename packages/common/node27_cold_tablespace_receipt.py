@@ -10,6 +10,7 @@ from typing import Any
 
 import jsonschema
 
+from packages.common.node27_cold_tablespace_container import ContainerSnapshot
 from packages.common.node27_cold_tablespace_identity import (
     PRODUCTION_IDENTITY,
     ColdTablespaceIdentity,
@@ -165,6 +166,18 @@ def optional_string(value: object) -> str | None:
 
 def optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def container_snapshot_payload(snapshot: ContainerSnapshot) -> dict[str, Any]:
+    """Render the public secret-free container identity for a receipt.
+
+    Only the reconstructible config digest and the sorted environment variable
+    names are published.  Environment values, image, labels, and the Docker
+    instance ID stay in the private recovery authority.
+    """
+
+    public = snapshot.public_payload()
+    return {"config_digest": snapshot.config_digest, "environment_names": public["environment_names"]}
 
 
 def set_authority_receipt(receipt: dict[str, Any], authority: Mapping[str, Any], *, state: str = "sidecar") -> None:

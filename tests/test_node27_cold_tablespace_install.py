@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
 
+from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
 from packages.common.node27_cold_tablespace_install import (
     COLD_CONTAINER_PATH,
     COLD_HOST_PATH,
@@ -521,6 +523,51 @@ def test_recovery_authority_is_private_before_container_mutation(tmp_path: Path)
     assert not config.recovery_path.exists()
 
 
+def test_installed_receipt_reports_live_recreated_snapshot_and_in_progress_keeps_preimage(
+    tmp_path: Path,
+) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    config = _config(tmp_path, enforce=True)
+    published: list[dict[str, Any]] = []
+    deps.before_receipt_publish = lambda _path, receipt: published.append(
+        {"outcome": receipt.get("outcome"), "snapshot": dict(receipt["container_snapshot"])}
+    )
+
+    result = run_install(config, deps)
+
+    assert result.outcome == "installed", result.receipt
+    after = normalize_raw_inspect(deps.inspect_container())
+    before = normalize_raw_inspect(_inspect())
+    progress = next(item for item in published if item["outcome"] == "in_progress")
+    assert progress["snapshot"] == {
+        "config_digest": before.config_digest,
+        "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+    }
+    assert result.receipt["container_snapshot"] == {
+        "config_digest": after.config_digest,
+        "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+    }
+    assert result.receipt["container_snapshot"]["config_digest"] != before.config_digest
+    assert "do-not-leak" not in json.dumps(result.receipt)
+
+
+def test_already_ready_second_run_receipt_equals_the_installed_final_snapshot(tmp_path: Path) -> None:
+    connection = FakeConnection()
+    deps = _dependencies(connection)
+    config = _config(tmp_path, enforce=True)
+
+    first = run_install(config, deps)
+    assert first.outcome == "installed", first.receipt
+    final_snapshot = dict(first.receipt["container_snapshot"])
+    final_live = normalize_raw_inspect(deps.inspect_container())
+
+    second = run_install(config, deps)
+    assert second.outcome == "already_ready", second.receipt
+    assert second.receipt["container_snapshot"]["config_digest"] == final_live.config_digest
+    assert second.receipt["container_snapshot"] == final_snapshot
+
+
 def test_enforce_failing_host_precondition_never_opens_database_or_mutates(tmp_path: Path) -> None:
     connection = FakeConnection()
     deps = _dependencies(connection)
@@ -673,10 +720,17 @@ def test_recovery_complete_target_is_idempotent_and_removes_authority_after_term
     )
     config.recovery_path.write_text(json.dumps(authority), encoding="utf-8")
     config.recovery_path.chmod(0o600)
+    private_before = config.recovery_path.read_text(encoding="utf-8")
 
     result = run_install(config, deps)
 
     assert result.outcome == "installed"
+    assert result.receipt["container_snapshot"] == {
+        "config_digest": normalize_raw_inspect(deps.inspect_container()).config_digest,
+        "environment_names": ["POSTGRES_PASSWORD", "POSTGRES_USER"],
+    }
+    assert "do-not-leak" in private_before
+    assert "do-not-leak" not in json.dumps(result.receipt)
     assert not config.recovery_path.exists()
     assert not deps.action_log
 

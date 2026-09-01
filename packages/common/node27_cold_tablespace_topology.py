@@ -17,7 +17,12 @@ from packages.common.node27_cold_tablespace_evidence import (
     assess_resident_path,
 )
 from packages.common.node27_cold_tablespace_identity import ColdTablespaceIdentity
-from packages.common.node27_cold_tablespace_receipt import optional_int, optional_string, path_payload
+from packages.common.node27_cold_tablespace_receipt import (
+    container_snapshot_payload,
+    optional_int,
+    optional_string,
+    path_payload,
+)
 from packages.common.node27_cold_tablespace_types import InstallConfig, InstallDependencies
 
 WRITER_TIMER_UNITS = (
@@ -285,10 +290,7 @@ def inspect_preconditions(
     except TypeError:
         backup = dict(deps.inspect_backup())
     receipt["path"] = path_payload(identity, path)
-    receipt["container_snapshot"] = {
-        "config_digest": snapshot.config_digest,
-        "environment_names": snapshot.public_payload()["environment_names"],
-    }
+    receipt["container_snapshot"] = container_snapshot_payload(snapshot)
     capacity = assess_install_capacity(
         free_bytes=optional_int(path.get("free_bytes")) or -1,
         install_required_bytes=config.install_required_bytes,
