@@ -2,7 +2,7 @@ import type { FeatureCollection } from 'geojson'
 import { describe, expect, it } from 'vitest'
 
 import type { OverviewBasin } from '@/lib/m11/overviewDataContracts'
-import { staticBasinBoundaryIndex, withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
+import { staticBasinBboxIndex, withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
 
 const domain: FeatureCollection = {
   type: 'FeatureCollection',
@@ -67,23 +67,23 @@ function basin(overrides: Partial<OverviewBasin>): OverviewBasin {
   } as OverviewBasin
 }
 
-describe('staticBasinBoundaryIndex', () => {
-  it('indexes Polygon (promoted to MultiPolygon) and MultiPolygon features by basin_id', () => {
-    const index = staticBasinBoundaryIndex(domain)
+describe('staticBasinBboxIndex', () => {
+  it('indexes a bbox from Polygon and MultiPolygon features by basin_id without exposing a boundary', () => {
+    const index = staticBasinBboxIndex(domain)
     expect([...index.keys()].sort()).toEqual(['basins_heihe', 'basins_qhh'])
     const qhh = index.get('basins_qhh')
-    expect(qhh?.boundary.type).toBe('MultiPolygon')
     expect(qhh?.bbox).toEqual({ minLon: 98, minLat: 37.5, maxLon: 100.5, maxLat: 38.3 })
+    expect(qhh).not.toHaveProperty('boundary')
   })
 
   it('returns an empty index for null/missing domain', () => {
-    expect(staticBasinBoundaryIndex(null).size).toBe(0)
-    expect(staticBasinBoundaryIndex({ type: 'FeatureCollection', features: [] }).size).toBe(0)
+    expect(staticBasinBboxIndex(null).size).toBe(0)
+    expect(staticBasinBboxIndex({ type: 'FeatureCollection', features: [] }).size).toBe(0)
   })
 })
 
-describe('withStaticBasinBoundaries', () => {
-  it('fills boundary and bbox only for basins missing both', () => {
+describe('withStaticBasinBboxes', () => {
+  it('fills only bbox and never reinjects a static boundary', () => {
     const serverBoundary = {
       type: 'MultiPolygon',
       coordinates: [[[[1, 1], [2, 1], [2, 2], [1, 1]]]],
@@ -92,8 +92,8 @@ describe('withStaticBasinBoundaries', () => {
       basin({ basinId: 'basins_qhh' }),
       basin({ basinId: 'basins_heihe', boundary: serverBoundary, bbox: { minLon: 1, minLat: 1, maxLon: 2, maxLat: 2 } }),
     ]
-    const next = withStaticBasinBoundaries(basins, domain)
-    expect(next[0].boundary?.type).toBe('MultiPolygon')
+    const next = withStaticBasinBboxes(basins, domain)
+    expect(next[0].boundary).toBeNull()
     expect(next[0].bbox?.maxLat).toBe(38.3)
     // 已有服务端边界的流域保持不动
     expect(next[1].boundary).toBe(serverBoundary)
@@ -101,7 +101,7 @@ describe('withStaticBasinBoundaries', () => {
 
   it('keeps the original array identity when nothing changes', () => {
     const basins = [basin({ basinId: 'unknown_basin' })]
-    expect(withStaticBasinBoundaries(basins, domain)).toBe(basins)
-    expect(withStaticBasinBoundaries(basins, null)).toBe(basins)
+    expect(withStaticBasinBboxes(basins, domain)).toBe(basins)
+    expect(withStaticBasinBboxes(basins, null)).toBe(basins)
   })
 })

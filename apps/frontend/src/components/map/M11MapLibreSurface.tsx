@@ -16,6 +16,7 @@ import {
   buildM11RegisteredOverlay,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
+  m11BasinBoundaryOverlayEnabled,
   m11SelectedLayerUnavailableReason,
   type BasinRiverFeature,
 } from '@/components/map/m11MapBuilders'
@@ -67,6 +68,7 @@ export {
   buildM11RenderedNationalRiverCollection,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
+  m11BasinBoundaryOverlayEnabled,
   m11BasinLabelAnchor,
   m11SelectedLayerUnavailableReason,
   m11VectorSourceKey,
@@ -313,6 +315,7 @@ export function M11MapLibreSurface({
       <M11MapStatusOverlays
         loading={loading}
         boundaryLoading={boundaryLoading}
+        basinBoundaryOverlayEnabled={m11BasinBoundaryOverlayEnabled}
         basinCount={basins.length}
         basinFeatureCount={basinFeatureCollection.features.length}
         skippedBasinGeometryCount={skippedBasinGeometryCount}

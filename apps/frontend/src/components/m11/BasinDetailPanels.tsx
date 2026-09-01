@@ -16,7 +16,7 @@ import {
   type M11QueryPatch,
   type M11QueryState,
 } from '@/lib/m11/queryState'
-import { staticBasinBoundaryIndex, withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
+import { staticBasinBboxIndex, withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
@@ -108,10 +108,11 @@ export function useBasinDetailMode({
   const basinDisplayName = detail?.displayName || basinId
   const selectedSegment = currentBasinData?.selectedSegment
   const selectedSegmentId = selectedSegment?.riverSegmentId ?? null
-  // 服务端 bbox/boundary 缺失（mesh 碎片被预算拒绝）时回落静态 domain 轮廓，恢复相机 fit + 边界。
+  // 服务端 bbox 缺失（mesh 碎片被预算拒绝）时回落静态 domain 的范围，恢复相机 fit；
+  // 静态轮廓本身不会进入地图渲染。
   const nationalGeo = useNationalBasinGeo(true)
   const staticFallbackBbox = useMemo(
-    () => staticBasinBoundaryIndex(nationalGeo.domain).get(basinId)?.bbox ?? null,
+    () => staticBasinBboxIndex(nationalGeo.domain).get(basinId)?.bbox ?? null,
     [basinId, nationalGeo.domain],
   )
   // 本流域静态河网（shp 真实河道）：详情页秒显垫底；可点击 mesh 河段层加载后，该流域静态河流整段从底图
@@ -129,7 +130,7 @@ export function useBasinDetailMode({
   const basinMapContext = useMemo(
     () =>
       detail && !basinNotFoundReason
-        ? withStaticBasinBoundaries([basinDetailToOverviewBasin(detail)], nationalGeo.domain)
+        ? withStaticBasinBboxes([basinDetailToOverviewBasin(detail)], nationalGeo.domain)
         : [],
     [basinNotFoundReason, detail, nationalGeo.domain],
   )

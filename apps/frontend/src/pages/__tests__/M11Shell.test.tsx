@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
   buildM11RegisteredOverlay,
+  countSkippedBasinGeometries,
+  m11BasinBoundaryOverlayEnabled,
   m11VectorSourceKey,
 } from '@/components/map/M11MapLibreSurface'
-import type { BasinSegmentRow, LayerState } from '@/lib/m11/overviewDataContracts'
+import type { BasinSegmentRow, LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
@@ -114,6 +117,32 @@ describe('M11 discharge shell contracts', () => {
       q_value: 25,
       q_unit: 'm3/s',
     })
+  })
+
+  it('suppresses every basin boundary and its map label source', () => {
+    const basins = [
+      {
+        basinId: 'basins_qhh',
+        displayName: 'QHH',
+        basinGroup: null,
+        areaKm2: null,
+        riverCount: null,
+        activeModelCount: 0,
+        latestForecastTime: null,
+        selectedBasinVersionId: null,
+        basinVersions: [],
+        boundary: {
+          type: 'MultiPolygon',
+          coordinates: [[[[98, 37], [99, 37], [99, 38], [98, 37]]]],
+        },
+        bbox: { minLon: 98, minLat: 37, maxLon: 99, maxLat: 38 },
+        unavailableReason: null,
+      },
+    ] as OverviewBasin[]
+
+    expect(m11BasinBoundaryOverlayEnabled).toBe(false)
+    expect(buildBasinFeatureCollection(basins, undefined).features).toEqual([])
+    expect(countSkippedBasinGeometries(basins, undefined)).toBe(0)
   })
 
   it('keeps shared visual tokens available for the overview surface', () => {
