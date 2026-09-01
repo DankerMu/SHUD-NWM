@@ -53,6 +53,10 @@ export interface BasinFeatureCollection {
   features: BasinFeature[]
 }
 
+// 产品口径：全国/流域详情地图不展示流域边界，也不展示依附该边界的流域名称标记。
+// bbox 仍由 overview 数据保留，用于相机定位，不参与此 GeoJSON collection。
+export const m11BasinBoundaryOverlayEnabled = false
+
 export interface BasinRiverFeatureProperties {
   segment_id: string
   river_segment_id: string
@@ -190,6 +194,7 @@ export function m11VectorSourceKey({
 }
 
 export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
+  if (!m11BasinBoundaryOverlayEnabled) return { type: 'FeatureCollection', features: [] }
   const visible = visibleBasinIds ? new Set(visibleBasinIds) : null
   return {
     type: 'FeatureCollection',
@@ -214,6 +219,7 @@ export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasi
 }
 
 export function countSkippedBasinGeometries(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): number {
+  if (!m11BasinBoundaryOverlayEnabled) return 0
   return basins.filter((basin) => {
     if (!basin.boundary) return false
     const visible = visibleBasinIds ? visibleBasinIds.includes(basin.basinId) : true

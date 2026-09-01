@@ -29,7 +29,7 @@ import {
   parseM11QueryState,
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
-import { withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
+import { withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
 import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
@@ -299,10 +299,10 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 静态文件只保留轻量 basin domain；常态河网由 layer catalog 注册的 national MVT 分片加载。
   const nationalGeo = useNationalBasinGeo(true)
 
-  // DB 内 basin geom 是 mesh 碎片、被客户端预算拒绝时，用静态 domain 轮廓回填边界/bbox，
-  // 恢复边界渲染、点击钻取与相机 fit（honest：静态文件缺失则维持原状）。
+  // DB 内 basin geom 是 mesh 碎片、被客户端预算拒绝时，静态 domain 仅回填 bbox 给相机
+  // 定位；流域边界和边界关联的地图名称标记不再渲染。
   const basins = useMemo(
-    () => withStaticBasinBoundaries(mapOverview?.basins ?? [], nationalGeo.domain),
+    () => withStaticBasinBboxes(mapOverview?.basins ?? [], nationalGeo.domain),
     [mapOverview?.basins, nationalGeo.domain],
   )
   const summary = currentOverview?.summary ?? mapOverview?.summary
