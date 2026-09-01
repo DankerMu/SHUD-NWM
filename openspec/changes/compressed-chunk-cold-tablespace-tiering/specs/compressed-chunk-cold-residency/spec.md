@@ -188,6 +188,26 @@ reported as success.
   synthesized by echoing expected config values, while the isolated oracle
   injects at least one safe mismatch and proves zero movement SQL
 
+#### Scenario: Writability is measured as the numeric server principal
+
+- **WHEN** the target inspector validates production or disposable residency
+- **THEN** both dry-run and enforce require numeric UID and GID config before
+  database connection, with each decimal component in `1..4294967294` (`2^32-2`,
+  excluding root and the `(uid_t)-1` sentinel). At the env/Python seam, missing,
+  empty, whitespace-padded, named/non-integral, boolean at the Python seam,
+  negative, above-bound, zero, or one-component-only input refuses. One bounded
+  inert
+  Docker inspection uses a small projection within the existing 5-second/64-KiB
+  ceilings to observe both the unique cold bind and strict numeric `Config.User`,
+  proves exact equality, and only then runs `test -w` with
+  `--user <uid>:<gid>` using that same pair. At the inspect seam, missing/empty,
+  named, UID-only, malformed, either-component-root, or mismatched identity
+  refuses before writable or movement. Image user names such as `postgres`, root
+  execution, and implicit defaults are forbidden, and tests prove image
+  `postgres=1000:1000` does not override an expected/observed runtime principal
+  of `1005:1005` on a mode-0700 owner-matched path. The public env example exposes
+  both UID/GID keys unassigned; #1895 fills them only after fresh measurement.
+
 #### Scenario: Pinned engine identity drifts
 
 - **WHEN** the live read-only image identity, disposable image ID, PostgreSQL version, or TimescaleDB version differs from the pinned contract
@@ -287,12 +307,21 @@ SHALL enter recovery handling rather than ordinary movement.
 
 The runner receipt SHALL bind its schema version, mode, exact reviewed head
 SHA, cluster/server/extension identity, business watermark, compression lag and
-cutoff, target tablespace/catalog/path/device identity, bounds and timeout
-budgets, and every selected/deferred/skipped group. Each group observation
-SHALL record origin/compressed identities, every physical member's relation
-kind, OID/name, before/after tablespace and bytes, duration/wait, outcome, and
-any error/recovery status. Credentials and secret environment values SHALL
-never appear.
+cutoff, target tablespace/catalog/path/device identity, independently observed
+numeric container runtime UID/GID, bounds and timeout budgets, and every
+selected/deferred/skipped group. Each group observation SHALL record origin/
+compressed identities, every physical member's relation kind, OID/name, before/
+after tablespace and bytes, duration/wait, outcome, and any error/recovery
+status. Credentials and secret environment values SHALL never appear.
+
+New writers and all shipping examples SHALL emit schema version `1.1`. The
+shipping schema and readers SHALL accept a union of historical `1.0` and current
+`1.1`; a schema that accepts only `1.1` is invalid because it would strand
+existing recovery authority. Historical `1.0` target objects omit
+`container_exec_uid` and `container_exec_gid`. An observed `1.1` target SHALL
+require both non-root integers. An unobserved `1.1` target SHALL require both
+fields present as null rather than echoing expected config. New runs SHALL NOT
+emit `1.0`.
 
 Receipt publication SHALL be bounded, mode 0600 and atomic. Before an enforce
 run issues its first movement SQL, it SHALL atomically write a same-directory
@@ -312,7 +341,17 @@ never an older success presented as current.
 #### Scenario: Normal and no-op receipts prove parity
 
 - **WHEN** one group migrates and one group is already cold
-- **THEN** both receipts validate, the migrated group proves every member at the target, and the no-op proves zero movement
+- **THEN** both receipts validate, the migrated group proves every member at the
+  target, the no-op proves zero movement, and each schema `1.1` target records the
+  independently observed numeric principal used for writability
+
+#### Scenario: Historical receipt remains readable across the evidence upgrade
+
+- **WHEN** startup encounters a schema `1.0` terminal receipt or authoritative
+  sidecar written before the numeric-principal evidence field existed
+- **THEN** validation and recovery remain available without inventing UID/GID,
+  while every newly generated terminal, intent, tombstone, and example uses
+  schema `1.1`; a `1.1` observed target missing either numeric field is invalid
 
 #### Scenario: Partial/error receipt is honest
 

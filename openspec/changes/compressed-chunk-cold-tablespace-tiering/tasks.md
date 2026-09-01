@@ -9,8 +9,10 @@ Seams under test:
   measured PG 15.2 / TimescaleDB 2.10.2 movement and lifecycle verdicts.
 - Shared residency-group module: catalog snapshot -> complete group or stable
   blocker; group + target -> transactional move/reconciliation result.
-- Runner CLI/wrapper: dry-run/enforce config -> schema-valid receipt and bounded
-  DB effects.
+- Runner CLI/wrapper: dry-run/enforce config, including required numeric runtime
+  UID/GID -> schema-valid receipt and bounded DB effects.
+- Target inspector: one bounded Mounts + strict numeric `Config.User` observation
+  -> exact `uid:gid` writable probe -> observed schema-1.1 target evidence.
 - Installer/governance CLI: host/container/catalog evidence -> NO-GO or exact
   topology receipt.
 - Node-27 rollout: frozen reviewed SHA + approved maintenance inputs -> live
@@ -128,6 +130,38 @@ Seams under test:
   integration suite, strict OpenSpec validation, and `uv run ruff check .`;
   attach normal/no-op/intent/partial/error receipt examples.
 
+## 2A. #1929 — Bind target writability to numeric runtime identity
+
+- [ ] 2A.1 Require explicit non-root
+  `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID/GID` integers for dry-run and enforce
+  before any database connection; propagate them through `RunnerConfig` and
+  `RuntimeConfig`. Require each decimal component in `1..4294967294`; reject
+  missing/empty/whitespace/named/non-integral/Python-bool/negative/above-bound/
+  either-zero/one-component-only input with no `postgres`, root, image-default,
+  UID-only, or implicit fallback. Expose both keys unassigned
+  in the public env example for #1895 to fill after fresh measurement.
+- [ ] 2A.2 Replace the mount-only production observation with one bounded inert,
+  small Docker inspect projection that stays inside the existing 5-second/64-KiB
+  ceilings and parses exactly one cold bind plus strict numeric `Config.User`;
+  reject missing/empty/named/UID-only/malformed/either-root/mismatched identity
+  before running `test -w`, then execute that check as the same `<uid>:<gid>`.
+- [ ] 2A.3 Carry observed `container_exec_uid/gid` through `TargetIdentity` and
+  target receipt evidence. New writers/examples use schema `1.1`; the shipping
+  schema/readers accept historical `1.0` and current `1.1`; `1.0` target objects
+  omit the fields, observed `1.1` requires both non-root integers, and unobserved
+  `1.1` requires both present as null without expected-config echo.
+- [ ] 2A.4 Test dry-run and enforce preflight for the discriminating
+  image-`postgres=1000:1000` / expected+observed runtime `1005:1005` /
+  owner-matched mode-0700 path case; assert exact numeric argv, the complete
+  env/Python and inspect refusal matrices before writable/SQL, config tombstone/
+  redaction, 1.0-omit/1.1-observed-required/1.1-unobserved-null schema
+  compatibility, shipping examples, fixed inspect ceilings, and selector
+  producer-consumer closure.
+- [ ] 2A.5 Run focused target/runtime/CLI/schema/selector tests, full pytest, Ruff,
+  strict OpenSpec, and a node-27 live read-only/disposable receipt proving current
+  `Config.User`, numeric writable success, named `postgres` failure, unchanged
+  live container identity, and zero DDL/chunk movement.
+
 ## 3. #1894 — Install and govern the fresh cold tablespace
 
 - [x] 3.1 Implement dry-run-default installation/preflight for `nhms_cold` with fixed host/container paths, empty non-symlink directory, exact owner/mode/device, root RAID/SMART evidence freshness, capacity/rollback budget, and backup coverage gates.
@@ -163,11 +197,21 @@ Seams under test:
 
 ## Risk-pack evidence mapping
 
-- Public API / CLI / config: tasks 2.2, 2.4, 3.1-3.3; invalid/missing values -> pre-connect/pre-mutation refusal.
-- File IO / path / permissions / secrets: tasks 1.2, 2.3, 3.1-3.2; symlink/alias/mode/credential cases -> stable refusal/redaction and no unsafe overwrite.
-- Schema / evidence identity: tasks 1.7, 2.3, 3.1-3.7, 4.8; installer private recovery authority and public installer/governance receipts -> schema validation, redaction/secret rejection, durable publication, and independent semantic readback.
-- Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.2-4.6; lock/timeout/full/interruption/race -> rollback or explicit recovery state.
-- Legacy/display compatibility: tasks 2.4, 3.3, 4.5-4.7; unchanged hot/new chunks, ingest, retention and display -> existing behavior and performance.
+- Public API / CLI / config: tasks 2.2, 2.4, 2A.1-2A.2, 3.1-3.3;
+  invalid/missing values -> pre-connect/pre-mutation refusal.
+- File IO / path / permissions / secrets: tasks 1.2, 2.3, 2A.1-2A.4,
+  3.1-3.2; symlink/alias/mode/credential/principal cases -> stable refusal,
+  redaction, exact numeric execution and no unsafe overwrite.
+- Schema / evidence identity: tasks 1.7, 2.3, 2A.2-2A.5, 3.1-3.7, 4.8;
+  historical 1.0 + current 1.1 residency target evidence, installer private
+  recovery authority and public installer/governance receipts -> schema
+  validation, redaction/secret rejection, durable publication, and independent
+  semantic readback.
+- Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.2-4.6;
+  lock/timeout/full/interruption/race -> rollback or explicit recovery state.
+- Legacy/display compatibility: tasks 2.4, 2A.3, 3.3, 4.5-4.7; historical
+  receipt recovery plus unchanged hot/new chunks, ingest, retention and display
+  -> existing behavior and performance.
 - TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.4-4.7; exact 2.10.2 catalog/lifecycle and business-time boundaries -> real isolated/live oracle evidence.
 - Documentation/migration/backup: tasks 1.8, 3.6, 4.1-4.8; ADR/runbook/readiness and rollback evidence -> no production mutation without all gates.
 

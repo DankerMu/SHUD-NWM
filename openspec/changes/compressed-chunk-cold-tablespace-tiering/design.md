@@ -231,7 +231,34 @@ identity, target catalog/path/device identity, validated business-column
 inventory and per-window parity, capacity decision, and group observations.
 Target bind/host/device observations come from a required production inspector;
 configuration supplies expected values only and may never echo them as observed
-truth. Before enforce mutation, the runner atomically writes a same-directory mode-0600
+truth. The same rule applies to the PostgreSQL server principal. The runner
+requires explicit non-root numeric UID and GID inputs before connection in both
+dry-run and enforce. Each component must be a decimal integer in
+`1..4294967294` (`2^32-2`, excluding root and the `(uid_t)-1` sentinel). Missing,
+empty, whitespace-padded, named/non-integral, boolean at the Python seam,
+negative, above-bound, or one-component-only configuration refuses before DB
+connection. The public example exposes both keys
+unassigned; #1895 fills them only after fresh measurement.
+
+One bounded inert Docker inspection uses a small projection—not the full inspect
+document—to observe both `Mounts` and strict numeric `Config.User` inside the
+existing 5-second and 64-KiB ceilings. Missing/empty, named, UID-only, malformed,
+either-component-root, or mismatched runtime identity refuses before the
+writability command. Only after equality is proved may the inspector execute
+`test -w` as that exact `uid:gid`; image user names such as `postgres`, root
+execution, and implicit fallbacks are forbidden. No second `Config.User` read is
+required after the command; the existing descriptor-bound host before/after
+identity comparison remains the accepted TOCTOU fence. The observed numeric pair
+is carried through target identity into every current receipt.
+
+This evidence addition uses a versioned schema union: readers and the shipping
+schema accept both historical `1.0` and current `1.1`, while the writer and all
+shipping examples emit only `1.1`. Historical `1.0` target objects omit
+`container_exec_uid/gid`; observed `1.1` targets require both non-root integers,
+and unobserved `1.1` targets require both fields present as null without echoing
+expected config. A schema with `const: "1.1"` alone is invalid because it would
+strand existing authoritative sidecars. Before enforce mutation, the runner
+atomically writes a same-directory mode-0600
 intent sidecar and replaces the public receipt with the same schema-valid
 `in_progress` payload naming selected groups and the complete preflight source
 snapshot: original compressed sibling/member identities, source residency,
@@ -380,12 +407,16 @@ Domain packs considered:
   in `nhms_cold`; every uncertain state blocks further mutation.
 - Source of truth: display business watermark + configured compression lag;
   TimescaleDB chunk/compression catalogs joined to PostgreSQL OIDs; fixed
-  tablespace catalog/path/device identity; receipt schema version.
+  tablespace catalog/path/device identity; required expected and independently
+  observed numeric container runtime UID/GID; receipt schema version.
 - Producers: compression runner creates compressed chunks; #1893 residency
-  runner creates group receipts; #1894 installer/governance creates environment
-  receipts; #1895 creates rollout evidence.
+  runner creates group receipts; #1929 binds those receipts and writable checks to
+  the observed numeric runtime principal; #1894 installer/governance creates
+  environment receipts; #1895 creates rollout evidence.
 - Validators/preflight: shared group resolver/transaction primitive, runner
-  selection/revalidation, installer RAID/SMART/mount/catalog/backup gates.
+  selection/revalidation, one bounded Mounts+`Config.User` inspector followed by
+  exact numeric-principal writability, and installer RAID/SMART/mount/catalog/
+  backup gates.
 - Storage/cache/query: origin/compressed heaps, TOAST and indexes across
   `pg_default` and `nhms_cold`; no cache or row-schema change.
 - Public routes/entrypoints: #1893 CLI/wrapper/systemd stage and #1894 installer;
@@ -445,14 +476,19 @@ Boundary-surface checklist:
    serialization, and unit + isolated-cluster integration tests.
 3. #1894 implements and tests fresh installation/rollback, container identity,
    RAID/SMART/backup gates, and dual-device governance without moving chunks.
-4. #1895 performs the controlled live install/migration/rollback proof and
+4. #1929 corrects the #1893 target inspector before rollout: production config
+   requires the measured numeric runtime UID/GID; one bounded inspect proves that
+   pair and the bind, the same pair executes writability, and schema `1.1` records
+   it while retaining read compatibility for historical `1.0` recovery evidence.
+5. #1895 performs the controlled live install/migration/rollback proof and
    validates automatic convergence plus display/performance.
-5. Archive this shared OpenSpec change only after #1895; earlier PRs leave later
+6. Archive this shared OpenSpec change only after #1895; earlier PRs leave later
    task groups unchecked so unimplemented behavior is never published as done.
 
 ## Open Questions
 
-- None for #1893. The #1892 probe fixed the only movement sequence; D4-D6 fix the
-  production owner, live-column parity, mutex/order, systemd trigger, capacity
-  inputs, and publication boundary. #1894/#1895 still own installation and the
-  measured live reserve values, not alternate runtime semantics.
+- None for #1929. Node-27's current numeric runtime identity is measured as
+  `1005:1005`, but the fixture does not hard-code that deployment value: #1895
+  must re-observe it and place the same explicit pair in the mode-0600 environment.
+  The #1892 movement sequence and #1893 runner semantics remain unchanged; #1895
+  still owns installation and measured live reserve values.
