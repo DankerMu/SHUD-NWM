@@ -67,6 +67,7 @@ export {
   buildM11RenderedNationalRiverCollection,
   buildSelectedSegmentFeatureCollection,
   countSkippedBasinGeometries,
+  m11BasinBoundaryOverlayEnabled,
   m11BasinLabelAnchor,
   m11SelectedLayerUnavailableReason,
   m11VectorSourceKey,
