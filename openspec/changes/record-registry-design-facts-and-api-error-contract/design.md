@@ -110,8 +110,8 @@ point at one place.
 Runbook: a new subsection immediately after the Heihe query at
 `docs/runbooks/current-production-ops.md:3676-3684` explains the two groups,
 states `count(*) == 2 × segment_count` is expected, gives the filtered
-comparison query, notes `output_segment_count` is receipt/`resource_profile`
-only, and back-links #1122/#1123. Executable pin: extend the existing
+comparison query, notes `output_segment_count` is not an rnv column (receipt →
+`resource_profile` → manifest fields), and back-links #1122/#1123. Executable pin: extend the existing
 real-DB import test around `tests/test_basins_registry_import.py:3473`
 (already counting reach rows for the imported rnv) with
 `total_rows == 2 * segment_count` and `output_rows == reach_rows`, comment
@@ -163,8 +163,9 @@ Facts to state (no causal story beyond what is traced):
   lifecycle channel) and are not read by the scheduler.
 - Compute-plane authority is the file-registry manifest
   (`NHMS_SCHEDULER_REGISTRY_BACKEND=file`, `manifest-last.json`, written by
-  `scripts/publish_scheduler_file_registry.py`); the scheduler is DB-free and
-  never reads either DB flag. The two planes are not synchronized by design.
+  `scripts/publish_scheduler_file_registry.py`); the DB-free scheduler cannot
+  reach either DB flag (the `core.model_instance.active_flag` read at
+  `chain_repository.py:265` belongs to the postgres backend). The two planes are not synchronized by design.
 
 Placement: `docs/spec/03_database_design.md` §5.2 and the `model_instance`
 table get a short "authority" note (architecture/spec status per
@@ -184,8 +185,10 @@ reads. `compute.example` header gains the same pointer;
 and on compute node cn01 per srun receipt 2026-09-02) and
 `NHMS_MODEL_ASSET_ROOT` becomes the template's own placeholder scheme
 `/scratch/frd_muziyao/nhms-production/model-assets`, which does NOT exist on
-node-22 (receipt 12:36Z block: `MISSING`; the live host env uses
-`nhms-prod/model-assets`) and is
+node-22 (receipt 12:36Z block: `MISSING`; receipt 14:59Z block:
+`compute.host.env:34` and `compute.scheduler-dbfree.env:35` both set
+`NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-prod/model-assets`, which
+EXISTS) and is
 therefore labelled a placeholder in the template comment, never asserted to
 exist.
 

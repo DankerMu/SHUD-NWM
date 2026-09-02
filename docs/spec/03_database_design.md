@@ -232,8 +232,12 @@ CREATE TABLE core.model_instance (
 > **`active_flag` 权威归属（#1695）**：`core.model_instance.active_flag` 是
 > **展示面与 lifecycle 的权威**，不是计算面的。以下非 test 读者按面分组列出
 > （grep 口径：`grep -rn active_flag packages services workers scripts apps db`，
-> 剔除同名但不同表的 `core.basin_version` / `met.met_station` / `met.interp_weight` 列，
-> 2026-09-02）。列出它们是为了能看清翻这个 flag 的爆炸半径：
+> 剔除同名但不同表的列——`core.basin_version` / `met.met_station` /
+> `met.interp_weight`，以及 `met.grid_snapshot`、`core.basin` 等——和纯写入点
+> （INSERT 字面量、schema DDL、API payload 直通），2026-09-02）。列出它们是为了
+> 能看清翻这个 flag 的爆炸半径；写这一列的路径除下文的激活闸门外还有
+> `workers/model_registry/qhh_production_bootstrap.py::_activate_qhh_model`（`:1622`）
+> 与 `:1675-1679` 的持久化置 inactive，不在读者清单内：
 >
 > - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，
 >   另见 `:442`、`:653`、`:691`、`:1411`）；
@@ -251,6 +255,17 @@ CREATE TABLE core.model_instance (
 >   `SELECT … FOR UPDATE` 现状读）、`:1741`（同 basin 的重复 active 行检测）、
 >   `:1791-1803`（`_fetch_model_identity`，回填 `:1101` 的 `active` 字段）；
 > - **激活闸门**：`scripts/node27_autopipeline.py:1255-1260`（详见下文）；
+> - **调度 run/no-run 判定**：`services/orchestrator/scheduler_models.py::coerce_registered_model`
+>   （`:128` 由该 flag 推导 `lifecycle_state`，`:137-138` 在 flag 为 `False`
+>   或 state 非 `active` 时返回 `model_exclusion(row, "inactive_model")`，即该 model
+>   本轮不跑）；它的入参行由 `fetch_active_model_details`（`:29`）备好——
+>   候选集先由 `registry.list_models(..., active=True, ...)`（`:41`）圈定，
+>   逐条再经 `fetch_scheduler_model_detail`（`:50`，实现在 `:58-62`，
+>   走 `get_model_internal` / `get_model`）取回明细。postgres backend 下这个
+>   registry 是 `packages/common/model_registry.py::PsycopgModelRegistryStore`
+>   （`:580`），`:41` 的 `active=True` 落到 `list_models`（`:2372`）的
+>   `active_flag = %s` 过滤子句（`:2386`，`:2402` 把该谓词按 JOIN 重限定为
+>   `mi.active_flag`）；file provider 下则来自 manifest 行（见下文计算面段落）；
 > - **model lifecycle API**：`packages/common/model_registry.py`（多处，读写兼有）。
 >
 > API 层的 payload / schema 字段（`apps/api/main.py:154`、
@@ -276,8 +291,11 @@ CREATE TABLE core.model_instance (
 > 只有当同一 `basin_version_id` 下没有其它 active 行时才会更新（`:1255-1260`
 > 的 `active_flag = true OR NOT EXISTS (…)` 谓词——已 active 的行是幂等分支），
 > 撞上 baseline 兄弟行的 variant 拿到 `rowcount == 0`；
-> 该行为由 `tests/test_node27_autopipeline_preflight.py:832-864` 钉住
-> （`_activate_model(…, "dg_source_variant") == 0`）。调度器不读这个列，
+> 该谓词的形状由 `tests/test_node27_autopipeline_preflight.py:832-869` 钉住
+> （mock cursor 上断言 SQL 含 `NOT EXISTS` 与
+> `active_sibling.basin_version_id = core.model_instance.basin_version_id`；
+> `:864` 的 `== 0` 来自 mock 的固定 `rowcount`，不是真库行为，真库下的
+> rowcount 无测试覆盖）。调度器不读这个列，
 > 所以它们照跑不误。
 >
 > 不要为了「让数字好看」去翻 `dg_*` 的 flag。两道 DB 闸门会先拦住你：

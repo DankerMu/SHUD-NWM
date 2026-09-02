@@ -12,5 +12,5 @@
 #### Scenario: Display membership is traced to the right flag
 
 - **WHEN** a reader asks why baseline `core.model_instance` rows are active while the `dg_*` rows that run on node-22 are not
-- **THEN** the spec statement says display membership reads `core.model_instance.active_flag` on the baseline rows, that `dg_*` rows are not activated through the DB lifecycle channel, and that the two planes are not synchronized by design
+- **THEN** the spec statement says display membership reads `core.model_instance.active_flag` (the MVT predicate has no baseline/variant test; as of the 2026-09-02 counts only baseline rows are `true`), that `dg_*` rows are not activated through the DB lifecycle channel, and that the two planes are not synchronized by design
 - **AND** no DB row is changed by this change
