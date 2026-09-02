@@ -5982,11 +5982,27 @@ class FileOrchestrationJournalRepository:
         the memoized listing still reflects the on-disk job set. Model-level
         scoping happens in _filter_cycle_rows_for_model, mirroring how the
         unfiltered scan feeds the model_id=None rows.
+
+        #1941 D1: both legs of that signature are taken through
+        ``_containment_stat_signature``, the same containment-aware probe the
+        cycle-rows fingerprint uses. A bare ``_stat_signature`` reports a
+        missing path as ``None`` without asking whether a parent component is
+        a symlink, so ``pipeline-jobs/by-cycle/<source>`` swapped for a
+        symlink to a decoy that also lacks the ``<cycle>`` child signed
+        ``(sig, None)`` before AND after the swap and this cache kept serving
+        its pre-tamper ``[]`` while a cold instance raised
+        ``file_journal_unsafe_scanned_entry``. A signature carrying
+        :data:`_FINGERPRINT_CONTAINMENT_FAULT` can therefore neither be a hit
+        nor be stored: the recompute below reads the tampered path and reaches
+        the cold instance's raise, and a stat fault the recompute does NOT
+        reproduce simply yields uncached rows rather than a new token. Genuine
+        absence under real directories still signs ``None``, so an untouched
+        empty by-cycle partition stays a cacheable legal empty read.
         """
         cache_key = (source_id, format_cycle_time(cycle_time))
         signature = (
-            _stat_signature(self.root / "pipeline-jobs"),
-            _stat_signature(
+            self._containment_stat_signature(self.root / "pipeline-jobs"),
+            self._containment_stat_signature(
                 self.root
                 / "pipeline-jobs"
                 / "by-cycle"
@@ -5994,9 +6010,10 @@ class FileOrchestrationJournalRepository:
                 / format_cycle_time(cycle_time)
             ),
         )
+        faulted = _signature_has_containment_fault(signature)
         with self._cache_lock:
             cached = self._direct_jobs_cycle_cache.get(cache_key)
-        if cached is not None and cached[0] == signature:
+        if cached is not None and not faulted and cached[0] == signature:
             return [dict(job) for job in cached[1]]
         # #1734 D11 candidate B: this is the CACHE-MISS path, which is the cost
         # this cache's shared-directory signature keeps re-paying. The lane tag
@@ -6011,12 +6028,17 @@ class FileOrchestrationJournalRepository:
                 model_id=None,
             )
         ]
-        cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
-        entry = (signature, [dict(job) for job in jobs])
-        with self._cache_lock:
-            if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
-                self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
-            self._direct_jobs_cycle_cache[cache_key] = entry
+        # #1941 D1: a signature that observed a containment fault is never
+        # stored, so a later read cannot recompute the same marker, compare
+        # equal and serve rows computed under the tamper. The cache type is
+        # unchanged — the marker never enters it.
+        if not faulted:
+            cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES), 1)
+            entry = (signature, [dict(job) for job in jobs])
+            with self._cache_lock:
+                if cache_key not in self._direct_jobs_cycle_cache and len(self._direct_jobs_cycle_cache) >= cache_limit:
+                    self._direct_jobs_cycle_cache.pop(next(iter(self._direct_jobs_cycle_cache)), None)
+                self._direct_jobs_cycle_cache[cache_key] = entry
         return jobs
 
     def _cycle_rows_source_fingerprint(
@@ -6718,7 +6740,7 @@ class FileOrchestrationJournalRepository:
         Design D10: every component is scoped to THIS cycle, never to a shared
         directory. ``_direct_jobs_cycle_cache`` is the cautionary example in
         this same file — its first component is
-        ``_stat_signature(root / "pipeline-jobs")``, a globally shared
+        ``_containment_stat_signature(root / "pipeline-jobs")``, a globally shared
         directory, so any write to any cycle invalidates every entry. That is
         correct and it thrashes; a memo built the same way buys nothing.
 
