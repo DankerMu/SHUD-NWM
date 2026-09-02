@@ -112,6 +112,11 @@ NHMS_SCHEDULER_REGISTRY_MANIFEST=<trusted-registry-manifest>
 NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
 NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=<trusted-readiness-index>
 NHMS_SCHEDULER_JOURNAL_BACKEND=file
+# Must be a realpath (`readlink -f` equals this value): every component a real
+# directory, none a symlink. An alias ANCESTOR passes the db-free preflight and
+# then fails the scheduler at start with FILE_JOURNAL_INVALID_ROOT; a symlink
+# leaf, a symlink loop or a missing root never gets that far -- the preflight's
+# own redacted blocker stops the pass first (#1943, 8.10).
 NHMS_SCHEDULER_JOURNAL_ROOT=<node-22-writable-journal-root>
 NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
 NHMS_SCHEDULER_STATE_INDEX=<trusted-state-index>

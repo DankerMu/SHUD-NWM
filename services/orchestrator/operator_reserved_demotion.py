@@ -13,14 +13,12 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any
-
-from packages.common.safe_fs import SafeFilesystemError, verify_directory_no_follow
 
 from .accepted_submit_identity import ACCEPTED_SUBMIT_CONTRACT_VERSION
 from .chain_types import OrchestratorError
 from .file_orchestration_journal import FileOrchestrationJournalError, FileOrchestrationJournalRepository
+from .journal_root_authority import verify_journal_root_authority
 
 
 def _parse_iso_utc(value: str, option_name: str) -> datetime:
@@ -64,20 +62,16 @@ def _demote_reserved_job(
         raise ValueError("demote-reserved-job --checked-by must not be blank")
     if not verification_note.strip():
         raise ValueError("demote-reserved-job --verification-note must not be blank")
-    # One journal-root authority (#1564 D10): the receipt locator is derived
-    # from the same safe-FS expansion/no-follow canonicalization the repository
-    # I/O uses for every read and write, never bare Path.resolve() on operator
+    # One journal-root authority (#1564 D10), now the SHARED #1943 seam the
+    # db-free scheduler factory also calls: the receipt locator is derived from
+    # the same safe-FS expansion/no-follow canonicalization the repository I/O
+    # uses for every read and write, never bare Path.resolve() on operator
     # input.  A hostile root (symlink loop) fails typed and pre-commit; a
     # literal unexpanded ``~`` expands to the exact authority location.  All
-    # fallible canonicalization happens before the authority commit.
-    try:
-        display_journal_root = str(verify_directory_no_follow(Path(journal_root)))
-    except (OSError, SafeFilesystemError) as error:
-        raise OrchestratorError(
-            "FILE_JOURNAL_INVALID_ROOT",
-            "journal root failed safe filesystem verification",
-            {"error_type": type(error).__name__},
-        ) from error
+    # fallible canonicalization happens before the authority commit.  One error
+    # code and one message now cover both lanes; the setting this lane read the
+    # value from rides in the error details.
+    display_journal_root = str(verify_journal_root_authority(journal_root, setting="--journal-root"))
     # The repository I/O root is the SAME expanded authority location: a literal
     # unexpanded ``~`` must never make repository reads/writes diverge from the
     # verified receipt root.

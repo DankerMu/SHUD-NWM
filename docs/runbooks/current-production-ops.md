@@ -145,7 +145,9 @@ fi'
 
 The scheduler service is oneshot; it is normal for it to be inactive between
 timer ticks. Any `DATABASE_URL`/libpq env in the scheduler process is a
-misconfiguration. Slurm submission is through the node-22 Slurm Gateway and
+misconfiguration. `NHMS_SCHEDULER_JOURNAL_ROOT` 必须写成 realpath——每一段路径
+组件都是真实目录、没有任何一段是 symlink（`readlink -f` 的结果与配置值逐字
+相同）；否则调度器启动即以 `FILE_JOURNAL_INVALID_ROOT` 拒绝，详见 8.10。 Slurm submission is through the node-22 Slurm Gateway and
 `sbatch`; Slurm then runs compute work on allocated compute nodes such as
 `cnXX`.
 
@@ -1221,7 +1223,8 @@ segment 才回退到流量分位筛选。MVT feature 必须同时携带 `river_s
 全国总览的 basin API 请求固定带 `has_display_product=true`；因此把 HHY 的
 `core.basin_version.valid_to` 置为退役时间后，历史 run 仍保留但不再进入展示列表。
 不要用 `active_flag` 做这项退役：当前 Basins importer 创建的版本默认都是 false，
-误用它会把 18 个现行流域一起隐藏。
+误用它会把 18 个现行流域一起隐藏（`core.basin_version` / `core.model_instance` /
+file-registry manifest 三个 `active_flag` 各自的权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)）。
 
 以下是 **2026-07-01 历史展示快照**，不是当前 registry 或 display inventory
 authority：当时 domain 输出 13 个 basin；river 输出 20,100 条 feature，
@@ -2868,7 +2871,9 @@ lifecycle 通道 deactivate。
   `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
   会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
   manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
-- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义），
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，对计算面无权威、
+  展示面只是「默认选中版本」的选择器，全 false 时是 no-op；
+  权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)），
   也不要动已经 inactive 的 `dg_*` 行。一行一操作。
 
 **验收 receipt（必须前后对照，只翻旗不算修好）**：
@@ -3651,6 +3656,180 @@ source-first 部分恢复：reference 已去掉目标、destination 仍失败时
 解冻 writer。回滚是显式操作员决定，用各 lane 自己的 archive 字节，且必须先核对
 当前 preimage；CLI 不会静默覆盖后来的合法发布。
 
+### 8.10 NHMS_SCHEDULER_JOURNAL_ROOT 必须是 realpath
+
+**约束**：`NHMS_SCHEDULER_JOURNAL_ROOT` 的**每一段路径组件**都必须是真实目录，
+任何一段都不得是 symlink。file journal 的每一次读取都从文件系统锚点起、逐段
+以 `O_NOFOLLOW` 打开（`packages/common/safe_fs.py` 的 `_open_directory_no_follow`），
+所以祖先目录上任意一段 symlink 都会让每一次读取失败。
+
+**症状（本 PR 之前）**——三条同时出现才是这个卡点：
+
+- db-free preflight **PASS**：`_db_free_path_check` 只拒绝 leaf 或直接父目录是
+  symlink 的情况，祖先层的 alias 它判不出来，所以配置能过 preflight。
+- 每个 cycle 每一行都是 blocked row：跨 model 车道（`model_id=None`）报
+  `file_journal_unsafe_scanned_entry`，model-scoped 车道报
+  `file_journal_unreadable`。
+- 诊断文本里**没有 symlink 这个词**：darwin 上是 `Path component is not a
+  directory`（ENOTDIR），Linux 上是 ELOOP 文案。
+
+**一行自检**（在 node-22 上执行，结果必须与配置值逐字相同）：
+
+```bash
+readlink -f "$NHMS_SCHEDULER_JOURNAL_ROOT"
+```
+
+**处置**：把 `NHMS_SCHEDULER_JOURNAL_ROOT` 改成 `readlink -f` 的输出，重启
+`nhms-compute-scheduler.timer`。同一约束已写在
+`infra/env/compute.scheduler-dbfree.env.example`、`infra/env/compute.example`
+和 `infra/README.two-node-docker.md` 的该变量上方。
+
+**本 PR 之后**：调度器在构造 file journal repository 时就验证该 root，不合规
+直接以 `FILE_JOURNAL_INVALID_ROOT: <message>` 写 stderr 并 exit 1（oneshot unit
+随之失败），不再退化成"每轮全是 blocked row"。**适用范围**：这条 exit 1 只覆盖
+**能通过 db-free preflight** 的 root——上面那种祖先层 alias 正是这一类。leaf 本身
+是 symlink、symlink loop、以及 root 根本不存在这三种形状，preflight 自己就先拦
+下了：`from_env` 走 blocked 分支、`active_repository` 为 `None`，这一趟以
+preflight 自己的 redacted blocker 结束，根本走不到 root 验证。message 里带 `readlink -f` 与
+"real directory" 的处置指引，不含路径、traceback 或模块名；配置值与它来自哪个
+设置项（调度器是 `NHMS_SCHEDULER_JOURNAL_ROOT`，demote CLI 是 `--journal-root`）
+放在错误的结构化 details 里。operator 的 `demote-reserved-job` 与 8.11 的
+`census-job-id-scope` 走的是同一个 seam，同码同文案；这两条 CLI 前面没有
+preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调度器车道——CLI 上
+**所有**不合规形状都由这个 seam 拒绝，包括自 #1944 起补上的空值与相对路径
+（`details["error_type"]` 为 `RelativeJournalRoot`；`~` 无法展开时为
+`UnexpandableJournalRoot`；否则它们会被 `safe_fs` 锚到当前工作目录上）。
+
+### 8.11 #1760 scope gate 与既存分叉 job_id 行
+
+**什么叫分叉行**：一行 pipeline_job 的 `job_id` 里编码的 `(source, cycle)` 与
+这一行自己的 `(source_id, cycle_time)` 不一致。判定口径就是写入侧 gate
+`_require_job_id_cycle_scope` 本身（token `file_journal_job_id_scope_mismatch`，
+field `job_id`）；census 只调用这一个谓词，不做第二套比较。
+
+**先把 `$NHMS_SCHEDULER_JOURNAL_ROOT` 放进当前 shell**。下面的命令块是照抄粘贴
+的，变量为空就等于没给 root。活值只有一处权威：调度器进程自己的环境（口径同
+本文件第 3 节的 `/proc/$pid/environ` 自检）；oneshot 在 tick 之间是 inactive，
+进程不在时退回 EnvironmentFile
+`/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env`（模板见
+`infra/env/compute.scheduler-dbfree.env.example:47`）。
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 '
+pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
+if [ "${pid:-0}" != "0" ]; then
+  tr "\0" "\n" < /proc/$pid/environ | grep "^NHMS_SCHEDULER_JOURNAL_ROOT="
+else
+  grep "^NHMS_SCHEDULER_JOURNAL_ROOT=" /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+fi'
+```
+
+把取到的值 `export NHMS_SCHEDULER_JOURNAL_ROOT=...` 之后再跑普查。自 #1944 起，
+空值或相对路径**不再**退化成"普查当前工作目录然后 exit 0"——journal-root seam
+在任何读取之前就以 `FILE_JOURNAL_INVALID_ROOT`（exit 1）拒绝，见 8.10。
+
+**普查命令**（node-22，只读，写作详见 8.10 的 root 前提）：
+
+```bash
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli census-job-id-scope --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" --max-records 5000000
+```
+
+退出码：`0` = 没有分叉行；`2` = 发现分叉行（stdout 是 JSON receipt，
+`divergent_rows` 逐条列出 `job_id`、`own_scope`、`job_id_scope`、
+`anchor_present`、`flat_direct_present`、`reconcile_abort_trigger`）；`1` = typed
+失败（stderr 是 `error_code: message` 或 `reason: field`，无 traceback）。receipt
+是在写 `--output` **之前**就打到 stdout 的，所以 receipt 发出之后才发生的 typed
+失败（例如 `--output` 不可写）会以 `1` 收场，**即使这一趟真的查出了分叉行**；
+判分叉一律读 stdout receipt 里的 `exit_code`，不要只看 `$?`。
+
+**为什么带 `--max-records 5000000`**：整树 replay 只有**一个** record 预算，默认
+`MAX_FILE_JOURNAL_RECORDS = 100_000`，计费单位是：每一个 latest view 里
+**物化出来的每一行 pipeline_job 各记一次**（一个 view 可以带很多行，这才是
+预算的大头）＋每个 journal segment 的**每一行 JSONL 各记一次**（不分记录类型）。
+direct 记录只在 `include_direct=True` 的 replay 上计费，而 census 传的是
+`include_direct=False`，所以 direct 文件**一次都不计**。node-22 在 2026-09-02
+用默认预算跑就以 exit 1 + `file_journal_record_limit_exceeded:
+pipeline_job_records` 停住。补救就是 `--max-records N`；5000000 是实测跑通的
+经验余量（headroom），不是算出来的数——receipt 不记录实际消耗量，所以只知道它
+够用，不知道离预算还剩多少。
+
+**`--max-files` 不是这个旋钮**——它管的是单次目录遍历发现的文件数（默认同为
+100000，超限报的是 `file_journal_file_limit_exceeded`，anchor 列举那一处报的是
+`file_journal_record_limit_exceeded: reconcile_inventory`），而实际文件数离
+100,000 还很远；调它不会让 record 预算变宽。预算跳闸是 fail-loud，不写任何字节，抬预算是唯一支持的处置，
+不存在"跳过"这个选项。
+
+**实测记录**（PR #1951，worktree SHA `de33bd87`，2026-09-02 09:46 UTC，
+node-22 detached worktree + `/scratch/frd_muziyao/NWM/.venv/bin/python -m`）：
+
+- 第 1 趟按默认预算跑 → exit 1，`file_journal_record_limit_exceeded:
+  pipeline_job_records`，无 traceback，零写入。
+- 第 2 趟加 `--max-records 5000000` → **exit 0**，`divergent_total` 0，
+  `reconcile_abort_triggers` 0；per-surface：flat direct 5,125 行 / by-cycle
+  direct 9,362 行 / journal replay 14,922 行（5,998 latest view + 275 segment）/
+  reconcile-inventory 3 个 anchor、residue 0 / `active_reconcile` 不存在。
+- `rows` 的口径按 surface 不同：`journal_replay.rows` 数的是 replay 去重之后的
+  **唯一 `job_id` 个数**（所以 14,922 可以大于它读的 6,273 个文件——一个 latest
+  view 里可以有很多行），其余 surface 的 `rows` 数的是**读进来的文件个数**
+  （一个文件一行；`reconcile_inventory.rows` 是 anchor 个数，不含 residue）。
+  receipt schema 不变。
+- receipt 与 transcript：`docs/runbooks/receipts/journal-scope-census/node22-2026-09-02-de33bd87.json`
+  与同目录 `-transcript.md`。
+- 结论：node-22 当前**没有**分叉行，规划中的 guarded repair 命令
+  （`repair-job-id-scope`）因此没有实现；真要修就走本节下面的人工恢复步骤。
+- 并发口径：两趟都是在 `nhms-compute-scheduler.service` 处于 `activating`
+  时跑的（node-22 上这个 oneshot 跑得久）。**只读 census 与调度器同时跑是被接受
+  的模式**：census 不持有任何 repository 锁，撕裂读会以 `file_journal_unreadable`
+  fail loud，重跑即可。只有下面的人工恢复步骤才必须先停 timer。
+
+**什么时候跑**：任何 post-#1939 的 checkout 在 node-22 上生效之前跑一次（gate
+生效后分叉行才会真正咬人）；以及任何一次手工编辑 journal root 之后。命令对
+journal 树零写入——`--output` 拒绝任何位于 root 内的路径，`reconcile-inventory/`
+里的 `.tmp` 残留只统计不删除。
+
+**后果 (a)：整趟 reconcile scan 中止。** 一行分叉行如果同时满足"有
+`reconcile-inventory/<job_id>.json` anchor" + "没有 flat direct 文件"，
+`_iter_reconcile_inventory_records` 的非严格修复分支会去
+`_restore_derived_master_direct_unlocked`，出站校验撞上 gate；该分支没有 `try`，
+于是**排序在它之后的 anchor 一个都不会被 yield**，这个 anchor 也不会被 prune。
+`scheduler_runtime.py` 用 `except Exception` 兜住，pass 表面上活着，但
+`evidence["status"]` 变成 `error`、恢复 0 个 cohort，**每一趟都如此**，而且没有
+任何 receipt 会说出这个 `job_id`。census 把这个组合命名为
+`reconcile_abort_trigger`。
+
+**后果 (b)：这一行无法通过任何 API 退休。** `update_pipeline_job_status`、
+`upsert_pipeline_job`、`permit_pipeline_job_retry` 都把持久化的 `job_id` 原样
+带进出站记录，所以 gate 会反复触发：
+
+- **非终态行**：朝任何目标状态都被拒。
+- **终态行**（`succeeded` / `failed` / `cancelled`）：朝普通目标会在 gate 之前
+  短路，但朝 `partially_failed` / `permanently_failed` 仍然进入 gate
+  （`terminal_guarded` 的第二个合取项）。
+
+也就是说**终态行和非终态行都不能通过 API 退休**。生产上真正会撞到它的路径是
+auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
+（`retry.py` / `chain_forecast_orchestrator_cycle.py`）以及
+`chain_array_accounting.py` 的 `partially_failed` 汇总。
+
+**人工恢复**（唯一支持的路径；顺序不可省）：
+
+1. `systemctl --user stop nhms-compute-scheduler.timer`，确认
+   `nhms-compute-scheduler.service` 为 `inactive`。
+2. 备份：把该 `job_id` 的 flat direct、by-cycle direct 和 anchor 三个文件拷到
+   root 之外的目录。
+3. 删除该行的 `pipeline-jobs/<job_id>.json`、
+   `pipeline-jobs/by-cycle/<source>/<cycle>/<job_id>.json` **以及它的
+   `reconcile-inventory/<job_id>.json` anchor——三者必须一起删**。只删 direct
+   文件而把 anchor 留下，下一趟 scan 会在同一个 anchor 上以同样的方式再次中止。
+4. 重跑上面的 census，确认该 `job_id` 的 `reconcile_abort_trigger` 已消失。
+5. `systemctl --user start nhms-compute-scheduler.timer`。
+
+**segment 里的那一份留着**：journal segment 是 append-only 历史。anchor 与
+direct 文件删除之后，这一行不再喂给 reconcile scan、也无法被 transition，但它会
+继续出现在 census 的 `journal_replay` surface 上，`reconcile_abort_trigger` 为
+`false`。这是可接受的终态；为退休它而重写 segment 不在范围内。
+
+
 ## 9. 值守 SQL 片段
 
 Run these on node-27 after sourcing the ingest writer env
@@ -3700,7 +3879,59 @@ group by 1
 order by 1;
 ```
 
-### 9.1 `pg_stat_activity` 归因与 cancel 纪律（#1714）
+### 9.1 `core.river_segment` 两类行与计数不变量（#1693）
+
+上面这条按 `shud_output_river` 分组的查询之所以要分组，是因为**同一个
+`river_network_version_id` 下 `core.river_segment` 按设计存两类行**（术语定义见
+`openspec/glossary.md` 的 `## Domain terms`：`SHUD input reach row` /
+`SHUD output river row`）：
+
+| 行类 | id 形状 | 来源 | `properties_json->>'shud_output_river'` | 作用 |
+|---|---|---|---|---|
+| reach 行 | `<model_id>_reach_<iRiv:06d>` | model package 的 `gis/river.shp` | 无该键或 `'false'` | 水力参数 + flow-ordered 单 part 几何；`core.river_segment_crosswalk` 只指向它 |
+| output 行 | `<model_id>_shud_riv_<N:06d>` | model package 的 `.sp.riv` | `'true'` | SHUD 输出序列身份（`hydro.river_timeseries` 按它建键）；几何从对应 reach 行回填 |
+
+`core.river_network_version.segment_count` **只数 reach 行**（post-PR-2 #561
+即 `gis/river.shp` 记录数）。导入时会校验 `river.shp` 记录数 == `.sp.riv` reach 数
+（`workers/model_registry/basins_geometry.py::_validate_river_shp_single_part_invariant`），两类行因此恒等量，所以：
+
+> 不加过滤的 `count(*)` 等于 `2 × segment_count` 是**预期值，不是重复播种**。
+
+issue #1122 与 #1123 两次都把这个翻倍读成重复 seed 行，#1123 一度已经准备好生产 delete。
+体检查询一律先过滤再比：
+
+```sql
+-- 逐类计数并与 segment_count 对照；差值应为 0/0，total 应为 2×segment_count
+-- 下面的 river_network_version_id 换成要体检的那一个。
+select rnv.river_network_version_id,
+       rnv.segment_count,
+       count(*)                                                          as total_rows,
+       count(*) filter (where coalesce(rs.properties_json->>'shud_output_river','false') = 'false') as reach_rows,
+       count(*) filter (where coalesce(rs.properties_json->>'shud_output_river','false') = 'true')  as output_rows
+from core.river_network_version rnv
+join core.river_segment rs using (river_network_version_id)
+where rnv.river_network_version_id = 'basins_heihe_rivnet_vbasins'
+group by rnv.river_network_version_id, rnv.segment_count;
+```
+
+要点：
+
+- `output_segment_count` **不是** `core.river_network_version` 的列（`db/migrations/` 里
+  也没有任何表带这个列名）。它是 JSON / receipt 字段：导入 receipt、
+  `core.model_instance.resource_profile`（由 `packages/common/forecast_store.py:268`、
+  `packages/common/display_coverage.py:86` 读取），以及调度器 file-registry /
+  candidate / chain manifest（`services/orchestrator/scheduler_file_providers.py:1061-1104`
+  等）。值同样等于 `.sp.riv` reach 数。按列名去查库只会得到 `column does not exist`。
+- 已经正确过滤的现成 oracle，可直接抄谓词：
+  `workers/model_registry/basins_registry_import.py:610-620`（reach 行幂等守卫）、
+  `tests/test_real_database_integration.py:448-453`（reach 行几何断言）、
+  `tests/test_basins_registry_import.py::test_pr2_contract_reach_rows_single_part_and_crosswalk_count`
+  （真实库里钉住 `total_rows == 2 × segment_count`）。
+- `workers/output_parser/parser.py::load_river_segments`（`:820-838`）是
+  **output-class-first**：先按 `shud_output_river='true'` 取，取不到才回落到
+  不带过滤的全量查询。不要把它当成无条件过滤的证据。
+
+### 9.2 `pg_stat_activity` 归因与 cancel 纪律（#1714）
 
 2026-08-22 事故：`pg_stat_activity` 里一条 `state=active`、`dur=00:06:59` 的
 `SELECT h.run_id, ...` 被判为「自己的 pytest 慢查询」并 `pg_cancel_backend`，

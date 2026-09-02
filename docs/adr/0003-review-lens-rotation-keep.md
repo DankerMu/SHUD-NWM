@@ -2724,3 +2724,66 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 default. Reversal still requires the attribution-schema, round-intent and
 round-role repairs plus maintainer review. Next revisit on the audit's next
 flag.
+
+## Revisit 2026-09-02 (post PR #1951 / issues #1943 #1944)
+
+`loop_log_audit.py` flags rotation attribution again: **154** multi-round
+merged PRs, later-round catches **core=103 vs rotated=297**. Relative to the
+previous entry (core=98 / rotated=297) this PR's margin is **core +5 /
+rotated +0**. Round 2 rotated in a limits/concurrency bundle beside the two
+core bundles; it co-raised the round's P1 (blank/relative `--journal-root`
+censusing the cwd) together with the spec-compliance bundle, and the log
+attributes that catch to the core lens by the first-raiser rule, so the
+rotated lens earns no credit in the count even though it independently found
+the P1. Round 3 rotated nothing in (integration/invariant-state returned as a
+seam blast-radius pass) and its two P2s are core. Attribution therefore still
+under-credits rotation on co-raised findings — the same schema limit the
+earlier entries record. The accumulated later-round catches remain
+concentrated in rotated-in lenses (**297 versus 103**), so **keep rotation**
+stands under the recorded autonomous default. Next revisit on the audit's
+next flag.
+
+## Revisit 2026-09-02 (post #1693 / #1694 / #1695 / #1678, PR #1956) — keep; another no-rotation datum
+
+After the PR #1956 accountability line, `loop_log_audit.py` reports **155**
+multi-round merged PRs and later-round catches **core=109 / rotated=297**.
+The core count rises by eleven across two lines appended since the #1949
+revisit (PR #1951 from a parallel session contributed five, PR #1956 six);
+the rotated count is unchanged.
+
+Round 1 ran correctness, integration, test/evidence and spec-compliance and
+produced eleven confirmed findings (two P1). Round 2 pinned the two lenses
+that had caught most in Round 1 (spec-compliance, test/evidence) and kept
+correctness at full scope; it returned six confirmed P2/Note findings, all in
+lenses already present in Round 1, so all six fall in the core bucket by
+construction. No lens rotated in; the three Phase 7 gap-sweep catches are
+not round catches and are not attributed. The PR is a no-rotation datum,
+like #1947 and #1949: it moves the core count and says nothing about
+rotation's causal value.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**297 versus 109**), so **keep rotation** stands under the recorded
+autonomous default. Reversal still requires the attribution-schema,
+round-intent and round-role repairs plus maintainer review. Next revisit on
+the audit's next flag.
+
+## Revisit 2026-09-02 (post #1945, PR #1963) — keep; another no-rotation datum
+
+After the PR #1963 accountability line, `loop_log_audit.py` reports **156**
+multi-round merged PRs and later-round catches **core=109 / rotated=297**,
+both counts unchanged from the #1956 revisit.
+
+Round 1 ran the same six lenses as Round 2 (correctness, security/perf,
+integration, invariant-state, spec-compliance, test/evidence) and produced
+four confirmed findings (one P2 coverage gap, three P3). Round 2 re-ran the
+same mix on the fix delta and returned zero semantic candidates; its three
+P3 text items were local-repaired without a verifier round. No lens rotated
+in and no later-round catch was recorded, so the PR adds +0 to both buckets.
+It is a no-rotation datum, like #1947, #1949 and #1956: it says nothing about
+rotation's causal value.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**297 versus 109**), so **keep rotation** stands under the recorded
+autonomous default. Reversal still requires the attribution-schema,
+round-intent and round-role repairs plus maintainer review. Next revisit on
+the audit's next flag.

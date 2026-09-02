@@ -2347,26 +2347,33 @@ def test_forcing_version_checksum_is_finalized_after_child_rows(tmp_path: Path) 
     ]
 
 
-def test_compressed_chunk_guard_error_sets_dedicated_forcing_error_code(tmp_path: Path) -> None:
-    """F4: ``CompressedChunkGuardError`` inside ``produce()`` routes to a
-    dedicated ``forecast_cycle.error_code`` bucket
-    (``FORCING_COMPRESSED_CHUNK_BLOCKED``) and re-raises un-wrapped so the
-    CLI's ``except CompressedChunkGuardError`` arm is reachable.
+def test_compressed_chunk_write_error_sets_blocked_forcing_error_code(tmp_path: Path) -> None:
+    """#1785 arm 1/8 (subclass): a real compressed-chunk hit inside
+    ``produce()`` keeps the ``FORCING_COMPRESSED_CHUNK_BLOCKED`` bucket on
+    ``met.forecast_cycle.error_code`` and re-raises un-wrapped so the CLI's
+    subclass arm is reachable.
 
     Before R2/F1, the generic ``except Exception`` in ``produce()`` swallowed
     the guard error and wrapped it as ``ForcingProductionError`` — the CLI
     arm was dead code, and every guard failure landed in the generic
-    ``FORCING_FAILED`` bucket. The dedicated ``except CompressedChunkGuardError``
-    arm was added upstream of ``except Exception`` to close the pattern.
+    ``FORCING_FAILED`` bucket. The dedicated guard arms were added upstream
+    of ``except Exception`` to close the pattern; #1785 then split them so
+    only this subclass path routes the operator to a decompress.
     """
-    from packages.common.timescale_write_guard import CompressedChunkGuardError
+    from packages.common.timescale_write_guard import (
+        CompressedChunkGuardError,
+        CompressedChunkWriteError,
+    )
 
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
 
     def _raise_guard(*_args: Any, **_kwargs: Any) -> None:
-        raise CompressedChunkGuardError(
-            "Reingest targets compressed chunk _timescaledb_internal._hyper_2_5_chunk"
+        raise CompressedChunkWriteError(
+            chunk_schema="_timescaledb_internal",
+            chunk_name="_hyper_2_5_chunk",
+            hypertable_schema="met",
+            hypertable_name="forcing_station_timeseries",
         )
 
     repository.replace_forcing_timeseries = _raise_guard  # type: ignore[method-assign]
@@ -2376,10 +2383,44 @@ def test_compressed_chunk_guard_error_sets_dedicated_forcing_error_code(tmp_path
 
     # Un-wrapped: propagates as the raw guard error, NOT ForcingProductionError.
     assert not isinstance(exc_info.value, ForcingProductionError)
+    assert isinstance(exc_info.value, CompressedChunkWriteError)
     # Dedicated bucket on forecast_cycle.error_code.
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
     assert repository.cycle_updates[-1]["error_code"] == "FORCING_COMPRESSED_CHUNK_BLOCKED"
     assert "_hyper_2_5_chunk" in repository.cycle_updates[-1]["error_message"]
+
+
+def test_compressed_chunk_guard_error_sets_guard_failed_forcing_error_code(tmp_path: Path) -> None:
+    """#1785 arm 1/8 (base class): the guard failing to certify the batch
+    (catalog timeout, partial window, unregistered hypertable) MUST NOT be
+    reported as a compressed-chunk hit — it stamps
+    ``FORCING_COMPRESSED_CHUNK_GUARD_FAILED`` instead, so the runbook routes
+    it to DB-health / caller-bug triage rather than a needless decompress.
+    """
+    from packages.common.timescale_write_guard import (
+        CompressedChunkGuardError,
+        CompressedChunkWriteError,
+    )
+
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    def _raise_guard(*_args: Any, **_kwargs: Any) -> None:
+        raise CompressedChunkGuardError(
+            "Compressed-chunk guard lookup failed for met.forcing_station_timeseries: "
+            "canceling statement due to statement timeout"
+        )
+
+    repository.replace_forcing_timeseries = _raise_guard  # type: ignore[method-assign]
+
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert not isinstance(exc_info.value, ForcingProductionError)
+    assert not isinstance(exc_info.value, CompressedChunkWriteError)
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
+    assert repository.cycle_updates[-1]["error_code"] == "FORCING_COMPRESSED_CHUNK_GUARD_FAILED"
+    assert "statement timeout" in repository.cycle_updates[-1]["error_message"]
 
 
 def test_failed_child_write_leaves_forcing_version_incomplete_and_retry_finalizes(tmp_path: Path) -> None:

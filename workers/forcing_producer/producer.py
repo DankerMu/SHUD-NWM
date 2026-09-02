@@ -36,7 +36,10 @@ from packages.common.shud_forcing_contract import (
     SHUD_FORCING_ROLE,
 )
 from packages.common.source_identity import normalize_source_id
-from packages.common.timescale_write_guard import CompressedChunkGuardError
+from packages.common.timescale_write_guard import (
+    CompressedChunkGuardError,
+    CompressedChunkWriteError,
+)
 from workers.canonical_converter.converter import canonical_product_is_forcing_usable
 from workers.data_adapters.region import GeoBBox
 from workers.forcing_producer.direct_grid_contract import (
@@ -803,22 +806,36 @@ class ForcingProducer:
                 forcing_version_id=result.forcing_version_id,
             )
             return result
-        except CompressedChunkGuardError as error:
-            # Dedicated caller-observable contract for the compressed-chunk write
-            # guard: operators route on this dedicated error_code
+        except CompressedChunkWriteError as error:
+            # Subclass arm FIRST: a compressed chunk was actually detected, so
+            # the write is unappliable until an operator decompresses.
+            # Operators route on this dedicated error_code
             # (``FORCING_COMPRESSED_CHUNK_BLOCKED``) to the runbook decompress
             # procedure rather than the generic ``FORCING_FAILED`` bucket. The
-            # exception re-raises un-wrapped so the CLI's dedicated
-            # ``except CompressedChunkGuardError`` arm can emit the
-            # ``FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:`` stderr prefix.
-            # MUST precede the generic ``except Exception`` — otherwise the
-            # guard error would be wrapped as ``ForcingProductionError`` and
-            # the CLI arm becomes dead code.
+            # exception re-raises un-wrapped so the CLI's matching subclass arm
+            # can emit the ``FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:`` stderr
+            # prefix.
             self._mark_failed(
                 resolved_source_id,
                 parsed_cycle_time,
                 error,
                 error_code="FORCING_COMPRESSED_CHUNK_BLOCKED",
+            )
+            raise
+        except CompressedChunkGuardError as error:
+            # Base-class arm SECOND: the guard could not certify the batch —
+            # partial batch window, unregistered hypertable, or its own catalog
+            # SELECT failing under the 5s statement_timeout. There is no chunk
+            # to decompress, so it gets its own error_code and routes to
+            # DB-health / caller-bug triage instead. Both guard arms MUST
+            # precede the generic ``except Exception`` — otherwise the guard
+            # error would be wrapped as ``ForcingProductionError`` and the CLI
+            # arms become dead code.
+            self._mark_failed(
+                resolved_source_id,
+                parsed_cycle_time,
+                error,
+                error_code="FORCING_COMPRESSED_CHUNK_GUARD_FAILED",
             )
             raise
         except Exception as error:

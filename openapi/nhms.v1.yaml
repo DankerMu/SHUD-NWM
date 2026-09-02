@@ -1863,8 +1863,12 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Queue Depth Api V1 Queue Depth Get
+        '502':
+          $ref: '#/components/responses/SlurmGatewayUpstreamError'
         '503':
           $ref: '#/components/responses/ControlPlaneQueueUnavailable'
+        '504':
+          $ref: '#/components/responses/SlurmGatewayTimeout'
   /api/v1/layers:
     get:
       tags:
@@ -4476,6 +4480,76 @@ components:
                     type: string
                     enum:
                     - CONTROL_PLANE_QUEUE_UNAVAILABLE
+                  message:
+                    type: string
+                  details:
+                    type:
+                    - object
+                    - 'null'
+                    additionalProperties: true
+    SlurmGatewayUpstreamError:
+      description: The Slurm gateway command failed or returned output the gateway
+        could not parse.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - request_id
+            - status
+            - error
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum:
+                - error
+              error:
+                type: object
+                required:
+                - code
+                - message
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - SLURM_COMMAND_ERROR
+                    - SLURM_PARSE_ERROR
+                  message:
+                    type: string
+                  details:
+                    type:
+                    - object
+                    - 'null'
+                    additionalProperties: true
+    SlurmGatewayTimeout:
+      description: The Slurm gateway command exceeded its timeout before returning.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - request_id
+            - status
+            - error
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum:
+                - error
+              error:
+                type: object
+                required:
+                - code
+                - message
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - SLURM_TIMEOUT
                   message:
                     type: string
                   details:

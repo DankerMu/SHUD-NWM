@@ -641,7 +641,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # and to 42 in #1872 (the four retention partitions, which replace one
     # same-name target with the retained core suite plus three moved
     # partitions — the independent frontier suite already rode here),
-    # and stays FROZEN here as a
+    # and to 44 in #1943/#1944 (the journal-root authority and job-id scope
+    # census suites: 50 tests in 1.50s together, measured with
+    # `uv run pytest -q` in PR-lane conditions), and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -690,6 +692,13 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_scheduler_generation.py",
         "tests/test_scheduler_journal_retention_archive.py",
         "tests/test_scheduler_journal_retention_planning.py",
+        # #1943/#1944: the two journal suites ride the broad orchestrator
+        # directory rule — that route is what closes the importer gaps of
+        # `services/orchestrator/__init__.py`, journal_root_authority.py,
+        # journal_scope_census.py, operator_reserved_demotion.py and
+        # scheduler_config/db_free.py, which no narrow or stop rule owns.
+        "tests/test_scheduler_journal_root_authority.py",
+        "tests/test_scheduler_journal_scope_census.py",
         "tests/test_scheduler_lineage.py",
         "tests/test_scheduler_timing.py",
         # The selector meta-guard joins because retry.py has a same-name
@@ -3145,18 +3154,22 @@ def test_suite_importer_closure_anchor_anti_vacuity_real_slurm_gateway() -> None
 
 def test_suite_importer_closure_anchor_anti_vacuity_production_scheduler() -> None:
     # Anti-vacuity for the production_scheduler owner WITHOUT enumerating all
-    # five filenames: issue acceptance explicitly requires its FIVE current
-    # direct importers, so the derived cardinality is asserted as exactly 5 and
-    # one representative importer is pinned. The cardinality itself is derived
-    # (it is the size of the independent authority's set), never frozen.
+    # six filenames: issue acceptance explicitly requires its SIX current direct
+    # importers, so the derived cardinality is asserted as exactly 6 and one
+    # representative importer is pinned. The cardinality itself is derived (it is
+    # the size of the independent authority's set), never frozen. The sixth is
+    # tests/test_scheduler_journal_root_authority.py (#1943), which top-level-
+    # imports `_set_db_free_scheduler_env` because the journal-root refusal is
+    # only reached once the WHOLE db-free preflight passes — a partial
+    # environment would test nothing.
     import tests.test_select_ci_tests as _self
 
     owner = "tests/test_production_scheduler.py"
     required = _self._non_gated_top_level_importer_index().get(_dotted_module_name(owner), set())
 
-    assert len(required) == 5, (
+    assert len(required) == 6, (
         f"tests/test_production_scheduler.py derived {sorted(required)} — "
-        "issue acceptance requires exactly its five current direct importers"
+        "issue acceptance requires exactly its six current direct importers"
     )
     assert "tests/test_scheduler_backfill.py" in required, (
         f"expected a representative importer in the derived closure, got {sorted(required)}"
@@ -7485,10 +7498,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/production_closure/two_node_e2e_evidence.py", "tests/test_two_node_docker_runtime.py"): "edge-consumer",
     # -- edge-consumer: data_adapters/base.py cycle-identity helpers --------
     # base.py exports `cycle_id_for`, `format_cycle_time` and `CycleDiscovery`;
-    # fourteen orchestration-, API- and journal-layer suites import one of those
+    # fifteen orchestration-, API- and journal-layer suites import one of those
     # three names and nothing else from the adapters. Each is selected by the
     # rule that owns its own surface, which is where a regression in it would be
-    # investigated. Pulling all fourteen into `workers/data_adapters/**` would
+    # investigated. Pulling all fifteen into `workers/data_adapters/**` would
     # put the orchestrator's journal and scheduler suites on every GFS/IFS/ERA5
     # adapter PR. The one importer with NO owning rule anywhere,
     # tests/test_state_clone_cutover_hook.py, is not here: it gets a narrow
@@ -7504,6 +7517,10 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/data_adapters/base.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill_predecessor.py"): "edge-consumer",
+    # #1944: the job-id scope census imports `cycle_id_for`/`format_cycle_time`
+    # to mint the journal rows it censuses; it is an orchestrator-journal suite,
+    # selected by `services/orchestrator/**`.
+    ("workers/data_adapters/base.py", "tests/test_scheduler_journal_scope_census.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_source_scoped_dispatch.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_state_clone.py"): "edge-consumer",
     # -- runtime-budget ----------------------------------------------------
@@ -7564,6 +7581,14 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     # gateway, the forcing producer, apps/api.
     ("services/orchestrator/chain.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     ("services/orchestrator/chain_types.py", "tests/test_file_orchestration_journal.py"): "edge-consumer",
+    # #1943: same shape as the journal pair above — the root-authority suite
+    # imports `OrchestratorError` from chain_types and nothing else of it, while
+    # its subject is the scheduler's journal-root refusal. chain_types.py is the
+    # manifest-surface stop rule, whose whole contract is focused `::` node ids
+    # (test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes
+    # pins the selection exactly), so the suite is selected from the cli.py,
+    # scheduler.py and scheduler_core.py rules instead.
+    ("services/orchestrator/chain_types.py", "tests/test_scheduler_journal_root_authority.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_qhh_scripts_static.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/chain.py", "tests/test_source_identity.py"): "edge-consumer",
