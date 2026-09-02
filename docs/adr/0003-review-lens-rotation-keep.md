@@ -2642,3 +2642,23 @@ rotated free slot would have found more. The cumulative attribution remains
 `296 versus 88`, so **keep rotation** is unchanged under the recorded autonomous
 default. Any reversal still requires the existing attribution-schema,
 round-intent and Phase 7 role repairs plus maintainer review.
+
+## Revisit 2026-09-02 (post #1912 / PR #1934) — keep; single-round clean adds no rotation datum
+
+After the PR #1934 accountability line, `loop_log_audit.py` still reports **149**
+multi-round merged PRs and later-round catches **core=88 / rotated=296**. Every
+number is unchanged from the PR #1930 revisit because PR #1934 completed one
+comprehensive round only.
+
+Round 1 used the standard six-lens high-risk mix and produced zero candidates;
+there was therefore no verifier batch, fix pass, or follow-up comprehensive
+round. The independent Phase 7 Gap Sweep was also clean. With no later round,
+no lens rotation was applied and this PR cannot enter either attribution bucket.
+
+This is a completion/closure datum for the test-layout invariant, not a rotation
+experiment. Reading its zero catches as evidence for either keep or cut would
+confuse "no follow-up round was needed" with "rotation was applied and found
+nothing". **Keep rotation** remains unchanged under the recorded autonomous
+default, with no increase in evidentiary strength. Any reversal still requires
+the existing attribution-schema, round-intent, and round-role repairs plus
+maintainer review.
