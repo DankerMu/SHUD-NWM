@@ -85,7 +85,7 @@ _is_create_engine = attribution._is_create_engine
 FIRST_PARTY_ROOTS = attribution.FIRST_PARTY_ROOTS
 ATTRIBUTED = attribution.ATTRIBUTED
 UNREACHABLE = attribution.UNREACHABLE
-_first_party_imports = attribution._first_party_imports
+_imported_first_party_modules = attribution._imported_first_party_modules
 _module_path = attribution._module_path
 _owns_connect_surface = attribution._owns_connect_surface
 
@@ -120,6 +120,71 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         UNREACHABLE,
         "hydro_display imports only the _ok response helper; pipeline._engine belongs to the "
         "control-plane routes and is never reached from a display route",
+    ),
+    # The eight below entered this closure with #1728's ancestor-package fix to
+    # the shared walk (a package __init__ executes before its submodules, so it
+    # is part of the import graph). Every one of them hangs off the SAME single
+    # edge as the pipeline.py row above: hydro_display imports `_ok` from
+    # apps/api/routes/pipeline.py, which imports services.orchestrator, whose
+    # package __init__ is now walked. No display route reaches any of them.
+    (
+        "apps/api/routes/hydro_display.py",
+        "packages/common/best_available.py",
+        UNREACHABLE,
+        "via apps/api/routes/pipeline.py -> services/orchestrator/__init__.py -> chain.py; the "
+        "best-available repository is built by apps/api/routes/best_available.py (its own attributed "
+        "surface nhms-api-best-available), never from a display route",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "packages/common/state_manager.py",
+        UNREACHABLE,
+        "via apps/api/routes/pipeline.py -> services/orchestrator/__init__.py -> chain.py; the state "
+        "repository is built by apps/api/routes/state_snapshots.py (nhms-api-state-snapshots), never "
+        "from a display route",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "packages/common/met_store.py",
+        UNREACHABLE,
+        "import-only, same verdict and reason as the unit-level row in "
+        "tests/test_node27_connection_attribution.py: PsycopgMetStore.from_env() is called only from "
+        "worker/CLI factories, none of which a display route reaches",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "packages/common/grid_registry_store.py",
+        UNREACHABLE,
+        "import-only, same verdict and reason as the unit-level row: PsycopgGridRegistryStore is "
+        "constructed only in workers/grid_registry/__main__.py",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "services/orchestrator/chain_compat_runtime.py",
+        UNREACHABLE,
+        "static-only: services/orchestrator/chain.py is imported ONLY inside the module __getattr__ at "
+        "services/orchestrator/__init__.py:53, so it is absent from the display unit's runtime sys.modules",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "services/orchestrator/chain_repository.py",
+        UNREACHABLE,
+        "static-only: reached only through chain_compat_runtime.py, itself behind the deferred chain "
+        "import in services/orchestrator/__init__.py:53",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "services/tile_publisher/publisher.py",
+        UNREACHABLE,
+        "static-only: imported by services/orchestrator/chain.py, behind the deferred import in "
+        "services/orchestrator/__init__.py:53",
+    ),
+    (
+        "apps/api/routes/hydro_display.py",
+        "workers/forcing_producer/store.py",
+        UNREACHABLE,
+        "static-only: imported function-locally at workers/forcing_producer/producer.py:485 inside "
+        "ForcingProducer.from_env(), which no display route calls",
     ),
     (
         "scripts/node27_timeseries_retention.py",
@@ -174,7 +239,7 @@ def _connect_owning_closure(relative_path: str) -> set[str]:
         current_relative = current.relative_to(REPO_ROOT).as_posix()
         if current is not entry and current_relative not in registered and _owns_connect_surface(current):
             owners.add(current_relative)
-        for dotted in _first_party_imports(current):
+        for dotted in _imported_first_party_modules(current):
             if dotted in seen_modules:
                 continue
             seen_modules.add(dotted)

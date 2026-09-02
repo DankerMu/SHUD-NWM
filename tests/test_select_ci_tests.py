@@ -726,6 +726,11 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1728 merged the connection-attribution guards into this rule:
+            # the module carries the application_name injection seam for both
+            # nhms-api-forecast and nhms-api-data-sources.
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
             INVARIANT_SUITE_PATH,
         }
     )

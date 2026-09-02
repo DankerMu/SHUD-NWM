@@ -806,7 +806,19 @@ def test_guard_rejects_an_unmarked_connect_site(tmp_path: Path) -> None:
 # Honest limits (same class as the delegated guard's): static import graph
 # only, ``unreachable`` verdicts are pinned human judgements rather than
 # proofs, and only ``psycopg2.connect`` / ``create_engine`` count as connect
-# surfaces.
+# surfaces. Two more, named by review and NOT covered by either half:
+#   * both halves are keyed on the seam the routes use today -- a route that
+#     constructs a store directly (``PsycopgForecastStore(dsn)`` instead of
+#     ``X.from_env(application_name=...)``) is neither a ``from_env`` call site
+#     for the factory half nor a new connect-owning module for the discovery
+#     half, so it would open an unnamed backend with this file green;
+#   * ``_forwards_injected_application_name`` matches the EXPRESSION at the
+#     connect site (``**_attribution_connect_kwargs(<...>.application_name)``).
+#     It proves the kwarg is spelled, not that a non-None name reached it: a
+#     store whose ``application_name`` attribute is never populated from the
+#     injected value still passes. That is what the executed T1/T2 cases at the
+#     bottom of this file exist to cover, and they cover only the six stores
+#     listed in DISPLAY_UNIT_STORE_CASES.
 # --------------------------------------------------------------------------- #
 ROUTE_REGISTRY = "apps/api/route_registry.py"
 # route_registry.py takes the runtime router as a parameter, so it cannot be
@@ -853,6 +865,41 @@ DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
         "import-only: models.py -> model_registry -> state_clone -> workers/mapping_builder/rewrite.py -> "
         "algorithm.py imports dataclasses from this module; PsycopgGridRegistryStore is constructed only in "
         "workers/grid_registry/__main__.py, which is not part of the display unit",
+    ),
+    (
+        "packages/common/met_store.py",
+        UNREACHABLE,
+        "import-only: packages/common/model_registry.py:21 imports workers.forcing_producer.direct_grid_contract, "
+        "so workers/forcing_producer/__init__.py:10 executes producer.py, which imports this module at line 31 "
+        "(it IS in the unit's runtime sys.modules). PsycopgMetStore.from_env() is called only from worker/CLI "
+        "factories -- workers/canonical_converter/converter.py:55, workers/data_adapters/{era5,gfs,ifs}_adapter.py "
+        "from_env, workers/forcing_producer/producer.py:487 (ForcingProducer.from_env) and "
+        "services/orchestrator/scheduler_adapters.py:413 -- none of which any display-unit route reaches",
+    ),
+    (
+        "services/orchestrator/chain_compat_runtime.py",
+        UNREACHABLE,
+        "static-only: the single bridge is services/orchestrator/chain.py, imported ONLY inside "
+        "services/orchestrator/__init__.py:53 (the module __getattr__ body), so `import apps.api.main` leaves "
+        "services.orchestrator.chain out of sys.modules and this module is never executed by the unit",
+    ),
+    (
+        "services/orchestrator/chain_repository.py",
+        UNREACHABLE,
+        "static-only: reached only through services/orchestrator/chain_compat_runtime.py, itself behind the "
+        "deferred chain import in services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
+    ),
+    (
+        "services/tile_publisher/publisher.py",
+        UNREACHABLE,
+        "static-only: imported by services/orchestrator/chain.py, which is behind the deferred import in "
+        "services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
+    ),
+    (
+        "workers/forcing_producer/store.py",
+        UNREACHABLE,
+        "static-only: imported function-locally at workers/forcing_producer/producer.py:485, inside "
+        "ForcingProducer.from_env(), which no display-unit route calls; absent from the unit's runtime sys.modules",
     ),
 )
 
@@ -905,6 +952,24 @@ def _module_path(dotted: str) -> Path | None:
         return module
     package = REPO_ROOT / dotted.replace(".", "/") / "__init__.py"
     return package if package.is_file() else None
+
+
+def _imported_first_party_modules(path: Path) -> set[str]:
+    """What importing ``path`` actually pulls in: leaf names AND every ancestor package.
+
+    ``import a.b.c`` executes ``a/__init__.py`` and ``a/b/__init__.py`` before
+    ``a/b/c``, so a package ``__init__`` is part of the import graph even when
+    nobody names it. Walking only the leaf dotted names hid whole subtrees: the
+    unit closure never enqueued ``workers/forcing_producer/__init__.py``, so
+    ``packages/common/met_store.py`` -- which that package's ``producer.py``
+    imports at module level, and which owns two bare ``psycopg2.connect``
+    surfaces -- was invisible while the discovery half stayed green.
+    """
+    names: set[str] = set()
+    for dotted in _first_party_imports(path):
+        parts = dotted.split(".")
+        names.update(".".join(parts[: index + 1]) for index in range(len(parts)))
+    return names
 
 
 def _owns_connect_surface(path: Path) -> bool:
@@ -1015,7 +1080,7 @@ def _unit_connect_owning_closure() -> set[str]:
         visited.add(current)
         if _owns_connect_surface(current):
             owners.add(current.relative_to(REPO_ROOT).as_posix())
-        for dotted in _first_party_imports(current):
+        for dotted in _imported_first_party_modules(current):
             if dotted in seen_modules:
                 continue
             seen_modules.add(dotted)

@@ -1003,6 +1003,51 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
 )
 
 
+# #1728: the connection-attribution guards. Before this issue only
+# apps/api/routes/hydro_display.py and the delegated-helper modules routed them,
+# because those were the only registered surfaces. The unit-level guard added
+# for #1728 is rooted at apps/api/route_registry.py and walks the six other
+# business routers plus the packages/common stores they build, so a diff that
+# drops a `fallback_application_name`, renames a surface, registers a new router
+# or adds a connect-owning module to the unit's import closure now reddens these
+# two suites — and NO other suite asserts any of that. Both are pure-AST plus a
+# handful of monkeypatched connect probes (~4s together), so they are cheap
+# enough to ride every rule that owns an attribution seam.
+CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
+    "tests/test_node27_connection_attribution.py",
+    "tests/test_node27_connection_attribution_delegated.py",
+)
+# The route modules the unit-level guard walks from the registry, plus the
+# registry itself: each declares a module-level `_APPLICATION_NAME` and injects
+# it into its store factories.
+CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
+    "apps/api/route_registry.py",
+    "apps/api/routes/best_available.py",
+    "apps/api/routes/data_sources.py",
+    "apps/api/routes/forecast.py",
+    "apps/api/routes/models.py",
+    "apps/api/routes/pipeline.py",
+    "apps/api/routes/state_snapshots.py",
+)
+# The packages/common stores that carry the #1728 injection seam
+# (`application_name=` through `from_env` down to the connect call). Two more —
+# forecast_store.py and state_manager.py — already have exact rules, so the
+# suites are MERGED into those instead of listed here: a duplicate pattern
+# splits a module's ownership across two rules
+# (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
+    "packages/common/best_available.py",
+    "packages/common/model_registry.py",
+    "packages/common/object_store_forcing.py",
+)
+# #1704: the only suite that asserts the error-response log line exists, is
+# redacted, is bounded, and that the request-id is not client-forgeable. Both
+# halves of that contract live in apps/api/errors.py (the chokepoint) and
+# apps/api/main.py (the handler install + the request-id middleware); the
+# `apps/api/**` rule's three broad API suites assert none of it.
+API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
+
+
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
@@ -1646,6 +1691,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # CI green unchallenged (same at-site reasoning as #1341's
             # mvt.py / display_coverage.py entries).
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1728: this module carries the connection-attribution injection
+            # seam (`application_name=` through `from_env` to the connect call)
+            # for BOTH nhms-api-forecast and nhms-api-data-sources. MERGED into
+            # this rule rather than added as a second exact entry — a duplicate
+            # pattern splits the module's ownership across two rules
+            # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -1713,6 +1765,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py::test_build_candidates_suppresses_a_model_before_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_admits_a_model_at_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_without_lineage_is_unchanged",
+            # #1728: this module carries the connection-attribution injection
+            # seam for nhms-api-state-snapshots (StateManager.from_env ->
+            # PsycopgStateSnapshotRepository -> connect). MERGED here for the
+            # same duplicate-pattern reason as forecast_store.py above.
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -2658,6 +2715,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_gateway.py",
         (SLURM_AUTH_DEPLOYMENT_TEST,),
+    ),
+    *(
+        PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
+        for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        "apps/api/errors.py",
+        (API_ERROR_LOGGING_TEST,),
+    ),
+    PathTestRule(
+        "apps/api/main.py",
+        (API_ERROR_LOGGING_TEST,),
     ),
 )
 

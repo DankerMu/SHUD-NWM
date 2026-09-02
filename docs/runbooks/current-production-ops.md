@@ -3749,7 +3749,7 @@ compression / raw-retention 每个 tick 的第一条连接）与
   再 drop）。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
   混在一张 `pg_stat_activity` 里的起点。
 - **display API 的写入面（`nhms-api-pipeline` / `nhms-api-models`）取消前先看日志。**
-  自 #1704 起每个错误响应都会在 `/tmp/display-api.log` 留一行
+  自 #1704 起每个**经过 `error_response()` 的**错误响应都会在 `/tmp/display-api.log` 留一行
   `api_error request_id=… code=… status=… path=… details=…`（5xx 记 ERROR，4xx 记
   WARNING），用客户端拿到的 `X-Request-ID` 直接 grep 即可把一条 backend 对上一次请求：
 
@@ -3757,9 +3757,19 @@ compression / raw-retention 每个 tick 的第一条连接）与
   grep -F "<X-Request-ID>" /tmp/display-api.log
   ```
 
-  该行里的 `details` 已按审计口径脱敏（绝对路径/URI/校验和/敏感 key 以及 `rejected_value`
-  一律 `[redacted]`），所以它能定位问题但不能替代复现客户端请求。已知盲区：
-  `/api/v1/slurm*` 的校验错误走独立 handler，不产生这行。
+  该行里的 `details` 已按审计口径脱敏（绝对路径/URI/校验和/敏感 key 以及 `rejected_value` /
+  `rejected_values` 一律 `[redacted]`），所以它能定位问题但不能替代复现客户端请求；
+  **但它不是全量脱敏**——其它 key 下的客户端标识（`station_id`、`run_id` 等）保持明文，
+  详见 `docs/runbooks/object-store-forcing-series-read.md` 的「脱敏边界」。`details=` 段有固定
+  字节预算，超出以 `…[truncated N bytes]` 截断（响应体不截断）；入站 `X-Request-ID` 仅在匹配
+  `[A-Za-z0-9._-]{1,64}` 时沿用，否则服务端另发 UUID。
+
+  已知盲区（grep 不到 ≠ 没发生）：`/api/v1/slurm*` 的**全部**错误响应（校验错误走
+  `services/slurm_gateway/validation_errors.py` 的独立 handler；网关错误由
+  `services/slurm_gateway/routes.py:149` 与 `_gateway_error_response`（:212-217）直接构造
+  `JSONResponse`）；Starlette 自己应答的 `HTTPException`——未匹配路由的 404（含
+  `apps/api/startup_wiring.py:87` 的 SPA catch-all）与 405；以及被
+  `ServerErrorMiddleware` 接住的未捕获异常（写出的是 uvicorn traceback，不是 `api_error` 行）。
 - 运维需要临时覆写标识时，在 DSN 上写 `?application_name=<name>`：代码给的是
   libpq `fallback_application_name`，显式值永远优先。
 
