@@ -57,6 +57,30 @@ containment fault"). A marker forces a miss; the recompute goes through
 `_probe_containment_failure`, so the exception type, code
 (`file_journal_unreadable`) and lane fate are byte-identical to a cold instance.
 
+**Per-leg fault token (implementation finding).** The journal, event-log and
+latest-directory legs reach `_probe_containment_failure` and report
+`file_journal_unreadable`. The two direct-partition legs (`pipeline-jobs/
+by-cycle/<seg>` and the flat `pipeline-jobs` root) are read by the direct
+scanners, whose containment fault is `file_journal_unsafe_scanned_entry`. Both
+tokens are fail-loud, both are what a cold instance reports on the same leg,
+and the invariant (warm == cold, one answer for one tree) holds on all five
+legs; the spec names both tokens rather than promising `file_journal_unreadable`
+on every leg.
+
+**Stated limit — the by-cycle leg's hard variant (deferred, not expanded).**
+When neither the decoy nor the real by-cycle directory contains `<cycle>`, the
+by-cycle bare stat is `None` before and after the swap, the fingerprint still
+observes the fault on the swapped parent and is correctly never stored, but the
+forced recompute then satisfies its direct-partition read from
+`_direct_jobs_cycle_cache` — a separate cache that still fingerprints with the
+bare `_stat_signature` (proposal non-goal) — and a warm instance returns `[]`
+where a cold instance raises. That is #1567's headline symptom surviving on one
+leg through a *different* cache. The proposal named the cycle-rows cache and
+excluded `_direct_jobs_cycle_cache` after review; widening scope mid-flight is
+the renegotiation this workflow forbids, so the spec scenario is bounded to
+"where the recompute itself reads the tampered path" and the residual is routed
+to a follow-up issue at Phase 8 and named in the work summary's 已知限制.
+
 Why non-cacheable and not merely unequal: if a marker-carrying fingerprint
 were stored, the next read would compute the same marker, compare equal, and
 serve the tampered rows — the exact hole in a new shape. `None` cannot be the
@@ -289,6 +313,11 @@ Regression rows:
   -> `list_stage_statuses` returns the `file_journal_unreadable` blocked row, not `[]`
 - same tampered tree, cold instance vs warm instance -> identical result
 - tamper under `latest/<src>` (the scandir parent) instead -> same fail-loud (sibling stat covered)
+- tamper under `pipeline-events/<src>` -> `file_journal_unreadable`; tamper under
+  `pipeline-jobs/by-cycle/<src>` or `pipeline-jobs` -> `file_journal_unsafe_scanned_entry`
+  (per-leg token, D1); warm == cold on every leg
+- by-cycle hard variant (no `<cycle>` under decoy or real dir) -> warm `[]` vs cold raise:
+  stated limit (D1), out of scope via `_direct_jobs_cycle_cache`, routed as a follow-up issue
 - untouched empty directory, warm instance -> legal `[]`, still a cache hit on the second read
 - fingerprint that observed a fault -> no entry stored (cache dict inspected)
 - owner inside its window, parent swapped for symlink between two owner reads -> second read
@@ -318,8 +347,12 @@ Regression rows:
   has no journal record and no direct file; a re-run after correcting the row is idempotent
   for the already-imported rows
 - write with unparseable `job_id` -> accepted, fall-open unchanged
-- every existing writer in the journal, chain, warm-start and scheduler suites -> no writer
-  trips the gate (full suites green)
+- every existing *production* writer exercised by the journal, chain, warm-start, scheduler
+  and migration suites -> no writer trips the gate (full suites green). One *test-side*
+  writer did: the `_lineage_cross_cycle_failed_row` fixture minted a June-named row into a
+  July cycle through the public `reserve_pipeline_job` — the exact row the gate forbids —
+  and was rewritten to lay the row directly on disk (assertions untouched; recorded in the
+  PR's 偏离记录). The rebind-guard tests it feeds still cover the legacy/corruption shape.
 ```
 
 ## Boundary-surface checklist
@@ -358,3 +391,11 @@ Regression rows:
    the repair lane and the historical-import lane, not one.
 5. D3: symlinked aliases still kept; the re-pinned `("IFS","ifs")` test branches
    on filesystem semantics rather than deleting the assertion.
+6. D1 error mapping: `_containment_stat_signature` maps `FileNotFoundError` to
+   `None` and every other `OSError` (`NotADirectoryError`, `PermissionError`,
+   `EIO`) to the fault marker. Where the cold-read path swallows the same
+   error (e.g. the `except OSError: pass` around the latest scandir), the
+   result is a permanent, silent cache miss for that cycle rather than a fault
+   — a perf-regression shape, not a correctness hole. Security-perf and
+   invariant-state reviewers: judge whether any such leg exists and whether
+   the old bare `_stat_signature` returned `None` there.
