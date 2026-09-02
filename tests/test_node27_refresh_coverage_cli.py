@@ -22,6 +22,7 @@ from typing import Any
 import psycopg2
 import pytest
 
+from packages.common import display_coverage
 from packages.common.display_coverage import DisplayCoverageRefreshRefused
 from scripts import node27_refresh_coverage
 
@@ -80,8 +81,10 @@ def test_refused_single_run_exits_3_with_one_structured_stderr_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # The real advice text, not a stand-in: the one-line contract below is only
+    # worth anything if it is the shipped string that has to stay newline-free.
     def _refuse(_connection: Any, run_id: str, *, force: bool = False) -> bool:
-        raise DisplayCoverageRefreshRefused(run_id, 12, "back-fill or force")
+        raise DisplayCoverageRefreshRefused(run_id, 12, display_coverage._REFUSAL_ADVICE)
 
     monkeypatch.setattr(node27_refresh_coverage, "refresh_run_display_coverage", _refuse)
 
@@ -93,7 +96,7 @@ def test_refused_single_run_exits_3_with_one_structured_stderr_line(
     assert captured.out == ""
     assert captured.err.splitlines() == [
         f"DISPLAY_COVERAGE_REFRESH_REFUSED run_id={LEGACY_RUN_ID} "
-        "existing_segment_count=12 advice=back-fill or force"
+        f"existing_segment_count=12 advice={display_coverage._REFUSAL_ADVICE}"
     ]
     # The refusal is a return, not a raise: the connection still gets closed.
     assert [connection.closed for connection in cli] == [True]

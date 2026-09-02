@@ -126,8 +126,11 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
 - **legacy run 覆写已由 guard 兜底（#1446）**：#1341 后 river coverage 扫描按代理
   键选行，legacy（pre-#1340、NULL 键）run 扫不到任何行。曾经裸 `--all` 或
   `--run-id <legacy run>` 会把已物化的 `run_display_coverage` 覆写成 0 / NULL
-  边界，且**旧值无法就地恢复**（归零后的行本身不是永久损失：#1408 身份 backfill
-  落地后，下一次刷新会重新算出真实计数并自愈）；现在 upsert 的条件
+  边界，且**旧值无法就地恢复**（归零后的行本身不是永久损失，但**不会自愈**：归零的
+  upsert 会把 `refreshed_at` 刷成 `now()`，该行随即是 fresh 的，cron 的
+  `--all --skip-fresh` 永远不会再回头扫它。#1408 身份 backfill 落地后，恢复需要显式
+  `--run-id <run>` 刷新——或一次省掉 `--skip-fresh` 的 `--all`——才会重新算出真实
+  计数）；现在 upsert 的条件
   `DO UPDATE ... WHERE` 直接拒绝该写入——`--run-id` 退出码 **3** 并在 stderr 打一行
   `DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…`，
   `--all` 把它计入 JSON 报告的 `refused` 且仍退出 0（不打断批次）。

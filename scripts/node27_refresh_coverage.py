@@ -21,8 +21,12 @@ river valid-time bounds. Overwriting the correct text-era values with that
 result drops the run out of latest-product readiness and off the national tile,
 and nothing restores the old values in place — so the upsert now **refuses**
 it: an existing populated row is never replaced by an empty scan unless
-``--force`` is passed. (A row already zeroed this way is not lost forever: once
-the #1408 identity back-fill lands, the next refresh recomputes real counts.)
+``--force`` is passed. (A row already zeroed this way is not lost forever, but
+it does not heal by itself: the zeroing upsert stamps ``refreshed_at = now()``,
+so the row is *fresh* and the cron's ``--all --skip-fresh`` loop never revisits
+it. Once the #1408 identity back-fill lands, recovery takes an explicit
+``--run-id <run>`` refresh -- or an ``--all`` run without ``--skip-fresh`` --
+which then recomputes the real counts.)
 
 * ``--run-id <legacy run>`` exits **3** and prints one
   ``DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…``

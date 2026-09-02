@@ -214,6 +214,9 @@ def test_legacy_populated_run_is_refused_with_its_stored_count_and_rolled_back()
     assert refusal.run_id == "run-1"
     assert refusal.existing_segment_count == 12
     assert refusal.advice == display_coverage._REFUSAL_ADVICE
+    # One stderr line is the CLI's contract (tests/test_node27_refresh_coverage_cli.py);
+    # it holds only while the advice itself carries no newline.
+    assert "\n" not in display_coverage._REFUSAL_ADVICE
     assert "run-1" in str(refusal)
     # Nothing written, and the transaction is left clean for the caller.
     assert connection.rollbacks == 1

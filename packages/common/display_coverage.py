@@ -550,8 +550,10 @@ _COVERAGE_CTES = (
 # overlooked — the protected cohort is finished pre-cutover runs whose station
 # inputs no longer change, and the freeze ends when the #1408 identity backfill
 # restores their surrogate keys and the next refresh succeeds. The standing
-# cost is that the run stays stale and is rescanned by the cron `--all
-# --skip-fresh` loop every tick until then.
+# cost is bounded by staleness: because a refused row keeps its old
+# `refreshed_at`, the cron `--all --skip-fresh` loop rescans the run every tick
+# only while `refreshed_at < hydro_run.updated_at` -- a refused run whose row is
+# already fresh is not rescanned at all.
 _REFRESH_SQL = (
     _COVERAGE_CTES
     + """
