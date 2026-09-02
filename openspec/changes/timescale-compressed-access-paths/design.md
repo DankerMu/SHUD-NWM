@@ -8,6 +8,8 @@ Issues #1779, #1778, #1476 — TimescaleDB compressed-side access paths and lock
 
 **Non-Goals**: `parsed -> published` semantics beyond the predicate; bumping `updated_at`; #1342 column drop/recompression; #1686 ingest criterion; the copyback probe's join key or `variable_e`; `SELECT … FOR UPDATE`/`NOWAIT` rewrites; the #1408 classification code itself.
 
+- Non-goal (recorded deferral, 2026-09-02 review): the base-spec register sentence in `openspec/specs/river-identity-normalization/spec.md` that lists `scripts/node27_autopipeline.py`（ingest 判据与 publish 回填 EXISTS）among `hydro.river_timeseries` consumer surfaces is left as-is; both halves are now historical (#1789 removed the ingest probe, #1779 the publish probe) and the enforceable oracle (`RIVER_TABLE_CENSUS` = 0) already governs. The register rewrite belongs to #1342.
+
 ## Decisions
 
 ### D1 (#1779) — authority state, not a fact probe; spec and oracle move together

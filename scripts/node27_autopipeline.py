@@ -1081,12 +1081,21 @@ def _already_ingested_runs(
 
     Completeness is decided by AUTHORITY STATE first (#1674). A run at status
     'published' is complete whether or not its fact rows are key-visible right
-    now: publish only ever happens once rows exist, so a later invisibility has
-    exactly two sources -- NULL-key legacy rows the backfill could not reach
-    inside compressed chunks (a recorded, converging exclusion contract), or a
-    retention-dropped chunk (an intentional deletion). Neither should
-    re-trigger the per-cycle handoff. A run at status 'parsed' still requires
-    evidence that a parse finished, now read as a non-NULL parsed_at.
+    now. What backs that is the PARSER, not publish: mark_run_parsed stamps
+    parsed_at in the same transaction that commits the run's fact rows
+    (workers/output_parser/parser.py), so a post-cutover run that reached
+    'parsed' has a committed parse behind it. The pre-cutover legacy cohort is
+    'published' by contract instead (#1674 design D2) and was never stamped.
+    Publish itself no longer reads the fact table at all -- since #1779 it keys
+    on status plus parsed_at -- so it neither adds to nor subtracts from that
+    guarantee. Invisibility of a published run's rows therefore has three
+    sources: NULL-key legacy rows the backfill could not reach inside compressed
+    chunks (a recorded, converging exclusion contract), a retention-dropped
+    chunk (an intentional deletion), or -- new with #1779 -- a run whose parser
+    committed zero rows and which publish advances anyway (the #1789 owner
+    decision). None of the three should re-trigger the per-cycle handoff. A run
+    at status 'parsed' still requires evidence that a parse finished, now read
+    as a non-NULL parsed_at.
 
     This statement touches NO fact table (#1789). parsed_at is a column on
     hydro_run, stamped by every successful parse; it used to be derived here as

@@ -16,9 +16,10 @@
 
 #### Scenario: Integration seeds carry the timestamp only for completed parses
 
-- **WHEN** a test helper seeds a run at `status = 'parsed'` together with its fact rows (a completed parse)
+- **WHEN** a test helper seeds a run at `status = 'parsed'` together with its fact rows to represent a completed parse
 - **THEN** it also stamps `parsed_at`, so the publish step publishes that run
 - **AND** a seeded `parsed` run without fact rows may leave `parsed_at` NULL and is not published
+- **AND** a helper that deliberately seeds `parsed` + fact rows with `parsed_at` NULL (the counterfactual the old fact-table probe misread as a completed parse) is a discriminating oracle row, not a completed parse, and is not published
 
 #### Scenario: Manual status without timestamp stays put
 
@@ -27,7 +28,7 @@
 
 ### Requirement: Transitional pushdown aids SHALL be labelled with their true planner effect
 
-Each surviving transitional aid on `hydro.river_timeseries` consumers SHALL carry, next to the byte-identical `PUSHDOWN_AID_MARKER` line, a statement of whether it is a segmentby index pushdown or an orderby batch filter.
+The forcing-copyback discovery aid in `services/tile_publisher/forcing_copyback_backfill.py` (`_DISCOVER_BACKFILL_RUNS_SQL`, the `rt.variable = 'q_down'` conjunct) SHALL carry, next to the byte-identical `PUSHDOWN_AID_MARKER` line, a statement that it is an orderby-level batch filter and not a segmentby index pushdown. The other surviving `PUSHDOWN_AID_MARKER` sites (`packages/common/forecast_store.py`, `services/tiles/mvt.py`, `services/tile_publisher/publisher.py`, `workers/output_parser/parser.py`, `packages/common/display_coverage.py`, `apps/api/routes/hydro_display.py`) are #1342's scope and are not relabelled by this change.
 
 #### Scenario: Copyback aid is described as an orderby filter
 
