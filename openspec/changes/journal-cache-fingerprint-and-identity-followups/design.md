@@ -293,8 +293,21 @@ segment read".
     the gate on a terminal legacy row too; a `permanently_failed` row always
     short-circuits; `permit_pipeline_job_retry` returns `0` on any terminal row;
     `upsert_pipeline_job` reaches the gate in every state).
-    `FileJournalRetryService` is the same lane class. The mitigation is the
-    #1759 migration measurement (0/4309 historical rows divergent), which is
+    `FileJournalRetryService` is the same lane class. The repo's own test
+    corpus held one writer of this shape outside the journal suites —
+    `tests/test_retry.py::test_retry_api_maps_file_journal_invalid_evidence_to_409`
+    minted a June `job_id` into a July cycle through the public
+    `upsert_pipeline_job` (found by the Phase 7 sweep, invisible to PR-scoped CI
+    because the file was not in the diff). The divergence is load-bearing for
+    that test — its HTTP 409 lane exists only when the cycle-scoped public
+    projection skips a direct file whose name resolves to another cycle while
+    the private per-id read still rejects its tampered evidence — so the
+    fixture now mints the row in scope through the public writer and rewrites
+    the persisted `job_id` bytes on disk (the same technique as the journal
+    suite's `_rewrite_persisted_job_id`), and the suite was added to the §0
+    sibling command. Every production caller derives
+    `job_id` from the row's own `run_id`/cycle, so no live lane mints it. The
+    mitigation is the #1759 migration measurement (0/4309 historical rows divergent), which is
     input-side evidence, not a live-journal census; the operator recovery is
     the same hand-correction as above.
   - `_project_committed_pipeline_job_write` (`:8897-8930`) wraps the direct

@@ -2808,10 +2808,19 @@ def test_retry_api_maps_file_journal_invalid_evidence_to_409(tmp_path: Any, monk
 
     journal_root = tmp_path / "journal"
     cycle_iso = "2026-07-20T00:00:00+00:00"
+    # The 409 lane is only reachable when the public projection and the private
+    # per-id read disagree: the cycle-scoped projection skips a direct file
+    # whose NAME resolves to another cycle, while ``_pipeline_job_for_id_unlocked``
+    # still reads that file by id and rejects its tampered evidence.  #1760's
+    # job-id scope gate means such an id can no longer pass the write boundary,
+    # so the row is minted IN scope through the public writer and its persisted
+    # ``job_id`` bytes are rewritten on disk afterwards — the shape a pre-gate
+    # deployment leaves behind.
+    minted_job_id = "job_fcst_gfs_2026072000_model_a_forecast"
     job_id = "job_fcst_gfs_2026060100_model_a_forecast"
     repository = _Repo(journal_root)
     record = {
-        "job_id": job_id,
+        "job_id": minted_job_id,
         "run_id": "fcst_gfs_2026072000_model_a",
         "cycle_id": "gfs_2026072000",
         "source_id": "gfs",
@@ -2828,10 +2837,23 @@ def test_retry_api_maps_file_journal_invalid_evidence_to_409(tmp_path: Any, monk
         "finished_at": cycle_iso,
     }
     repository.upsert_pipeline_job(record)
+    minted_direct = journal_root / "pipeline-jobs" / f"{minted_job_id}.json"
+    for path in [
+        minted_direct,
+        *sorted(journal_root.rglob("*.jsonl")),
+        *sorted((journal_root / "latest").rglob("*.json")),
+    ]:
+        text = path.read_text(encoding="utf-8")
+        if minted_job_id in text:
+            path.write_text(text.replace(minted_job_id, job_id), encoding="utf-8")
     direct_path = journal_root / "pipeline-jobs" / f"{job_id}.json"
+    minted_direct.rename(direct_path)
     direct_record = _json.loads(direct_path.read_text(encoding="utf-8"))
     direct_record["payload"]["error_code"] = {"nested": "not-a-scalar"}
     direct_path.write_text(_json.dumps(direct_record, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    # The divergent state appeared underneath the repository, so nothing may be
+    # served from the in-memory cycle-rows cache.
+    repository = _Repo(journal_root)
 
     class _FileGateway:
         def submit_job(self, request):  # pragma: no cover - must not be reached

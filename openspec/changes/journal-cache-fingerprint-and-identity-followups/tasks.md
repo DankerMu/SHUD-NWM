@@ -12,7 +12,7 @@ node-27 or node-22 receipt applies).
 
 - [x] `uv run pytest tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py -q` green on the default (case-insensitive) macOS volume
 - [x] The same two files green with `--basetemp` on a case-sensitive APFS volume (issue #1761 `Verification:` block B — `hdiutil create ... 'Case-sensitive APFS'`); the two filesystem-branching pins must run their *other* branch here
-- [x] `uv run pytest tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_file_orchestration_migration.py -q` green (proves no existing writer — chain, warm-start, scheduler, historical import — trips the #1760 gate and no chain path regresses on the cache changes)
+- [x] `uv run pytest tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_file_orchestration_migration.py tests/test_retry.py -q` green (proves no existing writer — chain, warm-start, scheduler, historical import, retry lane — trips the #1760 gate; `tests/test_retry.py` was added after the Phase 7 sweep found its 409-mapping fixture minting a cross-cycle `job_id` through the public writer and no chain path regresses on the cache changes)
 - [x] `uv run ruff check .` clean
 - [x] Red proofs, batched, against pre-change source (implementer contract): the #1567 warm-tamper test, the #1658 survival test, the #1761 double-read tests, and the #1760 rejection tests each shown red before / green after; `git stash list` holds no `red-proof` entry afterwards
 - [x] `openspec validate journal-cache-fingerprint-and-identity-followups --strict --no-interactive`
@@ -190,8 +190,11 @@ test asserts the wrong token.
         row and for the row after it (abort-at-row, not collect-and-raise);
         corrected re-run idempotent
       - `job_id` matching neither regex → accepted, row readable
-      - full journal + chain + warm-start + scheduler suites green (no writer
-        trips the gate)
+      - full journal + chain + warm-start + scheduler + retry suites green (no
+        production writer trips the gate; the one repo fixture that did —
+        `test_retry_api_maps_file_journal_invalid_evidence_to_409`, a cross-cycle
+        `job_id` minted through the public writer — was found by the Phase 7 sweep
+        and rewritten to plant the divergent id on disk instead, see design D4)
 
 ## 5. Spec + docs
 
