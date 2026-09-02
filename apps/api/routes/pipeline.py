@@ -27,7 +27,14 @@ from services.artifacts import (
     safe_public_log_uri,
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
-from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
+from services.orchestrator.retry import (
+    ManualRetryService,
+    RetryConfig,
+    RetryConflictError,
+    RetryError,
+    RetryNotFoundError,
+    RetryService,
+)
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
 from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 from workers.data_adapters.base import format_cycle_time, parse_cycle_time
@@ -89,7 +96,7 @@ class _StageStats:
 @dataclass(frozen=True)
 class _RetryExecutionContext:
     policy_decision: PolicyDecision
-    service: RetryService
+    service: ManualRetryService
     gateway: SlurmGateway
 
 
@@ -184,7 +191,7 @@ def require_cancel_control_action(
 
 def get_retry_execution_context(
     policy_decision: PolicyDecision = Depends(require_retry_control_action),
-    service: RetryService = Depends(get_retry_service),
+    service: ManualRetryService = Depends(get_retry_service),
     gateway: SlurmGateway = Depends(get_slurm_gateway),
 ) -> _RetryExecutionContext:
     return _RetryExecutionContext(policy_decision=policy_decision, service=service, gateway=gateway)

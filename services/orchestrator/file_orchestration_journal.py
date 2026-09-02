@@ -11514,6 +11514,86 @@ class FileJournalRetryService:
                 return previous_job_id.strip()
         return None
 
+    def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None:
+        """Runtime-root evidence from ``job_id``'s latest ``submission`` event.
+
+        The manual-retry seam ``POST /runs/{run_id}/retry`` reads this AFTER
+        ``attempt_manual_retry`` returned a ``submission_failed`` row, to attach
+        ``details.runtime_root_resolution`` to its structured 503.  Mirrors the
+        database lane (``RetryService.submission_runtime_root_resolution``):
+        latest-first over the job's own ``submission`` events, first Mapping
+        ``details["runtime_root_resolution"]`` wins, ``None`` when there is none.
+
+        NO trigger filter, unlike the sibling
+        ``_file_retry_event_runtime_root_candidates``: that reader deliberately
+        skips manual-retry submissions because it wants the ORIGINAL submission's
+        roots, while this one wants the latest event -- which, after a failed
+        manual retry, IS that retry's own failure event.  For the same reason no
+        helper is shared between the two.
+
+        NO second redaction.  The evidence was already reduced by
+        ``_runtime_root_resolution_evidence`` (``redact_payload`` over the whole
+        mapping plus bounded per-value redaction) and persisted through
+        ``_public_evidence``, which additionally renders ``*_path``/``*_root``
+        keys as ``[local-path]``.  The database lane re-applies
+        ``_redacted_mapping`` on read only because its stored mapping never
+        passed that public scrub.  Returning the persisted mapping unchanged is
+        what makes "response equals persisted event details" provable.
+
+        Fail-soft: a typed journal fault on this SECOND read returns ``None``,
+        so the caller still emits its 503 with the evidence key absent instead
+        of collapsing into an unclassified 500 (the read runs outside the
+        route's ``RetryError`` handler).  This is NARROWER than
+        ``get_pipeline_job``'s precedent, which converts a typed fault into a
+        blocked row still carrying ``error_code`` and ``file_journal`` tokens:
+        here "no evidence" and "evidence read faulted" are byte-identical on the
+        HTTP surface, so the single warning below is the only observable
+        difference.  Widening the 503 details with a discriminator would widen
+        the route contract.  The database lane is deliberately asymmetric -- a
+        SQL fault in its reader still surfaces as a 500.
+        """
+
+        try:
+            job = self.repository.get_pipeline_job(job_id)
+            if job is None:
+                return None
+            file_journal = job.get("file_journal")
+            if isinstance(file_journal, Mapping) and file_journal.get("status") == "blocked":
+                # ``get_pipeline_job`` keeps the REAL job id on the blocked row
+                # it synthesises, so only the marker identifies it; without this
+                # branch ``_source_id_from_job`` would raise on ``cycle_id=None``.
+                return None
+            rows = self.repository._cycle_rows(
+                source_id=_source_id_from_job(job),
+                cycle_time=_cycle_time_from_job(job),
+                model_id=_optional_safe_identity(job, "model_id"),
+            )
+            submission_events = sorted(
+                (
+                    event
+                    for event in rows.pipeline_events
+                    if str(event.get("entity_id") or "") == job_id
+                    and str(event.get("event_type") or "") == "submission"
+                ),
+                key=lambda event: _optional_positive_int(event.get("event_id")) or 0,
+                reverse=True,
+            )
+            for event in submission_events:
+                details = event.get("details")
+                if not isinstance(details, Mapping):
+                    continue
+                evidence = details.get("runtime_root_resolution")
+                if isinstance(evidence, Mapping):
+                    return dict(evidence)
+            return None
+        except FileOrchestrationJournalError as error:
+            LOGGER.warning(
+                "manual retry submission evidence unreadable: reason=%s field=%s",
+                error.reason,
+                error.field,
+            )
+            return None
+
     def _file_retry_event_runtime_root_candidates(
         self,
         job_id: str,
