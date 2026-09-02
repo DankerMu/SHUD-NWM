@@ -386,6 +386,34 @@ CALIBRATION_OVERRIDES_CONSUMER_TESTS: tuple[str, ...] = (
     SELECTOR_META_GUARD_TEST,
 )
 
+# #1912: the Basins package publication corpus was physically partitioned out of the
+# 3,582-line `tests/test_basins_package_publication.py` monolith into six collectible
+# suites below the 1,000-line structural limit, with one shared non-collectible helper.
+# The retained core path alone is NO LONGER the corpus: a `workers/model_registry/**`
+# change that reaches only it runs 20 of the 80 publication oracles and leaves the other
+# six moved partitions blind in the PR lane — the exact #1684/#1872 failure class. This
+# tuple is the single six-partition route authority for both boundaries below, and
+# tests/test_select_ci_tests.py derives the tracked `tests/test_basins_package_publication*.py`
+# + `tests/test_basins_migration_report.py` + `tests/test_basins_package_forcing_identity.py`
+# set against it, so a seventh partition reddens the meta-guard instead of falling out.
+# Explicit sorted tuple, never derived at import time (same reason as MAPPING_BUILDER_TESTS:
+# derivation would run `git ls-files` in the process CWD and break `--repo-root` callers).
+BASINS_PACKAGE_PUBLICATION_TESTS: tuple[str, ...] = (
+    "tests/test_basins_migration_report.py",
+    "tests/test_basins_package_forcing_identity.py",
+    "tests/test_basins_package_publication.py",
+    "tests/test_basins_package_publication_failures.py",
+    "tests/test_basins_package_publication_refusal.py",
+    "tests/test_basins_package_publication_toctou.py",
+)
+# The helper owns the corpus's shared fixture builders and the sibling suite's two
+# helpers, so a helper-only diff must run all six partitions AND that sibling importer.
+BASINS_PACKAGE_HELPERS_PATH = "tests/basins_package_helpers.py"
+BASINS_PACKAGE_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
+    *BASINS_PACKAGE_PUBLICATION_TESTS,
+    "tests/test_basins_package.py",
+)
+
 # #1684 shared-auth owner-to-focused-suite mappings (EVID-01). These shared
 # modules have no same-name derivable suite and their consumers are the focused
 # partitioned Slurm auth suites, not the broad core-smoke/API/orchestrator
@@ -949,6 +977,19 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_gateway_reconcile_writer_rollforward.py",
         ),
     ),
+    PathTestRule(
+        # #1912: the non-collectible helper owning the Basins publication corpus's
+        # shared fixture builders (`_write_valid_inventory`, `_make_valid_model`,
+        # `_object_store_env`, the canonical required-file/manifest/CLI helpers and
+        # the identity snapshot). All six collectible partitions import it at module
+        # scope, and so does `tests/test_basins_package.py`, whose two helpers moved
+        # here from the former monolith. A builder edit can therefore flip publication
+        # oracles from "refused" to "published" without touching a single test file, so
+        # the whole consumer set must run — the selector's meta-guard rider is added by
+        # the support-module branch itself and is deliberately NOT repeated here.
+        BASINS_PACKAGE_HELPERS_PATH,
+        BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
+    ),
 )
 
 
@@ -1164,7 +1205,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the suite that owns the packaging contract those modules feed.
             # It rides the directory list for the same reason as the rest.
             "tests/test_basins_package.py",
-            "tests/test_basins_package_publication.py",
+            # #1912: the single publication core target is replaced by the six-way
+            # partition authority. Only `tests/test_basins_package_publication.py`
+            # is same-name derivable from a Basins production module, and even that
+            # derivation is not this rule's leg — so every one of the six is proven
+            # load-bearing by tests/test_select_ci_tests.py's per-edge RED rows.
+            *BASINS_PACKAGE_PUBLICATION_TESTS,
             "tests/test_basins_registry_import.py",
             "tests/test_basins_reingest.py",
             "tests/test_direct_grid_variant_registration.py",

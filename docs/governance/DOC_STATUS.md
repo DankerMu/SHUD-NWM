@@ -10,7 +10,7 @@ only tells readers which source should win when two sources disagree.
 |---|---|---|
 | `current entrypoint` | A maintained orientation page for current project state, onboarding, or navigation. This status covers the page's role as an entrypoint; it does not assert every embedded milestone fact is freshly reconciled. | `README.md`, `progress.md`, `CLAUDE.md` |
 | `current runbook` | Operational procedure that is current for a role, node, deployment, or validation lane. | `docs/runbooks/**` |
-| `current validation matrix` | Maintained validation source of truth for what evidence is required or accepted. | `docs/VALIDATION.md`, active OpenSpec `tasks.md` |
+| `current validation matrix` | Maintained validation source of truth for what evidence is required or accepted. | `docs/VALIDATION.md`, `docs/validation/**`, active OpenSpec `tasks.md` |
 | `architecture/spec` | Design contract for architecture, API, database, time semantics, operations, or product behavior. | `docs/spec/**`, `openapi/**`, `schemas/**`, `db/migrations/**` |
 | `module decomposition` | Module-level design or implementation guide. It explains a slice, but does not override current specs, code, runbooks, or validation evidence. | `docs/modules/**` |
 | `historical baseline` | Earlier plan, design-freeze note, receipt, or worklog kept for audit context. It may explain why the project moved in a direction but is not current guidance. | old root plans, worklogs, historical OpenSpec notes |

@@ -21,7 +21,7 @@ import scripts.provision_direct_grid_scheduler_registry as direct_grid
 import scripts.publish_scheduler_file_registry as scheduler_registry
 import workers.model_registry.basins_package as basins_package
 from packages.common.object_store import LocalObjectStore
-from tests.test_basins_package_publication import _object_store_env, _write_valid_inventory
+from tests.basins_package_helpers import _object_store_env, _write_valid_inventory
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 from workers.model_registry.cli import _argparse_main
 
