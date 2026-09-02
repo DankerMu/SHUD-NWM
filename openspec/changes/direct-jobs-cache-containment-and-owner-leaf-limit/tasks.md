@@ -64,7 +64,7 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 
 ## 4. Spec + docs
 
-- [x] 4.1 `specs/pipeline-job-persistence/spec.md` delta: MODIFIED "Journal existence probes SHALL enforce filesystem containment before declaring absence" — name the direct-jobs cycle cache, drop the recompute-reads-tampered-path bound from the warm/cold scenario, add the by-cycle hard-variant scenario, widen the never-stored scenario to both caches.
+- [x] 4.1 `specs/pipeline-job-persistence/spec.md` delta: MODIFIED "Journal existence probes SHALL enforce filesystem containment before declaring absence" — name the direct-jobs cycle cache, keep the recompute-reads-tampered-path bound on the warm/cold scenario (superseded wording: an earlier draft dropped it; 3d.1 restored it), add the by-cycle hard-variant scenario, widen the never-stored scenario to both caches.
 - [x] 4.2 Second MODIFIED block for the owner fast-path requirement (`:796`): the stated-limit sentence widened from "a leaf file swapped for a symlink" to any leaf-level change beneath the probed directories, with the window-bounded exposure (review round 1, cand-02). The MODIFIED containment requirement names the owner only for the parent-component swap and cross-references that limit.
 - [x] 4.3 #1941 acceptance item 4 (rewrite the archived change's `design.md:390-391` / `:80-93`): not done — archived changes are immutable; the closure is carried by design D1 / matrix rows 2-4 and the spec delta. Recorded in `proposal.md` "Deviations recorded up front" and repeated in the PR 偏离记录.
 

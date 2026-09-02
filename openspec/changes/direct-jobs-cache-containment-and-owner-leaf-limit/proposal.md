@@ -56,9 +56,11 @@ The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
    stays; its docstring stops promising a flip and cites the ruling.
 4. **Spec**: the `pipeline-job-persistence` containment-probes requirement is
    MODIFIED so the direct-jobs cycle cache is named among the caches the
-   discipline governs and the warm/cold-agreement scenario loses the "only
-   where the recompute reads the tampered path" bound that existed solely to
-   exclude the hard variant. The owner fast-path requirement already carries
+   discipline governs; the warm/cold-agreement scenario keeps its
+   "recompute reads the tampered path" bound (the hard variant satisfies it —
+   the recompute traverses the swapped partition; the case-alias leg does
+   not) and gains the direct-cache clause in its THEN, and a by-cycle
+   hard-variant scenario is added. The owner fast-path requirement already carries
    the stated-limit sentence; a second MODIFIED block widens it from "a leaf swapped for a symlink" to any leaf-level change beneath the probed directories (the probe is fault-only), which is what ruling B accepts.
 
 ## Deviations recorded up front
