@@ -2766,3 +2766,24 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 autonomous default. Reversal still requires the attribution-schema,
 round-intent and round-role repairs plus maintainer review. Next revisit on
 the audit's next flag.
+
+## Revisit 2026-09-02 (post #1945, PR #1963) — keep; another no-rotation datum
+
+After the PR #1963 accountability line, `loop_log_audit.py` reports **156**
+multi-round merged PRs and later-round catches **core=109 / rotated=297**,
+both counts unchanged from the #1956 revisit.
+
+Round 1 ran the same six lenses as Round 2 (correctness, security/perf,
+integration, invariant-state, spec-compliance, test/evidence) and produced
+four confirmed findings (one P2 coverage gap, three P3). Round 2 re-ran the
+same mix on the fix delta and returned zero semantic candidates; its three
+P3 text items were local-repaired without a verifier round. No lens rotated
+in and no later-round catch was recorded, so the PR adds +0 to both buckets.
+It is a no-rotation datum, like #1947, #1949 and #1956: it says nothing about
+rotation's causal value.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**297 versus 109**), so **keep rotation** stands under the recorded
+autonomous default. Reversal still requires the attribution-schema,
+round-intent and round-role repairs plus maintainer review. Next revisit on
+the audit's next flag.
