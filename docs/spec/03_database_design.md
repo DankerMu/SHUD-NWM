@@ -134,6 +134,48 @@ CREATE TABLE core.basin_version (
 CREATE INDEX basin_version_geom_gix ON core.basin_version USING gist (geom);
 ```
 
+> **`active_flag` 权威归属（#1695）**：`core.basin_version.active_flag`
+> 对**计算面不承载任何权威**；在**展示面它是「默认选中版本」的选择器**。
+>
+> 写入侧：Basins importer 对它创建的每一行硬编码写 `false`
+> （`workers/model_registry/basins_registry_import.py:542-548`），
+> 此后没有任何 `UPDATE` 路径碰这一列——importer 后续的
+> `UPDATE core.basin_version`（`basins_registry_import.py:799`）只改
+> `source_uri` / `checksum`。两个内部写 API（`POST /api/v1/basins`
+> → `::create_basin_with_version`，`POST /api/v1/basins/{basin_id}/versions`
+> → `::create_basin_version`，都落到
+> `packages/common/model_registry.py::_insert_basin_version`，`:2549` 绑定该字段）
+> 确实接受 payload 里的 `active_flag`，可以在**新建行**上把它写成 `true`，
+> 但生产 ingest 不走这条路（现有行全部来自 Basins importer）。
+>
+> 读者集合（非测试，2026-09-02 全仓核查）：
+>
+> - **后端排序 tiebreak**：`packages/common/model_registry.py:874` 的
+>   `ORDER BY active_flag DESC, created_at DESC, basin_version_id`。
+> - **API 透传**：同一查询把该列 SELECT 出来（`:866`），
+>   `_basin_version_public_projection`（`:3611-3617`）只抹 `source_uri`/`checksum`、
+>   保留 `active_flag`，于是它经
+>   `GET /api/v1/basins/{basin_id}/versions`（`apps/api/routes/models.py:381-393`）出网。
+> - **前端默认版本选择**：`fetchBasinVersions`
+>   （`apps/frontend/src/stores/overviewData.ts:543-551`）→ `normalizeBasinVersions`
+>   （`apps/frontend/src/lib/m11/overviewDataContracts.ts:846-854`，
+>   `active: version.active_flag`）→
+>   `versions.find(v => v.active_flag)`（`overviewData.ts:1285`）与
+>   `versionOptions.find(v => v.active)`（`overviewDataContracts.ts:396`、`:601`）。
+>   它决定 `selectedBasinVersionId`，进而决定 basin 的 boundary / bbox / areaKm2，
+>   在 basin detail 里还决定 models 过滤（`overviewDataContracts.ts:605`）
+>   与由此得出的 `activeModelCount`（`:617`），以及按 basin_version 发起的下游请求。
+>   （`createBasinSummaries` 的 `riverCount`/`activeModelCount`（`:407-408`）按
+>   basin 的全部版本聚合，不受这个选择器影响。）
+>
+> node-27 实测（2026-09-02，只读）：`core.basin_version` 44 行中 `active_flag = true` 的有 **0** 行。
+> 全表皆 `false` 时上述选择器全部退化为 no-op（回落到列表首行），
+> 所以它**今天**不改变任何行为；但把任意一行置 `true`
+> 会改变该 basin 的默认选中版本及上面列出的下游值——它不是死列，只是当前处于 no-op 状态。
+> 另外，「查库看到 `active_flag` 全 false」**不等于**「没有模型在跑」——
+> 计算面的权威是 node-22 file-registry manifest（见下面 §5.5 的注记）。
+> 要让某个 basin version 退出展示列表，改 `valid_to`，不要改 `active_flag`。
+
 ### 5.3 `core.river_network_version`
 
 ```sql
@@ -186,6 +228,100 @@ CREATE TABLE core.model_instance (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+> **`active_flag` 权威归属（#1695）**：`core.model_instance.active_flag` 是
+> **展示面与 lifecycle 的权威**；对生产计算面（file lane，
+> `NHMS_SCHEDULER_REGISTRY_BACKEND=file`）它没有权威，权威是 manifest；只有在
+> postgres lane（代码默认值 `postgres`，生产未用）它才是调度 run/no-run 的闸门。
+> 以下非 test 读者按面分组列出
+> （grep 口径：`grep -rn active_flag packages services workers scripts apps db`，
+> 剔除同名但不同表的列——`core.basin_version` / `met.met_station` /
+> `met.interp_weight`——和纯写入点
+> （INSERT 字面量、schema DDL、API payload 直通），2026-09-02）。列出它们是为了
+> 能看清翻这个 flag 的爆炸半径；写这一列的路径除下文的激活闸门外还有
+> `workers/model_registry/qhh_production_bootstrap.py::_activate_qhh_model`（`:1622`）
+> 与 `:1675-1679` 的持久化置 inactive，不在读者清单内：
+>
+> - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，
+>   另见 `:442`、`:653`、`:691`、`:1411`）；
+> - **展示 source-version 摘要**：`services/tiles/mvt.py:1426`
+>   （`national_river_network_source_version`，方言相关谓词）、`:1590`
+>   （`national_discharge_valid_times`，函数头 `:1544`）；
+> - **前端**：`activeModelCount`（`apps/frontend/src/lib/m11/overviewDataContracts.ts:408`、`:617`）、
+>   ops 侧 model-asset 过滤器（`apps/frontend/src/stores/modelAssets.ts:637`）、
+>   model-assets 页的 supersede 候选筛选与启用/停用徽章
+>   （`apps/frontend/src/pages/ModelAssetsPage.tsx:79`、`:346`）；
+> - **ingest 面的行为读者**（影响的不只是展示）：
+>   `workers/model_registry/basins_registry_import.py::_model_active_state`
+>   （`:2363-2373`，在 `:352` 决定重复导入时报告的 active 状态）、
+>   `workers/model_registry/qhh_production_bootstrap.py:1168-1182`（bootstrap 的
+>   `SELECT … FOR UPDATE` 现状读）、`:1741`（同 basin 的重复 active 行检测）、
+>   `:1791-1803`（`_fetch_model_identity`，回填 `:1101` 的 `active` 字段）；
+> - **激活闸门**：`scripts/node27_autopipeline.py:1255-1260`（详见下文）；
+> - **调度 run/no-run 判定**：`services/orchestrator/scheduler_models.py::coerce_registered_model`
+>   （`:128` 由该 flag 推导 `lifecycle_state`，`:137-138` 在 flag 为 `False`
+>   或 state 非 `active` 时返回 `model_exclusion(row, "inactive_model")`，即该 model
+>   本轮不跑）；它的入参行由 `fetch_active_model_details`（`:29`）备好——
+>   候选集先由 `registry.list_models(..., active=True, ...)`（`:41`）圈定，
+>   逐条再经 `fetch_scheduler_model_detail`（`:50`，实现在 `:58-62`，
+>   走 `get_model_internal` / `get_model`）取回明细。postgres backend 下这个
+>   registry 是 `packages/common/model_registry.py::PsycopgModelRegistryStore`
+>   （`:580`），`:41` 的 `active=True` 落到 `list_models`（`:2372`）的
+>   `active_flag = %s` 过滤子句（`:2386`，`:2402` 把该谓词按 JOIN 重限定为
+>   `mi.active_flag`）；file provider 下则来自 manifest 行（见下文计算面段落）；
+> - **model lifecycle API**：`packages/common/model_registry.py`（多处，读写兼有）。
+>
+> API 层的 payload / schema 字段（`apps/api/main.py:154`、
+> `apps/api/routes/models.py:46`、`:110`、`:135`、`apps/api/openapi_patching.py:1403`、
+> `apps/frontend/src/api/types.ts`）属于 lifecycle API 契约本身，不另列。
+>
+> **计算面的权威是 node-22 的 file-registry manifest**
+> （`manifest-last.json`，由 `scripts/publish_scheduler_file_registry.py` 写出，
+> 其中每个 model 带 `active_flag` / `lifecycle_state` 字段；file provider 从 manifest 行读它，
+> 见 `services/orchestrator/scheduler_file_providers.py:156`、`:162`、`:1106`）。
+> 生产调度器在 `NHMS_SCHEDULER_REGISTRY_BACKEND=file` 下是 DB-free 的
+> （env 文件 `compute.scheduler-dbfree.env`，node-22 不连活 DB），
+> 因此**两个 DB flag 它都够不着**；会读 DB 的那条路
+> （`services/orchestrator/chain_repository.py:265`，读 `core.model_instance`）属于 postgres backend。
+>
+> 两个面**按设计不同步**。所以会出现这个看起来矛盾的实测组合
+> （node-27，2026-09-02，只读）：baseline `basins_*_shud` 行 **38 true / 6 false**，
+> 而真正在 node-22 上跑的 `dg_*` 行 **0 true / 153 false**。
+> `dg_*` 保持 false 的可追溯原因分两类。多数行（142/153）所属 `basin_version`
+> 已有 active 的 baseline 行，它们被 node-27 autopipeline 的激活函数
+> `scripts/node27_autopipeline.py::_activate_model`（`:1235-1266`，语句为
+> `UPDATE core.model_instance SET active_flag = true, lifecycle_state = 'active'`；
+> 调用点 `:1300`、`:1947`）自带 one-active-sibling 闸门：对尚未 active 的行，
+> 只有当同一 `basin_version_id` 下没有其它 active 行时才会更新（`:1255-1260`
+> 的 `active_flag = true OR NOT EXISTS (…)` 谓词——已 active 的行是幂等分支），
+> 撞上 baseline 兄弟行的 variant 拿到 `rowcount == 0`。其余 11 行所属
+> `basin_version` 没有任何 active 行（2026-09-02 只读核对，SQL 随回执），闸门
+> 不会拦它们，它们为 false 只说明从未对其调用过 `_activate_model`；
+> 该谓词的形状由 `tests/test_node27_autopipeline_preflight.py:832-869` 钉住
+> （mock cursor 上断言 SQL 含 `NOT EXISTS` 与
+> `active_sibling.basin_version_id = core.model_instance.basin_version_id`；
+> `:864` 的 `== 0` 来自 mock 的固定 `rowcount`，不是真库行为，真库下的
+> rowcount 无测试覆盖）。生产（file lane）调度器不读这个列，
+> 所以它们照跑不误。
+>
+> 不要为了「让数字好看」去翻 `dg_*` 的 flag。两道 DB 闸门会先拦住你：
+> 只改 `active_flag` 会被 CHECK 约束
+> `model_instance_active_lifecycle_consistency_chk` 拒绝
+> （`db/migrations/000022_model_asset_lifecycle.sql:42-46`，要求 `active_flag = true`
+> 与 `lifecycle_state = 'active'` 同时成立；`lifecycle_state` 是
+> `TEXT NOT NULL DEFAULT 'inactive'`（同文件 `:1-2`），所以没有 NULL 行让
+> CHECK 落空）；两列一起改、而该
+> `basin_version_id` 已有 active 行时，会被 partial UNIQUE
+> `model_instance_active_basin_version_uidx` 拒绝（同文件 `:61-63`）。
+> **只有**当目标行所属 `basin_version` 没有 active 兄弟行时这个翻转才会落库，
+> 那时它**会**改变全国 MVT 的展示成员；这类行确实存在（2026-09-02 只读核对：
+> 153 个 `dg_*` 行中 11 个所属 `basin_version` 没有 active 行；`core.model_instance`
+> 共 197 行，baseline/`dg_*` 按 `model_id like 'dg_%'` 二分）。真正危险的动作是为了绕开这两道约束而去
+> 松 `lifecycle_state` 或改约束本身。
+> 另：`services/tiles/mvt.py:367` 的成员谓词里没有 baseline/variant 判别，
+> 「展示成员只认 baseline 行上的这个 flag」是当前数据状态下的观察
+> （只有 baseline 行是 true），不是查询语义。
+> `core.basin_version.active_flag` 的（无）权威见 [§5.2 `core.basin_version` 的注记](#52-corebasin_version)。
 
 ### 5.6 `met.data_source`
 
