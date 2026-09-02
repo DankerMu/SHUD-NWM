@@ -2672,3 +2672,13 @@ PR #1939 adds a direct datum: of its three round-2 catches, one (an over-general
 warm-cache scenario in the spec delta) was found only by the rotated-in
 `design-consistency` lens, one by four pinned lenses plus the rotated one,
 one by a pinned lens. Next revisit on the audit's next flag.
+
+## Revisit 2026-09-02 (post PR #1947)
+
+The audit re-flagged rotation attribution at **151 multi-round merged PRs,
+later-round catches core=94 vs rotated=297**. Rotated-in lenses still carry
+the clear majority of later-round recall, so the keep decision stands.
+PR #1947 is a no-rotation datum: round 2 re-bundled the same six risk packs
+as round 1, so all four of its round-2 catches fall in the core bucket by
+construction. They say nothing about rotation either way and only move the
+core count. Next revisit on the audit's next flag.
