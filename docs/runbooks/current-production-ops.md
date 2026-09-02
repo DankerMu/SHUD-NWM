@@ -3762,7 +3762,13 @@ compression / raw-retention 每个 tick 的第一条连接）与
   **但它不是全量脱敏**——其它 key 下的客户端标识（`station_id`、`run_id` 等）保持明文，
   详见 `docs/runbooks/object-store-forcing-series-read.md` 的「脱敏边界」。`details=` 段有固定
   字节预算，超出以 `…[truncated N bytes]` 截断（响应体不截断）；入站 `X-Request-ID` 仅在匹配
-  `[A-Za-z0-9._-]{1,64}` 时沿用，否则服务端另发 UUID。
+  `[A-Za-z0-9._-]{1,64}` 时沿用，否则服务端另发 UUID；`path=` 段按 `quote(path, safe="/")`
+  percent-encoding 后再写，客户端可控的路径参数里塞不进空格、`=` 或控制字节（只含 unreserved
+  字符与 `/` 的路径逐字节不变；`:` `@` `+` 等 sub-delims 会被编成 `%XX`）。
+  `details=` 段在截断前先把换行类字符转义（`\n` → `\\n` 等），所以一次错误响应永远只有一行；
+  但段内的值是逐字原样的，出现 `code=…` 这种 token 仿冒串属正常——按 `details=` 之前的位置解析
+  字段，别全行扫 token。
+  另外，合规形状的 `X-Request-ID` 由客户端自选，grep 命中只证明同一行日志里有这个 id，不证明来源。
 
   已知盲区（grep 不到 ≠ 没发生）：`/api/v1/slurm*` 的**全部**错误响应（校验错误走
   `services/slurm_gateway/validation_errors.py` 的独立 handler；网关错误由

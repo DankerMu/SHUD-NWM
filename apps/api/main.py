@@ -10,7 +10,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from apps.api import openapi_patching, route_registry, startup_wiring
 from apps.api.auth import audit_record, evaluate_request_action
-from apps.api.errors import error_response, register_error_handlers, sanitize_request_id
+from apps.api.errors import error_response, register_error_handlers, resolve_request_id
 from apps.api.runtime_mode import load_runtime_config
 
 REPO_ROOT = startup_wiring.REPO_ROOT
@@ -279,14 +279,16 @@ def _model_lifecycle_validation_error(request_id: str) -> _PreBodyPolicyError:
 
 
 def _ensure_request_id(request: Any) -> str:
-    request_id = getattr(request.state, "request_id", None)
-    if request_id:
-        return request_id
-    # Same acceptance rule as the request-id middleware, so the pre-body auth
-    # path (401/403 before `add_request_id` has run for this handler) cannot
-    # echo a client-forged id into the response header, the audit record and
-    # the `api_error` line.
-    request_id = sanitize_request_id(request.headers.get("X-Request-ID"))
+    """The id for this request, resolved by the one rule the whole app shares.
+
+    Delegates to `errors.resolve_request_id`, so the pre-body auth path
+    (401/403 before `add_request_id` has run for this handler) cannot echo a
+    client-forged id into the response header, the audit record and the
+    `api_error` line. `request.state` is RE-CHECKED against the same acceptance
+    rule rather than returned as-is: this guard is not the outermost
+    middleware, so any middleware above it can have set that attribute.
+    """
+    request_id = resolve_request_id(request)
     request.state.request_id = request_id
     return request_id
 

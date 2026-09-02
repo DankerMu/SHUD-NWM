@@ -122,6 +122,15 @@ ssh -p 32099 nwm@210.77.77.27 \
   'grep -F "<X-Request-ID>" /tmp/display-api.log'
 ```
 
+**这个 grep 证明的是「同一行日志里出现了这个 id」，不是「这条日志来自报障的那个客户端」**：
+合规形状的入站 `X-Request-ID` 会被原样沿用（见下文），客户端可以自选、也可以复用别人用过的 id，
+甚至多个请求共用一个。把 grep 命中当作定位线索用，不要当作来源归属的证据。
+
+这行落地到 stderr 的方式是 `apps/api/main.py::_install_api_log_handler()` 给 `apps.api` logger
+树显式装的 handler，而**不是**复用 uvicorn 的 `uvicorn.error`：生产 unit 跑
+`python -m uvicorn apps.api.main:app` 且**不传 `--log-config`**，所以 root logger 未被配置，
+不自带 handler 的话这行会被直接丢掉。改动 unit 的启动参数或日志配置时，先确认这条前提还成立。
+
 一行的形状（5xx 记 ERROR，4xx 记 WARNING）：
 
 ```text
@@ -149,6 +158,25 @@ ssh -p 32099 nwm@210.77.77.27 \
 **请求 ID 只在合规形状下回显**：入站 `X-Request-ID` 仅当整体匹配 `[A-Za-z0-9._-]{1,64}` 时才被沿用，
 否则服务端另发 UUID（响应头、审计记录、这行日志三者始终一致）。所以行里 `request_id=` 后面不可能被
 客户端塞进空格分隔的假 `code=` / `path=` 字段。
+
+**`path=` 段做 percent-encoding**：`request.url.path` 是**解码后**的路径，带路径参数的路由上
+那一段是客户端可控的，所以 `path=` 统一按 `quote(path, safe="/")` 渲染后再写行。效果是：
+`path=` 永远是一个不含空格、不含 `=`、不含控制字节的 token（空格 → `%20`，`=` → `%3D`，
+`NUL` → `%00`，`ESC` → `%1B`），不会把这行拆成两行。只由 unreserved 字符（`A-Za-z0-9._~-`）
+和 `/` 组成的路径逐字节不变，上面的样例行形状不受影响；路径里若出现 `:` `@` `+` `,` `;` `!` `$`
+`(` `)` 等 sub-delims，也会被编成 `%XX`，grep 时按编码后的形式写。
+因此 `grep -F request_id=<id>` 不会被伪造字段带偏，也不会因为路径里塞了 `%00`
+而让 `grep` 把整个未 rotate 的日志报成 “Binary file matches”。
+注意 TAB/CR/LF（`%09`/`%0D`/`%0A`）在 `urlsplit` 阶段就被剥掉了，日志里既看不到原字符也看不到
+它们的 percent 形式。
+
+**`details=` 一定不断行，但不做 token 净化**：渲染 `details=` 时会把所有换行类字符
+（`\n` `\r` `\x0b` `\x0c` `\x85` U+2028 U+2029）转义成 `\\n` 这类可见形式**再**做字节预算截断，
+所以无论 `details` 是 mapping、list 还是裸字符串，一次错误响应永远只写一行。但**内容是逐字原样**的：
+mapping 的值另有 `repr` 的引号，裸字符串则连引号都没有。也就是说
+`details={'station_id': 'STA code=OK status=200'}` 这种「看起来像字段」的串会出现在行里——它属于
+`details=` 段，不构成第二组真字段。按位置解析（取 `details=` 之前的部分）是可靠的，
+按 `code=` 之类 token 全行扫描则会被 `details=` 里的仿冒串误导。
 
 **已知盲区**（这三类错误响应**不**产生 `api_error` 行，别把「grep 不到」读成「没发生」）：
 

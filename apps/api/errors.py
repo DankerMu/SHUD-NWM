@@ -4,6 +4,7 @@ import logging
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -34,8 +35,33 @@ _CLIENT_INPUT_KEYS = frozenset({"rejected_value", "rejected_values"})
 # single authorised POST of a few thousand items wrote a multi-megabyte line
 # into an unrotated unit log (measured 8.5 MB from a 20 000-item body). The
 # response body is unaffected; only what is written server-side is bounded.
+# RESIDUAL, not fixed here: the budget bounds what is WRITTEN, not the work.
+# `_redact_error_details` still walks the whole payload before `_render_details`
+# cuts it (measured ~554 ms of event loop for a 20 000-item validation list),
+# so a large list body is still a synchronous cost on an authorised, list-bodied
+# route. A pre-walk item cap was rejected for now because the truncation marker
+# states DROPPED BYTES: capping by item count would either change that contract
+# or make the reported byte count a lie.
 _DETAILS_RENDER_BUDGET_BYTES = 8192
 _DETAILS_TRUNCATION_MARKER = "…[truncated {dropped} bytes]"
+
+# Every character `str.splitlines()` treats as a line break. A MAPPING `details`
+# is already safe -- `str(dict)` renders its values through `repr`, which escapes
+# them -- but a non-mapping one (a bare string, most of all) is rendered with
+# `str()` and nothing quotes it. A raw `\n` in such a value wrote a SECOND
+# physical line carrying attacker-chosen `code=`/`status=` tokens and no
+# `request_id=` at all, which the runbook's grep can never tie back to its
+# request. Escaped, not stripped: the operator still reads the whole value.
+_LINE_BREAK_ESCAPES = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\x0b": "\\x0b",
+    "\x0c": "\\x0c",
+    "\x85": "\\x85",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+_LINE_BREAK_TRANSLATION = str.maketrans(_LINE_BREAK_ESCAPES)
 
 # An inbound `X-Request-ID` is echoed into the response header, the audit record
 # and this log line. Accepting it verbatim let a client inject `code=`/`path=`
@@ -54,6 +80,22 @@ def sanitize_request_id(header_value: Any) -> str:
     if isinstance(header_value, str) and _REQUEST_ID_RE.fullmatch(header_value):
         return header_value
     return str(uuid4())
+
+
+def resolve_request_id(request: Any) -> str:
+    """The id for this request: an id already on `request.state`, else the header rule.
+
+    `protected_mutation_auth_guard` wraps `add_request_id`, and on its allow
+    branch it has already run `apps/api/main.py::_ensure_request_id`. Minting
+    unconditionally here replaced that id mid-request, so the decision the guard
+    evaluated and the response the client got carried different ids for no
+    reason. The state value is re-checked against the same acceptance rule
+    rather than trusted: any middleware may have set it.
+    """
+    existing = getattr(getattr(request, "state", None), "request_id", None)
+    if isinstance(existing, str) and _REQUEST_ID_RE.fullmatch(existing):
+        return existing
+    return sanitize_request_id(request.headers.get("X-Request-ID"))
 
 
 class ApiError(RuntimeError):
@@ -75,7 +117,7 @@ class ApiError(RuntimeError):
 def register_error_handlers(app: FastAPI) -> None:
     @app.middleware("http")
     async def add_request_id(request: Request, call_next: Any) -> Any:
-        request_id = sanitize_request_id(request.headers.get("X-Request-ID"))
+        request_id = resolve_request_id(request)
         request.state.request_id = request_id
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
@@ -140,19 +182,51 @@ def _redact_error_details(details: Any) -> Any:
 
 
 def _render_details(safe_details: Any) -> str:
-    """The `details=` segment, bounded to `_DETAILS_RENDER_BUDGET_BYTES`.
+    """The `details=` segment: one physical line, bounded to `_DETAILS_RENDER_BUDGET_BYTES`.
+
+    Line-breaking characters are escaped FIRST, so the budget is measured on
+    what actually lands in the file (each escape is wider than the character it
+    replaces) and the truncation marker's dropped-byte count stays honest.
 
     Length is measured on the UTF-8 encoding (what actually lands in the file);
     the cut is decoded with `errors="ignore"` so it always falls on a character
     boundary, and the dropped byte count is stated rather than implied.
     """
-    text = str(safe_details)
+    text = str(safe_details).translate(_LINE_BREAK_TRANSLATION)
     encoded = text.encode("utf-8")
     if len(encoded) <= _DETAILS_RENDER_BUDGET_BYTES:
         return text
     kept = encoded[:_DETAILS_RENDER_BUDGET_BYTES].decode("utf-8", "ignore")
     dropped = len(encoded) - len(kept.encode("utf-8"))
     return kept + _DETAILS_TRUNCATION_MARKER.format(dropped=dropped)
+
+
+def _render_path(raw_path: Any) -> str:
+    """The `path=` segment: exactly one whitespace-free, control-byte-free token.
+
+    `request.url.path` is the DECODED path, so on any matched path-parameter
+    route the client owns a segment of it: `/api/v1/met/stations/STA%20code=OK
+    %20status=200%20request_id=deadbeef%20/series` used to render a second
+    `code=`/`status=`/`request_id=` triple into the very line the runbook tells
+    the operator to `grep -F request_id=<id>`. Control bytes came through the
+    same way -- a `%00` makes `grep -F` answer "Binary file matches" for the
+    whole unrotated log, and `%1B[2K` erases the terminal line it is printed on.
+
+    `quote(..., safe="/")` re-encodes every byte outside the unreserved set, so
+    a path built from `[A-Za-z0-9._~-]` and `/` -- which is every path parameter
+    this app declares (`station_id`, `model_id`, `run_id`, `layer_id`, ...) --
+    is byte-identical to its request form and the documented line shape does not
+    move. Sub-delims such as `:` and `@` are legal in a path and WOULD be
+    encoded; that is accepted, because keeping them safe means keeping `=` safe
+    is the next argument, and `=` is exactly what must not survive. `%r` was
+    rejected for the same "don't move the line shape" reason: it would quote
+    every line. TAB/CR/LF never reach here at all -- `urlsplit` strips them from
+    the URL before the app sees it -- so they are covered by absence, not
+    encoding.
+    """
+    if not raw_path:
+        return "<unknown>"
+    return quote(str(raw_path), safe="/", errors="replace")
 
 
 def _log_error_response(
@@ -175,7 +249,7 @@ def _log_error_response(
             rendered_details = _render_details(_redact_error_details(details))
         except Exception as error:  # noqa: BLE001 - never log the value we failed to redact
             rendered_details = f"<redaction-failed:{type(error).__name__}>"
-        path = getattr(getattr(request, "url", None), "path", None) or "<unknown>"
+        path = _render_path(getattr(getattr(request, "url", None), "path", None))
         level = logging.ERROR if status_code >= 500 else logging.WARNING
         logger.log(
             level,

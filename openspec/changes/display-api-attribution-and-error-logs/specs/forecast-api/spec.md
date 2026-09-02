@@ -33,6 +33,11 @@
 - **THEN** the response header and the logged `request_id=` carry a server-minted UUID instead, and the line contains exactly one `code=` token
 - **AND** a conforming id such as `req-1704-abc` is echoed unchanged in both places
 
+#### Scenario: Client-controlled path segments cannot forge line fields
+
+- **WHEN** a request whose matched path parameter contains a percent-encoded space, `=`, NUL, ESC or any other control byte (for example `/api/v1/met/stations/x%20code=OK%20request_id=deadbeef%20/series`) produces an error response
+- **THEN** the log line renders the path percent-encoded, contains exactly one `code=`, one `request_id=` and one `status=` token, no byte below 0x20 and no `\x7f`–`\x9f`, U+2028 or U+2029, and occupies exactly one physical line; a clean path renders byte-identically to its request form
+
 #### Scenario: Logging cannot break the response
 
 - **WHEN** `details` carries a value the redactor cannot process
