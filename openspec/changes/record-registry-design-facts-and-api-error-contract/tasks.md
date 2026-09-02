@@ -64,18 +64,31 @@ Recorded reasons (no issue filed, per user instruction to resolve in-batch):
 
 Expected `redocly` output after this change is **0 errors, 4 warnings** — the same four
 as before: `operation-4xx-response` on `GET /api/v1/queue/depth`, `GET /api/v1/slurm/health`,
-`GET /health` (none has a reachable 4XX: design D5) and `info-license` (owner-pending).
-This is the pinned, justified state, not a regression.
+`GET /health` and `info-license` (owner-pending).
+This is the pinned, justified state, not a regression. Per-operation reason no 4XX is
+reachable (raise-site audit in design.md Context, re-verified by round-1 reviewers):
+
+- `GET /api/v1/queue/depth`: no parameters (no 422), no auth dependency (mutation guard
+  only), the display guard raises 503, and `gateway.list_jobs` raises only 502/504
+  subclasses (`SlurmCommandError`, `SlurmParseError`, `SlurmTimeoutError`); a gateway
+  construction failure is a plain `ValueError` → unhandled 500.
+- `GET /api/v1/slurm/health`: both backends' `health()` return an unhealthy 200 body
+  instead of raising; no parameters, no dependencies; `create_gateway` failures are
+  unhandled 500, not 4XX.
+- `GET /health`: static dict handler in `apps/api/startup_wiring.py`, no inputs.
+- `#/info` license: owner decision pending (see Recorded reasons).
 
 - [x] 0.1 `uv run pytest -q tests/test_openapi_drift.py tests/test_api_contract.py tests/test_openapi_31_contract.py tests/test_monitoring_api.py tests/test_gateway.py tests/test_runtime_mode.py` green locally
+- [x] 0.11 (added after round 1, cand-07; 746 passed / 3 skipped locally, CI selection 1791 passed / 38 skipped) consumers of `infra/env/compute.example` green: `uv run pytest -q tests/test_two_node_docker_runtime.py tests/test_role_boundary_static.py tests/test_slurm_gateway_deployment_contract.py tests/test_two_node_docker_runbook_environment_invariant.py tests/test_two_node_docker_source_trust.py`, plus the full `scripts/select_ci_tests.py` selection for this diff
+- [x] 0.12 (added after round 1, cand-09; red proof: injected 403 → `assert ['403'] == []`) executable oracle for the no-4XX invariant: `tests/test_api_contract.py::test_operations_without_reachable_4xx_declare_none` green, red when a 4XX is injected on either side
 - [x] 0.2 `npx --yes @redocly/cli@1.25.13 lint openapi/nhms.v1.yaml --skip-rule no-unused-components --max-problems 1000` → 0 errors, exactly the 4 warnings named above
 - [x] 0.3 `cd apps/frontend && corepack pnpm run check:api-types` green (regenerate `src/api/types.ts` via `pnpm generate:api` and commit if output changed)
 - [x] 0.4 `uv run ruff check .` and `openspec validate record-registry-design-facts-and-api-error-contract --strict --no-interactive` green
 - [x] 0.5 Red proof for the new contract cases: with the `_patch_pipeline_openapi` injection reverted, the two new `test_api_contract.py` cases fail on the runtime side (batched red run against pre-change source, output in the implementer report)
-- [ ] 0.6 node-27 (oracle for real-DB pytest): `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=<node-27 scratch url> uv run pytest -q -m integration tests/test_basins_registry_import.py -k "<extended test name>"` green at the reviewed SHA; red proof = the new `2 × segment_count` assertion fails when its expected factor is mutated to 1
+- [x] 0.6 node-27 (oracle for real-DB pytest; receipt `.workplans/pr-1956/node27-receipts.log`: green `1 passed` at 60b986d3 in a detached worktree, red proof `assert 10 == (1 * 5)`): `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=<node-27 scratch url> uv run pytest -q -m integration tests/test_basins_registry_import.py -k "<extended test name>"` green at the reviewed SHA; red proof = the new `2 × segment_count` assertion fails when its expected factor is mutated to 1
 - [x] 0.7 `grep -n '/volume/data/nwm' infra/env/compute.example` empty; `grep -n '^NHMS_BASINS_ROOT=' infra/env/compute.example infra/env/compute.scheduler-dbfree.env.example` shows the same value
-- [x] 0.8 node-22 receipt (orchestrator, `.workplans/batch-1693-1694-1695-1678/node22-compute-env-receipt.log`, 2026-09-02T10:42Z; `nhms-scheduler-journal-retention.service` from the tracked `infra/systemd/` is `LoadState=not-found` on node-22, so it is correctly absent from the README table): `systemctl --user show <unit> -p EnvironmentFiles` for the five units matches the README table; `grep -nE 'BASIN|MODEL_IDS' infra/env/compute.env` before/after shows the three values aligned and the header present; `stat -c %a` of the edited file and its backup both `600`
-- [ ] 0.9 node-27 read-only receipt at the final head: `select count(*) filter (where active_flag), count(*) from core.basin_version` and the `model_instance` baseline/dg breakdown match the numbers quoted in `docs/spec/03_database_design.md` (with date)
+- [x] 0.8 node-22 receipt (orchestrator, `.workplans/pr-1956/node22-compute-env-receipt.log`, 2026-09-02T10:42Z; `nhms-scheduler-journal-retention.service` from the tracked `infra/systemd/` is `LoadState=not-found` on node-22, so it is correctly absent from the README table): `systemctl --user show <unit> -p EnvironmentFiles` for the five units matches the README table; `grep -nE 'BASIN|MODEL_IDS' infra/env/compute.env` before/after shows the three values aligned and the header present; `stat -c %a` of the edited file and its backup both `600`
+- [x] 0.9 node-27 read-only receipt (2026-09-02T11:13Z at 60b986d3: basin_version 0/44; model_instance baseline 38 t / 6 f, dg 0 t / 153 f — matches docs/spec/03; re-check at the final head in Phase 8): `select count(*) filter (where active_flag), count(*) from core.basin_version` and the `model_instance` baseline/dg breakdown match the numbers quoted in `docs/spec/03_database_design.md` (with date)
 - [x] 0.10 markdown lint clean on the touched `docs/**` and `infra/env/README.md` (`markdownlint-cli2` per `.markdownlint.yaml`)
 
 ## 1. #1678 OpenAPI error contract
@@ -92,7 +105,7 @@ This is the pinned, justified state, not a regression.
 - [x] 2.2 `docs/runbooks/current-production-ops.md`: add a subsection right after the Heihe `shud_output_river` query (`:3676-3684`) that states the invariant, the hygiene query pattern (filter by `COALESCE(properties_json->>'shud_output_river','false')` then compare to `segment_count`; unfiltered `2 ×` is expected), the `output_segment_count` note, and back-links #1122 / #1123 plus the correctly filtered oracles (`basins_registry_import.py:610-620`, `tests/test_real_database_integration.py:448-453`; `workers/output_parser/parser.py::load_river_segments` only as "output-class-first with unfiltered fallback", see design D2); do not cite `scripts/node27_archive_rebuild_drill.py` (deleted)
 - [x] 2.3 `workers/model_registry/basins_geometry.py:126-129`: correct the stale comment (`segment_count` = `gis/river.shp` reach records post-PR-2, equal to the `.sp.riv` count by validation at `:796-806`); `basins_reingest.py:348-359`: add one line pointing at the glossary terms; behavior and assertions unchanged
 - [x] 2.4 `tests/test_basins_registry_import.py` (real-DB test around `:3473`): add `total_rows == 2 * segment_count` and `output_rows == reach_rows` assertions for the imported rnv, comment `# #1693: two row classes under one rnv by design`
-- [ ] 2.5 Run 0.6 (node-27, orchestrator) — implementer runs the test locally only if a PostGIS DB is available, otherwise reports it as node-27-owned
+- [x] 2.5 Run 0.6 (node-27, orchestrator) — implementer runs the test locally only if a PostGIS DB is available, otherwise reports it as node-27-owned
 
 ## 3. #1695 active_flag authority
 
@@ -105,10 +118,10 @@ This is the pinned, justified state, not a regression.
 
 - [x] 4.1 `infra/env/README.md`: add a "node-22 unit → EnvironmentFile" table (five units, files, tracked template or "untracked, no template" for `compute.host.env`, scheduler drop-in note) and one sentence that `compute.env` is the compose-lane instance no node-22 unit reads; state the scheduler basin root is the `compute.scheduler-dbfree.env` value (live `/volume/nwm/Basins` as of 2026-09-02) and that `/ghdc/data/nwm/Basins` is the separate NFS root node-27 ingest reads
 - [x] 4.2 `infra/env/compute.example`: header pointer to the authority table; `NHMS_BASINS_ROOT=/volume/nwm/Basins`; `NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets`; no other value changes
-- [x] 4.3 Orchestrator ops step on node-22 (done 2026-09-02T10:42Z, backup `compute.env.bak-1694-20260902T104210Z`, receipt in `.workplans/batch-1693-1694-1695-1678/node22-compute-env-receipt.log`) (not implementer): backup `compute.env` → `compute.env.bak-1694-<UTC>` (`cp -p`), prepend the 3-line header, set the three values per design D4, capture the 0.8 receipt
+- [x] 4.3 Orchestrator ops step on node-22 (done 2026-09-02T10:42Z, backup `compute.env.bak-1694-20260902T104210Z`, receipt in `.workplans/pr-1956/node22-compute-env-receipt.log`) (not implementer): backup `compute.env` → `compute.env.bak-1694-<UTC>` (`cp -p`), prepend the 3-line header, set the three values per design D4, capture the 0.8 receipt
 - [x] 4.4 Run 0.7, 0.10
 
 ## 5. Close-out
 
 - [x] 5.1 Implementer report lists changed files, verification output, red proofs (0.5), the raise-site table for 1.4, and every deviation (or "no deviations")
-- [ ] 5.2 PR body `偏离记录` seeded; #1678 premise correction (issue's 403/422 guesses vs. audited 502/504/none) recorded there and in the #1678 closure comment
+- [x] 5.2 PR body `偏离记录` seeded; #1678 premise correction (issue's 403/422 guesses vs. audited 502/504/none) recorded there and in the #1678 closure comment

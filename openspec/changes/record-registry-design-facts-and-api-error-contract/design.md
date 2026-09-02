@@ -131,9 +131,17 @@ Facts to state (no causal story beyond what is traced):
   `active_flag` in its payload on creation; it is not used by production
   ingest, so the docs must say "importer writes false, nothing updates it,
   the internal create API could set it but nothing does", not "no code path
-  can set it". Sole non-test reader is `packages/common/model_registry.py:874`
-  (`ORDER BY` tiebreak; one version per basin). It carries no authority for
-  compute or display.
+  can set it". Readers (round-1 review corrected the first draft's "sole
+  reader" claim): backend `packages/common/model_registry.py:874` (`ORDER BY`
+  tiebreak); the same query SELECTs the column (`:866`) and
+  `_basin_version_public_projection` (`:3611-3617`) passes it through
+  `GET /api/v1/basins/{basin_id}/versions`; the frontend maps it to
+  `BasinVersionOption.active` (`overviewDataContracts.ts:854`) and uses it to
+  pick the default selected version (`overviewData.ts:1285`,
+  `overviewDataContracts.ts:396`, `:601`). So: no compute authority; on the
+  display plane it is a default-version selector that is a no-op while every
+  row is `false`, and setting any row `true` changes that basin's default
+  selected version. It is not a display-membership flag.
 - `met.met_station.active_flag` is a fourth, unrelated flag (station
   selection scoped by `basin_version_id`, read at
   `packages/common/forecast_store.py:1060`, flipped by
@@ -165,9 +173,13 @@ template (or "untracked, no template" for `compute.host.env`), and one
 sentence that `compute.env` is the compose-lane instance no node-22 unit
 reads. `compute.example` header gains the same pointer;
 `NHMS_BASINS_ROOT` becomes `/volume/nwm/Basins` (matches
-`compute.scheduler-dbfree.env.example:84`, verified live) and
+`compute.scheduler-dbfree.env.example:84`; exists on the node-22 login host
+and on compute node cn01 per srun receipt 2026-09-02) and
 `NHMS_MODEL_ASSET_ROOT` becomes the template's own placeholder scheme
-`/scratch/frd_muziyao/nhms-production/model-assets`.
+`/scratch/frd_muziyao/nhms-production/model-assets`, which does NOT exist on
+node-22 (receipt: the live host env uses `nhms-prod/model-assets`) and is
+therefore labelled a placeholder in the template comment, never asserted to
+exist.
 
 Live `compute.env` (orchestrator ops step, not implementer): back up as
 `compute.env.bak-1694-<UTC>` (mode 0600 preserved), then in place: prepend a

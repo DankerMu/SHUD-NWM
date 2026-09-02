@@ -1448,6 +1448,46 @@ def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
         assert static_codes == runtime_codes, (path, status_code)
 
 
+def test_operations_without_reachable_4xx_declare_none() -> None:
+    """#1678: operations whose raise-site audit found no reachable 4XX declare none.
+
+    This pins *declaration*, not reachability: the drift test above only proves
+    static == runtime, so a fabricated 4XX added to both `openapi_patching.py`
+    and `nhms.v1.yaml` would pass it. Design D5's raise-site audit, re-verified
+    2026-09-02:
+
+    - `GET /api/v1/queue/depth` (`apps/api/routes/pipeline.py:822-847`) takes no
+      parameters and no auth dependency; the only raise site is re-raising
+      `SlurmGatewayError` from `queue_depth`/`list_jobs`, whose reachable
+      subclasses are 502 (`SlurmCommandError`, `SlurmParseError`) and 504
+      (`SlurmTimeoutError`). 503 comes from the display_readonly guard.
+    - `GET /api/v1/slurm/health` (`services/slurm_gateway/routes.py:228-233`)
+      only converts a raised `SlurmGatewayError`; neither backend's `health()`
+      raises — `real_backend.py:552-580` and `mock_backend.py:222-239` both
+      return an `unhealthy` 200 body instead.
+    - `GET /health` (`apps/api/startup_wiring.py:52-58`) returns a static dict.
+
+    `"4XX".startswith("4")` is True, so a wildcard 4XX declaration also trips
+    this test.
+    """
+    static_spec = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
+    )
+    app.openapi_schema = None
+    runtime_spec = app.openapi()
+
+    operations = [
+        ("/api/v1/queue/depth", "get"),
+        ("/api/v1/slurm/health", "get"),
+        ("/health", "get"),
+    ]
+    for spec_name, spec in (("static", static_spec), ("runtime", runtime_spec)):
+        for path, method in operations:
+            responses = spec["paths"][path][method]["responses"]
+            client_error_codes = sorted(code for code in responses if str(code).startswith("4"))
+            assert client_error_codes == [], (spec_name, path, method, client_error_codes)
+
+
 def test_station_mvt_tile_static_runtime_contract() -> None:
     static_spec = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")

@@ -3,7 +3,8 @@
 #   docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config
 #
 # SCOPE (#1694): this is the template for the COMPOSE lane only. Its instance
-# `infra/env/compute.env` is read by NO node-22 systemd unit. The live node-22
+# `infra/env/compute.env` is listed in NO node-22 user systemd unit's
+# EnvironmentFiles (read-only check 2026-09-02). The live node-22
 # services load `compute.scheduler-dbfree.env` (scheduler + evidence retention),
 # `compute.scheduler-provider-refresh.env` (provider refresh), and the untracked
 # `compute.host.env` (compute-api + slurm-gateway). See the
@@ -183,8 +184,13 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # is available; cycles at/after it require exact warm-start.
 # NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-26T12:00:00Z
 
-# Basin root matches compute.scheduler-dbfree.env.example (the scheduler
-# authority). Both roots below must exist on node-22 (#1694).
+# NHMS_BASINS_ROOT is the live scheduler value: it matches
+# compute.scheduler-dbfree.env.example (the scheduler authority) and the
+# directory is present on the node-22 login host and on compute node cn01
+# (read-only check 2026-09-02).
+# NHMS_MODEL_ASSET_ROOT is a compose-lane placeholder following this template's
+# /scratch/frd_muziyao/nhms-production/* scheme; it was NOT verified to exist on
+# node-22. Set it to a real path when you instantiate this file (#1694).
 NHMS_BASINS_ROOT=/volume/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud

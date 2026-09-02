@@ -1221,7 +1221,8 @@ segment 才回退到流量分位筛选。MVT feature 必须同时携带 `river_s
 全国总览的 basin API 请求固定带 `has_display_product=true`；因此把 HHY 的
 `core.basin_version.valid_to` 置为退役时间后，历史 run 仍保留但不再进入展示列表。
 不要用 `active_flag` 做这项退役：当前 Basins importer 创建的版本默认都是 false，
-误用它会把 18 个现行流域一起隐藏（三个 `active_flag` 各自的权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)）。
+误用它会把 18 个现行流域一起隐藏（`core.basin_version` / `core.model_instance` /
+file-registry manifest 三个 `active_flag` 各自的权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)）。
 
 以下是 **2026-07-01 历史展示快照**，不是当前 registry 或 display inventory
 authority：当时 domain 输出 13 个 basin；river 输出 20,100 条 feature，
@@ -2851,7 +2852,8 @@ lifecycle 通道 deactivate。
   `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
   会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
   manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
-- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义；
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，对计算面无权威、
+  展示面只是「默认选中版本」的选择器，全 false 时是 no-op；
   权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)），
   也不要动已经 inactive 的 `dg_*` 行。一行一操作。
 
@@ -3707,6 +3709,7 @@ issue #1122 与 #1123 两次都把这个翻倍读成重复 seed 行，#1123 一�
 
 ```sql
 -- 逐类计数并与 segment_count 对照；差值应为 0/0，total 应为 2×segment_count
+-- 下面的 river_network_version_id 换成要体检的那一个。
 select rnv.river_network_version_id,
        rnv.segment_count,
        count(*)                                                          as total_rows,
@@ -3714,15 +3717,18 @@ select rnv.river_network_version_id,
        count(*) filter (where coalesce(rs.properties_json->>'shud_output_river','false') = 'true')  as output_rows
 from core.river_network_version rnv
 join core.river_segment rs using (river_network_version_id)
-where rnv.river_network_version_id = :rnv_id
+where rnv.river_network_version_id = 'basins_heihe_rivnet_vbasins'
 group by rnv.river_network_version_id, rnv.segment_count;
 ```
 
 要点：
 
-- `output_segment_count` **不是** `core.river_network_version` 的列。它只出现在
-  导入 receipt 和 `core.model_instance.resource_profile` 里，值同样等于
-  `.sp.riv` reach 数。按列名去查库只会得到 `column does not exist`。
+- `output_segment_count` **不是** `core.river_network_version` 的列（`db/migrations/` 里
+  也没有任何表带这个列名）。它是 JSON / receipt 字段：导入 receipt、
+  `core.model_instance.resource_profile`（由 `packages/common/forecast_store.py:268`、
+  `packages/common/display_coverage.py:86` 读取），以及调度器 file-registry /
+  candidate / chain manifest（`services/orchestrator/scheduler_file_providers.py:1061-1104`
+  等）。值同样等于 `.sp.riv` reach 数。按列名去查库只会得到 `column does not exist`。
 - 已经正确过滤的现成 oracle，可直接抄谓词：
   `workers/model_registry/basins_registry_import.py:610-620`（reach 行幂等守卫）、
   `tests/test_real_database_integration.py:448-453`（reach 行几何断言）、

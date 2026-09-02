@@ -75,12 +75,28 @@ Notes:
   the wrong answer for both units. `systemctl --user show <unit> -p
   EnvironmentFiles` is the authority; the drop-in procedure is
   `docs/runbooks/current-production-ops.md` §3.2.2.
-- **`infra/env/compute.env` is the compose-lane instance of `compute.example`,
-  and no node-22 systemd unit reads it.** Its only references are the tracked
-  `infra/systemd/nhms-compute-compose.service` (not installed on node-22) and
-  `infra/README.two-node-docker.md`. Values in it — including basin roots and
-  scheduler model/basin filters — are **not** the production scheduler's
-  configuration and must not be quoted as such.
+- **`infra/env/compute.env` is the compose-lane instance of `compute.example`.**
+  Verified on node-22 read-only 2026-09-02: no user systemd unit lists it in
+  `EnvironmentFiles`, and no running container reads it. Values in it — including
+  basin roots and scheduler model/basin filters — are **not** the production
+  scheduler's configuration and must not be quoted as such.
+
+  It is not unreferenced, though. Who else names it:
+
+  - `infra/systemd/nhms-compute-compose.service` (tracked, **not installed** on
+    node-22) and `infra/README.two-node-docker.md` describe the compose lane.
+  - `scripts/validate_two_node_docker_source_trust.py:190` treats it as the
+    compute role env for source-trust checks, and
+    `tests/test_two_node_docker_source_trust.py:350`/`:392`/`:406`,
+    `tests/test_two_node_docker_runtime.py:3725`, and
+    `tests/test_two_node_docker_runbook_environment_invariant.py:548` exercise
+    the instance / the `compute.example` → `compute.env` install step.
+  - The `compute.example` template itself is parsed by
+    `tests/test_two_node_docker_runtime.py` (55 call sites, including the
+    display forbidden-mount fixture). **Editing a value in `compute.example`
+    therefore requires running `tests/test_two_node_docker_runtime.py`,
+    `tests/test_two_node_docker_source_trust.py`, and
+    `tests/test_two_node_docker_runbook_environment_invariant.py`.**
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
 
@@ -90,13 +106,15 @@ Notes:
 for the production scheduler are whatever `compute.scheduler-dbfree.env` says
 (template `compute.scheduler-dbfree.env.example`) — never `compute.env`.
 
-- Live scheduler value as of 2026-09-02: `NHMS_BASINS_ROOT=/volume/nwm/Basins`,
+- Live scheduler value as of 2026-09-02: `NHMS_BASINS_ROOT=/volume/nwm/Basins`
+  (exists on the node-22 login host and on compute node cn01, 2026-09-02),
   with both `NHMS_SCHEDULER_BASIN_IDS` and `NHMS_SCHEDULER_MODEL_IDS` empty
   (registry-driven selection, as required above).
-- `/ghdc/data/nwm/Basins` also exists on node-22 with different contents. It is
-  the **separate shared-NFS basin root that node-27 ingest reads** (as
-  `/home/ghdc/nwm/Basins`). It is not the scheduler root; do not treat either
-  path as "the" basin root without naming the lane.
+- `/ghdc/data/nwm/Basins` also exists on the node-22 **login host** with
+  different contents. It is the **separate shared-NFS basin root that node-27
+  ingest reads** (as `/home/ghdc/nwm/Basins`). It is not the scheduler root, and
+  it is **not mounted on the compute nodes** (cn01 check 2026-09-02: MISSING) —
+  do not treat either path as "the" basin root without naming the lane.
 
 Compute role, node 22:
 
