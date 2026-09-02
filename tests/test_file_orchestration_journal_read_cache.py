@@ -1262,11 +1262,15 @@ def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
 
     `by_cycle_direct_partition` runs its HARD variant on purpose: neither the
     real `pipeline-jobs/by-cycle/gfs` nor the decoy holds a `<cycle>` child, so
-    the bare stat returns `None` before AND after the swap.  There the public
-    read is `[]` even WITH the fix — the forced recompute is served from
-    `_direct_jobs_cycle_cache`, a separate cache this change deliberately does
-    not widen to (design D1's stated residual, routed to a follow-up) — so the
-    public token is not asserted for it here.
+    a bare stat returns `None` before AND after the swap.  #1567 left that cell
+    open — the forced recompute was served the pre-tamper `[]` from
+    `_direct_jobs_cycle_cache`, a second cache that still fingerprinted with
+    bare stats — and #1941 D1 closes it by taking both of that cache's
+    signature legs through `_containment_stat_signature` and never storing a
+    faulted signature.  So the hard variant now asserts the public token too,
+    in BOTH lanes (`model_a` and the cross-model `model_id=None`, which share
+    the direct cache's `(source_id, cycle_segment)` key), plus `after ==
+    before` on `_direct_jobs_cycle_cache` itself.
     `test_every_fingerprint_parent_leg_fails_loud_after_a_symlink_swap` pins
     the public tokens for the ordinary variants.
     """
@@ -1282,6 +1286,8 @@ def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
     assert _read_cycle(repository) == []
     before = {key: entry[0] for key, entry in repository._cycle_rows_cache.items()}
     assert before, "the warm read must have stored a legal entry"
+    direct_before = {key: entry[0] for key, entry in repository._direct_jobs_cycle_cache.items()}
+    assert direct_before, "the warm read must have stored a direct-jobs entry"
 
     _swap_for_symlinked_decoy(root, relative, tmp_path / f"decoy_{leg}", child=child)
 
@@ -1293,8 +1299,7 @@ def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
     )
 
     rows = _read_cycle(repository)
-    if not hard_variant:
-        assert _stage_status_code(rows) == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
+    assert _stage_status_code(rows) == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
     after = {key: entry[0] for key, entry in repository._cycle_rows_cache.items()}
     # The pre-tamper entry is a legally stored one and simply stops being
     # reachable (the fault forces a miss).  What must never happen is a NEW
@@ -1309,11 +1314,218 @@ def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
     assert repository._cycle_rows_source_fingerprint(
         source_segments=("gfs",), cycle_segment=_TAMPER_SEGMENT
     ) is journal_module._FINGERPRINT_CONTAINMENT_FAULT
-    if not hard_variant:
-        assert (
-            _stage_status_code(_read_cycle(repository))
-            == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
+    assert (
+        _stage_status_code(_read_cycle(repository)) == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
+    )
+    # The cross-model lane shares the direct cache's `(source_id, cycle_segment)`
+    # key with the model-scoped one but misses `_cycle_rows_cache`, so it is the
+    # lane that would still have been served the pre-#1941 warm `[]`.
+    assert (
+        _stage_status_code(_read_cycle(repository, model_id=None))
+        == _FINGERPRINT_PARENT_TOKENS[leg][None]
+    )
+    # #1941 D1: the same never-stored rule on the direct-jobs cycle cache.
+    direct_after = {key: entry[0] for key, entry in repository._direct_jobs_cycle_cache.items()}
+    assert direct_after == direct_before, "the faulted direct read must store nothing"
+    assert not any(
+        journal_module._signature_has_containment_fault(signature)
+        for signature in direct_after.values()
+    )
+
+
+# --- #1941: the direct-jobs cycle cache under containment (design D1) --------
+#
+# The residual #1567 left open.  `_direct_pipeline_job_records_for_cycle_cached`
+# signed its listing with bare `_stat_signature` on `pipeline-jobs` and on
+# `pipeline-jobs/by-cycle/<source>/<cycle>`.  In the HARD variant — the
+# per-source partition swapped for a symlink to a decoy that, like the
+# original, holds no `<cycle>` child — both legs sign `(sig, None)` before AND
+# after the swap, so a warm instance kept serving `[]` from that cache while a
+# cold one raised `file_journal_unsafe_scanned_entry`.  The owner fast path
+# shared the hole: its directory probe forced a `_cycle_rows` recompute, but
+# the recompute consulted the same warm direct cache.
+
+
+def _hard_variant_tree(root: Path) -> None:
+    """The empty cycle tree WITHOUT the `by-cycle/gfs/<cycle>` child.
+
+    That missing child is what makes the variant hard: a bare absence stat of
+    `<cycle>` compares equal across the partition swap, so only a
+    containment-aware signature can tell the two trees apart.
+    """
+
+    _empty_cycle_tree(root)
+    (root / "pipeline-jobs" / "by-cycle" / "gfs" / _TAMPER_SEGMENT).rmdir()
+
+
+def _swap_by_cycle_for_hard_decoy(root: Path, decoy: Path) -> None:
+    """Replace `pipeline-jobs/by-cycle/gfs` with a symlink to a childless decoy."""
+
+    _swap_for_symlinked_decoy(root, "pipeline-jobs/by-cycle/gfs", decoy, child=None)
+
+
+def test_cold_instance_fails_loud_on_the_by_cycle_hard_variant(tmp_path: Path) -> None:
+    """#1941 D1 — the cold answer every warm/owner/retention row is compared to.
+
+    Green on master by construction: a fresh repository has nothing cached, so
+    it always recomputes and always reaches the tampered partition.  Pinning it
+    here makes "warm == cold" a statement about a measured cold value rather
+    than about whatever the recompute happens to do.
+
+    Input: the hard-variant tree, tampered BEFORE the first read.  Expected:
+    `file_journal_unsafe_scanned_entry` in both lanes and an empty
+    `_direct_jobs_cycle_cache` — the faulted read stores nothing.
+    """
+
+    root = tmp_path / "journal"
+    _hard_variant_tree(root)
+    _swap_by_cycle_for_hard_decoy(root, tmp_path / "decoy_by_cycle")
+    expected = _FINGERPRINT_PARENT_TOKENS["by_cycle_direct_partition"]
+
+    repository = FileOrchestrationJournalRepository(root)
+    for model_id in ("model_a", None):
+        rows = _read_cycle(repository, model_id=model_id)
+        assert _stage_status_code(rows) == expected[model_id], (
+            f"cold read for model_id={model_id!r} did not fail loud"
         )
+        assert rows[0]["file_journal"]["status"] == "blocked"
+    assert not repository._direct_jobs_cycle_cache, (
+        "a cold read that faulted must leave the direct-jobs cache empty"
+    )
+
+
+def test_cycle_write_window_owner_hit_under_the_by_cycle_hard_variant_fails_loud(
+    tmp_path: Path,
+) -> None:
+    """#1941 D1 — the owner lane's cell of the hard variant.
+
+    The owner computes no source-file fingerprint, but
+    `pipeline-jobs/by-cycle/<source>/<cycle>` IS in its directory probe list,
+    so the swap already forced a recompute before this change.  The recompute
+    was then served the pre-tamper `[]` out of `_direct_jobs_cycle_cache` — the
+    probe found the fault and the answer was `[]` anyway.
+
+    Input: two in-window `_cycle_rows` reads with the partition swapped for the
+    childless decoy between them.  Expected: the second raises
+    `file_journal_unsafe_scanned_entry`, the cold read's token.  Master returns
+    the cached empty rows instead.
+    """
+
+    root = tmp_path / "journal"
+    _hard_variant_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    with repository._locked_cycle_write(source_id="gfs", cycle_time=_TAMPER_CYCLE):
+        first = repository._cycle_rows(
+            source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a"
+        )
+        assert not first.pipeline_jobs
+        assert repository._direct_jobs_cycle_cache, (
+            "the in-window read must have populated the direct-jobs cache"
+        )
+
+        _swap_by_cycle_for_hard_decoy(root, tmp_path / "decoy_by_cycle")
+
+        assert repository._cycle_directories_probe_faulted(
+            source_segments=("gfs",), cycle_segment=_TAMPER_SEGMENT
+        ), "the swapped partition is a directory the owner probe covers"
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            repository._cycle_rows(source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a")
+    assert caught.value.reason == "file_journal_unsafe_scanned_entry"
+    assert repository._cycle_write_owner is None
+
+
+def test_untouched_empty_by_cycle_partition_still_hits_the_direct_cache(
+    tmp_path: Path,
+) -> None:
+    """#1941 D1 — genuine absence still caches, which is why the cache exists.
+
+    The guard has to be read across two public reads that both MISS
+    `_cycle_rows_cache` yet share the direct cache's key: `_cycle_rows` keys on
+    `model_id`, the direct cache keys on `(source_id, cycle_segment)`.  Two
+    same-`model_id` reads would be answered by the outer cycle-rows hit before
+    the direct cache is consulted at all, and would count one recompute even if
+    the direct cache never hit.
+
+    Input: an untouched tree whose real `by-cycle/gfs/<cycle>` directory holds
+    no records; one read with `model_id="model_a"`, one with `model_id=None`.
+    Expected: `_iter_direct_pipeline_job_records_for_cycle` runs exactly once
+    and both reads are `[]`.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    calls: list[str | None] = []
+    real_iter = repository._iter_direct_pipeline_job_records_for_cycle
+
+    def counting_iter(*, source_id: str, cycle_time: datetime, model_id: str | None) -> Any:
+        calls.append(model_id)
+        return real_iter(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(repository, "_iter_direct_pipeline_job_records_for_cycle", counting_iter)
+    try:
+        assert _read_cycle(repository, model_id="model_a") == []
+        assert _read_cycle(repository, model_id=None) == []
+    finally:
+        monkeypatch.undo()
+
+    assert len(calls) == 1, (
+        f"the second read must be served from the direct-jobs cache, saw {calls}"
+    )
+    keys = set(repository._direct_jobs_cycle_cache)
+    assert keys == {("gfs", _TAMPER_SEGMENT)}, keys
+
+
+def test_retention_inspection_reports_the_hard_variant_as_blocked(tmp_path: Path) -> None:
+    """#1941 D1 matrix row 6 — the destructive-operation predicate fails closed.
+
+    `_inspect_retention_cycle_unlocked` reads `_cycle_rows(model_id=None)`
+    BEFORE its own direct call and catches `FileOrchestrationJournalError` into
+    a `blocked` row.  On master that read was served the warm direct `[]`, no
+    row blocked rollback quiescence, and the window reported the slice
+    `eligible` on a listing the tree no longer backs.
+
+    The warm cell must be built INSIDE one window: `open_retention_cycle` wipes
+    all three caches on entry and on exit, so a pre-window warmup would make
+    the second inspection a cold read.  The fresh-instance comparison is taken
+    after the window has exited — a second repository opening the same cycle
+    while the first still holds it gets `status == "busy"`.
+
+    Expected: the second in-window `inspect()` is `blocked` /
+    `file_journal_unsafe_scanned_entry`, field for field what a fresh instance
+    reports on the same tree.  `inspect()` never calls `remove_members`, so the
+    status IS the assertion.
+    """
+
+    root = tmp_path / "journal"
+    _hard_variant_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    with repository.open_retention_cycle(source_id="gfs", cycle_time=_TAMPER_CYCLE) as window:
+        assert window.status == "locked"
+        warm = window.inspect()
+        assert warm.status == "eligible", (
+            f"the pre-tamper inspection must be a legal empty slice, got {warm}"
+        )
+        assert repository._direct_jobs_cycle_cache, (
+            "the in-window inspection must have populated the direct-jobs cache"
+        )
+
+        _swap_by_cycle_for_hard_decoy(root, tmp_path / "decoy_by_cycle")
+
+        blocked = window.inspect()
+
+    assert blocked.status == "blocked"
+    assert blocked.reason == "file_journal_unsafe_scanned_entry"
+
+    fresh = FileOrchestrationJournalRepository(root)
+    with fresh.open_retention_cycle(source_id="gfs", cycle_time=_TAMPER_CYCLE) as cold_window:
+        assert cold_window.status == "locked"
+        cold = cold_window.inspect()
+    assert blocked == cold, "the warm inspection must equal a cold one field for field"
 
 
 def test_cycle_write_window_owner_hit_under_a_tampered_parent_fails_loud(tmp_path: Path) -> None:
@@ -1355,9 +1567,19 @@ def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
     instance on the same tree raises.  That narrows the pre-PR state (the owner
     did no tamper detection at all) instead of widening it.
 
-    When the residual is closed (a leaf-level owner probe, routed to a
-    follow-up issue), this test must be FLIPPED — the owner read starts raising
-    `file_journal_unreadable` like the cold one — not deleted.
+    #1942 ruled this limit PERMANENT (design D3, option B): the fast path is
+    not going to grow a leaf probe, so this test pins a settled behaviour, not
+    a pending flip.  The cost is the reason — the five swappable leaf cells are
+    exactly the files the source-file fingerprint stats, so a leaf probe IS the
+    fingerprint under another name.  Measured: the five-directory probe already
+    costs 191 Python-level `os.*` calls, the full fingerprint 414, and a warm
+    cache-hit public read 422 against 20 before the containment work.  Option A
+    would put probe + fingerprint on every in-window hit, i.e. collapse the
+    fast path into the non-owner path and keep the probe's cost on top.  The
+    exposure stays bounded to the window: the owner's next append invalidates
+    every reachable key for the pair, and the first read after the window
+    revalidates under the full containment-aware fingerprint, which sees the
+    swapped leaf and fails loud.  The cold and non-owner lanes never had it.
 
     Input: an empty tree; two in-window `_cycle_rows` reads with
     `journal/gfs/<cycle>.jsonl` replaced by a symlink to a decoy regular file
