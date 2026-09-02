@@ -867,6 +867,10 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_display_publish_status_only.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        # #1774: the autopipe stats guard's two ANALYZE legs are what force the
+        # writer role to OWN the relations, so the write-role guards must run
+        # when this script changes.
+        "tests/test_node27_write_roles.py",
         # #1442/#1789: the publish criterion is a registered oracle
         # statement; the ingest criterion's fact-table-free shape is pinned
         # by the same file.

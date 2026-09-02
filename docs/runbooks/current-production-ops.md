@@ -2054,9 +2054,23 @@ run discovery.
 
 ### 5.1 数据库
 
-当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。display API uses a
-readonly role from `infra/env/display.env`; cron ingest uses writer credentials
-from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
+当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。
+
+数据库角色（#1774 起，写侧不再是 superuser）：
+
+| 角色 | rolsuper | 用途 | 谁用它 |
+|---|---|---|---|
+| `nhms` | **t** | 库/扩展 owner + 迁移；两个 migration-class 例外 lane | `packages/common/migrate.py`；`node27-timeseries-compression-replay.env`（`pg_dump`/`psql --file`/`pg_restore`）；已退役的 archive-rebuild drill（需 `CREATEDB`） |
+| `nhms_ingest_rw` | f | `core`/`hydro`/`met`/`ops`/`map`/`flood` 全部 relation 的 **owner** + DML + default privileges + `CREATE ON TABLESPACE nhms_cold`；ownership 是 `compress_chunk`/`drop_chunks`/chunk `ANALYZE`/`SET TABLESPACE` 与 #1643/#1468 统计守卫两条腿的硬要求 | `node27-ingest.env`、`node27-timeseries-compression.env`、`node27-cold-residency.env`、`node27-timeseries-retention.env` |
+| `nhms_download_rw` | f | 仅 `met.*` 的 DML + default privileges（下载链路实测**不连库**，角色存在是为了让模板承诺成立） | `node27-download.env` |
+| `nhms_display_ro` | f | 只读；无 INSERT/UPDATE/DELETE | display API (`infra/env/display.env`)、frontier-alert、raw-retention、resource-governance |
+
+两个写角色的 `rolsuper`/`rolcreaterole`/`rolcreatedb`/`rolreplication`/`rolbypassrls`
+全为 `f`，因此 `COPY … FROM PROGRAM`（= 容器内命令执行）对它们是关闭的。角色、授权与
+ownership 由幂等脚本 `scripts/node27_provision_write_roles.sh`
+（SQL: `db/roles/node27_write_roles.sql`）提供，**每次迁移后必须重跑**，否则新表仍归
+`nhms` 所有、其 ANALYZE 会被静默跳过；完整口径与切换/回滚流程见
+`docs/runbooks/tier-node27-timeseries-storage.md` §9。
 
 数据库文件自 2026-08-06 起分布在**两块设备**上。容器 `nhms-db` 由裸
 `docker run` 创建（无 compose、无 systemd unit），三个 bind mount 缺一不可：

@@ -1,0 +1,119 @@
+## Risk Triage
+
+```text
+Issue type: security hardening (least privilege) with live production DDL
+Project profile: NHMS (openspec/project-profile.md)
+Blast radius: high (every write unit on node-27; hypertable ownership)
+Fixture level: expanded
+Repair intensity: high
+Upstream suggested level: absent (hand-written issue; expanded forced by auth/permissions + production config + example templates)
+Why:
+- production role/grant/ownership DDL on the primary; env cutover of four units
+- a wrong inventory silently breaks ingest (ANALYZE skip) or fails ticks (permission denied)
+OpenSpec change: node27-write-path-roles
+Evidence floor:
+- uv run ruff check . ; uv run pytest -q tests/test_node27_write_roles.py
+- local disposable TimescaleDB 2.10.2 container: provision SQL twice + per-role probes (transcript in PR)
+- node-27 pre-merge: `--roles-only` provision (additive), negative probes, pg_roles output
+- node-27 post-merge: ownership transfer audit + relacl diff, per-component runs under the new roles, env cutover receipts per unit
+- openspec validate node27-write-path-roles --strict --no-interactive
+```
+
+## Risk Packs
+
+| Pack | 选择 | 理由 |
+|---|---|---|
+| Public API / CLI / script entry | selected | new provision runner; every write unit's DSN |
+| Config / project setup | selected | six env files + templates; drill and replay exceptions |
+| File IO / path safety / overwrite | selected | env backups `*.env.pre-1774`; runner must not print passwords |
+| Schema / columns / units / field names | not selected | no schema change; ownership/grants only |
+| Auth / permissions / secrets | selected | the entire change; passwords only via env, never in repo/logs |
+| Concurrency / shared state / ordering | selected | ownership transfer takes AccessExclusiveLock per relation/chunk while the display API (unstoppable, public) holds AccessShareLock: T7 stops the writer timers, runs the loop under `SET lock_timeout='5s'` with retry, captures `relacl` before/after; cutover order |
+| Resource limits / large input / discovery | not selected | no volume change |
+| Legacy compatibility / examples | selected | templates aligned; migration role unchanged |
+| Error handling / rollback / partial outputs | selected | rollback path; partial grant = permission denied in journal |
+| Release / packaging / dependency compatibility | not selected | none |
+| Documentation / migration notes | selected | inventory + procedure + re-run-after-migration step |
+| PostGIS / TimescaleDB 域行为 | selected | owner requirement for tiering functions and ANALYZE; chunk ownership cascade |
+| 其余 domain packs | not selected | not touched |
+
+## Tasks
+
+- [x] T1 Inventory: static scan per unit entrypoint widened to DML + ANALYZE + DDL + `SET TABLESPACE` + `psql --file`/`pg_dump`/`pg_restore` call sites, plus local container runs of each component under the candidate role (both stats-guard legs must report `ok`); write the table into the tier runbook incl. the download lane's "no DB connection" finding and the replay/drill exceptions.
+- [x] T2 `db/roles/node27_write_roles.sql`: roles (flags), schema USAGE, schema-scoped ownership loop to `nhms_ingest_rw` (relkind r/p first, then S, plus v/m; core/hydro/met/ops/map/flood; absent schema tolerated; generated as one autocommitted `ALTER … OWNER TO` statement per relation — never one `DO` transaction — under `SET lock_timeout='5s'` with up to 5 retry passes; exhaustion -> partial transfer, audit red, runner non-zero), DML + sequence USAGE + default privileges in the six schemas for `nhms_ingest_rw` and on `met.*` for `nhms_download_rw`, conditional `GRANT CREATE ON TABLESPACE nhms_cold`, trailing audit query incl. `nhms_display_ro` SELECT set; idempotent (run twice locally, transcript in PR; drift case after a new table: INSERT ok, ANALYZE warning, audit red, re-run green).
+- [x] T3 `scripts/node27_provision_write_roles.sh`: `docker exec -i nhms-db psql` runner with `--roles-only` (additive phase) and full mode (adds the per-relation autocommit ownership loop with `lock_timeout` + retry passes, `relacl` before/after capture and diff, trailing audit); password from env or skip; audit diff → non-zero; no secret in output; shell test with a fake `docker` covering both modes and the exhaustion path.
+- [x] T4 Templates: compression/cold-residency/retention → `nhms_ingest_rw`; comments on ingest/download; drill and compression-replay keep `nhms` with the reason.
+- [x] T5 `tests/test_node27_write_roles.py`: templates carry no `nhms` credential in any form (`nhms:` or `PGUSER=nhms`) except the drill and replay allow-list; SQL names exactly the template roles; ownership loop covers the six schemas and is not wrapped in a single `DO`/transaction; the ingest default-privilege block and the display-audit clause are present; download grants ⊇ scanned `met.*` targets; forbidden statements absent (`REASSIGN OWNED`, `GRANT nhms TO`).
+- [x] T6 Docs: runbook provision/cutover/rollback procedure, re-run-after-migration step, `current-production-ops.md` role table, bringup checklist.
+- [ ] T7 node-27 pre-merge (queued session, first in queue, additive only): `scripts/node27_provision_write_roles.sh --roles-only` (roles, grants, default privileges, tablespace grant, `pg_roles` flags, negative `COPY … FROM PROGRAM` probes as both roles) from a detached worktree; no ownership transfer, no unit touched. Post-merge (same session, after the reviewed merge): stop compression + autopipe timers, verify no in-flight tick/`compress_chunk`, run the full provision (per-relation autocommit ownership loop, `lock_timeout` + retry, `relacl` before/after diff, trailing audit), restart timers; per-component runs under the new roles (autopipe dry tick with both stats-guard legs `ok`, compression, retention, cold-residency dry-runs, download as no-DB control); env cutover download → ingest → compression + cold-residency → retention with restarts and receipts; redacted `grep` of env files (replay/drill still `nhms`, documented).
+
+## Recorded deviations (implementation)
+
+1. **T1, "local container runs of each component under the candidate role"** —
+   not closable locally. The `timescale/timescaledb:2.10.2-pg15` image ships no
+   PostGIS, so `packages/common/migrate.py` cannot apply the schema and no lane
+   can execute against a disposable container. What T2's container **does**
+   prove is the privilege shape each lane needs, measured as primitives under a
+   real `nhms_ingest_rw` / `nhms_download_rw` login: `compress_chunk`,
+   `decompress_chunk`, `drop_chunks`, `chunks_detailed_size`, chunk `ANALYZE`,
+   authority-table `ANALYZE`, `ALTER … SET TABLESPACE nhms_cold`, `met.*` DML,
+   and the negative probes. The **per-component runs move to T7 post-merge**
+   (design D5 already schedules them there). The static half of T1 (scan widened
+   to DML / `ANALYZE` / DDL / `SET TABLESPACE` / `psql --file` / `pg_dump` /
+   `pg_restore`) is complete and is re-derived by
+   `tests/test_node27_write_roles.py`, not frozen into a list.
+2. **`infra/env/node27-archive-rebuild-drill.example` does not exist.** The
+   archive lane was permanently retired in #1370 (ADR 0002 Revision 2026-08-11):
+   no unit, no wrapper, no template. The proposal's "comments in
+   node27-archive-rebuild-drill.example" is therefore unimplementable. The name
+   is kept in the guard test's allow-list (the live `node27-archive-rebuild-drill.env`
+   still exists on node-27 per the issue evidence) and the exception is recorded
+   in the runbook's inventory table; no template was invented for it.
+3. **`relacl` before/after is a receipt, not a gate.** `ALTER … OWNER TO`
+   rewrites the grantor references inside every ACL entry, so the diff is never
+   empty after a real transfer (measured: `nhms_display_ro=r/nhms` →
+   `nhms_display_ro=r/nhms_ingest_rw`). The runner prints the diff and gates on
+   `nhms_display_ro`'s **effective** `SELECT` set instead, which is what the
+   spec scenario actually asserts. Exit 4 is reserved for that regression.
+
+## Additions beyond the fixture (recorded for review)
+
+Two hardening items the fixture does not name, both kept inside its stated risk
+posture ("passwords never in repo or logs"; "least privilege must not degrade a
+safety check"):
+
+A. **Password logging.** `ALTER ROLE … PASSWORD` is written verbatim to the
+   server log under `log_statement=ddl|mod|all`, so the env-var-by-name design
+   still leaked into the container log. `db/roles/node27_write_roles.sql` now
+   wraps both ALTERs in `SET log_statement = 'none'` /
+   `SET log_min_duration_statement = -1` and restores them. Proved with a
+   canary against a container started `-c log_statement=ddl`: 1 hit for an
+   unsuppressed control statement, 0 for the runner-set passwords (transcript
+   appendix A). Residual recorded, not fixed: `log_min_error_statement` still
+   logs a **failed** ALTER.
+
+B. **Superuser-gated reads.** The T1 scan covered writes, which fail loudly.
+   `pg_stat_activity` / `pg_locks` do not fail for a non-superuser — they return
+   a filtered row set, so a quiescence guard would go silently green. Re-scanned
+   the converted lanes: no executed hit (all matches are `#` comments), every
+   live caller sits in a lane that keeps the superuser, and
+   `compressed_chunk_cold_residency.py` never names `pg_toast.*` in emitted SQL.
+   No grant was added; the audit is pinned by
+   `test_converted_lanes_do_not_read_superuser_gated_catalogs` and written up in
+   runbook §9.2 + transcript appendix B.
+
+C. **CI selector rules had to be MERGED, not appended.**
+   `tests/test_select_ci_tests.py` enforces that a `PathTestRule` pattern
+   appears at most once outside `INTENTIONAL_DUPLICATE_PATTERNS`
+   (`test_path_rule_duplicate_patterns_are_allowlisted_decisions`,
+   `test_duplicate_pattern_guard_flags_an_unmerged_sibling_collision`). Six of
+   the converted lanes already had a rule, so `tests/test_node27_write_roles.py`
+   was merged into those rules' test tuples; only the four patterns with no
+   pre-existing rule got a new row. This also required one 4-line edit to the
+   pinned expectation in
+   `test_select_tests_maps_autopipeline_script_without_core_smoke_fallback`
+   — the sole change to `tests/test_select_ci_tests.py`, which is a shared file.
+
+## Non-goals (explicit)
+
+`pg_hba` trust lines, SSL, migrations' role, drill and compression-replay env role change (documented exceptions), one-time `CREATE TABLESPACE` install, password rotation.

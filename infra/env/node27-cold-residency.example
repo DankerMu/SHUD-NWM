@@ -22,7 +22,12 @@ NODE27_COLD_RESIDENCY_REPO_ROOT=/home/nwm/NWM
 # Node-27 primary Postgres (writer role — residency is DDL).
 # Default application_name is `nhms-ts-cold-residency` (libpq
 # fallback_application_name). To override, append ?application_name=<name>.
-DATABASE_URL=postgresql://REPLACE_ME_WRITER:REPLACE_ME_PW@127.0.0.1:55432/nhms
+# Writer role (#1774): the DSN user MUST be `nhms_ingest_rw`, the non-superuser
+# role provisioned by scripts/node27_provision_write_roles.sh. It owns every
+# relation in core/hydro/met/ops/map/flood, which is what compress_chunk /
+# decompress_chunk / drop_chunks / `SET TABLESPACE` / chunk ANALYZE require, and
+# it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
+DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 
 # Chunk-selection lag in seconds. Unset falls through to
 # NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS, then the compression contract

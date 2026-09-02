@@ -1786,6 +1786,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "db/seeds/seed_demo.py",
         ("tests/test_river_ts_text_identity_cleanup.py",),
     ),
+    # #1774 node-27 write-path least-privilege roles. `db/**` above only buys
+    # tests/test_migrations.py, which never reads the role SQL; the runner is a
+    # shell script with no same-name suite; and `infra/env/**` only buys the
+    # two-node docker runtime suite. Without these four rows a change to the
+    # provision SQL, the runner, a node-27 env template or the autopipe stats
+    # guard would ship with the write-role guards unexecuted.
+    PathTestRule(
+        "db/roles/node27_write_roles.sql",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_provision_write_roles.sh",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "infra/env/node27-*.example",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    # the converted lanes with no pre-existing rule to merge into. The
+    # superuser-gated-READ guard scans these sources, and such a read fails
+    # SILENTLY under the new non-superuser role.
+    PathTestRule(
+        "scripts/node27_timeseries_retention.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_download_cycles.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_ingest_run.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_residency.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
     PathTestRule(
         "infra/compose.compute.yml",
         ("tests/test_two_node_docker_runtime.py",),
@@ -1872,6 +1909,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # It additionally pins the ingest criterion's authority-state gate.
             # Nothing above would notice any of it.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1774: the stats-guard ANALYZE legs are what force the writer
+            # role to OWN the relations, so the write-role guards must run.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -1915,6 +1955,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -1933,6 +1976,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2100,6 +2146,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_publication.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2167,6 +2216,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_target.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2542,6 +2594,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_integration.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",
             "tests/test_node27_cold_tablespace_root_evidence.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(

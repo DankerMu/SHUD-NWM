@@ -2,7 +2,9 @@
 
 Operation, rollback, and cadence rationale for the node-27 timeseries storage
 tier — **hypertable compression (§4)** and **gated DB retention (§8)** —
-delivered under `openspec/changes/tier-node27-timeseries-storage`.
+delivered under `openspec/changes/tier-node27-timeseries-storage`, plus the
+**write-path least-privilege roles (§9)** these lanes run as
+(`openspec/changes/node27-write-path-roles`, #1774).
 
 ## Retirement record: the cold archive lane is gone (2026-08-11)
 
@@ -3591,6 +3593,230 @@ and the schema itself all keep the same shape.
 Do not read `[]` as "everything dropped was archive-covered". In a historical
 `enabled`-mode receipt an empty list meant "no db-export subject overlapped
 this drop window"; in every current receipt it means nothing was covered.
+
+## 9. Write-path least-privilege roles (`#1774`)
+
+Until this section existed, **every** recurring write unit on node-27 connected
+as the PostgreSQL superuser `nhms` (live `pg_roles`, 2026-09-02: only `nhms`
+(super) and `nhms_display_ro`). A superuser can `COPY … FROM PROGRAM`, i.e.
+execute shell commands as the database OS user, on the host that also serves
+`https://test.nwm.ac.cn`. The read side had a role boundary; the write side had
+none. The templates already named `nhms_ingest_rw` / `nhms_download_rw` — the
+roles had simply never been provisioned, so the deployment fell back to the
+superuser.
+
+Executable form: `db/roles/node27_write_roles.sql`, run through
+`scripts/node27_provision_write_roles.sh`. OpenSpec change
+`node27-write-path-roles`.
+
+### 9.1 The measured ownership finding (the issue's core unknown)
+
+Measured in a disposable `timescale/timescaledb:2.10.2-pg15` container (the
+node-27 versions); full transcript in
+`openspec/changes/node27-write-path-roles/evidence/local-container-transcript.md`.
+
+- `compress_chunk`, `decompress_chunk`, `drop_chunks`, `chunks_detailed_size`,
+  chunk `ANALYZE` and `ALTER … SET TABLESPACE` require the **hypertable owner**.
+  A plain non-superuser role is enough — superuser is not.
+- `ALTER TABLE <hypertable> OWNER TO <role>` **cascades** to the existing chunks
+  and to the compressed hypertable, and chunks created later (including chunks
+  created by the role's own INSERT) inherit the owner. There is no per-chunk
+  work.
+- A **DML-only** grantee can read `timescaledb_information.chunks`, INSERT into
+  new and compressed ranges and DELETE in uncompressed chunks, but is refused
+  `compress_chunk` (`must be owner of hypertable`), `COPY … FROM PROGRAM`,
+  `CREATE ROLE` and `CREATE DATABASE`, and its `ANALYZE` is **skipped with a
+  warning** rather than refused.
+- That last one is why ownership is not optional. PG 15 has no `MAINTAIN`
+  privilege, and the autopipe stats guard grades a skipped ANALYZE as
+  `status="warning"` (`scripts/node27_autopipeline.py:1490`) — the tick stays
+  green while the leg is dead. Both legs are affected: the #1643 frontier-chunk
+  leg (`:1482`) and the #1468 authority-table repair leg
+  (`_STATS_GUARD_AUTHORITY_CANDIDATES_SQL`, `:1419-1435`, run every tick at
+  `:1663`).
+- `ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA …` does cover tables a later
+  migration creates as `nhms`, so the drift window between a migration and the
+  next provision run is writable — only ANALYZE degrades.
+
+Consequence, and the accepted residual: `nhms_ingest_rw` owns every relation in
+`core`, `hydro`, `met`, `ops`, `map`, `flood`, so its blast radius is "drop or
+truncate any application relation". That is strictly smaller than superuser (no
+program execution, no role/database creation, no catalog escape) and it is what
+keeps both stats-guard legs and all tiering functions alive.
+
+### 9.2 Measured privilege inventory per component
+
+Derived by static scan from each unit's entrypoint (DML, `ANALYZE`,
+`CREATE/ALTER/DROP`, `SET TABLESPACE`, `psql --file`, `pg_dump`, `pg_restore`)
+plus the container probes above. `tests/test_node27_write_roles.py` re-runs the
+scan and fails if a lane grows a requirement this table does not cover.
+
+| Unit (systemd) | Entrypoint | Measured DB requirement | Role |
+|---|---|---|---|
+| `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
+| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
+| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:414,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:841` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression-replay.service` | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** | **`nhms` (documented exception)** |
+| archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
+
+Not required by any recurring lane, therefore not granted: schema `CREATE`,
+`TRUNCATE`, TimescaleDB policy management (`add_compression_policy` /
+`add_retention_policy` — compression and retention are explicit script calls,
+not background policies), `pg_execute_server_program`, `CREATEDB`, `CREATEROLE`,
+`REPLICATION`, `BYPASSRLS`.
+
+**Superuser-gated *reads* (audited separately — they fail SILENTLY).** A write a
+non-owner is not entitled to raises an error; a read does not. `pg_stat_activity`
+and `pg_locks` return a row set filtered to the caller's own sessions unless the
+role holds `pg_read_all_stats`, so a "no concurrent writer" or "no conflicting
+lock" guard running as `nhms_ingest_rw` would go permanently green instead of
+failing. Schema `pg_toast` likewise has no `USAGE` granted to `PUBLIC`.
+
+Scanned the converted lanes for `pg_stat_activity`, `pg_locks`, `pg_toast.`,
+`pg_stat_file`, `pg_ls_dir`, `pg_read_file`, `pg_read_binary_file`,
+`pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`: **no executed
+hit** — every match is a `#` comment (the #1714 `fallback_application_name`
+attribution notes). The live callers all sit outside the conversion: the replay
+lane's quiescence checks
+(`node27_timeseries_compression_supervisor.py:1281,1311`,
+`node27_timeseries_compression_capture.py:338-340`) keep the superuser;
+`node27_cold_governance_collection.py:246`, `node27_external_contract_snapshot.py:115`
+and `node27_river_identity_backfill.py:289` belong to lanes with no converted
+template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
+TOAST members for classification but never names them in SQL — `_lock_sql` is fed
+by `lockable_heaps()` (`relkind == "r"`, TOAST heaps are `'t'`) and `_move_sql` by
+`origin_shell_members()`; the TOAST relocation rides the
+`decompress_chunk`/`compress_chunk` rewrite. The one direct
+`ALTER TABLE pg_toast.… SET TABLESPACE`
+(`compressed_chunk_cold_probe/scenarios.py:80-83`) runs against the probe's own
+disposable cluster as that cluster's superuser. Therefore **no
+`GRANT USAGE ON SCHEMA pg_toast` and no `GRANT pg_read_all_stats` is granted.**
+`test_converted_lanes_do_not_read_superuser_gated_catalogs` fails the suite if a
+converted lane later grows one of these reads.
+
+The one-time `CREATE TABLESPACE nhms_cold` (#1894) stays superuser by nature and
+lives in the install/probe paths (`node27_cold_tablespace_engine.py:201`,
+`compressed_chunk_cold_probe/shell.py:319`), not in the recurring unit.
+
+### 9.3 Provision (staged: additive first, ownership second)
+
+Both phases run from the deployed checkout on node-27,
+`docker exec -i nhms-db psql -U nhms -d nhms` under the hood. The script is
+**idempotent** and must be re-run after every migration (§9.6).
+
+```bash
+# Phase 1 — ADDITIVE. Safe on the live primary with every unit still running as
+# `nhms`: creates the roles, DML grants, sequence USAGE, default privileges and
+# the conditional cold-tablespace grant, then runs the negative
+# COPY ... FROM PROGRAM probes and a NON-strict audit. Executes no
+# `ALTER ... OWNER TO`, takes no relation lock.
+export NODE27_INGEST_RW_PASSWORD='…'      # from the operator's password store
+export NODE27_DOWNLOAD_RW_PASSWORD='…'    # unset = leave the password unchanged
+bash scripts/node27_provision_write_roles.sh --roles-only
+unset NODE27_INGEST_RW_PASSWORD NODE27_DOWNLOAD_RW_PASSWORD
+```
+
+Expected: `NOTICE: copy-from-program refused for …` twice, all five privilege
+flags `f` for both roles, and an owner-drift list that still shows `nhms`
+everywhere — that list is *expected* in this phase, and the run exits 0.
+
+Password handling: the two values live only in the operator's shell environment
+and are forwarded to `psql` **by name** (`docker exec -e VAR`), so they never
+appear in the repo, in an argv, or in `docker inspect`. `ALTER ROLE … PASSWORD`
+is logged verbatim by the server whenever `log_statement` is `ddl`/`mod`/`all`,
+so the SQL wraps both ALTERs in `SET log_statement = 'none'` /
+`SET log_min_duration_statement = -1` and restores them immediately after
+(proved against a container started with `-c log_statement=ddl`; see the
+transcript appendix). Residual: if the `ALTER ROLE` itself **fails**,
+`log_min_error_statement` still writes the statement to the log — treat a failed
+password set as a credential to rotate.
+
+```bash
+# Phase 2 — OWNERSHIP TRANSFER. Timer-stopped window (§9.4).
+bash scripts/node27_provision_write_roles.sh
+```
+
+Phase 2 additionally captures `relacl` and `nhms_display_ro`'s effective
+`SELECT` set before and after, runs the transfer, diffs both, and ends with the
+**strict** audit.
+
+How the transfer treats the display API — it is public, cannot be stopped, and
+holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
+`AccessExclusiveLock` down the chunk tree:
+
+- one autocommitted `ALTER … OWNER TO` statement **per relation** (psql
+  `\gexec`), never one `DO` block and never one transaction, so a display query
+  stalls for at most one relation's `lock_timeout`;
+- `SET lock_timeout = '5s'`, and a relation that times out is skipped, not
+  waited on;
+- up to 5 passes, each re-selecting only what is still owned by somebody else;
+- tables/partitioned tables before sequences (an `OWNED BY` sequence follows its
+  table; a standalone `ALTER SEQUENCE … OWNER TO` on one is refused), then views
+  and materialized views;
+- an absent schema (`flood` is provisioned outside `db/`) and an absent
+  `nhms_cold` tablespace are tolerated, not fatal.
+
+**Exhaustion is a partial, audit-visible transfer, never a rollback.** The audit
+lists the relations still owned by `nhms`, the runner exits 3, and the env
+cutover does not proceed. That state is safe: every unit still connects as the
+superuser `nhms`, for which the owner check short-circuits, so tiering and
+ANALYZE keep working on relations `nhms` no longer owns. Re-run the script.
+
+Exit codes: `0` clean · `2` usage/environment · `3` incomplete transfer or
+refused audit · `4` `nhms_display_ro`'s SELECT set changed. Anything non-zero
+means **do not cut the env files over**.
+
+Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
+(moves the database, the schemas and extension-adjacent objects) and
+`GRANT nhms TO <writer>` (hands the superuser straight back through membership).
+
+### 9.4 Cutover (post-merge, one session)
+
+1. Stop `nhms-node27-timeseries-compression.timer` and the autopipe timer;
+   confirm no in-flight tick or `compress_chunk` in `pg_stat_activity`. The
+   display API keeps running.
+2. Run phase 2 above. Check: owner-drift list empty, display SELECT-set diff
+   empty, `## audit: OK -- no owner drift`.
+3. Restart the timers.
+4. Per-component run under the new roles from a detached worktree with scratch
+   env files, **before** touching the live env files: autopipe dry tick (both
+   stats-guard legs must report `ok`, not `warning`), compression `--enforce` on
+   one eligible chunk (or dry-run if none is eligible), retention dry-run,
+   cold-residency dry-run, download dry-run as the no-DB control.
+5. Cut the env files over in this order, backing each up as `*.env.pre-1774`
+   first, restarting the unit and receipting it (`journalctl` + the unit's own
+   receipt + `pg_stat_activity.usename`):
+   `node27-download.env` → `node27-ingest.env` →
+   `node27-timeseries-compression.env` + `node27-cold-residency.env` →
+   `node27-timeseries-retention.env`.
+6. Redacted `grep` of `/home/nwm/NWM/infra/env/*.env`: no `nhms:` DSN user and
+   no `PGUSER=nhms` outside `node27-timeseries-compression-replay.env` and
+   `node27-archive-rebuild-drill.env`.
+
+### 9.5 Rollback
+
+Restore the unit's `*.env.pre-1774` file and restart it. Ownership stays with
+`nhms_ingest_rw` and that is fine: `nhms` is a superuser and is unaffected by
+not owning the relations. There is no ownership rollback step, and none is
+needed.
+
+### 9.6 Re-run after every migration — mandatory
+
+A migration runs as `nhms` and creates its tables owned by `nhms`. Until the
+provision script is re-run:
+
+- ingest can still read and write them (default privileges), so nothing breaks
+  visibly;
+- but their `ANALYZE` is skipped with a warning, i.e. the #1643/#1468 guard
+  silently stops covering those tables;
+- and the audit reports the owner drift.
+
+So: **after every `migration_apply` on node-27, run
+`bash scripts/node27_provision_write_roles.sh` and confirm the audit is clean.**
+The full-mode audit exits 3 on drift precisely so this cannot be forgotten
+quietly.
 
 ## Rollback (unit-level, not data-level)
 
