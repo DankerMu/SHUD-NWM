@@ -582,6 +582,12 @@ SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_cli_publish_qdown.py",
     "tests/test_scheduler_backfill.py",
     "tests/test_scheduler_backfill_predecessor.py",
+    # #1943: the journal-root authority suite top-level-imports
+    # `ProductionScheduler`/`ProductionSchedulerConfig` and pins the typed
+    # `FILE_JOURNAL_INVALID_ROOT` refusal `from_env` now raises before any
+    # repository read. It measures 17 tests in 0.36s, so it joins the rule
+    # rather than riding an exclusion token.
+    "tests/test_scheduler_journal_root_authority.py",
     "tests/test_scheduler_timing.py",
     "tests/test_source_scoped_dispatch.py",
 )
@@ -592,6 +598,14 @@ ORCHESTRATOR_CLI_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_demote_cli_security.py",
     "tests/test_retention_frontier.py",
     "tests/test_scheduler_backfill.py",
+    # #1943/#1944: both new journal suites top-level-import `cli` and drive it
+    # through BOTH entrypoints (`_click_main`/`_argparse_main`) — the root
+    # authority suite for the refusal's operator-facing exit, the census suite
+    # for the read-only `census_job_id_scope` command registration. A register
+    # order or exit-code change in cli.py must run them; measured together they
+    # are 50 tests in 1.50s.
+    "tests/test_scheduler_journal_root_authority.py",
+    "tests/test_scheduler_journal_scope_census.py",
 )
 
 # #1748 recovery-CLI helper extraction: the shared
@@ -618,6 +632,11 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_demote_projection_faults.py",
     "tests/test_orchestrator_demote_reclaim_lifecycle.py",
     "tests/test_scheduler_backfill.py",
+    # #1944: the job-id scope census reads the journal tree directly and mints
+    # its divergent rows through the PUBLIC `reserve_pipeline_job` writer, so a
+    # change to the repository's on-disk layout or writer path silently changes
+    # what the census observes. 33 tests in 1.21s, hence a rule not an exclusion.
+    "tests/test_scheduler_journal_scope_census.py",
 )
 
 FILE_JOURNAL_READ_STATE_PATH_PATTERNS: tuple[str, ...] = (
@@ -816,6 +835,11 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/provider_mode_helpers.py",
         (
             "tests/test_production_scheduler.py",
+            # #1943: the journal-root authority suite builds its symlinked and
+            # mode-sensitive journal roots through
+            # `make_directory_with_explicit_mode`, so a helper change moves what
+            # its refusal cases actually construct.
+            "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_file_provider_refresh.py",
             "tests/test_scheduler_state_index_repair.py",
             "tests/test_state_manager.py",
@@ -1094,8 +1118,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#1943), not by editing the shared constant:
+        # FILE_JOURNAL_READ_STATE_TESTS also serves packages/common/safe_fs.py
+        # and the other journal patterns, whose selection must not move. The
+        # root-authority suite top-level-imports
+        # `_db_free_orchestration_repository_from_config` from scheduler_core.py
+        # — the factory that must now refuse a symlinked journal root — so this
+        # stop rule is where its importer gap closes.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[10],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_scheduler_journal_root_authority.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1336,6 +1367,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_file_orchestration_migration.py",
             "tests/test_scheduler_journal_retention_planning.py",
             "tests/test_scheduler_journal_retention_archive.py",
+            # #1943/#1944: the journal-root authority and job-id scope census
+            # suites top-level-import `services.orchestrator` itself plus the
+            # two new owner modules (journal_root_authority.py,
+            # journal_scope_census.py) and operator_reserved_demotion.py /
+            # scheduler_config/db_free.py — modules no stop rule owns, so the
+            # directory rule is where those importer gaps close. Both are
+            # orchestrator-journal suites; measured together, 50 tests in 1.50s.
+            "tests/test_scheduler_journal_root_authority.py",
+            "tests/test_scheduler_journal_scope_census.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
             "tests/test_pipeline_persistence.py",
