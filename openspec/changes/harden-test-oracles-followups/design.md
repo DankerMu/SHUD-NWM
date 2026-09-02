@@ -219,7 +219,10 @@ Fix (test-only, minimal, oracles intact):
   budgets, and the issue's second comment shows the same command flipping
   red/green without any change), and the mechanism it pointed at is the
   latency the widened budget absorbs; a red in the full-suite run at HEAD
-  would reopen it.
+  would reopen it. Result (tasks 0.8): both victims green in
+  `1 failed, 15771 passed, 217 skipped`; the single red is the open #1356
+  submit-once race in `test_file_journal_post_window_concurrent_public_cycles_submit_one_retry[gfs]`,
+  a submit-count assertion the poll-deadline budget cannot influence.
 - Declared limits, recorded (not fixed here): (i)
   `test_run_shud_main_solve_and_recovery_share_one_timeout_budget` (`:5888`)
   is the same failure class with no test-only fix — raising its budget breaks
