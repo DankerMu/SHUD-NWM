@@ -18,6 +18,7 @@
     "scripts/node27_timeseries_retention.py",
     "scripts/node27_frontier_stall_alert.py",
     "tests/test_node27_connection_attribution.py",
+    "tests/test_api_errors_logging.py",
     "tests/test_node27_frontier_stall_alert.py",
     "tests/test_node27_timeseries_retention.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",

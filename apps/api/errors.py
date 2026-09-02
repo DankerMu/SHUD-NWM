@@ -191,18 +191,33 @@ def _render_details(safe_details: Any) -> str:
     Length is measured on the UTF-8 encoding (what actually lands in the file);
     the cut is decoded with `errors="ignore"` so it always falls on a character
     boundary, and the dropped byte count is stated rather than implied.
+
+    The encode is lenient and its result is decoded back even when nothing is
+    cut: a LONE SURROGATE (what `surrogateescape` leaves behind for an
+    undecodable byte, e.g. `os.fsdecode` of such a filename) has no UTF-8
+    encoding, so a strict encode raised here and collapsed the whole line to
+    `<redaction-failed:UnicodeEncodeError>`: request id, code, status and path
+    survived, every readable detail did not. `redact_audit_payload` normalises
+    str LEAVES on the way in, so the door is a non-str value it returns
+    unchanged (`packages/common/auth_policy.py:417`), rendered here through
+    `str()`/`repr()`. Returning the re-decoded text also keeps what the handler
+    must write encodable: on a STRICT stream (a `FileHandler`, or any handler
+    not riding `sys.stderr`'s `backslashreplace`) returning the original moves
+    the same failure into `StreamHandler.emit`, where `logging` swallows it and
+    the line is lost silently. The round trip is the identity for every
+    encodable value.
     """
     text = str(safe_details).translate(_LINE_BREAK_TRANSLATION)
-    encoded = text.encode("utf-8")
+    encoded = text.encode("utf-8", "replace")
     if len(encoded) <= _DETAILS_RENDER_BUDGET_BYTES:
-        return text
+        return encoded.decode("utf-8")
     kept = encoded[:_DETAILS_RENDER_BUDGET_BYTES].decode("utf-8", "ignore")
     dropped = len(encoded) - len(kept.encode("utf-8"))
     return kept + _DETAILS_TRUNCATION_MARKER.format(dropped=dropped)
 
 
 def _render_path(raw_path: Any) -> str:
-    """The `path=` segment: exactly one whitespace-free, control-byte-free token.
+    """The `path=` segment: one whitespace-free, control-byte-free, bounded token.
 
     `request.url.path` is the DECODED path, so on any matched path-parameter
     route the client owns a segment of it: `/api/v1/met/stations/STA%20code=OK
@@ -213,20 +228,42 @@ def _render_path(raw_path: Any) -> str:
     whole unrotated log, and `%1B[2K` erases the terminal line it is printed on.
 
     `quote(..., safe="/")` re-encodes every byte outside the unreserved set, so
-    a path built from `[A-Za-z0-9._~-]` and `/` -- which is every path parameter
-    this app declares (`station_id`, `model_id`, `run_id`, `layer_id`, ...) --
-    is byte-identical to its request form and the documented line shape does not
-    move. Sub-delims such as `:` and `@` are legal in a path and WOULD be
-    encoded; that is accepted, because keeping them safe means keeping `=` safe
-    is the next argument, and `=` is exactly what must not survive. `%r` was
-    rejected for the same "don't move the line shape" reason: it would quote
-    every line. TAB/CR/LF never reach here at all -- `urlsplit` strips them from
-    the URL before the app sees it -- so they are covered by absence, not
-    encoding.
+    a path built from `[A-Za-z0-9._~-]` and `/` is byte-identical to its request
+    form and the documented line shape does not move. That covers every
+    IDENTIFIER-shaped path parameter this app declares (`station_id`,
+    `model_id`, `run_id`, `layer_id`, ...), but NOT every declared parameter:
+    the DATETIME-shaped `valid_time` on the tile routes
+    (`apps/api/routes/hydro_display.py:289,296,347,353`) carries a `:`, which is
+    a sub-delim and is rendered `%3A` -- the runbook says to grep the encoded
+    form. Encoding sub-delims such as `:` and `@` is accepted, because keeping
+    them safe means keeping `=` safe is the next argument, and `=` is exactly
+    what must not survive. `%r` was rejected for the same "don't move the line
+    shape" reason: it would quote every line. TAB/CR/LF never reach here at all
+    -- `urlsplit` strips them from the URL before the app sees it -- so they are
+    covered by absence, not encoding.
+
+    The encoded form is then held to `_DETAILS_RENDER_BUDGET_BYTES`, the same
+    budget as `details=`. `request.url.path` is bounded only by the server's
+    request-line limit, and encoding EXPANDS it: every byte of a 40 KiB `%FF`
+    path decodes to U+FFFD and re-encodes to the nine characters `%EF%BF%BD`,
+    which wrote a measured 123 KB single line. The marker is `_DETAILS_TRUNCATION_MARKER`
+    rendered through the same `quote`, so it states the same dropped-byte
+    contract and cannot carry the space that would split this field into two
+    tokens. `quote` emits ASCII only, so character count IS byte count here;
+    the cut is walked back so it never lands inside a `%XX` triple.
     """
     if not raw_path:
         return "<unknown>"
-    return quote(str(raw_path), safe="/", errors="replace")
+    encoded = quote(str(raw_path), safe="/", errors="replace")
+    if len(encoded) <= _DETAILS_RENDER_BUDGET_BYTES:
+        return encoded
+    kept = encoded[:_DETAILS_RENDER_BUDGET_BYTES]
+    if kept.endswith("%"):
+        kept = kept[:-1]
+    elif kept[-2:-1] == "%":
+        kept = kept[:-2]
+    dropped = len(encoded) - len(kept)
+    return kept + quote(_DETAILS_TRUNCATION_MARKER.format(dropped=dropped), safe="")
 
 
 def _log_error_response(
@@ -272,7 +309,12 @@ def error_response(
     message: str,
     details: Any | None = None,
 ) -> JSONResponse:
-    request_id = getattr(request.state, "request_id", None) or str(uuid4())
+    # Through the shared rule, not straight off `request.state`: this is the
+    # fourth writer of the id (after the middleware, the pre-body auth path and
+    # any app-outer middleware), and reading the state value unchecked here
+    # meant the "id is always sanitised" property held only as long as an
+    # inventory of the other three stayed complete.
+    request_id = resolve_request_id(request)
     _log_error_response(
         request,
         request_id=request_id,

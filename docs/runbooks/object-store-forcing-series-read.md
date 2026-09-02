@@ -154,6 +154,10 @@ ssh -p 32099 nwm@210.77.77.27 \
 当前 8192 B），超出部分截断并以 `…[truncated N bytes]` 结尾。这是为了防止一次校验失败的大 body
 （每个非法元素一条 `rejected_value` 记录）把几 MB 写进未做 rotate 的 unit 日志。**响应体不受影响**，
 客户端拿到的仍是完整 `details`；也就是说日志里看到截断标记时，完整清单要去复现请求或看响应体。
+`path=` 段共用同一个字节预算：路径长度只受服务器请求行上限约束，而 percent-encoding 还会放大它
+（一条 40 KiB 全 `%FF` 的路径解码成 U+FFFD 后编码成 `%EF%BF%BD`，实测单行 123 KB），所以超预算时
+`path=` 也会截断，标记是同一个 marker 的 percent 形式 `%E2%80%A6%5Btruncated%20N%20bytes%5D`
+（不含空格，`path=` 仍是单个 token）。因此单行长度上限约为 2 × 8192 B 加上两个 marker 与前缀。
 
 **请求 ID 只在合规形状下回显**：入站 `X-Request-ID` 仅当整体匹配 `[A-Za-z0-9._-]{1,64}` 时才被沿用，
 否则服务端另发 UUID（响应头、审计记录、这行日志三者始终一致）。所以行里 `request_id=` 后面不可能被

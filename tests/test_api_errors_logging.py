@@ -33,6 +33,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,6 +46,7 @@ from pydantic import BaseModel
 
 from apps.api import errors, main
 from apps.api.errors import ApiError, error_response, register_error_handlers
+from apps.api.routes.hydro_display import get_hydro_display_session
 from packages.common.object_store_forcing import (
     CONCURRENT_REPLACE_REASON_PREFIX,
     _station_csv_failure_reason,
@@ -59,9 +61,24 @@ MALFORMED_DETAILS: dict[str, Any] = {
 }
 
 
-def _request(path: str = "/api/v1/met/stations/STA-0001/series") -> Any:
-    """The minimal Request surface `error_response()` actually touches."""
-    return SimpleNamespace(state=SimpleNamespace(request_id=REQUEST_ID), url=SimpleNamespace(path=path))
+def _request(
+    path: str = "/api/v1/met/stations/STA-0001/series",
+    *,
+    state_request_id: str | None = REQUEST_ID,
+    header_request_id: str | None = None,
+) -> Any:
+    """The minimal Request surface `error_response()` actually touches.
+
+    `headers` is part of that surface now that `error_response()` resolves the
+    id through `resolve_request_id`, which falls back to the inbound header
+    when the state value is not of the accepted shape. A real `Request` always
+    carries headers, so this is not a widening of the fake.
+    """
+    return SimpleNamespace(
+        state=SimpleNamespace(request_id=state_request_id),
+        url=SimpleNamespace(path=path),
+        headers={"X-Request-ID": header_request_id} if header_request_id is not None else {},
+    )
 
 
 @pytest.fixture
@@ -316,6 +333,7 @@ class _Payload(BaseModel):
 
 
 _PARAM_ROUTE = "/api/v1/met/stations/{station_id}/series"
+_TILE_ROUTE = "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf"
 _STR_DETAILS = "line one\ncode=OK status=200"
 
 
@@ -342,6 +360,14 @@ def _probe_app() -> FastAPI:
     @app.get(_PARAM_ROUTE)
     def _raise_for_station(station_id: str) -> None:
         raise ApiError(status_code=404, code="STATION_NOT_FOUND", message="Unknown station.", details=None)
+
+    # The DATETIME-shaped path parameter the tile routes declare
+    # (apps/api/routes/hydro_display.py:289,296,347,353). Declared with the same
+    # annotation on the same template so the `%3A` pin below is about a shape
+    # this app really serves, not one typed into a test.
+    @app.get(_TILE_ROUTE)
+    def _raise_for_tile(run_id: str, variable: str, valid_time: datetime, z: int, x: int, y: int) -> None:
+        raise ApiError(status_code=404, code="TILE_NOT_FOUND", message="Unknown tile.", details=None)
 
     # A NON-mapping `details`: `_render_details` calls `str()`, not `repr()`, so
     # nothing quotes this value on its way into the line.
@@ -606,8 +632,9 @@ def test_oversized_details_are_truncated_to_the_render_budget(
     # and path, the tail is the marker.
     overhead = len(prefix.encode("utf-8")) + len((separator + marker + tail).encode("utf-8"))
     # 256 is this route's short synthetic path, not a general ceiling: the real
-    # ceiling is budget + rendered path length, and the path is bounded by the
-    # server's request-line limit, not by `_DETAILS_RENDER_BUDGET_BYTES`.
+    # ceiling is budget + rendered path length, and `path=` carries the SAME
+    # budget (see `test_an_oversized_path_is_truncated_to_the_render_budget`),
+    # so the whole line is bounded by twice the budget plus two markers.
     assert overhead < 256, prefix
     assert len(message.encode("utf-8")) <= errors._DETAILS_RENDER_BUDGET_BYTES + overhead
     # Vacuity guard: without the budget this line would have been ~100x longer.
@@ -803,13 +830,65 @@ def _logged_path(message: str) -> str:
     return match.group(1)
 
 
-def _assert_one_clean_physical_line(message: str) -> None:
-    """One grep-able line: no C0/C1 control byte, no DEL, no Unicode line break."""
-    assert message.count("\n") == 0, repr(message)
-    assert message.count("\r") == 0, repr(message)
+def _assert_no_control_byte_anywhere(message: str) -> None:
+    """The strict rule applied to the WHOLE record, details segment included.
+
+    Only sound where `details` cannot carry a raw control byte -- `None`, or a
+    mapping, whose values render through `repr`. The path-forgery scenario
+    states this about the record, so it is asserted at those call sites instead
+    of being folded into `_assert_one_clean_physical_line`, which must stay
+    true for the bare-string `details` arm as well.
+    """
     for char in message:
         assert not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F), f"control char {char!r} in {message!r}"
         assert char not in {"\u2028", "\u2029"}, f"unicode line break {char!r} in {message!r}"
+
+
+def _assert_one_of_each_field(message: str) -> None:
+    """Exactly one `request_id=`, `code=`, `status=` and `path=` in the FIELD region.
+
+    Counted before ` details=`, not over the whole line: the `details=` segment
+    echoes client input verbatim by design (the recorded redaction residual),
+    so a look-alike `code=OK` there is expected and is exactly why the runbook
+    tells the operator to parse by position. A whole-line count would either
+    fail on that or, worse, quietly pin the absence of an echo that a future
+    route is free to add.
+    """
+    fields, separator, _rendered = message.partition(" details=")
+    assert separator, f"the line has no details= field: {message!r}"
+    for field in ("request_id=", "code=", "status=", "path="):
+        assert fields.count(field) == 1, f"{field} is not unique in {fields!r}"
+
+
+# The seven characters `str.splitlines()` splits on, written out here rather
+# than imported from `errors`: this is the oracle, not a mirror of the mapping
+# under test.
+_LINE_BREAKING_CHARS = frozenset({"\n", "\r", "\x0b", "\x0c", "\x85", "\u2028", "\u2029"})
+
+
+def _assert_one_clean_physical_line(message: str) -> None:
+    """One grep-able record, held to two different rules by region.
+
+    The FIELD region -- everything before ` details=`, i.e. what the runbook
+    tells the operator to parse positionally -- carries no C0/C1 control byte,
+    no DEL and no Unicode line break: `request_id=` is shape-checked and
+    `path=` is percent-encoded, so nothing there is client-controlled.
+
+    The DETAILS region is held only to "does not break the line", because that
+    is all `_render_details` promises: it escapes the seven line-breaking
+    characters and nothing else, so a non-mapping `details` carrying ESC or TAB
+    would reach the line verbatim. No arm produces one today (a mapping renders
+    through `repr`, which escapes them), so the old whole-line rule passed only
+    because nothing exercised it -- a helper that promises more than the code
+    does is a false receipt, not a stricter test.
+    """
+    fields, separator, rendered = message.partition(" details=")
+    assert separator, f"the line has no details= field: {message!r}"
+    for char in fields:
+        assert not (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F), f"control char {char!r} in {fields!r}"
+        assert char not in {"\u2028", "\u2029"}, f"unicode line break {char!r} in {fields!r}"
+    for char in rendered:
+        assert char not in _LINE_BREAKING_CHARS, f"line break {char!r} in details={rendered!r}"
 
 
 def test_a_forged_path_segment_cannot_inject_line_fields(
@@ -825,25 +904,33 @@ def test_a_forged_path_segment_cannot_inject_line_fields(
     # The two bytes that make a forged field parse as a field are gone.
     assert "%20" in _logged_path(message)
     assert "%3D" in _logged_path(message)
-    # The line still carries exactly one of each field an operator greps on.
-    assert message.count("code=") == 1
-    assert message.count("request_id=") == 1
-    assert message.count("status=") == 1
+    # The field region still carries exactly one of each field an operator greps on.
+    _assert_one_of_each_field(message)
     assert f"request_id={response.headers['X-Request-ID']}" in message
     assert "status=404" in message
     _assert_one_clean_physical_line(message)
+    # `details=None` here, so the whole record is held to the strict rule.
+    _assert_no_control_byte_anywhere(message)
 
 
 def test_a_clean_path_segment_is_rendered_byte_identically(
     api_error_logs: pytest.LogCaptureFixture,
 ) -> None:
-    """The encoding must be invisible on every real path, or the runbook shape moves."""
+    """The encoding must be invisible on an identifier-shaped path, or the runbook shape moves.
+
+    The segment carries every unreserved character class RFC 3986 names --
+    ALPHA, DIGIT and all four of `-`, `.`, `_`, `~` -- because those are
+    precisely the bytes `quote(safe="/")` leaves alone, and "a clean path is
+    byte-identical" is a claim about that set, not about the one identifier
+    shape this app happens to use most.
+    """
     client = TestClient(_probe_app(), raise_server_exceptions=False)
 
-    client.get("/api/v1/met/stations/STA-0001/series")
+    client.get("/api/v1/met/stations/STA-0001.v2_beta~rc/series")
 
     message = api_error_logs.records[0].getMessage()
-    assert _logged_path(message) == "/api/v1/met/stations/STA-0001/series"
+    assert _logged_path(message) == "/api/v1/met/stations/STA-0001.v2_beta~rc/series"
+    assert "%" not in _logged_path(message)
 
 
 @pytest.mark.parametrize(
@@ -868,9 +955,172 @@ def test_control_bytes_in_the_path_are_percent_encoded(
     message = api_error_logs.records[0].getMessage()
     assert _logged_path(message) == expected_path
     _assert_one_clean_physical_line(message)
-    assert message.count("code=") == 1
-    assert message.count("request_id=") == 1
-    assert message.count("status=") == 1
+    _assert_no_control_byte_anywhere(message)
+    _assert_one_of_each_field(message)
+
+
+def test_a_datetime_path_parameter_renders_its_colon_percent_encoded(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """Not every declared path parameter is byte-identical, and the docs say so.
+
+    `valid_time: datetime` on the tile routes
+    (apps/api/routes/hydro_display.py:289,296,347,353) puts a `:` -- an RFC 3986
+    sub-delim, outside the unreserved set -- into the decoded path, so a real
+    production tile request renders `%3A`. Pinned because the runbook tells the
+    operator to grep the ENCODED form: a claim that "every declared parameter
+    survives unchanged" would send them looking for a line that is not there.
+    """
+    client = TestClient(_probe_app(), raise_server_exceptions=False)
+
+    response = client.get("/api/v1/tiles/hydro/run-1/discharge/2026-09-02T00%3A00%3A00Z/3/1/2.pbf")
+
+    # 404, not 422: the segment really did parse as the declared `datetime`.
+    assert response.status_code == 404
+    message = api_error_logs.records[0].getMessage()
+    assert _logged_path(message) == "/api/v1/tiles/hydro/run-1/discharge/2026-09-02T00%3A00%3A00Z/3/1/2.pbf"
+    assert "code=TILE_NOT_FOUND" in message
+    assert "00:00:00" not in message
+    _assert_one_of_each_field(message)
+
+
+def test_an_invalid_utf8_byte_in_the_path_is_replaced_not_raised(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """`%FF` is not valid UTF-8 in any position.
+
+    Starlette decodes it to U+FFFD before the app sees the path, and
+    `quote(..., errors="replace")` re-encodes that to `%EF%BF%BD`. The failure
+    mode this pins is invisible rather than ugly: an exception raised inside
+    `_render_path` is swallowed by `_log_error_response`, so the whole line --
+    not just the path -- would silently disappear for these requests.
+    """
+    client = TestClient(_probe_app(), raise_server_exceptions=False)
+
+    client.get("/api/v1/met/stations/x%FFy/series")
+
+    assert len(api_error_logs.records) == 1
+    message = api_error_logs.records[0].getMessage()
+    assert _logged_path(message) == "/api/v1/met/stations/x%EF%BF%BDy/series"
+    assert "redaction-failed" not in message
+    _assert_one_clean_physical_line(message)
+    _assert_no_control_byte_anywhere(message)
+    _assert_one_of_each_field(message)
+
+
+def test_a_real_route_echoing_its_path_parameter_keeps_the_field_region_unique(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """The production shape the positional-parse rule exists for.
+
+    `list_layer_valid_times` runs `validate_identifier`, which raises
+    `details={field_name: value}` (services/tiles/mvt.py:113-120), so ONE forged
+    segment lands in both regions of the line: percent-encoded in `path=` and
+    verbatim inside `details=`. A whole-line `count("code=") == 1` is therefore
+    not merely a weak assertion, it is false on a real route -- the guarantee
+    is per-region. The session dependency is overridden because the identifier
+    check raises before the session is touched; no database is involved.
+    """
+    app = main.create_app()
+    app.dependency_overrides[get_hydro_display_session] = lambda: object()
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get(f"/api/v1/layers/{_FORGED_PATH_SEGMENT}/valid-times")
+    finally:
+        app.dependency_overrides.pop(get_hydro_display_session, None)
+
+    assert response.status_code == 422
+    message = api_error_logs.records[0].getMessage()
+    assert _logged_path(message) == (
+        "/api/v1/layers/STA%20code%3DOK%20status%3D200%20request_id%3Ddeadbeef%20/valid-times"
+    )
+    _assert_one_of_each_field(message)
+    _assert_one_clean_physical_line(message)
+    # A mapping `details` renders through `repr`, so a `%00` in the segment
+    # could not reach the line raw either: the strict rule holds record-wide.
+    _assert_no_control_byte_anywhere(message)
+    assert f"request_id={response.headers['X-Request-ID']}" in message
+    # Vacuity guard: the echo really is in the line. This is the recorded
+    # redaction residual -- `layer_id` is not a redacted key -- and it is why
+    # the field region, not the whole line, is what carries "one of each".
+    _fields, _separator, rendered = message.partition(" details=")
+    assert "code=OK status=200 request_id=deadbeef" in rendered
+
+
+# `…[truncated N bytes]` rendered through the same percent-encoding as the rest
+# of the field, derived from RFC 3986 and UTF-8 rather than from the code:
+# U+2026 is E2 80 A6, `[` is 0x5B, SP is 0x20, `]` is 0x5D. The marker must not
+# contain a raw space, or `path=` would stop being one token.
+_PATH_TRUNCATION_MARKER_RE = re.compile(r"%E2%80%A6%5Btruncated%20(\d+)%20bytes%5D$")
+
+
+@pytest.mark.parametrize(
+    ("segment", "encoded_segment_length"),
+    # `%FF` is undecodable, so each of the 13 653 bytes becomes U+FFFD, whose
+    # UTF-8 is three bytes and whose encoded form is nine characters -- a 3x
+    # expansion of a 40 KiB request line, which is how a single request wrote a
+    # measured 123 KB log line.
+    [("a" * 15360, 15360), ("%FF" * 13653, 13653 * 9)],
+    ids=["15KiB-clean", "40KiB-invalid-utf8-expands-9x-per-byte"],
+)
+def test_an_oversized_path_is_truncated_to_the_render_budget(
+    api_error_logs: pytest.LogCaptureFixture, segment: str, encoded_segment_length: int
+) -> None:
+    """`path=` is bounded by the same budget as `details=`.
+
+    `request.url.path` is bounded only by the server's request-line limit, and
+    percent-encoding EXPANDS it, so the `details=` budget alone did not bound
+    the line: one 40 KiB request wrote 123 KB into an unrotated unit log.
+    """
+    client = TestClient(_probe_app(), raise_server_exceptions=False)
+
+    client.get(f"/api/v1/met/stations/{segment}/series")
+
+    message = api_error_logs.records[0].getMessage()
+    path = _logged_path(message)
+    match = _PATH_TRUNCATION_MARKER_RE.search(path)
+    assert match, f"the rendered path was not truncated: ...{path[-80:]!r}"
+    kept = path[: match.start()]
+    dropped = int(match.group(1))
+
+    assert len(kept.encode("utf-8")) <= errors._DETAILS_RENDER_BUDGET_BYTES
+    assert dropped > 0
+    # The cut never lands inside a `%XX` triple, or the tail would be a
+    # syntactically broken escape an operator cannot decode back.
+    assert not kept.endswith("%")
+    assert kept[-2:-1] != "%"
+    # Kept + dropped accounts for the whole encoded path, computed from the URL
+    # grammar here rather than from `_render_path`.
+    assert len(kept) + dropped == len("/api/v1/met/stations/") + encoded_segment_length + len("/series")
+    assert kept.startswith("/api/v1/met/stations/")
+    # Still one token, still one line, still one of each field.
+    assert " " not in path
+    _assert_one_clean_physical_line(message)
+    _assert_no_control_byte_anywhere(message)
+    _assert_one_of_each_field(message)
+
+
+@pytest.mark.parametrize(
+    "prefix", ["/a/", "/ab/"], ids=["cut-lands-inside-a-triple", "cut-lands-right-after-a-percent"]
+)
+def test_the_path_cut_never_lands_inside_a_percent_escape(prefix: str) -> None:
+    """Both walk-back branches, driven by moving the boundary one byte.
+
+    U+FFFD encodes to the nine characters `%EF%BF%BD`, so a one-byte shift of
+    the prefix moves the budget boundary to a different position inside that
+    group: one prefix cuts after `%`, the other after `%B`. Neither tail can be
+    decoded back to a byte, and the runbook has the operator reading `path=`
+    in its encoded form -- a dangling escape is a value they cannot recover.
+    """
+    rendered = errors._render_path(prefix + "\ufffd" * 2000)
+
+    match = _PATH_TRUNCATION_MARKER_RE.search(rendered)
+    assert match, rendered[-40:]
+    kept = rendered[: match.start()]
+    assert not kept.endswith("%")
+    assert kept[-2:-1] != "%"
+    # At most two characters are given back to reach a whole escape.
+    assert errors._DETAILS_RENDER_BUDGET_BYTES - 2 <= len(kept) <= errors._DETAILS_RENDER_BUDGET_BYTES
 
 
 def test_encoded_newlines_and_tabs_never_reach_the_line(
@@ -888,6 +1138,7 @@ def test_encoded_newlines_and_tabs_never_reach_the_line(
     message = api_error_logs.records[0].getMessage()
     assert _logged_path(message) == "/api/v1/met/stations/abcd/series"
     _assert_one_clean_physical_line(message)
+    _assert_no_control_byte_anywhere(message)
 
 
 def test_a_newline_inside_a_details_value_stays_on_one_physical_line(
@@ -941,11 +1192,8 @@ def test_a_non_mapping_details_string_cannot_split_the_line(
     # the operator to parse by position and not to scan the whole line for
     # tokens. Before the escape that look-alike was on a physical line of its
     # own, with no `request_id=` to tie it to anything.
-    fields, separator, rendered = message.partition(" details=")
-    assert separator, message
-    assert fields.count("code=") == 1
-    assert fields.count("status=") == 1
-    assert fields.count("request_id=") == 1
+    _assert_one_of_each_field(message)
+    _fields, _separator, rendered = message.partition(" details=")
     assert "code=OK" in rendered
 
 
@@ -1002,6 +1250,118 @@ def test_the_escaping_happens_before_the_byte_budget_cut(
     assert marker, "the rendered details were not truncated"
     assert len(kept.encode("utf-8")) <= errors._DETAILS_RENDER_BUDGET_BYTES
     assert message.count("\n") == 0
+
+
+class _SurrogateEscapedText:
+    """A `details` leaf whose text carries a lone surrogate.
+
+    `"\\udcff"` is what `surrogateescape` leaves behind for a byte that is not
+    valid UTF-8 -- `os.fsdecode` of an undecodable filename produces exactly
+    this. A bare STRING cannot carry one this far: `redact_audit_payload`
+    normalises str leaves to U+FFFD on its way through. Anything that is not a
+    str/Mapping/list/tuple is returned unchanged
+    (packages/common/auth_policy.py:417) and `_render_details` renders it with
+    `str()`/`repr()`, which is the door the surrogate comes through.
+    """
+
+    def __str__(self) -> str:
+        return "bad\udcffbyte"
+
+    __repr__ = __str__
+
+
+def test_a_lone_surrogate_in_a_details_value_still_writes_the_line(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """A value with no UTF-8 encoding must cost the value, not the whole line.
+
+    The strict encode in `_render_details` raised on it, and
+    `_log_error_response` turns any redaction/render exception into
+    `<redaction-failed:UnicodeEncodeError>` -- so the request id, the code, the
+    status and the path survived but every readable detail was replaced by the
+    name of an exception class. The lenient encode has to reach the RETURNED
+    text too: on a STRICT stream (a `FileHandler`, or any handler not riding
+    `sys.stderr`'s `backslashreplace`) handing the surrogate back moves the
+    same failure into `StreamHandler.emit`, where `logging` swallows it and the
+    line vanishes from the file while every assertion on the record object
+    still passes. That is why the record is also written through a real,
+    strict UTF-8 stream here.
+
+    Driven through `_log_error_response`, not `error_response()`: a lone
+    surrogate anywhere in `details` also breaks the RESPONSE
+    (`JSONResponse.render` -> `json.dumps(...).encode("utf-8")`,
+    starlette/responses.py:201). That arm is pre-existing and separate; the log
+    is best effort and must record what it can regardless of it.
+    """
+    errors._log_error_response(
+        _request(),
+        request_id=REQUEST_ID,
+        status_code=500,
+        code="DATABASE_ERROR",
+        details={"parse_reason": _SurrogateEscapedText()},
+    )
+
+    message = api_error_logs.records[0].getMessage()
+    assert "redaction-failed" not in message
+    assert "\udcff" not in message
+    # `errors="replace"` on ENCODE is `?`, not U+FFFD; the neighbouring text
+    # is still readable, which is the point of keeping the line.
+    assert "'parse_reason': bad?byte" in message
+
+    buffer = io.BytesIO()
+    handler = logging.StreamHandler(io.TextIOWrapper(buffer, encoding="utf-8", write_through=True))
+    handler.emit(api_error_logs.records[0])
+    handler.flush()
+    assert b"bad?byte" in buffer.getvalue()
+
+
+def test_error_response_re_sanitises_a_planted_state_request_id(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """`error_response()` is the fourth writer of the id, and it read state raw.
+
+    It is called directly from `apps/api/main.py` on the pre-body denial path,
+    so "the id is always shape-checked" rested on an inventory of the other
+    three writers staying complete. Routed through `resolve_request_id`, a
+    forged `request.state.request_id` is re-checked here too: the header, the
+    body and the line all get the minted UUID instead.
+    """
+    response = error_response(
+        _request(state_request_id=_FORGED_REQUEST_ID),
+        status_code=500,
+        code="DATABASE_ERROR",
+        message="m",
+        details=None,
+    )
+
+    request_id = response.headers["X-Request-ID"]
+    _assert_minted_uuid(request_id)
+    assert json.loads(bytes(response.body))["request_id"] == request_id
+    message = api_error_logs.records[0].getMessage()
+    assert f"request_id={request_id}" in message
+    assert "path=/healthz" not in message
+    _assert_one_of_each_field(message)
+
+
+def test_error_response_falls_back_to_the_header_rule_when_state_is_forged(
+    api_error_logs: pytest.LogCaptureFixture,
+) -> None:
+    """Re-checking state must not mean ignoring a conforming inbound header.
+
+    Otherwise a client that sent a legitimate `X-Request-ID` would be answered
+    under a different id whenever some middleware planted a bad state value --
+    the correlation the header exists for, lost to the fix.
+    """
+    response = error_response(
+        _request(state_request_id=_FORGED_REQUEST_ID, header_request_id=REQUEST_ID),
+        status_code=500,
+        code="DATABASE_ERROR",
+        message="m",
+        details=None,
+    )
+
+    assert response.headers["X-Request-ID"] == REQUEST_ID
+    assert f"request_id={REQUEST_ID}" in api_error_logs.records[0].getMessage()
 
 
 def test_the_pre_body_guard_re_sanitises_a_planted_state_request_id(
