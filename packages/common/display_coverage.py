@@ -675,9 +675,12 @@ class DisplayCoverageRefreshRefused(RuntimeError):
 
 
 _REFUSAL_ADVICE = (
-    "The run's hydro.river_timeseries rows most likely still carry NULL surrogate keys "
-    "(pre-#1340); back-fill its identity (#1408) and refresh again, or pass force to "
-    "overwrite the stored coverage with zeros deliberately."
+    "The empty scan is the observation, not the diagnosis: most likely the run's "
+    "hydro.river_timeseries rows still carry NULL surrogate keys (pre-#1340), and the "
+    "identity back-fill (#1408) heals that on its own; the next refresh then succeeds "
+    "with real counts. Rows that were legitimately removed (retention, a re-parse) "
+    "produce exactly the same refusal. To materialize the empty scan deliberately, "
+    "rerun with --run-id <run> --force."
 )
 
 _EXISTING_SEGMENT_COUNT_SQL = """
@@ -809,8 +812,10 @@ def refresh_all_run_display_coverage(
     (#1446) is a run the upsert's overwrite guard skipped because its fresh scan
     was empty while its stored row is populated — distinct from ``failed`` (the
     refresh raised) and from ``skipped`` (the run was never a candidate). A
-    refusal never aborts the batch and leaves the run stale, so the next
-    ``--skip-fresh`` tick rescans it; ``force=True`` performs the zeroing.
+    refusal never aborts the batch and leaves the run's stored ``refreshed_at``
+    untouched, so a ``skip_fresh`` tick rescans it only for as long as it is
+    already stale (``refreshed_at < hydro_run.updated_at``) — a refused run
+    whose row is fresh is not rescanned. ``force=True`` performs the zeroing.
 
     ``connect`` (#1714) lets the calling component inject its own attributed
     ``psycopg2.connect`` so the per-run worker connections carry that

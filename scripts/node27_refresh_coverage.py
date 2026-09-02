@@ -19,22 +19,28 @@ legacy (pre-#1340) run whose ``hydro.river_timeseries`` rows still carry NULL
 keys computes as ``segment_count = 0``, ``river_sample_count = 0`` and NULL
 river valid-time bounds. Overwriting the correct text-era values with that
 result drops the run out of latest-product readiness and off the national tile,
-and there is no undo — so the upsert now **refuses** it: an existing populated
-row is never replaced by an empty scan unless ``--force`` is passed.
+and nothing restores the old values in place — so the upsert now **refuses**
+it: an existing populated row is never replaced by an empty scan unless
+``--force`` is passed. (A row already zeroed this way is not lost forever: once
+the #1408 identity back-fill lands, the next refresh recomputes real counts.)
 
 * ``--run-id <legacy run>`` exits **3** and prints one
   ``DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…``
   line on stderr. Nothing is written.
 * ``--all`` counts refusals under ``refused`` in the JSON report and still
   exits 0; the batch is never aborted.
-* ``--force`` performs the zeroing deliberately (an operator who really wants
-  the empty scan materialized).
+* ``--force`` performs the zeroing deliberately. The intended manual use is
+  ``--run-id <run> --force`` — one operator-reviewed run. It also composes with
+  ``--all``, which zeroes *every* refused run in the batch in one command; that
+  is an explicit operator opt-in and the cron loop never passes it.
 
-A refused run keeps its old ``refreshed_at``, so it stays stale and the cron's
-``--all --skip-fresh`` loop rescans it every tick until its keys are backfilled
-(#1408) or an operator forces it. That standing cost is why ``--skip-fresh``
-remains the right default for the cron loop, even though omitting it is no
-longer destructive.
+A refused run keeps its old ``refreshed_at``, so the cron's
+``--all --skip-fresh`` loop rescans it on every tick only while it is already
+stale (``refreshed_at < hydro_run.updated_at``); a refused run whose row is
+fresh is not rescanned. The rescans end when its keys are backfilled (#1408) or
+an operator forces it. ``--skip-fresh`` remains the right default for the cron
+loop — omitting it rescans every already-fresh run — even though omitting it is
+no longer destructive.
 
 Examples::
 
@@ -101,7 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Overwrite a populated coverage row even when the fresh scan finds no segments "
             "(#1446). Without it such a refresh is refused: --run-id exits 3 and --all counts "
-            "the run under 'refused'. The cron loop never passes this."
+            "the run under 'refused'. Intended manual use is '--run-id <run> --force' (one "
+            "reviewed run); it also composes with --all, which zeroes every refused run in "
+            "the batch at once. The cron loop never passes this."
         ),
     )
     parser.add_argument("--progress", action="store_true", help="With --all, emit per-run progress to stderr.")

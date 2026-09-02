@@ -8,6 +8,9 @@ here:
 * the parallel path really opens one connection per run and commits/closes each;
 * #1725 -- one run failing (its ``connect`` raises) leaves the others refreshed
   and is counted once under ``failed``, identically on BOTH worker paths;
+* #1725 -- the transaction hygiene of each arm: a run whose ``_refresh`` raises
+  rolls its own connection back and commits nothing, and a refused run commits
+  (closing its read-only transaction) without a rollback;
 * #1446 -- a run the overwrite guard refused is counted under ``refused``,
   never under ``failed``, and never aborts the batch.
 """
@@ -132,6 +135,66 @@ def test_one_failing_run_does_not_stop_the_other_runs(
 
 
 @pytest.mark.parametrize("workers", (1, 2))
+def test_a_run_failing_after_connect_rolls_its_own_connection_back(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+) -> None:
+    """#1725: the failure arm's transaction hygiene, on BOTH worker paths.
+
+    The sibling test injects at ``connect``, so the failing run never owns a
+    connection and the ``rollback`` arm is never reached -- deleting
+    ``conn.rollback()`` leaves it green. Here the failure lands at ``_refresh``,
+    *after* ``connect`` succeeded: the run holds an open transaction that only
+    the ``except`` arm can close. An uncommitted, un-rolled-back connection
+    handed back to the driver is how a batch leaks locks.
+
+    ``_refresh`` receives the run id, so the failure is pinned to a named run
+    (``run-b``) rather than to an attempt counter -- deterministic on both
+    dispatch paths -- and the connection that run was given is captured from the
+    same call, which is what makes "its OWN connection" assertable.
+    """
+    run_ids = ["run-a", "run-b", "run-c"]
+    connections: list[_Connection] = []
+    by_run: dict[str, _Connection] = {}
+    lock = threading.Lock()
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
+
+    def connect(_dsn: str) -> _Connection:
+        connection = _Connection()
+        with lock:
+            connections.append(connection)
+        return connection
+
+    def refresh(connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+        with lock:
+            by_run[run_id] = connection
+        if run_id == "run-b":
+            raise RuntimeError("refresh blew up after the connection was open")
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    result = display_coverage.refresh_all_run_display_coverage(
+        object(),
+        dsn="postgresql://example",
+        workers=workers,
+        connect=connect,
+    )
+
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 1, "refused": 0}
+    assert len(connections) == len(run_ids)
+    failed_connection = by_run["run-b"]
+    assert failed_connection.rollbacks == 1
+    assert failed_connection.commits == 0
+    assert failed_connection.closed
+    survivors = [by_run["run-a"], by_run["run-c"]]
+    assert all(connection.commits == 1 for connection in survivors)
+    assert all(connection.rollbacks == 0 for connection in survivors)
+    assert all(connection.closed for connection in survivors)
+
+
+@pytest.mark.parametrize("workers", (1, 2))
 def test_a_refused_run_is_counted_apart_from_failures_and_does_not_stop_the_batch(
     monkeypatch: pytest.MonkeyPatch,
     workers: int,
@@ -143,18 +206,28 @@ def test_a_refused_run_is_counted_apart_from_failures_and_does_not_stop_the_batc
     ``failed`` would make the cron log indistinguishable from a real breakage,
     and charging it to ``skipped`` would hide it behind the "run is not a
     candidate" outcome.
+
+    The refused run's own transaction is asserted too: the guard wrote nothing,
+    so its commit is a no-op that closes a read-only transaction -- but dropping
+    that commit leaves the transaction open until the driver reaps it, and
+    taking the rollback arm instead would misreport a refusal as a failed write.
     """
     run_ids = ["run-a", "run-legacy", "run-c"]
     connections: list[_Connection] = []
+    by_run: dict[str, _Connection] = {}
+    lock = threading.Lock()
 
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
 
     def connect(_dsn: str) -> _Connection:
         connection = _Connection()
-        connections.append(connection)
+        with lock:
+            connections.append(connection)
         return connection
 
-    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+    def refresh(connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+        with lock:
+            by_run[run_id] = connection
         if run_id == "run-legacy":
             return display_coverage.RefreshOutcome([], [run_id])
         return display_coverage.RefreshOutcome([run_id], [])
@@ -171,6 +244,10 @@ def test_a_refused_run_is_counted_apart_from_failures_and_does_not_stop_the_batc
     assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 1}
     assert len(connections) == 3
     assert all(connection.closed and connection.rollbacks == 0 for connection in connections)
+    refused_connection = by_run["run-legacy"]
+    assert refused_connection.commits == 1
+    assert refused_connection.rollbacks == 0
+    assert refused_connection.closed
 
 
 def test_force_is_passed_through_to_every_run(monkeypatch: pytest.MonkeyPatch) -> None:
