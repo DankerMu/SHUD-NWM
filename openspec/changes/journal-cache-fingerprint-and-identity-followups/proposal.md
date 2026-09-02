@@ -45,11 +45,13 @@ last two are independent of them and of each other):
 1. **Containment-aware cache fingerprint (#1567).** Every stat that feeds the
    cycle-rows fingerprint resolves through the same no-follow containment probe
    as the hardened readers. A containment fault yields a fingerprint that can
-   neither hit nor be stored, so the forced recompute reaches the existing
-   probe fault in `_read_cycle_segments` and raises `file_journal_unreadable`
-   exactly as a cold instance does. The owner fast path keeps skipping the
-   source-file fingerprint but runs the same cheap directory probe, so the
-   window owner is no longer a tamper hole either.
+   neither hit nor be stored, so the forced recompute reaches the
+   hardened reader that first touches the tampered path and raises the token a
+   cold instance reports on that leg and lane (`file_journal_unreadable` or
+   `file_journal_unsafe_scanned_entry`, design D1). The owner fast path keeps
+   skipping the source-file fingerprint but runs a directory-only containment
+   probe (measured cost in design D1b), so the window owner is no longer a
+   tamper hole for a swapped parent directory either.
 2. **Scoped exit clear (#1658).** The window-exit clear evicts only the
    window's own `(source_id, cycle_segment)` prefix (base key included). The
    window-entry clear stays global, untouched.

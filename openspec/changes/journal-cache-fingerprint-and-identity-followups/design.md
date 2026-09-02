@@ -262,7 +262,7 @@ segment read".
     `_iter_reconcile_inventory_records` (`:7059`, non-strict branch, no try),
     which `_iter_reconcile_pipeline_job_records` re-yields bare (`:6990`) into
     the list-comprehension consumers of `query_inflight_jobs` /
-    `query_reserved_unbound_jobs` (`:1895` / `:1990`, no
+    `query_reserved_unbound_jobs` (`:1990` / `:1895`, no
     `except FileOrchestrationJournalError`). One legacy divergent anchor with a
     missing flat direct therefore aborts the whole reconcile scan: every later
     anchor is never yielded, the divergent anchor is never pruned, and each
@@ -284,9 +284,15 @@ segment read".
     be transitioned — `update_pipeline_job_status`, `permit_pipeline_job_retry`
     and `upsert_pipeline_job` all raise `file_journal_job_id_scope_mismatch`
     with zero bytes written where they succeeded before (measured on a
-    reserved row; a terminal row already short-circuits `update_pipeline_job_status`
-    at `terminal_guarded` and `permit_pipeline_job_retry` at its `0` return,
-    so only `upsert_pipeline_job` reaches the gate on a terminal row).
+    reserved row and on a 36-cell status × target matrix: a `succeeded`/`failed`/
+    `cancelled` row short-circuits `update_pipeline_job_status` at `terminal_guarded`
+    for every target except `partially_failed` and `permanently_failed`, which
+    reach the gate and raise — so the auto-retry decline path
+    (`FileJournalRetryService.mark_permanently_failed` routes non-master rows
+    through this lane) and the array aggregator's `partially_failed` write hit
+    the gate on a terminal legacy row too; a `permanently_failed` row always
+    short-circuits; `permit_pipeline_job_retry` returns `0` on any terminal row;
+    `upsert_pipeline_job` reaches the gate in every state).
     `FileJournalRetryService` is the same lane class. The mitigation is the
     #1759 migration measurement (0/4309 historical rows divergent), which is
     input-side evidence, not a live-journal census; the operator recovery is
@@ -386,7 +392,7 @@ Regression rows:
 - tamper under `latest/<src>` (the scandir parent) instead -> same fail-loud (sibling stat covered)
 - tamper under `pipeline-events/<src>` -> `file_journal_unreadable`; tamper under
   `pipeline-jobs/by-cycle/<src>` or `pipeline-jobs` -> `file_journal_unsafe_scanned_entry`
-  (per-leg token, D1); warm == cold on every leg
+  (token per (leg, lane), D1); warm == cold on every leg
 - by-cycle hard variant (no `<cycle>` under decoy or real dir) -> warm `[]` vs cold raise:
   stated limit (D1), out of scope via `_direct_jobs_cycle_cache`, routed as a follow-up issue
 - untouched empty directory, warm instance -> legal `[]`, still a cache hit on the second read
