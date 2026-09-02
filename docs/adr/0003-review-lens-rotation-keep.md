@@ -2682,3 +2682,24 @@ PR #1947 is a no-rotation datum: round 2 re-bundled the same six risk packs
 as round 1, so all four of its round-2 catches fall in the core bucket by
 construction. They say nothing about rotation either way and only move the
 core count. Next revisit on the audit's next flag.
+
+## Revisit 2026-09-02 (post #1929 / PR #1940) — keep; clean core-subset recheck adds no rotation datum
+
+After the PR #1940 accountability line, `loop_log_audit.py` reports **152**
+multi-round merged PRs and later-round catches **core=94 / rotated=297**. The
+sample increases from 151, while neither catch count changes.
+
+Round 1 used the standard six high-risk lenses and produced two independently
+confirmed P1 test-evidence findings. Round 2 retained integration,
+test/evidence and invariant/state, all already present in Round 1, to verify
+the recording-seam and evidence-provenance repairs. It returned zero
+candidates; Phase 6.2 and the independent Phase 7 Gap Sweep were also clean.
+No free-slot lens rotated in.
+
+This PR therefore supplies a pinned closure sample, not an additive rotation
+experiment. Its `core +0 / rotated +0` result proves the known findings closed
+under re-review but cannot estimate rotation's causal value. The accumulated
+later-round catches still concentrate in rotated-in lenses (**297 versus
+94**), so **keep rotation** remains unchanged under the recorded autonomous
+default. Any reversal still requires the existing attribution-schema,
+round-intent and round-role repairs plus maintainer review.
