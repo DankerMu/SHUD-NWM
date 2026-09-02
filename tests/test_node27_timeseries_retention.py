@@ -3919,14 +3919,21 @@ def test_retention_unit_routes_stderr_to_the_journal() -> None:
 
 
 def test_sibling_units_keep_their_systemd_err_lane() -> None:
-    """The retirement is scoped. Of the eight sibling units, six were only ever
-    registered, never diagnosed here — changing them would be an unreviewed
-    behaviour change on lanes this issue never looked at, so this pins that they
-    keep their `systemd.err` lane. `nhms-node27-resource-governance.service` is
-    the one deliberate exception (#1765 gives it `StandardError=journal` +
-    `OnFailure=`), asserted negatively below;
-    `nhms-node27-unit-failure-alert@.service` has no `StandardError=append:`
-    lane at all.
+    """The retirement is scoped, and the scope is pinned as a SET, not a sample.
+
+    Eight units sit beside this one. Six of them were only ever registered,
+    never diagnosed here — changing them would be an unreviewed behaviour
+    change on lanes this issue never looked at, so this asserts exactly which
+    six still carry `StandardError=append:…/systemd.err`. Equality rather than
+    membership: a subset check would let a seventh unit lose its lane, or a
+    ninth appear without one, without anybody noticing.
+
+    The remaining two are the whole of the difference:
+    `nhms-node27-resource-governance.service` is the one deliberate retirement
+    (#1765 gives it `StandardError=journal` + `OnFailure=`), re-asserted
+    negatively below because that is the fact #1712/#1765 must not silently
+    reacquire; `nhms-node27-unit-failure-alert@.service` never had a
+    `StandardError=` directive at all. 6 + 1 + 1 = 8.
     """
     siblings = sorted(
         path
@@ -3943,9 +3950,17 @@ def test_sibling_units_keep_their_systemd_err_lane() -> None:
             for line in path.read_text(encoding="utf-8").splitlines()
         )
     ]
-    assert "nhms-node27-autopipe.service" in with_err_lane
-    assert "nhms-node27-timeseries-compression.service" in with_err_lane
-    # The governance unit is the one deliberate exception (#1765).
+    assert set(with_err_lane) == {
+        "nhms-node27-autopipe.service",
+        "nhms-node27-download.service",
+        "nhms-node27-frontier-alert.service",
+        "nhms-node27-raw-retention.service",
+        "nhms-node27-timeseries-compression.service",
+        "nhms-node27-timeseries-compression-replay.service",
+    }
+    # Stated twice on purpose: the set above already excludes it, but this line
+    # is the one that names WHY, so a future edit widening the set has to
+    # delete an assertion that says "deliberate exception" out loud.
     assert "nhms-node27-resource-governance.service" not in with_err_lane
 
 
