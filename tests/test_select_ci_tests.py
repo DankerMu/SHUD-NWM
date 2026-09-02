@@ -11610,13 +11610,22 @@ QHH_PARTITION_FIXTURE_PIN = "_QHH_SCHEDULER_REQUESTED_FIXTURES"
 QHH_PARTITION_SCHEDULER_FACADE = "_MetStoreCanonicalReadinessProvider"
 QHH_PARTITION_BASELINE_SHA = "9785e52d541aba71845316da3a9c5b9011749644"
 QHH_PARTITION_CONTRACT_SHA = "5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83"
-# The baseline digest values this change's design pins. Independent source of truth: the
-# change design/spec text, not anything derived from the tree at runtime.
+# The baseline source blob's SHA-256, frozen independently of the tracked oracle: a
+# regenerated capture must record exactly this blob, and the blob itself must hash to it.
+QHH_PARTITION_BASELINE_SOURCE_SHA256 = "e94c0ebc36055c8b80131c6d92b9511ee007712303d632bd59985b1659d08f2f"
+# The baseline digest values this change pins. Independent source of truth: the change
+# design/spec text and this frozen table, not anything derived from the tree or from the
+# oracle's own rows at runtime (the per-row re-derivation below is a consistency check, not
+# the authority — an internally consistent regenerated oracle would satisfy it).
 QHH_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
     "full_node": "baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc",
     "suffix": "896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86",
     "integration_suffix": "746147ebe8ab8023183d1986074d305ceb61ac8c1204e4c811db8d172cc82ef1",
     "owner_map": "baacfa8fc15194a81c8061863c279df0bbbf90686c5997d4f2f3e5eb29ebd9b6",
+    "definition": "5a47654bee9a2f17eb60eedc61497b339cbd49b4c4ac029782d5468456266331",
+    "ast": "53bc34b026195e0bf51aa03300c2c616be78bd52dbd2ce9e2c1803bf8ee6fef0",
+    "helper_inventory": "4759039c74f5cad4d57347dee0eae51730f8c33fb9a5eb80195117848c1b2446",
+    "helper_source": "a99db190c96c8a2d80dc2c99b2be585643fbbeef5c7967f769982bc102de6446",
 }
 # The filename the partition deliberately did NOT choose, kept as the oracle's positive
 # control: `tests/*integration*.py` really would rescue deletion of its exact edge.
@@ -11656,11 +11665,26 @@ QHH_PARTITION_OWNER_RULE_AT_BASELINE: tuple[str, ...] = (
 # partition's `-k "MetStoreCanonicalReadinessProvider"` collects ZERO nodes even at baseline
 # (the symbol names a class used only inside a support function), so it is a must-be-empty
 # authoritative recipe (#1936/#1935 defect class).
+# Record: `(paths, full "-k" marker, occurrences in the inventory document)`. The intended
+# QHH node set is derived from the TRACKED oracle by marker-substring at test time, so the
+# broad command's unrelated `tests/test_production_scheduler.py` growth never freezes here.
 QHH_PARTITION_DOC_COMMANDS: tuple[tuple[tuple[str, ...], str, int], ...] = (
     (
         ("tests/test_qhh_production_bootstrap_scheduler.py",),
         "canonical_readiness or scheduler_ready or scheduler_derives_current_identity",
-        3,
+        1,
+    ),
+    (
+        (
+            "tests/test_production_scheduler.py",
+            "tests/test_qhh_production_bootstrap.py",
+            "tests/test_qhh_production_bootstrap_state.py",
+            "tests/test_qhh_production_bootstrap_scheduler.py",
+        ),
+        "from_env or default_adapters or active_repository_from_env or "
+        "canonical_readiness_provider_from_env or forcing_producer_from_env or "
+        "MetStoreCanonicalReadinessProvider or canonical_readiness",
+        2,
     ),
 )
 QHH_PARTITION_DOC_STALE_COMMANDS: tuple[str, ...] = (
@@ -11757,12 +11781,35 @@ def _qhh_digest_lines(values: Sequence[str]) -> str:
     return hashlib.sha256(("\n".join(values) + "\n").encode()).hexdigest()
 
 
+_QHH_PYTEST_TIMEOUT_SECONDS = 300.0
+
+
 def _qhh_pytest(*arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run the QHH corpus in a child pytest with local execution semantics only.
+
+    The child must see the same local-skip semantics on every machine: the integration
+    opt-in/DSN variables that turn conftest's skip into a real database lifecycle on
+    node-27 are parent state, not a property of this meta-suite. The run is bounded so a
+    broken corpus cannot hang the selector meta-suite.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "NHMS_RUN_INTEGRATION",
+            "NHMS_INTEGRATION_DATABASE_URL",
+            "NHMS_ALLOW_DATABASE_URL_INTEGRATION",
+            "DATABASE_URL",
+        }
+    }
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *arguments],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
+        timeout=_QHH_PYTEST_TIMEOUT_SECONDS,
     )
 
 
@@ -11983,6 +12030,48 @@ def _qhh_counts(stdout: str) -> str:
     return ""
 
 
+def _qhh_owned_git_env() -> dict[str, str]:
+    """Child environment for QHH-OWNED temporary repositories: no ambient git state.
+
+    A repository this meta-suite creates must be the only git state the child sees.
+    Ambient ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE`` (exported by an external
+    hook/precommit process) would otherwise redirect init/config/add/commit/update-ref/
+    checkout into the caller's repository — the exact corruption class these guards must
+    not inherit. Global/system config are disabled so a machine-level identity, hook or
+    template cannot change what an owned-repo regression proves, and the identity is fixed
+    so owned commits are deterministic across machines.
+    """
+    return {
+        **{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "qhh-scope-test",
+        "GIT_AUTHOR_EMAIL": "qhh-scope-test@localhost",
+        "GIT_COMMITTER_NAME": "qhh-scope-test",
+        "GIT_COMMITTER_EMAIL": "qhh-scope-test@localhost",
+    }
+
+
+def _qhh_owned_git(
+    *arguments: str, repo_root: Path, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Run `git` inside a #1948-OWNED temporary repository, hermetically.
+
+    Only temporary repositories this partition suite creates may use this seam.
+    Live-project readers (``_qhh_git_stdout``, ``_qhh_baseline_blob`` and
+    ``_qhh_current_change_set`` with ``repo_root=None``) deliberately keep ambient git
+    state: temporary-index/precommit scope is part of their contract.
+    """
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repo_root,
+        env=_qhh_owned_git_env(),
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
 def _qhh_git_stdout(*arguments: str) -> str:
     completed = subprocess.run(["git", *arguments], capture_output=True, text=True, check=True)
     return completed.stdout
@@ -11994,6 +12083,25 @@ def _qhh_baseline_blob(path: str) -> bytes:
         ["git", "show", f"{QHH_PARTITION_BASELINE_SHA}:{path}"], capture_output=True, check=True
     )
     return completed.stdout
+
+
+def _qhh_assert_baseline_source_anchor(captured: dict[str, Any]) -> None:
+    """Independent baseline anchor: recorded source SHA == frozen literal == actual blob.
+
+    The frozen literal is the only non-self-referential authority on the baseline source:
+    the oracle's own ``captured_from`` row, its self-digest and its per-row re-derivations
+    are all part of the same payload, so an internally consistent regeneration would rewrite
+    all of them together. The literal (and the blob hash computed from the pinned baseline
+    commit) cannot be rewritten by a payload edit.
+    """
+    assert captured["sha256"] == QHH_PARTITION_BASELINE_SOURCE_SHA256, (
+        f"the oracle records source SHA {captured['sha256']}, the frozen literal is "
+        f"{QHH_PARTITION_BASELINE_SOURCE_SHA256}"
+    )
+    assert hashlib.sha256(_qhh_baseline_blob(captured["path"])).hexdigest() == captured["sha256"], (
+        "the baseline blob at the pinned commit no longer hashes to the oracle's recorded "
+        "source SHA"
+    )
 
 
 def _qhh_bug008_command_text() -> str:
@@ -12015,7 +12123,11 @@ def test_qhh_partition_oracle_is_tracked_and_self_contained() -> None:
     assert captured["baseline_sha"] == QHH_PARTITION_BASELINE_SHA
     assert captured["lines"] == 2278
     assert captured["contract_sha256"] == QHH_PARTITION_CONTRACT_SHA
-    assert re.fullmatch(r"[0-9a-f]{64}", captured["sha256"])
+    # The recorded source SHA is anchored to the FROZEN literal AND to the actual baseline
+    # blob: `git show` of the pinned baseline commit must produce bytes whose SHA-256 is both
+    # the recorded value and the literal. Format-checking alone would accept a regenerated
+    # oracle whose source SHA was rewritten to match a different baseline blob.
+    _qhh_assert_baseline_source_anchor(captured)
     # The pinned baseline must resolve in this checkout too, or the provenance is fiction.
     assert len(_qhh_git_stdout("rev-parse", f"{captured['baseline_sha']}^{{commit}}").strip()) == 40
     optional_capture = Path(".workplans/issue-1948/contract.json")
@@ -12099,6 +12211,48 @@ def test_qhh_partition_oracle_shape_is_the_frozen_contract_authority() -> None:
     )
     assert oracle["selector"]["three_partition_authority"] == list(partitions)
     assert oracle["selector"]["helper_route"] == _qhh_helper()
+
+
+def test_qhh_partition_rejected_regenerated_oracle_rewrites_the_source_anchor() -> None:
+    # Anti-tamper RED for the INDEPENDENT anchor (cand-evidence-01 T2): a regeneration that
+    # rewrites the recorded baseline source SHA and recomputes its own self-digest is
+    # internally consistent (shape, self-digest, per-row re-derivations all hold) yet must
+    # fail the frozen literal. The constructed tamper never touches the tracked oracle; it
+    # asserts on a constructed payload whose only drift is the anchored SHA claim.
+    oracle = _qhh_partition_oracle()
+    payload = json.loads(json.dumps(oracle, sort_keys=True))
+    payload["captured_from"]["sha256"] = "0" * 64
+    payload["digests"]["oracle"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "digests"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+
+    # Premise: the tampered payload is internally consistent — self-digest recomputed over
+    # its own payload and every digest the shape test re-derives from rows unchanged (rows
+    # are untouched, so definition/ast/helper/owner-map re-derivations still match their
+    # recorded values) — so ONLY the independent frozen anchor can reject it.
+    canonical = json.dumps(
+        {key: value for key, value in payload.items() if key != "digests"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    assert payload["digests"]["oracle"] == hashlib.sha256(canonical).hexdigest()
+    for key in ("definition", "ast", "helper_inventory", "helper_source", "owner_map"):
+        assert payload["digests"][key] == oracle["digests"][key], key
+    assert payload["captured_from"]["sha256"] != QHH_PARTITION_BASELINE_SOURCE_SHA256, (
+        "the tampered payload must actually differ, or this RED premise is vacuous"
+    )
+    assert payload["digests"]["oracle"] != oracle["digests"]["oracle"], (
+        "the tampered payload must have recomputed its self-digest, or the premise is stale"
+    )
+
+    with pytest.raises(AssertionError, match=QHH_PARTITION_BASELINE_SOURCE_SHA256):
+        _qhh_assert_baseline_source_anchor(payload["captured_from"])
 
 
 def test_qhh_partition_tracked_tree_is_exactly_three_suites_and_one_helper() -> None:
@@ -12388,6 +12542,24 @@ def test_qhh_partition_owner_route_reds_when_an_edge_is_removed(
     assert set(_qhh_partitions()) - {removed} <= selected
 
 
+def _qhh_owner_rule_contract(rule: PathTestRule, baseline_rule: Sequence[str]) -> None:
+    """QHH-local owner-rule contract: exact A/B/C intersection, baseline subset preserved.
+
+    The single-#1948 obligation is that the `workers/model_registry/**` rule's QHH
+    intersection is exactly the three partitions AND that no pre-#1948 target was dropped.
+    Deliberately NOT a whole-list equality against the baseline transcription: a legitimate
+    unrelated future consumer added to this rule must not false-red the QHH contract, and
+    the baseline transcription is provenance for the pre-#1948 content, not a ceiling.
+    """
+    baseline_non_qhh = set(baseline_rule) - {_qhh_partitions()[0]}
+    tests = set(rule.tests)
+    qhh_in_rule = tests & set(_qhh_partitions())
+
+    assert qhh_in_rule == set(_qhh_partitions()), sorted(qhh_in_rule ^ set(_qhh_partitions()))
+    missing_baseline = baseline_non_qhh - tests
+    assert not missing_baseline, f"prior owner-rule targets dropped: {sorted(missing_baseline)}"
+
+
 def test_qhh_partition_owner_route_selects_all_three_with_a_non_same_name_probe() -> None:
     # The probe must not be same-name derivable, or the three per-edge REDs above would only
     # prove that the derivation still works. And the expansion must be ADDITIVE: the rule's
@@ -12402,10 +12574,41 @@ def test_qhh_partition_owner_route_selects_all_three_with_a_non_same_name_probe(
     rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"])
 
     assert set(_qhh_partitions()) <= selected
-    assert set(rule.tests) == (set(baseline_rule) - {_qhh_partitions()[0]}) | set(_qhh_partitions()), sorted(
-        set(rule.tests) ^ ((set(baseline_rule) - {_qhh_partitions()[0]}) | set(_qhh_partitions()))
-    )
     assert len([test for test in rule.tests if "qhh_production_bootstrap" in test]) == 3
+    _qhh_owner_rule_contract(rule, baseline_rule)
+
+
+def test_qhh_partition_owner_rule_permits_an_unrelated_future_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Future-compatibility GREEN arm (constructed, never derived from current data): a
+    # legitimate future target added to the `workers/model_registry/**` rule under a
+    # DIFFERENT owner directory must not false-red the QHH partition contract. The QHH
+    # intersection stays exactly A/B/C, every pre-#1948 target survives and the probe
+    # still selects all three partitions.
+    future_target = "tests/test_some_future_registry_consumer.py"
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            (*rule.tests, future_target),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"]
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(future_target in candidate.tests for candidate in patched)
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", patched)
+
+    baseline_rule = _qhh_owner_rule_tests_at_baseline()
+    selected = set(select_tests([QHH_PARTITION_OWNER_PROBE], repo_root=Path(".")))
+    future_rule = next(
+        rule for rule in patched if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"]
+    )
+
+    assert set(_qhh_partitions()) <= selected
+    _qhh_owner_rule_contract(future_rule, baseline_rule)
 
 
 def _qhh_owner_rule_tests_at_baseline() -> tuple[str, ...]:
@@ -12497,6 +12700,38 @@ def _qhh_string_constants(tree: ast.Module) -> dict[str, str]:
     return out
 
 
+def _qhh_database_contract(observed: Sequence[str], baseline_patterns: Sequence[str]) -> None:
+    """QHH-local `database:` filter contract: exact {C, D}, baseline subset preserved.
+
+    The single-#1948 obligation is that the tracked `database:` block contains the scheduler
+    owner and the DB-support helper as exact QHH corpus literals, that the retained/state
+    owners are absent, and that every pre-#1948 pattern survives. Deliberately NOT a
+    whole-list equality against the oracle's snapshot: a legitimate unrelated future pattern
+    added to the `database:` filter must not false-red the QHH partition contract, and the
+    oracle's own pattern list is provenance for the pre-#1948 content, not a ceiling on
+    unrelated growth.
+    """
+    partitions = _qhh_partitions()
+    helper = _qhh_helper()
+    observed_set = set(observed)
+
+    corpus_patterns = {pattern for pattern in observed if "qhh_production_bootstrap" in PurePosixPath(pattern).name}
+    assert corpus_patterns == {partitions[2], helper}, sorted(corpus_patterns)
+    assert observed_set & set(partitions) == {partitions[2]}, (
+        f"the scheduler owner must be the only partition literal: "
+        f"{sorted(observed_set & set(partitions))}"
+    )
+    assert helper in observed_set, "the DB-support helper must be an exact database trigger"
+    assert partitions[0] not in observed, "the retained owner owns no integration node"
+    assert partitions[1] not in observed, "the state owner owns no integration node"
+    assert partitions[0] in baseline_patterns
+    # Baseline non-QHH subset preservation. The one baseline literal #1948 itself removes is
+    # the QHH monolith (`partitions[0]`) — that removal is the point of the change and is
+    # asserted above, so it is excluded from the "nothing dropped" claim.
+    missing_baseline = set(baseline_patterns) - observed_set - {partitions[0]}
+    assert not missing_baseline, f"prior database patterns dropped: {sorted(missing_baseline)}"
+
+
 def test_qhh_partition_database_authority_is_exactly_the_scheduler_owner_and_helper() -> None:
     oracle = _qhh_partition_oracle()
     partitions = _qhh_partitions()
@@ -12504,21 +12739,28 @@ def test_qhh_partition_database_authority_is_exactly_the_scheduler_owner_and_hel
     authority = oracle["ci_database_authority"]
     observed = _qhh_observed_database_patterns()
 
-    assert observed == authority["patterns"], (
-        "ci.yml `database:` block drifted from the tracked oracle: "
-        f"observed={observed} oracle={authority['patterns']}"
-    )
     assert authority["qhh_bootstrap_exact_set"] == [partitions[2], helper]
     assert authority["removed_literal"] == partitions[0]
     assert authority["absent_literals"] == [partitions[0], partitions[1]]
-    corpus_patterns = {pattern for pattern in observed if "qhh_production_bootstrap" in PurePosixPath(pattern).name}
-    assert corpus_patterns == set(authority["qhh_bootstrap_exact_set"]), sorted(corpus_patterns)
-    assert partitions[0] not in observed, "the retained owner owns no integration node"
-    assert partitions[1] not in observed, "the state owner owns no integration node"
-    baseline_patterns = authority["baseline_patterns"]
-    assert partitions[0] in baseline_patterns
-    assert set(observed) == (set(baseline_patterns) - {partitions[0]}) | {partitions[2], helper}
-    assert len(observed) == len(baseline_patterns) + 1
+    _qhh_database_contract(observed, authority["baseline_patterns"])
+
+
+def test_qhh_partition_database_filter_permits_an_unrelated_future_pattern() -> None:
+    # Future-compatibility GREEN arm (constructed, never derived from current data): a
+    # legitimate unrelated future pattern added to the tracked `database:` filter must not
+    # false-red the QHH partition contract. The QHH exact subset stays {C, D}, A/B stay
+    # absent and every pre-#1948 pattern survives.
+    future_pattern = "packages/common/some_future_store.py"
+    workflow = _qhh_workflow()
+    entry = f"              - '{future_pattern}'\n"
+    assert entry not in workflow
+    block = _database_filter_block(workflow)
+    mutated = workflow.replace(block, f"{entry}{block}")
+
+    _qhh_database_contract(
+        _database_filter_patterns(mutated),
+        _qhh_partition_oracle()["ci_database_authority"]["baseline_patterns"],
+    )
 
 
 @pytest.mark.parametrize("target", list(_qhh_partition_oracle()["ci_database_authority"]["qhh_bootstrap_exact_set"]))
@@ -12628,10 +12870,19 @@ def test_qhh_partition_bug008_history_and_ledger_stay_out_of_the_change_set() ->
 
 
 def _qhh_git_paths(*arguments: str, repo_root: Path | None = None) -> set[str]:
-    """``git`` stdout lines (path listings only); ``repo_root`` keeps the derivation hermetic."""
-    completed = subprocess.run(
-        ["git", *arguments], cwd=repo_root, capture_output=True, text=True, check=True
-    )
+    """``git`` stdout lines (path listings only); ``repo_root`` keeps the derivation hermetic.
+
+    With an explicit ``repo_root`` the read runs against a repository this partition suite
+    owns, so ambient ``GIT_*`` state must not redirect it into the caller's checkout. The
+    live project (``repo_root=None``) keeps ambient state: temporary-index/precommit scope
+    is part of that reader's contract.
+    """
+    if repo_root is not None:
+        completed = _qhh_owned_git(*arguments, repo_root=repo_root)
+    else:
+        completed = subprocess.run(
+            ["git", *arguments], cwd=None, capture_output=True, text=True, check=True
+        )
     return {line.strip() for line in completed.stdout.splitlines() if line.strip()}
 
 
@@ -12645,16 +12896,21 @@ def _qhh_current_change_set(repo_root: Path | None = None) -> tuple[str, ...]:
     accumulate every upstream commit after a rebase, so scope checks must never use one.
     """
     changed: set[str] = set()
-    base = subprocess.run(
-        ["git", "merge-base", "HEAD", "origin/master"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if base.returncode == 0 and base.stdout.strip():
+    if repo_root is not None:
+        base = _qhh_owned_git("merge-base", "HEAD", "origin/master", repo_root=repo_root, check=False)
+        base_rc, base_out = base.returncode, base.stdout
+    else:
+        base = subprocess.run(
+            ["git", "merge-base", "HEAD", "origin/master"],
+            cwd=None,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        base_rc, base_out = base.returncode, base.stdout
+    if base_rc == 0 and base_out.strip():
         changed.update(
-            _qhh_git_paths("diff", "--name-only", base.stdout.strip(), "HEAD", repo_root=repo_root)
+            _qhh_git_paths("diff", "--name-only", base_out.strip(), "HEAD", repo_root=repo_root)
         )
     changed.update(_qhh_git_paths("diff", "--cached", "--name-only", repo_root=repo_root))
     changed.update(_qhh_git_paths("diff", "--name-only", repo_root=repo_root))
@@ -12726,16 +12982,125 @@ def test_qhh_partition_scope_is_the_bounded_structural_diff() -> None:
     assert not structural, f"outside the #1948 structural no-move set: {sorted(structural)}"
 
 
+def _qhh_canary_snapshot(
+    repo_root: Path,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...], str]:
+    """Byte/identity snapshot of a repository: HEAD, refs, index entries, config.
+
+    Returns ``(head, refs, index_entries, config, worktree_digest)`` so a canary regression
+    can prove every surface an ambient-GIT redirect could corrupt stayed unchanged.
+    """
+    env = _qhh_owned_git_env()
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    refs = tuple(
+        subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/"],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    )
+    index = tuple(
+        subprocess.run(
+            ["git", "ls-files", "--stage"],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    )
+    config = tuple(
+        subprocess.run(
+            ["git", "config", "--list"],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    )
+    digest = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return (head, refs, index, config, digest)
+
+
+def test_qhh_partition_owned_temp_git_is_isolated_from_ambient_git_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Path-safety canary (cand-path-01): with ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
+    # pointing at a canary repository, every #1948-owned temporary-repo Git operation must
+    # still mutate ONLY the owned repo. Before the seam, init/config/add/commit/update-ref/
+    # checkout (and merge-base/diff reads) were redirected into the canary: its HEAD gained
+    # the owned commit, its index gained the owned files and its config gained the owned
+    # identity. The canary snapshot proves byte/identity unchanged and the owned repo proves
+    # the shared derivation still works.
+    canary = tmp_path / "canary"
+    owned = tmp_path / "owned"
+    canary.mkdir()
+    _qhh_owned_git("init", "-q", "-b", "master", repo_root=canary)
+    _qhh_owned_git("config", "user.name", "canary-test", repo_root=canary)
+    _qhh_owned_git("config", "user.email", "canary@localhost", repo_root=canary)
+    (canary / "canary.txt").write_text("canary\n", encoding="utf-8")
+    _qhh_owned_git("add", "--", "canary.txt", repo_root=canary)
+    _qhh_owned_git("commit", "-q", "-m", "canary base", repo_root=canary)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=canary)
+    before = _qhh_canary_snapshot(canary)
+
+    owned.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(canary / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(canary))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(canary / ".git" / "index"))
+    # The exact owned-repo sequence the scope regressions drive, now through the seam.
+    _qhh_scope_repo_init(owned)
+    fixture = QHH_PARTITION_ALLOWED_PREFIXES[0].rstrip("/")
+    (owned / fixture).mkdir(parents=True)
+    (owned / fixture / "design.md").write_text("base\n", encoding="utf-8")
+    _qhh_scope_commit(owned, f"{fixture}/design.md", message="base")
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=owned)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=owned)
+    (owned / fixture / "README.md").write_text("issue\n", encoding="utf-8")
+    _qhh_scope_commit(owned, f"{fixture}/README.md", message="issue")
+    changed = set(_qhh_current_change_set(repo_root=owned))
+
+    after = _qhh_canary_snapshot(canary)
+    assert after == before, (
+        "ambient GIT_* state leaked into the canary repository: "
+        f"{[display for display, (old, new) in zip(('head', 'refs', 'index', 'config', 'worktree'), zip(before, after)) if old != new]}"  # noqa: E501
+    )
+    assert f"{fixture}/README.md" in changed
+    assert f"{fixture}/design.md" not in changed
+    assert _qhh_partition_scope_change_set(repo_root=owned) is not None
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=owned, env=_qhh_owned_git_env(), capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head != before[0], "the owned repo did not make its own commit"
+
+
 def _qhh_scope_repo_init(tmp_path: Path) -> None:
-    """Minimal git scaffold for scope-derivation regressions (deterministic identity)."""
-    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "qhh-scope-test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "qhh-scope-test@localhost"], cwd=tmp_path, check=True)
+    """Minimal git scaffold for scope-derivation regressions (deterministic identity).
+
+    Runs through the owned-repository seam: the scaffold is a #1948-owned repository, so
+    ambient ``GIT_*`` state must not redirect it into the caller's checkout.
+    """
+    _qhh_owned_git("init", "-q", "-b", "master", repo_root=tmp_path)
+    _qhh_owned_git("config", "user.name", "qhh-scope-test", repo_root=tmp_path)
+    _qhh_owned_git("config", "user.email", "qhh-scope-test@localhost", repo_root=tmp_path)
 
 
 def _qhh_scope_commit(tmp_path: Path, *paths: str, message: str) -> None:
-    subprocess.run(["git", "add", "--", *paths], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", message], cwd=tmp_path, check=True)
+    _qhh_owned_git("add", "--", *paths, repo_root=tmp_path)
+    _qhh_owned_git("commit", "-q", "-m", message, repo_root=tmp_path)
 
 
 def test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base(
@@ -12758,7 +13123,7 @@ def test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base(
     _qhh_scope_commit(
         tmp_path, f"{fixture}/design.md", "workers/upstream.py", ".large-file-guard.json", message="base"
     )
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
     # Master moves on with upstream paths BEFORE the feature branch point (#1945 shape: un-
     # related legit work lands after the old branch point, before this branch rebases).
     (tmp_path / "workers/upstream.py").write_text("upstream change\n", encoding="utf-8")
@@ -12766,9 +13131,9 @@ def test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base(
     _qhh_scope_commit(
         tmp_path, "workers/upstream.py", ".large-file-guard.json", message="upstream"
     )
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
     # Feature = origin/master tip + one issue commit (the post-rebase shape).
-    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
     (tmp_path / fixture / "README.md").write_text("issue\n", encoding="utf-8")
     _qhh_scope_commit(tmp_path, f"{fixture}/README.md", message="issue")
 
@@ -12790,10 +13155,10 @@ def test_qhh_partition_scope_change_set_includes_staged_and_untracked_issue_path
     (tmp_path / fixture).mkdir(parents=True)
     (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
     _qhh_scope_commit(tmp_path, f"{fixture}/design.md", message="base")
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
     staged = f"{fixture}/proposal.md"
     (tmp_path / staged).write_text("staged\n", encoding="utf-8")
-    subprocess.run(["git", "add", "--", staged], cwd=tmp_path, check=True)
+    _qhh_owned_git("add", "--", staged, repo_root=tmp_path)
     untracked = f"{fixture}/tasks.md"
     (tmp_path / untracked).write_text("untracked\n", encoding="utf-8")
 
@@ -12820,14 +13185,14 @@ def test_qhh_partition_scope_names_and_reddens_a_guard_change_next_to_the_active
     (tmp_path / fixture).mkdir(parents=True)
     (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
     _qhh_scope_commit(tmp_path, ".large-file-guard.json", f"{fixture}/design.md", message="base")
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
     (tmp_path / fixture / "README.md").write_text("issue\n", encoding="utf-8")
     _qhh_scope_commit(tmp_path, f"{fixture}/README.md", message="issue")
     # The guard is touched again ON the feature branch: staged or plain worktree edit.
     (tmp_path / ".large-file-guard.json").write_text("guard edit\n", encoding="utf-8")
     if staged:
-        subprocess.run(["git", "add", "--", ".large-file-guard.json"], cwd=tmp_path, check=True)
+        _qhh_owned_git("add", "--", ".large-file-guard.json", repo_root=tmp_path)
 
     changed = set(_qhh_current_change_set(repo_root=tmp_path))
     assert _qhh_partition_scope_change_set(repo_root=tmp_path) is not None, (
@@ -12861,8 +13226,8 @@ def test_qhh_partition_scope_gate_noops_without_an_active_fixture_change(
         _qhh_scope_commit(tmp_path, "README.md", f"{fixture}/design.md", message="base")
     else:
         _qhh_scope_commit(tmp_path, "README.md", message="base")
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts/unrelated_plugin.py").write_text("x\n", encoding="utf-8")
     _qhh_scope_commit(tmp_path, "scripts/unrelated_plugin.py", message="unrelated")
@@ -12911,6 +13276,39 @@ def test_qhh_partition_execution_semantics_match_the_frozen_baseline() -> None:
         ("bug008_command", "8 passed"),
     ):
         assert recorded["post_partition"][name]["summary"].startswith(summary), recorded["post_partition"][name]
+
+
+def test_qhh_partition_nested_pytest_ignores_parent_integration_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Resource-isolation canary (cand-resource-01): the nested QHH pytest runs must keep
+    # LOCAL execution semantics even when the parent carries node-27's real-DB opt-in and
+    # DSN. Before `_qhh_pytest` scrubbed these variables, conftest's `_integration_skip_reason`
+    # returned None, the session `integration_database_url` fixture attempted to create/drop
+    # `nhms_it_*` databases and the summary became connection errors instead of 11 skipped.
+    # The canary values are opt-in + closed-port DSNs; local integration collection must
+    # still skip all eleven nodes with no connection attempt, and the default/non-integration
+    # semantics must stay 55 passed / 11 skipped and 11 deselected.
+    opt_in = "1"
+    closed_dsn = "postgresql://nobody:invalid@127.0.0.1:1/qhh_partition_guard_never_connects"
+    monkeypatch.setenv("NHMS_RUN_INTEGRATION", opt_in)
+    monkeypatch.setenv("NHMS_INTEGRATION_DATABASE_URL", closed_dsn)
+    monkeypatch.setenv("NHMS_ALLOW_DATABASE_URL_INTEGRATION", opt_in)
+    monkeypatch.setenv("DATABASE_URL", closed_dsn)
+
+    partitions = list(_qhh_partitions())
+
+    default = _qhh_pytest(*partitions)
+    integration = _qhh_pytest("-m", "integration", partitions[2])
+    non_integration = _qhh_pytest("-m", "not integration", *partitions)
+
+    assert default.returncode == 0, default.stdout
+    assert _qhh_counts(default.stdout) == "55 passed, 11 skipped", default.stdout
+    assert integration.returncode == 0, integration.stdout
+    assert _qhh_counts(integration.stdout) == "11 skipped", integration.stdout
+    assert "Connection refused" not in integration.stdout, integration.stdout
+    assert non_integration.returncode == 0, non_integration.stdout
+    assert _qhh_counts(non_integration.stdout) == "55 passed, 11 deselected", non_integration.stdout
 
 
 def test_qhh_partition_registry_monolith_imports_stay_in_the_helper() -> None:
@@ -12973,10 +13371,30 @@ def test_qhh_partition_keeps_the_structural_guard_contract_and_out_of_the_change
     assert not [pattern for pattern in guard["exclude"] if "qhh_production_bootstrap" in pattern]
 
 
+def _qhh_intended_qhh_nodes(marker: str, command_paths: Sequence[str]) -> list[str]:
+    """QHH node ids a doc command is intended to collect, from the FROZEN oracle.
+
+    A marker token names a node when the token is part of that node's frozen suffix, and the
+    node must belong to one of the command's partition paths. Expected QHH identity is
+    derived from the oracle's frozen suffixes — never read off the current tree — so an
+    unrelated production-scheduler node growing or shrinking changes nothing here.
+    """
+    oracle = _qhh_partition_oracle()
+    command_partitions = sorted(set(command_paths) & set(_qhh_partitions()))
+    tokens = [token.strip() for token in marker.split(" or ") if token.strip()]
+    return [
+        f"{owner}::{suffix}"
+        for owner in command_partitions
+        for suffix in oracle["owner_nodes"][owner]
+        if any(token in suffix for token in tokens)
+    ]
+
+
 def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() -> None:
     document = Path(QHH_PARTITION_SCHEDULER_COMPAT_DOC).read_text(encoding="utf-8")
     unwrapped = re.sub(r"\n {2}", " ", document)
     helper = _qhh_helper()
+    partitions = set(_qhh_partitions())
 
     # The stale command must be GONE *and* be the empty recipe it was: absent from the
     # document, and collecting zero nodes when replayed, which is what made replacing it
@@ -12989,15 +13407,27 @@ def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() 
         assert _qhh_collected_nodeids(stale_paths, "-k", stale_marker) == [], (
             f"the replaced command now collects nodes; this guard's premise is stale: {stale}"
         )
-    for paths, marker, expected_nodes in QHH_PARTITION_DOC_COMMANDS:
+    for paths, marker, occurrences in QHH_PARTITION_DOC_COMMANDS:
         command = f"uv run pytest -q {' '.join(paths)} -k \"{marker}\""
-        assert command in unwrapped, f"current command missing from the inventory: {command}"
+        # The exact command must sit at every current intended location of the inventory
+        # (the compatibility row AND its guard-hook metadata entry), never just once.
+        assert unwrapped.count(command) == occurrences, (
+            f"current command changed location in the inventory: {command} "
+            f"({unwrapped.count(command)} vs {occurrences})"
+        )
 
         collected = _qhh_collected_nodeids(paths, "-k", marker)
 
         assert collected, f"{command} collects nothing"
-        assert len(collected) == expected_nodes, collected
-        assert {node.split("::")[0] for node in collected} == set(paths)
+        intended = _qhh_intended_qhh_nodes(marker, paths)
+        collected_qhh = [node for node in collected if node.split("::")[0] in partitions]
+        # The command's QHH portion is exactly the frozen intended node identity: no QHH
+        # node may be silently dropped from the recipe, and no non-intended QHH node may
+        # leak in (an overly broad token would change this). Non-QHH nodes (the unrelated
+        # production-scheduler suite) are deliberately NOT frozen here, so growth there
+        # cannot false-red this contract.
+        assert set(collected_qhh) == set(intended), f"{command}: qhh={collected_qhh} intended={intended}"
+        assert intended, f"{command} intends no QHH node: {intended}"
         assert all(not node.startswith(helper) for node in collected)
     # Every current command that names the retained partition must name the whole corpus:
     # #1948 replaced a single monolith with three owners, and a doc that still lists one is
@@ -13009,6 +13439,23 @@ def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() 
     for line in whole_corpus:
         for owner in _qhh_partitions():
             assert owner in line, f"whole-corpus command omits {owner}: {line[:160]}"
+
+
+def test_qhh_partition_broad_doc_command_reddens_without_the_qhh_marker_token() -> None:
+    # Mutation/premise proof (cand-evidence-03 T2): the broad doc command's QHH portion rides
+    # on ONE load-bearing marker token. Removing that token must yield ZERO QHH nodes, so the
+    # command's QHH coverage is a real executable claim — not a string presence whose QHH
+    # meaning vanishes while the command text stays green.
+    paths, marker, _ = QHH_PARTITION_DOC_COMMANDS[1]
+    loaded_tokens = [token.strip() for token in marker.split(" or ") if token.strip()]
+    qhh_tokens = [token for token in loaded_tokens if _qhh_intended_qhh_nodes(token, paths)]
+    assert qhh_tokens, "no QHH-load-bearing marker token found in the broad command"
+    mutated = " or ".join(token for token in loaded_tokens if token not in qhh_tokens)
+    assert mutated != marker
+    partitions = set(_qhh_partitions())
+    collected = _qhh_collected_nodeids(paths, "-k", mutated)
+    leftover = [node for node in collected if node.split("::")[0] in partitions]
+    assert not leftover, f"the broad command still collects QHH nodes without {qhh_tokens}: {leftover}"
 
 
 def test_qhh_partition_scheduler_importer_disposition_follows_the_real_importer() -> None:
