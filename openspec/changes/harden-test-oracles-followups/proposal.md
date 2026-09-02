@@ -44,11 +44,15 @@ One PR, one OpenSpec change, serial implementation, all under `tests/`:
   (`tests/test_shud_runtime.py::test_execute_receipt_keeps_recovery_outcomes_when_the_observed_trail_is_long`,
   `tests/test_warm_start_chaining.py::test_cohort_reservation_records_each_models_warm_start_identity`)
   get budgets a slow runner cannot exhaust: `timeout_seconds=300` for the
-  two watcher-held-stub tests, and a `job_timeout_seconds=120` default on the
-  shared `_orchestrator` test helper (plus its eleven direct sites in the
-  victim's file) with a pin on that default. The diagnosis task reproduced
-  both failures verbatim with deterministic harnesses and refuted the
-  cross-test shared-state reading (design D6).
+  two watcher-held-stub tests (each with a `>= 60` floor pin), and a
+  `job_timeout_seconds=120` default on the shared `_orchestrator` test helper
+  (plus the eleven direct sites in the victim's file, the four inline
+  `OrchestratorConfig` builds in the helper's own file, and the two in
+  `tests/test_production_scheduler.py`) with `>= 60` pins on `_orchestrator`
+  and `_cohort_orchestrator`. The diagnosis task reproduced both failures
+  verbatim with deterministic harnesses; the cross-test shared-state reading
+  is recorded as superseded and not reproduced under the diagnosis's
+  conditions, not as refuted (design D6).
 - **#1649** — residuals 1 and 2 are closed in
   `tests/test_production_scheduler.py::test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list`:
   identity pins (`__module__` + `__qualname__`) for every inventoried
@@ -99,5 +103,7 @@ is test-infrastructure robustness.
 - Recorded deviation from #1613's original acceptance text: the issue body
   asks to name a cross-test shared-state leak; the issue author's second
   comment re-attributes the failures to CPU competition on wall-clock
-  budgets. This change follows the comment, and the diagnosis task states
-  what evidence rules the shared-state reading in or out.
+  budgets. This change follows the comment's wall-clock framing (the
+  diagnosis narrows A's trigger to subprocess spawn latency rather than CPU
+  competition alone), and design D6 records what the diagnosis did and did
+  not establish about the shared-state reading.

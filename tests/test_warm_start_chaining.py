@@ -1187,11 +1187,20 @@ def test_cohort_orchestrator_helper_default_job_timeout_survives_a_slow_runner(t
     `_cohort_orchestrator`'s `job_timeout_seconds` reaches the per-stage poll deadline in
     `chain_stage_execution.poll_cycle_stage_until_terminal`, which compares real
     `time.monotonic()`. At a contention-sized budget one slow status transition on a busy
-    oracle machine turns a green cohort into `status == "failed"` -- the #1613 victim
-    `test_cohort_reservation_records_each_models_warm_start_identity` is built by this very
-    helper. The floor is asserted rather than the exact value so a deliberate re-tune stays
-    free while a revert to a contention-sized budget is red. Mirrors the pin on the sibling
-    helper in `tests/test_orchestration_chain.py`.
+    oracle machine turns a green cohort into `status == "failed"` -- the failure mode #1613
+    was filed for.
+
+    This helper did NOT build the #1613 victim.
+    `test_cohort_reservation_records_each_models_warm_start_identity` (below) builds its
+    orchestrator with `_orchestrator`, imported from `tests/test_orchestration_chain.py`,
+    and is pinned by that file's sibling
+    `test_orchestrator_helper_default_job_timeout_survives_a_slow_runner`.
+    `_cohort_orchestrator` is the SECOND shared seam in the same blast radius: it feeds the
+    same wall-clock poll deadline for every test in this file that builds through it (nine
+    at authoring time -- the six cycle-cohort warm-start tests and three packaged-IC
+    bootstrap tests), so it carries the same floor pin rather than waiting to become the
+    next victim. The floor is asserted rather than the exact value so a deliberate re-tune
+    stays free while a revert to a contention-sized budget is red.
 
     This pin weakens no timeout oracle: no test in this file asserts that the poll deadline
     FIRES -- none fakes `time.monotonic`, drives a hanging clock, or builds a sub-second

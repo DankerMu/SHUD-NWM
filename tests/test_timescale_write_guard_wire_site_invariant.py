@@ -172,8 +172,17 @@ _ADMITTED_VALID_TIME_LOWER_BOUND = "valid_time >="
 _ADMITTED_VALID_TIME_UPPER_BOUND = "valid_time <="
 
 
-def _delete_literal_is_valid_time_bounded(text: str) -> bool:
-    """True iff a DELETE literal carries both admitted `valid_time` bounds.
+def _missing_valid_time_bounds(text: str) -> list[str]:
+    """The admitted bound spellings absent from ``text`` — the ONE window predicate.
+
+    This is the single place in this file that inspects a literal for the two
+    admitted spellings.  Both consumers go through it: the repository scan
+    (:func:`test_every_guarded_delete_literal_carries_the_certified_valid_time_window`,
+    which also prints the returned list in its failure message) and the boolean
+    spelling :func:`_delete_literal_is_valid_time_bounded`, which the synthetic
+    parametrized cases pin.  Keeping it to one implementation is what makes that
+    pin bite on the scan: two parallel bodies could drift, and gutting the one
+    the scan consumed would leave the pin green.
 
     Python concatenates adjacent string literals at parse time, so the two
     two-part writers (``workers/forcing_producer/store.py``,
@@ -189,17 +198,22 @@ def _delete_literal_is_valid_time_bounded(text: str) -> bool:
     for the ADMITTED spellings rather than scanning for refused ones.
     """
 
-    return _ADMITTED_VALID_TIME_LOWER_BOUND in text and _ADMITTED_VALID_TIME_UPPER_BOUND in text
-
-
-def _missing_valid_time_bounds(text: str) -> list[str]:
-    """The admitted bound spellings absent from ``text``, for the failure message."""
-
     return [
         bound
         for bound in (_ADMITTED_VALID_TIME_LOWER_BOUND, _ADMITTED_VALID_TIME_UPPER_BOUND)
         if bound not in text
     ]
+
+
+def _delete_literal_is_valid_time_bounded(text: str) -> bool:
+    """True iff a DELETE literal carries both admitted `valid_time` bounds.
+
+    A boolean view of :func:`_missing_valid_time_bounds`, not a second
+    implementation — see that function for the admitted spellings and why the
+    predicate reads them off a single ``ast.Constant``.
+    """
+
+    return not _missing_valid_time_bounds(text)
 
 
 def _guarded_delete_literals(tree: ast.AST, schema: str, table: str) -> list[tuple[str, str]]:
@@ -406,9 +420,13 @@ def test_every_guarded_hypertable_has_a_guarded_delete_site(
 
 #: Synthetic literals pinning the window predicate independently of the
 #: repository's current writers, in the style of ``_UNADMITTED_MODULE_LEVEL_FORMS``
-#: in ``tests/test_production_scheduler.py``.  Without these, deleting the
-#: predicate's body and returning ``True`` would keep the repository scan green
-#: forever — the scan can only ever observe source that already passes.
+#: in ``tests/test_production_scheduler.py``.  Without these, gutting the predicate
+#: — ``_missing_valid_time_bounds`` returning ``[]`` for everything — would keep the
+#: repository scan green forever: the scan can only ever observe source that already
+#: passes, so a predicate that admits everything looks exactly like a repository with
+#: no holes.  These cases are the only thing that can tell the two apart, and they can
+#: only do it because ``_delete_literal_is_valid_time_bounded`` is a boolean view of
+#: the SAME function the scan consumes rather than a second implementation of the rule.
 _VALID_TIME_WINDOW_PREDICATE_CASES: tuple[tuple[str, str, bool], ...] = (
     (
         "bounded_one_line",
@@ -471,6 +489,11 @@ def test_valid_time_window_predicate_admits_only_the_closed_window_spellings(
     reasonable author writes by accident: the guard's certified window is closed
     on both ends, so ``valid_time <`` targets a different row set than the one
     ``check_batch_targets_uncompressed`` inspected.
+
+    ``_delete_literal_is_valid_time_bounded`` and ``_missing_valid_time_bounds``
+    are one implementation under two names, so this pin is a pin ON THE SCAN:
+    the negative cases below go red when the rule the repository scan applies is
+    weakened, not merely when a decorative twin is.
     """
 
     assert _delete_literal_is_valid_time_bounded(literal) is expected

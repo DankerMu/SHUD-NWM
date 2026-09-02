@@ -195,9 +195,10 @@ Fix (test-only, minimal, oracles intact):
   test's own oracle cannot witness the raise because the publish-root refusal
   fires identically on a timed-out job, so its receipt is a plain before/after
   trace, not a red) are raised to the same value. The four timeout-path tests
-  (`test_orchestration_chain.py:4318/4356/4395/12841`) build their own
-  configs with `job_timeout_seconds=1` AND fake `time.monotonic`, so they are
-  neither affected nor slowed. One-line pins assert `_orchestrator`'s and
+  (`test_orchestration_chain.py:4318/4356/4395/12841` at `9785e52d`) build
+  their own configs with `job_timeout_seconds=1` AND fake `time.monotonic`,
+  and the three `HangingPollClock` tests keep the helper default but install a
+  clock that jumps past any budget, so none is affected or slowed. One-line pins assert `_orchestrator`'s and
   `_cohort_orchestrator`'s default is ≥ 60 s with docstrings citing #1613, so
   a revert to a contention-sized budget at either helper seam is red.
 - Oracle for the fix: the diagnosis's mechanism reds, re-run against the fixed
@@ -209,9 +210,16 @@ Fix (test-only, minimal, oracles intact):
   worktree; the durable, repo-resident oracle is the set of `>= 60` pins (A:
   both victim sites; B: `_orchestrator` and `_cohort_orchestrator`). A "N runs
   under a CPU hog" receipt is NOT the oracle: load never produced a red on
-  either victim in 20 iterations, which is also why issue criterion 2 ("stable
-  green under the full suite") is discharged by the mechanism harnesses rather
-  than by a full-suite re-run — a full-suite green would not discriminate.
+  either victim in 20 iterations. Issue criterion 2 ("stable green under the
+  full suite") is discharged twice: by the mechanism harnesses (which show the
+  budget absorbs the reproduced trigger) and by one full-suite run at the
+  final HEAD on node-27 in the detached worktree (receipt posted as a PR
+  comment). The issue's `--ignore=tests/test_safe_fs.py` A/B control is not
+  repeated: its lever was suite composition (one run per arm at the stock
+  budgets, and the issue's second comment shows the same command flipping
+  red/green without any change), and the mechanism it pointed at is the
+  latency the widened budget absorbs; a red in the full-suite run at HEAD
+  would reopen it.
 - Declared limits, recorded (not fixed here): (i)
   `test_run_shud_main_solve_and_recovery_share_one_timeout_budget` (`:5888`)
   is the same failure class with no test-only fix — raising its budget breaks
@@ -219,13 +227,19 @@ Fix (test-only, minimal, oracles intact):
   slow-runner flake; (ii) other files carrying `job_timeout_seconds=5`
   (`test_analysis_pipeline.py:505`, `test_e2e_ifs.py:111`, `test_e2e_m3.py:173`,
   `test_ifs_forecast_integration.py:177/552/573`, `test_orchestrator.py:324`,
-  `test_pipeline_logs_artifacts.py:448/493`,
-  `test_production_scheduler.py:46469/48432`, `test_warm_start.py:901`; all at
+  `test_pipeline_logs_artifacts.py:448/493`, `test_warm_start.py:901`; all at
   `9785e52d`) are the same latent class but not observed victims; left as-is
-  so this PR's diff and CI selection stay on the six issues' files; (iii) the
-  ten remaining inline `job_timeout_seconds=120` literals in
-  `tests/test_warm_start_chaining.py` carry no `>= 60` pin — inline literals,
-  no helper seam to pin. The durable answer for (i) and (ii) is an
+  so this PR's diff and CI selection stay on the six issues' files (the two
+  sites in `test_production_scheduler.py:46469/48432`, a file already in the
+  change surface, are raised to 120 instead — round-2 review; two of the
+  listed files, `test_pipeline_logs_artifacts.py` and `test_e2e_m3.py`, already
+  sit in CI's importer closure of `test_orchestration_chain.py`, so for them
+  the reason is diff scope alone); (iii) the ten remaining
+  `job_timeout_seconds=120` literals in `tests/test_warm_start_chaining.py`
+  carry no `>= 60` pin — nine are inline in test bodies with no helper seam,
+  and the tenth sits in `_quarantine_state_index_orchestrator`, whose four
+  callers never reach `orchestrate_cycle`'s poll deadline, so a pin there would
+  guard an unreachable budget. The durable answer for (i) and (ii) is an
   injectable monotonic clock in `StageExecutionDependencies`
   (`chain_stage_execution.py:149` already injects `utcnow`) and a clock seam in
   `workers/shud_runtime` — a production change outside a test-only PR.
@@ -234,8 +248,8 @@ Fix (test-only, minimal, oracles intact):
   the diagnosis; what this PR removes is the wall-clock dependence. The
   shared-state reading is recorded as superseded and not reproduced under the
   diagnosis's conditions (not as refuted), and criterion 2 is discharged by the
-  deterministic mechanism harnesses instead of a full-suite green (reason
-  above).
+  deterministic mechanism harnesses plus one full-suite node-27 run at the
+  final HEAD (reason above).
 
 ## Risks / Trade-offs
 

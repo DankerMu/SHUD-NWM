@@ -27852,7 +27852,10 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
 
     * **Residual 2 (was "five of eighteen constants carry a value pin").**  CLOSED.  All
       EIGHTEEN are pinned by the single table ``_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES``,
-      asserted by one loop below, and that table's KEY SET is held equal to
+      asserted by one loop below on the container KIND as well as the value (an
+      equal-membered ``set`` copy of a ``frozenset`` is exactly what ``==`` cannot see;
+      a nested swap inside the two table constants remains a declared bound, argued at
+      the assertion), and that table's KEY SET is held equal to
       ``_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS``, so a nineteenth constant cannot
       arrive with a consumer set and no value.  A same-kind reflective rebind or a
       duplicate assignment of ANY module-level constant is now red.  (The five that used
@@ -27945,7 +27948,24 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     # duplicate-assignment shape are closed on all of them rather than on the five #1418's
     # subject family owed.  Each entry's argument lives beside it in the table above.
     for name, expected_value in sorted(_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES.items()):
-        assert getattr(scheduler_state_failure_module, name) == expected_value, (
+        actual_value = getattr(scheduler_state_failure_module, name)
+        # The container KIND first, because `==` alone cannot see it: `set(frozenset({...}))`
+        # compares EQUAL to the frozenset it copies, so a rebind of `_NON_REGULAR_OBJECT_KINDS`
+        # (or of any other frozen refusal set) to a mutable twin would pass the value pin below
+        # while dropping the immutability that keeps a caller from widening a refusal set in
+        # place.  The claim above is that a same-kind reflective rebind of ANY constant is red;
+        # without this assertion that claim would be false for the kind-changing shape.
+        # DECLARED BOUND: this compares the TOP-LEVEL type only.  Inside the two table
+        # constants (`_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE`, `_REMEDY_NON_CAUSAL_CODE_TABLE`) a
+        # nested `frozenset` -> `set` swap is still seen by `==` alone, i.e. not at all.
+        assert type(actual_value) is type(expected_value), (
+            f"{name} is pinned as a {type(expected_value).__name__} but the module now holds a "
+            f"{type(actual_value).__name__}. An equal-membered container of another kind is not "
+            "the same constant -- a frozenset rebound to a set is mutable in place. If the kind "
+            "change is deliberate, update _SCHEDULER_STATE_FAILURE_CONSTANT_VALUES in the same "
+            "change; if it is not, a refusal source was rebound or assigned a second time."
+        )
+        assert actual_value == expected_value, (
             f"{name} no longer holds its pinned value. If the change is legitimate, update "
             "_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES in the same change; if it is "
             "not, a refusal source was rebound or assigned a second time."
@@ -46670,7 +46690,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
                 object_store_root=chain_object_root,
                 object_store_prefix="s3://nhms",
                 poll_interval_seconds=0,
-                job_timeout_seconds=5,
+                job_timeout_seconds=120,  # #1613
                 source_id=source_id,
                 terminal_stage=terminal_stage,
                 reconcile_slurm_user="scheduler-user",
@@ -48633,7 +48653,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
                     object_store_root=tmp_path / "chain-object-store",
                     object_store_prefix="s3://nhms",
                     poll_interval_seconds=0,
-                    job_timeout_seconds=5,
+                    job_timeout_seconds=120,  # #1613
                     source_id="gfs",
                 ),
                 repository=repository,
