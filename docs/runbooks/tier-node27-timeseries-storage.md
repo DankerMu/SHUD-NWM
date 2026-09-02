@@ -3494,10 +3494,14 @@ before a receipt exists.
    `done rc=` timestamps before counting, e.g. with `sed -n '/<start>/,$p'`.
 
    Before #1766 this criterion counted `lock-contention(` instead. That marker
-   attaches **only** to SQLSTATE 55P03/40P01, and both real refusals on record
-   (2026-08-21, 2026-08-22) were `57014` statement-timeout refusals that never
-   carry it — so the criterion read 0 while progress was 0. Do not go back to
-   counting the classification.
+   attaches **only** to SQLSTATE 55P03/40P01. The refused ticks this repo has
+   forensics for — **2026-08-18 = `40P01`** and **2026-08-21 = `57014`**, the
+   #1664 pair recorded in
+   `openspec/changes/archive/2026-08-22-harden-node27-retention-lock-contention/`
+   — both predate the marker, and the `57014` class (what the 08-21 refusal
+   was, and what `lock_timeout` explicitly **cannot** eliminate — hard edge 2
+   at `:3097-3100` above) never carries the marker at all. So the criterion
+   read 0 while progress was 0. Do not go back to counting the classification.
 
    To see *which kind* of drop failure a counted tick was — a diagnostic aid,
    never the criterion:
@@ -3598,12 +3602,14 @@ before a receipt exists.
    Then follow items 1-7 above from whichever wire code that prints.
 
    **KNOWN LIMITATION — scope.** The `systemd.err` file lane is retired for
-   **this unit only**; the sibling node-27 units still write
-   `StandardError=append:…/systemd.err` and their alerts (where they have one)
-   still quote lifecycle lines only. `StandardOutput=append:` is unchanged
-   here, but do not read it as the bracket destination: the wrapper writes
-   nothing at all to stdout. Its `start` / `done rc=` bracket lines are
-   appended straight to `retention.log`
+   this unit and, under #1765, for `nhms-node27-resource-governance.service`.
+   The other six node-27 units (`autopipe`, `download`, `frontier-alert`,
+   `raw-retention`, `timeseries-compression`, `timeseries-compression-replay`)
+   still write `StandardError=append:…/systemd.err`, and their alerts (where
+   they have one) still quote lifecycle lines only. `StandardOutput=append:`
+   is unchanged here, but do not read it as the bracket destination: the
+   wrapper writes nothing at all to stdout. Its `start` / `done rc=` bracket
+   lines are appended straight to `retention.log`
    (`scripts/node27_timeseries_retention_once.sh:143,:158`) and the runner's
    combined output now goes to stderr, so `systemd.log` is a stdout catch-all
    for anything the wrapper or runner might print in future — normally empty.
@@ -3668,7 +3674,8 @@ before a receipt exists.
      **`/home` free space has no critical tier.** The resource-governance
      audit gives that mount a warning threshold only —
      `home_free_warn_bytes` (default 300 GiB) ->
-     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70,:227`
+     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70`
+     (threshold), `:227` (comparison), `:232` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
      `status` is not `completed` (`:584-585`), or the receipt carries at least
@@ -3676,12 +3683,13 @@ before a receipt exists.
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
      hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
-     completed audit. (A rejected config never gets that far: it exits 2 from
-     `:571-576`, which also trips `OnFailure=`.) A `warning` changes neither
-     `status` nor the critical list, so it trips nothing. The three codes that
-     can be critical today are
+     completed audit. (A rejected config never gets that far: the config parse
+     is `:571-576` and the `return 2` is `:577`, which also trips
+     `OnFailure=`.) A `warning` changes neither `status` nor the critical
+     list, so it trips nothing. The three codes that can be critical today are
      `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
-     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:309`).
+     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:318`,
+     severity assigned at `:309`).
      So a free-space shortfall on the volume that actually holds pgdata and
      the object store can never page anyone: it only appears as a `warning`
      line in a receipt someone reads. The database-size proxy is the closest
@@ -3693,9 +3701,10 @@ before a receipt exists.
    clears its target on every run and would apply to the Mac and to CI too.
 
    Two wrapper locks still live on `/`, and that is **accepted, not
-   overlooked**: `scripts/node27_raw_retention_once.sh` and
-   `scripts/node27_timeseries_retention_once.sh` default their bootstrap locks
-   to `/tmp/...`. They are `flock` targets, effectively zero bytes, and moving
+   overlooked**: `scripts/node27_raw_retention_once.sh` defaults its primary
+   `LOCK_PATH` (`:113`) and `scripts/node27_timeseries_retention_once.sh` its
+   bootstrap lock (`:131`, the runner holds a separate DB-scoped one) to
+   `/tmp/...`. They are `flock` targets, effectively zero bytes, and moving
    them changes single-instance semantics on a live lane for no capacity gain.
    The resource-governance lock DID move (`$LOG_ROOT`) because that audit's
    whole job is to report `/` filling up.

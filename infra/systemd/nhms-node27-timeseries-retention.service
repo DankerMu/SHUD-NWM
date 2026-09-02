@@ -19,8 +19,9 @@ StandardOutput=append:/home/nwm/node27-timeseries-retention-logs/systemd.log
 # combined output into retention.log AND to its own stderr, so the file
 # transcript is unchanged while the refusal diagnostic (the redacted
 # `refusal_reason`, `RETENTION_*`) now lands in the 30 journal lines the
-# `OnFailure=` handler quotes. The `systemd.err` lane is retired for THIS unit
-# only — the sibling units keep theirs. `StandardOutput=` is unchanged, but it
+# `OnFailure=` handler quotes. The `systemd.err` lane is retired here and, in
+# the same change, on `nhms-node27-resource-governance.service` (#1765); the
+# other six node-27 units keep theirs. `StandardOutput=` is unchanged, but it
 # is a stdout catch-all, not the bracket destination: the wrapper appends its
 # own `start` / `done rc=` bracket lines straight to retention.log and writes
 # nothing to stdout, so systemd.log normally stays empty.

@@ -7,7 +7,7 @@ The repository pytest configuration SHALL set `tmp_path_retention_policy = "fail
 #### Scenario: Passing tests leave no tmp_path residue
 
 - **WHEN** a pytest session finishes with passing tests that used `tmp_path`
-- **THEN** those directories are removed at session end
+- **THEN** each of those directories is removed at that test's teardown
 
 #### Scenario: node-27 temporary root is off the root volume
 

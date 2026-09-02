@@ -216,10 +216,11 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "pyproject.toml": {
             "tests/test_node27_cold_tablespace_marker_contract.py",
             # #1765: the interpreter-pin table lives in the same file, so a
-            # `requires-python` / `.python-version` edit must run the truth
-            # suite (rule at scripts/select_ci_tests.py:2373). Spelled out
-            # literally, not imported as PYTHON_ENVIRONMENT_TRUTH_TEST: an
-            # expectation derived from the module it checks is vacuous.
+            # `requires-python` edit must run the truth suite (rule at
+            # scripts/select_ci_tests.py:2373; `.python-version` has its own
+            # rule at :2228-2234). Spelled out literally, not imported as
+            # PYTHON_ENVIRONMENT_TRUTH_TEST: an expectation derived from the
+            # module it checks is vacuous.
             "tests/test_python_environment_truth.py",
         },
         "tests/conftest.py": {"tests/test_node27_cold_tablespace_marker_contract.py"},
@@ -257,7 +258,7 @@ def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> N
     """#1712 — the `.service` row is narrower than its `.timer` sibling on purpose.
 
     Exact equality, not a subset: the comment at
-    ``scripts/select_ci_tests.py:1975-1979`` says the unit body cannot break
+    ``scripts/select_ci_tests.py:1972-1977`` says the unit body cannot break
     ``tests/test_node27_cold_residency.py`` (that target is the `.timer` row's
     schedule coverage), so a subset assertion would let the two rows quietly
     converge — which is the one drift this row exists to prevent. The

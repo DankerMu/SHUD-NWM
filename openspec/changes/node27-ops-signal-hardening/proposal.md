@@ -2,10 +2,10 @@
 
 Four independent node-27 operations signals are broken in ways that were each observed on the live host (issues #1766, #1712, #1765, #1647):
 
-- #1766: runbook §8.6 item 7 escalates "retention stopped progressing" by counting `lock-contention(` in `retention.log`, but the two real refused ticks (08-21, 08-22) were `57014` statement-timeout refusals that never carry that marker, so the criterion counts 0 while progress is 0.
+- #1766: runbook §8.6 item 7 escalates "retention stopped progressing" by counting `lock-contention(` in `retention.log`, but the refused ticks the repo has forensics for (2026-08-18 `40P01`, 2026-08-21 `57014`; archived change `2026-08-22-harden-node27-retention-lock-contention`) both predate the marker, and the `57014` class — which the 08-21 refusal was, and which `lock_timeout` explicitly cannot eliminate — never carries the marker at all, so the criterion reads 0 while progress is 0.
 - #1712: the retention unit's `OnFailure=` mail arrives without `refusal_reason`, because the wrapper swallows runner stderr into `retention.log` (`2>&1`) and the unit sends stderr to a file (`StandardError=append:`), so `journalctl -n 30` — the only thing the deliberately dumb handler quotes — has nothing lane-specific in it.
 - #1765: a two-day pytest run filled `/tmp/pytest-of-nwm` (27 GB) on the 98 GB root volume; the resource-governance audit saw the critical root-free signal and still exited 0 with no `OnFailure=`; its own lock lives on the disk that was full; the human capacity check (`df -h /home`) never looks at `/`.
-- #1647: every `psycopg2.connect` in `scripts/node27_autopipeline.py` has no `connect_timeout` and no `statement_timeout`, so a hung backend wedges the 10-minute tick under the flock forever; the compression runner interpolates a chunk name into `ANALYZE` with naive quoting; `NODE27_AUTOPIPE_STATS_GUARD` recognises only the literal `off`.
+- #1647: every `psycopg2.connect` in `scripts/node27_autopipeline.py` has no `connect_timeout` and no `statement_timeout`, so a hung backend wedges the 10-minute tick under the flock forever; the compression runner's `qualified_chunk` property hand-quotes a catalog-supplied chunk name with no validation — the ride-along `ANALYZE` that used it was removed in `f5069257`, so it has no consumer today and the naive quoting is an unexploded charge for the next interpolation site; `NODE27_AUTOPIPE_STATS_GUARD` recognises only the literal `off`.
 
 ## What Changes
 
@@ -25,8 +25,8 @@ Four independent node-27 operations signals are broken in ways that were each ob
 
 ## Impact
 
-- Code: `scripts/node27_timeseries_retention_once.sh`, `scripts/node27_resource_governance_once.sh`, `scripts/node27_resource_governance.py`, `scripts/node27_autopipeline.py`, `scripts/node27_timeseries_compression.py`, `pyproject.toml`, `.gitignore`.
+- Code: `scripts/node27_timeseries_retention_once.sh`, `scripts/node27_resource_governance_once.sh`, `scripts/node27_resource_governance.py`, `scripts/node27_autopipeline.py`, `scripts/node27_timeseries_compression.py`, `pyproject.toml`, `scripts/select_ci_tests.py` (four new/extended routing rows), `.gitignore`.
 - Units: `infra/systemd/nhms-node27-timeseries-retention.service`, `infra/systemd/nhms-node27-resource-governance.service` (re-install + `daemon-reload` on node-27 is a post-merge manual step); `infra/systemd/nhms-node27-unit-failure-alert@.service` comment-only (consumer inventory).
 - Docs: `docs/runbooks/tier-node27-timeseries-storage.md` §8.6, `docs/runbooks/current-production-ops.md`, `docs/runbooks/node-27-bringup-checklist.md`, `instructions/agents/shared.md` + regenerated `CLAUDE.md`/`AGENTS.md`.
-- Tests: `tests/test_node27_timeseries_retention.py`, `tests/test_node27_resource_governance.py`, `tests/test_node27_autopipeline*.py`, `tests/test_node27_timeseries_compression.py`, wrapper shell tests.
+- Tests: `tests/test_node27_timeseries_retention.py` (incl. the wrapper subprocess tests), `tests/test_node27_resource_governance.py`, `tests/test_node27_autopipeline_connection_bounds.py`, `tests/test_node27_autopipeline_handoff.py`, `tests/test_node27_timeseries_compression.py`, `tests/test_node27_connection_attribution.py`, `tests/test_python_environment_truth.py`, `tests/test_select_ci_tests.py`, `tests/test_file_orchestration_journal.py`, `tests/test_qhh_production_bootstrap.py`.
 - Behavior NOT changed: H5 fail-closed, `lock_timeout` values, timer schedules, the #1643 stats-guard observation semantics, receipt schemas.

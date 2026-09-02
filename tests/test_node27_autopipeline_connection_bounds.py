@@ -3,7 +3,9 @@
 Two independent surfaces of ``scripts/node27_autopipeline.py``:
 
 * ``_connect`` — the single connect site (11 callers). Before this change no
-  connection carried a connect timeout or a statement timeout, so one hung
+  connection carried a connect timeout, and only the two stats-guard legs
+  bounded statements at all (a per-relation ``SET statement_timeout``,
+  ``origin/master:1480``); every business statement was unbounded, so one hung
   backend wedged the 10-minute tick under its flock forever and every later
   tick was skipped by ``flock -n``. The expected kwargs are spelled out by hand
   here, never recomputed from the module constants, so a widened budget fails

@@ -3919,9 +3919,14 @@ def test_retention_unit_routes_stderr_to_the_journal() -> None:
 
 
 def test_sibling_units_keep_their_systemd_err_lane() -> None:
-    """The retirement is scoped to THIS unit. The eight siblings were only ever
-    registered, never diagnosed here, and changing them would be an unreviewed
-    behaviour change on lanes this issue never looked at.
+    """The retirement is scoped. Of the eight sibling units, six were only ever
+    registered, never diagnosed here — changing them would be an unreviewed
+    behaviour change on lanes this issue never looked at, so this pins that they
+    keep their `systemd.err` lane. `nhms-node27-resource-governance.service` is
+    the one deliberate exception (#1765 gives it `StandardError=journal` +
+    `OnFailure=`), asserted negatively below;
+    `nhms-node27-unit-failure-alert@.service` has no `StandardError=append:`
+    lane at all.
     """
     siblings = sorted(
         path
