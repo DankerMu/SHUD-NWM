@@ -12,6 +12,7 @@ from packages.common.compressed_chunk_cold_residency import ACCEPTED_SEQUENCE_NA
 from packages.common.compressed_chunk_cold_runtime import (
     CommitAckLost,
     RuntimeConfig,
+    bind_execute,
     inspect_residency_group,
     migrate_residency_group,
     preflight_target_identity,
@@ -19,6 +20,7 @@ from packages.common.compressed_chunk_cold_runtime import (
     reconcile_named_group,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
+    TABLESPACE_LOCATION_SQL,
     ColdRuntimeError,
     compute_window_parity,
     derive_bound_inventories,
@@ -263,13 +265,22 @@ def test_capacity_equality_passes_and_one_byte_short_refuses() -> None:
 
 
 def test_target_identity_drift_refuses_before_movement_sql() -> None:
+    """Catalog-location drift refuses with a *recorded* no-movement log.
+
+    `connection.executed` is only filled by `FakeCursor.execute`, so this must go
+    through the production `bind_execute` seam: a direct `connection.dispatch`
+    call answers the query and can even move the fake relation while leaving the
+    log empty, which would make the assertion below unfalsifiable.
+    """
+
     connection, item = _loaded(FakeConnection())
     connection.tablespace_location = "/wrong"
     with pytest.raises(ColdRuntimeError, match="identity mismatch"):
         preflight_target_identity(
-            lambda sql, params=None: connection.dispatch(sql, params)[0],
+            bind_execute(connection),
             _runtime(inspect_target=_inspect_target),
         )
+    assert [statement for statement, _params in connection.executed] == [TABLESPACE_LOCATION_SQL]
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
     del item
 

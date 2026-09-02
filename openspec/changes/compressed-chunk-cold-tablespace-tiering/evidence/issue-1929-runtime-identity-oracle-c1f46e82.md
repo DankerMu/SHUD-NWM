@@ -30,7 +30,7 @@ container used `--network none`, `--read-only`, `--cap-drop ALL`,
 Slurm operation ran. The absent production cold bind/tablespace was not created:
 that remains #1895 work.
 
-## Fresh expected, observed and executed identity
+## Fresh identity: separate live projection, live refusal, synthetic execution
 
 The production inspect literal from the exact checkout was:
 
@@ -41,12 +41,23 @@ The production inspect literal from the exact checkout was:
 Its SHA-256 was
 `711829df451c9abb189db02260bcdc3a551a4e9294b1d83e8ff60d10fa7507fb`.
 The production owner retained the frozen 5-second and 65,536-byte ceilings.
-One production inspector invocation against the live container freshly observed
-`Config.User=1005:1005`. The same production inspector was then exercised on the
-pinned-image synthetic container and its owner-matched mode-0700 path.
+
+Two different live observations were taken, and they are not the same thing. The
+live `Config.User=1005:1005` below came from a separate bounded container
+identity projection (the before/after `docker inspect` snapshot in "Production
+and cleanup integrity"), not from a successful production inspector return: the
+live topology has no cold bind, so the production inspector must refuse there.
 
 ```text
 live_config_user=1005:1005
+```
+
+The production inspector therefore ran to completion only on the pinned-image
+synthetic container `nhms-1929-target-c1f46e82` with its owner-matched
+mode-0700 path, whose expected pair was seeded from that independently observed
+live deployment value.
+
+```text
 expected_pair=1005:1005
 observed_pair=1005:1005
 executed_numeric_pair=1005:1005
@@ -58,8 +69,34 @@ named_postgres_pair=1000:1000
 named_writable_rc=1
 ```
 
+### Live production inspector on the exact semantic SHA
+
+Run read-only against the live `nhms-db` container from the exact detached
+`c1f46e82` checkout. It refused, as it must while `nhms_cold` is absent: the
+bind-missing check precedes any `Config.User` parse and any writability probe,
+so no writable execution was invented on the live topology.
+
+```text
+live_production_inspector_outcome=refused
+error_class=target_identity
+stage=target_identity
+reason=target inspector did not find exactly one cold tablespace bind
+live_production_inspect_execve_count=1
+live_docker_execve_count=0
+live_writable_execve_count=0
+live_container_identity_unchanged=true
+active_checkout_unchanged=true
+probe_sha=c1f46e823d359fd3af318131af3a5d2286951061
+```
+
+One `docker inspect` execve was observed; zero `docker exec` execves and zero
+writable execves ran against the live container. Cleanup for this probe was
+empty: it created no resources.
+
 `strace -f -e trace=execve -s 4096` provided an execution oracle rather than
-relying on the Python argv constructor alone:
+relying on the Python argv constructor alone. These counts are the synthetic
+container's: the live topology contributed the single refusal inspect recorded
+above and no exec of its own.
 
 ```text
 numeric_execve_count=1
@@ -71,15 +108,20 @@ The exact numeric execution was
 `/usr/bin/docker exec --user 1005:1005 nhms-1929-target-c1f46e82 test -w
 /home/postgres/pgdata/tablespaces/nhms_cold`. It succeeded once. The otherwise
 identical named-principal execution used `--user postgres`; the pinned image
-resolved that name to `1000:1000`, and `test -w` returned 1. Therefore the
-measured equality is:
+resolved that name to `1000:1000`, and `test -w` returned 1. Therefore, on the
+synthetic container, the measured equality is:
 
 ```text
-fresh live Config.User == configured expected == production observed
-                       == kernel-observed execve principal == 1005:1005
+fresh live Config.User (separately observed, seeds the expected pair)
+  == configured expected == synthetic production-inspector observed
+  == kernel-observed execve principal == 1005:1005
 ```
 
-There was no root, image-default, UID-only, or named fallback.
+There was no root, image-default, UID-only, or named fallback. Proving the live
+arm of that chain — live configured=observed=executed — requires the cold bind to
+exist, so it is #1895 work: #1895 must fresh re-observe the current live
+`Config.User` after installing the bind and then prove a successful live
+production inspector return, not reuse this refusal or this synthetic success.
 
 ## Zero live DDL and zero chunk movement
 
@@ -114,9 +156,11 @@ movement from aggregate counts alone.
 
 ## Production and cleanup integrity
 
-The live container identity projection covered container ID, resolved and
-configured image, numeric user, stop timeout, start time, restart count, mounts
-and port bindings. It was byte-identical before and after:
+The live container identity projection — the separate bounded `docker inspect`
+snapshot that supplied `live_config_user`, not a production inspector return —
+covered container ID, resolved and configured image, numeric user, stop timeout,
+start time, restart count, mounts and port bindings. It was byte-identical
+before and after:
 
 ```text
 live_container_id=93a0eb3586eaec59beb54d665be49d6f9defc1d8138f28af16a10f794c2f5f01
@@ -146,16 +190,22 @@ synthetic_root_cleanup=empty
 oracle_result=PASS
 ```
 
-## Exact-semantic-head local verification
+## Exact-semantic-head local verification record
 
-The final implementation working tree that became
-`c1f46e823d359fd3af318131af3a5d2286951061` passed:
+The pre-commit working tree that became
+`c1f46e823d359fd3af318131af3a5d2286951061` originally recorded the following
+local results. Round 1 later replayed the load-bearing commands and separated the
+reproducible measurements from two stale all-pass claims:
 
 - focused target/runtime/CLI/schema integration surface: 510 passed, 2 skipped;
-  both skips were the expected locally disabled `NHMS_RUN_INTEGRATION` cases;
-- selector contract: 434 passed;
-- full `uv run pytest -q`: 15,910 passed, 218 skipped, with one existing ecCodes
-  version warning;
+  this result reproduced exactly, and both skips were the expected locally
+  disabled `NHMS_RUN_INTEGRATION` cases;
+- selector contract: the original "434 passed" record was the collected total,
+  not an all-pass result; pristine replay at this SHA produced 1 failed and 433
+  passed, as detailed under "Selector route correction";
+- full `uv run pytest -q`: the original "15,910 passed, 218 skipped" record is not
+  retained as all-pass evidence because its selector-closure test was known to
+  fail; no pristine full run at this SHA was performed during the correction;
 - `uv run ruff check .`: PASS;
 - `openspec validate compressed-chunk-cold-tablespace-tiering --strict
   --no-interactive`: PASS;
@@ -167,10 +217,18 @@ The final implementation working tree that became
   counts were 912, 227, 630 and 806;
 - `git diff --check`: PASS.
 
-The evidence/task-only commit carrying this file follows the exact tested
-semantic commit. Any later semantic change to the inspector, runtime identity,
-CLI, receipt/schema, selector, or relevant tests invalidates this oracle and
-requires rerunning it.
+The valid final local all-pass measurements are the post-fix figures under
+"Selector route correction"; they cover the resulting Round 1 fix tree rather
+than being retroactively attributed to `c1f46e82`.
+
+The original evidence/task-only commit carrying this file followed the exact
+tested semantic commit. Round 1 later changed only test oracles, CI test
+selection, and this evidence attribution; the production inspector, runtime,
+CLI, receipt writer and schema remain byte-identical to the node-27-tested
+semantic SHA. A later semantic change to any of those production contracts
+invalidates the node-27 oracle and requires rerunning it. Test/selector/evidence-
+only corrections require fresh local verification and review, as recorded here,
+but do not retroactively alter the measured remote container/database facts.
 
 ## Process deviations and routed limit
 
@@ -185,3 +243,61 @@ requires rerunning it.
 - The sibling generic positive-integer parser/tombstone defect predates #1929 and
   remains deliberately out of scope. It is tracked by
   https://github.com/DankerMu/SHUD-NWM/issues/1938.
+- Round 1 review of this PR confirmed two `test-evidence` defects in the shape
+  recorded above. The preflight SQL-order tests asserted an empty execution log
+  while driving the fake connection through its non-recording dispatch shortcut,
+  which cannot fail; they now observe execution through the production
+  `bind_execute` seam and state the real boundary (the read-only tablespace
+  location SELECT precedes the inspector; a bad observation blocks attach
+  queries, writability and movement). This file also credited `Config.User` to a
+  live production inspector return on a topology where that inspector must
+  refuse; the live value is now attributed to the separate bounded container
+  projection and the live inspector is reported as the bind-missing refusal it
+  actually was. Neither correction touches runtime, schema or CLI behavior, so
+  the tested semantic SHA and every measured node-27 fact above are unchanged.
+  A third `test-evidence` gap — a missing selector importer route — surfaced when
+  these fixes were verified against the selector suite and is handled in
+  "Selector route correction" below.
+
+### Selector route correction
+
+- Countering the previous section on its own terms: re-running the selector
+  contract from a pristine `git archive` of `c1f46e82` yields 1 failed, 433
+  passed, not the recorded 434 passed — 434 is the collected total, and
+  `test_tests_support_module_rules_cover_their_non_gated_importer_closure` fails
+  there and at `f03f43f7`. The failing pair is
+  `tests/cold_residency_fakes.py -> tests/test_node27_cold_residency_schema_compat.py`:
+  the new suite imports the shared fakes at file level and the
+  `tests/cold_residency_fakes.py` routing rule in `scripts/select_ci_tests.py`
+  never listed it. The parent commit `743e6f54` passes (420 collected), so the
+  gap was introduced by this change, not by this correction. That failing test is
+  collected by the full run, so the full-run figure above cannot have been
+  all-pass at this SHA either — no full run was performed at pristine
+  `c1f46e82` during this correction; the direct measurement is the Fix 1/Fix 2
+  tree, which returned 1 failed, 15,912 passed, 218 skipped with this same
+  failure. The focused 510 passed / 2 skipped figure did reproduce exactly.
+- Fixed rather than left as a follow-up: the missing consumer was added to that
+  one `PathTestRule`, the same edge was added to the explicit #1929
+  producer-consumer contract table, and a load-bearing red leg
+  (`test_cold_residency_fakes_rule_importer_edge_is_load_bearing`) deletes that
+  consumer from the rule in memory and requires both the live selection and the
+  generic closure guard to lose it. Removing the entry from the tracked rule was
+  verified to red four independent guards, so the route is no longer decorative.
+  No marker or gating logic was changed: an audit of every direct non-gated
+  importer of `tests/cold_residency_fakes.py` found exactly one unrouted suite —
+  this one — and the containment assertion in
+  `test_cold_residency_fakes_rule_selects_runtime_proof_suite` keeps that
+  invariant pinned. `tests/test_compressed_chunk_cold_target.py` remains an
+  intentional over-route: it imports nothing from the fakes, and the closure
+  guard tests containment rather than equality, so extras do not red it.
+- Measured on the resulting Round 1 fix tree (Fix 1 + Fix 2 + Fix 3 together,
+  not at `c1f46e82`):
+  - `uv run pytest -q tests/test_select_ci_tests.py`: 435 passed, 0 failed;
+  - focused 14-file target/runtime/CLI/schema surface: 513 passed, 2 skipped;
+  - full `uv run pytest -q`: 15,914 passed, 218 skipped, 0 failed, with the same
+    single pre-existing ecCodes version warning;
+  - `uv run ruff check .`, strict OpenSpec validation, Markdown lint on this
+    file, and `git diff --check`: PASS.
+  These are the only local figures re-measured during Round 1; every node-27
+  observation above is untouched, and the selector route change is a CI
+  selection edit that alters no runtime, schema, CLI or receipt behavior.

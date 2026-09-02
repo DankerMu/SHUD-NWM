@@ -827,6 +827,10 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_publication.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
+            # #1929 Round 1: the schema-compat suite also imports the shared fakes
+            # at file scope (`FakeConnection`), so a fakes-only edit must run it —
+            # its 1.0/1.1 target-shape rows are asserted against these fixtures.
+            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(

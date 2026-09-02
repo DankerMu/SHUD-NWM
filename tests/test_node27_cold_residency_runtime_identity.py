@@ -7,7 +7,10 @@ claim that ties them together:
 2. direct Python ``RuntimeConfig`` identity — including the bool and half-pair
    cases a shell cannot express;
 3. observed ``Config.User`` / injected-inspector identity — mismatch refuses
-   before any writable probe or movement SQL.
+   before any writable probe, attach query or movement SQL. The preflight reads
+   the read-only tablespace location first, so the refusal boundary is asserted
+   against a recorded SQL log taken through the production ``bind_execute``
+   seam, never against "no SQL at all".
 
 The discriminating value pair is image ``postgres=1000:1000`` versus expected +
 observed runtime ``1005:1005`` on an owner-matched mode-0700 cold path.
@@ -15,6 +18,7 @@ observed runtime ``1005:1005`` on an owner-matched mode-0700 cold path.
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -27,13 +31,19 @@ from packages.common.compressed_chunk_cold_receipt import (
     publish_receipt,
     validate_receipt,
 )
+from packages.common.compressed_chunk_cold_residency import ALLOWED_HYPERTABLES, COLD_TABLESPACE_NAME
 from packages.common.compressed_chunk_cold_runtime import (
     RuntimeConfig,
     TargetIdentity,
+    bind_execute,
     preflight_target_identity,
     require_runtime_exec_identity,
 )
-from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
+from packages.common.compressed_chunk_cold_runtime_catalog import (
+    HYPERTABLE_ATTACH_SQL,
+    TABLESPACE_LOCATION_SQL,
+    ColdRuntimeError,
+)
 from packages.common.compressed_chunk_cold_target import CONTAINER_EXEC_ID_MAX
 from packages.common.compressed_chunk_cold_tick import runtime_config, target_payload
 from scripts import node27_cold_residency as runner
@@ -425,7 +435,106 @@ def test_runtime_config_propagates_the_pair_from_cli_config(tmp_path: Path) -> N
 
 
 def _execute(connection: FakeConnection):
+    """The production execution seam, so `connection.executed` is a real log.
+
+    `FakeConnection.dispatch` answers and mutates but records nothing; only
+    `FakeCursor.execute` appends. Anything that calls `dispatch` directly and
+    then reasons about `connection.executed` is a vacuous oracle — the guard in
+    :func:`test_sql_recording_requires_the_fake_cursor_seam` pins this down.
+    """
+
+    return bind_execute(connection)
+
+
+def _statements(connection: FakeConnection) -> list[str]:
+    return [sql for sql, _params in connection.executed]
+
+
+def _attach_queries(connection: FakeConnection) -> set[tuple[object, ...]]:
+    """Params of every recorded hypertable-attach query, order-insensitive.
+
+    `ALLOWED_HYPERTABLES` is a frozenset, so which of the two attach queries runs
+    first is not a production guarantee; the set of pairs that ran is.
+    """
+
+    attach = " ".join(HYPERTABLE_ATTACH_SQL.split())
+    return {tuple(params) for sql, params in connection.executed if " ".join(sql.split()) == attach}
+
+
+def _direct_dispatch(connection: FakeConnection):
+    """Direct dispatch: answers and mutates, records nothing. Probe material only."""
+
     return lambda sql, params=None: connection.dispatch(sql, params)[0]
+
+
+def test_sql_recording_requires_the_fake_cursor_seam() -> None:
+    """Load-bearing guard for the three refusal tests and the success test below.
+
+    `FakeConnection.dispatch` is a behavior engine, not an execution log: this
+    probe runs the real tablespace-location SELECT plus a `SET TABLESPACE`
+    through it and shows the read was answered, the fake relation really moved,
+    and `connection.executed` stayed empty. An execution-history assertion built
+    on that shortcut cannot fail. The last block pins the opposite property on
+    `_execute` itself, so if the order tests ever go back to direct dispatch the
+    recorded statement list comes up empty and this test goes red first.
+    """
+
+    connection = FakeConnection()
+    connection.load_group(chunk(), complete_relations())
+    movement_sql = f'ALTER TABLE "_timescaledb_internal"."_hyper_1_1_chunk" SET TABLESPACE "{COLD_TABLESPACE_NAME}"'
+
+    rows = _direct_dispatch(connection)(TABLESPACE_LOCATION_SQL, (COLD_TABLESPACE_NAME,))
+    _direct_dispatch(connection)(movement_sql, None)
+    assert rows
+    assert connection.relations[10].tablespace == COLD_TABLESPACE_NAME
+    assert connection.executed == []
+
+    connection.executed.clear()
+    _execute(connection)(TABLESPACE_LOCATION_SQL, (COLD_TABLESPACE_NAME,))
+    assert _statements(connection) == [TABLESPACE_LOCATION_SQL]
+
+
+def test_preflight_identity_tests_never_hand_fake_dispatch_as_the_execute_seam() -> None:
+    """Structural half of the guard: no inline `connection.dispatch` seam here.
+
+    :func:`test_sql_recording_requires_the_fake_cursor_seam` catches `_execute`
+    itself going back to dispatch. A call site that inlines the lambda instead
+    would dodge that, so this walks this file's own AST and rejects any
+    `preflight_target_identity(...)` argument that reaches for `.dispatch`. The
+    one sanctioned dispatch user, `_direct_dispatch`, is not a preflight call and
+    stays legal.
+    """
+
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if not (isinstance(callee, ast.Name) and callee.id == "preflight_target_identity"):
+            continue
+        for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+            for inner in ast.walk(argument):
+                if isinstance(inner, ast.Attribute) and inner.attr == "dispatch":
+                    offenders.append(f"line {inner.lineno}: preflight seam reaches .dispatch directly")
+    assert offenders == [], "SQL-order evidence must come from the recording seam:\n  " + "\n  ".join(offenders)
+
+
+def _assert_refusal_log_records_only_catalog_location(connection: FakeConnection) -> None:
+    """The honest refusal boundary: the read-only location probe ran, nothing else did.
+
+    `preflight_target_identity` reads `pg_tablespace` before it invokes the
+    inspector, so a refusal can never be proved by "no SQL at all". It is proved
+    by "only the read-only location SELECT, no attach query, and no movement".
+    """
+
+    assert _statements(connection) == [TABLESPACE_LOCATION_SQL]
+    assert [params for _sql, params in connection.executed] == [(COLD_TABLESPACE_NAME,)]
+    assert _attach_queries(connection) == set()
+    # The exact-list equality above already rules out any movement statement; the
+    # scan stays because it is the requirement as written, not an inference.
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
 
 
 @pytest.mark.parametrize(
@@ -459,6 +568,16 @@ def _execute(connection: FakeConnection):
             {**target_observation(), "container_exec_uid": "1005", "container_exec_gid": "1005"},
             id="string-pair",
         ),
+        # A claimed writability never substitutes for identity: the injected seam
+        # reports `writable` without an integral pair, and nothing may treat that
+        # as permission to continue into attach or movement.
+        pytest.param(
+            {
+                **{key: value for key, value in target_observation().items() if not key.startswith("container_exec_")},
+                "writable": True,
+            },
+            id="writable-claim-without-pair",
+        ),
     ],
 )
 def test_injected_inspector_identity_is_strictly_validated(payload: dict[str, object]) -> None:
@@ -469,11 +588,14 @@ def test_injected_inspector_identity_is_strictly_validated(payload: dict[str, ob
             RuntimeConfig(inspect_target=lambda: dict(payload), **expected_exec_identity()),
         )
     assert raised.value.error_class == "target_identity"
-    assert connection.executed == []
+    _assert_refusal_log_records_only_catalog_location(connection)
 
 
 def test_preflight_never_echoes_expected_identity_when_inspector_is_silent() -> None:
-    """The pre-fix inspector payload (no identity fields) must fail, not pass."""
+    """The pre-fix inspector payload (no identity fields) must fail, not pass.
+
+    The refusal must not be papered over by echoing the expected config pair.
+    """
 
     connection = FakeConnection()
     legacy = {
@@ -487,8 +609,7 @@ def test_preflight_never_echoes_expected_identity_when_inspector_is_silent() -> 
             _execute(connection),
             RuntimeConfig(inspect_target=lambda: dict(legacy), **expected_exec_identity()),
         )
-    # No catalog query ran: the identity gate precedes the first SQL.
-    assert connection.executed == []
+    _assert_refusal_log_records_only_catalog_location(connection)
 
 
 @pytest.mark.parametrize(
@@ -503,7 +624,7 @@ def test_preflight_never_echoes_expected_identity_when_inspector_is_silent() -> 
         (CONTAINER_EXEC_ID_MAX + 1, RUNTIME_EXEC_GID, "out-of-range"),
     ],
 )
-def test_observed_mismatch_refuses_before_any_catalog_sql(
+def test_observed_mismatch_refuses_before_attach_queries_or_movement(
     observed_uid: int,
     observed_gid: int,
     refusal: str,
@@ -521,10 +642,13 @@ def test_observed_mismatch_refuses_before_any_catalog_sql(
             ),
         )
     assert raised.value.stage == "target_identity"
-    assert connection.executed == []
+    _assert_refusal_log_records_only_catalog_location(connection)
 
 
 def test_matching_identity_preflights_and_returns_the_observed_pair() -> None:
+    """The accepting path is the refusal tests' oracle: catalog SELECT, then the
+    two attach queries, then a returned pair — and still no movement."""
+
     connection = FakeConnection()
     identity = preflight_target_identity(
         _execute(connection),
@@ -535,6 +659,12 @@ def test_matching_identity_preflights_and_returns_the_observed_pair() -> None:
         RUNTIME_EXEC_GID,
     )
     assert target_payload(identity)["container_exec_uid"] == RUNTIME_EXEC_UID
+    assert target_payload(identity)["container_exec_gid"] == RUNTIME_EXEC_GID
+    statements = _statements(connection)
+    assert statements[0] == TABLESPACE_LOCATION_SQL
+    assert statements[1:] == [HYPERTABLE_ATTACH_SQL] * len(ALLOWED_HYPERTABLES)
+    assert _attach_queries(connection) == set(ALLOWED_HYPERTABLES)
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
 
 
 def test_target_identity_record_requires_the_pair() -> None:
