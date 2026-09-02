@@ -3666,7 +3666,11 @@ readlink -f "$NHMS_SCHEDULER_JOURNAL_ROOT"
 
 **本 PR 之后**：调度器在构造 file journal repository 时就验证该 root，不合规
 直接以 `FILE_JOURNAL_INVALID_ROOT: <message>` 写 stderr 并 exit 1（oneshot unit
-随之失败），不再退化成"每轮全是 blocked row"。message 里带 `readlink -f` 与
+随之失败），不再退化成"每轮全是 blocked row"。**适用范围**：这条 exit 1 只覆盖
+**能通过 db-free preflight** 的 root——上面那种祖先层 alias 正是这一类。leaf 本身
+是 symlink、symlink loop、以及 root 根本不存在这三种形状，preflight 自己就先拦
+下了：`from_env` 走 blocked 分支、`active_repository` 为 `None`，这一趟以
+preflight 自己的 redacted blocker 结束，根本走不到 root 验证。message 里带 `readlink -f` 与
 "real directory" 的处置指引，不含路径、traceback 或模块名；配置值与它来自哪个
 设置项（调度器是 `NHMS_SCHEDULER_JOURNAL_ROOT`，demote CLI 是 `--journal-root`）
 放在错误的结构化 details 里。operator 的 `demote-reserved-job` 走的是同一个
@@ -3682,13 +3686,42 @@ field `job_id`）；census 只调用这一个谓词，不做第二套比较。
 **普查命令**（node-22，只读，写作详见 8.10 的 root 前提）：
 
 ```bash
-/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli census-job-id-scope --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT"
+/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli census-job-id-scope --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" --max-records 5000000
 ```
 
 退出码：`0` = 没有分叉行；`2` = 发现分叉行（stdout 是 JSON receipt，
 `divergent_rows` 逐条列出 `job_id`、`own_scope`、`job_id_scope`、
 `anchor_present`、`flat_direct_present`、`reconcile_abort_trigger`）；`1` = typed
 失败（stderr 是 `error_code: message` 或 `reason: field`，无 traceback）。
+
+**为什么带 `--max-records 5000000`**：整树 replay 把每一个 latest view、每一条
+segment 记录和每一条 direct 记录都记在**同一个 record 预算**上，默认值是
+`MAX_FILE_JOURNAL_RECORDS = 100_000`。生产树会正常地超过它：node-22 在
+2026-09-02 用默认预算跑就以 exit 1 + `file_journal_record_limit_exceeded:
+pipeline_job_records` 停住（5,998 个 latest view + 275 个 segment）。补救就是
+`--max-records N`，上面写的 5000000 是实测跑通的值。**`--max-files` 不是这个
+旋钮**——它管的是单次目录遍历发现的文件数（默认同为 100000，超限报的是
+`file_journal_file_limit_exceeded`），而实际文件数离 100,000 还很远；调它不会
+让 record 预算变宽。预算跳闸是 fail-loud，不写任何字节，抬预算是唯一支持的处置，
+不存在"跳过"这个选项。
+
+**实测记录**（PR #1951，worktree SHA `de33bd87`，2026-09-02 09:46 UTC，
+node-22 detached worktree + `/scratch/frd_muziyao/NWM/.venv/bin/python -m`）：
+
+- 第 1 趟按默认预算跑 → exit 1，`file_journal_record_limit_exceeded:
+  pipeline_job_records`，无 traceback，零写入。
+- 第 2 趟加 `--max-records 5000000` → **exit 0**，`divergent_total` 0，
+  `reconcile_abort_triggers` 0；per-surface：flat direct 5,125 行 / by-cycle
+  direct 9,362 行 / journal replay 14,922 行（5,998 latest view + 275 segment）/
+  reconcile-inventory 3 个 anchor、residue 0 / `active_reconcile` 不存在。
+- receipt 与 transcript：`docs/runbooks/receipts/journal-scope-census/node22-2026-09-02-de33bd87.json`
+  与同目录 `-transcript.md`。
+- 结论：node-22 当前**没有**分叉行，规划中的 guarded repair 命令
+  （`repair-job-id-scope`）因此没有实现；真要修就走本节下面的人工恢复步骤。
+- 并发口径：两趟都是在 `nhms-compute-scheduler.service` 处于 `activating`
+  时跑的（node-22 上这个 oneshot 跑得久）。**只读 census 与调度器同时跑是被接受
+  的模式**：census 不持有任何 repository 锁，撕裂读会以 `file_journal_unreadable`
+  fail loud，重跑即可。只有下面的人工恢复步骤才必须先停 timer。
 
 **什么时候跑**：任何 post-#1939 的 checkout 在 node-22 上生效之前跑一次（gate
 生效后分叉行才会真正咬人）；以及任何一次手工编辑 journal root 之后。命令对

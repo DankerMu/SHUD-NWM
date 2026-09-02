@@ -267,7 +267,14 @@ check proves shadowing; an import failure of the new module against the
 3.12.7 `.venv` is fail-closed and reported, never repaired with `uv sync`). `uv run --no-sync` is not used: outside a project it has no effect
 and picks an arbitrary interpreter. The live checkout is not pulled — pulling
 would activate the gate before the census, defeating the census window. Run
-between timer ticks; the receipt records timer/service state, root and
+between timer ticks when the service is inactive; measured on 2026-09-02 the
+oneshot service was `activating` before and after both runs (it runs long on
+node-22), so the accepted mode is a concurrent read-only census — no
+repository lock is held, and a torn read fails loud (`file_journal_unreadable`)
+and is rerun; stopping the timer is required only for the recovery steps. The
+default record budget (`MAX_FILE_JOURNAL_RECORDS = 100_000`) trips on the live
+replay (run 1, exit 1), so the documented command carries `--max-records
+5000000` (run 2, exit 0, 0 divergent). The receipt records timer/service state, root and
 `readlink -f` equality, worktree SHA, interpreter path and version, UTC time
 and every per-surface count; the worktree is removed afterwards. A torn
 segment read fails loud and is rerun. A non-scope rejection of a legitimately

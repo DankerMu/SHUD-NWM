@@ -34,6 +34,7 @@ from services.orchestrator.journal_root_authority import JOURNAL_ROOT_INVALID_ME
 from services.orchestrator.journal_scope_census import (
     CENSUS_JOB_ID_SCOPE_COMMAND,
     CENSUS_SCHEMA_VERSION,
+    OUTPUT_UNWRITABLE_MESSAGE,
     census_job_id_scope,
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
@@ -549,3 +550,93 @@ def test_output_outside_the_root_writes_the_same_json_as_stdout(
     assert code == 0
     assert json.loads(output.read_text(encoding="utf-8")) == json.loads(out)
     assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+@pytest.mark.parametrize("kind", ("missing_parent", "existing_directory"))
+def test_unwritable_output_still_publishes_the_receipt_on_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+    kind: str,
+) -> None:
+    """An unwritable ``--output`` costs the file, never the census.
+
+    On node-22 the census takes minutes over the live tree; an unguarded
+    ``write_text`` would leak an ``OSError`` traceback AND discard the run,
+    leaving the operator with nothing.  The receipt is echoed first, so stdout
+    still carries the complete JSON and the failure is one typed line.
+    """
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+    if kind == "missing_parent":
+        output = tmp_path / "absent" / "census.json"
+        assert not output.parent.exists()
+    else:
+        output = tmp_path / "receipts"
+        output.mkdir()
+    before = _snapshot(root)
+
+    code, out, err = _invoke(entrypoint, _census_args(root, "--output", str(output)), capsys)
+
+    assert code == 1
+    assert err.strip() == f"CENSUS_OUTPUT_UNWRITABLE: {OUTPUT_UNWRITABLE_MESSAGE}"
+    assert "Traceback" not in err
+    # The whole receipt is on stdout and parses: the census is not lost.
+    receipt = json.loads(out)
+    assert receipt["schema_version"] == CENSUS_SCHEMA_VERSION
+    assert receipt["divergent_total"] == 0
+    assert receipt["surfaces"]["flat_direct"]["rows"] == 2
+    assert _snapshot(root) == before
+
+
+# ---------------------------------------------------------------------------
+# 6. Record budget: the live node-22 tree needs the override
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_record_budget_trip_fails_loud_with_the_documented_token(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """The exact failure node-22 hit on 2026-09-02 with the default budget.
+
+    The whole-tree replay charges every latest view, segment record and direct
+    record against ONE budget, so a production tree trips
+    ``MAX_FILE_JOURNAL_RECORDS`` long before any file budget.  ``--max-files``
+    is not the knob: this is a record count, not a file count.
+    """
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+    before = _snapshot(root)
+
+    code, out, err = _invoke(entrypoint, _census_args(root, "--max-records", "1"), capsys)
+
+    assert code == 1
+    assert out.strip() == ""
+    assert err.strip() == "file_journal_record_limit_exceeded: pipeline_job_records"
+    assert "Traceback" not in err
+    assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_raised_record_budget_completes_and_is_recorded_in_the_receipt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """``--max-records N`` is the documented remedy, and the receipt says N."""
+
+    root = tmp_path / "journal"
+    _mint_legal_journal(root)
+
+    code, out, err = _invoke(entrypoint, _census_args(root, "--max-records", "1000"), capsys)
+
+    assert err == ""
+    assert code == 0
+    receipt = json.loads(out)
+    assert receipt["limits"]["max_records"] == 1000
+    assert receipt["limits"]["max_files"] == journal_module.MAX_FILE_JOURNAL_DISCOVERED_FILES
+    assert receipt["divergent_total"] == 0

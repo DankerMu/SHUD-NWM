@@ -47,6 +47,11 @@ distinguishable and uses exit **1**.  On stderr an ``OrchestratorError`` prints
 ``error_code: message`` (the ``plan-production`` convention) and a
 ``FileOrchestrationJournalError``, which carries ``reason``/``field`` rather
 than a code, prints ``reason: field``.  Neither prints a traceback.
+
+The receipt is echoed to stdout BEFORE ``--output`` is written, so an
+unwritable receipt path (``CENSUS_OUTPUT_UNWRITABLE``, exit 1) reports the
+failure without discarding the census that was already paid for; the in-root
+refusal still happens before the census runs, so nothing is echoed for it.
 """
 
 from __future__ import annotations
@@ -90,7 +95,10 @@ CENSUS_JOB_ID_SCOPE_HELP = (
     "reconcile-inventory anchors and the legacy active-reconcile directory). "
     "Writes nothing under the journal root: --output refuses any path inside "
     "it, and inventory .tmp residue is reported, never removed. Exit 0 when no "
-    "divergent row exists, 2 when one or more do, 1 on a typed failure."
+    "divergent row exists, 2 when one or more do, 1 on a typed failure. A "
+    "production-sized tree can legitimately exceed the default replay record "
+    "budget (file_journal_record_limit_exceeded: pipeline_job_records, exit 1); "
+    "--max-records raises it -- node-22 needed 5000000 on 2026-09-02."
 )
 
 #: The row-bearing surfaces a divergent id's ``surfaces`` list may name.
@@ -101,6 +109,29 @@ ROW_SURFACES = ("flat_direct", "by_cycle_direct", "journal_replay", "active_reco
 _OUTPUT_INSIDE_ROOT_MESSAGE = (
     "census receipt --output must not be inside the journal root: the census writes nothing under the root it reads"
 )
+#: Constant, path-free and traceback-free like every other typed line this
+#: command emits.  It names stdout deliberately: the census already ran and its
+#: receipt is complete on stdout, so the operator loses the file, not the run.
+OUTPUT_UNWRITABLE_MESSAGE = "census receipt could not be written; the receipt above on stdout is complete"
+
+MAX_FILES_HELP = (
+    "Override the per-walk discovered-file budget (default 100000). A trip is "
+    "file_journal_file_limit_exceeded on the offending directory, or "
+    "'file_journal_record_limit_exceeded: reconcile_inventory' for the anchor "
+    "listing. It does NOT widen the replay record budget: for "
+    "'file_journal_record_limit_exceeded: pipeline_job_records', raise "
+    "--max-records instead."
+)
+
+MAX_RECORDS_HELP = (
+    "Override the journal replay record budget (default MAX_FILE_JOURNAL_RECORDS "
+    "= 100000, charged across latest views, segment records and direct records "
+    "together). A trip fails loud with 'file_journal_record_limit_exceeded: "
+    "pipeline_job_records' and exit 1; node-22's live tree needed 5000000 on "
+    "2026-09-02. Raising the budget is the documented remedy, never a skip."
+)
+
+_OUTPUT_HELP = "Write the receipt to this path (must be outside the root); stdout carries it either way."
 
 
 class _Divergence:
@@ -515,22 +546,38 @@ def _census_command_result(
     max_files: int | None,
     max_records: int | None,
     output: str | None,
-) -> tuple[str, int]:
+    emit: Callable[[str], None],
+) -> int:
     """The command body shared verbatim by both entrypoints.
 
     The root is verified here as well as inside :func:`census_job_id_scope` so
     an invalid root is refused BEFORE the ``--output`` containment question can
     even be asked against it; the helper is idempotent and does no I/O beyond
     the no-follow walk.
+
+    ``emit`` publishes the receipt to stdout and is called BEFORE the optional
+    ``--output`` write, so a receipt path that turns out to be unwritable costs
+    the file and not the census: an unguarded write here would leak an
+    ``OSError`` traceback and throw away a run that on node-22 takes minutes.
+    The in-root refusal is unaffected -- it raises before the census runs, so
+    nothing has been emitted when it fires.
     """
 
     verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
     target = _require_output_outside_root(output, verified_root) if output else None
     receipt = census_job_id_scope(journal_root, max_files=max_files, max_records=max_records)
     rendered = json.dumps(receipt, sort_keys=True)
+    emit(rendered)
     if target is not None:
-        target.write_text(rendered + "\n", encoding="utf-8")
-    return rendered, int(receipt["exit_code"])
+        try:
+            target.write_text(rendered + "\n", encoding="utf-8")
+        except OSError as error:
+            raise OrchestratorError(
+                "CENSUS_OUTPUT_UNWRITABLE",
+                OUTPUT_UNWRITABLE_MESSAGE,
+                {"error_type": type(error).__name__, "output": str(target)},
+            ) from error
+    return int(receipt["exit_code"])
 
 
 def _census_error_line(error: BaseException) -> str:
@@ -548,9 +595,9 @@ def register_click_census_command(cli: Any) -> None:
 
     @cli.command(CENSUS_JOB_ID_SCOPE_COMMAND, help=CENSUS_JOB_ID_SCOPE_HELP)
     @click.option("--journal-root", required=True)
-    @click.option("--max-files", default=None, type=int)
-    @click.option("--max-records", default=None, type=int)
-    @click.option("--output", default=None, help="Write the receipt to this path (must be outside the root).")
+    @click.option("--max-files", default=None, type=int, help=MAX_FILES_HELP)
+    @click.option("--max-records", default=None, type=int, help=MAX_RECORDS_HELP)
+    @click.option("--output", default=None, help=_OUTPUT_HELP)
     def census_job_id_scope_command(
         journal_root: str,
         max_files: int | None,
@@ -558,16 +605,16 @@ def register_click_census_command(cli: Any) -> None:
         output: str | None,
     ) -> None:
         try:
-            rendered, exit_code = _census_command_result(
+            exit_code = _census_command_result(
                 journal_root=journal_root,
                 max_files=max_files,
                 max_records=max_records,
                 output=output,
+                emit=click.echo,
             )
         except (OrchestratorError, FileOrchestrationJournalError) as error:
             click.echo(_census_error_line(error), err=True)
             raise SystemExit(1) from error
-        click.echo(rendered)
         if exit_code != 0:
             raise SystemExit(exit_code)
 
@@ -581,29 +628,25 @@ def add_argparse_census_subparser(subparsers: Any) -> None:
         description=CENSUS_JOB_ID_SCOPE_HELP,
     )
     census_parser.add_argument("--journal-root", required=True)
-    census_parser.add_argument("--max-files", type=int, default=None)
-    census_parser.add_argument("--max-records", type=int, default=None)
-    census_parser.add_argument(
-        "--output",
-        default=None,
-        help="Write the receipt to this path (must be outside the root).",
-    )
+    census_parser.add_argument("--max-files", type=int, default=None, help=MAX_FILES_HELP)
+    census_parser.add_argument("--max-records", type=int, default=None, help=MAX_RECORDS_HELP)
+    census_parser.add_argument("--output", default=None, help=_OUTPUT_HELP)
 
 
 def run_argparse_census_command(args: Any) -> int:
     """Dispatch one argparse ``census-job-id-scope`` invocation."""
 
     try:
-        rendered, exit_code = _census_command_result(
+        exit_code = _census_command_result(
             journal_root=args.journal_root,
             max_files=args.max_files,
             max_records=args.max_records,
             output=args.output,
+            emit=print,
         )
     except (OrchestratorError, FileOrchestrationJournalError) as error:
         print(_census_error_line(error), file=sys.stderr)
         return 1
-    print(rendered)
     return exit_code
 
 
@@ -612,6 +655,9 @@ __all__ = [
     "CENSUS_JOB_ID_SCOPE_COMMAND",
     "CENSUS_JOB_ID_SCOPE_HELP",
     "CENSUS_SCHEMA_VERSION",
+    "MAX_FILES_HELP",
+    "MAX_RECORDS_HELP",
+    "OUTPUT_UNWRITABLE_MESSAGE",
     "add_argparse_census_subparser",
     "census_job_id_scope",
     "register_click_census_command",
