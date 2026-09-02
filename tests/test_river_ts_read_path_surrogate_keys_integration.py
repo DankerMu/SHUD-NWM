@@ -34,10 +34,12 @@ Scope: the questions a text-substring pin cannot answer.
   ``variable`` must both return the empty result the text predicates returned.
   The ``enum_range`` matcher is proved to be load-bearing by showing the cast
   it replaced really does raise on the same literal.
-* **What a coverage refresh does to an all-legacy run.** It zeroes the row the
-  text era had already materialized. That is a destructive operational
-  consequence rather than a design goal, so it is pinned here and documented
-  as a prohibition in ``scripts/node27_refresh_coverage.py``.
+* **What a coverage refresh does to an all-legacy run.** It refuses (#1446).
+  The key-scan emptiness is the #1341 contract; destroying coverage the text
+  era already materialized never was, so the upsert now skips a populated row
+  whose fresh scan is empty unless the caller forces it. Pinned here on a real
+  database because the guard IS a SQL clause -- ``force`` adaptation and the
+  conditional ``DO UPDATE ... WHERE`` cannot be checked by a fake cursor.
 """
 
 from __future__ import annotations
@@ -54,7 +56,10 @@ from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
 from apps.api.routes.hydro_display import _require_hydro_mvt_source_identity
-from packages.common.display_coverage import refresh_run_display_coverage
+from packages.common.display_coverage import (
+    DisplayCoverageRefreshRefused,
+    refresh_run_display_coverage,
+)
 from services.tiles.mvt import postgis_tile_sql, valid_times_for_layer
 from tests.integration_helpers import apply_migrations_from_zero, sqlalchemy_engine
 
@@ -75,8 +80,8 @@ _KEYED_RUN_ID = "run-1341-keyed"
 _LEGACY_RUN_ID = "run-1341-legacy"
 # A run with NOTHING but pre-#1340 rows, plus the coverage row the text era
 # already materialized for it. It exists to pin what a coverage refresh does to
-# such a run after the switch (it zeroes it), which is the operational hazard
-# behind the `--skip-fresh` warning in scripts/node27_refresh_coverage.py.
+# such a run after the switch: since #1446 it is REFUSED rather than zeroed,
+# and `force` is the only way to zero it.
 # Its cycle_time is the earliest of the three so the national layer's
 # DISTINCT ON still selects `_LEGACY_RUN_ID` and the zoom-split test is
 # unaffected.
@@ -736,75 +741,171 @@ def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows
     assert coverage["max_lead_time_hours"] == 1
 
 
-def test_refreshing_coverage_for_an_all_null_key_run_zeroes_what_the_text_era_stored(seeded: Any) -> None:
-    """The operational hazard, pinned rather than discovered in production.
+_COVERAGE_COLUMNS_SQL = """
+    SELECT segment_count, river_sample_count,
+           river_valid_time_start, river_valid_time_end,
+           min_lead_time_hours, max_lead_time_hours, refreshed_at
+    FROM hydro.run_display_coverage WHERE run_id = %s
+"""
+
+_ZEROED_COVERAGE = {
+    "segment_count": 0,
+    "river_sample_count": 0,
+    "river_valid_time_start": None,
+    "river_valid_time_end": None,
+    "min_lead_time_hours": None,
+    "max_lead_time_hours": None,
+}
+
+
+def _coverage(connection: Any, run_id: str) -> dict[str, Any] | None:
+    with connection.cursor() as cursor:
+        cursor.execute(_COVERAGE_COLUMNS_SQL, (run_id,))
+        row = cursor.fetchone()
+    return None if row is None else dict(row)
+
+
+def _assert_all_legacy_preconditions(connection: Any) -> dict[str, Any]:
+    """The seed really is the hazard shape: populated row, zero keyed rows."""
+    before = _coverage(connection, _ALL_LEGACY_RUN_ID)
+
+    # Independent expectation: the text era saw all three segments at both
+    # hours, and that is exactly what the seeded row holds.
+    assert before["segment_count"] == len(_SEGMENTS)
+    assert before["river_sample_count"] == len(_SEGMENTS) * 2
+    assert before["river_valid_time_start"] == _T0
+    assert before["river_valid_time_end"] == _T1
+
+    # And the rows really are still in the table, text-readable — so an empty
+    # fresh scan is the key switch, not missing data.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS n, COUNT(run_key) AS keyed
+            FROM hydro.river_timeseries WHERE run_id = %s
+            """,
+            (_ALL_LEGACY_RUN_ID,),
+        )
+        rows = dict(cursor.fetchone())
+    assert rows == {"n": len(_SEGMENTS) * 2, "keyed": 0}
+    return before
+
+
+def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(seeded: Any) -> None:
+    """#1446: the guard holds on a real database, against the real hazard shape.
 
     Re-scanning a run whose rows are all pre-#1340 does not merely fail to find
     them: ``coverage`` is built ``FROM candidate_runs`` with a LEFT JOIN to the
-    river rollup, so the run still produces a row — with ``COALESCE(..., 0)``
-    counts and NULL valid-time bounds — and the upsert overwrites the correct
-    values the text era had already materialized. That drops the run out of
-    latest-product readiness and off the national tile.
+    river rollup, so the run still produces an upsert row — with
+    ``COALESCE(..., 0)`` counts and NULL valid-time bounds. Before #1446 that
+    row overwrote the correct values the text era had materialized, dropping
+    the run out of latest-product readiness and off the national tile.
 
-    The exclusion itself is the recorded #1341 contract. Destroying coverage
-    that was already computed is not, which is why
-    ``scripts/node27_refresh_coverage.py`` now documents ``--skip-fresh`` as
-    mandatory and this test pins the behaviour it warns about.
+    The conditional ``DO UPDATE ... WHERE`` now skips it. This is the only test
+    that executes that clause: the unit suite's cursor is a fake and cannot
+    evaluate SQL.
+    """
+    url, _session = seeded
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        before = _assert_all_legacy_preconditions(connection)
+
+        with pytest.raises(DisplayCoverageRefreshRefused) as excinfo:
+            refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID)
+
+        assert excinfo.value.run_id == _ALL_LEGACY_RUN_ID
+        assert excinfo.value.existing_segment_count == len(_SEGMENTS)
+
+        # Whole-row skip (design D1): nothing moved, `refreshed_at` included —
+        # which is what keeps the run stale and rescanned until #1408 heals it.
+        assert _coverage(connection, _ALL_LEGACY_RUN_ID) == before
+    finally:
+        connection.close()
+
+
+def test_forced_refresh_of_an_all_null_key_run_performs_the_zeroing(seeded: Any) -> None:
+    """The escape hatch still works — and is the ONLY way to zero the row."""
+    url, _session = seeded
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        before = _assert_all_legacy_preconditions(connection)
+
+        assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID, force=True) is True
+
+        after = _coverage(connection, _ALL_LEGACY_RUN_ID)
+        assert {key: after[key] for key in _ZEROED_COVERAGE} == _ZEROED_COVERAGE
+        assert after["refreshed_at"] > before["refreshed_at"]
+    finally:
+        connection.close()
+
+
+def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(seeded: Any) -> None:
+    """The guard's third disjunct: a row that already reads 0 is not protected.
+
+    Chained after the force, because that is exactly the state that matters —
+    once a run has been zeroed deliberately, ordinary refreshes must keep
+    bumping its ``refreshed_at`` so it stops being reported stale forever.
+    """
+    url, _session = seeded
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID, force=True) is True
+        zeroed = _coverage(connection, _ALL_LEGACY_RUN_ID)
+        assert zeroed["segment_count"] == 0
+
+        # No force this time: the row reads 0, so the guard lets it through.
+        assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID) is True
+
+        after = _coverage(connection, _ALL_LEGACY_RUN_ID)
+        assert {key: after[key] for key in _ZEROED_COVERAGE} == _ZEROED_COVERAGE
+        assert after["refreshed_at"] > zeroed["refreshed_at"]
+    finally:
+        connection.close()
+
+
+def test_first_refresh_with_no_existing_row_writes_zero(seeded: Any) -> None:
+    """A first refresh is an INSERT and never reaches the DO UPDATE guard.
+
+    The guard must not make an empty run unmaterializable: without a stored
+    row there is nothing to protect, so the zero row is written exactly as
+    before #1446.
     """
     url, _session = seeded
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT segment_count, river_sample_count,
-                       river_valid_time_start, river_valid_time_end,
-                       min_lead_time_hours, max_lead_time_hours
-                FROM hydro.run_display_coverage WHERE run_id = %s
-                """,
+                "DELETE FROM hydro.run_display_coverage WHERE run_id = %s",
                 (_ALL_LEGACY_RUN_ID,),
             )
-            before = dict(cursor.fetchone())
-
-            # Independent expectation: the text era saw all three segments at
-            # both hours, and that is exactly what the seeded row holds.
-            assert before["segment_count"] == len(_SEGMENTS)
-            assert before["river_sample_count"] == len(_SEGMENTS) * 2
-            assert before["river_valid_time_start"] == _T0
-            assert before["river_valid_time_end"] == _T1
-
-            # And the rows really are still in the table, text-readable.
-            cursor.execute(
-                """
-                SELECT COUNT(*) AS n, COUNT(run_key) AS keyed
-                FROM hydro.river_timeseries WHERE run_id = %s
-                """,
-                (_ALL_LEGACY_RUN_ID,),
-            )
-            rows = dict(cursor.fetchone())
-        assert rows == {"n": len(_SEGMENTS) * 2, "keyed": 0}
+        connection.commit()
+        assert _coverage(connection, _ALL_LEGACY_RUN_ID) is None
 
         assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID) is True
 
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT segment_count, river_sample_count,
-                       river_valid_time_start, river_valid_time_end,
-                       min_lead_time_hours, max_lead_time_hours
-                FROM hydro.run_display_coverage WHERE run_id = %s
-                """,
-                (_ALL_LEGACY_RUN_ID,),
-            )
-            after = dict(cursor.fetchone())
+        after = _coverage(connection, _ALL_LEGACY_RUN_ID)
+        assert {key: after[key] for key in _ZEROED_COVERAGE} == _ZEROED_COVERAGE
     finally:
         connection.close()
 
-    assert after == {
-        "segment_count": 0,
-        "river_sample_count": 0,
-        "river_valid_time_start": None,
-        "river_valid_time_end": None,
-        "min_lead_time_hours": None,
-        "max_lead_time_hours": None,
-    }
+
+def test_keyed_run_refresh_is_never_refused(seeded: Any) -> None:
+    """Non-vacuity for the guard: a run whose scan finds segments is unaffected.
+
+    Refreshed twice in a row — the second call is the one that would trip a
+    guard written against "has an existing row" rather than against "the fresh
+    scan is empty".
+    """
+    url, _session = seeded
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True
+        first = _coverage(connection, _KEYED_RUN_ID)
+        assert first["segment_count"] == len(_SEGMENTS)
+
+        assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True
+        second = _coverage(connection, _KEYED_RUN_ID)
+        assert second["segment_count"] == len(_SEGMENTS)
+        assert second["refreshed_at"] > first["refreshed_at"]
+    finally:
+        connection.close()

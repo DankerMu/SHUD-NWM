@@ -577,7 +577,11 @@ def test_refresh_coverage_all_attributes_every_worker_connection(
     monkeypatch.setattr(psycopg2, "connect", _connect)
     monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
-    monkeypatch.setattr(display_coverage, "_refresh", lambda _connection, run_id: [run_id])
+    monkeypatch.setattr(
+        display_coverage,
+        "_refresh",
+        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+    )
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -610,7 +614,11 @@ def test_refresh_coverage_worker_connections_keep_the_operator_override(
     monkeypatch.setattr(psycopg2, "connect", _connect)
     monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
-    monkeypatch.setattr(display_coverage, "_refresh", lambda _connection, run_id: [run_id])
+    monkeypatch.setattr(
+        display_coverage,
+        "_refresh",
+        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+    )
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN_WITH_OVERRIDE]) == 0
     report = json.loads(capsys.readouterr().out)

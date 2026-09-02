@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -530,6 +530,28 @@ _COVERAGE_CTES = (
 """
 )
 
+# Issue #1446 — the overwrite guard lives in the upsert's own conditional
+# `DO UPDATE ... WHERE`, not in a caller-side read-then-write:
+#
+#   * the scan count is not observable before the write (it is produced by the
+#     same statement), so a read-before/rollback dance would need an extra
+#     statement on every run AND still race a concurrent refresh;
+#   * putting it here means every path — single run, batch worker, the all-runs
+#     form `_refresh(conn, None)` — inherits the protection for free.
+#
+# A populated row (`segment_count > 0`) whose fresh scan comes back empty is
+# skipped atomically and therefore absent from `RETURNING run_id`; the caller
+# turns that absence into a refusal. First refreshes (no row) are inserts and
+# never reach the clause, and an existing row that already reads 0 is rewritten
+# as before. `force` is the explicit zeroing escape hatch.
+#
+# The skip is whole-row: the `DO UPDATE` sets all 16 columns, so a refused row
+# keeps its station-side values and its `refreshed_at` too. Accepted, not
+# overlooked — the protected cohort is finished pre-cutover runs whose station
+# inputs no longer change, and the freeze ends when the #1408 identity backfill
+# restores their surrogate keys and the next refresh succeeds. The standing
+# cost is that the run stays stale and is rescanned by the cron `--all
+# --skip-fresh` loop every tick until then.
 _REFRESH_SQL = (
     _COVERAGE_CTES
     + """
@@ -565,6 +587,9 @@ _REFRESH_SQL = (
             min_lead_time_hours = EXCLUDED.min_lead_time_hours,
             max_lead_time_hours = EXCLUDED.max_lead_time_hours,
             refreshed_at = EXCLUDED.refreshed_at
+        WHERE %(force)s
+           OR EXCLUDED.segment_count > 0
+           OR hydro.run_display_coverage.segment_count = 0
         RETURNING run_id
     """
 )
@@ -612,7 +637,57 @@ _SCAN_PARAM_KEYS = (
 )
 
 
-def _refresh(connection: Any, run_id: str | None) -> list[str]:
+class RefreshOutcome(NamedTuple):
+    """What one ``_refresh`` call did, per run id.
+
+    ``refreshed`` are the run ids the upsert returned; ``refused`` are the run
+    ids that *reached* the upsert and were skipped by its guard clause (#1446).
+    The distinction is exact rather than heuristic: the ``coverage`` CTE selects
+    ``FROM candidate_runs`` with LEFT JOINs, so every candidate produces exactly
+    one upsert row, and "was a candidate but is absent from ``RETURNING``" can
+    only mean the ``WHERE`` skipped it.
+
+    A run that was never a candidate (no header row) appears in neither list —
+    it is the pre-existing "no coverage row" outcome, not a refusal.
+    """
+
+    refreshed: list[str]
+    refused: list[str]
+
+
+class DisplayCoverageRefreshRefused(RuntimeError):
+    """A single-run refresh would have zeroed a populated coverage row (#1446).
+
+    Carries the run id and the segment count still stored, so the caller can
+    report the refusal without re-querying. Raised only after the transaction
+    has been rolled back; nothing was written.
+    """
+
+    def __init__(self, run_id: str, existing_segment_count: int, advice: str) -> None:
+        super().__init__(
+            f"refusing to zero display coverage for {run_id}: "
+            f"the stored row has segment_count={existing_segment_count} and the fresh "
+            f"scan found none. {advice}"
+        )
+        self.run_id = run_id
+        self.existing_segment_count = existing_segment_count
+        self.advice = advice
+
+
+_REFUSAL_ADVICE = (
+    "The run's hydro.river_timeseries rows most likely still carry NULL surrogate keys "
+    "(pre-#1340); back-fill its identity (#1408) and refresh again, or pass force to "
+    "overwrite the stored coverage with zeros deliberately."
+)
+
+_EXISTING_SEGMENT_COUNT_SQL = """
+    SELECT segment_count
+    FROM hydro.run_display_coverage
+    WHERE run_id = %(run_id)s
+"""
+
+
+def _refresh(connection: Any, run_id: str | None, *, force: bool = False) -> RefreshOutcome:
     params: dict[str, Any] = {
         "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
         # Per-run refresh: run_id uniquely identifies the run and its basin, so
@@ -621,8 +696,13 @@ def _refresh(connection: Any, run_id: str | None) -> list[str]:
         "run_id": run_id,
         "variables": list(MVP_STATION_VARIABLES),
         "variable_count": len(MVP_STATION_VARIABLES),
+        # #1446: bypasses the upsert's overwrite guard when the caller asks for
+        # the zeroing explicitly. bool() so a truthy string can never reach the
+        # driver as a non-boolean literal.
+        "force": bool(force),
     }
     params.update(dict.fromkeys(_SCAN_PARAM_KEYS))
+    candidates: list[str] = []
     with connection.cursor(cursor_factory=RealDictCursor) as cursor:
         cursor.execute("SET LOCAL statement_timeout = %s", (_refresh_statement_timeout_ms(),))
         if run_id is not None:
@@ -633,7 +713,8 @@ def _refresh(connection: Any, run_id: str | None) -> list[str]:
             cursor.execute(_SCAN_HEADER_SQL, params)
             headers = cursor.fetchall()
             if not headers:
-                return []
+                return RefreshOutcome([], [])
+            candidates = [h["run_id"] for h in headers]
             header = headers[0]
             params.update(
                 scan_run_id=header["run_id"],
@@ -646,18 +727,40 @@ def _refresh(connection: Any, run_id: str | None) -> list[str]:
             )
         cursor.execute(_REFRESH_SQL, params)
         rows = cursor.fetchall()
-    return [r["run_id"] for r in rows]
+    refreshed = [r["run_id"] for r in rows]
+    # The all-runs form runs no header query, so it has no candidate set: it
+    # PROTECTS (guarded rows are simply not returned) but cannot CLASSIFY.
+    # Refusal accounting exists only where the run id is known.
+    refused = [run for run in candidates if run not in refreshed]
+    return RefreshOutcome(refreshed, refused)
 
 
-def refresh_run_display_coverage(connection: Any, run_id: str) -> bool:
+def _existing_segment_count(connection: Any, run_id: str) -> int:
+    """The `segment_count` a refused run still has stored (for the message)."""
+    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute(_EXISTING_SEGMENT_COUNT_SQL, {"run_id": run_id})
+        row = cursor.fetchone()
+    return 0 if row is None else int(row["segment_count"])
+
+
+def refresh_run_display_coverage(connection: Any, run_id: str, *, force: bool = False) -> bool:
     """Recompute and upsert coverage for one run. Returns True if a row resulted.
 
     A finished forecast run (any basin) always yields a coverage row (counts may
     be 0 if its forcing/river data is absent); a non-eligible run yields none.
+
+    Raises ``DisplayCoverageRefreshRefused`` (#1446) when the run reached the
+    upsert and the guard skipped it — i.e. the fresh scan found no segments but
+    the stored row is populated. Nothing is written and the transaction is
+    rolled back before the raise. ``force=True`` performs the zeroing instead.
     """
-    refreshed = _refresh(connection, run_id)
+    outcome = _refresh(connection, run_id, force=force)
+    if run_id in outcome.refused:
+        existing = _existing_segment_count(connection, run_id)
+        connection.rollback()
+        raise DisplayCoverageRefreshRefused(run_id, existing, _REFUSAL_ADVICE)
     connection.commit()
-    return run_id in refreshed
+    return run_id in outcome.refreshed
 
 
 def _eligible_run_ids(connection: Any) -> list[str]:
@@ -685,6 +788,7 @@ def refresh_all_run_display_coverage(
     on_progress: Any = None,
     workers: int = 1,
     connect: Callable[..., Any] | None = None,
+    force: bool = False,
 ) -> dict[str, int]:
     """Recompute coverage for every parsed/finished forecast run (all basins).
 
@@ -699,7 +803,14 @@ def refresh_all_run_display_coverage(
     psycopg2 strips the password from). A per-run failure (e.g. statement
     timeout) is recorded and skipped so one bad run never aborts the batch. With
     ``skip_fresh`` only runs whose coverage is missing or older than the run's
-    ``updated_at`` are recomputed (resumable). Returns counts.
+    ``updated_at`` are recomputed (resumable).
+
+    Returns ``{"refreshed", "skipped", "failed", "refused"}`` counts. ``refused``
+    (#1446) is a run the upsert's overwrite guard skipped because its fresh scan
+    was empty while its stored row is populated — distinct from ``failed`` (the
+    refresh raised) and from ``skipped`` (the run was never a candidate). A
+    refusal never aborts the batch and leaves the run stale, so the next
+    ``--skip-fresh`` tick rescans it; ``force=True`` performs the zeroing.
 
     ``connect`` (#1714) lets the calling component inject its own attributed
     ``psycopg2.connect`` so the per-run worker connections carry that
@@ -728,9 +839,17 @@ def refresh_all_run_display_coverage(
         conn = None
         try:
             conn = open_connection(dsn)
-            present = run_id in _refresh(conn, run_id)
+            outcome = _refresh(conn, run_id, force=force)
+            # #1446: a guard refusal is inspected straight off the outcome, not
+            # via an exception round-trip, and is classified BEFORE (and
+            # independently of) the generic failure arm below. Nothing was
+            # written, so the commit is a no-op that just closes the
+            # transaction cleanly.
+            if run_id in outcome.refused:
+                conn.commit()
+                return run_id, "refused"
             conn.commit()
-            return run_id, "refreshed" if present else "no-row"
+            return run_id, "refreshed" if run_id in outcome.refreshed else "no-row"
         except Exception as exc:  # noqa: BLE001 - isolate one run's failure
             if conn is not None:
                 conn.rollback()
@@ -748,17 +867,19 @@ def refresh_all_run_display_coverage(
         ) as executor:
             results = list(executor.map(refresh_one, run_ids))
 
-    refreshed = skipped = failed = 0
+    refreshed = skipped = failed = refused = 0
     for run_id, status in results:
         if status == "refreshed":
             refreshed += 1
         elif status == "no-row":
             skipped += 1
+        elif status == "refused":
+            refused += 1
         else:
             failed += 1
         if on_progress is not None:
             on_progress(run_id, status)
-    return {"refreshed": refreshed, "skipped": skipped, "failed": failed}
+    return {"refreshed": refreshed, "skipped": skipped, "failed": failed, "refused": refused}
 
 
 def _stale_run_ids(connection: Any, run_ids: list[str]) -> set[str]:

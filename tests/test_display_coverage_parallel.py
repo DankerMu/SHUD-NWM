@@ -1,3 +1,17 @@
+"""Batch coverage refresh: connection independence and per-run isolation.
+
+``refresh_all_run_display_coverage`` refreshes each run on its own short-lived
+connection, over two structurally different code paths -- a list comprehension
+for ``workers == 1`` and ``ThreadPoolExecutor.map`` for ``workers > 1``. Covered
+here:
+
+* the parallel path really opens one connection per run and commits/closes each;
+* #1725 -- one run failing (its ``connect`` raises) leaves the others refreshed
+  and is counted once under ``failed``, identically on BOTH worker paths;
+* #1446 -- a run the overwrite guard refused is counted under ``refused``,
+  never under ``failed``, and never aborts the batch.
+"""
+
 from __future__ import annotations
 
 import threading
@@ -38,9 +52,9 @@ def test_refresh_all_uses_independent_parallel_connections(
         connections.append(connection)
         return connection
 
-    def refresh(_connection: Any, run_id: str) -> list[str]:
+    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
         barrier.wait()
-        return [run_id]
+        return display_coverage.RefreshOutcome([run_id], [])
 
     monkeypatch.setattr(display_coverage.psycopg2, "connect", connect)
     monkeypatch.setattr(display_coverage, "_refresh", refresh)
@@ -51,9 +65,135 @@ def test_refresh_all_uses_independent_parallel_connections(
         workers=2,
     )
 
-    assert result == {"refreshed": 2, "skipped": 0, "failed": 0}
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 0}
     assert len(connections) == 2
     assert all(connection.commits == 1 and connection.closed for connection in connections)
+
+
+@pytest.mark.parametrize("workers", (1, 2))
+def test_one_failing_run_does_not_stop_the_other_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+) -> None:
+    """#1725: per-run failure isolation, asserted on BOTH worker paths.
+
+    ``workers == 1`` and ``workers > 1`` are two independent dispatch
+    constructs; a change that isolates one and not the other used to reach CI
+    green. The failure is injected at ``connect`` -- the earliest point inside
+    the try, and the one that only isolates if ``open_connection`` was hoisted
+    into the try block rather than left in front of it.
+
+    "The failing run saw no commit" is asserted as: three connect attempts, two
+    connection objects, both committed once and closed. The failing attempt
+    never produced a connection, so there was nothing to commit -- and the
+    ``rollback`` arm cannot have touched a survivor either.
+
+    ``connect`` receives only the DSN, so the failure is pinned to the *second
+    attempt* rather than to a named run id: with ``workers == 2`` the two paths
+    interleave and no run-to-attempt mapping exists. Exactly one of three
+    connects raising is the property under test.
+    """
+    run_ids = ["run-a", "run-b", "run-c"]
+    connections: list[_Connection] = []
+    lock = threading.Lock()
+    attempts = 0
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
+
+    def connect(_dsn: str) -> _Connection:
+        nonlocal attempts
+        with lock:
+            attempts += 1
+            failing = attempts == 2
+        if failing:
+            raise RuntimeError("connect refused for the second run")
+        connection = _Connection()
+        with lock:
+            connections.append(connection)
+        return connection
+
+    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    result = display_coverage.refresh_all_run_display_coverage(
+        object(),
+        dsn="postgresql://example",
+        workers=workers,
+        connect=connect,
+    )
+
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 1, "refused": 0}
+    assert attempts == len(run_ids)
+    assert len(connections) == 2
+    assert all(connection.commits == 1 and connection.closed for connection in connections)
+    assert all(connection.rollbacks == 0 for connection in connections)
+
+
+@pytest.mark.parametrize("workers", (1, 2))
+def test_a_refused_run_is_counted_apart_from_failures_and_does_not_stop_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    workers: int,
+) -> None:
+    """#1446: the guard's batch face.
+
+    A legacy populated run comes back from ``_refresh`` in ``refused``, not in
+    ``refreshed``. It must land under its own counter -- charging it to
+    ``failed`` would make the cron log indistinguishable from a real breakage,
+    and charging it to ``skipped`` would hide it behind the "run is not a
+    candidate" outcome.
+    """
+    run_ids = ["run-a", "run-legacy", "run-c"]
+    connections: list[_Connection] = []
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
+
+    def connect(_dsn: str) -> _Connection:
+        connection = _Connection()
+        connections.append(connection)
+        return connection
+
+    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+        if run_id == "run-legacy":
+            return display_coverage.RefreshOutcome([], [run_id])
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    result = display_coverage.refresh_all_run_display_coverage(
+        object(),
+        dsn="postgresql://example",
+        workers=workers,
+        connect=connect,
+    )
+
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 1}
+    assert len(connections) == 3
+    assert all(connection.closed and connection.rollbacks == 0 for connection in connections)
+
+
+def test_force_is_passed_through_to_every_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--force`` has to reach the worker, or the escape hatch is decorative."""
+    seen: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: ["run-a", "run-b"])
+
+    def refresh(_connection: Any, run_id: str, *, force: bool = False) -> display_coverage.RefreshOutcome:
+        seen.append((run_id, force))
+        return display_coverage.RefreshOutcome([run_id], [])
+
+    monkeypatch.setattr(display_coverage, "_refresh", refresh)
+
+    result = display_coverage.refresh_all_run_display_coverage(
+        object(),
+        dsn="postgresql://example",
+        connect=lambda _dsn: _Connection(),
+        force=True,
+    )
+
+    assert result == {"refreshed": 2, "skipped": 0, "failed": 0, "refused": 0}
+    assert seen == [("run-a", True), ("run-b", True)]
 
 
 @pytest.mark.parametrize("workers", (0, 9))
