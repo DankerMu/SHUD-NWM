@@ -2662,3 +2662,13 @@ nothing". **Keep rotation** remains unchanged under the recorded autonomous
 default, with no increase in evidentiary strength. Any reversal still requires
 the existing attribution-schema, round-intent, and round-role repairs plus
 maintainer review.
+
+## Revisit 2026-09-02 (post PR #1939)
+
+The audit re-flagged rotation attribution at **150 multi-round merged PRs,
+later-round catches core=90 vs rotated=297**. Rotated-in lenses still carry
+the clear majority of later-round recall, so the keep decision stands. PR
+#1939 adds a direct datum: of its three round-2 catches, one (an over-general
+warm-cache scenario in the spec delta) was found only by the rotated-in
+`design-consistency` lens, one by four pinned lenses plus the rotated one,
+one by a pinned lens. Next revisit on the audit's next flag.
