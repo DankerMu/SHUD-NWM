@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import fnmatch
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -14,6 +17,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 import yaml
@@ -7655,7 +7659,11 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("services/orchestrator/production_contract.py", "tests/test_api_contract.py"): "edge-consumer",
     ("services/orchestrator/retry.py", "tests/test_real_slurm_gateway.py"): "edge-consumer",
     ("services/orchestrator/scheduler.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
-    ("services/orchestrator/scheduler.py", "tests/test_qhh_production_bootstrap.py"): "edge-consumer",
+    # #1948 moved the only scheduler-facade importer in the QHH bootstrap corpus to the
+    # scheduler partition: A/B/C are the same corpus, but exactly ONE of them
+    # (`test_qhh_production_bootstrap_scheduler.py`) still names `ProductionScheduler` /
+    # `ProductionSchedulerConfig` at module scope, so the disposition follows that owner.
+    ("services/orchestrator/scheduler.py", "tests/test_qhh_production_bootstrap_scheduler.py"): "edge-consumer",
     # -- edge-consumer: slurm_gateway/config.py -----------------------------
     # config.py is a settings module every orchestration suite constructs a
     # gateway client from. These three importers are orchestrator-surface suites
@@ -8653,6 +8661,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # sibling packaging suite import it at module scope; the retained core is a valid
     # anchor for the same reason #1872 pinned the retention core.
     ("tests/basins_package_helpers.py", "tests/test_basins_package_publication.py"),
+    # #1948: the QHH bootstrap corpus's shared helper. All three partitions import it at
+    # module scope; the retained historical path is a valid anchor for the same reason.
+    ("tests/qhh_production_bootstrap_helpers.py", "tests/test_qhh_production_bootstrap.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -11569,3 +11580,1470 @@ def test_cold_residency_target_owner_rule_is_load_not_decoration(
     selected_after = set(select_tests([_COLD_TARGET_OWNER_PATH], repo_root=Path(".")))
     lost = sorted(set(rule.tests) - selected_after)
     assert lost, f"removing the {_COLD_TARGET_OWNER_PATH} rule changed nothing: {sorted(rule.tests)}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1948 — QHH production-bootstrap partition guards.
+#
+# Every EXPECTED value below comes from the TRACKED oracle
+# `tests/fixtures/qhh_bootstrap_partition_oracle.json`, which was generated from the frozen
+# ignored baseline capture at `9785e52d` and NEVER from the partitioned tree, or from another
+# independent tracked authority (`docs/bugs.md` for the historical BUG-008 command, the
+# baseline commit for every "unchanged" proof, this change's own design for the frozen
+# digest values). The partitioned tree supplies OBSERVED values only, so no guard here can be
+# satisfied by re-reading the thing it is supposed to check.
+#
+# Staging dependency: the tree-derived helpers below go through `git ls-files`, so the four
+# new QHH files must be at least intent-to-added (`git add -N`) for these guards to see them
+# — the same requirement every other tracked-tree guard in this module already carries.
+# ---------------------------------------------------------------------------
+
+QHH_PARTITION_ORACLE_PATH = "tests/fixtures/qhh_bootstrap_partition_oracle.json"
+QHH_PARTITION_SCHEMA = "qhh-bootstrap-partition-oracle/v1"
+QHH_PARTITION_STRUCTURAL_LIMIT = 1000
+QHH_PARTITION_REGISTRY_MONOLITH = "tests.test_basins_registry_import"
+QHH_PARTITION_REGISTRY_MONOLITH_PATH = "tests/test_basins_registry_import.py"
+QHH_PARTITION_BUG008_SCHEDULER_PATH = "tests/test_production_scheduler.py"
+QHH_PARTITION_SCHEDULER_COMPAT_DOC = "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md"
+QHH_PARTITION_FIXTURE_SYMBOL = "qhh_scheduler_canonical_readiness"
+QHH_PARTITION_FIXTURE_PIN = "_QHH_SCHEDULER_REQUESTED_FIXTURES"
+QHH_PARTITION_SCHEDULER_FACADE = "_MetStoreCanonicalReadinessProvider"
+QHH_PARTITION_BASELINE_SHA = "9785e52d541aba71845316da3a9c5b9011749644"
+QHH_PARTITION_CONTRACT_SHA = "5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83"
+# The baseline digest values this change's design pins. Independent source of truth: the
+# change design/spec text, not anything derived from the tree at runtime.
+QHH_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
+    "full_node": "baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc",
+    "suffix": "896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86",
+    "integration_suffix": "746147ebe8ab8023183d1986074d305ceb61ac8c1204e4c811db8d172cc82ef1",
+    "owner_map": "baacfa8fc15194a81c8061863c279df0bbbf90686c5997d4f2f3e5eb29ebd9b6",
+}
+# The filename the partition deliberately did NOT choose, kept as the oracle's positive
+# control: `tests/*integration*.py` really would rescue deletion of its exact edge.
+QHH_PARTITION_RESCUED_HYPOTHESIS = "tests/test_qhh_production_bootstrap_integration.py"
+# `workers/model_registry/validator.py` is tracked under the audited owner directory and has
+# NO same-name suite (`tests/test_validator.py` is absent), so every QHH bootstrap target it
+# selects arrives through the explicit rule row rather than the selector's
+# `tests/test_<module>.py` derivation. That is what makes the three per-edge REDs below
+# deletions of a load-bearing edge rather than deletions of a shadowed duplicate.
+QHH_PARTITION_OWNER_PROBE = "workers/model_registry/validator.py"
+# The `workers/model_registry/**` rule content at the baseline commit, transcribed from
+# `git show 9785e52d:scripts/select_ci_tests.py` — 13 targets, one of them the historical
+# monolith literal. #1948 must expand that literal to three and drop nothing.
+QHH_PARTITION_OWNER_RULE_AT_BASELINE: tuple[str, ...] = (
+    "tests/test_basins_discovery.py",
+    "tests/test_basins_migration_report.py",
+    "tests/test_basins_package.py",
+    "tests/test_basins_package_forcing_identity.py",
+    "tests/test_basins_package_publication.py",
+    "tests/test_basins_package_publication_failures.py",
+    "tests/test_basins_package_publication_refusal.py",
+    "tests/test_basins_package_publication_toctou.py",
+    "tests/test_basins_registry_import.py",
+    "tests/test_basins_reingest.py",
+    "tests/test_direct_grid_variant_registration.py",
+    "tests/test_hhe_mvt_binding.py",
+    "tests/test_model_registration.py",
+    "tests/test_model_registry_basin_versions.py",
+    "tests/test_model_registry_list_basins.py",
+    "tests/test_production_object_store_validation.py",
+    "tests/test_publish_scheduler_file_registry.py",
+    "tests/test_qhh_production_bootstrap.py",
+    "tests/test_qhh_scripts_static.py",
+)
+# Current scheduler-compatibility commands that must name the real owner and collect at
+# least one intended node, and the stale spelling that must never come back: the retained
+# partition's `-k "MetStoreCanonicalReadinessProvider"` collects ZERO nodes even at baseline
+# (the symbol names a class used only inside a support function), so it is a must-be-empty
+# authoritative recipe (#1936/#1935 defect class).
+QHH_PARTITION_DOC_COMMANDS: tuple[tuple[tuple[str, ...], str, int], ...] = (
+    (
+        ("tests/test_qhh_production_bootstrap_scheduler.py",),
+        "canonical_readiness or scheduler_ready or scheduler_derives_current_identity",
+        3,
+    ),
+)
+QHH_PARTITION_DOC_STALE_COMMANDS: tuple[str, ...] = (
+    'uv run pytest -q tests/test_qhh_production_bootstrap.py -k "MetStoreCanonicalReadinessProvider"',
+)
+# Files this structural change may touch. Anything else in the diff is scope drift; the
+# OpenSpec change directory is allowed because it is this change's own specification.
+QHH_PARTITION_ALLOWED_PATHS: frozenset[str] = frozenset(
+    {
+        ".github/workflows/ci.yml",
+        "docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
+        "scripts/select_ci_tests.py",
+        "tests/fixtures/qhh_bootstrap_partition_oracle.json",
+        "tests/qhh_production_bootstrap_helpers.py",
+        "tests/test_qhh_production_bootstrap.py",
+        "tests/test_qhh_production_bootstrap_scheduler.py",
+        "tests/test_qhh_production_bootstrap_state.py",
+        "tests/test_select_ci_tests.py",
+    }
+)
+QHH_PARTITION_ALLOWED_PREFIXES: tuple[str, ...] = ("openspec/changes/partition-qhh-production-bootstrap-tests/",)
+
+
+def _qhh_load_partition_oracle() -> dict[str, Any]:
+    payload = json.loads(Path(QHH_PARTITION_ORACLE_PATH).read_text(encoding="utf-8"))
+    assert payload["schema"] == QHH_PARTITION_SCHEMA, payload["schema"]
+    return payload
+
+
+def _qhh_partition_oracle() -> dict[str, Any]:
+    """Module-cached read of the tracked oracle (lazy, so import never touches the tree)."""
+    global _QHH_PARTITION_ORACLE_CACHE
+    if _QHH_PARTITION_ORACLE_CACHE is None:
+        _QHH_PARTITION_ORACLE_CACHE = _qhh_load_partition_oracle()
+    return _QHH_PARTITION_ORACLE_CACHE
+
+
+_QHH_PARTITION_ORACLE_CACHE: dict[str, Any] | None = None
+
+
+def _qhh_partitions(oracle: dict[str, Any] | None = None) -> tuple[str, ...]:
+    return tuple((oracle or _qhh_partition_oracle())["owners"]["partitions"])
+
+
+def _qhh_helper(oracle: dict[str, Any] | None = None) -> str:
+    return str((oracle or _qhh_partition_oracle())["owners"]["helper"])
+
+
+def _qhh_definition_start(node: ast.FunctionDef, lines: list[str]) -> int:
+    """The baseline capture's fragment start: decorator run plus any attached comment."""
+    start = min((decorator.lineno for decorator in node.decorator_list), default=node.lineno)
+    probe = start - 1
+    while probe >= 1 and lines[probe - 1].lstrip().startswith("#"):
+        probe -= 1
+    if probe < start - 1 and lines[probe - 1].strip() == "":
+        start = probe + 1
+    return start
+
+
+def _qhh_source_fragment(node: ast.AST, lines: list[str]) -> str:
+    start = _qhh_definition_start(node, lines) if isinstance(node, ast.FunctionDef) else node.lineno
+    assert isinstance(node.end_lineno, int), ast.dump(node)
+    return "\n".join(lines[start - 1 : node.end_lineno]) + "\n"
+
+
+def _qhh_member_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.FunctionDef):
+        return node.name
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        return names[0] if len(names) == 1 else None
+    return None
+
+
+def _qhh_members(path: str) -> dict[str, tuple[str, str]]:
+    """`name -> (source_sha256, ast_sha256)` for every top-level member of ``path``."""
+    content = Path(path).read_text(encoding="utf-8")
+    lines = content.splitlines()
+    out: dict[str, tuple[str, str]] = {}
+    for node in ast.parse(content, filename=path).body:
+        name = _qhh_member_name(node)
+        if name is None:
+            continue
+        fragment = _qhh_source_fragment(node, lines)
+        out[name] = (
+            hashlib.sha256(fragment.encode()).hexdigest(),
+            hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(),
+        )
+    return out
+
+
+def _qhh_digest_lines(values: Sequence[str]) -> str:
+    return hashlib.sha256(("\n".join(values) + "\n").encode()).hexdigest()
+
+
+def _qhh_pytest(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _qhh_collected_nodeids(paths: Sequence[str], *extra: str) -> list[str]:
+    completed = _qhh_pytest("--collect-only", *paths, *extra)
+    assert completed.returncode in (0, 5), completed.stdout + completed.stderr
+    return [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    ]
+
+
+def _qhh_suffixes(nodeids: Sequence[str]) -> list[str]:
+    return [nodeid.split("::", 1)[1] for nodeid in nodeids]
+
+
+def _qhh_decorator_markers(node: ast.FunctionDef) -> set[str]:
+    names: set[str] = set()
+    for decorator in node.decorator_list:
+        callee = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if (
+            isinstance(callee, ast.Attribute)
+            and isinstance(callee.value, ast.Attribute)
+            and isinstance(callee.value.value, ast.Name)
+            and callee.value.value.id == "pytest"
+            and callee.value.attr == "mark"
+        ):
+            names.add(callee.attr)
+    return names
+
+
+def _qhh_marked_test_names(path: str, marker: str) -> set[str]:
+    """Top-level `test_*` definitions in ``path`` carrying a `pytest.mark.<marker>`."""
+    content = Path(path).read_text(encoding="utf-8")
+    return {
+        node.name
+        for node in ast.parse(content, filename=path).body
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name.startswith("test_")
+            and marker in _qhh_decorator_markers(node)
+        )
+    }
+
+
+def _qhh_monkeypatch_targets(node: ast.FunctionDef) -> list[str]:
+    result: list[str] = []
+    for call in (candidate for candidate in ast.walk(node) if isinstance(candidate, ast.Call)):
+        if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
+            "setattr",
+            "setenv",
+            "delenv",
+            "chdir",
+        }:
+            continue
+        if not isinstance(call.func.value, ast.Name) or call.func.value.id != "monkeypatch":
+            continue
+        result.append(f"{call.func.attr}({', '.join(ast.unparse(argument) for argument in call.args[:2])})")
+    return sorted(result)
+
+
+def _qhh_imported_helper_names(path: str) -> set[str]:
+    """Symbols the module imports from the QHH bootstrap helper at MODULE scope."""
+    dotted = _dotted_module_name(_qhh_helper())
+    return {
+        alias.asname or alias.name
+        for node in ast.parse(Path(path).read_text(encoding="utf-8"), filename=path).body
+        if isinstance(node, ast.ImportFrom) and node.module == dotted and node.level == 0
+        for alias in node.names
+    }
+
+
+def _qhh_imported_names(path: str, module: str) -> set[str]:
+    return {
+        alias.asname or alias.name.split(".")[0]
+        for node in ast.parse(Path(path).read_text(encoding="utf-8"), filename=path).body
+        if isinstance(node, ast.ImportFrom) and node.module == module and node.level == 0
+        for alias in node.names
+    }
+
+
+def _qhh_bound_names(scope: ast.AST) -> set[str]:
+    """Names a scope introduces: parameters, bindings, definitions and imports."""
+    out: set[str] = set()
+    for node in ast.walk(scope):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            out.update(arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs])
+            if args.vararg is not None:
+                out.add(args.vararg.arg)
+            if args.kwarg is not None:
+                out.add(args.kwarg.arg)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            out.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            out.add(node.id)
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            out.add(node.name)
+    return out
+
+
+def _qhh_free_names(scope: ast.AST) -> set[str]:
+    loaded = {node.id for node in ast.walk(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    return {name for name in loaded - _qhh_bound_names(scope) if name not in _QHH_BUILTIN_NAMES}
+
+
+_QHH_BUILTIN_NAMES = frozenset(dir(builtins))
+
+
+def _qhh_used_helper_names(path: str, members: set[str]) -> set[str]:
+    """Helper names the module references: called/looked up, or requested as a fixture.
+
+    A pytest fixture is requested by ARGUMENT NAME, which no AST name reference exposes, so
+    the test definitions' argument names join the set too. A module-level assignment whose
+    value names an imported symbol (the scheduler owner's fixture pin) is a use as well.
+    """
+    content = Path(path).read_text(encoding="utf-8")
+    lines = content.splitlines()
+    module = ast.parse(content, filename=path)
+    imported = _qhh_imported_helper_names(path)
+    used: set[str] = set()
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef):
+            fragment = ast.parse(_qhh_source_fragment(node, lines), filename=path)
+            used |= {name for name in _qhh_free_names(fragment) if name in members}
+            used |= {
+                arg.arg
+                for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+                if arg.arg in imported
+            }
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and _qhh_member_name(node) in imported:
+            used |= {
+                child.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and child.id in imported
+            }
+    return used
+
+
+def _qhh_workflow() -> str:
+    return Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+
+
+def _qhh_observed_database_patterns() -> list[str]:
+    """The `database:` patterns of the TRACKED workflow (the observed side)."""
+    return _database_filter_patterns(_qhh_workflow())
+
+
+def _qhh_scheduler_fixture_harness(tmp_path: Path, source: str) -> subprocess.CompletedProcess[str]:
+    """Run ``source`` as a standalone module against a local stand-in DB fixture.
+
+    `--setup-plan` resolves every fixture of every item and prints the plan without
+    executing a test body, so the fixture-authoring contract is proven in milliseconds and
+    no database connection is ever attempted (the stand-in DSN names a closed port).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\nmarkers = ["integration: requires external services"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef integration_database_url() -> str:\n"
+        '    return "postgresql://nobody:invalid@127.0.0.1:1/qhh_partition_guard_never_connects"\n',
+        encoding="utf-8",
+    )
+    module = tmp_path / "qhh_scheduler_mutant.py"
+    module.write_text(source, encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--setup-plan",
+            "-c",
+            str(tmp_path / "pyproject.toml"),
+            "--rootdir",
+            str(tmp_path),
+            str(module),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+    )
+
+
+def _qhh_source_without_helper_import(source: str) -> str:
+    """Mutant: drop the helper import AND the pin that keeps the fixture binding used.
+
+    Dropping only the import would move the failure into the pin's `NameError` — a collection
+    error, not the fixture-not-found RED this proves.
+    """
+    lines = source.splitlines(keepends=True)
+    dotted = _dotted_module_name(_qhh_helper())
+    drop: set[int] = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.ImportFrom) and node.module == dotted and node.level == 0:
+            drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        if _qhh_member_name(node) == QHH_PARTITION_FIXTURE_PIN:
+            drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    assert drop, "no helper import or fixture pin found to mutate"
+    return "".join(line for index, line in enumerate(lines, start=1) if index not in drop)
+
+
+def _qhh_counts(stdout: str) -> str:
+    """pytest's counts clause (`55 passed, 11 skipped`), without the trailing duration."""
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip().strip("=").strip()
+        if re.fullmatch(r"(?:\d+ [\w-]+, )*\d+ (?:passed|failed|skipped|error)[\w, ]* in [0-9.]+s", stripped):
+            return re.sub(r" in [0-9.]+s$", "", stripped)
+    return ""
+
+
+def _qhh_git_stdout(*arguments: str) -> str:
+    completed = subprocess.run(["git", *arguments], capture_output=True, text=True, check=True)
+    return completed.stdout
+
+
+def _qhh_baseline_blob(path: str) -> bytes:
+    """Raw bytes of ``path`` at the #1948 baseline commit (``git show``, no text re-decode)."""
+    completed = subprocess.run(
+        ["git", "show", f"{QHH_PARTITION_BASELINE_SHA}:{path}"], capture_output=True, check=True
+    )
+    return completed.stdout
+
+
+def _qhh_bug008_command_text() -> str:
+    """BUG-20260527-008's `retest_command`, read from the ledger itself."""
+    text = Path("docs/bugs.md").read_text(encoding="utf-8")
+    entry = text.split("### BUG-20260527-008:", 1)[1]
+    block = entry.split("retest_command: |-\n", 1)[1].split("\n```\n", 1)[0]
+    return " ".join(block.split())
+
+
+def test_qhh_partition_oracle_is_tracked_and_self_contained() -> None:
+    # The oracle is the only runtime authority the guards below read, so it must ship in the
+    # repository: an ignored `.workplans/` capture is provenance, never a dependency.
+    tracked_fixtures = [line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line]
+
+    assert QHH_PARTITION_ORACLE_PATH in tracked_fixtures, f"{QHH_PARTITION_ORACLE_PATH} is not version-controlled"
+    captured = _qhh_partition_oracle()["captured_from"]
+    assert captured["path"] == _qhh_partitions()[0]
+    assert captured["baseline_sha"] == QHH_PARTITION_BASELINE_SHA
+    assert captured["lines"] == 2278
+    assert captured["contract_sha256"] == QHH_PARTITION_CONTRACT_SHA
+    assert re.fullmatch(r"[0-9a-f]{64}", captured["sha256"])
+    # The pinned baseline must resolve in this checkout too, or the provenance is fiction.
+    assert len(_qhh_git_stdout("rev-parse", f"{captured['baseline_sha']}^{{commit}}").strip()) == 40
+    optional_capture = Path(".workplans/issue-1948/contract.json")
+    if optional_capture.is_file():
+        assert hashlib.sha256(optional_capture.read_bytes()).hexdigest() == captured["contract_sha256"], (
+            "the ignored capture no longer matches the tracked oracle's recorded provenance"
+        )
+
+
+def test_qhh_partition_oracle_self_digest_covers_its_own_payload() -> None:
+    # Anti-tamper: `digests.oracle` is recomputed over the canonical JSON of every other key,
+    # so editing a frozen row, an owner map, a database pattern or an execution summary in the
+    # tracked oracle changes the digest and reddens this guard. Without it the oracle would be
+    # a plain editable file and every "expected value" below would be attacker-controlled.
+    oracle = _qhh_partition_oracle()
+    payload = {key: value for key, value in oracle.items() if key != "digests"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+    assert oracle["digests"]["oracle"] == hashlib.sha256(canonical).hexdigest(), (
+        "the tracked oracle's payload no longer matches its own self-digest"
+    )
+
+
+def test_qhh_partition_oracle_shape_is_the_frozen_contract_authority() -> None:
+    # The oracle must be internally the contract it claims to mirror — counts, owner maps and
+    # digest set cross-checked against each other (never against the partitioned tree), and
+    # the frozen digest values re-derived from its own rows — so a regenerated-but-wrong
+    # oracle reddens here instead of quietly weakening a downstream guard.
+    oracle = _qhh_partition_oracle()
+    partitions = _qhh_partitions()
+    counts = oracle["counts"]
+    rows = oracle["rows"]
+
+    assert partitions == (
+        "tests/test_qhh_production_bootstrap.py",
+        "tests/test_qhh_production_bootstrap_state.py",
+        "tests/test_qhh_production_bootstrap_scheduler.py",
+    )
+    assert _qhh_helper() == "tests/qhh_production_bootstrap_helpers.py"
+    assert counts["nodes"] == 66
+    assert counts["test_functions"] == 50
+    assert counts["support_functions"] == 12
+    assert counts["integration_defs"] == 9
+    assert counts["integration_nodes"] == 11
+    assert counts["partition_count"] == 3
+    assert counts["helper_count"] == 1
+    assert counts["database_authority_count"] == len(oracle["ci_database_authority"]["patterns"])
+    assert oracle["guard"]["max_lines"] == QHH_PARTITION_STRUCTURAL_LIMIT
+    assert len(rows) == 50
+    assert len(oracle["helper_rows"]) == 16
+    assert len(oracle["node_suffixes"]) == len(set(oracle["node_suffixes"])) == 66
+    assert len(oracle["integration_suffixes"]) == 11
+    assert oracle["owner_node_counts"] == {partitions[0]: 44, partitions[1]: 11, partitions[2]: 11}
+    assert oracle["owner_function_counts"] == {partitions[0]: 31, partitions[1]: 10, partitions[2]: 9}
+    assert sum(1 for row in rows.values() if "integration" in row["markers"]) == 9
+    assert oracle["owner_nodes"] == {
+        owner: sorted(suffix for suffix in oracle["node_suffixes"] if rows[suffix.split("[", 1)[0]]["owner"] == owner)
+        for owner in partitions
+    }
+    assert all(
+        rows[suffix.split("[", 1)[0]]["owner"] == owner
+        for owner, suffixes in oracle["owner_nodes"].items()
+        for suffix in suffixes
+    )
+    for key, frozen in QHH_PARTITION_FROZEN_DIGESTS.items():
+        assert oracle["digests"][key] == frozen, key
+    assert oracle["digests"]["suffix"] == _qhh_digest_lines(sorted(oracle["node_suffixes"]))
+    assert oracle["digests"]["integration_suffix"] == _qhh_digest_lines(sorted(oracle["integration_suffixes"]))
+    assert oracle["digests"]["definition"] == _qhh_digest_lines(
+        [f"{name}:{row['source_sha256']}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["ast"] == _qhh_digest_lines(
+        [f"{name}:{row['ast_sha256']}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["owner_map"] == _qhh_digest_lines(
+        [f"{name}:{row['owner']}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["helper_inventory"] == _qhh_digest_lines(sorted(oracle["helper_rows"]))
+    assert oracle["digests"]["helper_source"] == _qhh_digest_lines(
+        [f"{name}:{row['source_sha256']}" for name, row in sorted(oracle["helper_rows"].items())]
+    )
+    assert oracle["selector"]["three_partition_authority"] == list(partitions)
+    assert oracle["selector"]["helper_route"] == _qhh_helper()
+
+
+def test_qhh_partition_tracked_tree_is_exactly_three_suites_and_one_helper() -> None:
+    # "Three collectible suites is a floor, not a choice" (#1948): a fourth partition, a
+    # leftover compatibility shim, or a helper renamed into a suite all redden here. The
+    # expected membership is the oracle's, never a glob result.
+    partitions = set(_qhh_partitions())
+    helper = _qhh_helper()
+    tracked = set(_tracked_python_files("tests"))
+
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    corpus = {path for path in tracked if "qhh_production_bootstrap" in PurePosixPath(path).name}
+    assert corpus == partitions | {helper}, sorted(corpus ^ (partitions | {helper}))
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+    strays = [path for path in tracked if path.startswith("tests/test_qhh_production_bootstrap_")]
+    assert set(strays) <= partitions, sorted(set(strays) - set(partitions))
+
+
+@pytest.mark.parametrize("owner", list(_qhh_partitions()))
+def test_qhh_partition_collects_its_frozen_nodes_exactly_once(owner: str) -> None:
+    oracle = _qhh_partition_oracle()
+    expected = sorted(oracle["owner_nodes"][owner])
+
+    observed = _qhh_suffixes(_qhh_collected_nodeids([owner]))
+
+    assert sorted(observed) == expected, (
+        f"{owner}: collected {len(observed)} nodes, oracle freezes {len(expected)}; "
+        f"missing={sorted(set(expected) - set(observed))} extra={sorted(set(observed) - set(expected))}"
+    )
+    assert len(observed) == len(set(observed)), f"{owner}: duplicated node ids"
+    assert len(observed) == oracle["owner_node_counts"][owner]
+    assert len({suffix.split("[", 1)[0] for suffix in observed}) == oracle["owner_function_counts"][owner]
+
+
+def test_qhh_partition_union_is_the_frozen_sixty_six_suffixes() -> None:
+    oracle = _qhh_partition_oracle()
+    expected = sorted(oracle["node_suffixes"])
+
+    observed = _qhh_suffixes(_qhh_collected_nodeids(list(_qhh_partitions())))
+
+    assert sorted(observed) == expected
+    assert len(observed) == len(set(observed)) == 66, "a suffix vanished or landed in two partitions"
+    assert _qhh_digest_lines(sorted(set(observed))) == oracle["digests"]["suffix"]
+
+
+def test_qhh_partition_definitions_are_byte_and_ast_identical_to_the_baseline() -> None:
+    # Per-definition proof against the frozen rows: same name set, same source-fragment
+    # digest, same normalized-AST digest, in exactly one partition each. Imports and module
+    # headers are the only permitted differences, and no rephrased body can satisfy this.
+    oracle = _qhh_partition_oracle()
+    rows = oracle["rows"]
+    seen: dict[str, str] = {}
+    for owner in _qhh_partitions():
+        for name, digests in _qhh_members(owner).items():
+            frozen = rows.get(name)
+            if frozen is None:
+                continue
+            assert digests == (frozen["source_sha256"], frozen["ast_sha256"]), f"{owner}::{name} drifted"
+            assert frozen["owner"] == owner, f"{name}: defined in {owner}, oracle says {frozen['owner']}"
+            assert name not in seen, f"{name} defined twice ({seen[name]} and {owner})"
+            seen[name] = owner
+
+    assert set(seen) == set(rows), f"missing={sorted(set(rows) - set(seen))} extra={sorted(set(seen) - set(rows))}"
+    assert len(seen) == 50
+    assert _qhh_digest_lines([f"{name}:{seen[name]}" for name in sorted(seen)]) == oracle["digests"]["owner_map"]
+
+
+def test_qhh_partition_helper_owns_all_sixteen_members_identically() -> None:
+    oracle = _qhh_partition_oracle()
+    frozen = oracle["helper_rows"]
+
+    observed = _qhh_members(_qhh_helper())
+
+    assert set(observed) == set(frozen), (
+        f"helper inventory drifted: missing={sorted(set(frozen) - set(observed))} "
+        f"extra={sorted(set(observed) - set(frozen))}"
+    )
+    for name, row in frozen.items():
+        assert observed[name] == (row["source_sha256"], row["ast_sha256"]), f"{name} drifted"
+    assert sum(row["kind"] == "function" for row in frozen.values()) == 12
+    assert sum(row["kind"] == "constant" for row in frozen.values()) == 4
+    # No partition may re-home a support member: the suites define tests and nothing else.
+    for owner in _qhh_partitions():
+        assert not (set(_qhh_members(owner)) & set(frozen)), owner
+
+
+def test_qhh_partition_helper_defines_no_test_and_collects_zero_nodes() -> None:
+    helper = _qhh_helper()
+
+    assert not [name for name in _qhh_members(helper) if name.startswith("test_")]
+    assert not is_test_suite_path(helper)
+    completed = _qhh_pytest("--collect-only", helper)
+    assert completed.returncode == 5, completed.stdout + completed.stderr
+    assert "no tests collected" in completed.stdout
+    assert _qhh_collected_nodeids([helper]) == []
+
+
+def test_qhh_partition_integration_nodes_bind_to_the_scheduler_owner_only() -> None:
+    oracle = _qhh_partition_oracle()
+    partitions = _qhh_partitions()
+    expected_by_owner = oracle["integration_by_owner"]
+    expected_integration = sorted(oracle["integration_suffixes"])
+
+    collected = _qhh_collected_nodeids(list(partitions), "-m", "integration")
+    observed = _qhh_suffixes(collected)
+
+    assert sorted(observed) == expected_integration
+    assert len(observed) == 11
+    assert {node.split("::")[0] for node in collected} == {partitions[2]}
+    assert expected_by_owner[partitions[0]] == [], "the retained owner must own no integration node"
+    assert expected_by_owner[partitions[1]] == [], "the state owner must own no integration node"
+    assert sorted(expected_by_owner[partitions[2]]) == expected_integration
+    marked_total = 0
+    for owner in partitions:
+        marked = _qhh_marked_test_names(owner, "integration")
+        frozen = {suffix.split("[", 1)[0] for suffix in expected_by_owner[owner]}
+        assert marked == frozen, f"{owner}: integration markers {sorted(marked)} != owner map {sorted(frozen)}"
+        marked_total += len(marked)
+    assert marked_total == 9, marked_total
+    assert _qhh_digest_lines(sorted(observed)) == oracle["digests"]["integration_suffix"]
+
+
+def test_qhh_partition_preserves_every_frozen_decorator_marker_and_monkeypatch_target() -> None:
+    oracle = _qhh_partition_oracle()
+    checked = 0
+    for owner in _qhh_partitions():
+        definitions = {
+            node.name: node
+            for node in ast.parse(Path(owner).read_text(encoding="utf-8"), filename=owner).body
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name, row in oracle["rows"].items():
+            if row["owner"] != owner:
+                continue
+            node = definitions[name]
+            assert [ast.unparse(decorator) for decorator in node.decorator_list] == list(row["decorators"]), name
+            assert ast.unparse(node.args) == row["args"], name
+            assert _qhh_decorator_markers(node) == set(row["markers"]), name
+            assert _qhh_monkeypatch_targets(node) == sorted(row["monkeypatch_targets"]), name
+            checked += 1
+    assert checked == 50, checked
+
+
+def test_qhh_partition_suites_import_exactly_the_helper_support_they_use() -> None:
+    # Dead routes cut both ways: an import nobody uses is a fabricated consumer edge (the
+    # #1913 temptation this clause blocks), and a used symbol nobody imports is a NameError.
+    members = set(_qhh_partition_oracle()["helper_rows"])
+
+    for owner in _qhh_partitions():
+        imported = _qhh_imported_helper_names(owner)
+        used = _qhh_used_helper_names(owner, members)
+
+        assert imported, f"{owner} imports no helper support at all"
+        assert imported <= members, sorted(imported - members)
+        assert imported == used, f"{owner}: imported={sorted(imported)} used={sorted(used)}"
+
+
+def test_qhh_partition_scheduler_owner_imports_the_fixture_symbol_directly() -> None:
+    oracle = _qhh_partition_oracle()
+    scheduler_owner = _qhh_partitions()[2]
+
+    imported = _qhh_imported_helper_names(scheduler_owner)
+
+    assert QHH_PARTITION_FIXTURE_SYMBOL in imported, (
+        f"{scheduler_owner} must import the fixture symbol at module scope"
+    )
+    assert QHH_PARTITION_FIXTURE_SYMBOL in set(oracle["helper_rows"])
+    requesters = {
+        name for name, row in oracle["rows"].items() if QHH_PARTITION_FIXTURE_SYMBOL in str(row["args"])
+    }
+    assert requesters and len(requesters) == 3, sorted(requesters)
+    definitions = {
+        node.name: node
+        for node in ast.parse(Path(scheduler_owner).read_text(encoding="utf-8"), filename=scheduler_owner).body
+        if isinstance(node, ast.FunctionDef)
+    }
+    for name in requesters:
+        assert name in definitions, f"{name} left the scheduler owner"
+        args = [*definitions[name].args.posonlyargs, *definitions[name].args.args, *definitions[name].args.kwonlyargs]
+        assert QHH_PARTITION_FIXTURE_SYMBOL in [arg.arg for arg in args], name
+
+
+def test_qhh_partition_imported_fixture_resolves_and_reddens_without_the_import(tmp_path: Path) -> None:
+    """GREEN arm resolves all three fixture nodes; RED arm is fixture-not-found for each.
+
+    Same harness, same temporary tree, one mutated source — the RED cannot be a harness
+    artifact, and the imported-fixture contract is proven without touching a database.
+    """
+    scheduler_owner = _qhh_partitions()[2]
+    source = Path(scheduler_owner).read_text(encoding="utf-8")
+    requesters = sorted(
+        name
+        for name, row in _qhh_partition_oracle()["rows"].items()
+        if QHH_PARTITION_FIXTURE_SYMBOL in str(row["args"])
+    )
+    not_found = f"fixture {QHH_PARTITION_FIXTURE_SYMBOL!r} not found"
+
+    green = _qhh_scheduler_fixture_harness(tmp_path / "green", source)
+    red = _qhh_scheduler_fixture_harness(tmp_path / "red", _qhh_source_without_helper_import(source))
+
+    assert green.returncode == 0, green.stdout + green.stderr
+    assert not_found not in green.stdout
+    assert green.stdout.count(f"SETUP    F {QHH_PARTITION_FIXTURE_SYMBOL}") == 3, green.stdout
+    for name in requesters:
+        assert f"{name} (fixtures used:" in green.stdout, name
+
+    assert red.returncode != 0, red.stdout + red.stderr
+    assert red.stdout.count(not_found) == 3, red.stdout
+    errored = set(re.findall(r"ERROR [^\s]*::([A-Za-z0-9_\-\[\]]+)", red.stdout + red.stderr))
+    assert set(requesters) <= errored, sorted(set(requesters) - errored)
+
+
+def test_qhh_partition_helper_route_selects_exactly_the_three_consumers() -> None:
+    helper = _qhh_helper()
+    expected = set(_qhh_partitions())
+
+    rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == helper)
+    selected = set(select_tests([helper], repo_root=Path(".")))
+    derived = _non_gated_top_level_importer_tests(_dotted_module_name(helper))
+
+    assert set(rule.tests) == expected, sorted(set(rule.tests) ^ expected)
+    assert selected == expected | {SELECTOR_META_GUARD_TEST}, sorted(
+        selected ^ (expected | {SELECTOR_META_GUARD_TEST})
+    )
+    # The importer closure is derived from the tracked tree, never read off the rule table.
+    assert derived == expected, f"derived importer closure drifted: {sorted(derived ^ expected)}"
+
+
+@pytest.mark.parametrize("removed", list(_qhh_partitions()))
+def test_qhh_partition_helper_route_reds_when_a_consumer_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    from scripts import select_ci_tests
+
+    helper = _qhh_helper()
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(test for test in rule.tests if test != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == helper
+        else rule
+        for rule in SUPPORT_MODULE_TEST_RULES
+    )
+    assert any(rule.pattern == helper and removed not in rule.tests for rule in patched), "helper rule not patched"
+    monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", patched)
+
+    selected = set(select_tests([helper], repo_root=Path(".")))
+
+    assert removed not in selected, f"{removed} still selected after its helper edge was deleted"
+    assert set(_qhh_partitions()) - {removed} <= selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+@pytest.mark.parametrize("removed", list(_qhh_partitions()))
+def test_qhh_partition_owner_route_reds_when_an_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner_route = _qhh_partition_oracle()["selector"]["owner_route"]
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(test for test in rule.tests if test != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == owner_route
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(rule.pattern == owner_route and removed not in rule.tests for rule in patched), "owner rule not patched"
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+
+    selected = set(select_tests([QHH_PARTITION_OWNER_PROBE], repo_root=Path(".")))
+
+    assert removed not in selected, f"{removed} rescued by another route after its edge was deleted"
+    assert set(_qhh_partitions()) - {removed} <= selected
+
+
+def test_qhh_partition_owner_route_selects_all_three_with_a_non_same_name_probe() -> None:
+    # The probe must not be same-name derivable, or the three per-edge REDs above would only
+    # prove that the derivation still works. And the expansion must be ADDITIVE: the rule's
+    # baseline content is read from the pinned commit, so no prior target can quietly drop.
+    assert Path(QHH_PARTITION_OWNER_PROBE).is_file()
+    assert not Path(f"tests/test_{PurePosixPath(QHH_PARTITION_OWNER_PROBE).stem}.py").is_file(), (
+        "the owner-route probe is same-name derivable, which would void the per-edge REDs"
+    )
+    baseline_rule = _qhh_owner_rule_tests_at_baseline()
+
+    selected = set(select_tests([QHH_PARTITION_OWNER_PROBE], repo_root=Path(".")))
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"])
+
+    assert set(_qhh_partitions()) <= selected
+    assert set(rule.tests) == (set(baseline_rule) - {_qhh_partitions()[0]}) | set(_qhh_partitions()), sorted(
+        set(rule.tests) ^ ((set(baseline_rule) - {_qhh_partitions()[0]}) | set(_qhh_partitions()))
+    )
+    assert len([test for test in rule.tests if "qhh_production_bootstrap" in test]) == 3
+
+
+def _qhh_owner_rule_tests_at_baseline() -> tuple[str, ...]:
+    """The `workers/model_registry/**` rule's targets at the baseline commit."""
+    source = _qhh_git_stdout("show", f"{QHH_PARTITION_BASELINE_SHA}:scripts/select_ci_tests.py")
+    tree = ast.parse(source, filename="scripts/select_ci_tests.py")
+    rules = _qhh_literal_rule_rows(tree)
+    matches = [tests for pattern, tests in rules if pattern == _qhh_partition_oracle()["selector"]["owner_route"]]
+    assert len(matches) == 1, len(matches)
+    assert QHH_PARTITION_OWNER_RULE_AT_BASELINE == tuple(sorted(matches[0])), sorted(matches[0])
+    return matches[0]
+
+
+def _qhh_string_tuple_constants(tree: ast.Module) -> dict[str, tuple[str, ...]]:
+    """Module-level `NAME = ("...", ...)` tuples, used to expand `*NAME` rule targets."""
+    out: dict[str, tuple[str, ...]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        name = _qhh_member_name(node)
+        if name is None or not isinstance(node.value, (ast.Tuple, ast.List)):
+            continue
+        if all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in node.value.elts):
+            out[name] = tuple(item.value for item in node.value.elts if isinstance(item.value, str))
+    return out
+
+
+def _qhh_literal_rule_rows(tree: ast.Module) -> list[tuple[str, tuple[str, ...]]]:
+    """`(pattern, tests)` for every `PathTestRule(...)` row in a `PATH_TEST_RULES` tuple.
+
+    Three spellings are accepted and nothing else: a string literal target, a bare reference
+    to a module-level tuple of string literals, and a star-expansion of such a tuple. Anything
+    else raises, so the derivation cannot silently report a partial target list.
+    """
+    tuples = _qhh_string_tuple_constants(tree)
+    names = _qhh_string_constants(tree)
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for node in tree.body:
+        if not (isinstance(node, (ast.Assign, ast.AnnAssign)) and _qhh_member_name(node) == "PATH_TEST_RULES"):
+            continue
+        value = node.value
+        assert isinstance(value, (ast.Tuple, ast.List)), ast.dump(node)
+        for element in value.elts:
+            if not isinstance(element, ast.Call) or len(element.args) < 2:
+                continue
+            pattern, tests = element.args[0], element.args[1]
+            if not isinstance(pattern, ast.Constant) or not isinstance(pattern.value, str):
+                # A rule whose PATTERN is computed (e.g. `SOME_PATTERNS[0]`) is a different
+                # owner surface; this derivation only ever needs the literal-path rows, and
+                # the caller asserts the row it wanted was found exactly once.
+                continue
+            if isinstance(tests, ast.Name):
+                # `PathTestRule('<path>', SOME_TESTS)`: the whole target list is one
+                # module-level literal tuple, exactly as readable as an inline one.
+                assert tests.id in tuples, f"unresolvable rule target tuple {tests.id}"
+                out.append((pattern.value, tuples[tests.id]))
+                continue
+            assert isinstance(tests, (ast.Tuple, ast.List)), ast.unparse(element)[:80]
+            literals: list[str] = []
+            for item in tests.elts:
+                literals.extend(_qhh_rule_targets(item, tuples, names))
+            out.append((pattern.value, tuple(literals)))
+    return out
+
+
+def _qhh_rule_targets(node: ast.expr, tuples: dict[str, tuple[str, ...]], names: dict[str, str]) -> tuple[str, ...]:
+    """One `PathTestRule` target element resolved to literal suite paths, or it raises."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return (node.value,)
+    if isinstance(node, ast.Name):
+        if node.id in names:
+            return (names[node.id],)
+        if node.id in tuples:
+            return tuples[node.id]
+    if isinstance(node, ast.Starred) and isinstance(node.value, ast.Name) and node.value.id in tuples:
+        return tuples[node.value.id]
+    raise AssertionError(f"non-literal rule target: {ast.unparse(node)[:80]}")
+
+
+def _qhh_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level `NAME = "..."` strings, so rule targets spelled as names are readable."""
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        name = _qhh_member_name(node)
+        if name and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            out[name] = node.value.value
+    return out
+
+
+def test_qhh_partition_database_authority_is_exactly_the_scheduler_owner_and_helper() -> None:
+    oracle = _qhh_partition_oracle()
+    partitions = _qhh_partitions()
+    helper = _qhh_helper()
+    authority = oracle["ci_database_authority"]
+    observed = _qhh_observed_database_patterns()
+
+    assert observed == authority["patterns"], (
+        "ci.yml `database:` block drifted from the tracked oracle: "
+        f"observed={observed} oracle={authority['patterns']}"
+    )
+    assert authority["qhh_bootstrap_exact_set"] == [partitions[2], helper]
+    assert authority["removed_literal"] == partitions[0]
+    assert authority["absent_literals"] == [partitions[0], partitions[1]]
+    corpus_patterns = {pattern for pattern in observed if "qhh_production_bootstrap" in PurePosixPath(pattern).name}
+    assert corpus_patterns == set(authority["qhh_bootstrap_exact_set"]), sorted(corpus_patterns)
+    assert partitions[0] not in observed, "the retained owner owns no integration node"
+    assert partitions[1] not in observed, "the state owner owns no integration node"
+    baseline_patterns = authority["baseline_patterns"]
+    assert partitions[0] in baseline_patterns
+    assert set(observed) == (set(baseline_patterns) - {partitions[0]}) | {partitions[2], helper}
+    assert len(observed) == len(baseline_patterns) + 1
+
+
+@pytest.mark.parametrize("target", list(_qhh_partition_oracle()["ci_database_authority"]["qhh_bootstrap_exact_set"]))
+def test_qhh_partition_database_edge_deletion_is_independent_and_unrescued(target: str) -> None:
+    authority = _qhh_partition_oracle()["ci_database_authority"]
+    exact = set(authority["qhh_bootstrap_exact_set"])
+    survivor = next(iter(exact - {target}))
+    entry = f"              - '{target}'\n"
+
+    assert entry in _database_filter_block(_qhh_workflow())
+    mutated = _qhh_workflow().replace(entry, "")
+    remaining = _database_filter_patterns(mutated)
+
+    assert target not in remaining, f"{target} literal survived the constructed deletion"
+    assert survivor in remaining, "the other exact edge must survive independently"
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving pattern after its exact edge was deleted"
+    )
+    for glob in authority["integration_globs"]:
+        assert not fnmatch.fnmatch(target, glob), f"{target} matched by {glob}"
+    # A catch-all `tests/**`-shaped pattern would rescue EVERY deletion in the block and
+    # make this per-edge proof unprovable for any filename, so it is ruled out with a
+    # sentinel: the assertion is about the surviving patterns' shape, not about our two
+    # chosen names happening to be lucky.
+    sentinel = "tests/zz_any_bootstrap_consumer.py"
+    catch_alls = [pattern for pattern in remaining if fnmatch.fnmatch(sentinel, pattern)]
+    assert not catch_alls, f"catch-all `database:` patterns would rescue {target}: {catch_alls}"
+    assert "integration" not in PurePosixPath(target).name, target
+    # Positive control: the spelling the partition rejected IS rescued by the surviving
+    # `tests/*integration*.py` glob, which is exactly why this proof would have been vacuous
+    # had that filename been taken.
+    assert fnmatch.fnmatch(QHH_PARTITION_RESCUED_HYPOTHESIS, authority["integration_globs"][0])
+    assert authority["rescue"][QHH_PARTITION_RESCUED_HYPOTHESIS]["rescued"] is True
+    assert authority["rescue"][target] == {"matched_by": [], "rescued": False}
+
+
+def test_qhh_partition_helper_only_diff_opens_the_real_database_job() -> None:
+    # SUPPORT_MODULE_TEST_RULES cannot open the `dorny/paths-filter` database lane, so the
+    # helper needs its own exact trigger. Read the filter through the workflow's own YAML: a
+    # comment, a different block or a plain-text grep cannot satisfy it.
+    helper = _qhh_helper()
+    workflow = yaml.safe_load(_qhh_workflow())
+    filters = [
+        step["with"]["filters"]
+        for step in workflow["jobs"]["changes"]["steps"]
+        if isinstance(step, dict) and isinstance(step.get("with"), dict) and "filters" in step["with"]
+    ]
+    assert len(filters) == 1, len(filters)
+    database = yaml.safe_load(filters[0])["database"]
+
+    assert helper in database, "a helper-only diff would not start real-db-integration"
+    assert _qhh_partitions()[2] in database
+    assert _qhh_partitions()[0] not in database and _qhh_partitions()[1] not in database
+
+
+def test_qhh_partition_bug008_command_still_executes_exactly_eight_nodes() -> None:
+    oracle = _qhh_partition_oracle()
+    command = _qhh_bug008_command_text()
+    retained = _qhh_partitions()[0]
+    expected = oracle["executions"]["post_partition"]["bug008_ownership"]
+    paths = tuple(part for part in command.split(" ") if part.endswith(".py"))
+
+    assert paths == (retained, QHH_PARTITION_REGISTRY_MONOLITH_PATH, QHH_PARTITION_BUG008_SCHEDULER_PATH), paths
+    assert "-k output_segment_count" in command, command
+    nodes = _qhh_collected_nodeids(paths, "-k", "output_segment_count")
+    per_file = Counter(node.split("::", 1)[0] for node in nodes)
+    completed = _qhh_pytest(*paths, "-k", "output_segment_count")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _qhh_counts(completed.stdout).startswith("8 passed"), completed.stdout
+    assert len(nodes) == 8, nodes
+    assert per_file[retained] == 5 == expected["qhh_bootstrap_partition_A"]
+    assert per_file[QHH_PARTITION_REGISTRY_MONOLITH_PATH] == 2 == expected["registry_owner"]
+    assert per_file[QHH_PARTITION_BUG008_SCHEDULER_PATH] == 1 == expected["production_scheduler_owner"]
+    frozen_retained = sorted(
+        suffix for suffix in oracle["owner_nodes"][retained] if "output_segment_count" in suffix
+    )
+    observed_retained = sorted(_qhh_suffixes([node for node in nodes if node.startswith(f"{retained}::")]))
+    # Zero-collection false green is the failure mode: the command would still exit 0 if the
+    # five QHH cases moved out of the retained historical path, so they are pinned by id.
+    assert observed_retained == frozen_retained, f"BUG-008's QHH cases moved: {observed_retained}"
+    assert len(frozen_retained) == 5
+
+
+def test_qhh_partition_bug008_history_and_ledger_stay_out_of_the_change_set() -> None:
+    # #1948 must not move the BUG-008 ledger, its validator or the structural guard. That is
+    # proven against the CURRENT PR-visible change set (merge-base(HEAD, origin/master)..HEAD
+    # plus staged/unstaged/untracked state) — never against a fixed baseline SHA, whose
+    # whole-tree diff would count legitimate upstream work after a rebase as #1948 scope
+    # (upstream #1945 added `retry.py`/`pipeline.py` guard exclusions after the branch point).
+    # The retained historical path must still be there and the ledger validator must still
+    # pass.
+    retained = _qhh_partitions()[0]
+    guard_path = _qhh_partition_oracle()["guard"]["path"]
+    protected = ("docs/bugs.md", "scripts/validate_bugs_ledger.py", guard_path)
+
+    changed = _qhh_partition_scope_change_set()
+    if changed is not None:
+        moved = sorted(path for path in protected if path in set(changed))
+        assert not moved, f"#1948's change set moved protected BUG-008 evidence: {moved}"
+    assert retained in Path("docs/bugs.md").read_text(encoding="utf-8")
+    assert retained in Path("scripts/validate_bugs_ledger.py").read_text(encoding="utf-8")
+    ledger = subprocess.run(
+        [sys.executable, "scripts/validate_bugs_ledger.py"], capture_output=True, text=True, check=False
+    )
+    assert ledger.returncode == 0, ledger.stdout + ledger.stderr
+
+
+def _qhh_git_paths(*arguments: str, repo_root: Path | None = None) -> set[str]:
+    """``git`` stdout lines (path listings only); ``repo_root`` keeps the derivation hermetic."""
+    completed = subprocess.run(
+        ["git", *arguments], cwd=repo_root, capture_output=True, text=True, check=True
+    )
+    return {line.strip() for line in completed.stdout.splitlines() if line.strip()}
+
+
+def _qhh_current_change_set(repo_root: Path | None = None) -> tuple[str, ...]:
+    """The PR-visible change set, derived from the current git state rather than a fixed SHA.
+
+    Unions (a) the branch's own commits since ``merge-base(HEAD, origin/master)`` — skipped
+    when the ref is unavailable — (b) the staged/index diff, which is what carries a change
+    during a paused rebase and in the precommit state, (c) unstaged tracked edits, and (d)
+    untracked files under the repo's scoped prefixes. A fixed-baseline comparison would
+    accumulate every upstream commit after a rebase, so scope checks must never use one.
+    """
+    changed: set[str] = set()
+    base = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/master"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if base.returncode == 0 and base.stdout.strip():
+        changed.update(
+            _qhh_git_paths("diff", "--name-only", base.stdout.strip(), "HEAD", repo_root=repo_root)
+        )
+    changed.update(_qhh_git_paths("diff", "--cached", "--name-only", repo_root=repo_root))
+    changed.update(_qhh_git_paths("diff", "--name-only", repo_root=repo_root))
+    for pathspec in ("tests", "scripts", "docs", ".github", "openspec"):
+        changed.update(
+            _qhh_git_paths("ls-files", "--others", "--exclude-standard", "--", pathspec, repo_root=repo_root)
+        )
+    return tuple(sorted(changed))
+
+
+def _qhh_partition_scope_change_set(repo_root: Path | None = None) -> tuple[str, ...] | None:
+    """The current change set while the #1948 bounded-scope contract is in force, else None.
+
+    The contract holds only while the active OpenSpec change directory exists AND the change's
+    own fixture prefix is part of the current diff: after merge, or once a later PR archives
+    the directory, the durable test must no-op instead of reading the archive (or an
+    unrelated branch's diff) as #1948 business scope.
+    """
+    if not (Path(repo_root or ".") / QHH_PARTITION_ALLOWED_PREFIXES[0]).is_dir():
+        return None
+    changed = _qhh_current_change_set(repo_root=repo_root)
+    if not any(path.startswith(QHH_PARTITION_ALLOWED_PREFIXES[0]) for path in changed):
+        return None
+    return changed
+
+
+def _qhh_scope_offenders(changed: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Classify ``changed`` against the #1948 bounded structural write set.
+
+    Returns ``(write_set_offenders, structural_no_move_offenders)``: paths outside
+    QHH_PARTITION_ALLOWED_PATHS / the OpenSpec prefix, and paths the partition must never
+    move (archive evidence, backend trees, the registry monolith, the BUG ledger/validator).
+    """
+    write_set = sorted(
+        path
+        for path in changed
+        if path not in QHH_PARTITION_ALLOWED_PATHS
+        and not path.startswith(QHH_PARTITION_ALLOWED_PREFIXES)
+    )
+    structural = sorted(
+        path
+        for path in changed
+        if path.startswith(("openspec/changes/archive/", "workers/", "services/", "db/", "packages/", "apps/"))
+        or path
+        in {
+            QHH_PARTITION_REGISTRY_MONOLITH_PATH,
+            "scripts/validate_bugs_ledger.py",
+            "docs/bugs.md",
+        }
+    )
+    return tuple(write_set), tuple(structural)
+
+
+def test_qhh_partition_scope_is_the_bounded_structural_diff() -> None:
+    # tasks 4.7: production code, the registry monolith, archived evidence, the BUG ledger,
+    # the guard and #1903/#1913 files must not move with a structural partition. Both sides
+    # are checked: everything already tracked-and-modified, and everything untracked. The
+    # change set is the CURRENT PR diff (branch commits since merge-base plus
+    # staged/unstaged/untracked state), never a fixed baseline SHA: rebasing onto newer
+    # master must not turn upstream commits into #1948 offenders. The contract is only in
+    # force while the change is active and its OpenSpec prefix is in the current diff;
+    # otherwise this durable test no-ops (see `_qhh_partition_scope_change_set`).
+    changed = _qhh_partition_scope_change_set()
+    if changed is None:
+        return
+    assert changed, "nothing to scope-check"
+    offenders, structural = _qhh_scope_offenders(changed)
+    assert not offenders, f"outside the #1948 structural write set: {sorted(offenders)}"
+    assert not structural, f"outside the #1948 structural no-move set: {sorted(structural)}"
+
+
+def _qhh_scope_repo_init(tmp_path: Path) -> None:
+    """Minimal git scaffold for scope-derivation regressions (deterministic identity)."""
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "qhh-scope-test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "qhh-scope-test@localhost"], cwd=tmp_path, check=True)
+
+
+def _qhh_scope_commit(tmp_path: Path, *paths: str, message: str) -> None:
+    subprocess.run(["git", "add", "--", *paths], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=tmp_path, check=True)
+
+
+def test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base(
+    tmp_path: Path,
+) -> None:
+    # Rebasing #1948 onto newer master must not sweep the upstream commits that landed since
+    # the old branch point into the scope check: the committed half of the change set is
+    # merge-base(HEAD, origin/master)..HEAD, so a path master changed before the branch point
+    # stays out while the issue path the branch itself adds stays in (rebased-repo shape).
+    # The real rebase failure was upstream #1945 adding `.large-file-guard.json` exclusions
+    # after the branch point: the guard moved on master before the branch point, so it must
+    # NOT become a #1948 offender — same for any other upstream-touched path (workers/).
+    _qhh_scope_repo_init(tmp_path)
+    fixture = QHH_PARTITION_ALLOWED_PREFIXES[0].rstrip("/")
+    (tmp_path / fixture).mkdir(parents=True)
+    (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+    (tmp_path / "workers").mkdir()
+    (tmp_path / "workers/upstream.py").write_text("base\n", encoding="utf-8")
+    (tmp_path / ".large-file-guard.json").write_text("base\n", encoding="utf-8")
+    _qhh_scope_commit(
+        tmp_path, f"{fixture}/design.md", "workers/upstream.py", ".large-file-guard.json", message="base"
+    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    # Master moves on with upstream paths BEFORE the feature branch point (#1945 shape: un-
+    # related legit work lands after the old branch point, before this branch rebases).
+    (tmp_path / "workers/upstream.py").write_text("upstream change\n", encoding="utf-8")
+    (tmp_path / ".large-file-guard.json").write_text("upstream guard\n", encoding="utf-8")
+    _qhh_scope_commit(
+        tmp_path, "workers/upstream.py", ".large-file-guard.json", message="upstream"
+    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    # Feature = origin/master tip + one issue commit (the post-rebase shape).
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    (tmp_path / fixture / "README.md").write_text("issue\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, f"{fixture}/README.md", message="issue")
+
+    changed = set(_qhh_current_change_set(repo_root=tmp_path))
+    assert "workers/upstream.py" not in changed
+    assert ".large-file-guard.json" not in changed
+    assert f"{fixture}/README.md" in changed
+    assert f"{fixture}/design.md" not in changed
+
+
+def test_qhh_partition_scope_change_set_includes_staged_and_untracked_issue_paths(
+    tmp_path: Path,
+) -> None:
+    # During the paused rebase the committed branch diff is empty and the whole change sits
+    # in the index + worktree: the scope check must still see staged additions and untracked
+    # fixture work — the exact state this repository is in during the conflict.
+    _qhh_scope_repo_init(tmp_path)
+    fixture = QHH_PARTITION_ALLOWED_PREFIXES[0].rstrip("/")
+    (tmp_path / fixture).mkdir(parents=True)
+    (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, f"{fixture}/design.md", message="base")
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    staged = f"{fixture}/proposal.md"
+    (tmp_path / staged).write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--", staged], cwd=tmp_path, check=True)
+    untracked = f"{fixture}/tasks.md"
+    (tmp_path / untracked).write_text("untracked\n", encoding="utf-8")
+
+    changed = set(_qhh_current_change_set(repo_root=tmp_path))
+    assert staged in changed
+    assert untracked in changed
+    assert f"{fixture}/design.md" not in changed
+    assert _qhh_partition_scope_change_set(repo_root=tmp_path) is not None, (
+        "an active fixture change must keep the #1948 scope contract in force"
+    )
+
+
+@pytest.mark.parametrize("staged", [True, False], ids=["guard-staged", "guard-unstaged"])
+def test_qhh_partition_scope_names_and_reddens_a_guard_change_next_to_the_active_fixture(
+    tmp_path: Path, staged: bool
+) -> None:
+    # The rebase fix must not silently extend the default contract: an ACTIVE #1948 fixture
+    # change plus a guard edit in the index (paused-rebase/precommit state) or the worktree
+    # is still #1948 scope drift and must be NAMED (present in the change set) and RED
+    # (classified as a write-set offender by `_qhh_scope_offenders`).
+    _qhh_scope_repo_init(tmp_path)
+    fixture = QHH_PARTITION_ALLOWED_PREFIXES[0].rstrip("/")
+    (tmp_path / ".large-file-guard.json").write_text("base\n", encoding="utf-8")
+    (tmp_path / fixture).mkdir(parents=True)
+    (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, ".large-file-guard.json", f"{fixture}/design.md", message="base")
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    (tmp_path / fixture / "README.md").write_text("issue\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, f"{fixture}/README.md", message="issue")
+    # The guard is touched again ON the feature branch: staged or plain worktree edit.
+    (tmp_path / ".large-file-guard.json").write_text("guard edit\n", encoding="utf-8")
+    if staged:
+        subprocess.run(["git", "add", "--", ".large-file-guard.json"], cwd=tmp_path, check=True)
+
+    changed = set(_qhh_current_change_set(repo_root=tmp_path))
+    assert _qhh_partition_scope_change_set(repo_root=tmp_path) is not None, (
+        "the active fixture change keeps the #1948 contract in force"
+    )
+    assert ".large-file-guard.json" in changed, "a guard edit next to the fixture is invisible"
+    write_set, structural = _qhh_scope_offenders(changed)
+    assert ".large-file-guard.json" in write_set, f"guard edit not named as scope drift: {sorted(write_set)}"
+    assert ".large-file-guard.json" not in structural
+
+
+@pytest.mark.parametrize(
+    "fixture_present",
+    [True, False],
+    ids=["fixture-committed-but-unrelated", "fixture-absent"],
+)
+def test_qhh_partition_scope_gate_noops_without_an_active_fixture_change(
+    tmp_path: Path,
+    fixture_present: bool,
+) -> None:
+    # The #1948 bounded-scope contract must not fire on merged master or an unrelated future
+    # PR: once the active OpenSpec directory is archived/moved (absent) or the current diff
+    # touches nothing under its prefix (present but unrelated), the gate no-ops even though
+    # the branch carries a real change set.
+    _qhh_scope_repo_init(tmp_path)
+    fixture = QHH_PARTITION_ALLOWED_PREFIXES[0].rstrip("/")
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    if fixture_present:
+        (tmp_path / fixture).mkdir(parents=True)
+        (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+        _qhh_scope_commit(tmp_path, "README.md", f"{fixture}/design.md", message="base")
+    else:
+        _qhh_scope_commit(tmp_path, "README.md", message="base")
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/master", "HEAD"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tmp_path, check=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/unrelated_plugin.py").write_text("x\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, "scripts/unrelated_plugin.py", message="unrelated")
+
+    assert _qhh_partition_scope_change_set(repo_root=tmp_path) is None
+
+
+def test_qhh_partition_scope_offenders_names_an_extra_path_next_to_the_active_fixture_change() -> None:
+    # The #1948 PR check stays strict: an extra non-allowed path alongside the active fixture
+    # change is an offender (and, in a backend tree, also a structural no-move violation).
+    # Pure set classification — constructible without touching this repository.
+    fixture = "openspec/changes/partition-qhh-production-bootstrap-tests/tasks.md"
+    extra_doc = "docs/runbooks/someone_elses_runbook.md"
+    extra_backend = "workers/model_registry/validator.py"
+
+    write_set, structural = _qhh_scope_offenders({fixture, extra_doc, extra_backend})
+
+    assert fixture not in write_set and fixture not in structural
+    assert write_set == (extra_doc, extra_backend)
+    assert structural == (extra_backend,)
+
+
+def test_qhh_partition_execution_semantics_match_the_frozen_baseline() -> None:
+    oracle = _qhh_partition_oracle()
+    partitions = list(_qhh_partitions())
+    recorded = oracle["executions"]
+
+    default = _qhh_pytest(*partitions)
+    non_integration = _qhh_pytest("-m", "not integration", *partitions)
+    integration = _qhh_pytest("-m", "integration", partitions[2])
+
+    assert default.returncode == 0, default.stdout
+    assert _qhh_counts(default.stdout) == "55 passed, 11 skipped", default.stdout
+    assert non_integration.returncode == 0, non_integration.stdout
+    assert _qhh_counts(non_integration.stdout) == "55 passed, 11 deselected", non_integration.stdout
+    assert integration.returncode == 0, integration.stdout
+    assert _qhh_counts(integration.stdout) == "11 skipped", integration.stdout
+    assert recorded["baseline"]["default"]["summary"].startswith("55 passed, 11 skipped")
+    assert recorded["baseline"]["not_integration"]["summary"].startswith("55 passed, 11 deselected")
+    assert recorded["baseline"]["integration"]["summary"].startswith("11 skipped")
+    assert recorded["baseline"]["bug008"]["summary"].startswith("8 passed")
+    for name, summary in (
+        ("default", "55 passed, 11 skipped"),
+        ("not_integration", "55 passed, 11 deselected"),
+        ("integration_only", "11 skipped"),
+        ("bug008_command", "8 passed"),
+    ):
+        assert recorded["post_partition"][name]["summary"].startswith(summary), recorded["post_partition"][name]
+
+
+def test_qhh_partition_registry_monolith_imports_stay_in_the_helper() -> None:
+    helper = _qhh_helper()
+
+    for owner in _qhh_partitions():
+        text = Path(owner).read_text(encoding="utf-8")
+        imported = _qhh_imported_names(owner, QHH_PARTITION_REGISTRY_MONOLITH)
+        assert not imported, f"{owner} must not import the registry monolith: {sorted(imported)}"
+        assert QHH_PARTITION_REGISTRY_MONOLITH not in text, owner
+        assert "basins_registry_import_helpers" not in text, f"{owner} must not reach for #1913's future helper"
+    helper_text = Path(helper).read_text(encoding="utf-8")
+    module_level = _qhh_imported_names(helper, QHH_PARTITION_REGISTRY_MONOLITH)
+
+    assert module_level == {"_write_registry_fixture"}, sorted(module_level)
+    assert "from tests.test_basins_registry_import import _package_manifest_for_model" in helper_text
+    assert helper_text.count("from tests.test_basins_registry_import import") == 2, (
+        "the helper must keep exactly the two baseline registry imports #1913 retargets"
+    )
+
+
+def test_qhh_partition_all_four_outputs_stay_below_the_structural_limit() -> None:
+    oracle = _qhh_partition_oracle()
+    paths = [*_qhh_partitions(), _qhh_helper()]
+    recorded = oracle["guard"]["output_lines"]
+
+    assert sorted(recorded) == sorted(paths)
+    assert len(paths) == 4
+    for path in paths:
+        observed = len(Path(path).read_bytes().splitlines())
+        assert observed < QHH_PARTITION_STRUCTURAL_LIMIT, f"{path} is {observed} lines"
+        assert recorded[path] == observed, f"{path}: oracle {recorded[path]}, tree {observed}"
+
+
+def test_qhh_partition_keeps_the_structural_guard_contract_and_out_of_the_change_set() -> None:
+    # #1948 must not move the structural guard. "Unchanged" has two sides: the guard blob at
+    # the pinned baseline commit is still the frozen digest (that digest is the oracle's own
+    # independent value, not a tree read), and the CURRENT PR-visible change set must not
+    # touch the guard at all — merge-base(HEAD, origin/master)..HEAD plus
+    # staged/unstaged/untracked state, never a fixed-baseline whole-tree diff, which would
+    # count legitimate upstream guard work after the branch point (e.g. #1945's
+    # retry.py/pipeline.py exclusions) as #1948 scope. The guard's own shape stays
+    # load-bearing: enabled, structural limit, no QHH exclusion.
+    oracle = _qhh_partition_oracle()
+    paths = [*_qhh_partitions(), _qhh_helper()]
+    guard_path = oracle["guard"]["path"]
+    guard = json.loads(Path(guard_path).read_text(encoding="utf-8"))
+
+    assert oracle["guard"]["sha256"] == "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad"
+    assert hashlib.sha256(_qhh_baseline_blob(guard_path)).hexdigest() == oracle["guard"]["sha256"], (
+        "the guard blob at the #1948 baseline commit no longer matches the frozen digest"
+    )
+    changed = _qhh_partition_scope_change_set()
+    if changed is not None:
+        assert guard_path not in set(changed), "the #1948 change set moved the structural guard"
+    assert guard["enabled"] is True and guard["maxLines"] == QHH_PARTITION_STRUCTURAL_LIMIT
+    assert not [path for path in paths if path in guard["exclude"]], (
+        "a replacement exclusion would undo the point of the partition"
+    )
+    assert not [pattern for pattern in guard["exclude"] if "qhh_production_bootstrap" in pattern]
+
+
+def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() -> None:
+    document = Path(QHH_PARTITION_SCHEDULER_COMPAT_DOC).read_text(encoding="utf-8")
+    unwrapped = re.sub(r"\n {2}", " ", document)
+    helper = _qhh_helper()
+
+    # The stale command must be GONE *and* be the empty recipe it was: absent from the
+    # document, and collecting zero nodes when replayed, which is what made replacing it
+    # load-bearing rather than cosmetic (issue #1948 acceptance: no must-be-empty
+    # authoritative recipe survives, same defect class as #1936/#1935).
+    for stale in QHH_PARTITION_DOC_STALE_COMMANDS:
+        assert stale not in document, f"stale zero-collection command survived: {stale}"
+        stale_paths = tuple(part for part in stale.split(" ") if part.endswith(".py"))
+        stale_marker = stale.split("-k ", 1)[1].strip().strip('"')
+        assert _qhh_collected_nodeids(stale_paths, "-k", stale_marker) == [], (
+            f"the replaced command now collects nodes; this guard's premise is stale: {stale}"
+        )
+    for paths, marker, expected_nodes in QHH_PARTITION_DOC_COMMANDS:
+        command = f"uv run pytest -q {' '.join(paths)} -k \"{marker}\""
+        assert command in unwrapped, f"current command missing from the inventory: {command}"
+
+        collected = _qhh_collected_nodeids(paths, "-k", marker)
+
+        assert collected, f"{command} collects nothing"
+        assert len(collected) == expected_nodes, collected
+        assert {node.split("::")[0] for node in collected} == set(paths)
+        assert all(not node.startswith(helper) for node in collected)
+    # Every current command that names the retained partition must name the whole corpus:
+    # #1948 replaced a single monolith with three owners, and a doc that still lists one is
+    # a recipe for running a third of the suite and calling it green.
+    whole_corpus = [
+        line for line in unwrapped.splitlines() if "uv run pytest" in line and _qhh_partitions()[0] in line
+    ]
+    assert whole_corpus, "no current command lists the retained bootstrap owner"
+    for line in whole_corpus:
+        for owner in _qhh_partitions():
+            assert owner in line, f"whole-corpus command omits {owner}: {line[:160]}"
+
+
+def test_qhh_partition_scheduler_importer_disposition_follows_the_real_importer() -> None:
+    # The importer-gap disposition must name the partition that ACTUALLY imports the scheduler
+    # facade. Baseline imported it from the retained monolith; after the partition only the
+    # scheduler owner does, so a disposition still pointing at A is stale in one direction and
+    # missing in the other — both redden here, and the live gap guard
+    # (`test_directory_rule_importer_gaps_are_dispositioned`) re-derives the same pair.
+    partitions = _qhh_partitions()
+    scheduler_module = "services.orchestrator.scheduler"
+    scheduler_module_path = "services/orchestrator/scheduler.py"
+    # The gap-derivation domain is COLLECTIBLE SUITES importing the scheduler facade, so the
+    # helper (a support module, and the only member naming `_MetStore…` directly) is not part
+    # of it — it is asserted separately. `INTENTIONAL_RULE_GAP_EXCLUSIONS` keys are PATHS.
+    suite_importers = [owner for owner in partitions if _qhh_imports_module(owner, scheduler_module)]
+    facade_users = [
+        owner
+        for owner in (*partitions, _qhh_helper())
+        if QHH_PARTITION_SCHEDULER_FACADE in _qhh_imported_names(owner, scheduler_module)
+    ]
+    dispositioned = {
+        suite: reason
+        for (module_path, suite), reason in INTENTIONAL_RULE_GAP_EXCLUSIONS.items()
+        if module_path == scheduler_module_path and "qhh_production_bootstrap" in suite
+    }
+
+    assert suite_importers == [partitions[2]], suite_importers
+    assert facade_users == [_qhh_helper()], facade_users
+    assert dispositioned == {partitions[2]: "edge-consumer"}, dispositioned
+
+
+def _qhh_imports_module(path: str, module: str) -> bool:
+    """Whether ``path`` imports ``module`` at module scope (any name, absolute only)."""
+    content = Path(path).read_text(encoding="utf-8")
+    return any(
+        isinstance(node, ast.ImportFrom) and node.module == module and node.level == 0
+        for node in ast.parse(content, filename=path).body
+    )
