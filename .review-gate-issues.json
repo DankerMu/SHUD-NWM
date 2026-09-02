@@ -2448,6 +2448,17 @@
       "gateEntries": 1,
       "closed": []
     },
+    "1785": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1958,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
     "1774": {
       "ceilingPrs": [],
       "gateEntries": 2,
