@@ -24,9 +24,10 @@
 --
 -- Phase variables (all boolean, all default `on`):
 --   do_roles      roles, flags, passwords, schema USAGE, DML grants, sequence
---                 USAGE, default privileges, cold-tablespace CREATE grant and
---                 the negative COPY ... FROM PROGRAM probes.  Purely additive:
---                 nothing here transfers ownership.
+--                 USAGE, default privileges, cold-tablespace CREATE grant, the
+--                 negative COPY ... FROM PROGRAM probes and the event trigger
+--                 that refuses CREATE RULE / CREATE TRIGGER from the write
+--                 roles.  Purely additive: nothing here transfers ownership.
 --   do_ownership  the per-relation ownership transfer loop.  Limit worth
 --                 knowing before running it: a view/matview EXECUTES as its
 --                 owner (PG 15 defaults to security_invoker = false), so a view
@@ -38,11 +39,17 @@
 --                 targets before the transfer for exactly this reason.
 --   do_audit      the trailing audit queries.  Always asserts, in every mode:
 --                 the five privilege flags are false, both roles can log in, and
---                 neither role holds ANY role membership (pg_auth_members -- a
---                 membership hands back privileges the flags cannot show).
---                 Warns when the nhms_cold CREATE grant is missing.
---   strict_audit  when on, owner drift and a missing nhms_cold CREATE grant
---                 raise (psql exits non-zero).
+--                 pg_auth_members holds NO row in either direction for the write
+--                 roles -- neither a membership they hold (which hands back
+--                 privileges the flags cannot show) nor a grant of a write role
+--                 to somebody else (which hands that somebody SET ROLE into the
+--                 write set).  Warns when the nhms_cold CREATE grant is missing,
+--                 when a rule or non-internal trigger outside the migration
+--                 allow-list exists in the six schemas, or when the event
+--                 trigger above is missing, disabled or not superuser-owned.
+--   strict_audit  when on, owner drift, a missing nhms_cold CREATE grant, a
+--                 non-allow-listed rule/trigger and a broken event trigger raise
+--                 (psql exits non-zero) instead of warning.
 --
 -- Secrets: passwords are never in this file.  They are read from the
 -- environment of the psql process (NODE27_INGEST_RW_PASSWORD /
@@ -208,10 +215,24 @@ ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA met GRANT SELECT, INSERT, UPDAT
 ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA met GRANT USAGE ON SEQUENCES TO nhms_download_rw;
 
 \echo '## negative probe: COPY ... FROM PROGRAM must be refused for both write roles'
--- The whole point of the change: a leaked write credential must not be command
--- execution inside the database container.  The probe runs under SET LOCAL ROLE
--- (COPY checks GetUserId(), so the surrounding superuser session does not mask
--- the refusal) and touches no application relation.
+-- A leaked write credential must not be DIRECT command execution inside the
+-- database container.  That is what this probe pins, and it is all it pins:
+-- ownership still carries CREATE RULE / CREATE TRIGGER, and a rule action or
+-- trigger body executes as whichever role next WRITES the relation -- including
+-- the migration/seed/replay lanes, which stay on the superuser `nhms` (design
+-- D2).  That indirect path reaches pg_read_file, lo_export and
+-- `COPY ... TO PROGRAM`, so it is closed separately: the event trigger below
+-- refuses that DDL family for the write roles everywhere TimescaleDB lets it
+-- see the command (prevention; it does not see `CREATE TRIGGER` on a
+-- hypertable -- see the guard block), and the audit
+-- enumerates every rule and non-internal trigger against an explicit
+-- allow-list, checks that each allow-listed trigger is still enabled, and
+-- sweeps every stored expression for functions the write role cannot itself
+-- execute -- the `ALTER TABLE ... SET DEFAULT` form, which no event trigger can
+-- refuse without breaking cold residency (detection).  The
+-- probe runs under SET LOCAL ROLE (COPY checks GetUserId(), so the surrounding
+-- superuser session does not mask the refusal) and touches no application
+-- relation.
 DO $copy_probe$
 DECLARE
   v_role  text;
@@ -239,6 +260,63 @@ BEGIN
   END LOOP;
 END
 $copy_probe$;
+
+\echo '## guard: event trigger refusing CREATE RULE / CREATE TRIGGER from the write roles'
+-- Relation ownership carries CREATE RULE and CREATE TRIGGER.  A rule action and
+-- a trigger body execute as the role that WRITES the relation, not as the role
+-- that created them, so an owner-planted object turns the next migration, seed
+-- or replay write -- all of which stay on the superuser `nhms` -- into arbitrary
+-- superuser SQL (pg_read_file, lo_export into PGDATA, COPY ... TO PROGRAM).
+--
+-- Prevention lives here, in the ADDITIVE phase, so `--roles-only` installs it
+-- BEFORE the post-merge ownership transfer hands the write roles that ability.
+-- Detection (the allow-list inventory) lives in the audit below; neither
+-- replaces the other.
+--
+-- Why this holds: the event trigger and its function are owned by the
+-- provisioning superuser and live in a schema the write roles have no CREATE on,
+-- the write roles hold no role membership (audited below), so `SET ROLE` cannot
+-- reach a session_user the guard ignores, and a non-superuser cannot drop,
+-- disable or replace an event trigger.
+--
+-- Where it does NOT hold, measured on 2.10.2 (transcript §15): TimescaleDB's
+-- process-utility hook handles `CREATE TRIGGER` on a HYPERTABLE itself and
+-- never fires `ddl_command_start`, so the write roles ARE refused on ordinary
+-- tables and on chunks but NOT on a hypertable -- including the internal
+-- `_compressed_hypertable_N` that the ownership transfer hands them.  That gap
+-- is covered by detection only: the audit's rule/trigger inventory follows
+-- ownership into `_timescaledb_internal`.
+--
+-- Tag list: `CREATE OR REPLACE RULE` carries the `CREATE RULE` tag, and the
+-- ALTER/DROP tags stop the write roles renaming or removing the four `met`
+-- immutability triggers from migration 000043.  `ALTER TABLE` is deliberately
+-- NOT in the list: the cold-residency lane needs `ALTER TABLE ... SET
+-- TABLESPACE`.  The two `ALTER TABLE` forms of the same gadget -- a planted
+-- column DEFAULT / CHECK expression, and `... DISABLE TRIGGER` on an
+-- allow-listed guard -- are therefore closed by detection instead: the audit's
+-- function-privilege sweep and its `tgenabled` check.
+CREATE SCHEMA IF NOT EXISTS nhms_guard;
+
+CREATE OR REPLACE FUNCTION nhms_guard.refuse_write_role_rules_and_triggers()
+RETURNS event_trigger
+LANGUAGE plpgsql
+AS $guard$
+BEGIN
+  IF session_user IN ('nhms_ingest_rw', 'nhms_download_rw') THEN
+    RAISE EXCEPTION 'refused: role % may not run % -- a rule action or trigger body executes as the role that next writes the relation, including the migration superuser',
+      session_user, tg_tag
+      USING ERRCODE = 'insufficient_privilege',
+            HINT = 'run migration-class DDL as the migration role; see OpenSpec change node27-write-path-roles design D2';
+  END IF;
+END
+$guard$;
+
+DROP EVENT TRIGGER IF EXISTS nhms_guard_no_write_role_rules_triggers;
+CREATE EVENT TRIGGER nhms_guard_no_write_role_rules_triggers
+  ON ddl_command_start
+  WHEN TAG IN ('CREATE RULE', 'ALTER RULE', 'DROP RULE',
+               'CREATE TRIGGER', 'ALTER TRIGGER', 'DROP TRIGGER')
+  EXECUTE FUNCTION nhms_guard.refuse_write_role_rules_and_triggers();
 
 \endif
 
@@ -386,6 +464,12 @@ ORDER BY 1;
 -- the explicit grants above -- so ANY row here is a regression, not a policy
 -- judgement.  If a membership ever becomes genuinely necessary, add it to an
 -- explicit allow-list here with the reason, do not widen the predicate.
+--
+-- BOTH directions are checked.  The member direction catches
+-- `GRANT <anything> TO nhms_ingest_rw`; the grantee direction catches
+-- `GRANT nhms_ingest_rw TO nhms_display_ro`, which leaves every flag false and
+-- every membership-of-the-writer row empty while letting the read-only display
+-- credential `SET ROLE nhms_ingest_rw` into the full write and ownership set.
 DO $flags$
 DECLARE
   v_bad      text;
@@ -414,12 +498,297 @@ BEGIN
     JOIN pg_roles m ON m.oid = am.member
     JOIN pg_roles g ON g.oid = am.roleid
     WHERE m.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
+       OR g.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
     ORDER BY 1, 2
   LOOP
-    RAISE EXCEPTION 'SECURITY REGRESSION: role % is a member of % -- the write roles must hold no role membership; revoke it before proceeding', v_member, v_grantee;
+    IF v_member IN ('nhms_ingest_rw', 'nhms_download_rw') THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: role % is a member of % -- the write roles must hold no role membership; revoke it before proceeding', v_member, v_grantee;
+    ELSE
+      RAISE EXCEPTION 'SECURITY REGRESSION: role % has been granted to % -- the write roles must not be reachable by SET ROLE from any other role; revoke it before proceeding', v_grantee, v_member;
+    END IF;
   END LOOP;
 END
 $flags$;
+
+\echo '## audit: rules and non-internal triggers in the application schemas'
+-- Detection half of the owner-planted escalation path (the event trigger in
+-- do_roles is the prevention half).  Printed in EVERY mode, before the severity
+-- block below, because the pre-merge `--roles-only` run is the first time the
+-- real production inventory is visible: an unexpected trigger has to surface
+-- there, not in the post-merge strict run.
+--
+-- Excluded, by construction and not by allow-list: `_RETURN` (every view has
+-- one) and TimescaleDB's `ts_insert_blocker` (recreated on every hypertable and
+-- chunk).  Foreign-key and constraint triggers are `tgisinternal` and never
+-- appear.
+--
+-- Scope, and why it is not just the six application schemas (all measured on a
+-- 2.10.2 container, transcript §15).  TimescaleDB's process-utility hook takes
+-- `CREATE TRIGGER` on a HYPERTABLE down its own path, which never fires a
+-- `ddl_command_start` event trigger -- so the guard installed in do_roles does
+-- refuse the write roles on ordinary tables and on chunks, but NOT on a
+-- hypertable, including the internal `_compressed_hypertable_N` relation that
+-- the transfer hands to nhms_ingest_rw with its parent.  A trigger planted
+-- there propagates to every compressed chunk, and a superuser `COPY ... FROM`
+-- into such a chunk -- which is exactly what the replay `pg_restore` lane does
+-- -- executes its body as the superuser.  Chunks themselves refuse
+-- `ALTER TABLE ... SET DEFAULT` and `ADD CONSTRAINT` ("operation not supported
+-- on chunk tables"), but `_compressed_hypertable_N` accepts `SET DEFAULT`.
+-- So the audit follows OWNERSHIP into `_timescaledb_internal`: relations owned
+-- by a write role are in scope, TimescaleDB's own catalog tables (owned by the
+-- superuser) are not -- which keeps the extension's internals out of the scan
+-- while covering everything the transfer made plantable.
+SELECT n.nspname || '.' || c.relname AS relation, 'rule' AS kind, r.rulename AS name
+FROM pg_rewrite r
+JOIN pg_class c ON c.oid = r.ev_class
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+       OR (n.nspname = '_timescaledb_internal'
+           AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+  AND r.rulename <> '_RETURN'
+UNION ALL
+SELECT n.nspname || '.' || c.relname, 'trigger', t.tgname
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+       OR (n.nspname = '_timescaledb_internal'
+           AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+  AND NOT t.tgisinternal
+  AND t.tgname <> 'ts_insert_blocker'
+ORDER BY 1, 2, 3;
+
+\echo '## audit: function-privilege sweep over stored expressions'
+-- The ALTER TABLE form of the same escalation, which the event trigger cannot
+-- cover (the cold-residency lane needs ALTER TABLE for SET TABLESPACE): a
+-- column DEFAULT or CHECK expression planted by the relation owner is evaluated
+-- by whichever role next writes the row -- including the migration superuser --
+-- so `DEFAULT length(pg_read_file('/etc/hostname'))` reads server files the
+-- owner may not read itself.  Discriminator: EXECUTE on the referenced
+-- function.  Everything the migrations actually use (now(), nextval(),
+-- gen_random_uuid(), length(), the four met trigger functions) is executable by
+-- PUBLIC; pg_read_file / pg_ls_dir / lo_export are not.
+--
+-- Mechanism note (measured, not assumed): walking `pg_depend` does NOT work
+-- here.  Dependencies on PINNED objects -- every function created by initdb,
+-- which is exactly where pg_read_file lives -- are never recorded, so
+-- pg_attrdef has pg_depend rows to pg_class only and none to pg_proc.  The
+-- stored parse trees are therefore scanned directly for their `:funcid` /
+-- `:opfuncid` tokens (`:opfuncid` catches an operator-wrapped call).
+-- Free coverage worth stating: STORED generated columns also live in
+-- pg_attrdef and are swept.  Out of this class, deliberately: expression
+-- indexes (pg_read_file is VOLATILE, CREATE INDEX requires IMMUTABLE), RLS
+-- policies (owner and superuser bypass RLS), and view `_RETURN` rules (a view
+-- body is evaluated for the reader, not for the role writing the row) -- the
+-- latter are excluded by the same predicate as the inventory above.
+-- A temp table, not a CTE repeated three times: the inventory below, the
+-- severity block and the T7 receipt must all read the same scan.  It is dropped
+-- at the end of the block; an ON_ERROR_STOP abort ends the session anyway.
+CREATE TEMP TABLE pg_temp.nhms_audit_function_refs AS
+WITH sources AS (
+  SELECT n.nspname || '.' || c.relname AS relation,
+         'column default ' || a.attname AS kind,
+         d.adbin::text AS tree,
+         NULL::oid AS fnoid
+  FROM pg_attrdef d
+  JOIN pg_class c ON c.oid = d.adrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+  WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+         OR (n.nspname = '_timescaledb_internal'
+             AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+  UNION ALL
+  SELECT n.nspname || '.' || c.relname,
+         'CHECK constraint ' || k.conname,
+         k.conbin::text,
+         NULL::oid
+  FROM pg_constraint k
+  JOIN pg_class c ON c.oid = k.conrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+         OR (n.nspname = '_timescaledb_internal'
+             AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+    AND k.contype = 'c'
+    AND k.conbin IS NOT NULL
+  UNION ALL
+  SELECT n.nspname || '.' || c.relname,
+         'rule ' || r.rulename,
+         r.ev_action::text,
+         NULL::oid
+  FROM pg_rewrite r
+  JOIN pg_class c ON c.oid = r.ev_class
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+         OR (n.nspname = '_timescaledb_internal'
+             AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+    AND r.rulename <> '_RETURN'
+  UNION ALL
+  -- A trigger body is opaque (it is compiled at call time), so the function
+  -- itself is the unit of authority: tgfoid, taken straight from pg_trigger.
+  SELECT n.nspname || '.' || c.relname,
+         'trigger ' || t.tgname,
+         NULL::text,
+         t.tgfoid
+  FROM pg_trigger t
+  JOIN pg_class c ON c.oid = t.tgrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+         OR (n.nspname = '_timescaledb_internal'
+             AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+    AND NOT t.tgisinternal
+    AND t.tgname <> 'ts_insert_blocker'
+), refs AS (
+  SELECT s.relation, s.kind, (m[1])::oid AS fnoid
+  FROM sources s, regexp_matches(s.tree, ':(?:op)?funcid (\d+)', 'g') m
+  WHERE s.tree IS NOT NULL
+  UNION ALL
+  SELECT s.relation, s.kind, s.fnoid
+  FROM sources s
+  WHERE s.fnoid IS NOT NULL
+)
+SELECT r.relation,
+       r.kind,
+       pn.nspname || '.' || p.proname AS fn,
+       has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE') AS ingest_can_execute,
+       (SELECT count(*) FROM sources) AS sources_scanned
+FROM refs r
+JOIN pg_proc p ON p.oid = r.fnoid
+JOIN pg_namespace pn ON pn.oid = p.pronamespace;
+
+-- Printed in every mode, and the summary line is printed even when the sweep is
+-- clean, so the T7 receipt shows that it ran rather than showing nothing.
+SELECT x.detail
+FROM (
+  SELECT 0 AS ord,
+         format('%s expression(s)/trigger(s) scanned, %s distinct function(s) referenced, %s not executable by nhms_ingest_rw',
+                coalesce(max(sources_scanned), 0), count(DISTINCT fn),
+                count(DISTINCT fn) FILTER (WHERE NOT ingest_can_execute)) AS detail
+  FROM pg_temp.nhms_audit_function_refs
+  UNION ALL
+  SELECT 1,
+         format('%s %s references %s -- NOT executable by nhms_ingest_rw', relation, kind, fn)
+  FROM pg_temp.nhms_audit_function_refs
+  WHERE NOT ingest_can_execute
+  GROUP BY relation, kind, fn
+) x
+ORDER BY x.ord, x.detail;
+
+-- Severity is the phase's, not the statement's: the strict audit (full mode)
+-- refuses, `--roles-only` and the audit-only invocation warn.  psql does not
+-- interpolate `:variables` inside a dollar-quoted body, so the phase flag is
+-- handed to the block through a session GUC instead.
+SET nhms_provision.strict_audit TO :'strict_audit';
+DO $planted$
+DECLARE
+  -- psql's own \if accepts on/true/1/yes, so this must too: a run with
+  -- -v strict_audit=true would otherwise RAISE on owner drift and only WARN
+  -- here, splitting the severity of one audit.
+  v_strict  boolean := lower(coalesce(current_setting('nhms_provision.strict_audit', true), 'off')) IN ('on', 'true', '1', 'yes');
+  v_planted  text;
+  v_event    text;
+  v_smuggled text;
+  v_disabled text;
+BEGIN
+  -- The allow-list is spelled as (schema, table, trigger) triples, not by name
+  -- alone: a trigger called `canonical_grid_cell_immutable_trg` planted on a
+  -- DIFFERENT table is not the migration's trigger.
+  SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_planted
+  FROM (
+    SELECT n.nspname || '.' || c.relname || ' rule ' || r.rulename AS descr
+    FROM pg_rewrite r
+    JOIN pg_class c ON c.oid = r.ev_class
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+           OR (n.nspname = '_timescaledb_internal'
+               AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+      AND r.rulename <> '_RETURN'
+    UNION ALL
+    SELECT n.nspname || '.' || c.relname || ' trigger ' || t.tgname
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
+           OR (n.nspname = '_timescaledb_internal'
+               AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
+      AND NOT t.tgisinternal
+      AND t.tgname <> 'ts_insert_blocker'
+      AND (n.nspname, c.relname, t.tgname) NOT IN (
+        ('met', 'canonical_met_product', 'canonical_met_product_grid_definition_uri_match_trg'),
+        ('met', 'canonical_grid_snapshot', 'canonical_grid_snapshot_identity_immutable_trg'),
+        ('met', 'canonical_grid_cell', 'canonical_grid_cell_immutable_trg'),
+        ('met', 'canonical_grid_cell', 'canonical_grid_cell_direct_delete_blocked_trg')
+      )
+  ) planted;
+  IF v_planted IS NOT NULL THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: rule/trigger outside the migration allow-list (its body runs as the role that next writes the relation): %', v_planted;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: rule/trigger outside the migration allow-list (its body runs as the role that next writes the relation): %', v_planted;
+    END IF;
+  END IF;
+
+  -- The ALTER TABLE form: a function smuggled into a stored expression that the
+  -- write role may not call itself is an escalation by construction, because
+  -- the expression is evaluated by the role that writes the row.
+  SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_smuggled
+  FROM (
+    SELECT DISTINCT relation || ' ' || kind || ' references ' || fn AS descr
+    FROM pg_temp.nhms_audit_function_refs
+    WHERE NOT ingest_can_execute
+  ) smuggled;
+  IF v_smuggled IS NOT NULL THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: % the write role cannot execute (the expression is evaluated by the role that writes the row)', v_smuggled;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: % the write role cannot execute (the expression is evaluated by the role that writes the row)', v_smuggled;
+    END IF;
+  END IF;
+
+  -- `ALTER TABLE ... DISABLE TRIGGER` needs no rule/trigger DDL tag, so the
+  -- event trigger never sees it: an allow-listed guard can be switched off in
+  -- place.  000043 creates all four with the default origin firing mode, so
+  -- anything other than 'O' is drift.
+  SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_disabled
+  FROM (
+    SELECT n.nspname || '.' || c.relname || ' trigger ' || t.tgname || ' (tgenabled=' || t.tgenabled::text || ')' AS descr
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE (n.nspname, c.relname, t.tgname) IN (
+        ('met', 'canonical_met_product', 'canonical_met_product_grid_definition_uri_match_trg'),
+        ('met', 'canonical_grid_snapshot', 'canonical_grid_snapshot_identity_immutable_trg'),
+        ('met', 'canonical_grid_cell', 'canonical_grid_cell_immutable_trg'),
+        ('met', 'canonical_grid_cell', 'canonical_grid_cell_direct_delete_blocked_trg')
+      )
+      AND t.tgenabled <> 'O'
+  ) disabled;
+  IF v_disabled IS NOT NULL THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: allow-listed trigger not enabled: % -- the migration guard it implements is switched off', v_disabled;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger not enabled: % -- the migration guard it implements is switched off', v_disabled;
+    END IF;
+  END IF;
+
+  SELECT CASE
+           WHEN e.evtname IS NULL THEN 'missing'
+           WHEN e.evtenabled = 'D' THEN 'disabled'
+           WHEN NOT o.rolsuper THEN 'owned by the non-superuser role ' || o.rolname
+         END
+  INTO v_event
+  FROM (SELECT 1) present
+  LEFT JOIN pg_event_trigger e ON e.evtname = 'nhms_guard_no_write_role_rules_triggers'
+  LEFT JOIN pg_roles o ON o.oid = e.evtowner;
+  IF v_event IS NOT NULL THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: event trigger nhms_guard_no_write_role_rules_triggers is % -- the write roles can plant rules and triggers again; re-run the provision script', v_event;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: event trigger nhms_guard_no_write_role_rules_triggers is % -- the write roles can plant rules and triggers again; re-run the provision script', v_event;
+    END IF;
+  END IF;
+END
+$planted$;
+DROP TABLE pg_temp.nhms_audit_function_refs;
 
 \echo '## audit: CREATE on tablespace nhms_cold for nhms_ingest_rw'
 -- The grant itself is a \gexec over pg_tablespace and emits NOTHING when the

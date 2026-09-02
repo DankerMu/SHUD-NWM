@@ -24,6 +24,16 @@ Every recurring node-27 runtime unit that writes to the production database SHAL
 - **WHEN** either write role is granted membership in any other role (for example `GRANT nhms TO nhms_ingest_rw` or `GRANT pg_read_server_files TO nhms_ingest_rw`) and the provision script runs in any mode
 - **THEN** the flags audit raises a security-regression error naming the role and the membership, and the runner exits 3 — the audit reads `pg_auth_members`, not only the `pg_roles` flags
 
+#### Scenario: Owner-planted rules and triggers are refused and audited
+
+- **WHEN** either write role attempts `CREATE RULE` or `CREATE TRIGGER` on a relation it owns
+- **THEN** on ordinary tables and on TimescaleDB chunks the superuser-owned event trigger raises and no rule or trigger is created, the write role cannot drop that event trigger, and a migration run as `nhms` can still create triggers; on hypertables (and the internal `_compressed_hypertable_*` relations) TimescaleDB's utility hook processes `CREATE TRIGGER` itself and the event trigger does not fire, so a planted trigger is created and propagates to the chunks — there the guarantee is detection only: the strict audit fails on any rule (other than view `_RETURN` rules) or any non-internal trigger (other than TimescaleDB's `ts_insert_blocker`) in the six application schemas, or on any `_timescaledb_internal` relation owned by either write role, that is not on the explicit allowlist of the four `met` triggers from migration 000043, on any allow-listed trigger that is not enabled, and on any column default, `CHECK` constraint (including one added `NOT VALID`, which skips the owner-side validation but is still evaluated for new rows), rule action or trigger function in those relations that references a function the write role cannot itself `EXECUTE` (the `ALTER TABLE … SET DEFAULT` / `ADD CONSTRAINT … NOT VALID` forms of the same gadget, which the event trigger does not cover because the cold-residency lane needs `ALTER TABLE`)
+
+#### Scenario: Write roles granted to other roles are refused
+
+- **WHEN** either write role is granted to any other role (for example `GRANT nhms_ingest_rw TO nhms_display_ro`)
+- **THEN** the flags audit raises a security-regression error naming both roles and the runner exits 3
+
 #### Scenario: Cold tablespace grant is audited
 
 - **WHEN** the tablespace `nhms_cold` exists and `nhms_ingest_rw` does not hold `CREATE` on it

@@ -1789,9 +1789,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # #1774 node-27 write-path least-privilege roles. `db/**` above only buys
     # tests/test_migrations.py, which never reads the role SQL; the runner is a
     # shell script with no same-name suite; and `infra/env/**` only buys the
-    # two-node docker runtime suite. Without these four rows a change to the
-    # provision SQL, the runner, a node-27 env template or the autopipe stats
-    # guard would ship with the write-role guards unexecuted.
+    # two-node docker runtime suite. Without these three rows a change to the
+    # provision SQL, the runner or a node-27 env template would ship with the
+    # write-role guards unexecuted. The fourth producer, the autopipe stats
+    # guard, is covered by an extra target MERGED into the existing
+    # `scripts/node27_autopipeline.py` rule below, not by a row here.
     PathTestRule(
         "db/roles/node27_write_roles.sql",
         ("tests/test_node27_write_roles.py",),

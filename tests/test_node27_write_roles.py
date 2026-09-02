@@ -38,6 +38,28 @@ _SUPERUSER = "nhms"
 
 _APP_SCHEMAS = ("core", "hydro", "met", "ops", "map", "flood")
 
+# The only non-internal triggers a clean node-27 catalog carries in the six
+# application schemas, all created by db/migrations/000043_canonical_grid_snapshot.sql
+# (:127, :187, :209, :234). Keyed on (schema, table, name) because the same
+# trigger name on another table is not the migration's trigger.
+# The audit follows OWNERSHIP into TimescaleDB's internal schema: the transfer
+# hands `_compressed_hypertable_N` and every chunk to the write role, and
+# TimescaleDB's process-utility hook runs `CREATE TRIGGER` on a hypertable
+# without ever firing a `ddl_command_start` event trigger (measured, transcript
+# §15), so the do_roles guard cannot refuse it there. Owner-scoped, so
+# TimescaleDB's own superuser-owned catalog tables are never scanned.
+_INTERNAL_SCOPE_RE = (
+    r"OR \(n\.nspname = '_timescaledb_internal'\s+"
+    r"AND c\.relowner IN \('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole\)\)"
+)
+
+_ALLOWLISTED_TRIGGERS = (
+    ("met", "canonical_met_product", "canonical_met_product_grid_definition_uri_match_trg"),
+    ("met", "canonical_grid_snapshot", "canonical_grid_snapshot_identity_immutable_trg"),
+    ("met", "canonical_grid_cell", "canonical_grid_cell_immutable_trg"),
+    ("met", "canonical_grid_cell", "canonical_grid_cell_direct_delete_blocked_trg"),
+)
+
 # The only runtime env templates allowed to name the superuser, each for a
 # reason recorded in the OpenSpec design (D5) and in the template itself:
 # migration-class work `nhms_ingest_rw` structurally cannot carry.
@@ -54,10 +76,13 @@ _SUPERUSER_ALLOW_LIST = {
 # this tuple: its unit
 # (`infra/systemd/nhms-node27-timeseries-compression-replay.service:8`) is
 # `Type=oneshot` with no `.timer`, i.e. an operator-triggered migration-class
-# replay (pg_dump / two `migration_apply` steps / pg_restore, plus one
-# `decompress_chunk` leg), not a recurring lane. It keeps the superuser by
-# documented exception and is guarded separately by
-# `test_migration_class_tooling_stays_inside_the_allow_listed_lane`.
+# replay, not a recurring lane. Its full sequence
+# (`EXPECTED_COMMAND_SEQUENCE`, :117-128) is pg_dump / pg_restore_version /
+# pg_restore_list / two `migration_apply` / `decompress` /
+# `compression_dry_run` / `compression_enforce` plus the two benchmarks -- the
+# exception is scoped by "one-shot migration-class unit", not by which of those
+# calls it makes. It keeps the superuser by documented exception and is guarded
+# separately by `test_migration_class_tooling_stays_inside_the_allow_listed_lane`.
 _RECURRING_ENTRYPOINTS = (
     "scripts/node27_autopipeline.py",
     "scripts/node27_download_cycles.py",
@@ -314,26 +339,46 @@ def test_autocommit_is_never_turned_off(sql_text: str) -> None:
     assert not re.search(r"(?i)\bAUTOCOMMIT\s+off\b", sql_text)
 
 
-def test_audit_rejects_any_role_membership_held_by_the_write_roles(sql_text: str) -> None:
-    """Flag columns alone do not bound the roles.
+def test_audit_rejects_role_membership_in_both_directions(sql_text: str) -> None:
+    """Flag columns alone do not bound the roles, and one direction does not either.
 
     ``GRANT pg_write_server_files TO nhms_ingest_rw`` leaves every ``pg_roles``
     flag false while restoring ``COPY … FROM`` on server files, and a membership
-    in the migration role restores everything. The audit must read
-    ``pg_auth_members``.
+    in the migration role restores everything. The mirror image is just as bad:
+    ``GRANT nhms_ingest_rw TO nhms_display_ro`` leaves the writer holding no
+    membership at all while letting the read-only display credential
+    ``SET ROLE nhms_ingest_rw`` into the whole write and ownership set.
+
+    Anchored on the executable ``FROM pg_auth_members`` (the prose above it names
+    the catalog too, and the flags query a few lines earlier already carries a
+    ``WHERE rolname IN`` the role names would satisfy).
     """
-    section = _psql_section(sql_text, "do_audit")
-    assert "pg_auth_members" in section, (
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    assert "FROM pg_auth_members" in section, (
         "the audit reads only the pg_roles flag columns; a role membership is "
         "invisible to it"
     )
-    assert "SECURITY REGRESSION: role % is a member of %" in section
-    for role in (_INGEST_ROLE, _DOWNLOAD_ROLE):
-        membership_block = section[section.index("pg_auth_members") :]
-        assert f"'{role}'" in membership_block, f"{role} is not covered by the membership audit"
+    block = section[section.index("FROM pg_auth_members") :]
+    roles_list = f"('{_INGEST_ROLE}', '{_DOWNLOAD_ROLE}')"
+    # Both literals, so swapping `m.` for `g.` (one direction, spelled the other
+    # way round) turns this red instead of green.
+    assert f"WHERE m.rolname IN {roles_list}" in block, (
+        "the member direction (GRANT <role> TO a write role) is not audited"
+    )
+    assert f"OR g.rolname IN {roles_list}" in block, (
+        "the grantee direction (GRANT a write role TO <role>) is not audited; "
+        "`GRANT nhms_ingest_rw TO nhms_display_ro` would pass the audit"
+    )
+    assert "RAISE EXCEPTION 'SECURITY REGRESSION: role % is a member of %" in block, (
+        "the member direction must RAISE EXCEPTION, not warn"
+    )
+    assert "RAISE EXCEPTION 'SECURITY REGRESSION: role % has been granted to %" in block, (
+        "the grantee direction must RAISE EXCEPTION with its own message, not "
+        "reuse the member wording"
+    )
     # the check must be outside `\if :strict_audit`, i.e. it also runs under
     # --roles-only and in the audit-only call
-    strict = _psql_section(sql_text, "strict_audit")
+    strict = _psql_section(_sql_code(sql_text), "strict_audit")
     assert "pg_auth_members" not in strict, (
         "a membership regression must fail in every mode, not only in the strict audit"
     )
@@ -347,7 +392,7 @@ def test_audit_asserts_the_cold_tablespace_create_grant(sql_text: str) -> None:
     ``GRANT CREATE ON TABLESPACE nhms_cold`` was invisible -- the cold-residency
     lane would discover it at its first ``SET TABLESPACE`` instead.
     """
-    section = _psql_section(sql_text, "do_audit")
+    section = _psql_section(_sql_code(sql_text), "do_audit")
     assert "has_tablespace_privilege" in section, (
         "the audit never checks the cold-tablespace CREATE grant"
     )
@@ -358,13 +403,258 @@ def test_audit_asserts_the_cold_tablespace_create_grant(sql_text: str) -> None:
     assert "tablespace nhms_cold absent" in section, (
         "an absent tablespace must be reported loudly, not silently skipped"
     )
-    strict = _psql_section(sql_text, "strict_audit")
+    strict = _psql_section(_sql_code(sql_text), "strict_audit")
     assert "has_tablespace_privilege" in strict, (
         "a missing CREATE grant must be a hard failure in full mode"
     )
+    assert re.search(
+        r"RAISE EXCEPTION 'cold-residency regression: nhms_ingest_rw lacks CREATE", strict
+    ), (
+        "the strict leg must RAISE EXCEPTION; a WARNING here would let the "
+        "cutover proceed with the cold-residency lane already broken"
+    )
     non_strict = section.replace(strict, "\n")
-    assert "has_tablespace_privilege" in non_strict, (
-        "--roles-only must still warn about a missing CREATE grant"
+    assert re.search(
+        rf"has_tablespace_privilege\(\s*'{_INGEST_ROLE}'\s*,\s*'nhms_cold'\s*,\s*'CREATE'\s*\)",
+        non_strict,
+    ), (
+        "--roles-only must still warn about a missing CREATE grant, and it must "
+        "test the grant of nhms_ingest_rw -- the role that runs the "
+        f"cold-residency lane -- not of {_DOWNLOAD_ROLE}"
+    )
+    assert re.search(
+        r"RAISE WARNING 'cold-residency regression: nhms_ingest_rw lacks CREATE", non_strict
+    ), (
+        "--roles-only is the additive pre-merge phase: the missing grant must "
+        "surface as a WARNING naming nhms_ingest_rw, not be silent and not abort"
+    )
+
+
+def test_additive_phase_installs_the_rule_and_trigger_event_trigger(sql_text: str) -> None:
+    """Ownership carries CREATE RULE / CREATE TRIGGER; their bodies run as the writer.
+
+    A rule action or trigger body planted by ``nhms_ingest_rw`` executes as
+    whichever role next writes the relation -- including the superuser `nhms`
+    that runs migrations, seeds and the replay supervisor -- which reaches
+    ``pg_read_file`` / ``lo_export`` / ``COPY … TO PROGRAM``. The event trigger
+    is the prevention half and has to live in the ADDITIVE phase, so
+    ``--roles-only`` installs it BEFORE the post-merge transfer grants the
+    ability it refuses.
+    """
+    section = _sql_code(_psql_section(sql_text, "do_roles"))
+    assert "CREATE EVENT TRIGGER nhms_guard_no_write_role_rules_triggers" in section, (
+        "the event trigger must be created in the additive phase, not post-merge"
+    )
+    assert "DROP EVENT TRIGGER IF EXISTS nhms_guard_no_write_role_rules_triggers" in section, (
+        "CREATE EVENT TRIGGER has no OR REPLACE; the install must be idempotent"
+    )
+    assert "ON ddl_command_start" in section
+    for tag in ("'CREATE RULE'", "'CREATE TRIGGER'"):
+        assert tag in section, f"{tag} is not refused"
+    guard = section[section.index("CREATE OR REPLACE FUNCTION nhms_guard.") :]
+    assert "RETURNS event_trigger" in guard
+    assert f"session_user IN ('{_INGEST_ROLE}', '{_DOWNLOAD_ROLE}')" in guard, (
+        "the guard must name BOTH write roles, and match on session_user: the "
+        "write roles hold no membership, so SET ROLE cannot dodge it"
+    )
+    assert "RAISE EXCEPTION" in guard, "the guard must refuse, not warn"
+    assert "SECURITY DEFINER" not in guard, (
+        "a SECURITY DEFINER guard function would itself be an escalation surface"
+    )
+    # a schema the write roles cannot CREATE in: they get USAGE on the six
+    # application schemas only, never on this one.
+    assert "CREATE SCHEMA IF NOT EXISTS nhms_guard" in section
+    assert not re.search(r"GRANT[^;]*nhms_guard", _sql_code(sql_text)), (
+        "the write roles must hold nothing on the guard schema; a CREATE there "
+        "would let them replace the guard function"
+    )
+
+
+def test_audit_enumerates_rules_and_triggers_against_the_migration_allow_list(
+    sql_text: str,
+) -> None:
+    """Detection half: the event trigger cannot see what a superuser plants.
+
+    A rule or trigger created as `nhms` (a compromised migration, or the object
+    planted before this guard existed) fires on the next superuser write just the
+    same, so the audit enumerates every rule and every non-internal trigger in
+    the six schemas and refuses anything outside migration 000043's four `met`
+    triggers.
+    """
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    assert "FROM pg_rewrite" in section, "planted rules are not audited"
+    assert "FROM pg_trigger" in section, "planted triggers are not audited"
+    assert "r.rulename <> '_RETURN'" in section, (
+        "every view carries a _RETURN rule; without the exclusion the audit is "
+        "red on any database with a view and gets muted"
+    )
+    assert "NOT t.tgisinternal" in section, (
+        "foreign-key/constraint triggers are internal and would drown the signal"
+    )
+    assert "t.tgname <> 'ts_insert_blocker'" in section, (
+        "TimescaleDB recreates ts_insert_blocker on every hypertable and chunk"
+    )
+    for schema, table, trigger in _ALLOWLISTED_TRIGGERS:
+        assert f"('{schema}', '{table}', '{trigger}')" in section, (
+            f"{schema}.{table}.{trigger} (migration 000043) is not on the audit "
+            "allow-list, so a clean production catalog would fail the audit"
+        )
+    # the allow-list is keyed on (schema, table, name): the same trigger name on
+    # another table is NOT the migration's trigger.
+    assert "(n.nspname, c.relname, t.tgname) NOT IN (" in section
+    inventory = section[
+        section.index("rules and non-internal triggers") : section.index(
+            "function-privilege sweep"
+        )
+    ]
+    assert len(re.findall(_INTERNAL_SCOPE_RE, inventory)) == 2, (
+        "the every-mode inventory must list rules and triggers on the "
+        "_timescaledb_internal relations the write roles own -- a trigger "
+        "planted on `_compressed_hypertable_N` is invisible otherwise"
+    )
+    planted = section[section.index("DO $planted$") :]
+    assert len(re.findall(_INTERNAL_SCOPE_RE, planted)) == 2, (
+        "listing a planted trigger without failing on it is not detection"
+    )
+    assert "RAISE EXCEPTION 'SECURITY REGRESSION: rule/trigger outside the migration" in planted, (
+        "the strict audit must refuse a planted rule/trigger"
+    )
+    assert "RAISE WARNING 'SECURITY REGRESSION: rule/trigger outside the migration" in planted, (
+        "--roles-only and the audit-only invocation must still warn"
+    )
+    # severity comes from the phase, and the phase reaches the block through a
+    # GUC because psql does not interpolate :variables inside a dollar-quoted body
+    assert "SET nhms_provision.strict_audit TO :'strict_audit';" in section
+    assert "current_setting('nhms_provision.strict_audit', true)" in planted
+    assert "IN ('on', 'true', '1', 'yes')" in planted, (
+        r"psql's own \if accepts on/true/1/yes; a stricter parse here splits the "
+        "severity of one audit between its legs"
+    )
+
+
+def test_the_trigger_allow_list_is_exactly_what_the_migrations_create() -> None:
+    """A derived allow-list, not an assumed one.
+
+    If a later migration adds a trigger in one of the six schemas, the audit
+    would refuse a *clean* catalog and the operator would learn it during the
+    post-merge cutover. This test fails on the migration's PR instead, and the
+    fix is one row in ``_ALLOWLISTED_TRIGGERS`` plus one in the provision SQL.
+    """
+    created: set[tuple[str, str, str]] = set()
+    for path in sorted((_ROOT / "db").rglob("*.sql")):
+        if path == _SQL_PATH:
+            continue  # the provision file's own prose names these triggers
+        text = _sql_code(path.read_text(encoding="utf-8"))
+        for name, schema, table in re.findall(
+            r"CREATE TRIGGER\s+(\w+)[^;]*?\sON\s+([a-z_]+)\.([a-z_]+)", text, re.S
+        ):
+            if schema in _APP_SCHEMAS:
+                created.add((schema, table, name))
+    assert created == set(_ALLOWLISTED_TRIGGERS), (
+        "db/ creates a different set of triggers in the application schemas than "
+        f"the provision audit allow-lists: {sorted(created)}"
+    )
+    sql = _SQL_PATH.read_text(encoding="utf-8")
+    for schema, table, name in created:
+        assert f"('{schema}', '{table}', '{name}')" in sql
+
+
+def test_audit_sweeps_stored_expressions_for_functions_the_role_cannot_execute(
+    sql_text: str,
+) -> None:
+    """The `ALTER TABLE` form of the planted-body escalation.
+
+    No event trigger can refuse `ALTER TABLE` (the cold-residency lane needs it
+    for `SET TABLESPACE`), so a column `DEFAULT` or `CHECK` calling
+    ``pg_read_file`` is evaluated by whichever role writes the row -- the
+    migration superuser. The discriminator is EXECUTE on the referenced
+    function: everything the migrations use is PUBLIC-executable.
+    """
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    assert "FROM pg_attrdef d" in section, "column defaults are not swept"
+    assert "k.contype = 'c'" in section, "CHECK constraints are not swept"
+    assert "t.tgfoid" in section, (
+        "a trigger body is opaque, so the trigger FUNCTION is the unit of "
+        "authority and must be swept by oid"
+    )
+    assert "d.adbin::text" in section and "k.conbin::text" in section, (
+        "pg_depend records NOTHING for pinned catalog functions (measured: "
+        "pg_attrdef has rows to pg_class only), so the stored parse trees "
+        "themselves have to be scanned"
+    )
+    assert r":(?:op)?funcid (\d+)" in section, (
+        "the scan must pick up both FUNCEXPR :funcid and OpExpr :opfuncid"
+    )
+    assert "has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')" in section, (
+        "the sweep must test EXECUTE for the write role, not the function's "
+        "schema or its owner"
+    )
+    sweep = section[section.index("function-privilege sweep") : section.index("DO $planted$")]
+    assert len(re.findall(_INTERNAL_SCOPE_RE, sweep)) == 4, (
+        "all four sweep legs (defaults, CHECKs, rule actions, trigger "
+        "functions) must also cover the _timescaledb_internal relations the "
+        "transfer hands to the write roles -- owner-scoped, so TimescaleDB's "
+        "own catalog tables stay out"
+    )
+    planted = section[section.index("DO $planted$") :]
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: % the write role cannot execute" in planted
+    ), "the strict audit must refuse a smuggled function"
+    assert (
+        "RAISE WARNING 'SECURITY REGRESSION: % the write role cannot execute" in planted
+    ), "--roles-only and the audit-only invocation must still warn"
+    # the every-mode inventory has to print a line even when the sweep is clean,
+    # or the T7 receipt cannot show that it ran
+    inventory = section[section.index("function-privilege sweep") : section.index("DO $planted$")]
+    assert "not executable by nhms_ingest_rw" in inventory
+    assert "expression(s)/trigger(s) scanned" in inventory
+
+
+def test_audit_requires_the_allow_listed_triggers_to_stay_enabled(sql_text: str) -> None:
+    """`ALTER TABLE ... DISABLE TRIGGER` carries no rule/trigger DDL tag.
+
+    The event trigger never sees it, so an allow-listed guard can be switched
+    off in place while the inventory still lists it. Migration 000043 creates
+    all four with the default origin firing mode.
+    """
+    planted = _psql_section(_sql_code(sql_text), "do_audit")
+    planted = planted[planted.index("DO $planted$") :]
+    assert "t.tgenabled <> 'O'" in planted, (
+        "an allow-listed trigger that is not enabled must be drift; 000043 uses "
+        "no ENABLE ALWAYS/REPLICA, so 'O' is the only clean value"
+    )
+    for schema, table, trigger in _ALLOWLISTED_TRIGGERS:
+        assert planted.count(f"('{schema}', '{table}', '{trigger}')") == 2, (
+            f"{schema}.{table}.{trigger} must be checked both against the "
+            "allow-list and for still being enabled"
+        )
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: allow-listed trigger not enabled" in planted
+    )
+    assert (
+        "RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger not enabled" in planted
+    )
+
+
+def test_audit_asserts_the_event_trigger_is_present_enabled_and_superuser_owned(
+    sql_text: str,
+) -> None:
+    """A dropped or disabled guard must be loud; it is the prevention half."""
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    planted = section[section.index("DO $planted$") :]
+    assert "FROM pg_event_trigger" in planted or "pg_event_trigger e" in planted
+    assert "e.evtname = 'nhms_guard_no_write_role_rules_triggers'" in planted
+    assert "e.evtenabled = 'D'" in planted, "a disabled event trigger refuses nothing"
+    assert "NOT o.rolsuper" in planted, (
+        "an event trigger owned by a non-superuser could be dropped by that role"
+    )
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: event trigger "
+        "nhms_guard_no_write_role_rules_triggers is %" in planted
+    )
+    assert (
+        "RAISE WARNING 'SECURITY REGRESSION: event trigger "
+        "nhms_guard_no_write_role_rules_triggers is %" in planted
     )
 
 
@@ -511,13 +801,23 @@ def test_migration_class_tooling_stays_inside_the_allow_listed_lane() -> None:
         "a recurring lane grew migration-class tooling; it cannot run as "
         f"{_INGEST_ROLE} any more: {offenders}"
     )
-    supervisor = _grep_repo(
-        r"pg_dump|pg_restore", ("scripts/node27_timeseries_compression_supervisor.py",)
-    )
+    supervisor_path = "scripts/node27_timeseries_compression_supervisor.py"
+    supervisor = _grep_repo(r"pg_dump|pg_restore", (supervisor_path,))
     assert supervisor, (
         "the replay supervisor no longer runs pg_dump/pg_restore; its superuser "
         "exception must be re-justified or removed"
     )
+    # pg_dump/pg_restore are READ_ONLY_KINDS in the supervisor's own taxonomy
+    # (:139-142): they justify nothing on their own. `migration_apply` is a
+    # MUTATION_KIND (:143) and is the DDL `nhms_ingest_rw` structurally cannot
+    # carry, so anchor the exception on it as well.
+    mutating = _grep_repo(r"migration_apply", (supervisor_path,))
+    assert mutating, (
+        "the replay supervisor no longer applies migrations; without a "
+        "MUTATION_KIND step its superuser exception is only justified by "
+        "read-only tooling and must be re-derived"
+    )
+    assert "MUTATION_KINDS" in (_ROOT / supervisor_path).read_text(encoding="utf-8")
 
 
 def test_stats_guard_analyze_legs_still_exist_and_justify_ownership() -> None:
@@ -552,6 +852,10 @@ case "$phase" in
     fi
     ;;
   remaining)
+    if [ -n "${FAKE_QUERY_RC:-}" ]; then
+      printf 'psql: error: connection to server failed\n' >&2
+      exit "${FAKE_QUERY_RC}"
+    fi
     printf '%s\n' "${FAKE_REMAINING:-0}"
     ;;
   display_before)
@@ -712,7 +1016,24 @@ def test_roles_only_maps_a_refused_run_to_the_documented_exit_code(runner) -> No
     """psql's own exit status must not leak as an undocumented runner code."""
     result = runner("--roles-only", env={"FAKE_ROLES_RC": "1"})
     assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
-    assert "psql exit 1" in result.stderr
+    assert "docker exec/psql exit 1" in result.stderr, (
+        "the message must name what produced the status; `psql exit N` is wrong "
+        "for a docker/container failure, which is the likelier one on node-27"
+    )
+    assert "do not cut the env files over" in result.stderr.lower()
+
+
+def test_full_mode_maps_a_failed_docker_query_to_the_documented_exit_code(runner) -> None:
+    """Only `--roles-only` was wrapped; full mode propagated the raw status.
+
+    A missing container exited 1 (undocumented) and a wrong database exited 2
+    (which reads as this runner's "usage / environment error"), both of them
+    after the ownership pass had already run.
+    """
+    result = runner(env={"FAKE_QUERY_RC": "2"})
+    assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+    assert "docker exec/psql exit 2" in result.stderr
+    assert "remaining-relation count after pass 1" in result.stderr
     assert "do not cut the env files over" in result.stderr.lower()
 
 
@@ -785,6 +1106,18 @@ def test_runner_rejects_bad_arguments(runner) -> None:
     assert runner("--pass-interval").returncode == 2
     assert runner("--pass-interval", "-1").returncode == 2
     assert runner("--pass-interval", "abc").returncode == 2
+
+
+def test_runner_rejects_out_of_range_retry_settings(runner) -> None:
+    """Operator-typo guard: the cutover window is timer-stopped and finite."""
+    over_passes = runner("--max-passes", "101")
+    assert over_passes.returncode == 2, over_passes.stderr
+    assert "--max-passes must be <= 100" in over_passes.stderr
+    over_interval = runner("--pass-interval", "3601")
+    assert over_interval.returncode == 2, over_interval.stderr
+    assert "--pass-interval must be <= 3600" in over_interval.stderr
+    # the bounds themselves stay usable
+    assert runner("--roles-only", "--max-passes", "100", "--pass-interval", "3600").returncode == 0
 
 
 def test_runner_targets_the_production_container_by_default(runner) -> None:

@@ -5,12 +5,13 @@
 #
 #   --roles-only   The ADDITIVE phase.  Creates/converges nhms_ingest_rw and
 #                  nhms_download_rw, their DML grants, sequence USAGE, default
-#                  privileges and the cold-tablespace CREATE grant, then runs
-#                  the negative COPY ... FROM PROGRAM probes and a non-strict
-#                  audit.  No `ALTER ... OWNER TO` is executed and no relation
-#                  lock is taken, so it is safe to run on the live primary
-#                  while every unit still connects as `nhms`.  This is the
-#                  pre-merge phase.
+#                  privileges, the cold-tablespace CREATE grant and the event
+#                  trigger that refuses CREATE RULE / CREATE TRIGGER from the
+#                  write roles, then runs the negative COPY ... FROM PROGRAM
+#                  probes and a non-strict audit.  No `ALTER ... OWNER TO` is
+#                  executed and no relation lock is taken, so it is safe to run
+#                  on the live primary while every unit still connects as
+#                  `nhms`.  This is the pre-merge phase.
 #
 #   (default)      Full mode.  Everything above, plus the ownership transfer:
 #                  a before/after capture of relacl and of nhms_display_ro's
@@ -20,19 +21,38 @@
 #                  --pass-interval), and a strict trailing audit.  This is the
 #                  post-merge phase and must run inside a timer-stopped window.
 #
+# Residual after this change (design D2), stated plainly because the
+# COPY ... FROM PROGRAM probe alone reads as more than it proves: the write
+# credential's blast radius is "drop or truncate any application relation" --
+# no DIRECT program execution, no role/database creation, no direct catalog
+# escape.  Ownership does carry CREATE RULE / CREATE TRIGGER, whose bodies run
+# as the role that next writes the relation (the migration, seed and replay
+# lanes stay on the superuser `nhms`); that indirect path is closed by the event
+# trigger installed by the additive phase (prevention -- which TimescaleDB
+# bypasses for `CREATE TRIGGER` on a hypertable, measured) and, for the `ALTER
+# TABLE` forms no event trigger can refuse without breaking cold residency
+# (a planted column DEFAULT/CHECK expression, or DISABLE TRIGGER on an
+# allow-listed guard), by the audit's rule/trigger allow-list, its `tgenabled`
+# check and its function-privilege sweep over stored expressions (detection) --
+# not by removing the superuser-write half, which stays a follow-up.
+#
 # Retry window.  The passes are the whole tolerance for a lock holder that
 # outlives one `ALTER`: the effective window is
-# `--max-passes x lock_timeout` (default 5 x 5 s ~= 26 s of wall clock,
-# back-to-back).  Widen it with --max-passes / NODE27_WRITE_ROLES_MAX_PASSES, or
-# space the passes with --pass-interval / NODE27_WRITE_ROLES_PASS_INTERVAL when
-# the holder is a long display scan rather than a transient one.
+# `--max-passes x lock_timeout + (--max-passes - 1) x --pass-interval`
+# (default 5 x 5 s + 0 ~= 26 s of wall clock, back-to-back -- the interval is
+# only slept BETWEEN passes, never after the last one).  Widen it with
+# --max-passes / NODE27_WRITE_ROLES_MAX_PASSES, or space the passes with
+# --pass-interval / NODE27_WRITE_ROLES_PASS_INTERVAL when the holder is a long
+# display scan rather than a transient one.
 #
 # Exit codes
 #   0  provisioned, audit clean
 #   2  usage / environment error
-#   3  provisioning refused or incomplete: `--roles-only` psql run failed (any
-#      non-zero psql status is reported as 3), relations still owned by the old
-#      role, or the trailing audit refused.  Do NOT proceed with the env cutover.
+#   3  provisioning refused or incomplete: any `docker exec`/psql invocation
+#      failed in either mode (its own status -- 1 fatal / 2 connection / 3 script
+#      error under ON_ERROR_STOP, or docker's own 125/126/127 -- is mapped to 3
+#      and never leaks as a runner code), relations still owned by the old role,
+#      or the trailing audit refused.  Do NOT proceed with the env cutover.
 #   4  nhms_display_ro's effective SELECT set changed across the transfer, i.e.
 #      the SELECT privilege set measured per relation with has_table_privilege
 #      is not identical before and after.
@@ -76,10 +96,11 @@ Usage: node27_provision_write_roles.sh [--roles-only] [--container NAME]
                                        [--database NAME] [--superuser NAME]
                                        [--max-passes N] [--pass-interval SECONDS]
 
-  --max-passes N            ownership retry passes (default 5, positive integer)
+  --max-passes N            ownership retry passes (default 5, positive integer,
+                            at most 100)
   --pass-interval SECONDS   seconds to sleep between ownership passes (default 0
-                            = back-to-back; non-negative integer).  Only slept
-                            when another pass will actually run.
+                            = back-to-back; non-negative integer, at most 3600).
+                            Only slept when another pass will actually run.
 
 Environment overrides: NODE27_WRITE_ROLES_DOCKER, NODE27_WRITE_ROLES_CONTAINER,
 NODE27_WRITE_ROLES_DATABASE, NODE27_WRITE_ROLES_SUPERUSER,
@@ -108,6 +129,14 @@ done
 [[ -r "${SQL_FILE}" ]] || die "provision SQL not readable: ${SQL_FILE}"
 [[ "${MAX_PASSES}" =~ ^[1-9][0-9]*$ ]] || die "--max-passes must be a positive integer, got: ${MAX_PASSES}"
 [[ "${PASS_INTERVAL}" =~ ^(0|[1-9][0-9]*)$ ]] || die "--pass-interval must be a non-negative integer number of seconds, got: ${PASS_INTERVAL}"
+# Upper bounds are an operator-typo guard, not a policy: the cutover runs inside
+# a timer-stopped window, so a mistyped `--pass-interval 36000` (or
+# `--max-passes 5000`) must be refused up front rather than silently holding
+# that window open for hours.
+readonly MAX_PASSES_LIMIT=100
+readonly PASS_INTERVAL_LIMIT=3600
+[[ "${MAX_PASSES}" -le "${MAX_PASSES_LIMIT}" ]] || die "--max-passes must be <= ${MAX_PASSES_LIMIT}, got: ${MAX_PASSES}"
+[[ "${PASS_INTERVAL}" -le "${PASS_INTERVAL_LIMIT}" ]] || die "--pass-interval must be <= ${PASS_INTERVAL_LIMIT} seconds, got: ${PASS_INTERVAL}"
 
 # Password env vars are forwarded by NAME. Only when non-empty: `docker exec -e
 # VAR` on an empty value would set an EMPTY password, not skip the change.
@@ -139,6 +168,23 @@ run_sql_file() {
     < "${SQL_FILE}"
 }
 
+# Map ANY docker/psql failure to the documented exit 3.  Without this, `set -e`
+# propagates psql's own status (1 fatal / 2 connection / 3 script error) or
+# docker's (125/126/127) as this script's exit code -- and 2 reads as "usage /
+# environment error" while 1 is not a documented code at all.
+run_or_fail() {
+  local what="$1"; shift
+  local rc=0
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "node27-write-roles: FAILED -- ${what} (docker exec/psql exit ${rc}); do not cut the env files over" >&2
+    exit 3
+  fi
+}
+
 # Run one ad-hoc query, unaligned/tuples-only, for the captures and counters.
 run_query() {
   local phase="$1" sql="$2"
@@ -168,19 +214,10 @@ echo "node27-write-roles: container=${CONTAINER} database=${DATABASE} superuser=
 
 if [[ "${ROLES_ONLY}" -eq 1 ]]; then
   echo "node27-write-roles: mode=roles-only (additive; no ownership transfer, no relation lock)"
-  # psql's own status (1 fatal / 2 connection / 3 script error under
-  # ON_ERROR_STOP) must not leak: 2 would read as this script's "usage /
-  # environment error" and 1 is not a documented code at all. Any refusal here is
-  # a refused provision run -> 3, matching the full-mode audit path below.
-  roles_rc=0
-  set +e
-  run_sql_file roles -v do_roles=on -v do_ownership=off -v do_audit=on -v strict_audit=off
-  roles_rc=$?
-  set -e
-  if [[ "${roles_rc}" -ne 0 ]]; then
-    echo "node27-write-roles: FAILED -- roles-only provision refused (psql exit ${roles_rc}); do not cut the env files over" >&2
-    exit 3
-  fi
+  # Any refusal here is a refused provision run -> 3 (run_or_fail), matching the
+  # full-mode paths below; psql's own status never reaches the caller.
+  run_or_fail "roles-only provision refused" \
+    run_sql_file roles -v do_roles=on -v do_ownership=off -v do_audit=on -v strict_audit=off
   echo "node27-write-roles: roles-only phase complete; ownership transfer deferred to the post-merge run"
   exit 0
 fi
@@ -190,8 +227,10 @@ echo "node27-write-roles: mode=full (additive phase + ownership transfer)"
 # --- before capture -----------------------------------------------------------
 # The display role's grants have no source of truth in db/; they exist only in
 # the live catalog, so the boundary is asserted as a before/after capture.
-run_query display_before "${DISPLAY_SELECT_SQL}" > "${WORK_DIR}/display-before.txt"
-run_query relacl_before "${RELACL_SQL}" > "${WORK_DIR}/relacl-before.txt"
+run_or_fail "display SELECT-set capture before the transfer" \
+  run_query display_before "${DISPLAY_SELECT_SQL}" > "${WORK_DIR}/display-before.txt"
+run_or_fail "relacl capture before the transfer" \
+  run_query relacl_before "${RELACL_SQL}" > "${WORK_DIR}/relacl-before.txt"
 echo "node27-write-roles: captured $(wc -l < "${WORK_DIR}/display-before.txt" | tr -d ' ') display-visible relation(s) before the transfer"
 
 # --- additive phase + ownership passes ---------------------------------------
@@ -200,11 +239,15 @@ pass=1
 while [[ "${pass}" -le "${MAX_PASSES}" ]]; do
   echo "node27-write-roles: ownership pass ${pass}/${MAX_PASSES}"
   if [[ "${pass}" -eq 1 ]]; then
-    run_sql_file ownership -v do_roles=on -v do_ownership=on -v do_audit=off -v strict_audit=off -v "pass=${pass}"
+    run_or_fail "ownership pass ${pass}" \
+      run_sql_file ownership -v do_roles=on -v do_ownership=on -v do_audit=off -v strict_audit=off -v "pass=${pass}"
   else
-    run_sql_file ownership -v do_roles=off -v do_ownership=on -v do_audit=off -v strict_audit=off -v "pass=${pass}"
+    run_or_fail "ownership pass ${pass}" \
+      run_sql_file ownership -v do_roles=off -v do_ownership=on -v do_audit=off -v strict_audit=off -v "pass=${pass}"
   fi
-  remaining="$(run_query remaining "${REMAINING_SQL}" | tr -d '[:space:]')"
+  run_or_fail "remaining-relation count after pass ${pass}" \
+    run_query remaining "${REMAINING_SQL}" > "${WORK_DIR}/remaining.txt"
+  remaining="$(tr -d '[:space:]' < "${WORK_DIR}/remaining.txt")"
   echo "node27-write-roles: after pass ${pass}: ${remaining} relation(s) still not owned by nhms_ingest_rw"
   if [[ "${remaining}" == "0" ]]; then
     break
@@ -217,8 +260,10 @@ while [[ "${pass}" -le "${MAX_PASSES}" ]]; do
 done
 
 # --- after capture + diffs ----------------------------------------------------
-run_query display_after "${DISPLAY_SELECT_SQL}" > "${WORK_DIR}/display-after.txt"
-run_query relacl_after "${RELACL_SQL}" > "${WORK_DIR}/relacl-after.txt"
+run_or_fail "display SELECT-set capture after the transfer" \
+  run_query display_after "${DISPLAY_SELECT_SQL}" > "${WORK_DIR}/display-after.txt"
+run_or_fail "relacl capture after the transfer" \
+  run_query relacl_after "${RELACL_SQL}" > "${WORK_DIR}/relacl-after.txt"
 
 echo "node27-write-roles: relacl diff across the transfer (informational -- ALTER ... OWNER TO rewrites grantor references):"
 if diff -u "${WORK_DIR}/relacl-before.txt" "${WORK_DIR}/relacl-after.txt"; then
@@ -258,7 +303,7 @@ if [[ "${remaining}" != "0" ]]; then
 fi
 
 if [[ "${audit_rc}" -ne 0 ]]; then
-  echo "node27-write-roles: FAILED -- trailing audit refused (psql exit ${audit_rc}); do not cut the env files over" >&2
+  echo "node27-write-roles: FAILED -- trailing audit refused (docker exec/psql exit ${audit_rc}); do not cut the env files over" >&2
   exit 3
 fi
 
