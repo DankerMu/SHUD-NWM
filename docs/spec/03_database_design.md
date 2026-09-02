@@ -230,11 +230,32 @@ CREATE TABLE core.model_instance (
 ```
 
 > **`active_flag` 权威归属（#1695）**：`core.model_instance.active_flag` 是
-> **展示面与 lifecycle 的权威**，不是计算面的。读它的地方：全国 river-network MVT
-> 成员判定（`services/tiles/mvt.py:367`，另见 `:442`、`:653`、`:691`、`:1411`）、
-> 前端 `activeModelCount`（`apps/frontend/src/lib/m11/overviewDataContracts.ts:408`、`:617`）、
-> ops 侧 model-asset 过滤器（`apps/frontend/src/stores/modelAssets.ts:637`）、
-> 以及 model lifecycle API（`packages/common/model_registry.py`）。
+> **展示面与 lifecycle 的权威**，不是计算面的。以下非 test 读者按面分组列出
+> （grep 口径：`grep -rn active_flag packages services workers scripts apps db`，
+> 剔除同名但不同表的 `core.basin_version` / `met.met_station` / `met.interp_weight` 列，
+> 2026-09-02）。列出它们是为了能看清翻这个 flag 的爆炸半径：
+>
+> - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，
+>   另见 `:442`、`:653`、`:691`、`:1411`）；
+> - **展示 source-version 摘要**：`services/tiles/mvt.py:1426`
+>   （`national_river_network_source_version`，方言相关谓词）、`:1590`
+>   （`national_discharge_valid_times`，函数头 `:1544`）；
+> - **前端**：`activeModelCount`（`apps/frontend/src/lib/m11/overviewDataContracts.ts:408`、`:617`）、
+>   ops 侧 model-asset 过滤器（`apps/frontend/src/stores/modelAssets.ts:637`）、
+>   model-assets 页的 supersede 候选筛选与启用/停用徽章
+>   （`apps/frontend/src/pages/ModelAssetsPage.tsx:79`、`:346`）；
+> - **ingest 面的行为读者**（影响的不只是展示）：
+>   `workers/model_registry/basins_registry_import.py::_model_active_state`
+>   （`:2363-2373`，在 `:352` 决定重复导入时报告的 active 状态）、
+>   `workers/model_registry/qhh_production_bootstrap.py:1168-1182`（bootstrap 的
+>   `SELECT … FOR UPDATE` 现状读）、`:1741`（同 basin 的重复 active 行检测）、
+>   `:1791-1803`（`_fetch_model_identity`，回填 `:1101` 的 `active` 字段）；
+> - **激活闸门**：`scripts/node27_autopipeline.py:1255-1260`（详见下文）；
+> - **model lifecycle API**：`packages/common/model_registry.py`（多处，读写兼有）。
+>
+> API 层的 payload / schema 字段（`apps/api/main.py:154`、
+> `apps/api/routes/models.py:46`、`:110`、`:135`、`apps/api/openapi_patching.py:1403`、
+> `apps/frontend/src/api/types.ts`）属于 lifecycle API 契约本身，不另列。
 >
 > **计算面的权威是 node-22 的 file-registry manifest**
 > （`manifest-last.json`，由 `scripts/publish_scheduler_file_registry.py` 写出，
@@ -248,9 +269,34 @@ CREATE TABLE core.model_instance (
 > 两个面**按设计不同步**。所以会出现这个看起来矛盾的实测组合
 > （node-27，2026-09-02，只读）：baseline `basins_*_shud` 行 **38 true / 6 false**，
 > 而真正在 node-22 上跑的 `dg_*` 行 **0 true / 153 false**。
-> `dg_*` 为 false 的原因只有一条可追溯事实：它们从未经由 DB lifecycle 通道被激活过；
-> 调度器不读这个列，所以它们照跑不误。展示成员只认 baseline 行上的这个 flag。
-> 不要为了「让数字好看」去翻 `dg_*` 的 flag——那会直接改变全国 MVT 的展示成员。
+> `dg_*` 保持 false 的可追溯原因是 node-27 autopipeline 的激活函数
+> `scripts/node27_autopipeline.py::_activate_model`（`:1235-1266`，语句为
+> `UPDATE core.model_instance SET active_flag = true, lifecycle_state = 'active'`；
+> 调用点 `:1300`、`:1947`）自带 one-active-sibling 闸门：对尚未 active 的行，
+> 只有当同一 `basin_version_id` 下没有其它 active 行时才会更新（`:1255-1260`
+> 的 `active_flag = true OR NOT EXISTS (…)` 谓词——已 active 的行是幂等分支），
+> 撞上 baseline 兄弟行的 variant 拿到 `rowcount == 0`；
+> 该行为由 `tests/test_node27_autopipeline_preflight.py:832-864` 钉住
+> （`_activate_model(…, "dg_source_variant") == 0`）。调度器不读这个列，
+> 所以它们照跑不误。
+>
+> 不要为了「让数字好看」去翻 `dg_*` 的 flag。两道 DB 闸门会先拦住你：
+> 只改 `active_flag` 会被 CHECK 约束
+> `model_instance_active_lifecycle_consistency_chk` 拒绝
+> （`db/migrations/000022_model_asset_lifecycle.sql:42-46`，要求 `active_flag = true`
+> 与 `lifecycle_state = 'active'` 同时成立；`lifecycle_state` 是
+> `TEXT NOT NULL DEFAULT 'inactive'`（同文件 `:1-2`），所以没有 NULL 行让
+> CHECK 落空）；两列一起改、而该
+> `basin_version_id` 已有 active 行时，会被 partial UNIQUE
+> `model_instance_active_basin_version_uidx` 拒绝（同文件 `:61-63`）。
+> **只有**当目标行所属 `basin_version` 没有 active 兄弟行时这个翻转才会落库，
+> 那时它**会**改变全国 MVT 的展示成员；这类 basin_version 确实存在
+> （同一次只读实测里 6 个 baseline 行为 false，但未逐行核对它们与 `dg_*`
+> 行的 basin_version 对应关系）。真正危险的动作是为了绕开这两道约束而去
+> 松 `lifecycle_state` 或改约束本身。
+> 另：`services/tiles/mvt.py:367` 的成员谓词里没有 baseline/variant 判别，
+> 「展示成员只认 baseline 行上的这个 flag」是当前数据状态下的观察
+> （只有 baseline 行是 true），不是查询语义。
 > `core.basin_version.active_flag` 的（无）权威见 [§5.2 `core.basin_version` 的注记](#52-corebasin_version)。
 
 ### 5.6 `met.data_source`

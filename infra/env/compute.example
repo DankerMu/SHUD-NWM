@@ -187,10 +187,16 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # NHMS_BASINS_ROOT is the live scheduler value: it matches
 # compute.scheduler-dbfree.env.example (the scheduler authority) and the
 # directory is present on the node-22 login host and on compute node cn01
-# (read-only check 2026-09-02).
+# (read-only check 2026-09-02; receipt
+# .workplans/pr-1956/node22-compute-env-receipt.log:84, :96, :110).
 # NHMS_MODEL_ASSET_ROOT is a compose-lane placeholder following this template's
-# /scratch/frd_muziyao/nhms-production/* scheme; it was NOT verified to exist on
-# node-22. Set it to a real path when you instantiate this file (#1694).
+# /scratch/frd_muziyao/nhms-production/* scheme. It WAS checked on the node-22
+# login host on 2026-09-02 and does not exist there (same receipt, :82 and :112:
+# "MISSING /scratch/frd_muziyao/nhms-production/model-assets"). A directory
+# with the near-identical nhms-prod spelling does exist (receipt :83, EXISTS
+# /scratch/frd_muziyao/nhms-prod/model-assets); no tracked env template binds
+# NHMS_MODEL_ASSET_ROOT to it, so do not assume it is the intended value.
+# Set this key to a real path when you instantiate this file (#1694).
 NHMS_BASINS_ROOT=/volume/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud

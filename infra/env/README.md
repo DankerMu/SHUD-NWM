@@ -76,15 +76,21 @@ Notes:
   EnvironmentFiles` is the authority; the drop-in procedure is
   `docs/runbooks/current-production-ops.md` §3.2.2.
 - **`infra/env/compute.env` is the compose-lane instance of `compute.example`.**
-  Verified on node-22 read-only 2026-09-02: no user systemd unit lists it in
-  `EnvironmentFiles`, and no running container reads it. Values in it — including
-  basin roots and scheduler model/basin filters — are **not** the production
-  scheduler's configuration and must not be quoted as such.
+  Verified on node-22 read-only 2026-09-02, receipt
+  `.workplans/pr-1956/node22-compute-env-receipt.log`: no user systemd unit
+  lists it in `EnvironmentFiles` (receipt `:1-13`, the five units in the table
+  above), and `docker ps` on the node-22 login host (`xnode`) returned no
+  container rows at all, so no running container reads it (receipt `:98-100`).
+  Values in it — including basin roots and scheduler model/basin filters — are
+  **not** the production scheduler's configuration and must not be quoted as
+  such.
 
   It is not unreferenced, though. Who else names it:
 
   - `infra/systemd/nhms-compute-compose.service` (tracked, **not installed** on
-    node-22) and `infra/README.two-node-docker.md` describe the compose lane.
+    node-22: `LoadState=not-found` in both the user and the system manager,
+    receipt `:101-106`) and `infra/README.two-node-docker.md` describe the
+    compose lane.
   - `scripts/validate_two_node_docker_source_trust.py:190` treats it as the
     compute role env for source-trust checks, and
     `tests/test_two_node_docker_source_trust.py:350`/`:392`/`:406`,
@@ -93,10 +99,25 @@ Notes:
     the instance / the `compute.example` → `compute.env` install step.
   - The `compute.example` template itself is parsed by
     `tests/test_two_node_docker_runtime.py` (55 call sites, including the
-    display forbidden-mount fixture). **Editing a value in `compute.example`
-    therefore requires running `tests/test_two_node_docker_runtime.py`,
-    `tests/test_two_node_docker_source_trust.py`, and
-    `tests/test_two_node_docker_runbook_environment_invariant.py`.**
+    display forbidden-mount fixture). **When you edit a value here, the local
+    oracle is the grep-derived consumer set** — everything that names the
+    template, from `grep -rln "compute\.example" tests/ scripts/` on 2026-09-02:
+    `tests/test_two_node_docker_runtime.py`,
+    `tests/test_two_node_docker_runbook_environment_invariant.py`,
+    `tests/test_role_boundary_static.py`,
+    `tests/test_slurm_gateway_deployment_contract.py`,
+    `tests/test_two_node_e2e_evidence.py`, `tests/test_production_scheduler.py`,
+    and `tests/test_select_ci_tests.py`, plus
+    `scripts/validate_two_node_docker_runtime.py:5374`, which uses the template
+    as the default `--compute-env` for the static check.
+    `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads
+    `compute.env`, not the template).
+  - **On CI the authority is `scripts/select_ci_tests.py`**, where two rules match
+    `infra/env/compute.example`: the `infra/env/**` glob (`:1797-1800` →
+    `tests/test_two_node_docker_runtime.py`) and the exact-path rule
+    (`:1810-1813` → `tests/test_slurm_gateway_deployment_contract.py`, the
+    constant at `:446`). The other consumer files are not selected for this path,
+    so a green PR here does not exercise them — run the grep set locally.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
 
@@ -110,13 +131,24 @@ for the production scheduler are whatever `compute.scheduler-dbfree.env` says
   (exists on the node-22 login host and on compute node cn01, 2026-09-02),
   with both `NHMS_SCHEDULER_BASIN_IDS` and `NHMS_SCHEDULER_MODEL_IDS` empty
   (registry-driven selection, as required above).
-- `/ghdc/data/nwm/Basins` also exists on the node-22 **login host** with
-  different contents. It is the **separate shared-NFS basin root that node-27
-  ingest reads** (as `/home/ghdc/nwm/Basins`). It is not the scheduler root, and
-  it is **not mounted on the compute nodes** (cn01 check 2026-09-02: MISSING) —
-  do not treat either path as "the" basin root without naming the lane.
+- `/ghdc/data/nwm/Basins` also exists on the node-22 **login host**
+  (receipt `.workplans/pr-1956/node22-compute-env-receipt.log` `:107-116`, read-only
+  2026-09-02) and its contents differ from the scheduler root: the same receipt
+  records 44 top-level entries under `/volume/nwm/Basins` against 33 under
+  `/ghdc/data/nwm/Basins`, with 17 entries only in the former (`CJ-BYH`,
+  `Pearl_*`, …) and 6 only in the latter (`BYH DTH_XJ DTH_YJ HJ MJ WJ`). It is
+  the **separate shared-NFS basin root that node-27 ingest reads** (as
+  `/home/ghdc/nwm/Basins`). It is not the scheduler root, and it is **not
+  mounted on the compute nodes** (cn01 check 2026-09-02: MISSING, receipt
+  `:94-97`) — do not treat either path as "the" basin root without naming the
+  lane.
 
 Compute role, node 22:
+
+The bullets below are the **compose-lane role contract** — what
+`compute.example` / `compute.env` and `infra/compose.compute.yml` must express.
+They are not a claim about which file a live node-22 unit loads; for that, the
+unit → EnvironmentFile table above is the authority.
 
 - Required: `NHMS_SERVICE_ROLE=compute_control`,
   `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL` for
@@ -129,10 +161,15 @@ Compute role, node 22:
 - The production `scheduler-once` service is DB-free: `infra/compose.compute.yml`
   does not pass `DATABASE_URL` to it. It must set
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, every scheduler backend selector to
-  `file`, and the registry/readiness/journal/state-index path variables from
-  the checked-in `compute.example` matrix. `DATABASE_URL` may remain in
-  `compute.env` only for `compute-api` or an explicit archived rollback drill;
-  node-22 `:55433` is stopped/archived and is not scheduler runtime env.
+  `file`, and the registry/readiness/journal/state-index path variables. On the
+  live node-22 units those variables come from `compute.scheduler-dbfree.env`
+  (tracked template `compute.scheduler-dbfree.env.example`), per the table
+  above; `compute.example` carries the same key names for the compose lane only.
+  `DATABASE_URL` belongs to the compose lane's `compute-api` or to an explicit
+  archived rollback drill — and the live `nhms-compute-api.service` does not load
+  `compute.env` at all; its only `EnvironmentFile` is the untracked
+  `compute.host.env` (receipt `:9-10`). Node-22 `:55433` is stopped/archived and
+  is not scheduler runtime env.
 - The node-22 DB-free scheduler live env
   (`compute.scheduler-dbfree.env`, referenced by systemd `EnvironmentFile=`)
   has exactly one tracked source: `compute.scheduler-dbfree.env.example`.

@@ -131,9 +131,11 @@ class ParsedBasinsGeometry:
     # ``.sp.riv`` reach count. Equal to ``segment_count`` for a valid package:
     # ``_validate_river_shp_single_part_invariant`` fails the import with
     # ``BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED`` unless the ``river.shp``
-    # record count matches this one. Lands only in the import
-    # receipt and ``core.model_instance.resource_profile``; there is no
-    # ``output_segment_count`` column on ``core.river_network_version``.
+    # record count matches this one. It is not a ``core.river_network_version``
+    # column: it lands in the import receipt and
+    # ``core.model_instance.resource_profile``, and is re-read from there into
+    # the scheduler file-registry / candidate / chain manifests (carrier list in
+    # ``openspec/glossary.md``, entry ``output_segment_count``).
     output_segment_count: int
     evidence_counts: dict[str, int | None]
 

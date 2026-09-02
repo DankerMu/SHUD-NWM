@@ -18,18 +18,25 @@ Live receipts taken 2026-09-02 (read-only) that this design is built on:
   `compute.scheduler-provider-refresh.env`; `nhms-compute-api.service` and
   `nhms-slurm-gateway.service` load `compute.host.env` (untracked, no
   template). No unit and no running container references `compute.env`
-  (`docker ps` empty; the only references are the tracked
-  `infra/systemd/nhms-compute-compose.service`, not installed, and
-  `infra/README.two-node-docker.md`).
+  (receipt `.workplans/pr-1956/node22-compute-env-receipt.log`
+  2026-09-02T12:36Z block: `docker ps` prints no containers;
+  `nhms-compute-compose.service` is `LoadState=not-found` in both the user
+  and the system manager, i.e. the tracked
+  `infra/systemd/nhms-compute-compose.service` is not installed). Tracked
+  references to `compute.env` are enumerated in `infra/env/README.md`
+  (validators, tests, `infra/README.two-node-docker.md`).
 - node-22 `compute.env` (header: "Local 22-node E2E env generated
   2026-06-01"): `NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud`,
   `NHMS_SCHEDULER_BASIN_IDS=basins_qhh`,
   `NHMS_BASINS_ROOT=/volume/data/nwm/Basins`; `/volume/data/nwm` does not
-  exist. `compute.scheduler-dbfree.env`: both filters empty,
-  `NHMS_BASINS_ROOT=/volume/nwm/Basins` (exists). `/ghdc/data/nwm/Basins` also
-  exists with different contents (it is the NFS root node-27 ingest reads as
-  `/home/ghdc/nwm/Basins`); the scheduler root is whatever the dbfree env
-  says, and the README must not name either as "the" root.
+  exist on the login host nor on cn01 (same receipt log, 12:36Z and srun
+  blocks). `compute.scheduler-dbfree.env`: both filters empty,
+  `NHMS_BASINS_ROOT=/volume/nwm/Basins` (exists on login host and cn01).
+  `/ghdc/data/nwm/Basins` also exists on the login host with different
+  contents (receipt: 44 vs 33 top-level entries, 17 only under `/volume`,
+  6 only under `/ghdc`; not mounted on cn01); it is the NFS root node-27
+  ingest reads as `/home/ghdc/nwm/Basins`. The scheduler root is whatever
+  the dbfree env says, and the README must not name either as "the" root.
 - Tracked `infra/env/compute.example:178-179`:
   `NHMS_BASINS_ROOT=/volume/data/nwm/Basins`,
   `NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets` — both dead on
@@ -177,7 +184,8 @@ reads. `compute.example` header gains the same pointer;
 and on compute node cn01 per srun receipt 2026-09-02) and
 `NHMS_MODEL_ASSET_ROOT` becomes the template's own placeholder scheme
 `/scratch/frd_muziyao/nhms-production/model-assets`, which does NOT exist on
-node-22 (receipt: the live host env uses `nhms-prod/model-assets`) and is
+node-22 (receipt 12:36Z block: `MISSING`; the live host env uses
+`nhms-prod/model-assets`) and is
 therefore labelled a placeholder in the template comment, never asserted to
 exist.
 
