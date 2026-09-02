@@ -16,11 +16,13 @@ Must preserve: every existing test in the six files and their current assertions
 byte-identical at commit time (`git diff -- packages services workers` empty);
 every timeout-path test still receives a budget that expires; the `_orchestrator`
 helper's consumers outside the six files keep passing —
-`tests/test_file_orchestration_journal.py` (`:78, :16300, :16364, :17367`),
-`tests/test_forced_resubmit_veto.py` (`:657, :704`) and
-`tests/test_production_scheduler.py` import it inside function bodies, which
-`scripts/select_ci_tests.py:66-73` deliberately excludes from CI's importer
-closure, so they are run locally here (0.1/0.2) instead.
+`tests/test_file_orchestration_journal.py` (`:78, :16300, :16364, :17367`; CI-selected
+via its module-level `from tests.test_production_scheduler import` at `:49`),
+`tests/test_forced_resubmit_veto.py` (`:657, :704`; imports inside function bodies,
+which `scripts/select_ci_tests.py:66-73` deliberately excludes from CI's importer
+closure — the one consumer invisible to the PR CI lane) and
+`tests/test_production_scheduler.py` (in the change surface, self-selected); all
+three are run locally here (0.1/0.2).
 
 Seams under test (declared per issue, consumed not renegotiated):
 `repo.clone_lineage_signal` / `resolve_lineage_cutover` over the file-index fixture
@@ -55,12 +57,12 @@ Oracle is local + CI pytest for all six (all `db-free`); node-27 receipts are
 required only where the issue demands both platforms (#1733) or where the
 failure needs the oracle machine's contention profile (#1613). No node-22.
 
-- [x] 0.1 `uv run pytest -q tests/test_scheduler_lineage.py tests/test_scheduler_file_provider_refresh.py tests/test_timescale_write_guard_wire_site_invariant.py tests/test_shud_runtime.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py tests/test_forced_resubmit_veto.py` green locally (the last two are `_orchestrator` consumers invisible to the PR CI lane)
+- [x] 0.1 `uv run pytest -q tests/test_scheduler_lineage.py tests/test_scheduler_file_provider_refresh.py tests/test_timescale_write_guard_wire_site_invariant.py tests/test_shud_runtime.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py tests/test_file_orchestration_journal.py tests/test_forced_resubmit_veto.py` green locally (the last two are `_orchestrator` consumers; only `test_forced_resubmit_veto.py` is invisible to the PR CI lane)
 - [x] 0.2 `uv run pytest -q tests/test_production_scheduler.py -k "bounded or scheduler_state_failure or module_level_constant"` green locally, then the whole file once
 - [x] 0.3 `uv run ruff check .` clean
 - [x] 0.4 Red proofs (sections 1-6), each shown red before / green after; NO `git stash` (the stash stack is shared with other live sessions) — mutate, run, `git checkout -- <file>`, paste output
 - [x] 0.5 `git diff --stat -- packages services workers` empty at commit time
-- [ ] 0.6 node-27 (detached worktree at the frozen SHA, never the live tree): #1733 file green + mutation receipt (section 2); #1613 three files green + the two post-fix mechanism harness commands passing (section 6)
+- [x] 0.6 node-27 (detached worktree at the frozen SHA, never the live tree): #1733 file green + mutation receipt (section 2); #1613 three files green + the two post-fix mechanism harness commands passing (section 6)
 - [x] 0.7 `openspec validate harden-test-oracles-followups --strict --no-interactive`
 
 ## 1. #1745 — fixture wiring becomes an observed quantity (D1)
@@ -72,7 +74,7 @@ failure needs the oracle machine's contention profile (#1613). No node-22.
 
 - [x] 2.1 Add `test_provider_snapshot_rejects_metadata_only_divergence` adjacent to the two provider-snapshot tests (`tests/test_scheduler_file_provider_refresh.py:687-756`): destination `generation-a`; monkeypatch `provider_atomic_module.read_bytes_limited_no_follow`; on call 2 read the bytes, then `os.chmod` the destination to a different mode (bytes untouched); assert `reason == "provider_preimage_changed"`, `calls == 3`, bytes still `generation-a`; restore the original mode in `finally`
 - [x] 2.2 Red proof (macOS): delete the `before != after` disjunct at `packages/common/provider_atomic.py:139` → `-k provider_snapshot_rejects` shows the new test red AND the existing two still passing (`1 failed, 2 passed`); restore; file green
-- [ ] 2.3 Same mutation receipt on node-27 in a detached worktree (`1 failed, 2 passed` under mutation; whole file green unmutated); the live `/home/nwm/NWM` tree is not mutated
+- [x] 2.3 Same mutation receipt on node-27 in a detached worktree (`1 failed, 2 passed` under mutation; whole file green unmutated); the live `/home/nwm/NWM` tree is not mutated
 
 ## 3. #1642 — DELETE window predicate (D3)
 
@@ -102,14 +104,16 @@ failure needs the oracle machine's contention profile (#1613). No node-22.
 
 ## 6. #1613 — wall-clock robustness of the two victims (D6; diagnosis done)
 
-Diagnosis persisted at `.workplans/issue-1745/diag-1613/DIAGNOSIS.txt` with the
-harness plugin `diag1613.py` (env knobs `DIAG1613_SPAWN_DELAY`, `DIAG1613_JOB_TIMEOUT`,
-`DIAG1613_TRACE`); cross-test shared state refuted for both victims.
+Diagnosis persisted at `.workplans/pr-1949/diag-1613/DIAGNOSIS.txt` (gitignored,
+local-only evidence) with the harness plugin `diag1613.py` (env knobs
+`DIAG1613_SPAWN_DELAY`, `DIAG1613_JOB_TIMEOUT`, `DIAG1613_STALL_STAGE`, `DIAG1613_TRACE`);
+the issue's cross-test shared-state reading is superseded and not reproduced under
+the diagnosis's conditions (design D6).
 
-- [x] 6.1 Victim A: `_runtime(tmp_path, repository, shud_executable=stub, timeout_seconds=300)` at `tests/test_shud_runtime.py:6034` and at the sibling watcher-held-stub test (`:6092`); a one-line comment cites #1613 (budget is spawn-latency headroom, not a timeout oracle)
-- [x] 6.2 Victim B: `_orchestrator` (`tests/test_orchestration_chain.py:9209`) takes `job_timeout_seconds: float = 120.0` and passes it into `OrchestratorConfig`; raise the eleven direct `job_timeout_seconds=5` sites in `tests/test_warm_start_chaining.py` (`:1172, 1514, 1624, 1745, 1795, 1838, 1884, 1926, 1967, 2028, 2446`) to `120`
-- [x] 6.3 Pin: a small test in `tests/test_orchestration_chain.py` asserting `_orchestrator(...).config.job_timeout_seconds >= 60` with a docstring citing #1613 (red against the previous hard-coded 5)
+- [x] 6.1 Victim A: `_runtime(tmp_path, repository, shud_executable=stub, timeout_seconds=300)` at `tests/test_shud_runtime.py:6034` and at the sibling watcher-held-stub test (`:6092`); a one-line comment cites #1613 (budget is spawn-latency headroom, not a timeout oracle); each site pins `runtime.config.timeout_seconds >= 60` so a revert to the helper's 30 s default is red
+- [x] 6.2 Victim B: `_orchestrator` (`tests/test_orchestration_chain.py:9209`) takes `job_timeout_seconds: float = 120.0` and passes it into `OrchestratorConfig`; raise the eleven direct `job_timeout_seconds=5` sites in `tests/test_warm_start_chaining.py` (`:1172, 1514, 1624, 1745, 1795, 1838, 1884, 1926, 1967, 2028, 2446`) and the four inline `OrchestratorConfig` builds in `tests/test_orchestration_chain.py` (`:4465, 4492, 4527, 4553`) to `120`
+- [x] 6.3 Pin: a small test in `tests/test_orchestration_chain.py` asserting `_orchestrator(...).config.job_timeout_seconds >= 60` and one in `tests/test_warm_start_chaining.py` asserting the same for `_cohort_orchestrator(...)`, each with a docstring citing #1613 (red against the previous hard-coded 5); the ten remaining inline `120` literals in `test_warm_start_chaining.py` stay unpinned (declared limit D6 iii)
 - [x] 6.4 Timeout-path oracles intact: `tests/test_orchestration_chain.py:4318,4356,4395,12841` and `tests/test_shud_runtime.py:5888` unchanged; `--durations=10` on both files before/after shows no test slowed by more than noise; the out-of-file `_orchestrator` consumers (`tests/test_file_orchestration_journal.py`, `tests/test_forced_resubmit_veto.py`, `tests/test_production_scheduler.py`) pass with the new default (0.1/0.2)
-- [x] 6.5 Mechanism red → green (local): (a) A pre-fix red with `PYTHONPATH=.workplans/issue-1745/diag-1613 DIAG1613_SPAWN_DELAY=14.5 uv run pytest -q -p no:cacheprovider -p diag1613 <victim A nodeid>` (`f012=budget_exhausted`), post-fix same command passes; (b) B: extend `diag1613.py` with `DIAG1613_STALL_STAGE=state_save_qc:6` (sleep in `FakeCycleSlurmClient.get_job_status` or the poll wrapper for that stage) — pre-fix `'failed' == 'complete'` red, post-fix passes. Paste both.
-- [ ] 6.6 node-27 (detached worktree at the frozen SHA, live tree untouched): `uv run pytest -q tests/test_shud_runtime.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py` green, plus the two post-fix harness commands from 6.5 passing there
-- [ ] 6.7 Recorded deviation in the PR `偏离记录`: acceptance re-framed from "name the shared state" to "remove the wall-clock dependence" (issue author's second comment + diagnosis verdict); declared limits `:5888` and the other-file `job_timeout_seconds=5` sites listed in design D6 with the one-line reason
+- [x] 6.5 Mechanism red → green (local): (a) A pre-fix red with `PYTHONPATH=.workplans/pr-1949/diag-1613 DIAG1613_SPAWN_DELAY=14.5 uv run pytest -q -p no:cacheprovider -p diag1613 <victim A nodeid>` (`f012=budget_exhausted`), post-fix same command passes; (b) B: extend `diag1613.py` with `DIAG1613_STALL_STAGE=state_save_qc:6` (sleep in `FakeCycleSlurmClient.get_job_status` or the poll wrapper for that stage) — pre-fix `'failed' == 'complete'` red, post-fix passes. Paste both. The harness is gitignored local-only evidence; the committed, repo-resident oracle is the `>= 60` pins of 6.1/6.3.
+- [x] 6.6 node-27 (detached worktree at the frozen SHA, live tree untouched): `uv run pytest -q tests/test_shud_runtime.py tests/test_warm_start_chaining.py tests/test_orchestration_chain.py` green, plus the two post-fix harness commands from 6.5 passing there
+- [x] 6.7 Recorded deviation in the PR `偏离记录`: acceptance re-framed from "name the shared state" to "remove the wall-clock dependence" (issue author's second comment + diagnosis verdict; shared state recorded as superseded / not reproduced, not refuted; criterion 2 discharged by the mechanism harnesses, not a full-suite green); declared limits `:5888`, the other-file `job_timeout_seconds=5` sites and the ten unpinned inline `120` literals listed in design D6 with the one-line reason

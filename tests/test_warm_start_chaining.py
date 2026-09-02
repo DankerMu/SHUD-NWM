@@ -1181,6 +1181,26 @@ def _cohort_orchestrator(
     )
 
 
+def test_cohort_orchestrator_helper_default_job_timeout_survives_a_slow_runner(tmp_path: Path) -> None:
+    """#1613: this helper's poll budget is wall clock, so it must not be contention-sized.
+
+    `_cohort_orchestrator`'s `job_timeout_seconds` reaches the per-stage poll deadline in
+    `chain_stage_execution.poll_cycle_stage_until_terminal`, which compares real
+    `time.monotonic()`. At a contention-sized budget one slow status transition on a busy
+    oracle machine turns a green cohort into `status == "failed"` -- the #1613 victim
+    `test_cohort_reservation_records_each_models_warm_start_identity` is built by this very
+    helper. The floor is asserted rather than the exact value so a deliberate re-tune stays
+    free while a revert to a contention-sized budget is red. Mirrors the pin on the sibling
+    helper in `tests/test_orchestration_chain.py`.
+
+    This pin weakens no timeout oracle: no test in this file asserts that the poll deadline
+    FIRES -- none fakes `time.monotonic`, drives a hanging clock, or builds a sub-second
+    budget -- so raising the floor removes no red from this file.
+    """
+
+    assert _cohort_orchestrator(tmp_path, FakeStateManager([])).config.job_timeout_seconds >= 60
+
+
 class LineageAwareFakeStateManager(FakeStateManager):
     def __init__(self, snapshots: list[StateSnapshot]) -> None:
         super().__init__(snapshots)

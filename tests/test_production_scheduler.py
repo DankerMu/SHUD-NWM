@@ -27717,32 +27717,53 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS: dict[str, frozenset[str]] = {
 }
 
 
-#: #1649 residual 2: the thirteen module-level constants of ``scheduler_state_failure``
-#: that carried no VALUE pin before this change.  Together with the five spelled out
-#: inline in the test below (the four #1313 round-1 pins plus #1418's own), every one of
-#: the module's eighteen module-level constants now has a value assertion, which is what
-#: closes the same-kind reflective-rebind shape on the constant leg: a
+#: #1649 residual 2: the VALUE pin for EVERY module-level constant of
+#: ``scheduler_state_failure`` -- all eighteen, in one table.  A value assertion is the
+#: only thing that sees the same-kind reflective-rebind shape on the constant leg: a
 #: ``setattr(sys.modules[__name__], "<name>", <other value>)`` names the constant only as
 #: a STRING, so it adds no ``ast.Name`` to any consumer set, no stray name and no kind
 #: mismatch -- only a value assertion sees it.  A duplicate assignment later in the module
 #: body is the same event from the other direction (the later binding wins at import,
 #: while key set and consumer sets stay identical).
 #:
-#: The expected values are LITERALS copied from
+#: Thirteen entries carry values LITERALLY copied from
 #: ``services/orchestrator/scheduler_state_failure.py`` at ``9785e52d``
 #: (``:66, 74, 81, 85, 215, 216, 313, 321, 521, 522, 964, 965, 973``), never expressions
 #: that recompute what the module computes: ``_NON_REGULAR_OBJECT_KINDS`` is written out
 #: as the two strings ``OBJECT_KIND_DIRECTORY`` / ``OBJECT_KIND_OTHER`` hold
 #: (``packages/common/object_store.py:30-31``) rather than by re-importing them, and
 #: ``_FORCING_SIDECAR_MAX_BYTES`` as ``16_777_216`` rather than ``16 * 1024 * 1024``.
+#: The remaining five (the four remedy-table/refusal-set entries and
+#: ``_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS``) are carried VERBATIM from the inline
+#: assertions this table replaced -- four from #1313 round-1 V1-C1 and the fifth #1418's
+#: own -- so their chain of custody is those pins, not a fresh reading of the module.
+#: Their arguments are kept as per-entry comments below rather than restated.
 #: The friction is the contract: a legitimate value change updates one entry here.
-_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES: dict[str, Any] = {
+_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES: dict[str, Any] = {
     "_COPYBACK_REQUIRED_RESTART_STAGES": {"copyback"},
     "_ARTIFACT_PROBE_ERROR_REASON": "artifact_probe_error",
     "_ARTIFACT_TARGET_NOT_A_FILE_REASON": "artifact_target_not_a_file",
     "_NON_REGULAR_OBJECT_KINDS": frozenset({"directory", "other"}),
+    "_REMEDY_NON_CAUSAL_CLASSIFIERS": frozenset({"resource_configuration", "policy_blocked"}),
+    "_REMEDY_NON_CAUSAL_CODES": frozenset(
+        {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+    ),
     "_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS": frozenset({"resource_configuration"}),
     "_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES": frozenset({"OUT_OF_MEMORY"}),
+    #: Both arms are per-remedy tables over the SAME two rows (#1313 round-1 V1-C1); the
+    #: ``changed_model_package`` row is the #1161 list verbatim on both arms, which is what
+    #: keeps the refresh channel at zero semantic change.  These two arms and the two flat
+    #: sets above are four separate copied literals, never derived from one another.
+    "_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE": {
+        "raw_input_reingestion": frozenset({"resource_configuration", "policy_blocked"}),
+        "changed_model_package": frozenset({"resource_configuration"}),
+    },
+    "_REMEDY_NON_CAUSAL_CODE_TABLE": {
+        "raw_input_reingestion": frozenset(
+            {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+        ),
+        "changed_model_package": frozenset({"OUT_OF_MEMORY"}),
+    },
     "_RECORDED_FAILURE_CODE_KEYS": ("error_code", "reason_code", "failure_reason"),
     "_HYDRO_RUN_CODE_CLEARING_STATUSES": frozenset(
         {"pending", "created", "succeeded", "complete", "parsed", "published"}
@@ -27760,23 +27781,20 @@ _SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES: dict[str, Any] = {
     "_FORCING_SIDECAR_FILENAME": "forcing_version_record.json",
     "_FORCING_PACKAGE_MANIFEST_FILENAME": "forcing_package.json",
     "_FORCING_SIDECAR_MAX_BYTES": 16_777_216,
+    #: Added by #1418: the one constant in that change's own subject family (a permanence
+    #: refusal source) that carried no value pin.  A REFLECTIVE rebind of an
+    #: already-inventoried constant to a same-kind value -- ``setattr(sys.modules[__name__],
+    #: "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS", <wider set>)``, or the ``globals()[...]``
+    #: spelling -- names the constant only as a STRING, so it adds no ``ast.Name`` to any
+    #: consumer set, no stray name and no kind mismatch.  It was measured to flip the
+    #: ``code_recorded=False`` verdict with every other assertion in the test green; only a
+    #: value assertion sees it.  (The ``global`` spelling is a different shape and is already
+    #: red via the consumer mapping, since a Store-context ``ast.Name`` is attributed as a
+    #: consumer.)
+    "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS": frozenset(
+        {"malformed_input", "policy_blocked", "resource_configuration"}
+    ),
 }
-
-#: The five constants whose value pins are spelled out inline in the test below, kept
-#: there verbatim rather than folded into the table above: four are #1313 round-1 V1-C1
-#: and the fifth is #1418's own, and each carries argument this change does not restate.
-#: Listing their names here is what lets the test assert that the pinned-name set covers
-#: ``_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS`` exactly, so a nineteenth constant
-#: cannot arrive with a consumer set but no value.
-_SCHEDULER_STATE_FAILURE_INLINE_PINNED_CONSTANTS: frozenset[str] = frozenset(
-    {
-        "_REMEDY_NON_CAUSAL_CODE_TABLE",
-        "_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE",
-        "_REMEDY_NON_CAUSAL_CODES",
-        "_REMEDY_NON_CAUSAL_CLASSIFIERS",
-        "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS",
-    }
-)
 
 
 def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -> None:
@@ -27822,22 +27840,24 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     * a list living in ANOTHER module is outside #1313 AC-1, which is a proposition
       about this module, and is not extended here.
 
-    Four of the five constant-VALUE assertions spelled out inline below are kept verbatim
-    from #1313 round-1 V1-C1; the fifth is #1418's own.  None is redundant with the
-    mapping: a duplicate assignment of the same name later in the module leaves both the
-    key set and every consumer set unchanged, and only the value assertion sees it (the
-    later binding wins at import).  That is the sole reason it was safe to drop the retired
-    ``source.count(...) == 1`` scan -- whoever removes them owes a duplicate-definition
-    guard in their place.
+    The constant-VALUE pins live in ``_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES`` above --
+    five of them carried verbatim from #1313 round-1 V1-C1 and #1418, the other thirteen
+    added by #1649.  None is redundant with the mapping: a duplicate assignment of the same
+    name later in the module leaves both the key set and every consumer set unchanged, and
+    only the value assertion sees it (the later binding wins at import).  That table IS the
+    duplicate-definition guard that made it safe to drop the retired
+    ``source.count(...) == 1`` scan -- whoever weakens it owes a replacement.
 
     #1649 residuals 1 and 2, closed here:
 
-    * **Residual 2 (was "five of eighteen constants carry a value pin").**  CLOSED.  The
-      other thirteen are pinned by ``_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES``
-      and the two tables are held equal to
+    * **Residual 2 (was "five of eighteen constants carry a value pin").**  CLOSED.  All
+      EIGHTEEN are pinned by the single table ``_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES``,
+      asserted by one loop below, and that table's KEY SET is held equal to
       ``_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS``, so a nineteenth constant cannot
       arrive with a consumer set and no value.  A same-kind reflective rebind or a
-      duplicate assignment of ANY module-level constant is now red.
+      duplicate assignment of ANY module-level constant is now red.  (The five that used
+      to be asserted inline here were folded into that table, values unchanged: a pin the
+      loop executes cannot fall out of step with the key-set equality that guards it.)
     * **Residual 1 (same-kind reflective rebind of a ``function``/``class`` name).**
       CLOSED for the plain shapes, by the ``__module__`` + ``__qualname__`` pins: a
       wrapper ``def`` defined outside this module body, a subclass swap of the admitted
@@ -27920,63 +27940,21 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
             "reflective rebind to another definition."
         )
 
-    # #1649 residual 2: value pins for the module's other thirteen module-level
-    # constants, so the same-kind reflective rebind and the duplicate-assignment shape
-    # are closed on EVERY constant rather than on the five #1418's subject family owed.
-    for name, expected_value in sorted(_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES.items()):
+    # #1649 residual 2: the value pin for EVERY one of the module's eighteen module-level
+    # constants, executed from one table, so the same-kind reflective rebind and the
+    # duplicate-assignment shape are closed on all of them rather than on the five #1418's
+    # subject family owed.  Each entry's argument lives beside it in the table above.
+    for name, expected_value in sorted(_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES.items()):
         assert getattr(scheduler_state_failure_module, name) == expected_value, (
             f"{name} no longer holds its pinned value. If the change is legitimate, update "
-            "_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES in the same change; if it is "
+            "_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES in the same change; if it is "
             "not, a refusal source was rebound or assigned a second time."
         )
 
     # No nineteenth constant can arrive carrying a consumer set but no value pin: the
-    # mapping above is the module's complete constant inventory, and this equality makes
-    # the two tables move together.
-    assert (
-        set(_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES)
-        | _SCHEDULER_STATE_FAILURE_INLINE_PINNED_CONSTANTS
-    ) == set(_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS)
-    assert not (
-        set(_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES)
-        & _SCHEDULER_STATE_FAILURE_INLINE_PINNED_CONSTANTS
-    )
-
-    # Both arms are per-remedy tables over the SAME two rows (#1313 round-1
-    # V1-C1); the ``changed_model_package`` row is the #1161 list verbatim on both
-    # arms, which is what keeps the refresh channel at zero semantic change.
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODE_TABLE == {
-        "raw_input_reingestion": frozenset(
-            {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
-        ),
-        "changed_model_package": frozenset({"OUT_OF_MEMORY"}),
-    }
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIER_TABLE == {
-        "raw_input_reingestion": frozenset({"resource_configuration", "policy_blocked"}),
-        "changed_model_package": frozenset({"resource_configuration"}),
-    }
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODES == frozenset(
-        {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
-    )
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
-        {"resource_configuration", "policy_blocked"}
-    )
-    # The fifth, added by #1418: the one constant in this change's own subject family (a
-    # permanence refusal source) that carried no value pin.  A REFLECTIVE rebind of an
-    # already-inventoried constant to a same-kind value -- ``setattr(sys.modules[__name__],
-    # "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS", <wider set>)``, or the ``globals()[...]``
-    # spelling -- names the constant only as a STRING, so it adds no ``ast.Name`` to any
-    # consumer set, no stray name and no kind mismatch.  It was measured to flip the
-    # ``code_recorded=False`` verdict with every other assertion here green; only a value
-    # assertion sees it.  (The ``global`` spelling is a different shape and is already red
-    # via the mapping, since a Store-context ``ast.Name`` is attributed as a consumer.)
-    # #1649 closed the residual this comment used to declare: the module's other thirteen
-    # module-level constants are pinned in
-    # `_SCHEDULER_STATE_FAILURE_ADDITIONAL_CONSTANT_VALUES` above, so the reflective-rebind
-    # shape is shut on all eighteen rather than on these five.
-    assert scheduler_state_failure_module._DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS == frozenset(
-        {"malformed_input", "policy_blocked", "resource_configuration"}
-    )
+    # consumer mapping above is the module's complete constant inventory, and this
+    # equality makes the value table move with it in both directions.
+    assert set(_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES) == set(_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS)
 
 
 #: A module body using every admitted statement form at once -- all eight of them:

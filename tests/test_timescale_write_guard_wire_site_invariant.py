@@ -512,7 +512,8 @@ def test_every_guarded_delete_literal_carries_the_certified_valid_time_window() 
                     f"from {schema}.{table} without {' and '.join(missing)} in the same "
                     "SQL literal. The guard certifies a window closed on BOTH ends "
                     "(check_batch_targets_uncompressed(valid_time_min, valid_time_max)), "
-                    "so the DELETE must target that same closed window. Admitted "
+                    "so the DELETE literal must carry both bounds -- this predicate checks "
+                    "their PRESENCE, not that they name the guard's own window. Admitted "
                     f"spellings are exactly {_ADMITTED_VALID_TIME_LOWER_BOUND!r} and "
                     f"{_ADMITTED_VALID_TIME_UPPER_BOUND!r}; a half-open 'valid_time <' "
                     "is refused. Bound the DELETE, or widen the admitted set in this "
@@ -520,9 +521,10 @@ def test_every_guarded_delete_literal_carries_the_certified_valid_time_window() 
                     f"literal: {literal!r}"
                 )
     assert scanned >= 3, (
-        f"Only {scanned} guarded DELETE literal(s) reached the window predicate; the "
-        "three known bounded writers should all be scanned. A vacuous scan would make "
-        "this invariant unfalsifiable."
+        f"Only {scanned} guarded DELETE literal(s) reached the window predicate; at least "
+        "the three writers known at authoring time must reach it. This is a FLOOR, not a "
+        "count -- more literals are expected as writers are added. A vacuous scan would "
+        "make this invariant unfalsifiable."
     )
 
 

@@ -147,7 +147,8 @@ newly pinned constant with a different value in a temporary module mutation →
 value pin red, then restore.
 
 **D6 (#1613) — raise the two victims' wall-clock budgets at the test seam;
-diagnosis persisted at `.workplans/issue-1745/diag-1613/DIAGNOSIS.txt`.**
+diagnosis persisted at `.workplans/pr-1949/diag-1613/DIAGNOSIS.txt` (gitignored
+local evidence).**
 The report-only diagnosis reproduced both failures verbatim with deterministic
 red commands and settled the mechanism and the trigger:
 - Victim A (`tests/test_shud_runtime.py:6016`): `f012=bu…` is
@@ -158,39 +159,59 @@ red commands and settled the mechanism and the trigger:
   main solve by 1.00x (it is `sleep`-dominated), so **CPU competition alone is
   refuted for A**: the only lane that can eat the budget is subprocess
   spawn/exec latency (three `Popen` sites; a 14.5 s stall per spawn at the
-  stock 30 s budget reproduces the exact string). Cross-test shared state is
-  refuted: no module-level cache, no env read on the execute path, the red
-  reproduces in a single-test process with a fresh `tmp_path`.
+  stock 30 s budget reproduces the exact string). The issue's cross-test
+  shared-state reading is **superseded** (issue author's second comment) and
+  was **not reproduced under the diagnosis's conditions**: no module-level
+  cache, no env read on the execute path, and the red reproduces in a
+  single-test process with a fresh `tmp_path`. It is not excluded as a
+  contributor to the observed full-suite reds; the widened budget absorbs the
+  latency either way, and the issue's `--ignore=tests/test_safe_fs.py`
+  full-suite control is not re-run here (see the oracle paragraph).
 - Victim B (`tests/test_warm_start_chaining.py:2740`): the per-stage poll
   deadline (`chain_stage_execution.py:1013-1017`, reached through
   `orchestrate_cycle`) trips in `state_save_qc` when one status-transition
   block exceeds `job_timeout_seconds=5`; slowest lane 0.042 s here, ~0.34 s
   on node-27 (the test runs 8.2x slower there), and load amplified a lane
   7.2x locally — same order as the ~15x node-27 margin, so the issue's CPU
-  reading is plausible for B. Shared state refuted (no non-`tmp_path` roots,
-  no singletons).
+  reading is plausible for B. No non-`tmp_path` roots and no singletons were
+  found; the shared-state reading has the same superseded / not-reproduced
+  status as for A.
 Fix (test-only, minimal, oracles intact):
 - A: `_runtime(..., timeout_seconds=300)` at the victim (`:6034`) and at its
   sibling that uses the same watcher-held stub (`:6092`). The kwarg exists
   (`:224-228`). Neither test asserts the timeout path; the stub's own 20 s
-  self-cap bounds worst-case wall time. The only wall-clock-expiry test in the
+  self-cap bounds worst-case wall time. Each site pins
+  `runtime.config.timeout_seconds >= 60` right after construction, so a revert
+  to the helper's 30 s default is red. The only wall-clock-expiry test in the
   file (`:5888`, explicit `timeout_seconds=10`) is untouched.
 - B: `_orchestrator` (`tests/test_orchestration_chain.py:9209`) gains a
   `job_timeout_seconds: float = 120.0` keyword (was hard-coded 5); the eleven
   direct `job_timeout_seconds=5` sites in `tests/test_warm_start_chaining.py`
-  are raised to the same value. The four timeout-path tests
+  (one of them inside the shared `_cohort_orchestrator` helper) and the four
+  inline `OrchestratorConfig(job_timeout_seconds=5)` builds in
+  `tests/test_orchestration_chain.py` itself (`:4465/4492/4527/4553` at
+  `9785e52d`; only the last, the full-cycle publish-root test, reaches the
+  real-clock poll loop — the other three are raised for consistency; that
+  test's own oracle cannot witness the raise because the publish-root refusal
+  fires identically on a timed-out job, so its receipt is a plain before/after
+  trace, not a red) are raised to the same value. The four timeout-path tests
   (`test_orchestration_chain.py:4318/4356/4395/12841`) build their own
   configs with `job_timeout_seconds=1` AND fake `time.monotonic`, so they are
-  neither affected nor slowed. A one-line pin asserts the helper's default is
-  ≥ 60 s with a docstring citing #1613, so a revert to a contention-sized
-  budget is red.
+  neither affected nor slowed. One-line pins assert `_orchestrator`'s and
+  `_cohort_orchestrator`'s default is ≥ 60 s with docstrings citing #1613, so
+  a revert to a contention-sized budget at either helper seam is red.
 - Oracle for the fix: the diagnosis's mechanism reds, re-run against the fixed
   tests — A with `DIAG1613_SPAWN_DELAY=14.5` at the (now 300 s) budget passes;
   B with a 6 s stall injected into the `state_save_qc` status transition
   (red at 5 s, green at 120 s). Both harnesses live in
-  `.workplans/issue-1745/diag-1613/`, run on macOS and in a detached node-27
-  worktree. A "N runs under a CPU hog" receipt is NOT the oracle: load never
-  produced a red on either victim in 20 iterations.
+  `.workplans/pr-1949/diag-1613/` — a gitignored evidence directory, so they
+  are **local-only evidence**, run on macOS and in a detached node-27
+  worktree; the durable, repo-resident oracle is the set of `>= 60` pins (A:
+  both victim sites; B: `_orchestrator` and `_cohort_orchestrator`). A "N runs
+  under a CPU hog" receipt is NOT the oracle: load never produced a red on
+  either victim in 20 iterations, which is also why issue criterion 2 ("stable
+  green under the full suite") is discharged by the mechanism harnesses rather
+  than by a full-suite re-run — a full-suite green would not discriminate.
 - Declared limits, recorded (not fixed here): (i)
   `test_run_shud_main_solve_and_recovery_share_one_timeout_budget` (`:5888`)
   is the same failure class with no test-only fix — raising its budget breaks
@@ -199,17 +220,22 @@ Fix (test-only, minimal, oracles intact):
   (`test_analysis_pipeline.py:505`, `test_e2e_ifs.py:111`, `test_e2e_m3.py:173`,
   `test_ifs_forecast_integration.py:177/552/573`, `test_orchestrator.py:324`,
   `test_pipeline_logs_artifacts.py:448/493`,
-  `test_orchestration_chain.py:4465/4492/4527/4553`,
-  `test_production_scheduler.py:46469/48432`, `test_warm_start.py:901`) are the
-  same latent class but not observed victims; left as-is so this PR's diff and
-  CI selection stay on the six issues' files. The durable answer for both is an
+  `test_production_scheduler.py:46469/48432`, `test_warm_start.py:901`; all at
+  `9785e52d`) are the same latent class but not observed victims; left as-is
+  so this PR's diff and CI selection stay on the six issues' files; (iii) the
+  ten remaining inline `job_timeout_seconds=120` literals in
+  `tests/test_warm_start_chaining.py` carry no `>= 60` pin — inline literals,
+  no helper seam to pin. The durable answer for (i) and (ii) is an
   injectable monotonic clock in `StageExecutionDependencies`
   (`chain_stage_execution.py:149` already injects `utcnow`) and a clock seam in
   `workers/shud_runtime` — a production change outside a test-only PR.
 - Recorded deviation: the issue body's acceptance ("name the shared state,
   isolate the leak") is superseded by the issue author's second comment and by
-  the diagnosis; what this PR removes is the wall-clock dependence, and the
-  shared-state reading is recorded as refuted with evidence.
+  the diagnosis; what this PR removes is the wall-clock dependence. The
+  shared-state reading is recorded as superseded and not reproduced under the
+  diagnosis's conditions (not as refuted), and criterion 2 is discharged by the
+  deterministic mechanism harnesses instead of a full-suite green (reason
+  above).
 
 ## Risks / Trade-offs
 
