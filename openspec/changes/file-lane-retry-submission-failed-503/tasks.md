@@ -13,7 +13,7 @@ Verification command; CI status read at every head (recorded per round).
 - [x] `uv run pytest -q tests/test_select_ci_tests.py` green locally (458 passed; `_top_level_imported_module_names('tests/test_retry.py')` has no file-lane entry)
 - [x] `uv run ruff check .` clean
 - [ ] node-27 receipt (host, HEAD SHA, command line, pass line) for `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py`
-- [ ] Frozen surfaces diff-empty vs `origin/master`: `RetryService.submission_runtime_root_resolution` body; `get_retry_service`; `attempt_manual_retry`'s `except Exception` block, `_record_manual_retry_submission_failure`, `_manual_retry_submission_failure_details`; the 409 mapping in `retry_run`; `_file_retry_event_runtime_root_candidates`. `retry.py` diff is the Protocol block plus `runtime_checkable` on the `typing` import line, nothing else. (Checked at implementation: all diff-empty; `tests/test_retry.py` has exactly one deleted line, the `type: ignore`.)
+- [x] Frozen surfaces diff-empty vs `origin/master`: `RetryService.submission_runtime_root_resolution` body; `get_retry_service`; `attempt_manual_retry`'s `except Exception` block, `_record_manual_retry_submission_failure`, `_manual_retry_submission_failure_details`; the 409 mapping in `retry_run`; `_file_retry_event_runtime_root_candidates`. `retry.py` diff is the Protocol block plus `runtime_checkable` on the `typing` import line, nothing else. (Checked at implementation: all diff-empty; `tests/test_retry.py` has exactly one deleted line, the `type: ignore`.)
 - [ ] CI green on the final head; CI status of every pushed head recorded in the round ledger
 - [x] `openspec validate file-lane-retry-submission-failed-503 --strict --no-interactive`
 
@@ -30,9 +30,10 @@ Verification command; CI status read at every head (recorded per round).
 
 ## 3. Tests (D3)
 
-- [x] 3.1 T1 evidence present (`_clear_runtime_root_env` first; `WORKSPACE_ROOT` + `OBJECT_STORE_ROOT` distinct realpaths; gateway with `submit_job` only; response equals persisted event details; redaction assertions incl. both injected roots absent)
+- [x] 3.1 T1 evidence present (`_clear_runtime_root_env` first; `WORKSPACE_ROOT` + `OBJECT_STORE_ROOT` distinct realpaths; gateway with `submit_job` only; response equals persisted event details; redaction assertions incl. both injected roots absent); `error.code` also equals the persisted event's `error_code`
+- [x] 3.1b (round-1 cand-01, P2 coverage) `test_retry_api_file_lane_second_retry_reports_its_own_evidence`: two POSTs on one run mint `_retry_active` then `_retry_2`; differ-guard on the two persisted mappings; second response equals its own event and not the first's; direct reader call on the first job returns the first's (kills the filter-only mutant; the sort-order half has no in-domain oracle — one submission event per job id)
 - [x] 3.2 T2 evidence absent (key absent, not `null`)
-- [x] 3.3 T3 on T1's baseline, three tests: (a) literal `_cycle_rows` fault (lands on the blocked branch via `get_pipeline_job`), (b) hardened: pin `get_pipeline_job` to the real row then fault `_cycle_rows` → reader's `except` + one redacted WARNING (`caplog`), (c) blocked row from `get_pipeline_job` → key absent, 503 intact
+- [x] 3.3 T3 on T1's baseline, three tests: (a) literal `_cycle_rows` fault (lands on the blocked branch via `get_pipeline_job`), (b) hardened: pin `get_pipeline_job` to the real row then fault `_cycle_rows` with the documented journal-relative field `journal/gfs/2026072000.jsonl` (round-1 cand-05) → reader's `except` + one redacted WARNING (`caplog`), (c) blocked row from `get_pipeline_job` → key absent, 503 intact, and NO `evidence unreadable` WARNING (negative `caplog`, round-1 cand-02 — the sole discriminator between the guard and the `except`)
 - [x] 3.4 T4 Protocol `isinstance` pin for both lanes
 - [x] 3.5 Existing DB-lane 503 tests unchanged (diff-empty on those functions)
 

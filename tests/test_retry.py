@@ -3085,6 +3085,10 @@ def test_retry_api_file_lane_submission_failure_returns_503_with_persisted_evide
     assert set(expected["required"]) == {"workspace_dir", "object_store_root"}
     assert expected["missing"] == []
     assert details["runtime_root_resolution"] == expected
+    # The literal in the helper pins the wire contract; this pins the route to
+    # the code the journal actually durably recorded, so a lane that answered a
+    # hardcoded 503 code while persisting something else would be caught.
+    assert response.json()["error"]["code"] == persisted[0]["details"]["error_code"]
 
     rendered = json.dumps(response.json())
     assert "Traceback" not in rendered
@@ -3092,6 +3096,58 @@ def test_retry_api_file_lane_submission_failure_returns_503_with_persisted_evide
     assert str(fixture["journal_root"]) not in rendered
     assert str(workspace_root) not in rendered
     assert str(object_store_root) not in rendered
+
+
+def test_retry_api_file_lane_second_retry_reports_its_own_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1 sister — the reader is scoped to the job id it was asked for.
+
+    T1 alone leaves the reader's job scoping undiscriminated: with one job in
+    the journal, ``entity_id == job_id`` and "no filter at all" agree, and
+    latest-first and oldest-first agree.  Two retries of the same run put two
+    ``submission`` events with DIFFERENT evidence into the same cycle segment
+    (``submission_failed`` is a manual-retry source status, so the second POST
+    proceeds and mints ``..._retry_2`` after ``..._retry_active``).
+
+    Mutants killed:
+
+    * filter dropped + oldest-first -> the second 503 would carry the FIRST
+      retry's evidence; killed by ``d2[...] == e2`` / ``!= e1``.
+    * filter dropped, newest-first kept -> the route reads for the newest job
+      and still agrees, but asking for the FIRST job's id now returns the
+      second's evidence; killed by the direct reader call at the end.
+
+    Sort order alone has no in-domain oracle: each job id owns exactly one
+    ``submission`` event here (asserted), and minting a second one for a single
+    job would mean faking journal writes rather than exercising the route.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    first_response = _post_file_lane_retry(fixture, monkeypatch)
+    second_response = _post_file_lane_retry(fixture, monkeypatch)
+
+    first_details = _assert_file_lane_submission_failed_503(first_response)
+    second_details = _assert_file_lane_submission_failed_503(second_response)
+    assert first_details["job_id"] != second_details["job_id"]
+
+    first_events = _persisted_submission_events(fixture["journal_root"], first_details["job_id"])
+    second_events = _persisted_submission_events(fixture["journal_root"], second_details["job_id"])
+    assert len(first_events) == 1
+    assert len(second_events) == 1
+    first_evidence = first_events[0]["details"]["runtime_root_resolution"]
+    second_evidence = second_events[0]["details"]["runtime_root_resolution"]
+    # Differ guard: without this the equalities below would hold vacuously for
+    # every mutant, because the two events would be indistinguishable.  They
+    # differ on the retry lineage keys (``retry_job_id`` / ``previous_job_id``).
+    assert first_evidence != second_evidence
+
+    assert second_details["runtime_root_resolution"] == second_evidence
+    assert second_details["runtime_root_resolution"] != first_evidence
+    assert fixture["service"].submission_runtime_root_resolution(first_details["job_id"]) == first_evidence
 
 
 def test_retry_api_file_lane_submission_failure_returns_503_without_evidence(
@@ -3164,6 +3220,15 @@ def test_retry_api_file_lane_evidence_read_fault_reaches_reader_fail_soft(
     evidence" and "evidence read faulted" are byte-identical by design, and the
     single ``logger.warning`` carrying only ``reason``/``field`` is the only
     observable difference.
+
+    The injected ``field`` is a root-RELATIVE segment token, the shape real
+    raise sites produce (``field=str(_relative_evidence(path, self.root))`` over
+    the ``journal/<source>/<cycle>.jsonl`` layout), so the leak assertions below
+    run against the documented payload rather than a degenerate one-word field.
+    That makes this a shape pin, not a leak guard: ``_relative_evidence``
+    already collapses anything outside the root to ``[local-path]``, so an
+    absolute path could only reach the log if a raise site were rewritten, which
+    is out of this test's reach.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
@@ -3182,7 +3247,7 @@ def test_retry_api_file_lane_evidence_read_fault_reaches_reader_fail_soft(
             return pinned if job_id == str(retry_row.job_id) else None
 
         def _faulting(*_args: Any, **_kwargs: Any):
-            raise FileOrchestrationJournalError("file_journal_unreadable", field="journal")
+            raise FileOrchestrationJournalError("file_journal_unreadable", field="journal/gfs/2026072000.jsonl")
 
         monkeypatch.setattr(repository, "get_pipeline_job", _pinned_get)
         monkeypatch.setattr(repository, "_cycle_rows", _faulting)
@@ -3208,7 +3273,9 @@ def test_retry_api_file_lane_evidence_read_fault_reaches_reader_fail_soft(
         assert secret not in fail_soft[0]
 
 
-def test_retry_api_file_lane_blocked_job_row_keeps_503(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_api_file_lane_blocked_job_row_keeps_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """T3 sister — a blocked row from the second ``get_pipeline_job`` (D1 step 1).
 
     ``get_pipeline_job`` keeps the REAL job id on the blocked row it synthesises
@@ -3216,6 +3283,15 @@ def test_retry_api_file_lane_blocked_job_row_keeps_503(tmp_path: Path, monkeypat
     ``file_journal_read_blocked`` sentinel), so the reader must key off
     ``file_journal.status``; a job-id compare would never match and
     ``_source_id_from_job`` would then raise on ``cycle_id=None``.
+
+    The NEGATIVE log oracle is what actually pins that branch.  Deleting the
+    blocked-row guard keeps every HTTP assertion green: ``_source_id_from_job``
+    raises ``file_journal_missing_identity`` on the blocked row's null identity,
+    the reader's fail-soft ``except`` swallows it and the route emits the same
+    evidence-less 503.  The two paths differ only in that the ``except`` arm
+    logs; asserting that NOTHING was logged separates them.  The assertion is on
+    the message TEMPLATE, not on a reason token, so it also catches a guard
+    removal that raises some other typed reason.
     """
 
     from services.orchestrator.file_orchestration_journal import (
@@ -3238,11 +3314,19 @@ def test_retry_api_file_lane_blocked_job_row_keeps_503(tmp_path: Path, monkeypat
         assert blocked["file_journal"]["status"] == "blocked"
         monkeypatch.setattr(repository, "get_pipeline_job", lambda *_a, **_k: blocked)
 
-    response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_block_job_row)
+    with caplog.at_level(logging.WARNING, logger=_FILE_JOURNAL_MODULE):
+        response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_block_job_row)
 
     details = _assert_file_lane_submission_failed_503(response)
     assert "runtime_root_resolution" not in details
     assert "Traceback" not in json.dumps(response.json())
+
+    fail_soft = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _FILE_JOURNAL_MODULE and "manual retry submission evidence unreadable" in record.getMessage()
+    ]
+    assert fail_soft == []
 
 
 def test_both_retry_lanes_satisfy_manual_retry_service_protocol(tmp_path: Path) -> None:

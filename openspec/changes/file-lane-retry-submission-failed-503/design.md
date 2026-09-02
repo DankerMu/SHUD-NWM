@@ -97,17 +97,28 @@ def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | No
    Returning the persisted mapping unchanged is what
    makes the acceptance pin "response equals persisted event details"
    provable in one assertion (no leak, no double scrub). Write-side scrub
-   parity: `_sanitize_public_evidence` redacts sensitive keys, `_path`/`_root`
-   keys → `[local-path]`, URI-shaped scalars through
-   `_sanitize_file_provider_evidence_scalar`, and free text through
-   `_safe_error_message` (= `redact_payload`) — at least as wide as the DB
-   lane's `redact_payload` for the fields the evidence carries. If the
-   fixture review found no field the write side leaves narrower than
-   `redact_payload` (checked `resolved`/`missing`/`rejected`/`candidate_counts`/
-   `db_free_runtime.*`/identity fields). The asymmetry runs the other way: the
-   DB lane's read side returns `resolved.<field>.value` absolute local roots
-   verbatim (`redact_payload` does not scrub paths) where the file lane renders
-   `[local-path]`. Pre-existing DB-lane surface, out of scope here, routed as #1961
+   parity, stated precisely (round-1 cand-04): `_sanitize_public_evidence`
+   redacts sensitive keys; for keys ending `_path`/`_root` the key rule at
+   `_sanitize_public_field` (`:13081`) replaces the **whole value** with
+   `[local-path]` — so `resolved.object_store_root` (and any
+   `published_artifact_root`) is a bare string in the file lane's persisted
+   and returned evidence, while `resolved.workspace_dir` keeps
+   `{present, source, value}` with `value` rendered `[local-path]` through the
+   scalar path (`_sanitize_file_provider_scalar`,
+   `scheduler_file_providers.py:2258-2270`); URI-shaped scalars go through
+   `_sanitize_file_provider_evidence_scalar`, free text through
+   `_safe_error_message` (= `redact_payload`). The file lane's scrub is
+   therefore **wider than `redact_payload` but structurally lossy**: the DB
+   lane keeps `{present, source, value, same_as_workspace}` for
+   `object_store_root` (`retry.py:1840-1853`; `same_as_workspace=True` is
+   unreachable from fresh resolution, `:1518-1528` rejects the pair earlier),
+   the file lane drops `present`/`source` for every `_root` key. Fixture
+   review checked `missing`/`rejected`/`candidate_counts`/`db_free_runtime.*`/
+   identity fields: nothing narrower than `redact_payload` there. The collapse
+   is pre-existing write-side behaviour (`_public_evidence` untouched by this
+   PR) and is routed as #1965 (distinct from #1961); the DB lane's own
+   asymmetry — returning `resolved.<field>.value` absolute local roots
+   verbatim — is #1961
    (p3: reachable only from a `compute_control` + `DATABASE_URL` process by an
    authorised operator; display_readonly answers 409 before the 503 arm).
 6. **Second-read fault is fail-soft.** The call at `:545` runs *after*
@@ -124,8 +135,11 @@ def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | No
    (T2) and "evidence read faulted" (T3) are byte-identical. Accepted for this
    change (adding a discriminator to the 503 details would widen the route
    contract, out of scope); the reader emits one `logger.warning` carrying
-   only `error.reason` / `error.field` (no path, no message text) so the fault
-   is observable in logs. The `except` spans steps 1-3 as one block (the
+   only `error.reason` and `error.field` — the latter a journal-relative token
+   such as `journal/gfs/2026072000.jsonl` (every read-path raise site passes
+   it through `_relative_evidence`, `:14990-14994`, which falls back to
+   `[local-path]` for out-of-root paths), never an absolute root, and no
+   message text — so the fault is observable in logs. The `except` spans steps 1-3 as one block (the
    blocked-row branch, `_source_id_from_job`, and `_cycle_rows` can all raise
    `FileOrchestrationJournalError`), and catches nothing narrower or wider:
    `_JournalProbeContainmentError` (`:724`) is converted to
@@ -214,8 +228,10 @@ into `_RetryExecutionContext` via `app.dependency_overrides`.
   test's redaction assertions (`Traceback`, `/journal/pipeline-jobs`,
   `str(journal_root)` absent) **plus** `str(workspace_root)` and
   `str(object_store_root)` absent — the roots T1 actually injects (the write
-  side renders them `[local-path]` via `_sanitize_file_provider_scalar`
-  `scheduler_file_providers.py:2258-2270`; this pins it).
+  side renders `workspace_dir.value` as `[local-path]` via
+  `_sanitize_file_provider_scalar` `scheduler_file_providers.py:2258-2270` and
+  collapses the whole `object_store_root` sub-mapping to `[local-path]` via the
+  key rule at `:13081`; this pins both).
 - **T2 evidence absent**: `_clear_runtime_root_env(monkeypatch)`, no prior
   submission events → resolver returns `None` → event has no key → 503 with
   `"runtime_root_resolution" not in details` (absent, not `null`).
@@ -242,8 +258,10 @@ into `_RetryExecutionContext` via `app.dependency_overrides`.
   pins `get_pipeline_job` to the real row read from a healthy repository, then
   faults `_cycle_rows`, so the fault reaches the reader's own `except`;
   `caplog` asserts exactly one `services.orchestrator.file_orchestration_journal`
-  WARNING carrying `file_journal_unreadable`/`journal` and none of the three
-  roots — the only oracle for step 6; (c)
+  WARNING carrying `file_journal_unreadable` and the injected journal-relative
+  field `journal/gfs/2026072000.jsonl` (the documented real shape, round-1
+  cand-05) and none of the three roots — the only oracle for step 6 (it pins
+  the documented shape; it is not a leak guard for raise sites); (c)
   `test_retry_api_file_lane_blocked_job_row_keeps_503` — the sister:
   `_blocked_query_job(...)` row (asserting it carries the real `job_id`) →
   key absent, 503 intact (pins D1 step 1 / Invariant 10). Three tests, not
