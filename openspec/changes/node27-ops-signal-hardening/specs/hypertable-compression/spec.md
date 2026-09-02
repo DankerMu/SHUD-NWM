@@ -12,4 +12,4 @@
 #### Scenario: Well-formed chunk name
 
 - **WHEN** the chunk name is `_hyper_3_8_chunk` in schema `_timescaledb_internal`
-- **THEN** the qualified name is produced unchanged, and no statement in the module interpolates it (a repo test asserts the module carries no f-string SQL naming a chunk)
+- **THEN** the qualified name is produced unchanged, and no statement in the module interpolates it directly (a repo test asserts the module carries no f-string SQL naming a chunk or the property; the scan does not follow a local rebinding, which the property's own `ValueError` still covers)

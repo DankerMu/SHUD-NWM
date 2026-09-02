@@ -2333,3 +2333,103 @@ def test_cancelled_ingest_statement_fails_its_run_and_the_next_tick_is_normal(
 
     assert next_rc == 0
     assert next_summary["runs"]["ingested"] == 1
+
+
+@pytest.mark.parametrize(
+    "site",
+    ["_basin_seeded", "_already_ingested_runs", "_publish_display_runs"],
+    ids=["pre-loop-seeded-probe", "pre-loop-already-ingested", "publish"],
+)
+def test_cancelled_statement_on_a_pre_loop_or_publish_site_propagates_out_of_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    site: str,
+) -> None:
+    """The other half of the 600 s budget's blast radius: no summary at all.
+
+    The per-run half above is contained — one run goes `failed`, the tick still
+    reports. These three sites are not: `main()` calls each of them outside any
+    `try`, so a `QueryCanceled` unwinds the whole tick. That is the accepted
+    design (a tick that cannot read what is already ingested must not invent a
+    green summary), and the consequence worth pinning is the pair: the
+    exception leaves `main()` uncaught, and NOTHING reaches stdout — no partial
+    JSON, no `completed_with_failures` object an operator or a log scraper
+    could mistake for a tick that ran. Under the module's own entrypoint
+    (`raise SystemExit(main())`) an uncaught exception is exit 1 plus a
+    traceback on stderr, which is what the unit's `OnFailure=` sees; `main()`
+    itself raises no `SystemExit`, so this asserts the exception, not an rc.
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}
+    )
+
+    def raise_cancelled(*_args: Any, **_kwargs: Any) -> Any:
+        raise cancelled
+
+    monkeypatch.setattr(autopipe, site, raise_cancelled)
+
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        autopipe.main(
+            [
+                "--object-store-root",
+                str(object_store_root),
+                "--basins-root",
+                str(object_store_root.parent / "Basins"),
+            ]
+        )
+
+    assert capsys.readouterr().out == ""
+
+    # The next tick is unaffected — the point of bounding the statement.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["runs"]["ingested"] == 1
+
+
+def test_cancelled_decline_count_nulls_the_field_and_leaves_the_tick_rc_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fourth shape: an observability read is allowed to fail, quietly.
+
+    `_active_decline_count` catches `psycopg2.Error` by design (#1781), and
+    `QueryCanceled` is one, so a cancelled count degrades to `null` in the
+    summary instead of unwinding the tick — an ingest that succeeded stays
+    green. The real function is restored over the harness double so the
+    `except` clause under test is the production one, and the raiser is
+    installed on `_connect` itself: every other database surface in this tick
+    is stubbed, so `connects == [NODE27_DATABASE_URL]` proves the count is the
+    only live connect site here, which is what makes `rc == 0` mean "the count
+    failed and nothing else did".
+    """
+    real_active_decline_count = autopipe._active_decline_count
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}
+    )
+    monkeypatch.setattr(autopipe, "_active_decline_count", real_active_decline_count)
+
+    connects: list[str] = []
+
+    def cancelled_connect(database_url: str, **_kwargs: Any) -> Any:
+        connects.append(database_url)
+        raise psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(autopipe, "_connect", cancelled_connect)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert connects == [NODE27_DATABASE_URL]
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["return_code"] == 0
+    assert summary["declines_active"] is None
+    assert summary["runs"]["ingested"] == 1

@@ -35,17 +35,17 @@ Wrapper line 147 becomes `"$PYTHON_BIN" "$SCRIPT" "$@" 2>&1 | tee -a "$LOG_FILE"
 - Producers: `node27_timeseries_retention.py::_emit_stderr_diagnostic`; `node27_resource_governance.py::main`; `node27_autopipeline.py::_connect`.
 - Validators/preflight: anchor tests in `tests/test_node27_timeseries_retention.py`; `qualified_chunk` regex + identity pin; stats-guard flag parser.
 - Storage/cache/query: `retention.log`, `resource-governance.log`, journal; governance receipt JSON (shape unchanged).
-- Public routes/entrypoints: the two `_once.sh` wrappers and their units; `node27_autopipeline.py` tick (12 `_connect` call sites).
+- Public routes/entrypoints: the two `_once.sh` wrappers and their units; `node27_autopipeline.py` tick (11 `_connect` call sites, AST count).
 - Frontend/downstream consumers: `nhms-node27-unit-failure-alert@.service` handler (unchanged); operators reading §8.6.
-- Failure paths/rollback/stale state: `tee` failure must not alter `RC`; governance receipt is written before the non-zero exit; stats guard failure still leaves tick rc unchanged (#1643); a >600 s statement cancels the tick visibly.
+- Failure paths/rollback/stale state: `tee` failure must not alter `RC`; governance receipt is written before the non-zero exit; stats guard failure still leaves tick rc unchanged (#1643); a >600 s statement cancels instead of wedging — per-run: run `failed` + rc≠0; display-ready seed: `seed_failed` + summary + rc≠0; pre-loop/publish: propagates, no summary, rc≠0; decline count: `declines_active: null`, rc unchanged (by design).
 - Evidence/audit/readiness: node-27 receipts — refused-tick journal + mail body; governance forced-critical exit + mail; autopipe dry tick receipt with stats-guard section unchanged and longest statement noted; `pytest-of-nwm` location + `df -h /` before/after.
 - Regression rows:
   - retention runner refuses with 57014 -> exactly one `RETENTION_DROP_FAILED:` diagnostic line; runbook count = 1; wrapper `RC` = runner rc; `retention.log` has `start`/`done rc=` bracket + the line.
   - runner exits 0 -> zero counted lines; `RC=0`.
   - governance audit with a critical recommendation -> receipt written, `status: completed`, stderr `RESOURCE_GOVERNANCE_CRITICAL:<code>`, exit 1; no critical -> exit 0.
-  - `_connect(url)` -> `psycopg2.connect(url, connect_timeout=10, options='-c statement_timeout=600000', fallback_application_name='nhms-autopipe')`; stats guard -> its own budget; `url?connect_timeout=3` -> no `connect_timeout` kwarg (DSN wins); a fake backend that sleeps past the budget on a non-guard connection -> `QueryCanceled`, run outcome `failed`, tick rc≠0, next tick unaffected; the same on a guard `ANALYZE` -> that relation's entry `status="failed"`, summary `completed`; on the guard connect/candidate query -> summary `status="failed"`; tick rc unchanged in both (#1643 row preserved).
+  - `_connect(url)` -> `psycopg2.connect(url, connect_timeout=10, options='-c statement_timeout=600000', fallback_application_name='nhms-autopipe')`; stats guard -> its own budget; `url?connect_timeout=3` -> no `connect_timeout` kwarg (DSN wins); a fake backend that sleeps past the budget on a non-guard connection -> `QueryCanceled`; per-run → run outcome `failed`, tick rc≠0; display-ready seed → `seed_failed`, summary emitted, rc≠0; pre-loop/publish → propagates, no summary, rc≠0; `_active_decline_count` → `None`, rc unchanged; next tick unaffected in every shape; the same on a guard `ANALYZE` -> that relation's entry `status="failed"`, summary `completed`; on the guard connect/candidate query -> summary `status="failed"`; tick rc unchanged in both (#1643 row preserved).
   - `qualified_chunk` with `_hyper_1_2_chunk"; DROP` -> `ValueError`, no cursor call; compression pattern == `_STATS_GUARD_IDENT_RE.pattern`.
-  - Unchanged sibling: the 7 other `append:` units and `nhms-node27-unit-failure-alert@.service` byte-identical; product-archive receipt README untouched.
+  - Unchanged sibling: the 7 other `append:` units byte-identical; `nhms-node27-unit-failure-alert@.service` changed comment-only (consumer inventory + standing-critical note, round-1 fix); product-archive receipt README untouched.
 
 ## Boundary surfaces
 

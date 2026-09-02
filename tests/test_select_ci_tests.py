@@ -213,7 +213,15 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "schemas/examples/node27_cold_governance_receipt.drift.example.json": {
             "tests/test_node27_cold_governance.py",
         },
-        "pyproject.toml": {"tests/test_node27_cold_tablespace_marker_contract.py"},
+        "pyproject.toml": {
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+            # #1765: the interpreter-pin table lives in the same file, so a
+            # `requires-python` / `.python-version` edit must run the truth
+            # suite (rule at scripts/select_ci_tests.py:2373). Spelled out
+            # literally, not imported as PYTHON_ENVIRONMENT_TRUTH_TEST: an
+            # expectation derived from the module it checks is vacuous.
+            "tests/test_python_environment_truth.py",
+        },
         "tests/conftest.py": {"tests/test_node27_cold_tablespace_marker_contract.py"},
         "infra/env/node27-resource-governance.example": {
             "tests/test_node27_cold_governance.py",
@@ -231,15 +239,6 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
         },
-        # #1712: the retention unit file is the producer of the
-        # `StandardError=journal` + `OnFailure=` contract; it is infra/**
-        # non-python, so without its own rule it matched nothing and a
-        # unit-only PR selected zero tests. Deliberately narrower than the
-        # `.timer` sibling: a glob over the retention unit files would drag in
-        # cold_residency, which the unit body cannot break.
-        "infra/systemd/nhms-node27-timeseries-retention.service": {
-            "tests/test_node27_timeseries_retention.py",
-        },
         # #1647: the compression runner owns one half of the byte-identity
         # pin between `_CHUNK_IDENT_RE` and the autopipeline
         # `_STATS_GUARD_IDENT_RE`; the assertion lives in the bounds suite.
@@ -252,6 +251,29 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
     for producer, consumers in expected.items():
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert consumers <= selected, f"{producer} lost focused consumers: {sorted(consumers - selected)}"
+
+
+def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> None:
+    """#1712 — the `.service` row is narrower than its `.timer` sibling on purpose.
+
+    Exact equality, not a subset: the comment at
+    ``scripts/select_ci_tests.py:1975-1979`` says the unit body cannot break
+    ``tests/test_node27_cold_residency.py`` (that target is the `.timer` row's
+    schedule coverage), so a subset assertion would let the two rows quietly
+    converge — which is the one drift this row exists to prevent. The
+    `.timer` sibling is asserted alongside it so the difference itself is the
+    pinned fact, not an accident of two independent rows.
+    """
+    assert select_tests(
+        ["infra/systemd/nhms-node27-timeseries-retention.service"], repo_root=Path(".")
+    ) == ["tests/test_node27_timeseries_retention.py"]
+
+    assert select_tests(
+        ["infra/systemd/nhms-node27-timeseries-retention.timer"], repo_root=Path(".")
+    ) == [
+        "tests/test_node27_cold_residency.py",
+        "tests/test_node27_timeseries_retention.py",
+    ]
 
 
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:

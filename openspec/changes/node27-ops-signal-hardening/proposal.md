@@ -26,7 +26,7 @@ Four independent node-27 operations signals are broken in ways that were each ob
 ## Impact
 
 - Code: `scripts/node27_timeseries_retention_once.sh`, `scripts/node27_resource_governance_once.sh`, `scripts/node27_resource_governance.py`, `scripts/node27_autopipeline.py`, `scripts/node27_timeseries_compression.py`, `pyproject.toml`, `.gitignore`.
-- Units: `infra/systemd/nhms-node27-timeseries-retention.service`, `infra/systemd/nhms-node27-resource-governance.service` (re-install + `daemon-reload` on node-27 is a post-merge manual step).
+- Units: `infra/systemd/nhms-node27-timeseries-retention.service`, `infra/systemd/nhms-node27-resource-governance.service` (re-install + `daemon-reload` on node-27 is a post-merge manual step); `infra/systemd/nhms-node27-unit-failure-alert@.service` comment-only (consumer inventory).
 - Docs: `docs/runbooks/tier-node27-timeseries-storage.md` §8.6, `docs/runbooks/current-production-ops.md`, `docs/runbooks/node-27-bringup-checklist.md`, `instructions/agents/shared.md` + regenerated `CLAUDE.md`/`AGENTS.md`.
 - Tests: `tests/test_node27_timeseries_retention.py`, `tests/test_node27_resource_governance.py`, `tests/test_node27_autopipeline*.py`, `tests/test_node27_timeseries_compression.py`, wrapper shell tests.
 - Behavior NOT changed: H5 fail-closed, `lock_timeout` values, timer schedules, the #1643 stats-guard observation semantics, receipt schemas.

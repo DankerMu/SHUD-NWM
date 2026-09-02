@@ -2,7 +2,7 @@
 
 Two independent surfaces of ``scripts/node27_autopipeline.py``:
 
-* ``_connect`` — the single connect site (12 callers). Before this change no
+* ``_connect`` — the single connect site (11 callers). Before this change no
   connection carried a connect timeout or a statement timeout, so one hung
   backend wedged the 10-minute tick under its flock forever and every later
   tick was skipped by ``flock -n``. The expected kwargs are spelled out by hand

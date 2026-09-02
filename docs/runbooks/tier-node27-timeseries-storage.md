@@ -3670,8 +3670,16 @@ before a receipt exists.
      `home_free_warn_bytes` (default 300 GiB) ->
      `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70,:227`
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
-     `OnFailure=` mail lane fires only on `severity: critical` (`:564`
-     `_critical_codes`), and the three codes that can be critical today are
+     `OnFailure=` mail lane has two triggers, in this order: the receipt's
+     `status` is not `completed` (`:584-585`), or the receipt carries at least
+     one `severity: critical` recommendation (`:590-593`, `:556`
+     `_critical_codes`). The first is a defensive guard today — `build_receipt`
+     hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
+     in practice a critical recommendation is the only thing that reddens a
+     completed audit. (A rejected config never gets that far: it exits 2 from
+     `:571-576`, which also trips `OnFailure=`.) A `warning` changes neither
+     `status` nor the critical list, so it trips nothing. The three codes that
+     can be critical today are
      `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
      (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:309`).
      So a free-space shortfall on the volume that actually holds pgdata and

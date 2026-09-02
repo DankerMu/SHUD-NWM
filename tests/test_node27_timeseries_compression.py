@@ -2053,13 +2053,32 @@ def _fstring_chunk_refs(node: ast.JoinedStr) -> set[str]:
 def _fstring_sql_naming_a_chunk(source: str) -> list[str]:
     """Every f-string in ``source`` that would put a chunk name into SQL text.
 
-    Two shapes are flagged: any f-string interpolating ``qualified_chunk`` at
-    all, and an f-string handed to ``execute``/``executemany`` as the STATEMENT
-    (first positional argument) whose interpolations name a chunk. Parsed, not
-    grepped: the module legitimately builds f-strings out of ``chunk_schema`` /
-    ``chunk_name`` for bind-parameter values (``compress_chunk(%s::regclass)``)
-    and for error text, and a substring scan would match those, the module's
-    comments, and this docstring.
+    Exactly two rules fire, and their reach is worth stating because neither is
+    a taint analysis:
+
+    * **Rule 1 — any f-string that interpolates ``qualified_chunk``**, wherever
+      it sits. Position-independent: an argument, a kwarg, a nested
+      ``sql.SQL(f"")``, a bare log line all match, because the property has no
+      production consumer at all, so every occurrence is news.
+    * **Rule 2 — an f-string handed DIRECTLY as the first positional argument
+      (the statement) to ``execute``/``executemany``**, whose interpolations
+      name ``chunk_schema`` / ``chunk_name`` / ``qualified_chunk``. Syntactic
+      position only.
+
+    What that leaves unflagged, verified rather than assumed: a local rebinding
+    (``q = chunk.qualified_chunk`` then ``execute(f"... {q}")``) escapes BOTH
+    rules — nothing follows the name — and only ``qualified_chunk``'s own
+    ``ValueError``, which fires on the attribute access before any text exists,
+    still stands there; a ``query=`` kwarg and ``sql.SQL(f"")`` escape rule 2
+    (not the first positional argument) but are still caught by rule 1 when the
+    f-string names ``qualified_chunk``; and ``.format`` / ``+`` / ``%``
+    concatenation escape both rules always, since they produce no ``JoinedStr``
+    node.
+
+    Parsed, not grepped: the module legitimately builds f-strings out of
+    ``chunk_schema`` / ``chunk_name`` for bind-parameter values
+    (``compress_chunk(%s::regclass)``) and for error text, and a substring scan
+    would match those, the module's comments, and this docstring.
     """
     offenders: list[str] = []
     for node in ast.walk(ast.parse(source)):
