@@ -2724,3 +2724,21 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 default. Reversal still requires the attribution-schema, round-intent and
 round-role repairs plus maintainer review. Next revisit on the audit's next
 flag.
+
+## Revisit 2026-09-02 (post PR #1951 / issues #1943 #1944)
+
+`loop_log_audit.py` flags rotation attribution again: **154** multi-round
+merged PRs, later-round catches **core=103 vs rotated=297**. Relative to the
+previous entry (core=98 / rotated=297) this PR's margin is **core +5 /
+rotated +0**. Round 2 rotated in a limits/concurrency bundle beside the two
+core bundles; it co-raised the round's P1 (blank/relative `--journal-root`
+censusing the cwd) together with the spec-compliance bundle, and the log
+attributes that catch to the core lens by the first-raiser rule, so the
+rotated lens earns no credit in the count even though it independently found
+the P1. Round 3 rotated nothing in (integration/invariant-state returned as a
+seam blast-radius pass) and its two P2s are core. Attribution therefore still
+under-credits rotation on co-raised findings — the same schema limit the
+earlier entries record. The accumulated later-round catches remain
+concentrated in rotated-in lenses (**297 versus 103**), so **keep rotation**
+stands under the recorded autonomous default. Next revisit on the audit's
+next flag.
