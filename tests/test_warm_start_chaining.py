@@ -1169,7 +1169,7 @@ def _cohort_orchestrator(
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=120,  # #1613
         require_forecast_warm_start=require_forecast_warm_start,
     )
     return ForecastOrchestrator(
@@ -1511,7 +1511,7 @@ def test_strict_cycle_prefilled_required_f006_rejects_stale_or_wrong_cycle_same_
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1621,7 +1621,7 @@ def test_strict_cycle_prefilled_invalid_state_blocks_before_side_effects(tmp_pat
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1742,7 +1742,7 @@ def test_strict_cycle_invalid_successor_blocks_before_side_effects(
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1792,7 +1792,7 @@ def test_strict_cycle_malformed_persisted_source_blocks_before_side_effects(tmp_
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1835,7 +1835,7 @@ def test_strict_cycle_prefilled_uri_only_mismatch_blocks_before_side_effects(tmp
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1881,7 +1881,7 @@ def test_strict_cycle_raw_package_checksum_alias_mismatch_blocks_before_side_eff
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1923,7 +1923,7 @@ def test_strict_cycle_missing_target_checksum_blocks_when_state_has_checksum(tmp
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -1964,7 +1964,7 @@ def test_strict_cycle_missing_target_and_state_checksum_blocks_before_side_effec
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -2025,7 +2025,7 @@ def test_strict_cycle_malformed_prefilled_metadata_blocks_before_side_effects(
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=True,
         ),
         repository=repository,
@@ -2443,7 +2443,7 @@ def _quarantine_state_index_orchestrator(
             object_store_root=object_root,
             object_store_prefix="s3://nhms",
             poll_interval_seconds=0,
-            job_timeout_seconds=5,
+            job_timeout_seconds=120,  # #1613
             require_forecast_warm_start=False,
         ),
         repository=FakeOrchestratorRepository(),
