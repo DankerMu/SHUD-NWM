@@ -69,6 +69,20 @@ AND they identify the backend scheduler/orchestrator path as the production auto
 
 When the scheduler pass evidence payload exceeds the configured size bound and the bounded fallback shape is emitted, the artifact SHALL preserve an operator-readable observability floor — the true computed pass status, per-candidate summary rows, and a compact restart-reconcile block — without weakening the fail-closed top-level status contract or the hard size bound.
 
+The restart-reconcile lane contract SHALL be covered by a payload-driven
+property in addition to the exact-shape assertions: for every lane key of the
+SOURCE payload's `restart_reconcile` block whose value carries an `outcomes`
+sequence, the bounded artifact SHALL carry that lane with the same number of
+outcome rows. The property SHALL derive its lane set from the source payload
+and SHALL NOT read the compactor's lane constant, because the compactor
+iterates that constant itself and a constant-driven property could never
+observe a lane the constant omits — the very shape that let a lane be
+discarded unnoticed. The exact-shape assertions SHALL be kept alongside the
+property: they are what catches an EXTRA key leaking into the floor, which a
+presence property cannot. Declared residual: a lane that exists only in the
+producer and was never mirrored into the test payload remains invisible to
+both; producer-to-fixture synchronisation is a separate obligation.
+
 #### Scenario: pre-limit status is preserved inside the limit block
 
 - WHEN the evidence payload exceeds `max_evidence_bytes` and the bounded fallback payload is written
@@ -99,6 +113,14 @@ When the scheduler pass evidence payload exceeds the configured size bound and t
 - WHEN a bounded fallback artifact is read by an operator or an acceptance check asking whether a pass recorded any `identity_mismatch_blocked` or `identity_mismatch_released` outcome
 - THEN the answer SHALL be derivable from the artifact, because the lane carrying those outcomes (`inflight` for jobs bound to a Slurm id, `reserved_unbound` for reserved unbound jobs) is present whenever the source payload carried it
 - AND the artifact SHALL NOT present a syntactically valid `restart_reconcile` block whose missing lane reads as "no such outcomes occurred" when the lane was in fact discarded.
+
+#### Scenario: every source lane with outcomes is present in the bounded block
+
+- WHEN the shared incident test payload — which carries both `inflight` and `reserved_unbound` lanes with outcome rows — is passed through the bounded fallback at the tier that retains `restart_reconcile`
+- THEN for every source lane key whose value carries an `outcomes` sequence, the bounded `restart_reconcile` block carries that key with an `outcomes` list of the same length
+- AND the check enumerates the source payload's lane keys and does not consult the compactor's lane constant
+- AND removing either lane's rebuild from the compactor makes this check fail while the compactor's own constant is unchanged
+- AND a source lane that carries a `count` but no `outcomes` sequence is not demanded in the bounded block.
 
 #### Scenario: within-limit evidence is byte-identical to the pre-change contract
 
@@ -365,3 +387,4 @@ Readiness root discovery and scheduler pass-evidence retention SHALL use one sha
 
 - **WHEN** an operator supplies one scheduler evidence file explicitly instead of a root
 - **THEN** readiness validates that selected file through the existing content contract without applying root-discovery filename filtering
+
