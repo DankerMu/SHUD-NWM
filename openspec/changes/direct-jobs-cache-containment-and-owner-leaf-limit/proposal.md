@@ -76,8 +76,9 @@ The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
 
 ## Capabilities
 
-- `pipeline-job-persistence` (modified): one existing requirement MODIFIED
-  (journal existence probes / cache fingerprints under containment).
+- `pipeline-job-persistence` (modified): two existing requirements MODIFIED
+  (journal existence probes / cache fingerprints under containment; the
+  cycle-write-window ownership fast path's stated-limit sentence).
 
 ## Non-goals
 

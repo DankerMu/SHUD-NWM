@@ -75,8 +75,9 @@ Every existence probe over the file orchestration journal tree (segment slot pro
 
 #### Scenario: A cold and a warm instance agree on a tampered tree
 
-- **WHEN** one instance cached the cycle before the tamper and another instance
-  is created after it
+- **WHEN** one instance cached the cycle before the tamper, another instance
+  is created after it, and the recompute for that read reads the tampered
+  path
 - **THEN** both report the same fail-loud outcome — the same containment token,
   reason and lane fate — for the same public read, whichever cache the
   recompute would otherwise have been served from

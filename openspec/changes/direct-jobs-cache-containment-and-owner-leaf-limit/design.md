@@ -251,8 +251,11 @@ tamper D3 rules on.
 Governing invariant: Every cache the cycle-rows recompute consults — the cycle-rows cache and
   the direct-jobs cycle cache alike — judges the identity of its sources under the containment
   discipline, so a cold instance, a warm instance and the write-window owner give one answer
-  for one tree for a parent component swapped for a symlink; the sole remaining exception is the
-  ruled, spec-stated owner leaf-level limit, bounded to the window that grants the fast path.
+  for one tree for a parent component swapped for a symlink on a path the recompute reads; the
+  sole remaining exception is the ruled, spec-stated owner leaf-level limit — bounded to the
+  window that grants the fast path for changes that move a probed directory's stat identity,
+  and, for an in-place rewrite of a direct-job leaf, left to the direct cache's pre-existing
+  directory granularity inside and after the window.
 
 | # | Invariant | Where enforced | Test / evidence | Status |
 |---|---|---|---|---|

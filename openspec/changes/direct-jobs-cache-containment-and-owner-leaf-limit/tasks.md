@@ -56,6 +56,12 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 - [x] 3c.3 D3 provenance: APFS measured, ext4 reasoned (r2-cand-03).
 - [x] 3c.4 Docstrings falsified by the diff — `_cycle_job_records_signature` (`:6743`) and `tests/test_file_orchestration_journal.py:15515` — name `_containment_stat_signature`; the owner pin docstring's "exposure bounded to the window" sentence scoped like 3c.1 (r2-cand-04 + verifier note).
 
+## 3d. Phase 7 local repairs (text-only)
+
+- [x] 3d.1 Warm/cold-agreement scenario WHEN regains "and the recompute for that read reads the tampered path" (matches the requirement prose repaired in round 1).
+- [x] 3d.2 Invariant Matrix governing invariant scoped like the owner block (window-bounded only for stat-identity-moving changes; in-place rewrite carved out).
+- [x] 3d.3 proposal Capabilities: two MODIFIED requirements; PR body refreshed (counts, two MODIFIED blocks, scoped exposure sentence).
+
 ## 4. Spec + docs
 
 - [x] 4.1 `specs/pipeline-job-persistence/spec.md` delta: MODIFIED "Journal existence probes SHALL enforce filesystem containment before declaring absence" — name the direct-jobs cycle cache, drop the recompute-reads-tampered-path bound from the warm/cold scenario, add the by-cycle hard-variant scenario, widen the never-stored scenario to both caches.
