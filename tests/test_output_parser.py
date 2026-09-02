@@ -358,13 +358,16 @@ def test_output_parser_db_free_writes_object_store_artifacts(
     assert parse_result["rows_written"] == 2
 
 
-def test_compressed_chunk_guard_error_sets_dedicated_error_code(tmp_path: Path) -> None:
-    """E3: ``CompressedChunkGuardError`` from the guard becomes
+def test_compressed_chunk_write_error_sets_blocked_error_code(tmp_path: Path) -> None:
+    """#1785 arm 2/8 (subclass): a real compressed-chunk hit becomes
     ``OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED`` on ``hydro_run.error_code`` and
     the exception re-raises so the CLI (and callers) see the structured
     exception rather than a generic runtime bucket.
     """
-    from packages.common.timescale_write_guard import CompressedChunkGuardError
+    from packages.common.timescale_write_guard import (
+        CompressedChunkGuardError,
+        CompressedChunkWriteError,
+    )
 
     store, parser, repository = _build_parser(tmp_path)
     store.write_bytes_atomic(
@@ -377,18 +380,61 @@ def test_compressed_chunk_guard_error_sets_dedicated_error_code(tmp_path: Path) 
     def _raise_guard(rows: Any, *, batch_size: int, run_identity: Any = None, segment_keys: Any = None) -> None:
         # Preserve batch_size handshake so the assertion in the fake still fires.
         del rows, batch_size, run_identity, segment_keys
-        raise CompressedChunkGuardError(
-            "guard raised: chunk _hyper_1_1_chunk in hydro.river_timeseries"
+        raise CompressedChunkWriteError(
+            chunk_schema="_timescaledb_internal",
+            chunk_name="_hyper_1_1_chunk",
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
         )
 
     repository.upsert_river_timeseries = _raise_guard  # type: ignore[method-assign]
 
-    with pytest.raises(CompressedChunkGuardError):
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
         parser.parse_run("run_001")
 
+    assert isinstance(exc_info.value, CompressedChunkWriteError)
     assert repository.statuses == ["failed"]
     assert repository.failures[0][0] == "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED"
     assert "hydro.river_timeseries" in repository.failures[0][1]
+    # Restore for hygiene in case the fixture is reused.
+    repository.upsert_river_timeseries = original_upsert  # type: ignore[method-assign]
+
+
+def test_compressed_chunk_guard_error_sets_guard_failed_error_code(tmp_path: Path) -> None:
+    """#1785 arm 2/8 (base class): a guard-internal failure MUST NOT claim a
+    compressed chunk was hit — it stamps
+    ``OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED`` on ``hydro_run.error_code``
+    so the operator triages DB health / a caller bug instead of decompressing.
+    """
+    from packages.common.timescale_write_guard import (
+        CompressedChunkGuardError,
+        CompressedChunkWriteError,
+    )
+
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        ("time,seg_a,seg_b\n2026-05-01T00:00:00Z,86400,172800\n").encode("utf-8"),
+    )
+
+    original_upsert = repository.upsert_river_timeseries
+
+    def _raise_guard(rows: Any, *, batch_size: int, run_identity: Any = None, segment_keys: Any = None) -> None:
+        del rows, batch_size, run_identity, segment_keys
+        raise CompressedChunkGuardError(
+            "Compressed-chunk guard lookup failed for hydro.river_timeseries: "
+            "canceling statement due to statement timeout"
+        )
+
+    repository.upsert_river_timeseries = _raise_guard  # type: ignore[method-assign]
+
+    with pytest.raises(CompressedChunkGuardError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert not isinstance(exc_info.value, CompressedChunkWriteError)
+    assert repository.statuses == ["failed"]
+    assert repository.failures[0][0] == "OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED"
+    assert "statement timeout" in repository.failures[0][1]
     # Restore for hygiene in case the fixture is reused.
     repository.upsert_river_timeseries = original_upsert  # type: ignore[method-assign]
 
