@@ -39,7 +39,7 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 
 ## 3. #1942 — ruling B (D3)
 
-- [x] 3.1 Reword the docstring of `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit` (`:1344`): drop "must be FLIPPED when the residual is closed"; state the limit is ruled permanent by #1942 with the cost reason (probe 191 / fingerprint 414 / hit 422 vs 20 syscalls; a leaf probe is the fingerprint). Assertions unchanged.
+- [x] 3.1 Reword the docstring of `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit` (`:1344` on master, `:1670` at head): drop "must be FLIPPED when the residual is closed"; state the limit is ruled permanent by #1942 with the cost reason (probe 191 / fingerprint 414 / hit 422 vs 20 syscalls; a leaf probe is the fingerprint). Assertions unchanged.
 - [x] 3.2 No change to `_cycle_directories_probe_faulted` (`:9701`) or the probe list.
 
 ## 3b. Round-1 review repairs (test-oracle, verified)
@@ -47,7 +47,14 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 - [x] 3b.1 Signature-only fault test (matrix row 2b): on a clean `_empty_cycle_tree`, monkeypatch `repository._containment_stat_signature` to return `_FINGERPRINT_CONTAINMENT_FAULT` for the `pipeline-jobs` path only; two reads (`model_a`, then `None`) both recompute (counter == 2), `_direct_jobs_cycle_cache` stays empty; remove the patch, next read recomputes then hits. Mutation "drop `if not faulted`" must go red.
 - [x] 3b.2 Parametrize 1.6 over `_empty_cycle_tree` and `_hard_variant_tree` (spec scenario "including a real by-cycle partition with no `<cycle>` child").
 - [x] 3b.3 Replace the vacuous no-marker assertion after `direct_after == direct_before` with a comment, or drop it.
-- [x] 3b.4 `:1344` docstring: "any leaf-level change (symlink swap, plain-file add/replace/remove)" and the depth caveat on the 191/414/422 figures (14-component root; this PR's 334 warm hit is at 9).
+- [x] 3b.4 owner leaf-swap pin docstring (`:1670` at head): "any leaf-level change (symlink swap, plain-file add/replace/remove)" and the depth caveat on the 191/414/422 figures (14-component root; this PR's 334 warm hit is at 9).
+
+## 3c. Round-2 review repairs (spec-contract, verified)
+
+- [x] 3c.1 Owner-requirement delta: the window-boundedness clause scoped to changes that move a probed directory's stat identity; an in-place rewrite of a direct-job leaf is named as the direct cache's pre-existing directory granularity (r2-cand-01).
+- [x] 3c.2 "Permanent" restored in design D3 heading/ruling and proposal, consistent with #1942's definition of option B; option C stays priced-and-rejected, no reopen condition (r2-cand-02).
+- [x] 3c.3 D3 provenance: APFS measured, ext4 reasoned (r2-cand-03).
+- [x] 3c.4 Docstrings falsified by the diff — `_cycle_job_records_signature` (`:6743`) and `tests/test_file_orchestration_journal.py:15515` — name `_containment_stat_signature`; the owner pin docstring's "exposure bounded to the window" sentence scoped like 3c.1 (r2-cand-04 + verifier note).
 
 ## 4. Spec + docs
 

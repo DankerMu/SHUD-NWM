@@ -6740,7 +6740,7 @@ class FileOrchestrationJournalRepository:
         Design D10: every component is scoped to THIS cycle, never to a shared
         directory. ``_direct_jobs_cycle_cache`` is the cautionary example in
         this same file — its first component is
-        ``_stat_signature(root / "pipeline-jobs")``, a globally shared
+        ``_containment_stat_signature(root / "pipeline-jobs")``, a globally shared
         directory, so any write to any cycle invalidates every entry. That is
         correct and it thrashes; a memo built the same way buys nothing.
 

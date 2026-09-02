@@ -1682,8 +1682,9 @@ def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
     (`journal/gfs/<cycle>.jsonl`, one of five measured leaf cells) is one
     instance of that class, not the whole of it.  Whichever shape it takes, the
     owner keeps serving its pre-tamper cached rows while a cold instance on the
-    same tree raises.  That narrows the pre-PR state (the owner did no tamper
-    detection at all) instead of widening it.
+    same tree gives the fresh answer — rows reflecting the add, removal or
+    rewrite, or a raise for the symlink swap.  That narrows the pre-PR state
+    (the owner did no tamper detection at all) instead of widening it.
 
     #1942 ruled this limit PERMANENT (design D3, option B): the fast path is
     not going to grow a leaf probe, so this test pins a settled behaviour, not
@@ -1704,11 +1705,20 @@ def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
     flat `pipeline-jobs` root turns other cycles' writes into owner recomputes,
     and a parent tuple does not move for an in-place append to an existing
     `.jsonl` leaf, so C would close the swap/add/remove cells but not the
-    append cell at an unmeasured hit-rate cost.  The exposure stays bounded to
-    the window: the owner's next append invalidates every reachable key for the
-    pair, and the first read after the window revalidates under the full
-    containment-aware fingerprint, which sees the swapped leaf and fails loud.
-    The cold and non-owner lanes never had it.
+    append cell at an unmeasured hit-rate cost.  For a change that moves a
+    probed directory's own stat identity — an entry added, removed, replaced
+    by rename, or swapped for a symlink — the exposure stays bounded to the
+    window: the owner's next append invalidates every reachable key for the
+    pair, and the first read after the window recomputes from disk; for the
+    symlink swap exercised below, that recompute fails loud on the decoy.  The
+    cold and non-owner lanes never had THAT exposure.  An in-place rewrite of
+    an existing direct-job leaf's bytes under the flat `pipeline-jobs` root or
+    the by-cycle partition is a different shape and is NOT bounded that way:
+    it moves no probed directory's stat identity, so the direct-jobs cycle
+    cache's directory-granular signature does not see it inside or after the
+    window.  That granularity is pre-existing and belongs to that cache
+    (documented at `_cycle_job_records_signature`'s docstring), not to the
+    owner path.
 
     Input: an empty tree; two in-window `_cycle_rows` reads with
     `journal/gfs/<cycle>.jsonl` replaced by a symlink to a decoy regular file

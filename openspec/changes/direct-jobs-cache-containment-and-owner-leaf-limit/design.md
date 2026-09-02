@@ -168,7 +168,7 @@ non-difference, not a hole. **No code change.** The conclusion is recorded
 here and in the PR's 偏离记录; it rests on the mechanism plus the empty-tree
 probe.
 
-## D3 — #1942: the owner leaf-level tamper is a stated limit (option B)
+## D3 — #1942: the owner leaf-level tamper is a permanent stated limit (option B)
 
 ### The options, priced (A and B from PR #1939's verifier, cand-03/cand-04; C surfaced by this PR's review)
 
@@ -196,8 +196,9 @@ probe.
   for its five directories and keeps only the `is _FINGERPRINT_CONTAINMENT_FAULT`
   test; storing those tuples on the owner's entry and comparing on the next
   hit costs zero additional `os.*` calls, and a leaf unlink/symlink/rename
-  moves the parent directory's mtime on APFS and ext4 (measured for all five
-  cells in review). C is not adopted here, for costs that are not syscalls:
+  moves the parent directory's mtime (measured for all five cells on APFS in
+  review; the same holds on ext4 by POSIX plus ns timestamps — reasoned, not
+  measured). C is not adopted here, for costs that are not syscalls:
   (a) `pipeline-jobs` is a globally shared flat root — every non-candidate
   job of *any* cycle is written there through `_atomic_write_json_unlocked`
   (`_write_pipeline_job_direct_unlocked` `:9241-9259`), so other cycles' writes
@@ -213,13 +214,14 @@ probe.
 
 ### Ruling
 
-**B**, as the user ruled between A and B. The limit is recorded as a stated
-limit of the owner path, not as a residual awaiting closure; it is reopened
-only by a measured owner hit-rate figure under other cycles' flat writes
-(option C's cost) — no such measurement is planned. What changes on disk:
+**B**, as the user ruled between A and B — and #1942 defines B as accepting
+the residual *permanently*. The limit is a permanent stated limit of the
+owner path, not a residual awaiting closure; option C is recorded above as
+priced and rejected under this same ruling, not as a reopen condition. What
+changes on disk:
 
 - `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit`
-  (`tests/test_file_orchestration_journal_read_cache.py:1344`) keeps pinning
+  (`tests/test_file_orchestration_journal_read_cache.py:1670` at this head; `:1344` on master) keeps pinning
   the observable behavior. Its docstring currently says the test "must be
   FLIPPED" when the residual is closed; that sentence is now false and is
   replaced by the ruling, citing #1942 and the cost figures above.
@@ -263,7 +265,7 @@ Governing invariant: Every cache the cycle-rows recompute consults — the cycle
 | 6 | Retention inspection reports the tamper as a blocked row, never `eligible` | `_inspect_retention_cycle_unlocked` unchanged; behaviour moves at `:5835` via `:10099` | one `open_retention_cycle` window: `inspect()` → hard-variant tamper → `inspect()` == `blocked`/`file_journal_unsafe_scanned_entry`, equal to a fresh instance's inspection; master gives `eligible` | new |
 | 7 | No new exception type at any public boundary | tokens unchanged | tests assert `file_journal_unsafe_scanned_entry` only | pinned |
 | 8 | Sibling `_cycle_job_records_cache` unchanged | no diff | D2 table + `git diff` empty at `:6707-6870` | recorded |
-| 9 | Owner leaf-level tamper remains observable as the stated limit | no code change | `:1344` pin still green; docstring cites #1942 and says "any leaf-level change", with the depth caveat on the cost figures | reworded |
+| 9 | Owner leaf-level tamper remains observable as the stated limit | no code change | the owner leaf-swap pin (`:1670` at this head) still green; docstring cites #1942 and says "any leaf-level change", with the depth caveat on the cost figures | reworded |
 | 10 | `test_cycle_write_window_owner_keeps_fingerprint_free_fast_path` (`:434`) stays green | owner path untouched | existing test | pinned |
 | 11 | Direct cache cost delta measured, not estimated | — | syscall delta recorded in D1 "Measured" | evidence |
 ```

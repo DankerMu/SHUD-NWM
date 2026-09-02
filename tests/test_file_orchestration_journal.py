@@ -15512,7 +15512,7 @@ def test_cycle_scoped_replay_memo_is_not_evicted_by_a_write_to_another_cycle(
     """#1734 D10: the memo's invalidation signature is scoped to ONE cycle.
 
     ``_direct_jobs_cycle_cache`` keys its signature on
-    ``_stat_signature(root / "pipeline-jobs")`` — a shared, unpartitioned
+    ``_containment_stat_signature(root / "pipeline-jobs")`` — a shared, unpartitioned
     directory — so any write to any cycle invalidates every entry. It is
     correct and it thrashes. This test is what separates the new memo from
     that pattern: a write to a DIFFERENT cycle must leave this cycle's entry
