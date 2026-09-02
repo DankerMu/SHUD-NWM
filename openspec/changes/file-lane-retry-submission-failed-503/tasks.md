@@ -9,12 +9,12 @@ Oracles: local pytest (macOS) for red/green; node-27 for the issue's
 Verification command; CI status read at every head (recorded per round).
 
 - [x] Red proof (pre-change, scratch `red_1945.py` + implementer's pre-change run of the new tests: 6 FAILED, 5 with the `pipeline.py:545` AttributeError, T4 ImportError): T2/T1 setup at HEAD → HTTP 500, `AttributeError: 'FileJournalRetryService' object has no attribute 'submission_runtime_root_resolution'`
-- [x] `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py` green locally (201 passed)
+- [x] `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py` green locally (202 passed at 1f3e96ed; 201 at 1140b72d)
 - [x] `uv run pytest -q tests/test_select_ci_tests.py` green locally (458 passed; `_top_level_imported_module_names('tests/test_retry.py')` has no file-lane entry)
 - [x] `uv run ruff check .` clean
-- [ ] node-27 receipt (host, HEAD SHA, command line, pass line) for `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py`
+- [x] node-27 receipt (host ghdc, HEAD 1140b72d: 201 + 712 passed; 1f3e96ed: 202 + 712 passed; command lines recorded in `.workplans/pr-1945/node27-receipt-<sha>.txt`) for `uv run pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py` (+ api/journal suites)
 - [x] Frozen surfaces diff-empty vs `origin/master`: `RetryService.submission_runtime_root_resolution` body; `get_retry_service`; `attempt_manual_retry`'s `except Exception` block, `_record_manual_retry_submission_failure`, `_manual_retry_submission_failure_details`; the 409 mapping in `retry_run`; `_file_retry_event_runtime_root_candidates`. `retry.py` diff is the Protocol block plus `runtime_checkable` on the `typing` import line, nothing else. (Checked at implementation: all diff-empty; `tests/test_retry.py` has exactly one deleted line, the `type: ignore`.)
-- [ ] CI green on the final head; CI status of every pushed head recorded in the round ledger
+- [x] CI green on every pushed head so far (1140b72d run 33633144326, 1f3e96ed run 33646603046: Unit Tests success) and recorded in the round ledger; the final head's run is the merge gate
 - [x] `openspec validate file-lane-retry-submission-failed-503 --strict --no-interactive`
 
 ## 1. File-lane reader (D1)

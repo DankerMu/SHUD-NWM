@@ -135,11 +135,14 @@ def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | No
    (T2) and "evidence read faulted" (T3) are byte-identical. Accepted for this
    change (adding a discriminator to the 503 details would widen the route
    contract, out of scope); the reader emits one `logger.warning` carrying
-   only `error.reason` and `error.field` — the latter a journal-relative token
-   such as `journal/gfs/2026072000.jsonl` (every read-path raise site passes
-   it through `_relative_evidence`, `:14990-14994`, which falls back to
-   `[local-path]` for out-of-root paths), never an absolute root, and no
-   message text — so the fault is observable in logs. The `except` spans steps 1-3 as one block (the
+   only `error.reason` and `error.field` — the latter either a journal-relative
+   token such as `journal/gfs/2026072000.jsonl` (journal read/decode raise
+   sites pass the path through `_relative_evidence`, `:14990-14994`, which
+   falls back to `[local-path]` for out-of-root paths) or a bare column name
+   such as `cycle_id` / `source_id` from the identity helpers
+   (`_required_safe_identity`, `_normalize_file_source_id`) — never an
+   absolute root, and no message text — so the fault is observable in logs
+   (round-2 C1 wording). The `except` spans steps 1-3 as one block (the
    blocked-row branch, `_source_id_from_job`, and `_cycle_rows` can all raise
    `FileOrchestrationJournalError`), and catches nothing narrower or wider:
    `_JournalProbeContainmentError` (`:724`) is converted to
@@ -288,6 +291,14 @@ into `_RetryExecutionContext` via `app.dependency_overrides`.
 | 10 | Blocked row from `get_pipeline_job` on the second read → key absent, 503 intact | T3 sister assertion |
 
 ## Boundary-surface checklist
+
+- `.large-file-guard.json` gains two exclusions, `services/orchestrator/retry.py`
+  (1899 lines at base) and `apps/api/routes/pipeline.py` (2323 at base): both
+  already exceed the local commit hook's `maxLines: 1000`, so annotation-level
+  edits cannot be committed without them (precedent `553d2e6a`, `da58bd81`).
+  The hook is local tooling, not a CI gate; the structural-burndown spec's
+  direction is shrinkage of that list, so this is recorded as an entropy
+  surface, disclosed here and in the PR (round-2 C3).
 
 - `retry_run` is the only consumer of `submission_runtime_root_resolution`
   (grep: `pipeline.py:545`, `retry.py:713`); `cancel_run` uses `PipelineStore`.

@@ -3221,14 +3221,16 @@ def test_retry_api_file_lane_evidence_read_fault_reaches_reader_fail_soft(
     single ``logger.warning`` carrying only ``reason``/``field`` is the only
     observable difference.
 
-    The injected ``field`` is a root-RELATIVE segment token, the shape real
-    raise sites produce (``field=str(_relative_evidence(path, self.root))`` over
-    the ``journal/<source>/<cycle>.jsonl`` layout), so the leak assertions below
-    run against the documented payload rather than a degenerate one-word field.
-    That makes this a shape pin, not a leak guard: ``_relative_evidence``
-    already collapses anything outside the root to ``[local-path]``, so an
-    absolute path could only reach the log if a raise site were rewritten, which
-    is out of this test's reach.
+    The injected ``field`` pins the root-RELATIVE segment token that the
+    read/decode raise sites produce (``field=str(_relative_evidence(path,
+    self.root))`` over the ``journal/<source>/<cycle>.jsonl`` layout).  That is
+    one real shape among several, not the only one: the identity helpers
+    (``_required_safe_identity``, ``_normalize_file_source_id``) raise with a
+    bare column name such as ``cycle_id`` / ``source_id``, which is exactly what
+    the blocked-row sister test's no-guard mutant logs.  Neither family is ever
+    an absolute root -- ``_relative_evidence`` collapses anything outside the
+    root to ``[local-path]`` -- so this is a shape pin for the path-token
+    family, not a leak guard.
     """
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
