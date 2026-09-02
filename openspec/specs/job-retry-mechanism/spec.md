@@ -2200,17 +2200,32 @@ a dependency on a code outside that axis is not caught, and widening the
 axis is the way to buy more. A refusal list that is neither a module-level constant of this
 module nor consulted on that leg — for example a function-local literal on
 the raw-manifest or model-package leg, or a list living in another module —
-is outside this requirement. Two further bounds are stated rather than
-closed. First, the run-time cross-check closes installs under a name the
+is outside this requirement (an inline literal at the head of
+`_remedy_permits_permanent_failure` is caught only incidentally, by the
+raw-manifest behavioural tests elsewhere in the suite, and only when it
+includes a code those tests exercise; spelled with two other retired codes
+it was measured to leave the whole file green). Three further bounds are stated rather than closed. First, the run-time cross-check closes installs under a name the
 module body does not bind and rebinds that change a name's observed kind.
 Three mechanisms are measured to survive it, and this list is **what
 measurement found, not a proof that nothing else survives**. (a) A reflective
 rebind of an already-inventoried **name** — constant, function or class alike,
 not constants alone — to a value of the same observed kind, the name reaching
 the module object only as a string literal so that no syntactic reference
-exists to inventory. On the constant leg the constant-value assertions close
-it, and those name five of the module's eighteen module-level constants; on
-the function and class legs nothing closes it. (b) An install onto an
+exists to inventory. On the constant leg the constant-value assertions close it, and those name
+all eighteen of the module's module-level constants (the thirteen that
+carried no value pin before #1649 are pinned since, so a same-kind
+reflective rebind or a duplicate assignment of any constant is red). On
+the function and class legs an identity pin closes the plain same-kind
+rebind: for every inventoried `def` and admitted `class` name the runtime
+object's `__module__` SHALL equal the module's name and its `__qualname__`
+SHALL equal the inventoried name, which reds a wrapper `def` defined
+outside the module body, a `functools.partial`, and a subclass swap of the
+admitted class. The identity pin is itself bounded by identity forgery,
+and the bound is deliberate: `functools.wraps`, `functools.lru_cache` and
+(since Python 3.10) `staticmethod` copy both attributes onto the wrapper,
+so a rebind that carries the original's identity attributes still passes
+— that is the same property that keeps decorating an existing helper from
+false-redding, and the two cannot be separated by attribute comparison. (b) An install onto an
 **import-bound** name, exempt from the kind clause for the reason stated
 above. (c) An install under a name shaped like a **dunder**, which the first
 clause's dunder filter removes from consideration before the comparison
@@ -2226,7 +2241,16 @@ and is also measured — a `def` rebound to a `functools.partial`, a
 body goes from caught to uncaught — but no refusal list is itself callable, so
 no kill this change demonstrates is lost. Second, the accept-set's catch-all
 refuses any statement form the language grows next, but it cannot refuse a
-form the interpreter rejects before parsing completes. Source-text literal comparison against
+form the interpreter rejects before parsing completes. Third, the
+behavioural guard's two axes are bounded scales, not proofs: the code axis
+carries three of the retired blacklist's five codes and deliberately leaves
+`OUT_OF_MEMORY` and `POLICY_BLOCKED` — still live permanence codes in
+`_REMEDY_NON_CAUSAL_CODES` — off it, so a code-keyed recurrence on either
+of those two is not caught; and the classifier matrix's distinguishable
+signals for a new refusal are set by its axis width (five per axis), not by
+its cell count, so adding cells buys nothing. Neither axis is widened
+without a real recurrence, because widening charges every legitimate change
+for a hypothetical one. Source-text literal comparison against
 production source SHALL NOT be used to discharge this obligation: the
 retired guard's scan admitted a re-added blacklist written on one line, at a
 different indent, under a different name, or reordered so that neither
@@ -2314,6 +2338,30 @@ a renamed refusal list either — they are structurally the same event.
   change
 - **THEN** both guards stay green, so neither a false red nor a false green
   can be produced by a line-wrapping or indentation change alone
+
+#### Scenario: a same-kind reflective rebind of a judging function or the admitted class fails the suite
+
+- **WHEN** `_remedy_permits_permanent_failure` — or any other inventoried
+  `def` — is rebound at run time through a string-named install
+  (`setattr(sys.modules[__name__], "<name>", ...)` or the `globals()[...]`
+  spelling) to a callable defined outside the module body that does not carry
+  the original's `__module__` and `__qualname__`, or the admitted class
+  `_ForcingSidecarProvenance` is replaced by a subclass
+- **THEN** the identity pin fails on that name while the mapping comparison,
+  the stray-name clause and the kind clause are unchanged
+- **AND** a rebind that copies the original's identity attributes
+  (`functools.wraps`, `functools.lru_cache`, `staticmethod`) is outside this
+  scenario and is the identity pin's declared bound; decorating an existing
+  helper with `functools.lru_cache` stays green
+
+#### Scenario: a value change or duplicate assignment of any module-level constant fails the suite
+
+- **WHEN** any of the module's eighteen module-level constants is assigned a
+  second time later in the module body with a different value, or its literal
+  value is changed, or it is reflectively rebound to a same-kind value
+- **THEN** that constant's value assertion fails
+- **AND** the friction is the contract: a legitimate value change updates one
+  assertion in the same change
 
 ### Requirement: The repaired-stage-evidence predicate's admitting shapes MUST have regression coverage
 

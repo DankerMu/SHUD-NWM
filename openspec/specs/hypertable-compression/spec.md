@@ -1015,6 +1015,21 @@ fail-closed contract hollow; an unbounded DELETE is rejected outright by
 TimescaleDB once any chunk of the hypertable is compressed, even when zero
 rows match.
 
+The `valid_time` bound SHALL be enforced structurally, not only by the
+per-writer unit tests: the wire-site invariant
+(`tests/test_timescale_write_guard_wire_site_invariant.py`) SHALL require
+that every `DELETE FROM <schema>.<table>` string literal passed as a call
+argument and targeting a `HYPERTABLES_GUARDED` pair carries, in the same
+literal, both a lower bound spelled `valid_time >=` and an upper bound
+spelled `valid_time <=`. Those two spellings are the whole admitted set: a
+half-open upper bound (`valid_time <`) is NOT admitted, because the guard's
+certified window is closed on both ends and a half-open DELETE targets a
+different window than the one certified. A writer that needs another
+spelling SHALL widen the admitted set in the same change with a recorded
+reason. The predicate SHALL be pinned on synthetic literals so that the
+unbounded, lower-only, upper-only and half-open forms are each shown to
+fail independently of the repository's current writers.
+
 #### Scenario: Existing rows outside the incoming batch widen both windows
 
 - **WHEN** `workers/forcing_producer/store.py::replace_forcing_timeseries`
@@ -1056,6 +1071,27 @@ rows match.
 - **THEN** `replace_forcing_timeseries` is still defined, still makes
   exactly one `self._replace_values(...)` call, and still binds
   `pre_write_cursor_hook=` to a locally-defined function
+
+#### Scenario: An unbounded DELETE on a guarded hypertable fails the wire-site invariant
+
+- **WHEN** a production module under the scan roots issues `DELETE FROM
+  <schema>.<table>` for a `HYPERTABLES_GUARDED` pair whose literal lacks
+  `valid_time >=`, lacks `valid_time <=`, or spells the upper bound as
+  `valid_time <` — even when the same function also calls
+  `check_batch_targets_uncompressed`
+- **THEN** the wire-site invariant fails and names the module, the enclosing
+  function and the missing bound
+- **AND** the same predicate, applied to synthetic literals in each of those
+  three shapes, fails, while the bounded form with newline, indentation and
+  parameter-style variations passes
+
+#### Scenario: The three existing bounded writers pass the window predicate
+
+- **WHEN** the predicate is applied to every DELETE hit of the repository
+  scan at the current writers (`workers/output_parser/parser.py`,
+  `workers/forcing_producer/store.py`,
+  `packages/common/forcing_domain_handoff_apply.py`)
+- **THEN** every hit passes without any allowlist entry
 
 ### Requirement: The surviving `*_invocation` slots MUST name their real truth source
 

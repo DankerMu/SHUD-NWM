@@ -2703,3 +2703,24 @@ later-round catches still concentrate in rotated-in lenses (**297 versus
 94**), so **keep rotation** remains unchanged under the recorded autonomous
 default. Any reversal still requires the existing attribution-schema,
 round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-09-02 (post #1745 / #1733 / #1642 / #1800 / #1613 / #1649, PR #1949) — keep; lean-subset re-review adds core-only catches
+
+After the PR #1949 accountability line, `loop_log_audit.py` reports **153**
+multi-round merged PRs and later-round catches **core=98 / rotated=297**. The
+core count rises by four; the rotated count is unchanged.
+
+Round 1 ran correctness, integration, test/evidence and spec-compliance and
+produced five confirmed P2 test-evidence findings. Round 2 was a lean pass
+over the two lenses that had caught in Round 1 (test/evidence,
+spec-compliance) and returned four confirmed P2s plus one plausible; Round 3
+repeated the same two lenses and was clean. No lens rotated in at any round,
+so all four Round 2 catches fall in the core bucket by construction, exactly
+as PR #1947 did. The PR is a no-rotation datum: it moves the core count and
+says nothing about rotation's causal value.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**297 versus 98**), so **keep rotation** stands under the recorded autonomous
+default. Reversal still requires the attribution-schema, round-intent and
+round-role repairs plus maintainer review. Next revisit on the audit's next
+flag.
