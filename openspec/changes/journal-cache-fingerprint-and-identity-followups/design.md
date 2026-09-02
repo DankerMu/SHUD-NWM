@@ -116,6 +116,21 @@ between) and the probe costs less than one journal segment read.
   wrong reason, and the tempting "fix" — narrowing the entry clear — is the one
   thing this issue forbids. `MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512`
   (`:172`), so LRU eviction cannot confound the test.
+- **Stated limit — the shared flat-root stat.** Every cycle's fingerprint ends
+  with the stat of the flat `pipeline-jobs` root (`:6025`). A window whose body
+  writes a flat direct file (`pipeline-jobs/<job_id>.json` via
+  `_atomic_write_json_unlocked`) changes that directory's mtime, so after X's
+  window exits Y's entry survives the sweep but its fingerprint mismatches and
+  Y re-reads disk anyway. #1658's benefit is therefore bounded to windows whose
+  writes land in `journal/` or the by-cycle partition only; a flat direct write
+  still invalidates every cycle through the shared root stat. This is
+  pre-existing (the root stat is what makes rename-only changes visible) and
+  out of scope; it caps the acceptance criterion and is carried into the work
+  summary's 已知限制 with deferral routing. **Test shape consequence**: the
+  survival test's X-window body must append a journal record for X or write a
+  by-cycle candidate row — not a master/cohort flat direct — or Y misses for
+  the wrong reason; dropping the root stat from the fingerprint or weakening
+  the zero-read assertion are both forbidden responses to that miss.
 - `_direct_jobs_cycle_cache` (key at `:5926`) and the #1734 memo
   (`:6635-6690`) are out of scope (already cycle-scoped). The two other
   `_cycle_rows_cache.clear()` sites (`:1153`, `:1167`) are not window clears

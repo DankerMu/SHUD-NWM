@@ -62,9 +62,15 @@ Seam under test: `_locked_cycle_write` + `_cycle_rows_cache` on one shared insta
       (diff shows no edit to that statement).
 - [ ] Tests:
       - open X's window; inside it populate Y's entry (other cycle, same or other
-        source); exit → Y's entry still present and Y's next read makes zero
-        `_read_jsonl` / `_read_optional_json` calls; X's prefix (incl. base key)
-        is gone
+        source); X's window body appends a journal record for X or writes a
+        by-cycle candidate row (NOT a flat `pipeline-jobs/<job_id>.json`
+        direct — design D2 stated limit: the shared flat-root stat is in every
+        fingerprint); exit → Y's entry still present and Y's next read makes
+        zero `_read_jsonl` / `_read_optional_json` calls; X's prefix (incl. base
+        key) is gone
+      - stated limit recorded (design D2): a window that writes a flat direct
+        file still invalidates every cycle via the root stat — pre-existing,
+        out of scope, carried to the work summary's 已知限制 with routing
       - existing `test_cycle_write_window_*` and
         `test_non_owner_read_correct_even_with_cache_clear_disabled` stay green
         unmodified
