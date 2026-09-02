@@ -287,13 +287,16 @@ CREATE TABLE core.model_instance (
 > 两个面**按设计不同步**。所以会出现这个看起来矛盾的实测组合
 > （node-27，2026-09-02，只读）：baseline `basins_*_shud` 行 **38 true / 6 false**，
 > 而真正在 node-22 上跑的 `dg_*` 行 **0 true / 153 false**。
-> `dg_*` 保持 false 的可追溯原因是 node-27 autopipeline 的激活函数
+> `dg_*` 保持 false 的可追溯原因分两类。多数行（142/153）所属 `basin_version`
+> 已有 active 的 baseline 行，它们被 node-27 autopipeline 的激活函数
 > `scripts/node27_autopipeline.py::_activate_model`（`:1235-1266`，语句为
 > `UPDATE core.model_instance SET active_flag = true, lifecycle_state = 'active'`；
 > 调用点 `:1300`、`:1947`）自带 one-active-sibling 闸门：对尚未 active 的行，
 > 只有当同一 `basin_version_id` 下没有其它 active 行时才会更新（`:1255-1260`
 > 的 `active_flag = true OR NOT EXISTS (…)` 谓词——已 active 的行是幂等分支），
-> 撞上 baseline 兄弟行的 variant 拿到 `rowcount == 0`；
+> 撞上 baseline 兄弟行的 variant 拿到 `rowcount == 0`。其余 11 行所属
+> `basin_version` 没有任何 active 行（2026-09-02 只读核对，SQL 随回执），闸门
+> 不会拦它们，它们为 false 只说明从未对其调用过 `_activate_model`；
 > 该谓词的形状由 `tests/test_node27_autopipeline_preflight.py:832-869` 钉住
 > （mock cursor 上断言 SQL 含 `NOT EXISTS` 与
 > `active_sibling.basin_version_id = core.model_instance.basin_version_id`；
@@ -311,9 +314,9 @@ CREATE TABLE core.model_instance (
 > `basin_version_id` 已有 active 行时，会被 partial UNIQUE
 > `model_instance_active_basin_version_uidx` 拒绝（同文件 `:61-63`）。
 > **只有**当目标行所属 `basin_version` 没有 active 兄弟行时这个翻转才会落库，
-> 那时它**会**改变全国 MVT 的展示成员；这类 basin_version 确实存在
-> （同一次只读实测里 6 个 baseline 行为 false，但未逐行核对它们与 `dg_*`
-> 行的 basin_version 对应关系）。真正危险的动作是为了绕开这两道约束而去
+> 那时它**会**改变全国 MVT 的展示成员；这类行确实存在（2026-09-02 只读核对：
+> 153 个 `dg_*` 行中 11 个所属 `basin_version` 没有 active 行；`core.model_instance`
+> 共 197 行，baseline/`dg_*` 按 `model_id like 'dg_%'` 二分）。真正危险的动作是为了绕开这两道约束而去
 > 松 `lifecycle_state` 或改约束本身。
 > 另：`services/tiles/mvt.py:367` 的成员谓词里没有 baseline/variant 判别，
 > 「展示成员只认 baseline 行上的这个 flag」是当前数据状态下的观察

@@ -160,9 +160,13 @@ Facts to state (no causal story beyond what is traced):
   (`apps/frontend/src/lib/m11/overviewDataContracts.ts:408, :617`) — and by
   the lifecycle API (`model_registry.py`). As of the 2026-09-02 counts only
   baseline rows are `true` (the MVT predicate has no baseline/variant test);
-  `dg_*` rows stay `false` because `node27_autopipeline::_activate_model`'s
-  one-active-sibling guard never flips them, and the production file-lane
-  scheduler does not read the column (the postgres lane would).
+  `dg_*` rows are `false` for two traceable reasons — 142/153 sit under a
+  `basin_version` with an active baseline sibling, so
+  `node27_autopipeline::_activate_model`'s one-active-sibling guard returns
+  `rowcount == 0` for them; the other 11 have no active sibling and are
+  `false` only because activation was never attempted (node-27 read-only
+  check 2026-09-02, SQL echoed in the receipt) — and the production
+  file-lane scheduler does not read the column (the postgres lane would).
 - Compute-plane authority is the file-registry manifest
   (`NHMS_SCHEDULER_REGISTRY_BACKEND=file`, `manifest-last.json`, written by
   `scripts/publish_scheduler_file_registry.py`); the DB-free scheduler cannot
