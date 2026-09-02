@@ -2289,3 +2289,47 @@ def test_decline_on_the_empty_init_sentinel_reopens_once_a_manifest_appears(
         )
         == set()
     )
+
+
+# --------------------------------------------------------------------------- #
+# #1647 — a statement cancelled by the 600 s budget fails its run, not the lane
+# --------------------------------------------------------------------------- #
+def test_cancelled_ingest_statement_fails_its_run_and_the_next_tick_is_normal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Accepted consequence of the 600 s statement budget, stated as behaviour.
+
+    Bounding the statement means a genuinely long ingest statement is now
+    cancelled instead of hanging. What must NOT happen is a silent loss: the
+    driver's `QueryCanceled` travels the ordinary handoff-failure path, so the
+    run is marked `failed`, the tick's return code is non-zero (visible to the
+    unit and its `OnFailure=`), and the next tick — the whole point of bounding
+    it — runs normally instead of finding the flock still held.
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}, apply_reports={RUN_A: cancelled}
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["return_code"] == 1
+    assert summary["runs"]["failed"] == 1
+    assert [entry["run_id"] for entry in summary["runs"]["failed_runs"]] == [RUN_A]
+    assert summary["runs"]["failed_runs"][0]["stage"] == autopipe.FORCING_STAGE
+    assert autopipe.FORCING_HANDOFF_FAILED_REASON in summary["runs"]["failed_runs"][0]["error"]
+
+    # The next tick is unaffected: a fresh subject, nothing sticky left behind.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["runs"]["ingested"] == 1

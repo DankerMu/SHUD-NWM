@@ -449,11 +449,18 @@ def test_bounded_discovery_entry_limit_streams_without_materializing_directory(
         mode = stat.S_IFDIR if Path(path) == root else stat.S_IFREG
         return type("FakeStat", (), {"st_mode": mode})()
 
-    monkeypatch.setattr(qhh_bootstrap.os, "scandir", fake_scandir)
-    monkeypatch.setattr(qhh_bootstrap, "stat_no_follow", fake_stat_no_follow)
+    # #1765: `qhh_bootstrap.os` is the real `os` module, so this patch is global.
+    # `tmp_path_retention_policy = "failed"` rmtree()s tmp_path in the fixture
+    # finalizer, which calls os.scandir(fd) -- scope the patch to the call under
+    # test so it can never outlive the assertion and break teardown.
+    with monkeypatch.context() as patch:
+        patch.setattr(qhh_bootstrap.os, "scandir", fake_scandir)
+        patch.setattr(qhh_bootstrap, "stat_no_follow", fake_stat_no_follow)
 
-    with pytest.raises(QhhProductionBootstrapError) as exc_info:
-        qhh_bootstrap._bounded_discovery_preflight(root, model_id="basins_qhh_shud", qhh_source_root=qhh_source_root)
+        with pytest.raises(QhhProductionBootstrapError) as exc_info:
+            qhh_bootstrap._bounded_discovery_preflight(
+                root, model_id="basins_qhh_shud", qhh_source_root=qhh_source_root
+            )
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED"
     assert consumed == MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES + 1

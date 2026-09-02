@@ -865,6 +865,9 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
 
     assert selected == [
         "tests/test_display_publish_status_only.py",
+        # #1647: the `_connect` bounds + stats-guard flag parser suite, added to
+        # the same rule for the same reason (no same-name fallback finds it).
+        "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
         # #1442/#1789: the publish criterion is a registered oracle

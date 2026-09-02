@@ -6896,11 +6896,16 @@ def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_
     def fake_scandir(_fd: int) -> LazyScandir:
         return LazyScandir()
 
-    monkeypatch.setattr(safe_fs.os, "scandir", fake_scandir)
+    # #1765: `safe_fs.os` is the real `os` module, so this patch is global.
+    # `tmp_path_retention_policy = "failed"` rmtree()s tmp_path in the fixture
+    # finalizer, which calls os.scandir(fd) -- scope the patch to the call under
+    # test so it can never outlive the assertion and break teardown.
+    with monkeypatch.context() as patch:
+        patch.setattr(safe_fs.os, "scandir", fake_scandir)
 
-    query = FileOrchestrationJournalRepository(journal_root, max_files=max_files).query_pipeline_jobs_by_cycle(
-        cycle_id_for("gfs", cycle_time)
-    )
+        query = FileOrchestrationJournalRepository(journal_root, max_files=max_files).query_pipeline_jobs_by_cycle(
+            cycle_id_for("gfs", cycle_time)
+        )
 
     assert consumed_entries == max_files + 1
     assert query[0]["error_code"] == "file_journal_file_limit_exceeded"

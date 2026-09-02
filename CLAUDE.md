@@ -26,7 +26,7 @@ Do not hand-edit this file.
 - 22 的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
 - node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
 - 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
-- node-27 DB 数据文件全部在 `pg_default`（`/home/nwm/nhms-pgdata`，与 object store 共用 1.7 TB 卷）；容量核查一律 `df -h /home` + `psql` 实测，不引用文档里的历史数字。容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
+- node-27 DB 数据文件全部在 `pg_default`（`/home/nwm/nhms-pgdata`，与 object store 共用 1.7 TB 卷）；容量核查一律 `df -h / /home /data/GHDC` + `psql` 实测，不引用文档里的历史数字（`/` 也要看：#1765 的 `/tmp/pytest-of-nwm` 把根卷塞满过，node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`）。容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
 
 ### 验证 oracle 路由（改了什么 -> 在哪验）
 

@@ -1864,6 +1864,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
+            # #1647: the `_connect` bounds and the stats-guard flag parser live
+            # in their own suite, which the same-name fallback cannot find.
+            "tests/test_node27_autopipeline_connection_bounds.py",
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),
@@ -2351,6 +2354,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *CORE_SMOKE_TESTS,
             *THREAD_EXCEPTION_POLICY_TESTS,
             "tests/test_node27_cold_tablespace_marker_contract.py",
+            # #1765: `tmp_path_retention_policy` lives in the same table and is
+            # asserted here (parsed key + the running session's resolved ini).
+            PYTHON_ENVIRONMENT_TRUTH_TEST,
             SELECTOR_META_GUARD_TEST,
         ),
     ),

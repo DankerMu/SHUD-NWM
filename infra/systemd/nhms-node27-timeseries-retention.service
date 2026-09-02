@@ -15,5 +15,12 @@ WorkingDirectory=/home/nwm/NWM
 ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-timeseries-retention-logs
 ExecStart=/home/nwm/NWM/scripts/node27_timeseries_retention_once.sh
 StandardOutput=append:/home/nwm/node27-timeseries-retention-logs/systemd.log
-StandardError=append:/home/nwm/node27-timeseries-retention-logs/systemd.err
+# #1712: stderr to the journal, not to a file. The wrapper tees the runner's
+# combined output into retention.log AND to its own stderr, so the file
+# transcript is unchanged while the refusal diagnostic (the redacted
+# `refusal_reason`, `RETENTION_*`) now lands in the 30 journal lines the
+# `OnFailure=` handler quotes. The `systemd.err` lane is retired for THIS unit
+# only — the sibling units keep theirs. `StandardOutput=` is unchanged: the
+# wrapper's own bracket lines keep their file.
+StandardError=journal
 TimeoutStartSec=0

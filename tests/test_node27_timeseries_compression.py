@@ -2013,3 +2013,60 @@ def test_early_failure_publisher_lock_is_deadline_bounded(
         os.close(lock_fd)
     assert time.monotonic() - started < 0.5
     assert receipt.read_bytes() == raw
+
+
+# ---------------------------------------------------------------------------
+# #1647 — the qualified chunk name is fail-closed
+# ---------------------------------------------------------------------------
+
+
+def _chunk_named(chunk_schema: str, chunk_name: str) -> compression.ChunkRow:
+    return compression.ChunkRow(
+        hypertable_schema="hydro",
+        hypertable_name="river_timeseries",
+        chunk_schema=chunk_schema,
+        chunk_name=chunk_name,
+        range_start=_NOW - timedelta(days=8),
+        range_end=_NOW - timedelta(days=1),
+        is_compressed=False,
+    )
+
+
+class _ExplodingCursor:
+    """Any use at all is a failure — the refusal must precede every statement."""
+
+    def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a malformed chunk name reached a cursor")
+
+
+@pytest.mark.parametrize(
+    ("chunk_schema", "chunk_name"),
+    [
+        ("_timescaledb_internal", '_hyper_1_2_chunk"; DROP TABLE hydro.river_timeseries; --'),
+        ("_timescaledb_internal", "_hyper_1_2_chunk; SELECT 1"),
+        ('_timescaledb_internal"', "_hyper_1_2_chunk"),
+        ("_timescaledb_internal", "_hyper_1_2_chunk chunk"),
+        ("_timescaledb_internal", ""),
+        ("", "_hyper_1_2_chunk"),
+    ],
+    ids=["quote-in-name", "semicolon-in-name", "quote-in-schema", "space", "empty-name", "empty-schema"],
+)
+def test_qualified_chunk_refuses_a_non_identifier_name(
+    chunk_schema: str, chunk_name: str
+) -> None:
+    """The name goes into a statement that takes no bind parameters, so the only
+    safe input is one that cannot need escaping. Both parts are checked: a
+    catalog row is two identifiers, not one.
+    """
+    chunk = _chunk_named(chunk_schema, chunk_name)
+    cursor = _ExplodingCursor()
+
+    with pytest.raises(ValueError, match="non-identifier chunk name"):
+        cursor.execute(f'ANALYZE {chunk.qualified_chunk}')
+
+
+def test_qualified_chunk_accepts_a_real_catalog_name_unchanged() -> None:
+    """The shape TimescaleDB actually emits is produced byte-for-byte as before."""
+    chunk = _chunk_named("_timescaledb_internal", "_hyper_3_8_chunk")
+
+    assert chunk.qualified_chunk == '"_timescaledb_internal"."_hyper_3_8_chunk"'

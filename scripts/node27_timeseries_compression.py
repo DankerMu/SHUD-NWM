@@ -196,6 +196,15 @@ class CompressionConfig:
     systemd_wall_seconds: int
 
 
+# #1647: the qualified chunk name is the one identifier this module hands to a
+# statement that takes no bind parameters, so it is quoted by hand. Quoting by
+# hand is only safe if the input cannot contain a quote in the first place —
+# validate fail-closed instead. Byte-identical to the autopipeline anchor
+# ``scripts/node27_autopipeline.py::_STATS_GUARD_IDENT_RE``; the two patterns
+# are pinned equal by a test, so a loosening on either side is visible.
+_CHUNK_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
 @dataclass(frozen=True)
 class ChunkRow:
     hypertable_schema: str
@@ -212,6 +221,20 @@ class ChunkRow:
 
     @property
     def qualified_chunk(self) -> str:
+        """Double-quoted ``"schema"."chunk"`` for statements that take no binds.
+
+        Fail-closed (#1647): a catalog row whose name is not a bare identifier
+        raises before any caller can interpolate it, so a malformed name never
+        reaches a cursor. TimescaleDB chunk names are always
+        ``_hyper_<n>_<n>_chunk``; anything else is a catalog the runner does
+        not understand, and refusing is strictly safer than escaping.
+        """
+        for part in (self.chunk_schema, self.chunk_name):
+            if not _CHUNK_IDENT_RE.match(part):
+                raise ValueError(
+                    f"refusing to interpolate non-identifier chunk name: "
+                    f"{self.chunk_schema}.{self.chunk_name}"
+                )
         return f'"{self.chunk_schema}"."{self.chunk_name}"'
 
 
