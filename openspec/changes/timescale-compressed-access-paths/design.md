@@ -33,7 +33,7 @@ Comment rewrite at :73-86: "`rt.variable = 'q_down'` is an orderby-level batch f
 - Failure paths/rollback/stale state: a run with `status='parsed'` and NULL `parsed_at` (only by manual edit) stays unpublished and is visible in the census query; backfill refuses at config time on an inverted bound.
 - Evidence/audit/readiness: node-27 `EXPLAIN (COSTS OFF)` before/after (no `Seq Scan on compress_hyper_*`, no fact table at all after); count query = 0; backfill dry-run receipt with `bounds.lock_timeout_ms = 5000` and no `lock_contention` stop.
 - Regression rows:
-  - three `parsed` runs with `parsed_at` set -> all published, `updated_at` unchanged; a `parsed` run with NULL `parsed_at` -> untouched; `published` legacy run -> untouched.
+  - four-row oracle (post round-1 fix): a `parsed` run with `parsed_at` set -> published, `updated_at` unchanged; a `parsed` run with no rows and NULL `parsed_at` -> untouched; a `parsed` run WITH dual-written fact rows and NULL `parsed_at` (the counterfactual the retired EXISTS probe published) -> untouched; `published` legacy run -> untouched. Old predicate rowcount 2 vs new 1 (red observation recorded in the PR body).
   - oracle: any fact-table reference in `_publish_display_runs` -> red; dropped `PUSHDOWN_AID_MARKER` in copyback -> red (unchanged).
   - backfill: `lock_timeout_ms >= duration_wall_ms` -> config refusal, no batch executed; `55P03` -> `lock_contention`; `57014` -> halving then `duration_wall`.
   - unchanged sibling: `forcing_copyback_backfill.py` SQL and `required_columns` byte-identical; `tests/test_forcing_copyback_backfill.py` green.

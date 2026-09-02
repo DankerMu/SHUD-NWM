@@ -44,7 +44,7 @@ Evidence floor:
 - [x] T3 (#1778) Comment rewrite; marker line byte-identical (test stays green); PR body records (a)/(c) rejection; #1342 note.
 - [x] T4 (#1476) Env knob + default + config assertion + `SET LOCAL lock_timeout`; receipt `bounds` on both paths; schema `required` with `SCHEMA_VERSION` unchanged (no committed receipts; cursor loader gates on version only); tests (55P03 → lock_contention, 57014 unchanged, inverted bound refuses, receipt validates).
 - [x] T5 (#1476) Runbook §4.6.2 caveat (`:2204`) rewritten; env example if present.
-- [ ] T6 node-27 (queued session): RO `EXPLAIN (COSTS OFF)` of the old EXISTS form and the new form (plans archived under the PR); count query; integration-marked run of the three shared-seed suites; backfill dry-run (non-enforce) from a detached worktree with a scratch receipt path, `bounds.lock_timeout_ms` visible, no `lock_contention`.
+- [ ] T6 node-27 (queued session): RO `EXPLAIN (COSTS OFF)` of the old EXISTS form and the new form, plus `EXPLAIN (ANALYZE, BUFFERS)` of the new form showing the parsed=0 short-circuit stays at single-digit shared buffers (#1779 AC2) (plans archived under the PR); count query; integration-marked run of the three shared-seed suites; backfill dry-run (non-enforce) from a detached worktree with a scratch receipt path, `bounds.lock_timeout_ms` visible, no `lock_contention`.
 - [ ] T7 Comment on #1686: publish site closed, copyback pushdown still untriaged.
 
 ## Non-goals (explicit)

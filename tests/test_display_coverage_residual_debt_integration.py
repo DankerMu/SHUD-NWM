@@ -118,9 +118,10 @@ _LEGACY_PUBLISHED_RUN_ID = f"{ISSUE_126_PREFIX}_legacy_published_run"
 _LEGACY_PUBLISHED_RUN_SHIFT = timedelta(days=30)
 
 # The #1779 discriminator, one row: `parsed`, WITH key-visible fact rows, and no
-# `parsed_at`. It is the only row on which the retired EXISTS probe and the
-# authority-state predicate disagree (see
-# `_seed_parsed_run_with_rows_but_no_parse_timestamp`). Local to this module for
+# `parsed_at`. It is the only row SEEDED HERE on which the retired EXISTS probe
+# and the authority-state predicate disagree; the other disagreeing shape is
+# named, and deliberately not seeded, in
+# `_seed_parsed_run_with_rows_but_no_parse_timestamp`. Local to this module for
 # the same reason as the legacy row above.
 _ROWS_WITHOUT_PARSED_AT_RUN_ID = f"{ISSUE_126_PREFIX}_rows_without_parsed_at_run"
 _ROWS_WITHOUT_PARSED_AT_RUN_SHIFT = timedelta(days=15)
@@ -237,13 +238,27 @@ def _key_visible_river_row_count(connection: Any, run_id: str) -> int:
 def _seed_parsed_run_with_rows_but_no_parse_timestamp(connection: Any) -> None:
     """One ``parsed`` run WITH key-visible fact rows and NULL ``parsed_at``.
 
-    The single row on which the two publish predicates disagree. The retired
-    probe asked the fact table whether any row correlated with the run and would
-    publish this one; the #1779 predicate asks ``parsed_at IS NOT NULL`` and must
-    leave it ``parsed``. Both renditions of the old probe fire on it — this
-    module's ``_LEGACY_PUBLISH_SQL`` correlates on ``rt.run_id`` while pre-#1779
-    production correlated on ``rt.run_key``, and the dual-write helper populates
-    both — so the row reddens either way.
+    The only row seeded here on which the two publish predicates disagree. The
+    retired probe asked the fact table whether any row correlated with the run
+    and would publish this one; the #1779 predicate asks ``parsed_at IS NOT
+    NULL`` and must leave it ``parsed``. Both renditions of the old probe fire on
+    it — this module's ``_LEGACY_PUBLISH_SQL`` correlates on ``rt.run_id`` while
+    pre-#1779 production correlated on ``rt.run_key``, and the dual-write helper
+    populates both — so the row reddens either way.
+
+    It is not the only shape the two predicates disagree about, merely the only
+    one seeded here. A ``parsed`` run stamped with ``parsed_at`` whose parser wrote
+    ZERO fact rows disagrees in the opposite direction: published under the #1779
+    predicate, NOT published under either rendition of the old probe, whose
+    ``EXISTS`` is false when no fact row correlates. That direction is the
+    declared behaviour change rather than a regression — the #1789 owner decision
+    recorded in ``scripts/node27_autopipeline.py``'s publish criterion — and it is
+    production-reachable, because ``mark_run_parsed`` stamps ``parsed_at``
+    unconditionally, zero rows written included. No row here seeds it;
+    ``tests/test_display_publish_status_only.py``'s
+    ``test_publish_predicate_reads_authority_state_and_no_fact_table`` pins it at
+    the statement instead — asserting the publish statement reads neither the fact
+    table nor ``EXISTS`` is exactly what makes a stamped zero-row parse publish.
 
     It carries no timestamp because it is NOT a completed parse, which is the
     qualifier the "integration seeds carry the timestamp only for completed
@@ -393,11 +408,18 @@ def test_publish_predicate_publishes_completed_parses_and_nothing_else(
       have degenerated to ``status = 'parsed'`` and every assertion above would
       still pass;
     * discriminator — ``parsed`` with key-visible fact rows and NULL
-      ``parsed_at``. This is the ONLY row the retired ``EXISTS`` probe and the
-      authority-state predicate disagree about, and therefore the only reason
-      this test is red on pre-#1779 code: the probe publishes it (rowcount 2),
-      the predicate leaves it ``parsed`` (rowcount 1). Every other assertion
-      here holds under both statements;
+      ``parsed_at``. Of these four rows it is the ONLY one the retired ``EXISTS``
+      probe and the authority-state predicate disagree about, and therefore the
+      only reason this test is red on pre-#1779 code: the probe publishes it
+      (rowcount 2), the predicate leaves it ``parsed`` (rowcount 1). Every other
+      assertion here holds under both statements. The predicates also disagree
+      on a shape no row here seeds — a ``parsed`` run stamped with ``parsed_at``
+      whose parser wrote zero fact rows, which the new predicate publishes and
+      the old probe did not — but that direction is #1789's owner decision, not
+      a regression, and ``tests/test_display_publish_status_only.py``'s
+      ``test_publish_predicate_reads_authority_state_and_no_fact_table`` pins it
+      on the statement (see
+      ``_seed_parsed_run_with_rows_but_no_parse_timestamp``);
     * legacy — a run already ``published`` with NULL ``parsed_at`` (the #1674 D2
       pre-cutover cohort, 1360 rows in production) is outside the predicate and
       keeps its ``updated_at``. It is the row a predicate that keyed on

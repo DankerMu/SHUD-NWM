@@ -26,9 +26,9 @@
 - **WHEN** a run has `status = 'parsed'` and `parsed_at IS NULL`
 - **THEN** it is not published
 
-### Requirement: Transitional pushdown aids SHALL be labelled with their true planner effect
+### Requirement: The forcing-copyback transitional pushdown aid SHALL be labelled with its true planner effect
 
-The forcing-copyback discovery aid in `services/tile_publisher/forcing_copyback_backfill.py` (`_DISCOVER_BACKFILL_RUNS_SQL`, the `rt.variable = 'q_down'` conjunct) SHALL carry, next to the byte-identical `PUSHDOWN_AID_MARKER` line, a statement that it is an orderby-level batch filter and not a segmentby index pushdown. The other surviving `PUSHDOWN_AID_MARKER` sites (`packages/common/forecast_store.py`, `services/tiles/mvt.py`, `services/tile_publisher/publisher.py`, `workers/output_parser/parser.py`, `packages/common/display_coverage.py`, `apps/api/routes/hydro_display.py`) are #1342's scope and are not relabelled by this change.
+The forcing-copyback discovery aid in `services/tile_publisher/forcing_copyback_backfill.py` (`_DISCOVER_BACKFILL_RUNS_SQL`, the `rt.variable = 'q_down'` conjunct) SHALL carry, next to the byte-identical `PUSHDOWN_AID_MARKER` line, a statement that it is an orderby-level batch filter and not a segmentby index pushdown. The other 19 surviving `PUSHDOWN_AID_MARKER` sites (`packages/common/forecast_store.py` 6, `services/tiles/mvt.py` 7, `apps/api/routes/hydro_display.py` 3, `workers/output_parser/parser.py` 2, `services/tile_publisher/publisher.py` 1) and the unmarked #1341 prose-variant aids in `packages/common/display_coverage.py` are #1342's scope and are not relabelled by this change.
 
 #### Scenario: Copyback aid is described as an orderby filter
 
