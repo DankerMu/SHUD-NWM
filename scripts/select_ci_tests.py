@@ -1594,6 +1594,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # "eight below" census stays true.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1704: same guard-derived provenance — the API error-logging
+            # suite imports apps/api/routes/hydro_display.py at file level,
+            # which imports services.tiles.mvt, so it is a one-hop importer
+            # here (and a DIRECT importer on the hydro_display rule below).
+            "tests/test_api_errors_logging.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -1617,6 +1622,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/routes/hydro_display.py",
         (
             "tests/test_api_contract.py",
+            # #1704: guard-derived, not hand-curated — the API error-logging
+            # suite imports get_hydro_display_session from this module at file
+            # level, so it is a direct non-gated importer.
+            "tests/test_api_errors_logging.py",
             "tests/test_direct_grid_display_cutover_flip.py",
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
