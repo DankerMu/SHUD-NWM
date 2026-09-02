@@ -17,7 +17,7 @@ Every database connection opened by `scripts/node27_autopipeline.py` SHALL be op
 #### Scenario: A runaway statement cancels instead of wedging
 
 - **WHEN** a statement on a non-guard `_connect` connection exceeds the budget
-- **THEN** the driver raises `QueryCanceled`, the affected run is marked `failed`, the tick exits non-zero, and the next scheduled tick runs normally
+- **THEN** the driver raises `QueryCanceled` instead of the tick wedging under its flock; on the per-run ingest path (`_process_run`) the affected run is marked `failed` and the tick exits non-zero, while on the seed / pre-loop / publish sites (`_basin_seeded`, `_seed_basin`, `_already_ingested_runs`, `_publish_display_runs`) the exception propagates out of `main()` — the tick exits non-zero with a traceback and no JSON summary — and in both cases the next scheduled tick runs normally
 
 #### Scenario: Guard-leg cancellation keeps the #1643 semantics
 

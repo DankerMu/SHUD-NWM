@@ -231,6 +231,22 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
         },
+        # #1712: the retention unit file is the producer of the
+        # `StandardError=journal` + `OnFailure=` contract; it is infra/**
+        # non-python, so without its own rule it matched nothing and a
+        # unit-only PR selected zero tests. Deliberately narrower than the
+        # `.timer` sibling: a glob over the retention unit files would drag in
+        # cold_residency, which the unit body cannot break.
+        "infra/systemd/nhms-node27-timeseries-retention.service": {
+            "tests/test_node27_timeseries_retention.py",
+        },
+        # #1647: the compression runner owns one half of the byte-identity
+        # pin between `_CHUNK_IDENT_RE` and the autopipeline
+        # `_STATS_GUARD_IDENT_RE`; the assertion lives in the bounds suite.
+        "scripts/node27_timeseries_compression.py": {
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_autopipeline_connection_bounds.py",
+        },
     }
 
     for producer, consumers in expected.items():

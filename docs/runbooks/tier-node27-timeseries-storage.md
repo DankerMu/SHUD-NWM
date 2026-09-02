@@ -3601,8 +3601,14 @@ before a receipt exists.
    **this unit only**; the sibling node-27 units still write
    `StandardError=append:…/systemd.err` and their alerts (where they have one)
    still quote lifecycle lines only. `StandardOutput=append:` is unchanged
-   here, so the wrapper's own `start` / `done rc=` bracket lines keep going to
-   `systemd.log` and are NOT duplicated into the journal.
+   here, but do not read it as the bracket destination: the wrapper writes
+   nothing at all to stdout. Its `start` / `done rc=` bracket lines are
+   appended straight to `retention.log`
+   (`scripts/node27_timeseries_retention_once.sh:143,:158`) and the runner's
+   combined output now goes to stderr, so `systemd.log` is a stdout catch-all
+   for anything the wrapper or runner might print in future — normally empty.
+   Look for the bracket lines in `retention.log`; they are NOT duplicated into
+   the journal.
 
    **Deployment is MANUAL** — node-27's units are user-scope
    (`~/.config/systemd/user/`), so `git pull --ff-only` updates only the
@@ -3658,6 +3664,22 @@ before a receipt exists.
      onto the volume the retention runner's own ENOSPC reasoning is about; the
      bound that makes it safe is the retention policy above, not the volume's
      size.
+
+     **`/home` free space has no critical tier.** The resource-governance
+     audit gives that mount a warning threshold only —
+     `home_free_warn_bytes` (default 300 GiB) ->
+     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70,:227`
+     — and there is no `home_free_critical_bytes` at all. The exit-1 /
+     `OnFailure=` mail lane fires only on `severity: critical` (`:564`
+     `_critical_codes`), and the three codes that can be critical today are
+     `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
+     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:309`).
+     So a free-space shortfall on the volume that actually holds pgdata and
+     the object store can never page anyone: it only appears as a `warning`
+     line in a receipt someone reads. The database-size proxy is the closest
+     thing to a critical for this volume, and it says nothing about the object
+     store sharing it. Reading the newest `resource-governance-*.json` by hand
+     therefore stays a step of the bringup checklist, not an optional one.
 
    **Never** put `--basetemp` in shared config (`pyproject.toml`, CI): it
    clears its target on every run and would apply to the Mac and to CI too.

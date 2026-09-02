@@ -1918,6 +1918,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1647: `_CHUNK_IDENT_RE` is pinned byte-equal to the autopipeline
+            # `_STATS_GUARD_IDENT_RE` from that suite, so loosening the pattern
+            # here reds there — mirror of the autopipeline row above.
+            "tests/test_node27_autopipeline_connection_bounds.py",
         ),
     ),
     PathTestRule(
@@ -1963,6 +1967,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_retention.py",
         ),
+    ),
+    PathTestRule(
+        # #1712: the unit file carries the `StandardError=journal` lane and the
+        # `OnFailure=` alert wiring, both pinned by unit-file tests. Without an
+        # explicit row it is infra/** non-python, matches nothing, and a
+        # unit-only PR selected zero tests. Narrow on purpose — the `.timer`
+        # sibling's cold_residency target is timer-schedule coverage, not
+        # something the unit body can break.
+        "infra/systemd/nhms-node27-timeseries-retention.service",
+        ("tests/test_node27_timeseries_retention.py",),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",

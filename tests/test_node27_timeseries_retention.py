@@ -3579,8 +3579,9 @@ def test_alert_wrapper_exits_zero_without_a_unit_argument(tmp_path: Path) -> Non
 
 
 def test_retention_unit_declares_the_failure_alert_handler() -> None:
-    """The retention unit is the ONLY consumer wired in this change, and the
-    template it points at exists and runs the wrapper with ``%i``.
+    """The retention unit is one of the two consumers wired in this change
+    (the resource-governance unit is the other, #1765), and the template it
+    points at exists and runs the wrapper with ``%i``.
     """
     service_text = _SERVICE_PATH.read_text(encoding="utf-8")
     assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in service_text
@@ -3896,9 +3897,10 @@ def test_wrapper_takes_its_exit_code_from_the_runner_not_from_tee() -> None:
 def test_retention_unit_routes_stderr_to_the_journal() -> None:
     """The wrapper's stderr is only useful if the unit publishes it.
 
-    `StandardOutput=` is deliberately unchanged (the wrapper's own bracket
-    lines keep their file) and `OnFailure=` is unchanged — this is a lane
-    change, not a new alerting mechanism.
+    `StandardOutput=` is deliberately unchanged (a stdout catch-all; the
+    wrapper's own bracket lines never went there — they are appended straight
+    to retention.log) and `OnFailure=` is unchanged — this is a lane change,
+    not a new alerting mechanism.
     """
     text = _SERVICE_PATH.read_text(encoding="utf-8")
     # Directives only: the `#` lines explaining the retirement mention the

@@ -20,7 +20,7 @@ Four independent node-27 operations signals are broken in ways that were each ob
 **Modified Capabilities**
 - `timeseries-db-retention` — escalation criterion, journal-visible refusal reason, governance critical exit.
 - `frontier-chunk-statistics-freshness` — autopipeline connection timeouts, stats-guard flag parsing.
-- `hypertable-compression` — fail-closed chunk identifier in the compression ANALYZE path.
+- `hypertable-compression` — fail-closed chunk identifier helper in the compression runner (no interpolating consumer today; defence in depth).
 - `python-environment-truth` — bounded pytest temporary directories.
 
 ## Impact

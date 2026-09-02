@@ -190,6 +190,19 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   systemctl --user show nhms-node27-resource-governance.service -p OnFailure
   ```
 
+  **装 `OnFailure=` 之前先看有没有长期 `critical`**：只要还有一条 `critical`
+  建议没消，这个 unit 就会**每个每日 tick 都 exit 1**——按设计一直挂在
+  `systemctl --user --failed` 里并且每次都发一封信（告警处理器是刻意做傻的，
+  没有去重、没有状态）。让它安静的办法是把条件清掉，不是压制告警。所以先读
+  最新的一份 receipt 确认当前没有 `severity: critical`：
+
+  ```bash
+  ls -t /home/nwm/node27-resource-governance-logs/resource-governance-*.json | head -1 \
+    | xargs -r grep -c '"severity": *"critical"'
+  ```
+
+  timer 是 `OnCalendar=*-*-* 04:10:00 UTC`，所以「每个 tick」就是每天一封。
+
 ---
 
 ## 上线判定

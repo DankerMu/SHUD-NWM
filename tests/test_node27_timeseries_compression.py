@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import hashlib
 import inspect
@@ -2032,11 +2033,94 @@ def _chunk_named(chunk_schema: str, chunk_name: str) -> compression.ChunkRow:
     )
 
 
-class _ExplodingCursor:
-    """Any use at all is a failure — the refusal must precede every statement."""
+_CHUNK_IDENT_ATTRS = frozenset({"qualified_chunk", "chunk_name", "chunk_schema"})
 
-    def execute(self, *_args: object, **_kwargs: object) -> None:
-        raise AssertionError("a malformed chunk name reached a cursor")
+
+def _fstring_chunk_refs(node: ast.JoinedStr) -> set[str]:
+    """Chunk-identifier names interpolated by one f-string, attributes or bare."""
+    names: set[str] = set()
+    for value in node.values:
+        if not isinstance(value, ast.FormattedValue):
+            continue
+        for sub in ast.walk(value.value):
+            if isinstance(sub, ast.Attribute):
+                names.add(sub.attr)
+            elif isinstance(sub, ast.Name):
+                names.add(sub.id)
+    return names & _CHUNK_IDENT_ATTRS
+
+
+def _fstring_sql_naming_a_chunk(source: str) -> list[str]:
+    """Every f-string in ``source`` that would put a chunk name into SQL text.
+
+    Two shapes are flagged: any f-string interpolating ``qualified_chunk`` at
+    all, and an f-string handed to ``execute``/``executemany`` as the STATEMENT
+    (first positional argument) whose interpolations name a chunk. Parsed, not
+    grepped: the module legitimately builds f-strings out of ``chunk_schema`` /
+    ``chunk_name`` for bind-parameter values (``compress_chunk(%s::regclass)``)
+    and for error text, and a substring scan would match those, the module's
+    comments, and this docstring.
+    """
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.JoinedStr) and "qualified_chunk" in _fstring_chunk_refs(node):
+            offenders.append(f"line {node.lineno}: f-string interpolates qualified_chunk")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"execute", "executemany"}
+            and node.args
+            and isinstance(node.args[0], ast.JoinedStr)
+            and _fstring_chunk_refs(node.args[0])
+        ):
+            offenders.append(
+                f"line {node.lineno}: {node.func.attr}() statement interpolates "
+                f"{sorted(_fstring_chunk_refs(node.args[0]))}"
+            )
+    return sorted(offenders)
+
+
+def test_the_module_has_no_fstring_sql_naming_a_chunk() -> None:
+    """`qualified_chunk` has no production consumer, and that is the point.
+
+    Every chunk reference in the runner is a bound ``%s::regclass`` parameter;
+    the ride-along ANALYZE the helper was written for was removed in f5069257.
+    The helper is defence in depth for a future interpolation site, so the
+    thing worth pinning is that no such site has quietly appeared.
+    """
+    source = Path(compression.__file__).read_text(encoding="utf-8")
+
+    assert _fstring_sql_naming_a_chunk(source) == []
+
+
+def test_the_fstring_chunk_scan_flags_an_injected_analyze() -> None:
+    """A scan that cannot red is decoration. It must fire on the forbidden
+    shape and stay quiet on the three shapes the module actually uses.
+    """
+    assert _fstring_sql_naming_a_chunk(
+        'cursor.execute(f"ANALYZE {chunk.qualified_chunk}")\n'
+    ) == [
+        "line 1: execute() statement interpolates ['qualified_chunk']",
+        "line 1: f-string interpolates qualified_chunk",
+    ]
+    assert _fstring_sql_naming_a_chunk(
+        'cursor.execute(f"ANALYZE {chunk_schema}.{chunk_name}")\n'
+    ) == ["line 1: execute() statement interpolates ['chunk_name', 'chunk_schema']"]
+
+    assert (
+        _fstring_sql_naming_a_chunk(
+            'cursor.execute("SELECT compress_chunk(%s::regclass)",'
+            ' (f"{chunk.chunk_schema}.{chunk.chunk_name}",))\n'
+        )
+        == []
+    )
+    assert (
+        _fstring_sql_naming_a_chunk(
+            'raise ValueError(f"non-identifier {self.chunk_schema}.{self.chunk_name}")\n'
+        )
+        == []
+    )
+    assert _fstring_sql_naming_a_chunk('cursor.execute(f"SET statement_timeout = {ms}")\n') == []
 
 
 @pytest.mark.parametrize(
@@ -2051,18 +2135,21 @@ class _ExplodingCursor:
     ],
     ids=["quote-in-name", "semicolon-in-name", "quote-in-schema", "space", "empty-name", "empty-schema"],
 )
-def test_qualified_chunk_refuses_a_non_identifier_name(
+def test_qualified_chunk_raises_before_returning_a_non_identifier_name(
     chunk_schema: str, chunk_name: str
 ) -> None:
-    """The name goes into a statement that takes no bind parameters, so the only
-    safe input is one that cannot need escaping. Both parts are checked: a
-    catalog row is two identifiers, not one.
+    """The refusal is the property's own, not a caller's.
+
+    Any future consumer would interpolate this into a statement that takes no
+    bind parameters, so the only safe input is one that cannot need escaping —
+    and the check has to fire on the attribute access itself, before any text
+    exists to hand on. Both parts are checked: a catalog row is two
+    identifiers, not one.
     """
     chunk = _chunk_named(chunk_schema, chunk_name)
-    cursor = _ExplodingCursor()
 
     with pytest.raises(ValueError, match="non-identifier chunk name"):
-        cursor.execute(f'ANALYZE {chunk.qualified_chunk}')
+        chunk.qualified_chunk
 
 
 def test_qualified_chunk_accepts_a_real_catalog_name_unchanged() -> None:

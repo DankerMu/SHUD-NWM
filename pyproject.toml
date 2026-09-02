@@ -81,9 +81,14 @@ asyncio_mode = "auto"
 # host `TMPDIR=/home/nwm/tmp` discipline (docs/runbooks/
 # tier-node27-timeseries-storage.md §8.6, node-27-bringup-checklist.md).
 # Author contract: under this policy `tmp_path` is rmtree()d in its fixture
-# finalizer, which calls os.scandir(fd) -- a test that patches `os.scandir` /
-# `os.lstat` globally must scope it (`with monkeypatch.context() as patch:`)
-# or it errors at teardown.
+# finalizer, which calls os.scandir(fd). The rmtree runs with
+# ignore_errors=True, so it absorbs OSError; what still errors at teardown is a
+# global `os.scandir` / `os.lstat` patch that raises something else, or one
+# that returns a malformed object (#1765 fixed two of those:
+# tests/test_file_orchestration_journal.py and
+# tests/test_qhh_production_bootstrap.py handed back fake entries rmtree could
+# not walk). Scope such patches
+# (`with monkeypatch.context() as patch:`) instead of leaving them global.
 tmp_path_retention_policy = "failed"
 # #1646: escalate only pytest's built-in thread-exception collector so an
 # unhandled worker exception fails the owning test with its original cause,

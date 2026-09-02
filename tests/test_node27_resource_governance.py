@@ -661,8 +661,11 @@ def test_governance_unit_routes_stderr_to_the_journal_and_alerts_on_failure() ->
     assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in text
     assert "StandardError=journal" in text
     assert "StandardError=append:" not in text
-    # stdout keeps its file: the wrapper's own bracket lines are not journal
-    # material, and moving them would be an unrelated change.
+    # stdout keeps its file. Not because the bracket lines live there — the
+    # wrapper appends its own `start` / `done rc=` lines straight to
+    # resource-governance.log and writes nothing to stdout — but because
+    # `StandardOutput=` is the catch-all for anything the lane might print in
+    # future, and retargeting it would be an unrelated change.
     assert (
         "StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log" in text
     )

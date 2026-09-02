@@ -196,12 +196,17 @@ class CompressionConfig:
     systemd_wall_seconds: int
 
 
-# #1647: the qualified chunk name is the one identifier this module hands to a
-# statement that takes no bind parameters, so it is quoted by hand. Quoting by
-# hand is only safe if the input cannot contain a quote in the first place —
-# validate fail-closed instead. Byte-identical to the autopipeline anchor
+# #1647: no statement in this module interpolates a chunk name — every chunk
+# reference is a bound ``%s::regclass`` parameter, and the ride-along ANALYZE
+# this pattern was originally written for was removed in f5069257. So the
+# helper below has NO consumer today; it is defence in depth, kept so that a
+# future interpolation site inherits a fail-closed identifier by construction
+# rather than by review. Quoting by hand is only safe if the input cannot
+# contain a quote in the first place — validate fail-closed instead.
+# Byte-identical to the autopipeline anchor
 # ``scripts/node27_autopipeline.py::_STATS_GUARD_IDENT_RE``; the two patterns
-# are pinned equal by a test, so a loosening on either side is visible.
+# are pinned equal by a test, so a loosening on either side is visible, and a
+# module-scan test keeps the "no interpolating consumer" half true.
 _CHUNK_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
@@ -223,11 +228,16 @@ class ChunkRow:
     def qualified_chunk(self) -> str:
         """Double-quoted ``"schema"."chunk"`` for statements that take no binds.
 
+        No consumer today (defence in depth): the runner names chunks only
+        through bound ``%s::regclass`` parameters, and the ride-along ANALYZE
+        this property was written for was removed in f5069257.
+
         Fail-closed (#1647): a catalog row whose name is not a bare identifier
-        raises before any caller can interpolate it, so a malformed name never
-        reaches a cursor. TimescaleDB chunk names are always
-        ``_hyper_<n>_<n>_chunk``; anything else is a catalog the runner does
-        not understand, and refusing is strictly safer than escaping.
+        raises before any caller can interpolate it, so a malformed name could
+        not reach a cursor even once a first consumer appears. TimescaleDB
+        chunk names are always ``_hyper_<n>_<n>_chunk``; anything else is a
+        catalog the runner does not understand, and refusing is strictly safer
+        than escaping.
         """
         for part in (self.chunk_schema, self.chunk_name):
             if not _CHUNK_IDENT_RE.match(part):
