@@ -2,16 +2,20 @@
 # compressed-chunk-cold-tablespace-tiering).
 #
 # Copy to node27-cold-residency.env and chmod 0600. Do not create a live env
-# file in this repository. Reserve byte values are mandatory and have no
-# Python, wrapper, or example-template default; Issue #1895 fills measured
-# live values before install.
+# file in this repository. Reserve byte values and the container runtime
+# UID/GID pair are mandatory and have no Python, wrapper, or example-template
+# default; Issue #1895 fills measured live values before install.
 #
 # Copy/fill/install boundary:
 #   1. cp infra/env/node27-cold-residency.example /home/nwm/NWM/infra/env/node27-cold-residency.env
-#   2. fill DATABASE_URL, NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES and
-#      NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES
+#   2. fill DATABASE_URL, NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES,
+#      NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES, and both
+#      NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID/GID measured from the live
+#      container (see below)
 #   3. chmod 0600 /home/nwm/NWM/infra/env/node27-cold-residency.env
-#   4. Issue #1895 installs the unit after #1894 creates nhms_cold
+#   4. Issue #1929 (the numeric runtime identity probe) must be deployed before
+#      this runner's first dry-run; Issue #1895 installs the unit after #1894
+#      creates nhms_cold
 
 NODE27_COLD_RESIDENCY_REPO_ROOT=/home/nwm/NWM
 
@@ -53,6 +57,19 @@ NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS=7842
 # pre-connect.
 #NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES=
 #NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES=
+
+# Mandatory container runtime principal used for the cold-path writability
+# probe (issue #1929). Both are required in dry-run AND enforce, before the DB
+# connection: decimal integers in 1..4294967294 (non-root, below the (uid_t)-1
+# sentinel). They must equal the value `docker inspect --format
+# '{{.Config.User}}' nhms-db` reports at run time; the probe then executes
+# `docker exec --user <uid>:<gid> ... test -w` as that exact pair. There is no
+# `postgres`, image-default, root or UID-only fallback, and half a pair is a
+# refusal. Leave unassigned here: Issue #1895 re-observes the live numeric
+# uid:gid and fills both keys in the mode-0600 env file (never in this
+# template), then re-runs the probe before any enforce.
+#NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID=
+#NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID=
 
 # Absolute paths. Receipt, intent sidecar and both lock files must be disjoint.
 NODE27_COLD_RESIDENCY_RECEIPT_PATH=/home/nwm/NWM/artifacts/receipts/node27_timeseries_cold_residency.json

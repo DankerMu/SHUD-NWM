@@ -17,10 +17,13 @@ from tests.cold_residency_fakes import (
     FakeConnection,
     chunk,
     complete_relations,
+    required_exec_env,
+    target_observation,
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
+_TERMINAL = json.loads((_ROOT / "schemas/examples/timeseries_cold_residency_receipt.example.json").read_text())
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -44,6 +47,7 @@ def _base_env(tmp_path: Path, *, override: dict[str, str | None] | None = None) 
         "NODE27_COLD_RESIDENCY_STATEMENT_TIMEOUT_MS": "3600000",
         "NODE27_COLD_RESIDENCY_WRAPPER_WALL_SECONDS": "3901",
         "NODE27_COLD_RESIDENCY_SYSTEMD_WALL_SECONDS": "7842",
+        **required_exec_env(),
     }
     if override:
         for key, value in override.items():
@@ -208,18 +212,21 @@ def _connect_factory(connection: FakeConnection):
 
 
 def _ready(config: runner.RunnerConfig) -> runner.RunnerConfig:
+    """Config with an injected inspector that independently observes identity.
+
+    The injected pair is the runtime 1005:1005 principal, which is what the
+    mandatory env keys in :func:`_base_env` configure. The pair is supplied by
+    the fake rather than filled in by the runtime: the no-echo guarantee is
+    asserted in tests/test_node27_cold_residency_runtime_identity.py.
+    """
+
     return config.__class__(
         **{
             **config.__dict__,
             "cold_free_bytes": 10_000,
             "hot_free_bytes": 10_000,
             "expected_device_identity": "8:1",
-            "inspect_target": lambda: {
-                "container_name": "nhms-db",
-                "container_bind": "/data/GHDC/nhms-cold-tablespace",
-                "host_path": "/data/GHDC/nhms-cold-tablespace",
-                "device_identity": "8:1",
-            },
+            "inspect_target": lambda: target_observation(),
         }
     )
 

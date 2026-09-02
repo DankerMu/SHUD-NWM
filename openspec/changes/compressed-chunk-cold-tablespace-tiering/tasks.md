@@ -132,7 +132,7 @@ Seams under test:
 
 ## 2A. #1929 — Bind target writability to numeric runtime identity
 
-- [ ] 2A.1 Require explicit non-root
+- [x] 2A.1 Require explicit non-root
   `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID/GID` integers for dry-run and enforce
   before any database connection; propagate them through `RunnerConfig` and
   `RuntimeConfig`. Require each decimal component in `1..4294967294`; reject
@@ -140,17 +140,17 @@ Seams under test:
   either-zero/one-component-only input with no `postgres`, root, image-default,
   UID-only, or implicit fallback. Expose both keys unassigned
   in the public env example for #1895 to fill after fresh measurement.
-- [ ] 2A.2 Replace the mount-only production observation with one bounded inert,
+- [x] 2A.2 Replace the mount-only production observation with one bounded inert,
   small Docker inspect projection that stays inside the existing 5-second/64-KiB
   ceilings and parses exactly one cold bind plus strict numeric `Config.User`;
   reject missing/empty/named/UID-only/malformed/either-root/mismatched identity
   before running `test -w`, then execute that check as the same `<uid>:<gid>`.
-- [ ] 2A.3 Carry observed `container_exec_uid/gid` through `TargetIdentity` and
+- [x] 2A.3 Carry observed `container_exec_uid/gid` through `TargetIdentity` and
   target receipt evidence. New writers/examples use schema `1.1`; the shipping
   schema/readers accept historical `1.0` and current `1.1`; `1.0` target objects
   omit the fields, observed `1.1` requires both non-root integers, and unobserved
   `1.1` requires both present as null without expected-config echo.
-- [ ] 2A.4 Test dry-run and enforce preflight for the discriminating
+- [x] 2A.4 Test dry-run and enforce preflight for the discriminating
   image-`postgres=1000:1000` / expected+observed runtime `1005:1005` /
   owner-matched mode-0700 path case; assert exact numeric argv, the complete
   env/Python and inspect refusal matrices before writable/SQL, config tombstone/

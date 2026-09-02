@@ -24,6 +24,9 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from packages.common.compressed_chunk_cold_receipt import (
+    SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION,
+)
+from packages.common.compressed_chunk_cold_receipt import (
     ColdReceiptError,
     assert_publication_paths_disjoint,
     build_receipt,
@@ -46,6 +49,13 @@ from packages.common.compressed_chunk_cold_runtime import (
     LIVE_CONTAINER_NAME,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
+from packages.common.compressed_chunk_cold_target import (
+    CONTAINER_EXEC_ID_MIN,
+    container_exec_id_from_decimal,
+    container_exec_id_message,
+    is_canonical_decimal,
+    safe_token_echo,
+)
 from packages.common.compressed_chunk_cold_tick import run_tick as execute_tick
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.node27_timeseries_lifecycle_lock import (
@@ -62,8 +72,14 @@ from packages.common.node27_timeseries_sequential_budget import (
 )
 from packages.common.safe_fs import ensure_directory_no_follow, open_directory_no_follow
 
-SCHEMA_VERSION = "1.0"
+# Single writer authority lives in the receipt module; this CLI mirror must
+# equal it so a wrapper/ops probe never reports a version the runner did not
+# emit. It is the version NEW runs carry — historical 1.0 evidence stays
+# readable through the schema union, it is never re-emitted here.
+SCHEMA_VERSION = RECEIPT_SCHEMA_VERSION
 _APPLICATION_NAME = "nhms-ts-cold-residency"
+_ENV_CONTAINER_EXEC_UID = "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID"
+_ENV_CONTAINER_EXEC_GID = "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID"
 _CONNECT_TIMEOUT_SECONDS = 10
 _MAX_CATALOG_ROWS = 10_000
 _MAX_CATALOG_BYTES = 16 * 1024**2
@@ -108,6 +124,8 @@ class RunnerConfig:
     expected_host_path: str
     expected_container_name: str
     expected_device_identity: str
+    expected_container_exec_uid: int
+    expected_container_exec_gid: int
     inspect_target: Callable[[], Mapping[str, Any]] | None = None
     cold_free_bytes: int | None = None
     hot_free_bytes: int | None = None
@@ -202,6 +220,35 @@ def _parse_positive_int_with_default(env: Mapping[str, str], name: str, *, defau
     return _parse_positive_int(raw, name=name, minimum=minimum)
 
 
+def _parse_container_exec_id(env: Mapping[str, str], name: str) -> int:
+    """Required canonical decimal container runtime id (#1929).
+
+    Mandatory for dry-run and enforce alike, with no default of any kind: `postgres`,
+    the image default, root, a UID-only pair and an implicit fallback are all
+    unreachable from here.
+    """
+
+    raw = env.get(name)
+    if raw is None:
+        raise ColdResidencyConfigError(f"{name} must be set")
+    if raw == "":
+        raise ColdResidencyConfigError(f"{name} must not be empty")
+    if not is_canonical_decimal(raw):
+        # Bounded echo: an unbounded token here would overflow the 256-character
+        # `error.reason` cap and silently drop the config tombstone, exactly like
+        # an unguarded int() conversion would.
+        raise ColdResidencyConfigError(
+            f"{name} must be a canonical decimal integer, got {safe_token_echo(raw, limit=64)!r}"
+        )
+    # Bounded parse: int() never sees a token wider than the bound, so CPython's
+    # 4300-digit conversion limit cannot escape here as an untyped ValueError —
+    # which would skip the schema-valid config tombstone this refusal publishes.
+    value = container_exec_id_from_decimal(raw)
+    if value is None or value < CONTAINER_EXEC_ID_MIN:
+        raise ColdResidencyConfigError(container_exec_id_message(name, raw))
+    return value
+
+
 def _ceil_div(numerator: int, denominator: int) -> int:
     return -(-numerator // denominator)
 
@@ -288,6 +335,9 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         name="NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES",
         minimum=1,
     )
+    # #1929: mandatory in both modes, before any connection or writability probe.
+    container_exec_uid = _parse_container_exec_id(env, _ENV_CONTAINER_EXEC_UID)
+    container_exec_gid = _parse_container_exec_id(env, _ENV_CONTAINER_EXEC_GID)
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise ColdResidencyConfigError("DATABASE_URL must be set")
@@ -313,6 +363,8 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         expected_host_path=env.get("NODE27_COLD_RESIDENCY_HOST_PATH") or HOST_COLD_PATH,
         expected_container_name=LIVE_CONTAINER_NAME,
         expected_device_identity=env.get("NODE27_COLD_RESIDENCY_DEVICE_IDENTITY") or "",
+        expected_container_exec_uid=container_exec_uid,
+        expected_container_exec_gid=container_exec_gid,
     )
 
 
@@ -513,6 +565,12 @@ def main(
                     expected_host_path=HOST_COLD_PATH,
                     expected_container_name=LIVE_CONTAINER_NAME,
                     expected_device_identity="",
+                    # No accepted principal exists in a config-refusal path. Zero is
+                    # the explicit "nothing configured" marker: it is never validated,
+                    # never executed, and the tombstone target reports present nulls
+                    # instead of inventing an observed identity.
+                    expected_container_exec_uid=0,
+                    expected_container_exec_gid=0,
                 )
                 payload = _tombstone(
                     placeholder,

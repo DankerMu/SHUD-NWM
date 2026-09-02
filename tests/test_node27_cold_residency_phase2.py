@@ -20,7 +20,12 @@ from packages.common.compressed_chunk_cold_receipt import (
 )
 from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_cold_residency as runner
-from tests.cold_residency_fakes import FakeConnection, chunk, complete_relations
+from tests.cold_residency_fakes import (
+    FakeConnection,
+    chunk,
+    complete_relations,
+    target_observation,
+)
 from tests.test_node27_cold_residency import _args, _base_env, _ready
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -113,12 +118,7 @@ def test_second_group_refuses_when_free_space_shrinks(tmp_path: Path, monkeypatc
             **config.__dict__,
             "cold_free_bytes": None,
             "hot_free_bytes": 10_000,
-            "inspect_target": lambda: {
-                "container_name": "nhms-db",
-                "container_bind": "/data/GHDC/nhms-cold-tablespace",
-                "host_path": "/data/GHDC/nhms-cold-tablespace",
-                "device_identity": "8:1",
-            },
+            "inspect_target": lambda: target_observation(),
             "expected_device_identity": "8:1",
         }
     )
@@ -421,12 +421,7 @@ def _two_group_config(tmp_path: Path, **overrides: object) -> runner.RunnerConfi
         **config.__dict__,
         "cold_free_bytes": 10_000,
         "hot_free_bytes": 10_000,
-        "inspect_target": lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "8:1",
-        },
+        "inspect_target": lambda: target_observation(),
         "expected_device_identity": "8:1",
     }
     payload.update(overrides)

@@ -189,8 +189,67 @@ the 04:25 compression oneshot runs compression first, then
 lane-local flock. Catalog location, container bind and host path have
 fixed production defaults; `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` has
 no default and is mandatory for `--enforce` (Issue #1895 fills the live
-value). Check what is actually enabled on the box with
+value). `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID` and `..._GID` have no
+default either and are mandatory in **both** modes — see the next
+subsection (#1929). Check what is actually enabled on the box with
 `systemctl --user list-timers` before relying on the table.
+
+### Cold-residency target writability probe (#1929)
+
+The runner proves the cold path is writable **as the PostgreSQL server's own
+container principal**, never as an image user name. `docker exec --user postgres`
+resolves through the image `/etc/passwd` to `1000:1000`, while the live `nhms-db`
+container runs `--user 1005:1005` and its `/data/GHDC/nhms-cold-tablespace` is
+`nwm:nwm` mode `0700` (§4.3.3) — so a name-based probe is refused by the mode bits
+and fails a preflight that is otherwise healthy. That was the #1929 defect.
+
+- **Mandatory, unassigned config.** `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID`
+  and `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID` are required in **dry-run and
+  enforce alike**, before any DB connection. Each must be a canonical decimal
+  integer in `1..4294967294` (`2^32-2`, excluding root and the `(uid_t)-1`
+  sentinel). Missing, empty, whitespace-padded, `+`/`-`, names, zero, negative,
+  above-bound, or only one of the two keys refuses as `config`/`config`. The
+  bound is enforced **before** conversion: a token longer than the bound's 10
+  digits is refused by width, so CPython's 4300-digit `int()` limit can never
+  surface as an untyped `ValueError` that skips the config tombstone, and the
+  refusal summarizes such a token instead of echoing it (`error.reason` is capped
+  at 256 characters by the receipt schema). The
+  committed template ships both keys **commented with no value**; Issue #1895
+  measures them fresh and writes them into the mode-0600 live env only.
+- **One bounded observation.** A single inert
+  `docker inspect --format '{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}'`
+  supplies both the unique cold bind and `Config.User` inside the existing
+  5-second and 64-KiB ceilings (no full inspect document, no raised ceiling).
+  `--format` is a **Go text/template**, so keep it a JSON literal whose values
+  come from `{{json X}}`. Never wrap the projection in the sprig/Helm `dict`
+  helper: Docker has no such function, and the CLI fails client-side at exit 64
+  with `function "dict" not defined` before the daemon is contacted, so every run
+  would refuse on a healthy container.
+- **Fresh equality, then probe as that exact pair.** Observed `Config.User` must
+  equal the configured `uid:gid`, and only then does the runner execute
+  `docker exec --user <uid>:<gid> nhms-db test -w
+  /home/postgres/pgdata/tablespaces/nhms_cold` — argv, no shell. Missing/empty,
+  named, UID-only, non-canonical, either-component-root, or mismatched identity
+  refuses **before** the writability command. There is no `postgres`, root,
+  image-default or UID-only fallback anywhere, and no second `Config.User` read:
+  the descriptor-bound host identity before/after comparison stays the TOCTOU
+  fence.
+- **Evidence.** The observed pair is recorded in every schema `1.1` receipt
+  target as `container_exec_uid`/`container_exec_gid`. A config refusal publishes
+  a `1.1` tombstone with both fields present as **null** — never an echo of the
+  expected config. Historical `1.0` receipts and intent sidecars stay readable
+  (the schema accepts the `1.0`/`1.1` union; `1.0` target objects omit both
+  fields), so pre-#1929 recovery authority is not stranded.
+- **Ordering boundary.** #1929 must be deployed **before** the #1895 rollout
+  dry-run: without it, both dry-run and enforce are refused at target preflight
+  on the current node-27 configuration. Verify the live pair read-only first:
+
+  ```bash
+  # Both readings must agree with the two env keys; §4.3.3 records the last
+  # measured pair. Never copy a value from this document into the live env.
+  docker inspect nhms-db --format '{{.Config.User}}'
+  stat -c '%u:%g %a' /data/GHDC/nhms-cold-tablespace
+  ```
 
 ### Live-state notes (verified 2026-08-01)
 

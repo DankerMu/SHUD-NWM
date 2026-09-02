@@ -818,9 +818,15 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_runtime_proof.py",
+            "tests/test_compressed_chunk_cold_target.py",
+            # #1929: the isolated-cluster suite now shares the identity helpers,
+            # so a fakes-only PR must still run it (its own tests skip without
+            # the oracle, but collection is the contract check).
+            "tests/test_compressed_chunk_cold_runtime_integration.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_publication.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
         ),
     ),
     PathTestRule(
@@ -1867,6 +1873,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_publication.py",
+            # #1929 producers reach the whole identity contract, so the CLI
+            # module must select the target/runtime/schema surfaces too.
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
+            "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
@@ -1925,6 +1938,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node27-cold-residency.example",
         (
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
@@ -1935,6 +1949,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
@@ -1945,6 +1960,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
         ),
     ),
     PathTestRule(
@@ -1952,6 +1969,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
+            # #1929: the terminal example is the downgrade source for the
+            # historical-1.0 fixtures AND the tombstone base document.
+            "tests/test_node27_cold_residency_runtime_identity.py",
         ),
     ),
     PathTestRule(
@@ -1959,6 +1980,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
@@ -1966,6 +1988,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
@@ -1973,6 +1996,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
@@ -1980,6 +2004,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_timeseries_storage_schemas.py",
             "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
         ),
     ),
     PathTestRule(
@@ -2012,12 +2037,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # Movement owner. After the #1929 split this module owns only the
+        # shell-first sequence plus its catalog read helpers; the suites below
+        # are its derived importers (RuntimeConfig / LIVE_CONTAINER_NAME by name,
+        # or the tick that drives it). Its preflight re-exports and the
+        # inspector/receipt surfaces are routed to their own owners below.
         "packages/common/compressed_chunk_cold_runtime.py",
         (
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_runtime_proof.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency_publication.py",
+        ),
+    ),
+    PathTestRule(
+        # #1929 structural split: the ONLY definition site of the
+        # target-preflight identity contract (RuntimeConfig, TargetIdentity,
+        # preflight_target_identity, require_runtime_exec_identity). No test
+        # imports it by name — movement re-exports it and the CLI/tick reach it
+        # through that surface — so importer derivation alone routes a PR here
+        # to zero cold-residency suites. Each listed suite executes the gate:
+        # directly (preflight / RuntimeConfig / CLI env), or through a
+        # run_tick that preflights before its first SQL. `test_..._target.py` is
+        # the inspector's only production caller; the isolated-cluster suite is
+        # included because its disposable oracle proves the same
+        # expected==observed path on a real container.
+        "packages/common/compressed_chunk_cold_runtime_target.py",
+        (
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
+            "tests/test_compressed_chunk_cold_runtime_integration.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency_publication.py",
         ),
     ),
     PathTestRule(
@@ -2034,6 +2090,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_publication.py",
             "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_timeseries_storage_schemas.py",
         ),
     ),
@@ -2042,6 +2100,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_compressed_chunk_cold_target.py",
             "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_runtime_proof.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_phase2.py",
+            "tests/test_node27_cold_residency_publication.py",
         ),
     ),
     PathTestRule(
@@ -2050,6 +2113,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_publication.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_cold_residency_schema_compat.py",
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_compressed_chunk_cold_target.py",
         ),
     ),
     PathTestRule(

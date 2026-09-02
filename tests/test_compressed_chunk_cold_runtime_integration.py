@@ -30,6 +30,7 @@ from packages.common.compressed_chunk_cold_runtime import (
 from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories, load_eligible_chunks
 from packages.common.compressed_chunk_cold_tick import run_tick
 from scripts.node27_cold_residency import RunnerConfig
+from tests.cold_residency_fakes import expected_exec_identity, target_observation
 
 _WATERMARK = datetime(2026, 7, 11, tzinfo=UTC)
 _CUTOFF = datetime(2026, 7, 4, tzinfo=UTC)
@@ -225,12 +226,15 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
                 expected_host_path=str(work / "cold"),
                 expected_container_name=config.container_name,
                 expected_device_identity="isolated",
-                inspect_target=lambda: {
-                    "container_name": config.container_name,
-                    "container_bind": str(work / "cold"),
-                    "host_path": str(work / "cold"),
-                    "device_identity": "isolated",
-                },
+                # #1929: the disposable oracle runs its container as the host
+                # observer's numeric identity, so expected and observed agree.
+                **expected_exec_identity(),
+                inspect_target=lambda: target_observation(
+                    container_name=config.container_name,
+                    container_bind=str(work / "cold"),
+                    host_path=str(work / "cold"),
+                    device_identity="isolated",
+                ),
                 cold_free_bytes=10**12,
                 hot_free_bytes=10**12,
                 after_group_progress=after_group_progress,
@@ -288,13 +292,14 @@ def _runtime_config(config: Any) -> RuntimeConfig:
         expected_container_bind=cold,
         expected_host_path=cold,
         expected_container_name=config.container_name,
-        inspect_target=lambda: {
-            "container_name": config.container_name,
-            "container_bind": cold,
-            "host_path": cold,
-            "device_identity": "isolated",
-        },
+        inspect_target=lambda: target_observation(
+            container_name=config.container_name,
+            container_bind=cold,
+            host_path=cold,
+            device_identity="isolated",
+        ),
         expected_device_identity="isolated",
+        **expected_exec_identity(),
     )
 
 

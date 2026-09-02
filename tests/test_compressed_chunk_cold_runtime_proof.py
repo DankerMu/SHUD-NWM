@@ -21,6 +21,8 @@ from tests.cold_residency_fakes import (
     bound_inventories,
     chunk,
     complete_relations,
+    expected_exec_identity,
+    target_observation,
 )
 
 
@@ -37,13 +39,16 @@ def _loaded(connection: FakeConnection, item=None, space: str = "pg_default") ->
     return connection, current
 
 
-def _inspect_target() -> dict[str, str]:
-    return {
-        "container_name": "nhms-db",
-        "container_bind": "/data/GHDC/nhms-cold-tablespace",
-        "host_path": "/data/GHDC/nhms-cold-tablespace",
-        "device_identity": "8:1",
-    }
+def _inspect_target() -> dict[str, Any]:
+    """Injected inspector observing the runtime principal independently (#1929)."""
+
+    return target_observation()
+
+
+def _runtime(**overrides: Any) -> RuntimeConfig:
+    """RuntimeConfig with the mandatory expected numeric principal."""
+
+    return RuntimeConfig(**{**expected_exec_identity(), **overrides})
 
 
 def test_off_pin_postgres_refuses_before_movement() -> None:
@@ -60,7 +65,7 @@ def test_off_pin_postgres_refuses_before_movement() -> None:
             hot_free_bytes=10_000,
             cold_reserve_bytes=100,
             wal_reserve_bytes=1,
-            config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+            config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
         )
     assert raised.value.error_class == "engine_identity"
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
@@ -80,7 +85,7 @@ def test_off_pin_timescaledb_refuses_before_movement() -> None:
             hot_free_bytes=10_000,
             cold_reserve_bytes=100,
             wal_reserve_bytes=1,
-            config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+            config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
         )
     assert raised.value.error_class == "engine_identity"
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
@@ -122,7 +127,7 @@ def test_blocked_post_decompress_group_rolls_back_before_compress() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.shell_sql_executed is True
     assert observation.outcome != "migrated"
@@ -183,7 +188,7 @@ def test_all_cold_origin_only_post_recompress_rolls_back_before_commit() -> None
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert any(
         "compress_chunk" in sql and "decompress_chunk" not in sql

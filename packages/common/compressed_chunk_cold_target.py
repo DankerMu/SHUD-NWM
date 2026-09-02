@@ -1,9 +1,18 @@
-"""Read-only production inspector for the cold tablespace bind/device identity."""
+"""Read-only production inspector for the cold tablespace bind and runtime identity.
+
+Issue #1929: the writability probe must measure the principal that actually writes
+the tablespace — the container's numeric runtime UID/GID — never an image user name.
+One bounded, inert ``docker inspect`` projection observes ``.Mounts`` plus
+``.Config.User``; only after the observed pair equals the explicitly configured
+pair may ``test -w`` run as that exact ``uid:gid``. There is no ``postgres``, root,
+image-default or UID-only fallback on any path.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import stat
 import subprocess
@@ -11,7 +20,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.safe_fs import SafeFilesystemError, open_directory_no_follow
@@ -22,16 +31,27 @@ HOST_COLD_PATH = "/data/GHDC/nhms-cold-tablespace"
 TRUSTED_DOCKER_BIN = "/usr/bin/docker"
 INSPECT_TIMEOUT_SECONDS = 5
 INSPECT_OUTPUT_MAX_BYTES = 64 * 1024
-CONTAINER_WRITABLE_ARGV = (
-    "/usr/bin/docker",
-    "exec",
-    "--user",
-    "postgres",
-    "nhms-db",
-    "test",
-    "-w",
-    "/home/postgres/pgdata/tablespaces/nhms_cold",
-)
+# `uid_t`/`gid_t` are 32-bit on the pinned image; 0 is root and 2**32-1 is the
+# (uid_t)-1 sentinel, so the representable non-root domain is 1..2**32-2.
+CONTAINER_EXEC_ID_MIN = 1
+CONTAINER_EXEC_ID_MAX = 2**32 - 2
+# Width of the largest accepted decimal token (10). Derived from the bound, never
+# a literal, so the two cannot drift apart.
+CONTAINER_EXEC_ID_DIGITS_MAX = len(str(CONTAINER_EXEC_ID_MAX))
+
+# A small projection, not the full inspect document: the only two fields the
+# target preflight consumes, so the 64-KiB ceiling stays meaningful.
+#
+# This is a Go text/template literal, which is what `docker inspect --format`
+# actually evaluates. It must NOT use `dict`: that is a sprig/Helm helper, is
+# not part of Docker's template function set, and fails client-side before any
+# daemon lookup (Docker 29.1.3: exit 64 `template parsing error: ... function
+# "dict" not defined`). `{{json X}}` emits valid JSON for each value, so the
+# surrounding literals keep the whole line parseable as one JSON object.
+INSPECT_FORMAT = '{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}'
+
+_CANONICAL_DECIMAL_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_NUMERIC_PAIR_RE = re.compile(r"^([0-9]+):([0-9]+)$")
 
 DockerRunner = Callable[..., subprocess.CompletedProcess[str]]
 HostInspectFn = Callable[[str], Mapping[str, Any]]
@@ -46,6 +66,14 @@ class HostIdentity:
 
 
 @dataclass(frozen=True)
+class ContainerExecIdentity:
+    """Strictly canonical numeric ``Config.User`` observed from the container."""
+
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
 class ObservedTarget:
     container_name: str
     container_bind: str
@@ -55,6 +83,160 @@ class ObservedTarget:
     host_mode: int
     host_uid: int
     host_gid: int
+    container_exec_uid: int
+    container_exec_gid: int
+
+
+class ContainerExecIdentityError(ColdRuntimeError):
+    """Refusal carrying the config/inspector error class and stage."""
+
+
+def validate_container_exec_id(value: Any, *, name: str) -> int:
+    """Canonical decimal integer in ``1..4294967294``; no bool, name, or fallback.
+
+    ``bool`` is rejected despite subclassing ``int``: a JSON ``true`` or a Python
+    ``True`` is never an observed principal.
+    """
+
+    if isinstance(value, bool):
+        raise ContainerExecIdentityError(
+            f"{name} must be an integer, not a boolean",
+            error_class="config",
+            stage="config",
+        )
+    if not isinstance(value, int):
+        raise ContainerExecIdentityError(
+            f"{name} must be an integer",
+            error_class="config",
+            stage="config",
+        )
+    if value < CONTAINER_EXEC_ID_MIN or value > CONTAINER_EXEC_ID_MAX:
+        raise ContainerExecIdentityError(
+            container_exec_id_message(name, value),
+            error_class="config",
+            stage="config",
+        )
+    return int(value)
+
+
+def require_container_exec_pair(uid: Any, gid: Any, *, uid_name: str, gid_name: str) -> tuple[int, int]:
+    """Validate a half-pair-complete principal; one component alone is refused."""
+
+    return (
+        validate_container_exec_id(uid, name=uid_name),
+        validate_container_exec_id(gid, name=gid_name),
+    )
+
+
+def is_canonical_decimal(text: str) -> bool:
+    """``0``, ``007``, ``+7``, ``" 7 "``, ``7_0`` and names are all non-canonical."""
+
+    return _CANONICAL_DECIMAL_RE.fullmatch(text) is not None
+
+
+def safe_token_echo(text: str, *, limit: int = CONTAINER_EXEC_ID_DIGITS_MAX) -> str:
+    """Bounded rendering of an untrusted token for use inside a refusal message.
+
+    Receipt ``reason`` is capped at 256 characters by the shipping schema, so a
+    refusal may never interpolate an unbounded value: echoing a 5000-character
+    env token would produce a config tombstone that fails schema validation and
+    is therefore never published — the very bypass this parse exists to close.
+    """
+
+    if len(text) <= limit:
+        return text
+    return f"a {len(text)}-character token"
+
+
+def container_exec_id_from_decimal(text: str) -> int | None:
+    """Bounded parse of one canonical decimal identity token.
+
+    Returns ``None`` when the value is above ``CONTAINER_EXEC_ID_MAX``; below
+    ``CONTAINER_EXEC_ID_MIN`` stays with the caller because the accepted floor is
+    site-specific (0 is a legal uid_t but never a legal exec principal).
+
+    ``int()`` is only ever reached on a token at most as long as the bound's own
+    decimal width. CPython 3.11+ raises a bare ``ValueError: Exceeds the limit
+    (4300 digits)`` for ``int('9' * 5000)``, and such an error carries no
+    ``error_class``/``stage``, so it escapes both typed refusals. The value
+    comparison after conversion is a backstop for a wider bound, not the escape
+    hatch for this one.
+    """
+
+    if len(text) > CONTAINER_EXEC_ID_DIGITS_MAX:
+        return None
+    value = int(text)
+    if value > CONTAINER_EXEC_ID_MAX:
+        return None
+    return value
+
+
+def container_exec_id_message(label: str, given: str | int) -> str:
+    """Range refusal text, bounded in size for both string and int inputs."""
+
+    bound = f"{label} must be within {CONTAINER_EXEC_ID_MIN}..{CONTAINER_EXEC_ID_MAX}"
+    if isinstance(given, str):
+        return f"{bound}, got {safe_token_echo(given)}"
+    # str() of an int with more than the interpreter's digit limit raises
+    # ValueError inside the message, replacing the refusal; compare instead.
+    if given >= 10**CONTAINER_EXEC_ID_DIGITS_MAX:
+        return f"{bound}, got a number of more than {CONTAINER_EXEC_ID_DIGITS_MAX} digits"
+    return f"{bound}, got {given}"
+
+
+def _reject_observed_identity(reason: str) -> NoReturn:
+    raise ContainerExecIdentityError(reason, error_class="target_identity", stage="target_identity")
+
+
+def parse_container_exec_user(raw: Any) -> ContainerExecIdentity:
+    """Parse strict canonical numeric ``<uid>:<gid>`` from ``Config.User``.
+
+    Empty, missing, name-only, UID-only, whitespace-padded, non-canonical, root
+    and above-bound values all refuse here — long before any writability
+    command, and never with a fallback to an image user name.
+    """
+
+    if not isinstance(raw, str):
+        _reject_observed_identity("container Config.User must be a canonical numeric uid:gid string")
+    match = _NUMERIC_PAIR_RE.fullmatch(raw)
+    if match is None:
+        _reject_observed_identity("container Config.User is not a canonical numeric uid:gid pair")
+    pair: list[int] = []
+    for text, component in zip(match.groups(), ("uid", "gid"), strict=True):
+        if _CANONICAL_DECIMAL_RE.fullmatch(text) is None:
+            _reject_observed_identity(f"container Config.User {component} is not a canonical decimal integer")
+        value = container_exec_id_from_decimal(text)
+        if value is None or value < CONTAINER_EXEC_ID_MIN:
+            _reject_observed_identity(
+                container_exec_id_message(f"container Config.User {component}", text),
+            )
+        pair.append(value)
+    return ContainerExecIdentity(uid=pair[0], gid=pair[1])
+
+
+def container_writable_argv(
+    *,
+    uid: int,
+    gid: int,
+    container_name: str = LIVE_CONTAINER_NAME,
+    container_path: str = CONTAINER_COLD_PATH,
+    docker_bin: str = TRUSTED_DOCKER_BIN,
+) -> tuple[str, ...]:
+    """Exact numeric-principal writability probe: no shell, no user name."""
+
+    validate_container_exec_id(uid, name="expected_container_exec_uid")
+    validate_container_exec_id(gid, name="expected_container_exec_gid")
+    _require_trusted_docker(docker_bin)
+    return (
+        docker_bin,
+        "exec",
+        "--user",
+        f"{uid}:{gid}",
+        container_name,
+        "test",
+        "-w",
+        container_path,
+    )
 
 
 def _require_trusted_docker(docker_bin: str) -> None:
@@ -196,16 +378,24 @@ def run_bounded_command(
     )
 
 
-def inspect_nhms_db_cold_bind(
+def inspect_container_identity_observation(
     *,
     container_name: str = LIVE_CONTAINER_NAME,
     expected_container_path: str = CONTAINER_COLD_PATH,
     docker_bin: str = TRUSTED_DOCKER_BIN,
     runner: DockerRunner | None = None,
-) -> str:
+) -> tuple[str, ContainerExecIdentity]:
+    """One bounded inspect proving exactly one cold bind and numeric ``Config.User``.
+
+    Both facts come from the same snapshot, so the pair that authorizes the
+    writability probe is the pair that container was serving the bind with.
+    """
+
     _require_trusted_docker(docker_bin)
     result = run_bounded_command(
-        [docker_bin, "inspect", "--format", "{{json .Mounts}}", container_name],
+        [docker_bin, "inspect", "--format", INSPECT_FORMAT, container_name],
+        timeout=INSPECT_TIMEOUT_SECONDS,
+        max_bytes=INSPECT_OUTPUT_MAX_BYTES,
         runner=runner,
     )
     if result.returncode != 0:
@@ -216,13 +406,25 @@ def inspect_nhms_db_cold_bind(
             stage="target_identity",
         )
     try:
-        mounts = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as error:
+        projection = json.loads(result.stdout or "")
+    except ValueError as error:
+        # ValueError, not just json.JSONDecodeError: the decoder converts numeric
+        # literals with int(), which on CPython 3.11+ raises a bare
+        # "Exceeds the limit (4300 digits)" for an over-width number that still
+        # fits the 64-KiB ceiling. Either way the projection is unusable and must
+        # refuse here, before any writability probe.
         raise ColdRuntimeError(
             "target inspector returned malformed mount JSON",
             error_class="target_identity",
             stage="target_identity",
         ) from error
+    if not isinstance(projection, Mapping):
+        raise ColdRuntimeError(
+            "target inspector returned malformed mount JSON",
+            error_class="target_identity",
+            stage="target_identity",
+        )
+    mounts = projection.get("Mounts")
     if not isinstance(mounts, list):
         raise ColdRuntimeError(
             "target inspector returned malformed mount JSON",
@@ -243,7 +445,7 @@ def inspect_nhms_db_cold_bind(
             error_class="target_identity",
             stage="target_identity",
         )
-    return matches[0]
+    return matches[0], parse_container_exec_user(projection.get("User"))
 
 
 def inspect_host_path(host_path: str) -> HostIdentity:
@@ -295,11 +497,28 @@ def inspect_host_path(host_path: str) -> HostIdentity:
 
 def inspect_container_writable(
     *,
+    uid: int,
+    gid: int,
+    container_name: str = LIVE_CONTAINER_NAME,
+    container_path: str = CONTAINER_COLD_PATH,
     docker_bin: str = TRUSTED_DOCKER_BIN,
     runner: DockerRunner | None = None,
 ) -> bool:
-    _require_trusted_docker(docker_bin)
-    result = run_bounded_command(CONTAINER_WRITABLE_ARGV, runner=runner)
+    """``test -w`` as the exact numeric principal; a non-zero rc refuses."""
+
+    argv = container_writable_argv(
+        uid=uid,
+        gid=gid,
+        container_name=container_name,
+        container_path=container_path,
+        docker_bin=docker_bin,
+    )
+    result = run_bounded_command(
+        argv,
+        timeout=INSPECT_TIMEOUT_SECONDS,
+        max_bytes=INSPECT_OUTPUT_MAX_BYTES,
+        runner=runner,
+    )
     if result.returncode != 0:
         raise ColdRuntimeError(
             "container-side cold tablespace path is not writable",
@@ -329,6 +548,8 @@ def _observe_host_identity(host_bind: str, host_inspect: HostInspectFn | None) -
 
 def inspect_production_target(
     *,
+    expected_container_exec_uid: int,
+    expected_container_exec_gid: int,
     container_name: str = LIVE_CONTAINER_NAME,
     expected_container_path: str = CONTAINER_COLD_PATH,
     expected_host_path: str = HOST_COLD_PATH,
@@ -337,12 +558,25 @@ def inspect_production_target(
     host_inspect: HostInspectFn | None = None,
 ) -> ObservedTarget:
     _require_trusted_docker(docker_bin)
-    host_bind = inspect_nhms_db_cold_bind(
+    expected = require_container_exec_pair(
+        expected_container_exec_uid,
+        expected_container_exec_gid,
+        uid_name="expected_container_exec_uid",
+        gid_name="expected_container_exec_gid",
+    )
+    host_bind, observed_user = inspect_container_identity_observation(
         container_name=container_name,
         expected_container_path=expected_container_path,
         docker_bin=docker_bin,
         runner=runner,
     )
+    if (observed_user.uid, observed_user.gid) != expected:
+        # Truthful refusal naming only the kind of drift, never a fallback.
+        raise ColdRuntimeError(
+            "container runtime identity drifted from expected numeric uid:gid",
+            error_class="target_identity",
+            stage="target_identity",
+        )
     if host_bind != expected_host_path:
         raise ColdRuntimeError(
             "container bind source drifted from expected host path",
@@ -350,7 +584,14 @@ def inspect_production_target(
             stage="target_identity",
         )
     before = _observe_host_identity(host_bind, host_inspect)
-    writable = inspect_container_writable(docker_bin=docker_bin, runner=runner)
+    writable = inspect_container_writable(
+        uid=observed_user.uid,
+        gid=observed_user.gid,
+        container_name=container_name,
+        container_path=expected_container_path,
+        docker_bin=docker_bin,
+        runner=runner,
+    )
     after = _observe_host_identity(host_bind, host_inspect)
     if after != before:
         raise ColdRuntimeError(
@@ -368,6 +609,8 @@ def inspect_production_target(
         host_mode=host_mode,
         host_uid=host_uid,
         host_gid=host_gid,
+        container_exec_uid=observed_user.uid,
+        container_exec_gid=observed_user.gid,
     )
 
 
@@ -382,4 +625,6 @@ def production_inspect_target(**kwargs: Any) -> Mapping[str, Any]:
         "host_mode": observed.host_mode,
         "host_uid": observed.host_uid,
         "host_gid": observed.host_gid,
+        "container_exec_uid": observed.container_exec_uid,
+        "container_exec_gid": observed.container_exec_gid,
     }

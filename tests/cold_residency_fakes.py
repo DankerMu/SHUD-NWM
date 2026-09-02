@@ -20,6 +20,57 @@ LAG = 604800
 CUTOFF = datetime(2026, 7, 4, 12, tzinfo=UTC)
 RANGE_START = datetime(2026, 6, 27, 12, tzinfo=UTC)
 
+# #1929 discriminating principal pair. The exact image's default `postgres`
+# account is 1000:1000 while the node-27 container is created `--user 1005:1005`
+# and owns the mode-0700 cold path with the same pair, so "image default" and
+# "runtime principal" can never be confused by a test that passes both.
+IMAGE_DEFAULT_EXEC_UID = 1000
+IMAGE_DEFAULT_EXEC_GID = 1000
+RUNTIME_EXEC_UID = 1005
+RUNTIME_EXEC_GID = 1005
+
+
+def expected_exec_identity() -> dict[str, int]:
+    """Keyword arguments carrying a valid, explicit expected principal pair."""
+
+    return {
+        "expected_container_exec_uid": RUNTIME_EXEC_UID,
+        "expected_container_exec_gid": RUNTIME_EXEC_GID,
+    }
+
+
+ENV_CONTAINER_EXEC_UID = "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID"
+ENV_CONTAINER_EXEC_GID = "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID"
+
+
+def required_exec_env() -> dict[str, str]:
+    """The two mandatory #1929 env keys, as a valid live env would carry them."""
+
+    return {
+        ENV_CONTAINER_EXEC_UID: str(RUNTIME_EXEC_UID),
+        ENV_CONTAINER_EXEC_GID: str(RUNTIME_EXEC_GID),
+    }
+
+
+def target_observation(**overrides: Any) -> dict[str, Any]:
+    """An injected #1893 inspector payload, including observed runtime identity.
+
+    The pair is returned here because the inspector is the observation seam: a
+    test that wants a mismatch overrides the fields instead of letting the
+    runtime substitute expected config.
+    """
+
+    payload: dict[str, Any] = {
+        "container_name": "nhms-db",
+        "container_bind": "/data/GHDC/nhms-cold-tablespace",
+        "host_path": "/data/GHDC/nhms-cold-tablespace",
+        "device_identity": "8:1",
+        "container_exec_uid": RUNTIME_EXEC_UID,
+        "container_exec_gid": RUNTIME_EXEC_GID,
+    }
+    payload.update(overrides)
+    return payload
+
 
 def river_columns() -> tuple[ColumnDescriptor, ...]:
     names = (

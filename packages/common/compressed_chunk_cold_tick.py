@@ -39,6 +39,7 @@ from packages.common.compressed_chunk_cold_runtime import (
     preflight_target_identity,
     ranked_candidates,
     reconcile_named_group,
+    require_runtime_exec_identity,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
     BoundInventories,
@@ -72,6 +73,8 @@ def target_payload(identity: TargetIdentity) -> dict[str, Any]:
         "container_bind": identity.container_bind,
         "host_path": identity.host_path,
         "device_identity": identity.device_identity,
+        "container_exec_uid": identity.container_exec_uid,
+        "container_exec_gid": identity.container_exec_gid,
         "observed": True,
     }
 
@@ -92,6 +95,8 @@ def runtime_config(config: Any) -> RuntimeConfig:
         expected_host_path=config.expected_host_path,
         expected_device_identity=config.expected_device_identity,
         expected_container_name=config.expected_container_name,
+        expected_container_exec_uid=config.expected_container_exec_uid,
+        expected_container_exec_gid=config.expected_container_exec_gid,
         inspect_target=config.inspect_target,
         clock=getattr(config, "clock", None) or default_clock,
     )
@@ -369,6 +374,10 @@ def run_tick(
     max_catalog_rows: int,
     max_catalog_bytes: int,
 ) -> dict[str, Any]:
+    # #1929: the runtime config is built and its expected numeric principal is
+    # validated before any observer connection (watermark or residency) opens.
+    runtime = runtime_config(config)
+    require_runtime_exec_identity(runtime)
     watermark = (
         fetch_watermark()
         if fetch_watermark is not None
@@ -390,7 +399,7 @@ def run_tick(
         inventories = load_inventories(observer)
         target = preflight_target_identity(
             execute,
-            runtime_config(config),
+            runtime,
             require_device_identity=bool(config.enforce),
         )
     finally:
