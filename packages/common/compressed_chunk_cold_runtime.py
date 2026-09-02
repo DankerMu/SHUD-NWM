@@ -3,23 +3,24 @@
 Consumes the #1892 pure contract and executes exactly
 ``shell_first_decompress_recompress_atomic``. Production code never imports
 ``compressed_chunk_cold_probe``.
+
+The target-preflight identity contract (#1929) is owned by
+``compressed_chunk_cold_runtime_target``; the names it exports are re-exported
+here unchanged so every existing ``from ...compressed_chunk_cold_runtime import``
+site keeps working with no wrapper and no duplicated logic.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from packages.common.compressed_chunk_cold_residency import (
     ACCEPTED_SEQUENCE_NAME,
-    ALLOWED_HYPERTABLES,
-    COLD_TABLESPACE_NAME,
     PINNED_PG_VERSION_PREFIX,
     PINNED_TIMESCALEDB_VERSION,
     CatalogChunk,
-    ColdResidencyError,
     ResidencyGroup,
     ShellFirstPlan,
     build_shell_first_plan,
@@ -29,13 +30,11 @@ from packages.common.compressed_chunk_cold_residency import (
     evaluate_capacity_preflight,
     expanded_uncompressed_group_is_complete,
     recompressed_group_is_complete,
-    validate_catalog_path,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
     BoundInventories,
     ColdRuntimeError,
     WindowParity,
-    attached_tablespaces,
     collect_residency_group,
     compression_before_bytes,
     compute_window_parity,
@@ -46,50 +45,33 @@ from packages.common.compressed_chunk_cold_runtime_catalog import (
     ranked_candidates_from_execute,
     retained_source_bytes,
     snapshot_group,
-    tablespace_catalog_location,
+)
+
+# Compatibility surface: the target-preflight owner below is the single
+# definition site, and these names stay importable from this module for the
+# existing consumers (scripts/node27_cold_residency.py imports the fixed
+# identity constants; the runtime/CLI/test suites import the four preflight
+# names). Re-exports only — no wrapper functions, no duplicated logic.
+from packages.common.compressed_chunk_cold_runtime_target import (  # noqa: F401
+    CONTAINER_COLD_PATH,
+    DEFAULT_LOCK_TIMEOUT,
+    DEFAULT_MAX_MEMBERS,
+    DEFAULT_STATEMENT_TIMEOUT,
+    HOST_COLD_PATH,
+    LIVE_CONTAINER_NAME,
+    RuntimeConfig,
+    TargetIdentity,
+    preflight_target_identity,
+    require_runtime_exec_identity,
 )
 from packages.common.compressed_chunk_cold_runtime_timing import (
-    Clock,
     MoveObservation,
     StageTimer,
     build_move_observation,
-    default_clock,
     inspect_timing_payload,
 )
-from packages.common.compressed_chunk_cold_target import production_inspect_target
-
-DEFAULT_LOCK_TIMEOUT = "30s"
-DEFAULT_STATEMENT_TIMEOUT = "3600s"
-DEFAULT_MAX_MEMBERS = 64
-CONTAINER_COLD_PATH = "/home/postgres/pgdata/tablespaces/nhms_cold"
-HOST_COLD_PATH = "/data/GHDC/nhms-cold-tablespace"
-LIVE_CONTAINER_NAME = "nhms-db"
 
 Connect = Callable[..., Any]
-InspectTarget = Callable[[], Mapping[str, Any]]
-
-
-@dataclass(frozen=True)
-class TargetIdentity:
-    catalog_name: str
-    catalog_location: str
-    container_bind: str
-    host_path: str
-    device_identity: str
-
-
-@dataclass(frozen=True)
-class RuntimeConfig:
-    lock_timeout: str = DEFAULT_LOCK_TIMEOUT
-    statement_timeout: str = DEFAULT_STATEMENT_TIMEOUT
-    max_members: int = DEFAULT_MAX_MEMBERS
-    expected_catalog_location: str = CONTAINER_COLD_PATH
-    expected_container_bind: str = HOST_COLD_PATH
-    expected_host_path: str = HOST_COLD_PATH
-    expected_device_identity: str = ""
-    expected_container_name: str = LIVE_CONTAINER_NAME
-    inspect_target: InspectTarget | None = None
-    clock: Clock = default_clock
 
 
 class CommitAckLost(ColdRuntimeError):
@@ -181,76 +163,6 @@ def assert_engine_versions(server_version: str, timescaledb_version: str) -> Non
             error_class="engine_identity",
             stage="preflight",
         )
-
-
-def preflight_target_identity(
-    execute: Callable[..., list[Mapping[str, Any]]],
-    config: RuntimeConfig,
-    *,
-    require_device_identity: bool = False,
-) -> TargetIdentity:
-    catalog_location = tablespace_catalog_location(execute, COLD_TABLESPACE_NAME)
-    try:
-        validate_catalog_path(catalog_location=catalog_location, expected_location=config.expected_catalog_location)
-    except ColdResidencyError as error:
-        raise ColdRuntimeError(str(error), error_class="target_identity", stage="target_identity") from error
-    inspector = config.inspect_target or production_inspect_target
-    observed = dict(inspector())
-    container_name = str(observed.get("container_name") or "")
-    container_bind = str(observed.get("container_bind") or "")
-    host_path = str(observed.get("host_path") or "")
-    device_identity = str(observed.get("device_identity") or "")
-    if not container_name or not container_bind or not host_path:
-        raise ColdRuntimeError(
-            "target inspector did not observe container/bind/host identity",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    if container_name != config.expected_container_name:
-        raise ColdRuntimeError(
-            "container identity drifted",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    if container_bind != config.expected_container_bind:
-        raise ColdRuntimeError(
-            "container bind identity drifted",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    if host_path != config.expected_host_path:
-        raise ColdRuntimeError(
-            "host path identity drifted",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    if require_device_identity and not config.expected_device_identity:
-        raise ColdRuntimeError(
-            "expected device identity must be explicit for enforce",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    if config.expected_device_identity and device_identity != config.expected_device_identity:
-        raise ColdRuntimeError(
-            "device identity drifted",
-            error_class="target_identity",
-            stage="target_identity",
-        )
-    for schema, name in ALLOWED_HYPERTABLES:
-        attached = attached_tablespaces(execute, schema, name)
-        if COLD_TABLESPACE_NAME in attached:
-            raise ColdRuntimeError(
-                f"{schema}.{name} has {COLD_TABLESPACE_NAME} attached",
-                error_class="hypertable_attach",
-                stage="target_identity",
-            )
-    return TargetIdentity(
-        catalog_name=COLD_TABLESPACE_NAME,
-        catalog_location=catalog_location,
-        container_bind=container_bind,
-        host_path=host_path,
-        device_identity=device_identity,
-    )
 
 
 def load_inventories(connection: Any) -> BoundInventories:
@@ -527,6 +439,9 @@ def migrate_residency_group(
     if ACCEPTED_SEQUENCE_NAME != "shell_first_decompress_recompress_atomic":
         raise ColdRuntimeError("accepted sequence drifted", error_class="sequence", stage="plan")
     runtime = config or RuntimeConfig()
+    # #1929: an invalid expected principal is a config refusal, not a mid-flight
+    # movement failure — validate before the observer connection opens.
+    require_runtime_exec_identity(runtime)
     started = runtime.clock()
     before: ResidencyGroup | None = None
     before_parity: WindowParity | None = None

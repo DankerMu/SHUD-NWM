@@ -23,7 +23,12 @@ from packages.common.compressed_chunk_cold_receipt import (
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.safe_fs import SafeFilesystemError
 from scripts import node27_cold_residency as runner
-from tests.cold_residency_fakes import FakeConnection, chunk, complete_relations
+from tests.cold_residency_fakes import (
+    FakeConnection,
+    chunk,
+    complete_relations,
+    required_exec_env,
+)
 from tests.test_node27_cold_residency import _base_env, _ready
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +124,7 @@ def test_mixed_unresolved_intent_blocks_new_selection(tmp_path: Path) -> None:
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        **required_exec_env(),
     }
     args = runner._parser().parse_args(["--enforce"])
     config = runner.config_from_args(args, env)
@@ -151,6 +157,7 @@ def test_unknown_unresolved_intent_replaces_stale_public_success(tmp_path: Path)
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        **required_exec_env(),
     }
     args = runner._parser().parse_args(["--enforce"])
     config = runner.config_from_args(args, env)
@@ -183,6 +190,7 @@ def test_pending_public_authority_survives_post_unlink_fsync_failure(
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        **required_exec_env(),
     }
     args = runner._parser().parse_args(["--enforce"])
     config = _ready(runner.config_from_args(args, env))
@@ -246,6 +254,7 @@ def test_pending_public_absent_sidecar_reconciles_then_closes_without_movement(t
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -290,6 +299,7 @@ def test_resurrected_sidecar_outranks_pending_public_authority(tmp_path: Path) -
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -335,6 +345,7 @@ def test_final_closed_replace_indeterminate_recovery_never_selects(
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -396,6 +407,7 @@ def test_closed_public_proof_failure_blocks_new_selection(tmp_path: Path, monkey
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -448,6 +460,7 @@ def test_main_off_pin_engine_replaces_stale_clean_without_movement_or_secret(
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        **required_exec_env(),
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -488,6 +501,7 @@ def test_closed_receipt_proof_allows_next_enforce_selection(tmp_path: Path) -> N
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -517,6 +531,7 @@ def test_valid_sidecar_outranks_corrupt_public_receipt(tmp_path: Path) -> None:
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -547,6 +562,7 @@ def test_dry_run_sidecar_is_read_only_and_refuses_recovery(tmp_path: Path) -> No
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -581,6 +597,7 @@ def test_dry_run_pending_public_is_read_only_and_refuses_recovery(tmp_path: Path
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -623,6 +640,7 @@ def test_post_commit_mixed_reconciliation_retains_sidecar_authority(tmp_path: Pa
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -688,6 +706,7 @@ def test_pending_public_mixed_reconciliation_preserves_blocker(tmp_path: Path) -
                 "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
                 "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
                 "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+                **required_exec_env(),
             },
         )
     )
@@ -907,6 +926,7 @@ def test_off_pin_engine_through_runner_publishes_non_success(tmp_path: Path) -> 
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "runner.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        **required_exec_env(),
     }
     args = runner._parser().parse_args(["--enforce"])
     config = _ready(runner.config_from_args(args, env))

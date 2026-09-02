@@ -377,17 +377,78 @@
         "catalog_location": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
         "catalog_name": {"const": "nhms_cold"},
         "container_bind": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
+        "container_exec_gid": {"maximum": 4294967294, "minimum": 1, "type": ["integer", "null"]},
+        "container_exec_uid": {"maximum": 4294967294, "minimum": 1, "type": ["integer", "null"]},
         "device_identity": {"maxLength": 256, "type": ["string", "null"]},
         "host_path": {"maxLength": 512, "minLength": 1, "type": ["string", "null"]},
         "observed": {"type": "boolean"}
       },
       "required": ["catalog_name", "catalog_location", "container_bind", "host_path", "device_identity", "observed"],
       "type": "object"
+    },
+    "target_v1_0": {
+      "$comment": "Historical evidence shape: the numeric-principal fields did not exist, so a 1.0 target must omit them rather than being back-filled.",
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"not": {"anyOf": [{"required": ["container_exec_uid"]}, {"required": ["container_exec_gid"]}]}}
+      ]
+    },
+    "target_v1_1": {
+      "$comment": "Current evidence shape: both fields are always present. Observed targets carry the independently observed non-root pair; unobserved tombstones carry present nulls and must never echo expected config.",
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {"required": ["container_exec_uid", "container_exec_gid"]},
+        {
+          "if": {"properties": {"observed": {"const": true}}, "required": ["observed"]},
+          "then": {
+            "properties": {
+              "container_exec_gid": {"maximum": 4294967294, "minimum": 1, "type": "integer"},
+              "container_exec_uid": {"maximum": 4294967294, "minimum": 1, "type": "integer"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"observed": {"const": false}}, "required": ["observed"]},
+          "then": {
+            "properties": {
+              "container_exec_gid": {"type": "null"},
+              "container_exec_uid": {"type": "null"}
+            }
+          }
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "allOf": [
+    {
+      "$comment": "Evidence-version union (#1929): historical 1.0 documents stay readable and remain valid recovery authority; 1.1 requires the numeric container runtime principal in the target object.",
+      "if": {
+        "properties": {
+          "schema_version": {"const": "1.0"}
+        },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/target_v1_0"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"const": "1.1"}
+        },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "target": {"$ref": "#/$defs/target_v1_1"}
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -617,7 +678,7 @@
     "per_table_totals": {"$ref": "#/$defs/per_table_totals"},
     "per_tick_bound": {"maximum": 10000, "minimum": 1, "type": ["integer", "null"]},
     "recovery": {"$ref": "#/$defs/recovery"},
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.1"]},
     "selected": {"items": {"$ref": "#/$defs/group_observation"}, "maxItems": 10000, "type": "array"},
     "skipped": {"items": {"$ref": "#/$defs/skipped_descriptor"}, "maxItems": 10000, "type": "array"},
     "state": {"enum": ["idle", "in_progress", "complete_source", "complete_target", "mixed", "unknown"]},

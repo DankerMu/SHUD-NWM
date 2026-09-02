@@ -12,6 +12,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -10772,11 +10773,243 @@ def test_routed_support_module_selects_its_importer_suites_and_the_meta_guard(
     assert selected != {SELECTOR_META_GUARD_TEST}
 
 
+# The #1929 shared-fakes producer and the consumer PR #1940 Round 1 found missing
+# from its route. Named once here so the green membership pin and the red removal
+# leg below cannot disagree about which edge is under test.
+COLD_RESIDENCY_FAKES_PRODUCER = "tests/cold_residency_fakes.py"
+COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER = "tests/test_node27_cold_residency_schema_compat.py"
+
+
+def _support_rule_for(module: str) -> PathTestRule:
+    """The live support-module rule for ``module``, asserting exactly one exists."""
+    rules = [rule for rule in _prod_module.SUPPORT_MODULE_TEST_RULES if rule.pattern == module]
+    assert len(rules) == 1, f"expected exactly one support-module rule for {module}, got {len(rules)}"
+    return rules[0]
+
+
 def test_cold_residency_fakes_rule_selects_runtime_proof_suite() -> None:
-    selected = set(select_tests(["tests/cold_residency_fakes.py"], repo_root=Path(".")))
+    selected = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
 
     assert "tests/test_compressed_chunk_cold_runtime_proof.py" in selected
     assert SELECTOR_META_GUARD_TEST in selected
+    # The Round 1 PR #1940 gap: this consumer was never routed, so a fakes-only PR
+    # silently skipped the suite whose 1.0/1.1 target-shape rows are built on
+    # `FakeConnection`. Pinned here as membership and made load-bearing by
+    # test_cold_residency_fakes_rule_importer_edge_is_load_bearing.
+    assert COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER in selected
+
+    # Audit of THIS producer's whole importer surface, not just the repaired edge:
+    # every direct non-gated importer the tree derives must be routed. (The rule
+    # may carry extras — test_compressed_chunk_cold_target.py is an intentional
+    # over-route the closure guard permits — so this is containment, not equality.)
+    derived = _derived_support_module_importers([COLD_RESIDENCY_FAKES_PRODUCER])
+    routed = set(_support_rule_for(COLD_RESIDENCY_FAKES_PRODUCER).tests)
+    unrouted = sorted(derived[COLD_RESIDENCY_FAKES_PRODUCER] - routed)
+    assert unrouted == [], f"{COLD_RESIDENCY_FAKES_PRODUCER}: derived importers missing from its rule {unrouted}"
+
+
+def test_cold_residency_fakes_rule_importer_edge_is_load_bearing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RED LEG, in-memory; the tracked selector is untouched. Deleting exactly
+    # schema_compat from the shared-fakes rule must (a) make a fakes-only change
+    # stop selecting that suite, and (b) make the generic importer-closure guard
+    # name that pair as an offender. Positive membership alone would survive a
+    # rule that listed the suite while `select_tests` ignored it, and a guard fed
+    # a constructed selection would never exercise the real route — so both halves
+    # run against the live derivation and the live closure helper.
+    rule = _support_rule_for(COLD_RESIDENCY_FAKES_PRODUCER)
+    assert COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER in rule.tests
+
+    mutant = replace(rule, tests=tuple(t for t in rule.tests if t != COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER))
+    assert len(mutant.tests) == len(rule.tests) - 1
+    monkeypatch.setattr(
+        _prod_module,
+        "SUPPORT_MODULE_TEST_RULES",
+        tuple(
+            mutant if existing.pattern == COLD_RESIDENCY_FAKES_PRODUCER else existing
+            for existing in _prod_module.SUPPORT_MODULE_TEST_RULES
+        ),
+    )
+
+    mutated_selection = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
+    assert COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER not in mutated_selection, (
+        "the rule is not what routes this consumer; the green pin above is decorative"
+    )
+    # Nothing else about the route changes: this is a single-edge removal test.
+    assert set(rule.tests) - {COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER} <= mutated_selection
+
+    derived = _derived_support_module_importers([COLD_RESIDENCY_FAKES_PRODUCER])
+    offenders = _support_module_closure_offenders(
+        modules=[COLD_RESIDENCY_FAKES_PRODUCER],
+        derived=derived,
+        select=lambda _module: mutated_selection,
+    )
+    assert offenders == [
+        f"{COLD_RESIDENCY_FAKES_PRODUCER} -> {COLD_RESIDENCY_SCHEMA_COMPAT_CONSUMER}: "
+        "derived non-gated importer suite is not selected"
+    ], f"the closure guard did not bite on the deleted edge: {offenders}"
+
+
+# Issue #1929 producer -> consumer closure. The contract spans four surfaces
+# (target inspector, runtime identity, CLI/env config, receipt schema) and a
+# change on ONE of them invalidates assertions on another — e.g. deleting the
+# required env key breaks the identity suite while the CLI suite stays green,
+# and widening the schema to const `1.1` strands recovery while every runner
+# suite still passes. Same-stem derivation cannot express that, so each producer
+# names its consumers explicitly. Every entry is a real edge: that suite imports,
+# executes, or validates that producer's artifact.
+@pytest.mark.parametrize(
+    ("producer", "required"),
+    [
+        # Inspector: numeric pair, one bounded inspect, exact exec argv.
+        # Consumers: its own suite, the runtime owner that defaults to it, the
+        # preflight/migration suites that reach it through RuntimeConfig, and the
+        # identity suite that reads CONTAINER_EXEC_ID_MAX from it.
+        (
+            "packages/common/compressed_chunk_cold_target.py",
+            (
+                "tests/test_compressed_chunk_cold_target.py",
+                "tests/test_compressed_chunk_cold_runtime.py",
+                "tests/test_compressed_chunk_cold_runtime_proof.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # Movement owner: sequence execution that calls the preflight gate and
+        # builds RuntimeConfig by name. Post-split it no longer owns the identity
+        # contract, so the inspector and receipt-schema suites are not its rows.
+        (
+            "packages/common/compressed_chunk_cold_runtime.py",
+            (
+                "tests/test_compressed_chunk_cold_runtime.py",
+                "tests/test_compressed_chunk_cold_runtime_proof.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # #1929 split: sole definition site of the target-preflight identity
+        # contract. NO test imports it by name (movement re-exports it), so this
+        # row is the only thing standing between a PR here and a zero-signal
+        # selection; the derived-closure leg is asserted separately below.
+        (
+            "packages/common/compressed_chunk_cold_runtime_target.py",
+            (
+                "tests/test_compressed_chunk_cold_target.py",
+                "tests/test_compressed_chunk_cold_runtime.py",
+                "tests/test_compressed_chunk_cold_runtime_proof.py",
+                "tests/test_compressed_chunk_cold_runtime_integration.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # target_payload + runtime_config propagation into every terminal.
+        (
+            "packages/common/compressed_chunk_cold_tick.py",
+            (
+                "tests/test_compressed_chunk_cold_runtime.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # Writer version, tombstone nulls, and the 1.0/1.1 readers.
+        (
+            "packages/common/compressed_chunk_cold_receipt.py",
+            (
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_timeseries_storage_schemas.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # CLI: required env parsing, placeholder config, RunnerConfig fields,
+        # and the SCHEMA_VERSION mirror asserted against the writer.
+        (
+            "scripts/node27_cold_residency.py",
+            (
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_phase2.py",
+                "tests/test_node27_cold_residency_publication.py",
+            ),
+        ),
+        # Env template: both keys present and unassigned.
+        (
+            "infra/env/node27-cold-residency.example",
+            (
+                "tests/test_node27_cold_residency.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+            ),
+        ),
+        # Schema and every shipping example: the version union and target shape.
+        (
+            "schemas/timeseries_cold_residency_receipt.schema.json",
+            (
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_timeseries_storage_schemas.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency.py",
+            ),
+        ),
+        (
+            "schemas/examples/timeseries_cold_residency_receipt.example.json",
+            (
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_timeseries_storage_schemas.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+            ),
+        ),
+        (
+            "schemas/examples/timeseries_cold_residency_receipt.intent.example.json",
+            (
+                "tests/test_node27_cold_residency_schema_compat.py",
+                "tests/test_timeseries_storage_schemas.py",
+            ),
+        ),
+        # Runbook: the mandatory env / fresh-observation procedure.
+        (
+            "docs/runbooks/tier-node27-timeseries-storage.md",
+            ("tests/test_node27_cold_residency_runtime_identity.py",),
+        ),
+        # Shared fakes gained the identity helpers these suites consume. The
+        # schema-compat suite is here too: it imports FakeConnection at file
+        # scope (the edge PR #1940 Round 1 found the support-module rule missing),
+        # so the generic derived closure AND this explicit contract both pin it —
+        # a route edit that drops it reds two independent guards.
+        (
+            "tests/cold_residency_fakes.py",
+            (
+                "tests/test_compressed_chunk_cold_runtime_integration.py",
+                "tests/test_compressed_chunk_cold_target.py",
+                "tests/test_node27_cold_residency_runtime_identity.py",
+                "tests/test_node27_cold_residency_schema_compat.py",
+            ),
+        ),
+    ],
+)
+def test_cold_residency_identity_producer_selects_its_contract_suites(
+    producer: str,
+    required: tuple[str, ...],
+) -> None:
+    selected = set(select_tests([producer], repo_root=Path(".")))
+
+    missing = sorted(set(required) - selected)
+    assert not missing, f"{producer}: #1929 contract suites not selected {missing}"
+    # Every routed consumer must actually exist, or the route is a dead string.
+    for suite in required:
+        assert (Path(".") / suite).is_file(), f"{producer}: routes to a missing suite {suite}"
 
 
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
@@ -11150,3 +11383,62 @@ def test_tree_mutation_offenders_passes_the_legal_lookalikes() -> None:
     )
 
     assert _tree_mutation_offenders(ast.parse(source)) == []
+
+
+# --- #1929 structural split: target-preflight owner routing closure -------------
+
+_COLD_TARGET_OWNER_PATH = "packages/common/compressed_chunk_cold_runtime_target.py"
+_COLD_TARGET_OWNER_MODULE = "packages.common.compressed_chunk_cold_runtime_target"
+
+
+def _cold_target_owner_rule():
+    matches = [rule for rule in PATH_TEST_RULES if rule.pattern == _COLD_TARGET_OWNER_PATH]
+    assert len(matches) == 1, f"expected exactly one rule for {_COLD_TARGET_OWNER_PATH}, got {len(matches)}"
+    return matches[0]
+
+
+def test_cold_residency_target_owner_rule_covers_its_derived_importer_closure() -> None:
+    # Same defect class as the #1191/#1247/#1283/#1447 guarded-module recurrence,
+    # applied to the module #1929 split out of the movement owner: a rule written
+    # without a "who imports this" scan goes green on a partial selection and the
+    # gap only surfaces on the post-merge master full run. The importer set is
+    # DERIVED from the tracked tree here, never frozen.
+    #
+    # Direct importers are legitimately empty for this module — no test imports it
+    # by name, because compressed_chunk_cold_runtime re-exports the whole
+    # preflight surface and the CLI/tick reach it through that compatibility
+    # layer. That is exactly why the rule must exist at all (see the red leg) and
+    # why this module cannot join GUARDED_MODULE_CLOSURES, which asserts a
+    # non-empty DIRECT set.
+    rule = _cold_target_owner_rule()
+    required = _non_gated_top_level_importer_tests(_COLD_TARGET_OWNER_MODULE) | _one_hop_importer_tests(
+        _COLD_TARGET_OWNER_MODULE
+    )
+    assert required, (
+        f"{_COLD_TARGET_OWNER_MODULE}: derived no importer suites at all; the re-export "
+        "compatibility layer was removed and this guard must be rethought, not deleted"
+    )
+    missing = sorted(required - set(rule.tests))
+    assert not missing, f"{_COLD_TARGET_OWNER_PATH}: rule misses derived importer suites {missing}"
+    for suite in rule.tests:
+        assert Path(suite).is_file(), f"{_COLD_TARGET_OWNER_PATH}: routes to a missing suite {suite}"
+
+
+def test_cold_residency_target_owner_rule_is_load_not_decoration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Red leg, in-memory, tracked selector untouched: without the rule the
+    # derived importers vanish from the selection, proving the rule carries real
+    # signal rather than duplicating derivation.
+    rule = _cold_target_owner_rule()
+    selected_before = set(select_tests([_COLD_TARGET_OWNER_PATH], repo_root=Path(".")))
+    assert set(rule.tests) <= selected_before
+
+    monkeypatch.setattr(
+        _prod_module,
+        "PATH_TEST_RULES",
+        tuple(item for item in PATH_TEST_RULES if item.pattern != _COLD_TARGET_OWNER_PATH),
+    )
+    selected_after = set(select_tests([_COLD_TARGET_OWNER_PATH], repo_root=Path(".")))
+    lost = sorted(set(rule.tests) - selected_after)
+    assert lost, f"removing the {_COLD_TARGET_OWNER_PATH} rule changed nothing: {sorted(rule.tests)}"

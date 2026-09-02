@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "generated_at": "2026-07-15T04:25:30Z",
   "mode": "enforce",
   "outcome": "partial",
@@ -28,6 +28,8 @@
     "catalog_name": "nhms_cold",
     "catalog_location": "/home/postgres/pgdata/tablespaces/nhms_cold",
     "container_bind": "/data/GHDC/nhms-cold-tablespace",
+    "container_exec_uid": 1005,
+    "container_exec_gid": 1005,
     "host_path": "/data/GHDC/nhms-cold-tablespace",
     "device_identity": "md0",
     "observed": true

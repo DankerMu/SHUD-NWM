@@ -12,6 +12,7 @@ from packages.common.compressed_chunk_cold_residency import ACCEPTED_SEQUENCE_NA
 from packages.common.compressed_chunk_cold_runtime import (
     CommitAckLost,
     RuntimeConfig,
+    bind_execute,
     inspect_residency_group,
     migrate_residency_group,
     preflight_target_identity,
@@ -19,6 +20,7 @@ from packages.common.compressed_chunk_cold_runtime import (
     reconcile_named_group,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
+    TABLESPACE_LOCATION_SQL,
     ColdRuntimeError,
     compute_window_parity,
     derive_bound_inventories,
@@ -29,13 +31,17 @@ from tests.cold_residency_fakes import (
     CUTOFF,
     LAG,
     RANGE_START,
+    RUNTIME_EXEC_GID,
+    RUNTIME_EXEC_UID,
     WATERMARK,
     FakeConnection,
     bound_inventories,
     chunk,
     complete_relations,
+    expected_exec_identity,
     forcing_columns,
     river_columns,
+    target_observation,
 )
 
 
@@ -52,21 +58,31 @@ def _loaded(connection: FakeConnection, item=None, space: str = "pg_default") ->
     return connection, current
 
 
-def _inspect_target() -> dict[str, str]:
-    return {
-        "container_name": "nhms-db",
-        "container_bind": "/data/GHDC/nhms-cold-tablespace",
-        "host_path": "/data/GHDC/nhms-cold-tablespace",
-        "device_identity": "8:1",
-    }
+def _inspect_target() -> dict[str, Any]:
+    """Injected inspector: observes the runtime principal independently."""
+
+    return target_observation()
+
+
+def _runtime(**overrides: Any) -> RuntimeConfig:
+    """RuntimeConfig carrying the mandatory expected numeric principal (#1929).
+
+    Every positive preflight path must name the pair explicitly; negative
+    identity tests construct ``RuntimeConfig`` directly to omit or corrupt it.
+    """
+
+    return RuntimeConfig(**{**expected_exec_identity(), **overrides})
 
 
 def test_production_runtime_does_not_import_probe_modules() -> None:
     import packages.common.compressed_chunk_cold_receipt as receipt
     import packages.common.compressed_chunk_cold_runtime as runtime
     import packages.common.compressed_chunk_cold_runtime_catalog as catalog
+    import packages.common.compressed_chunk_cold_runtime_target as target_owner
 
-    for module in (runtime, catalog, receipt):
+    # Every production owner of the #1893/#1929 residency lane, including the
+    # target-preflight module split out of `runtime`, must stay probe-free.
+    for module in (runtime, target_owner, catalog, receipt):
         assert "compressed_chunk_cold_probe" not in Path(module.__file__).name
         imported = getattr(module, "__name__", "")
         assert "compressed_chunk_cold_probe" not in imported
@@ -249,13 +265,22 @@ def test_capacity_equality_passes_and_one_byte_short_refuses() -> None:
 
 
 def test_target_identity_drift_refuses_before_movement_sql() -> None:
+    """Catalog-location drift refuses with a *recorded* no-movement log.
+
+    `connection.executed` is only filled by `FakeCursor.execute`, so this must go
+    through the production `bind_execute` seam: a direct `connection.dispatch`
+    call answers the query and can even move the fake relation while leaving the
+    log empty, which would make the assertion below unfalsifiable.
+    """
+
     connection, item = _loaded(FakeConnection())
     connection.tablespace_location = "/wrong"
     with pytest.raises(ColdRuntimeError, match="identity mismatch"):
         preflight_target_identity(
-            lambda sql, params=None: connection.dispatch(sql, params)[0],
-            RuntimeConfig(inspect_target=_inspect_target),
+            bind_execute(connection),
+            _runtime(inspect_target=_inspect_target),
         )
+    assert [statement for statement, _params in connection.executed] == [TABLESPACE_LOCATION_SQL]
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
     del item
 
@@ -266,7 +291,7 @@ def test_hypertable_attach_is_refused() -> None:
     with pytest.raises(ColdRuntimeError, match="attached"):
         preflight_target_identity(
             lambda sql, params=None: connection.dispatch(sql, params)[0],
-            RuntimeConfig(inspect_target=_inspect_target),
+            _runtime(inspect_target=_inspect_target),
         )
 
 
@@ -303,12 +328,9 @@ def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        )
     )
     assert observation.outcome == "migrated"
     assert observation.reconciliation == "complete_target"
@@ -351,7 +373,7 @@ def test_production_met_before_hydro_parent_oids_lock_ascending() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.outcome == "migrated"
     share = [statement for statement, _params in connection.executed if "ACCESS SHARE" in statement]
@@ -374,7 +396,7 @@ def test_hydro_oid_before_met_still_locks_by_actual_oid() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.outcome == "migrated"
     share = [statement for statement, _params in connection.executed if "ACCESS SHARE" in statement]
@@ -393,12 +415,9 @@ def test_capacity_one_byte_short_refuses_before_movement_sql() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        )
     )
     assert observation.outcome == "refused"
     assert observation.shell_sql_executed is False
@@ -421,12 +440,9 @@ def test_statement_timeout_rolls_back() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        )
     )
     assert observation.error_class == "statement_timeout"
     assert connection.rolled_back is True
@@ -448,12 +464,9 @@ def test_lock_timeout_does_not_claim_shell_sql_executed() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        )
     )
     assert observation.error_class == "lock_timeout"
     assert observation.shell_sql_executed is False
@@ -476,12 +489,9 @@ def test_relation_disappearance_is_classified() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        )
     )
     assert observation.error_class == "relation_disappeared"
 
@@ -503,12 +513,9 @@ def test_commit_ack_loss_reconciles_without_replay() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=lambda: {
-            "container_name": "nhms-db",
-            "container_bind": "/data/GHDC/nhms-cold-tablespace",
-            "host_path": "/data/GHDC/nhms-cold-tablespace",
-            "device_identity": "",
-        }),
+        config=_runtime(
+            inspect_target=lambda: target_observation(device_identity=""),
+        ),
         lose_commit_ack=True,
     )
     assert observation.commit_ack_lost is True
@@ -576,7 +583,7 @@ def test_max_members_is_enforced() -> None:
             connect=_connect(connection),
             chunk=item,
             inventories=bound_inventories(),
-            config=RuntimeConfig(max_members=4),
+            config=_runtime(max_members=4),
         )
 
 
@@ -630,7 +637,7 @@ def test_locked_inventory_drift_refuses_before_set_tablespace() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.shell_sql_executed is False
     assert observation.error_class == "inventory_drift"
@@ -655,7 +662,7 @@ def test_locked_member_drift_refuses_before_set_tablespace() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.shell_sql_executed is False
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
@@ -700,7 +707,7 @@ def test_locked_parity_drift_refuses_before_set_tablespace() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.error_class == "parity"
     assert observation.shell_sql_executed is False
@@ -753,7 +760,7 @@ def test_enforce_requires_explicit_device_identity() -> None:
     with pytest.raises(ColdRuntimeError, match="device identity"):
         preflight_target_identity(
             lambda sql, params=None: connection.dispatch(sql, params)[0],
-            RuntimeConfig(inspect_target=_inspect_target),
+            _runtime(inspect_target=_inspect_target),
             require_device_identity=True,
         )
     del item
@@ -785,15 +792,19 @@ def test_runtime_config_propagates_disposable_container_name() -> None:
         expected_host_path="/unused/cold",
         expected_container_name="nhms-1893-isolated",
         expected_device_identity="isolated",
-        inspect_target=lambda: {
-            "container_name": "nhms-1893-isolated",
-            "container_bind": "/unused/cold",
-            "host_path": "/unused/cold",
-            "device_identity": "isolated",
-        },
+        **expected_exec_identity(),
+        inspect_target=lambda: target_observation(
+            container_name="nhms-1893-isolated",
+            container_bind="/unused/cold",
+            host_path="/unused/cold",
+            device_identity="isolated",
+        ),
     )
     runtime = runtime_config(config)
     assert runtime.expected_container_name == "nhms-1893-isolated"
+    # runtime_config must not drop the mandatory principal pair.
+    assert runtime.expected_container_exec_uid == RUNTIME_EXEC_UID
+    assert runtime.expected_container_exec_gid == RUNTIME_EXEC_GID
     connection, item = _loaded(FakeConnection())
     identity = preflight_target_identity(
         lambda sql, params=None: connection.dispatch(sql, params)[0],
@@ -804,12 +815,12 @@ def test_runtime_config_propagates_disposable_container_name() -> None:
         config.__class__(
             **{
                 **config.__dict__,
-                "inspect_target": lambda: {
-                    "container_name": "nhms-db",
-                    "container_bind": "/unused/cold",
-                    "host_path": "/unused/cold",
-                    "device_identity": "isolated",
-                },
+                "inspect_target": lambda: target_observation(
+                    container_name="nhms-db",
+                    container_bind="/unused/cold",
+                    host_path="/unused/cold",
+                    device_identity="isolated",
+                ),
             }
         )
     )
@@ -836,7 +847,7 @@ def test_injected_clock_records_non_zero_inspect_duration() -> None:
         connect=_connect(connection),
         chunk=item,
         inventories=bound_inventories(),
-        config=RuntimeConfig(clock=_StepClock()),
+        config=_runtime(clock=_StepClock()),
     )
     assert observation.timing is not None
     assert observation.timing["total_ms"] == 10
@@ -856,7 +867,7 @@ def test_injected_clock_records_mutation_stage_durations() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1", clock=_StepClock()),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1", clock=_StepClock()),
     )
     assert observation.outcome == "migrated"
     assert observation.timing is not None
@@ -904,7 +915,7 @@ def test_post_commit_inventory_drift_is_unknown_not_complete_target() -> None:
         hot_free_bytes=10_000,
         cold_reserve_bytes=100,
         wal_reserve_bytes=1,
-        config=RuntimeConfig(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
     )
     assert observation.reconciliation == "unknown"
     assert observation.outcome != "migrated"

@@ -45,6 +45,9 @@ not merely the near-empty origin chunk shell.
   tests, and serialized systemd integration.
 - #1894: fresh tablespace/container installation and rollback tooling,
   dual-device governance, backup-readiness checks, receipts, and tests.
+- #1929: bind the #1893 target writability probe to an explicitly configured,
+  observed numeric container runtime UID/GID and carry that principal in receipt
+  evidence; no image-user-name or root fallback is allowed.
 - #1895: controlled node-27 deployment and live receipts for migration,
   automatic convergence, hot/cold reads, timers, and display performance.
 - No row-schema migration, public API change, TimescaleDB/PostgreSQL upgrade,

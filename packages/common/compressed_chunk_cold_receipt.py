@@ -35,7 +35,12 @@ from packages.common.safe_fs import (
     unlink_no_follow_durable,
 )
 
-SCHEMA_VERSION = "1.0"
+# Writers emit only the current version. Readers and the shipping schema accept
+# the historical union as well: #1893 shipped `1.0` receipts and intent sidecars
+# that are still live recovery authority on node-27, and a const-`1.1`-only
+# schema would strand them.
+SCHEMA_VERSION = "1.1"
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas/timeseries_cold_residency_receipt.schema.json"
 MAX_RECEIPT_BYTES = 16 * 1024**2
 _FORMAT_CHECKER = jsonschema.FormatChecker()
@@ -49,7 +54,19 @@ class ColdReceiptError(RuntimeError):
 
 
 def load_receipt_schema() -> dict[str, Any]:
-    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    accepted = (schema.get("properties") or {}).get("schema_version", {}).get("enum")
+    if accepted != list(SUPPORTED_SCHEMA_VERSIONS):
+        # Writer code and the shipped schema must agree on which evidence
+        # versions are readable. Silent drift would strand (or invent)
+        # recovery authority, so refuse instead of validating against a schema
+        # the readers no longer match.
+        raise ColdReceiptError(
+            "cold residency receipt schema version union does not match the reader",
+            error_class="publication",
+            stage="startup",
+        )
+    return schema
 
 
 def iso_now(value: datetime | None = None) -> str:
@@ -569,12 +586,20 @@ def unavailable_cluster(*, application_name: str) -> dict[str, Any]:
 
 
 def unavailable_target() -> dict[str, Any]:
+    """Schema-1.1 tombstone: identity was never observed, so both fields are null.
+
+    Nulls are explicit rather than absent so a refusal can never be misread as
+    proof of a principal, and neither value is ever filled in from config.
+    """
+
     return {
         "catalog_name": "nhms_cold",
         "catalog_location": None,
         "container_bind": None,
         "host_path": None,
         "device_identity": None,
+        "container_exec_uid": None,
+        "container_exec_gid": None,
         "observed": False,
     }
 

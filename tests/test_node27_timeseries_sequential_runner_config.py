@@ -52,6 +52,8 @@ def _cold_env(tmp_path: Path) -> dict[str, str]:
         "NODE27_COLD_RESIDENCY_LOCK_PATH": str(tmp_path / "cold.lock"),
         "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "100",
         "NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES": "1",
+        "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID": "1005",
+        "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID": "1005",
     }
 
 
