@@ -49,6 +49,15 @@ _SUPERUSER_ALLOW_LIST = {
 }
 
 # Recurring node-27 unit entrypoints whose privilege needs this change encodes.
+#
+# `scripts/node27_timeseries_compression_supervisor.py` is deliberately NOT in
+# this tuple: its unit
+# (`infra/systemd/nhms-node27-timeseries-compression-replay.service:8`) is
+# `Type=oneshot` with no `.timer`, i.e. an operator-triggered migration-class
+# replay (pg_dump / two `migration_apply` steps / pg_restore, plus one
+# `decompress_chunk` leg), not a recurring lane. It keeps the superuser by
+# documented exception and is guarded separately by
+# `test_migration_class_tooling_stays_inside_the_allow_listed_lane`.
 _RECURRING_ENTRYPOINTS = (
     "scripts/node27_autopipeline.py",
     "scripts/node27_download_cycles.py",
@@ -271,6 +280,94 @@ def test_ownership_loop_is_not_one_transaction(sql_text: str) -> None:
     assert "\\unset ON_ERROR_STOP" in section
 
 
+def test_owner_to_appears_only_inside_the_ownership_section(sql_text: str) -> None:
+    """`--roles-only` is additive, and that has to hold for the WHOLE file.
+
+    Scoping the guard to the ``do_ownership`` block would miss an
+    ``ALTER … OWNER TO`` in the un-gated preamble (which runs in every mode,
+    including the audit-only call) or in ``do_roles`` (which runs under
+    ``--roles-only``, the phase whose contract is "takes no relation lock").
+    """
+    ownership = _psql_section(sql_text, "do_ownership")
+    assert ownership in sql_text
+    outside = _sql_code(sql_text.replace(ownership, "\n"))
+    assert "OWNER TO" not in outside, (
+        "an ownership transfer outside the do_ownership block would execute under "
+        f"--roles-only and in the audit-only call:\n{outside}"
+    )
+    assert _sql_code(ownership).count("OWNER TO") == 4, (
+        "expected exactly one ALTER … OWNER TO per relkind family inside the loop"
+    )
+
+
+def test_autocommit_is_never_turned_off(sql_text: str) -> None:
+    r"""``\set AUTOCOMMIT off`` is session-scoped, so the guard must be file-wide.
+
+    Setting it anywhere -- even inside ``do_roles`` -- would wrap the later
+    ``\gexec`` ownership statements into one implicit transaction and reinstate
+    exactly the whole-file AccessExclusiveLock this change exists to avoid.
+    """
+    assert not re.search(r"(?i)\\set\s+AUTOCOMMIT", sql_text), (
+        "AUTOCOMMIT is session-scoped; toggling it anywhere in the file batches "
+        "the per-relation ALTER … OWNER TO statements into one transaction"
+    )
+    assert not re.search(r"(?i)\bAUTOCOMMIT\s+off\b", sql_text)
+
+
+def test_audit_rejects_any_role_membership_held_by_the_write_roles(sql_text: str) -> None:
+    """Flag columns alone do not bound the roles.
+
+    ``GRANT pg_write_server_files TO nhms_ingest_rw`` leaves every ``pg_roles``
+    flag false while restoring ``COPY … FROM`` on server files, and a membership
+    in the migration role restores everything. The audit must read
+    ``pg_auth_members``.
+    """
+    section = _psql_section(sql_text, "do_audit")
+    assert "pg_auth_members" in section, (
+        "the audit reads only the pg_roles flag columns; a role membership is "
+        "invisible to it"
+    )
+    assert "SECURITY REGRESSION: role % is a member of %" in section
+    for role in (_INGEST_ROLE, _DOWNLOAD_ROLE):
+        membership_block = section[section.index("pg_auth_members") :]
+        assert f"'{role}'" in membership_block, f"{role} is not covered by the membership audit"
+    # the check must be outside `\if :strict_audit`, i.e. it also runs under
+    # --roles-only and in the audit-only call
+    strict = _psql_section(sql_text, "strict_audit")
+    assert "pg_auth_members" not in strict, (
+        "a membership regression must fail in every mode, not only in the strict audit"
+    )
+
+
+def test_audit_asserts_the_cold_tablespace_create_grant(sql_text: str) -> None:
+    r"""The cold-tablespace CREATE grant must be audited, not just emitted.
+
+    The grant in ``do_roles`` is a ``\gexec`` that emits NOTHING when the
+    tablespace is absent, so a revoked or never-issued
+    ``GRANT CREATE ON TABLESPACE nhms_cold`` was invisible -- the cold-residency
+    lane would discover it at its first ``SET TABLESPACE`` instead.
+    """
+    section = _psql_section(sql_text, "do_audit")
+    assert "has_tablespace_privilege" in section, (
+        "the audit never checks the cold-tablespace CREATE grant"
+    )
+    assert re.search(
+        rf"has_tablespace_privilege\(\s*'{_INGEST_ROLE}'\s*,\s*'nhms_cold'\s*,\s*'CREATE'\s*\)",
+        section,
+    ), section
+    assert "tablespace nhms_cold absent" in section, (
+        "an absent tablespace must be reported loudly, not silently skipped"
+    )
+    strict = _psql_section(sql_text, "strict_audit")
+    assert "has_tablespace_privilege" in strict, (
+        "a missing CREATE grant must be a hard failure in full mode"
+    )
+    non_strict = section.replace(strict, "\n")
+    assert "has_tablespace_privilege" in non_strict, (
+        "--roles-only must still warn about a missing CREATE grant"
+    )
+
+
 def test_audit_asserts_the_display_role_select_set_and_the_hypertable_owners(sql_text: str) -> None:
     section = _psql_section(sql_text, "do_audit")
     assert "has_table_privilege(r.oid, c.oid, 'SELECT')" in section
@@ -304,10 +401,31 @@ def test_default_privileges_cover_every_application_schema_for_ingest(sql_text: 
     )
     assert tables_clause in section
     assert sequences_clause in section
-    for clause in (tables_clause, sequences_clause):
-        block = section[section.index(clause) : section.index(clause) + 600]
-        for schema in _APP_SCHEMAS:
-            assert f"'{schema}'" in block, f"{schema} missing from the default-privilege block"
+
+
+def test_every_generated_schema_list_covers_all_six_schemas(sql_text: str) -> None:
+    """Every `ANY (ARRAY[...])` in `do_roles` must name all six app schemas.
+
+    A fixed-width window around one clause silently stops covering the list it
+    was meant to check as soon as the SQL is reformatted, and it says nothing
+    about the other four sites. Enumerate them instead: schema USAGE, DML on all
+    tables, USAGE on all sequences, and the two ALTER DEFAULT PRIVILEGES blocks.
+    """
+    section = _sql_code(_psql_section(sql_text, "do_roles"))
+    starts = [match.end() for match in re.finditer(r"ANY \(ARRAY\[", section)]
+    assert len(starts) == 5, (
+        "expected five generated schema lists in do_roles (schema USAGE, ALL "
+        f"TABLES, ALL SEQUENCES, default-priv TABLES, default-priv SEQUENCES); "
+        f"found {len(starts)}"
+    )
+    for start in starts:
+        end = section.index("]", start)
+        listed = tuple(re.findall(r"'([a-z_]+)'", section[start:end]))
+        context = section[max(0, start - 400) : start].strip().splitlines()[-1:]
+        assert set(listed) == set(_APP_SCHEMAS), (
+            f"generated schema list {listed} after {context} must name all six "
+            f"application schemas {_APP_SCHEMAS}"
+        )
 
 
 def test_schema_scoped_grants_are_generated_not_listed(sql_text: str) -> None:
@@ -427,6 +545,12 @@ for arg in "$@"; do
 done
 cat >> "$FAKE_DOCKER_STDIN_LOG" 2>/dev/null || true
 case "$phase" in
+  roles)
+    if [ -n "${FAKE_ROLES_RC:-}" ]; then
+      printf 'ERROR:  SECURITY REGRESSION: role nhms_ingest_rw is a member of pg_write_server_files\n' >&2
+      exit "${FAKE_ROLES_RC}"
+    fi
+    ;;
   remaining)
     printf '%s\n' "${FAKE_REMAINING:-0}"
     ;;
@@ -460,6 +584,13 @@ exit 0
 """
 
 
+# `sleep` is not a bash builtin, so a stub earlier on PATH makes --pass-interval
+# observable without spending the wall clock on it.
+_FAKE_SLEEP = r"""#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
+"""
+
+
 @pytest.fixture()
 def runner(tmp_path):
     bin_dir = tmp_path / "bin"
@@ -467,21 +598,31 @@ def runner(tmp_path):
     fake = bin_dir / "docker"
     fake.write_text(_FAKE_DOCKER, encoding="utf-8")
     fake.chmod(0o755)
+    fake_sleep = bin_dir / "sleep"
+    fake_sleep.write_text(_FAKE_SLEEP, encoding="utf-8")
+    fake_sleep.chmod(0o755)
     log = tmp_path / "docker-argv.log"
     stdin_log = tmp_path / "docker-stdin.log"
+    sleep_log = tmp_path / "sleep.log"
     log.touch()
     stdin_log.touch()
+    sleep_log.touch()
 
-    def run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def run(
+        *args: str,
+        env: dict[str, str] | None = None,
+        bash_flags: tuple[str, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
         child = dict(os.environ)
         child.pop("NODE27_INGEST_RW_PASSWORD", None)
         child.pop("NODE27_DOWNLOAD_RW_PASSWORD", None)
         child["PATH"] = f"{bin_dir}{os.pathsep}{child['PATH']}"
         child["FAKE_DOCKER_LOG"] = str(log)
         child["FAKE_DOCKER_STDIN_LOG"] = str(stdin_log)
+        child["FAKE_SLEEP_LOG"] = str(sleep_log)
         child.update(env or {})
         return subprocess.run(
-            ["bash", str(_RUNNER_PATH), *args],
+            ["bash", *bash_flags, str(_RUNNER_PATH), *args],
             capture_output=True,
             text=True,
             env=child,
@@ -490,6 +631,7 @@ def runner(tmp_path):
 
     run.argv_log = log  # type: ignore[attr-defined]
     run.stdin_log = stdin_log  # type: ignore[attr-defined]
+    run.sleep_log = sleep_log  # type: ignore[attr-defined]
     return run
 
 
@@ -523,7 +665,7 @@ def test_full_mode_captures_transfers_and_audits(runner) -> None:
     argv = runner.argv_log.read_text(encoding="utf-8")
     assert "do_roles=on -v do_ownership=on" in argv, "pass 1 must also run the additive phase"
     assert "do_ownership=off -v do_audit=on -v strict_audit=on" in argv
-    assert "read-side boundary preserved" in result.stdout
+    assert "SELECT privilege set unchanged" in result.stdout
     assert "full provision complete; audit clean" in result.stdout
 
 
@@ -536,6 +678,61 @@ def test_retry_passes_exhaust_into_a_non_zero_audit_visible_partial_transfer(run
     # ... and the refusal explains why this is safe and blocks the cutover
     assert "PARTIAL, audit-visible transfer, not a rollback" in result.stderr
     assert "do not cut the env files over" in result.stderr.lower()
+
+
+def test_pass_interval_defaults_to_no_delay_between_passes(runner) -> None:
+    result = runner(env={"FAKE_REMAINING": "2"})
+    assert result.returncode == 3
+    assert runner.sleep_log.read_text(encoding="utf-8") == "", (
+        "the default must stay back-to-back; an implicit delay changes the "
+        "documented retry window"
+    )
+
+
+def test_pass_interval_spaces_the_ownership_passes(runner) -> None:
+    """A lock holder that outlives 5 back-to-back passes needs a wider window."""
+    result = runner("--pass-interval", "7", env={"FAKE_REMAINING": "2"})
+    assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+    slept = runner.sleep_log.read_text(encoding="utf-8").split()
+    assert slept == ["7", "7", "7", "7"], (
+        "expected one interval between each of the 5 passes and none after the "
+        f"last one; got {slept}"
+    )
+
+
+def test_pass_interval_is_not_slept_after_a_completed_transfer(runner) -> None:
+    result = runner("--pass-interval", "7")
+    assert result.returncode == 0, result.stderr
+    assert runner.sleep_log.read_text(encoding="utf-8") == "", (
+        "the transfer completed on pass 1; there is nothing to wait for"
+    )
+
+
+def test_roles_only_maps_a_refused_run_to_the_documented_exit_code(runner) -> None:
+    """psql's own exit status must not leak as an undocumented runner code."""
+    result = runner("--roles-only", env={"FAKE_ROLES_RC": "1"})
+    assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+    assert "psql exit 1" in result.stderr
+    assert "do not cut the env files over" in result.stderr.lower()
+
+
+def test_password_presence_check_never_expands_the_value_under_bash_x(runner) -> None:
+    """`[[ -n "${!var:-}" ]]` prints the password into the `set -x` trace."""
+    sentinel = "s3cr3t-trace-sentinel"
+    result = runner(
+        "--roles-only",
+        env={"NODE27_INGEST_RW_PASSWORD": sentinel},
+        bash_flags=("-x",),
+    )
+    assert result.returncode == 0, result.stderr
+    assert sentinel not in result.stderr, (
+        "the password value reached the execution trace; an operator running the "
+        "runner under `bash -x` would paste it into a ticket"
+    )
+    assert sentinel not in result.stdout
+    assert "NODE27_INGEST_RW_PASSWORD" in result.stderr, (
+        "the trace must still be produced, or this test proves nothing"
+    )
 
 
 def test_retry_passes_stop_early_when_the_transfer_completes(runner) -> None:
@@ -578,13 +775,16 @@ def test_unset_password_is_skipped_rather_than_blanked(runner) -> None:
     assert "-e NODE27_INGEST_RW_PASSWORD" not in argv, (
         "`docker exec -e VAR` on an empty value sets an EMPTY password"
     )
-    assert "password will be left unchanged" in result.stderr
+    assert "cannot log in over TCP until one is set" in result.stderr
 
 
 def test_runner_rejects_bad_arguments(runner) -> None:
     assert runner("--nope").returncode == 2
     assert runner("--max-passes", "0").returncode == 2
     assert runner("--container").returncode == 2
+    assert runner("--pass-interval").returncode == 2
+    assert runner("--pass-interval", "-1").returncode == 2
+    assert runner("--pass-interval", "abc").returncode == 2
 
 
 def test_runner_targets_the_production_container_by_default(runner) -> None:
@@ -627,9 +827,14 @@ _CONVERTED_LANE_SOURCES = _RECURRING_ENTRYPOINTS + (
     "packages/common/node27_cold_tablespace_integration.py",
 )
 
-# Surfaces a superuser reads freely and a plain table owner does not:
-# pg_stat_activity/pg_locks show only the caller's own sessions without
-# pg_read_all_stats, and schema `pg_toast` has no USAGE granted to PUBLIC.
+# Surfaces a superuser reads freely and a plain table owner does not.
+# `pg_locks` itself is NOT row-filtered -- every role sees every lock row. What
+# degrades is the attribution a quiescence guard needs: `pg_stat_activity` keeps
+# one row per backend but masks `query`/`state`/`wait_event*` for other users'
+# sessions unless the role holds pg_read_all_stats, so a "no concurrent writer"
+# check goes permanently green instead of failing. `pg_locks` stays in the
+# pattern because it is only ever useful joined to that masked view. Schema
+# `pg_toast` has no USAGE granted to PUBLIC.
 _SUPERUSER_GATED_READS = re.compile(
     r"pg_stat_activity|pg_locks|pg_toast\.|pg_stat_file|pg_ls_dir|pg_read_file"
     r"|pg_read_binary_file|pg_terminate_backend|pg_cancel_backend|pg_reload_conf"
@@ -639,9 +844,11 @@ _SUPERUSER_GATED_READS = re.compile(
 def test_converted_lanes_do_not_read_superuser_gated_catalogs() -> None:
     """A superuser-gated READ degrades silently, unlike a write which errors.
 
-    pg_stat_activity/pg_locks do not raise for a non-superuser -- they return a
-    filtered result, so a quiescence or lock-conflict guard would go permanently
-    green.  Any new hit here must either be paired with a grant in
+    `pg_stat_activity` does not raise for a non-superuser -- it masks the
+    `query`/`state`/`wait_event*` columns of other users' backends, so a
+    quiescence or lock-conflict guard reading it (directly, or joined from
+    `pg_locks`, which is itself unfiltered) would go permanently green.  Any new
+    hit here must either be paired with a grant in
     db/roles/node27_write_roles.sql or move to a lane that stays superuser.
     """
     offenders: list[str] = []

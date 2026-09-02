@@ -19,6 +19,16 @@ Every recurring node-27 runtime unit that writes to the production database SHAL
 - **WHEN** the ownership loop has run
 - **THEN** `nhms_display_ro`'s `SELECT` privilege set over the application schemas is identical to the captured pre-transfer set, each relation's transfer committed on its own so no display query waited longer than one relation's `lock_timeout`, and any relation left untransferred after the retry passes is reported by the audit and blocks the cutover
 
+#### Scenario: Role membership regression is refused
+
+- **WHEN** either write role is granted membership in any other role (for example `GRANT nhms TO nhms_ingest_rw` or `GRANT pg_read_server_files TO nhms_ingest_rw`) and the provision script runs in any mode
+- **THEN** the flags audit raises a security-regression error naming the role and the membership, and the runner exits 3 — the audit reads `pg_auth_members`, not only the `pg_roles` flags
+
+#### Scenario: Cold tablespace grant is audited
+
+- **WHEN** the tablespace `nhms_cold` exists and `nhms_ingest_rw` does not hold `CREATE` on it
+- **THEN** the trailing audit reports the missing grant (a warning outside strict mode, an error under strict audit so the runner exits 3); when the tablespace is absent the audit prints an explicit "grant skipped" line instead of staying silent
+
 #### Scenario: Program execution is closed
 
 - **WHEN** either write role attempts `COPY … FROM PROGRAM`

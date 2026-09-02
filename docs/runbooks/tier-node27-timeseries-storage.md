@@ -2566,6 +2566,12 @@ ANALYZE **之后**实测 2,000 次等值查找：
 `\di core.river_segment_id_trgm_idx*` 应只剩一个名字，且
 `pg_index.indisvalid = true`。
 
+> **迁移后必跑（#1774，§9.6）**：node-27 上任何 `packages.common.migrate` /
+> `migration_apply` 之后，接着跑 `bash scripts/node27_provision_write_roles.sh`
+> 并确认审计干净。迁移以 `nhms` 建表，新表在重跑之前归 `nhms` 所有：ingest 仍可
+> 读写（default privileges），但其 `ANALYZE` 被静默跳过；若新建的是 hypertable，
+> 压缩/保留两条 lane 会直接 `must be owner of hypertable` 报错。
+
 `met.met_station` 的 `met_station_id_trgm_idx` 是 partial（`WHERE active_flag =
 true`）：不带该谓词的等值查找结构上不可选它（实测走 `met_station_pkey`，
 1.8 ms/500）；**带谓词的等值 join 会中招且随统计翻转**——2026-08-21 05:50Z 实测走
@@ -3658,7 +3664,7 @@ scan and fails if a lane grows a requirement this table does not cover.
 | `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:414,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:841` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
-| `nhms-node27-timeseries-compression-replay.service` | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** | **`nhms` (documented exception)** |
+| `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus one `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
 
 Not required by any recurring lane, therefore not granted: schema `CREATE`,
@@ -3668,11 +3674,16 @@ not background policies), `pg_execute_server_program`, `CREATEDB`, `CREATEROLE`,
 `REPLICATION`, `BYPASSRLS`.
 
 **Superuser-gated *reads* (audited separately — they fail SILENTLY).** A write a
-non-owner is not entitled to raises an error; a read does not. `pg_stat_activity`
-and `pg_locks` return a row set filtered to the caller's own sessions unless the
-role holds `pg_read_all_stats`, so a "no concurrent writer" or "no conflicting
-lock" guard running as `nhms_ingest_rw` would go permanently green instead of
-failing. Schema `pg_toast` likewise has no `USAGE` granted to `PUBLIC`.
+non-owner is not entitled to raises an error; a read does not. `pg_locks` is
+**not** row-filtered — every role sees every lock row. What degrades is
+`pg_stat_activity`: it keeps one row per backend for every role, but **masks the
+`query` / `state` / `wait_event*` columns of other users' sessions** unless the
+role holds `pg_read_all_stats`. A "no concurrent writer" or "no in-flight
+`compress_chunk`" guard running as `nhms_ingest_rw` therefore reads `NULL` where
+it expected the other lane's statement text and goes permanently green instead of
+failing. `pg_locks` stays inside the guard's scan pattern because it is only ever
+useful joined back to that masked view (pid → who/what). Schema `pg_toast`
+likewise has no `USAGE` granted to `PUBLIC`.
 
 Scanned the converted lanes for `pg_stat_activity`, `pg_locks`, `pg_toast.`,
 `pg_stat_file`, `pg_ls_dir`, `pg_read_file`, `pg_read_binary_file`,
@@ -3712,8 +3723,13 @@ Both phases run from the deployed checkout on node-27,
 # the conditional cold-tablespace grant, then runs the negative
 # COPY ... FROM PROGRAM probes and a NON-strict audit. Executes no
 # `ALTER ... OWNER TO`, takes no relation lock.
-export NODE27_INGEST_RW_PASSWORD='…'      # from the operator's password store
-export NODE27_DOWNLOAD_RW_PASSWORD='…'    # unset = leave the password unchanged
+# Read them, never type them into the command line: an `export VAR='…'` lands
+# verbatim in ~/.bash_history (and in the scrollback of a shared ssh session).
+# `read -rs` echoes nothing and stores nothing. Unset = leave an EXISTING role's
+# password unchanged; a role this run CREATES then has no password and cannot log
+# in over TCP until a later run sets one.
+read -rs NODE27_INGEST_RW_PASSWORD   && export NODE27_INGEST_RW_PASSWORD
+read -rs NODE27_DOWNLOAD_RW_PASSWORD && export NODE27_DOWNLOAD_RW_PASSWORD
 bash scripts/node27_provision_write_roles.sh --roles-only
 unset NODE27_INGEST_RW_PASSWORD NODE27_DOWNLOAD_RW_PASSWORD
 ```
@@ -3724,7 +3740,9 @@ everywhere — that list is *expected* in this phase, and the run exits 0.
 
 Password handling: the two values live only in the operator's shell environment
 and are forwarded to `psql` **by name** (`docker exec -e VAR`), so they never
-appear in the repo, in an argv, or in `docker inspect`. `ALTER ROLE … PASSWORD`
+appear in the repo, in an argv, in `docker inspect`, or in the runner's
+`bash -x` execution trace (the presence check uses `${!var:+x}`, which traces as
+`[[ -n x ]]`). `ALTER ROLE … PASSWORD`
 is logged verbatim by the server whenever `log_statement` is `ddl`/`mod`/`all`,
 so the SQL wraps both ALTERs in `SET log_statement = 'none'` /
 `SET log_min_duration_statement = -1` and restores them immediately after
@@ -3747,11 +3765,23 @@ holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
 `AccessExclusiveLock` down the chunk tree:
 
 - one autocommitted `ALTER … OWNER TO` statement **per relation** (psql
-  `\gexec`), never one `DO` block and never one transaction, so a display query
-  stalls for at most one relation's `lock_timeout`;
+  `\gexec`), never one `DO` block and never one transaction. The
+  `AccessExclusiveLock` is held for **one statement** — for a hypertable, the
+  whole chunk tree within that one statement — bounded by that `ALTER`'s own
+  `lock_timeout`, and released at its end rather than at the end of the loop. A
+  display query arriving mid-`ALTER` waits for **that statement**, not for the
+  rest of the pass;
 - `SET lock_timeout = '5s'`, and a relation that times out is skipped, not
   waited on;
-- up to 5 passes, each re-selecting only what is still owned by somebody else;
+- up to 5 passes, each re-selecting only what is still owned by somebody else.
+  **The effective retry window is `max-passes × lock_timeout`** — by default
+  5 × 5 s ≈ 26 s of wall clock, because the passes run back-to-back. Against a
+  holder that never releases inside that window the run ends as a partial
+  transfer (exit 3), not as an unbounded wait. Widen it with `--max-passes` /
+  `NODE27_WRITE_ROLES_MAX_PASSES`, or space the passes with `--pass-interval
+  <seconds>` / `NODE27_WRITE_ROLES_PASS_INTERVAL` (default `0`; the interval is
+  only slept when another pass will actually run) when the holder is a long
+  display scan rather than a transient one;
 - tables/partitioned tables before sequences (an `OWNED BY` sequence follows its
   table; a standalone `ALTER SEQUENCE … OWNER TO` on one is refused), then views
   and materialized views;
@@ -3764,9 +3794,39 @@ cutover does not proceed. That state is safe: every unit still connects as the
 superuser `nhms`, for which the owner check short-circuits, so tiering and
 ANALYZE keep working on relations `nhms` no longer owns. Re-run the script.
 
-Exit codes: `0` clean · `2` usage/environment · `3` incomplete transfer or
-refused audit · `4` `nhms_display_ro`'s SELECT set changed. Anything non-zero
-means **do not cut the env files over**.
+Exit codes: `0` clean · `2` usage/environment · `3` refused or incomplete
+transfer — this now also covers a `--roles-only` run whose `psql` refused, so
+`psql`'s own status (1 fatal / 2 connection / 3 script error) never leaks as a
+runner code · `4` `nhms_display_ro`'s SELECT **privilege set** changed. Anything
+non-zero means **do not cut the env files over**.
+
+What exit 4 measures, and only this: `has_table_privilege(nhms_display_ro, rel,
+'SELECT')` per relation in the six schemas, identical before and after.
+**Limit:** a view or matview *executes* as its **owner** (PG 15 defaults to
+`security_invoker = false`), so transferring a view whose body reads a relation
+**outside** the six application schemas can make it unreadable for display while
+that privilege set stays byte-identical — the gate cannot see it. T7 therefore
+enumerates relkind `v`/`m` in the six schemas together with their `pg_depend`
+targets outside them **before** the transfer (expected empty on node-27); if the
+enumeration is non-empty, add a `SET ROLE nhms_display_ro; EXPLAIN SELECT`
+execution probe before proceeding.
+
+**The audit refuses on ANY role membership, in every mode.** Both phases read
+`pg_auth_members` for `nhms_ingest_rw` and `nhms_download_rw` and raise
+`SECURITY REGRESSION: role X is a member of Y` (psql exit 3, runner exit 3) if
+either role holds a membership of any kind. The five `pg_roles` flag columns
+cannot see one: a single `GRANT pg_write_server_files TO nhms_ingest_rw` leaves
+all five `f` while restoring server-side file access through `COPY`, and a
+membership in the migration role restores everything it can do. The two write
+roles need no membership — their whole privilege set is relation ownership plus
+the explicit grants above — so any row is a regression, not a policy judgement.
+Revoke it before re-running; do not widen the predicate.
+
+The audit likewise checks the cold-tablespace grant: when `nhms_cold` exists,
+`has_tablespace_privilege('nhms_ingest_rw','nhms_cold','CREATE')` must be true
+(hard failure under the strict audit, `WARNING` under `--roles-only`); when it is
+absent the run says so loudly instead of skipping in silence — the `GRANT` is a
+`\gexec` over `pg_tablespace` and emits nothing when the tablespace is missing.
 
 Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
 (moves the database, the schemas and extension-adjacent objects) and
@@ -3774,9 +3834,14 @@ Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
 
 ### 9.4 Cutover (post-merge, one session)
 
-1. Stop `nhms-node27-timeseries-compression.timer` and the autopipe timer;
-   confirm no in-flight tick or `compress_chunk` in `pg_stat_activity`. The
-   display API keeps running.
+1. Stop `nhms-node27-timeseries-compression.timer`,
+   `nhms-node27-timeseries-retention.timer` and the autopipe timer; confirm no
+   in-flight tick, `compress_chunk` or `drop_chunks` in `pg_stat_activity`
+   (`drop_chunks` takes `AccessExclusiveLock` on the same chunk tree the transfer
+   wants). Run that check **as the superuser `nhms`** — see §9.2: the
+   `query`/`state` columns of other users' sessions are masked for a
+   non-`pg_read_all_stats` role, so the same query as `nhms_ingest_rw` would look
+   quiescent no matter what is running. The display API keeps running.
 2. Run phase 2 above. Check: owner-drift list empty, display SELECT-set diff
    empty, `## audit: OK -- no owner drift`.
 3. Restart the timers.
@@ -3811,6 +3876,12 @@ provision script is re-run:
   visibly;
 - but their `ANALYZE` is skipped with a warning, i.e. the #1643/#1468 guard
   silently stops covering those tables;
+- and if the migration created a **hypertable**, the drift is not a warning at
+  all: `compress_chunk` and `drop_chunks` refuse outright with `must be owner of
+  hypertable`, so the compression and retention lanes **fail** on it rather than
+  degrading. Nil today only because both lanes hard-filter to the two existing
+  hypertables (`scripts/node27_timeseries_retention.py:166`) — that is a property
+  of those filters, not of the grants;
 - and the audit reports the owner drift.
 
 So: **after every `migration_apply` on node-27, run

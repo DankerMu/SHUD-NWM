@@ -8,11 +8,17 @@
 -- superuser.  `nhms` keeps the database, the extension and the migrations.
 --
 -- Run it through scripts/node27_provision_write_roles.sh; that runner supplies
--- the phase variables below, the retry passes and the before/after captures.
--- Direct invocation is supported too (all phases, strict audit):
+-- the phase variables below, the retry passes, the before/after captures and
+-- the exit-code contract.  Direct invocation is AUDIT-ONLY -- use it to read the
+-- current state, never to perform a cutover:
 --
 --   docker exec -i nhms-db psql -U nhms -d nhms -v ON_ERROR_STOP=1 \
---     < db/roles/node27_write_roles.sql
+--     -v do_roles=off -v do_ownership=off < db/roles/node27_write_roles.sql
+--
+-- Running it directly with the default phases DOES execute the ownership
+-- transfer, but WITHOUT the runner's display before/after gate: only the runner
+-- captures nhms_display_ro's effective SELECT set on both sides and exits 4 when
+-- it changed.  This file cannot detect that regression on its own.
 --
 -- Idempotent: safe (and required) to re-run after every migration.
 --
@@ -21,9 +27,22 @@
 --                 USAGE, default privileges, cold-tablespace CREATE grant and
 --                 the negative COPY ... FROM PROGRAM probes.  Purely additive:
 --                 nothing here transfers ownership.
---   do_ownership  the per-relation ownership transfer loop.
---   do_audit      the trailing audit queries.
---   strict_audit  when on, owner drift raises (psql exits non-zero).
+--   do_ownership  the per-relation ownership transfer loop.  Limit worth
+--                 knowing before running it: a view/matview EXECUTES as its
+--                 owner (PG 15 defaults to security_invoker = false), so a view
+--                 whose body reads a relation OUTSIDE the six schemas can become
+--                 unreadable for display after the transfer even though
+--                 nhms_display_ro's SELECT privilege set is unchanged -- neither
+--                 this file nor the runner's exit-4 gate can see that.  T7
+--                 enumerates relkind v/m and their out-of-schema pg_depend
+--                 targets before the transfer for exactly this reason.
+--   do_audit      the trailing audit queries.  Always asserts, in every mode:
+--                 the five privilege flags are false, both roles can log in, and
+--                 neither role holds ANY role membership (pg_auth_members -- a
+--                 membership hands back privileges the flags cannot show).
+--                 Warns when the nhms_cold CREATE grant is missing.
+--   strict_audit  when on, owner drift and a missing nhms_cold CREATE grant
+--                 raise (psql exits non-zero).
 --
 -- Secrets: passwords are never in this file.  They are read from the
 -- environment of the psql process (NODE27_INGEST_RW_PASSWORD /
@@ -47,6 +66,17 @@
 \if :{?strict_audit}
 \else
 \set strict_audit on
+\endif
+-- Receipt attribution: the runner passes -v phase=... on every invocation and
+-- -v pass=N on the ownership passes.  Defaulted here so a direct invocation
+-- still prints an attributable audit header instead of a literal `:phase`.
+\if :{?phase}
+\else
+\set phase direct
+\endif
+\if :{?pass}
+\else
+\set pass n/a
 \endif
 
 
@@ -78,8 +108,11 @@ END
 $roles$;
 
 -- Passwords: present only in the psql process environment.  An unset variable
--- leaves the existing password untouched, which is what makes a re-run after a
--- migration safe for an operator who does not hold the credentials.
+-- leaves an EXISTING role's password untouched, which is what makes a re-run
+-- after a migration safe for an operator who does not hold the credentials.  A
+-- role this run just CREATED has no password at all in that case: it exists,
+-- owns relations and can be SET ROLE'd into, but cannot log in over TCP until a
+-- later run sets one.
 --
 -- `ALTER ROLE ... PASSWORD` is logged VERBATIM by the server whenever
 -- log_statement is 'ddl'/'mod'/'all' or log_min_duration_statement is low
@@ -96,14 +129,14 @@ SET log_min_duration_statement = -1;
 ALTER ROLE nhms_ingest_rw PASSWORD :'ingest_rw_password';
 \echo '   nhms_ingest_rw password set from NODE27_INGEST_RW_PASSWORD'
 \else
-\echo '   NODE27_INGEST_RW_PASSWORD unset -- nhms_ingest_rw password left unchanged'
+\echo '   NODE27_INGEST_RW_PASSWORD unset -- nhms_ingest_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
 \endif
 \getenv download_rw_password NODE27_DOWNLOAD_RW_PASSWORD
 \if :{?download_rw_password}
 ALTER ROLE nhms_download_rw PASSWORD :'download_rw_password';
 \echo '   nhms_download_rw password set from NODE27_DOWNLOAD_RW_PASSWORD'
 \else
-\echo '   NODE27_DOWNLOAD_RW_PASSWORD unset -- nhms_download_rw password left unchanged'
+\echo '   NODE27_DOWNLOAD_RW_PASSWORD unset -- nhms_download_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
 \endif
 RESET log_statement;
 RESET log_min_duration_statement;
@@ -133,8 +166,15 @@ ORDER BY n.nspname
 
 -- Default privileges: a table a later migration creates as `nhms` is owned by
 -- `nhms` until the next provision run, but stays readable/writable by ingest
--- during that drift window.  Only its stats-guard ANALYZE entry degrades to
+-- during that drift window.  Its stats-guard ANALYZE entry degrades to
 -- `warning` (ANALYZE needs ownership; PG 15 has no MAINTAIN).
+--
+-- A migration that creates a HYPERTABLE is worse than a warning: compress_chunk
+-- and drop_chunks refuse outright with `must be owner of hypertable`, so the
+-- compression and retention lanes FAIL on it, they do not degrade.  Nil today --
+-- both lanes hard-filter to the two existing hypertables -- but that is a
+-- property of those filters, not of this grant.  Re-run this file after every
+-- migration (runbook 9.6).
 \echo '## default privileges: ALTER DEFAULT PRIVILEGES FOR ROLE nhms -> nhms_ingest_rw'
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO nhms_ingest_rw', n.nspname)
 FROM pg_namespace n
@@ -205,14 +245,18 @@ $copy_probe$;
 
 \if :do_ownership
 
-\echo '## phase: ownership transfer of the application schemas to nhms_ingest_rw'
+\echo '## phase: ownership transfer of the application schemas to nhms_ingest_rw (pass' :pass 'of the runner retry loop)'
 -- Executed by \gexec, which runs each generated statement as its own
 -- autocommitted statement.  Deliberately NOT one DO block and NOT one
 -- transaction: `ALTER ... OWNER TO` takes AccessExclusiveLock down the chunk
 -- tree, and the display API (nhms_display_ro, public site, cannot be stopped)
 -- holds AccessShareLock on served relations.  One statement per transaction
--- means a display query stalls for at most one relation's lock_timeout, and a
--- completed transfer is never rolled back by a later failure.
+-- means the lock is held for one STATEMENT -- for a hypertable, the whole chunk
+-- tree in that one statement -- bounded by that ALTER's own lock_timeout below,
+-- and released at its end instead of at the end of the loop.  A display query
+-- arriving mid-ALTER waits for that statement (up to its lock_timeout), not for
+-- the rest of the pass, and a completed transfer is never rolled back by a
+-- later failure.
 --
 -- ON_ERROR_STOP is off for the loop so a lock_timeout on one relation does not
 -- abandon the rest of the pass; the runner re-runs this phase (up to 5 passes)
@@ -273,6 +317,8 @@ RESET lock_timeout;
 
 \if :do_audit
 
+\echo '## audit: invocation phase =' :phase
+\echo '## audit: ownership pass  =' :pass
 \echo '## audit: write-role flags (all five privilege flags must be false)'
 SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls, rolcanlogin
 FROM pg_roles
@@ -327,12 +373,25 @@ WHERE n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
   AND has_table_privilege(r.oid, c.oid, 'SELECT')
 ORDER BY 1;
 
--- Always asserted, in both modes: the roles exist and carry none of the five
--- privilege flags.  This is the invariant `--roles-only` is allowed to prove.
+-- Always asserted, in both modes: the roles exist, carry none of the five
+-- privilege flags, and hold NO role membership.  This is the invariant
+-- `--roles-only` is allowed to prove.
+--
+-- The membership leg is not redundant with the flag leg: `pg_auth_members` is
+-- invisible to every rolsuper/rolcreaterole/... column, so a single
+-- `GRANT pg_write_server_files TO nhms_ingest_rw` leaves all five flags false
+-- while restoring server-side file reads via COPY, and a membership in the
+-- migration role restores everything it can do.  The two write roles need no
+-- membership of any kind -- their whole privilege set is relation ownership plus
+-- the explicit grants above -- so ANY row here is a regression, not a policy
+-- judgement.  If a membership ever becomes genuinely necessary, add it to an
+-- explicit allow-list here with the reason, do not widen the predicate.
 DO $flags$
 DECLARE
-  v_bad     text;
-  v_logins  int;
+  v_bad      text;
+  v_logins   int;
+  v_member   text;
+  v_grantee  text;
 BEGIN
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO v_bad
   FROM pg_roles
@@ -348,8 +407,39 @@ BEGIN
   IF v_logins <> 2 THEN
     RAISE EXCEPTION 'expected 2 write roles able to log in, found %', v_logins;
   END IF;
+
+  FOR v_member, v_grantee IN
+    SELECT m.rolname, g.rolname
+    FROM pg_auth_members am
+    JOIN pg_roles m ON m.oid = am.member
+    JOIN pg_roles g ON g.oid = am.roleid
+    WHERE m.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
+    ORDER BY 1, 2
+  LOOP
+    RAISE EXCEPTION 'SECURITY REGRESSION: role % is a member of % -- the write roles must hold no role membership; revoke it before proceeding', v_member, v_grantee;
+  END LOOP;
 END
 $flags$;
+
+\echo '## audit: CREATE on tablespace nhms_cold for nhms_ingest_rw'
+-- The grant itself is a \gexec over pg_tablespace and emits NOTHING when the
+-- tablespace is absent, so neither a skipped nor a later-revoked grant shows up
+-- anywhere else.  The cold-residency lane would otherwise discover it at its
+-- first `ALTER ... SET TABLESPACE nhms_cold`.
+SELECT EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname = 'nhms_cold') AS nhms_cold_present \gset
+\if :nhms_cold_present
+DO $cold_tablespace$
+BEGIN
+  IF NOT has_tablespace_privilege('nhms_ingest_rw', 'nhms_cold', 'CREATE') THEN
+    RAISE WARNING 'cold-residency regression: nhms_ingest_rw lacks CREATE on tablespace nhms_cold -- ALTER ... SET TABLESPACE will be refused';
+  ELSE
+    RAISE NOTICE 'nhms_ingest_rw holds CREATE on tablespace nhms_cold';
+  END IF;
+END
+$cold_tablespace$;
+\else
+\echo '   tablespace nhms_cold absent -- CREATE grant skipped (expected off node-27; on node-27 this means the #1894 install did not run)'
+\endif
 
 \if :strict_audit
 -- Full mode only: owner drift is a hard failure, so the cutover cannot proceed
@@ -358,6 +448,12 @@ DO $strict$
 DECLARE
   v_drift int;
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tablespace WHERE spcname = 'nhms_cold') THEN
+    IF NOT has_tablespace_privilege('nhms_ingest_rw', 'nhms_cold', 'CREATE') THEN
+      RAISE EXCEPTION 'cold-residency regression: nhms_ingest_rw lacks CREATE on tablespace nhms_cold; re-run the provision script';
+    END IF;
+  END IF;
+
   SELECT count(*) INTO v_drift
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
