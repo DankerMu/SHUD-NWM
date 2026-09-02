@@ -185,18 +185,20 @@ def test_unusable_earliest_clone_row_still_resolves_lineage_on_the_db_free_plane
     """
     object_root = tmp_path / "objects"
     object_root.mkdir(parents=True)
-    repo = _repository(
-        tmp_path,
-        [
-            _entry(
-                object_root=object_root,
-                model_id="model_a_prime",
-                valid_time="2026-08-21T12:00:00Z",
-                cloned_from_model_id="model_a",
-                usable_flag=False,
-            )
-        ],
+    entry = _entry(
+        object_root=object_root,
+        model_id="model_a_prime",
+        valid_time="2026-08-21T12:00:00Z",
+        cloned_from_model_id="model_a",
+        usable_flag=False,
     )
+    # #1745: the unusable row is this test's whole premise, and until now nothing
+    # observed it -- `usable_flag=False` travelled from the call site into the index
+    # unasserted, so a fixture that silently wrote `True`
+    # (`tests/lineage_state_index_fixtures.py:100`) would have left the test green
+    # while it no longer exercised the unusable case at all.
+    assert entry["usable_flag"] is False
+    repo = _repository(tmp_path, [entry])
 
     signal = repo.clone_lineage_signal(model_id="model_a_prime", source_id="gfs")
     assert signal["has_lineage"] is True

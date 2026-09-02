@@ -756,6 +756,65 @@ def test_provider_snapshot_rejects_replacement_left_in_place(
     assert calls == 3
 
 
+def test_provider_snapshot_rejects_metadata_only_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1733: isolate the `before != after` disjunct of `read_provider_snapshot`.
+
+    The ABA test above isolates the content-digest disjunct; the left-in-place test
+    fires both at once.  Neither one reds when `before != after` is deleted, so the
+    metadata comparison had no covering test of its own.  This one changes the
+    destination's `mode` between the payload read and the second preimage capture:
+    the bytes are never rewritten, so the digest still equals `before.sha256` and
+    `size`/`mtime_ns` are untouched (chmod moves `st_ctime`, which
+    `ProviderPreimage` does not carry).  `mode` is the divergence field because it
+    needs neither privileges nor timestamp granularity -- deterministic on APFS and
+    ext4 alike.
+    """
+
+    destination = tmp_path / "index-last.json"
+    destination.write_bytes(b"generation-a")
+    original_mode = stat.S_IMODE(os.stat(destination).st_mode)
+    # Clear group/other read rather than add bits: the owner keeps read, so call 3
+    # still succeeds and the guard -- not an unreadable-destination error -- is what
+    # raises.  0o640 keeps the mode different even if the ambient umask already
+    # produced 0o600.
+    divergent_mode = 0o600 if original_mode != 0o600 else 0o640
+    assert divergent_mode != original_mode
+    real_read = provider_atomic_module.read_bytes_limited_no_follow
+    calls = 0
+
+    def chmod_after_payload_read(*args: object, **kwargs: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        if calls != 2:
+            return real_read(*args, **kwargs)
+        # Read the real payload FIRST, then diverge the metadata: the change has to
+        # land strictly between the payload read and the `after` capture, so that the
+        # bytes handed back are exactly the ones the digest comparison accepts.
+        content = real_read(*args, **kwargs)
+        os.chmod(destination, divergent_mode)
+        return content
+
+    monkeypatch.setattr(
+        provider_atomic_module, "read_bytes_limited_no_follow", chmod_after_payload_read
+    )
+    try:
+        with pytest.raises(ProviderAtomicError) as error_info:
+            read_provider_snapshot(destination, max_bytes=1024)
+
+        assert error_info.value.reason == "provider_preimage_changed"
+        assert error_info.value.phase == "precommit"
+        assert calls == 3
+        # The bytes never moved, so the digest disjunct cannot be what fired.
+        assert destination.read_bytes() == b"generation-a"
+        after = os.stat(destination)
+        assert stat.S_IMODE(after.st_mode) == divergent_mode
+        assert after.st_size == len(b"generation-a")
+    finally:
+        os.chmod(destination, original_mode)
+
+
 def test_provider_atomic_postread_failure_restores_validated_previous_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4462,7 +4462,7 @@ def test_publish_root_unknown_user_is_published_log_write_failed_at_gateway_pers
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=120,  # #1613
     )
     log_uri = "published://logs/gfs/2026050100/cycle_gfs_2026050100/job_cycle_gfs_2026050100_convert.out"
 
@@ -4489,7 +4489,7 @@ def test_publish_root_unknown_user_is_published_log_write_failed_at_local_stage_
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=120,  # #1613
     )
     payload = {"status": "ok", "stage": "convert"}
     log_uri = "published://logs/gfs/2026050100/cycle_gfs_2026050100/job.out"
@@ -4524,7 +4524,7 @@ def test_publish_root_unknown_user_is_published_log_write_failed_at_published_lo
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=120,  # #1613
     )
 
     with pytest.raises(OrchestratorError) as exc_info:
@@ -4550,7 +4550,7 @@ def test_publish_root_unknown_user_is_refused_at_the_full_orchestration_cycle(
         object_store_root=tmp_path / "object-store",
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=120,  # #1613
     )
 
     with pytest.raises(OrchestratorError) as exc_info:
@@ -9218,6 +9218,14 @@ def _orchestrator(
     slurm_env: dict[str, str] | None = None,
     target_python_runtime: str | None = None,
     terminal_stage: str | None = None,
+    # #1613: the per-stage poll deadline (`chain_stage_execution.py:1013-1017`) is a
+    # WALL-CLOCK budget, and none of this helper's consumers is a timeout oracle --
+    # every timeout-path test builds its own config with an explicit 1s budget AND a
+    # faked `time.monotonic`. At 5s a single slow status transition on a loaded runner
+    # tripped it (the #1613 victim: a lane measured at 0.042s here, ~0.34s on node-27,
+    # amplified 7.2x under load). 120s keeps the same margin the fast machine always
+    # had; a real hang still surfaces as the session's own duration.
+    job_timeout_seconds: float = 120.0,
 ) -> ForecastOrchestrator:
     workspace = tmp_path / "workspace"
     object_root = tmp_path / "object-store"
@@ -9226,7 +9234,7 @@ def _orchestrator(
         object_store_root=object_root,
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
-        job_timeout_seconds=5,
+        job_timeout_seconds=job_timeout_seconds,
         slurm_job_type_templates=slurm_job_type_templates or {},
         slurm_env=slurm_env or {},
         target_python_runtime=target_python_runtime,
@@ -9239,6 +9247,34 @@ def _orchestrator(
         object_store=object_store or LocalObjectStore(object_root, "s3://nhms"),
         retry_service=retry_service,
     )
+
+
+def test_orchestrator_helper_default_job_timeout_survives_a_slow_runner(tmp_path: Path) -> None:
+    """#1613: the shared test helper's poll budget is wall clock, so it must not be
+    contention-sized.
+
+    `_orchestrator`'s `job_timeout_seconds` reaches the per-stage poll deadline in
+    `chain_stage_execution.poll_cycle_stage_until_terminal`, which compares real
+    `time.monotonic()`. At the previous hard-coded 5s one slow status transition on a
+    busy oracle machine turned a green cohort into `status == "failed"` -- the #1613
+    victim, `tests/test_warm_start_chaining.py::
+    test_cohort_reservation_records_each_models_warm_start_identity`. The floor is
+    asserted rather than the exact value so a deliberate re-tune stays free while a
+    revert to a contention-sized budget is red.
+
+    This pin does NOT weaken any timeout oracle. Every test that asserts the poll deadline
+    FIRES fakes the clock, in one of two shapes: four of them rebuild
+    `orchestrator.config` with an explicit `job_timeout_seconds=1` and monkeypatch
+    `services.orchestrator.chain.time.monotonic` to an `iter([0.0, 0.0, 2.0, 2.0])`, so
+    they never read this default at all; the other three keep the helper default and
+    install `HangingPollClock`, which returns the anchor once and then 10_000.0, a jump
+    past ANY budget this helper could carry. Neither shape gets closer to green when the
+    default rises.
+    """
+
+    orchestrator = _orchestrator(tmp_path, FakeCycleRepository(), FakeCycleSlurmClient())
+
+    assert orchestrator.config.job_timeout_seconds >= 60
 
 
 class ReadyForecastRepository(FakeCycleRepository):

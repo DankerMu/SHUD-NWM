@@ -6031,7 +6031,11 @@ def test_execute_receipt_keeps_recovery_outcomes_when_the_observed_trail_is_long
     _write_package(object_root)
     _write_forcing(object_root)
     repository = FakeHydroRunRepository()
-    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    # #1613: headroom for subprocess spawn/exec latency on a loaded runner, NOT a
+    # timeout oracle -- this test asserts nothing about budget expiry, and the stub's
+    # own 20s self-cap still bounds the worst case.
+    runtime = _runtime(tmp_path, repository, shud_executable=stub, timeout_seconds=300)
+    assert runtime.config.timeout_seconds >= 60  # #1613 floor pin: revert to a contention-sized budget is red
     manifest = _manifest()
     manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
     run_id = manifest["run_id"]
@@ -6089,7 +6093,9 @@ def test_task_outcome_receipt_keeps_the_manifest_write_note_when_the_trail_is_lo
     stub = tmp_path / "watcher_held_solver.py"
     stub.write_text(_WATCHER_HELD_SOLVER_STUB, encoding="utf-8")
     repository = FakeHydroRunRepository()
-    runtime = _runtime(tmp_path, repository, shud_executable=stub)
+    # #1613: same watcher-held stub, same spawn-latency headroom; not a timeout oracle.
+    runtime = _runtime(tmp_path, repository, shud_executable=stub, timeout_seconds=300)
+    assert runtime.config.timeout_seconds >= 60  # #1613 floor pin: revert to a contention-sized budget is red
     workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
     manifest = _manifest()
     manifest["runtime"]["state_checkpoint_hours"] = [6, 12]

@@ -20478,6 +20478,75 @@ def test_bounded_evidence_retains_compact_restart_reconcile_incident_block() -> 
     assert _BOUNDED_INCIDENT_VERBOSE_MARKER not in rendered
 
 
+def test_bounded_evidence_keeps_every_source_restart_reconcile_lane_that_has_outcomes() -> None:
+    """#1800: a payload-driven lane-presence property, derived from the SOURCE payload.
+
+    The nine ``_expected_bounded_restart_reconcile()`` exact-equality assertions in
+    this file were the bounded block's only oracle, and a hand-copied expected dict
+    is a hand-copied oracle: when #1797's lane was dropped from the compactor, the
+    same author dropped it from the expected dict too and all nine stayed green.
+    This property cannot be silenced that way -- its expected lane set is read off
+    the source payload the compactor was handed, so removing a lane's rebuild from
+    the compactor reds it while the compactor's own lane constant is untouched.
+
+    That is also why the property enumerates the SOURCE payload's keys and never
+    reads the compactor's lane constant: the compactor iterates that constant
+    itself, so a constant-driven property is a tautology on exactly the shape
+    (a lane the constant omits) it would exist to catch.
+
+    The nine exact-equality assertions STAY. They are not redundant with this
+    property and this property cannot replace them: a presence property is blind
+    to an EXTRA key leaking into the bounded floor, and the floor's whole point is
+    that it is bounded. The two answer different questions.
+
+    Lane criterion, mirroring ``_compact_bounded_reconcile_lane``
+    (``scheduler_evidence_payload.py:405-420``): a `Mapping` whose ``outcomes`` is
+    a non-``str``/``bytes``/``bytearray`` ``Sequence``. Mirroring it is deliberate --
+    a lane carrying only a ``count`` legitimately produces no bounded lane (a
+    fabricated empty ``outcomes`` list would read as "the lane ran with zero
+    outcomes"), so demanding it would be a false red.
+
+    Declared residual: a lane that exists only in the producer
+    (``scheduler_runtime.py:1611-1627``) and was never mirrored into this test
+    payload is invisible to this property AND to the exact-equality assertions.
+    Fixture-to-producer synchronisation is a separate obligation and is not
+    discharged here.
+    """
+
+    payload = _incident_scheduler_evidence_payload("scheduler_2026072612_lane_presence")
+    source_reconcile = payload["restart_reconcile"]
+
+    bounded = scheduler_module._bounded_evidence_payload(
+        payload,
+        reason="evidence_size_limit_exceeded",
+        max_evidence_bytes=8_000,
+    )
+    bounded_reconcile = bounded["restart_reconcile"]
+
+    exercised: list[str] = []
+    for lane_key, lane_value in source_reconcile.items():
+        if not isinstance(lane_value, Mapping):
+            continue
+        outcomes = lane_value.get("outcomes")
+        if not isinstance(outcomes, Sequence) or isinstance(outcomes, str | bytes | bytearray):
+            continue
+        exercised.append(lane_key)
+        assert lane_key in bounded_reconcile, (
+            f"source restart_reconcile lane {lane_key!r} carries {len(outcomes)} outcome "
+            "row(s) but is absent from the bounded block: a discarded lane is "
+            "indistinguishable from a lane that recorded nothing."
+        )
+        assert len(bounded_reconcile[lane_key]["outcomes"]) == len(outcomes)
+
+    # A FLOOR, not an equality: a legitimate third lane added to the fixture and handled
+    # correctly by the compactor must not red this test -- pinning the lane NAMES here
+    # would rebuild the hand-copied oracle #1800 exists to remove.
+    assert len(exercised) >= 2, (
+        "the shared incident payload must exercise at least two reconcile lanes, or this "
+        f"property is vacuous; exercised: {sorted(exercised)}"
+    )
+
+
 def test_bounded_constructor_compacts_restart_reconcile_without_fit_tier_help() -> None:
     """Production runs a 5MB budget, so the constructor is the sole reconcile compactor."""
 
@@ -20500,7 +20569,13 @@ def test_bounded_constructor_compacts_restart_reconcile_without_fit_tier_help() 
 
 
 def test_bounded_evidence_retains_inflight_error_when_only_the_inflight_segment_failed() -> None:
-    """The inflight segment records its own failure key (`scheduler_runtime.py:1572`)."""
+    """The inflight segment records its own failure key (`scheduler_runtime.py:1572`).
+
+    #1800: the exact-shape assertion below pins LANE RETENTION as well as the error
+    key -- the expected dict names `inflight` with its filtered outcome row, so a
+    compactor that dropped the lane reds here too. The name says "inflight error",
+    but the assertion is the whole compact block.
+    """
 
     payload = _incident_scheduler_evidence_payload("scheduler_2026072612_inflight_error")
     payload["restart_reconcile"] = {
@@ -27545,9 +27620,13 @@ def _module_level_constant_consumers(
     with their measurements, in
     ``test_module_level_constant_subject_refuses_star_import``'s docstring.  The first
     of them is a same-name, same-kind rebinding of an already inventoried NAME -- constant,
-    function or class, not constants alone -- and only the constant leg has a backstop,
-    the constant-VALUE assertions, and only for the five constants they name.  A
-    star-import is refused here explicitly because it is the one channel for which name
+    function or class, not constants alone.  Since #1649 every leg has a backstop: the
+    constant leg is covered by value assertions on ALL EIGHTEEN of the module's
+    module-level constants, and the function and class legs by identity assertions
+    (``__module__`` + ``__qualname__``) on every inventoried ``def`` and admitted
+    ``class``.  What survives on those two legs is a rebind that FORGES identity -- see
+    the caller's own docstring for why that bound cannot be removed by attribute
+    comparison.  A star-import is refused here explicitly because it is the one channel for which name
     comparison is constitutionally unavailable: the names it binds are not knowable from
     this module's source at all.
     """
@@ -27638,6 +27717,86 @@ _SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS: dict[str, frozenset[str]] = {
 }
 
 
+#: #1649 residual 2: the VALUE pin for EVERY module-level constant of
+#: ``scheduler_state_failure`` -- all eighteen, in one table.  A value assertion is the
+#: only thing that sees the same-kind reflective-rebind shape on the constant leg: a
+#: ``setattr(sys.modules[__name__], "<name>", <other value>)`` names the constant only as
+#: a STRING, so it adds no ``ast.Name`` to any consumer set, no stray name and no kind
+#: mismatch -- only a value assertion sees it.  A duplicate assignment later in the module
+#: body is the same event from the other direction (the later binding wins at import,
+#: while key set and consumer sets stay identical).
+#:
+#: Thirteen entries carry values LITERALLY copied from
+#: ``services/orchestrator/scheduler_state_failure.py`` at ``9785e52d``
+#: (``:66, 74, 81, 85, 215, 216, 313, 321, 521, 522, 964, 965, 973``), never expressions
+#: that recompute what the module computes: ``_NON_REGULAR_OBJECT_KINDS`` is written out
+#: as the two strings ``OBJECT_KIND_DIRECTORY`` / ``OBJECT_KIND_OTHER`` hold
+#: (``packages/common/object_store.py:30-31``) rather than by re-importing them, and
+#: ``_FORCING_SIDECAR_MAX_BYTES`` as ``16_777_216`` rather than ``16 * 1024 * 1024``.
+#: The remaining five (the four remedy-table/refusal-set entries and
+#: ``_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS``) are carried VERBATIM from the inline
+#: assertions this table replaced -- four from #1313 round-1 V1-C1 and the fifth #1418's
+#: own -- so their chain of custody is those pins, not a fresh reading of the module.
+#: Their arguments are kept as per-entry comments below rather than restated.
+#: The friction is the contract: a legitimate value change updates one entry here.
+_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES: dict[str, Any] = {
+    "_COPYBACK_REQUIRED_RESTART_STAGES": {"copyback"},
+    "_ARTIFACT_PROBE_ERROR_REASON": "artifact_probe_error",
+    "_ARTIFACT_TARGET_NOT_A_FILE_REASON": "artifact_target_not_a_file",
+    "_NON_REGULAR_OBJECT_KINDS": frozenset({"directory", "other"}),
+    "_REMEDY_NON_CAUSAL_CLASSIFIERS": frozenset({"resource_configuration", "policy_blocked"}),
+    "_REMEDY_NON_CAUSAL_CODES": frozenset(
+        {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+    ),
+    "_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CLASSIFIERS": frozenset({"resource_configuration"}),
+    "_CHANGED_MODEL_PACKAGE_NON_CAUSAL_CODES": frozenset({"OUT_OF_MEMORY"}),
+    #: Both arms are per-remedy tables over the SAME two rows (#1313 round-1 V1-C1); the
+    #: ``changed_model_package`` row is the #1161 list verbatim on both arms, which is what
+    #: keeps the refresh channel at zero semantic change.  These two arms and the two flat
+    #: sets above are four separate copied literals, never derived from one another.
+    "_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE": {
+        "raw_input_reingestion": frozenset({"resource_configuration", "policy_blocked"}),
+        "changed_model_package": frozenset({"resource_configuration"}),
+    },
+    "_REMEDY_NON_CAUSAL_CODE_TABLE": {
+        "raw_input_reingestion": frozenset(
+            {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
+        ),
+        "changed_model_package": frozenset({"OUT_OF_MEMORY"}),
+    },
+    "_RECORDED_FAILURE_CODE_KEYS": ("error_code", "reason_code", "failure_reason"),
+    "_HYDRO_RUN_CODE_CLEARING_STATUSES": frozenset(
+        {"pending", "created", "succeeded", "complete", "parsed", "published"}
+    ),
+    "_DOWNSTREAM_FORECAST_OUTPUT_DEPENDENT_STAGES": {"parse", "state_save_qc", "publish", "copyback"},
+    "_MISSING_FORECAST_OUTPUT_RECOMPUTE_CODES": {
+        "NODE_FAILURE",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "SLURM_TIMEOUT",
+        "STATE_SAVE_QC_TASK_FAILED",
+        "PARSE_TASK_FAILED",
+        "PUBLISH_TASK_FAILED",
+    },
+    "_FORCING_SIDECAR_FILENAME": "forcing_version_record.json",
+    "_FORCING_PACKAGE_MANIFEST_FILENAME": "forcing_package.json",
+    "_FORCING_SIDECAR_MAX_BYTES": 16_777_216,
+    #: Added by #1418: the one constant in that change's own subject family (a permanence
+    #: refusal source) that carried no value pin.  A REFLECTIVE rebind of an
+    #: already-inventoried constant to a same-kind value -- ``setattr(sys.modules[__name__],
+    #: "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS", <wider set>)``, or the ``globals()[...]``
+    #: spelling -- names the constant only as a STRING, so it adds no ``ast.Name`` to any
+    #: consumer set, no stray name and no kind mismatch.  It was measured to flip the
+    #: ``code_recorded=False`` verdict with every other assertion in the test green; only a
+    #: value assertion sees it.  (The ``global`` spelling is a different shape and is already
+    #: red via the consumer mapping, since a Store-context ``ast.Name`` is attributed as a
+    #: consumer.)
+    "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS": frozenset(
+        {"malformed_input", "policy_blocked", "resource_configuration"}
+    ),
+}
+
+
 def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -> None:
     """#1313 AC-1, re-armed (#1418): ONE consulted permanence refusal source, any spelling.
 
@@ -27681,13 +27840,47 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     * a list living in ANOTHER module is outside #1313 AC-1, which is a proposition
       about this module, and is not extended here.
 
-    Four of the five constant-VALUE assertions below are kept verbatim from #1313
-    round-1 V1-C1; the fifth is #1418's own.  None is redundant with the mapping: a
-    duplicate assignment of the same name later in the module leaves both the key set
-    and every consumer set unchanged, and only the value assertion sees it (the later
-    binding wins at import).  That is the sole reason it was safe to drop the retired
-    ``source.count(...) == 1`` scan -- whoever removes them owes a duplicate-definition
-    guard in their place.
+    The constant-VALUE pins live in ``_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES`` above --
+    five of them carried verbatim from #1313 round-1 V1-C1 and #1418, the other thirteen
+    added by #1649.  None is redundant with the mapping: a duplicate assignment of the same
+    name later in the module leaves both the key set and every consumer set unchanged, and
+    only the value assertion sees it (the later binding wins at import).  That table IS the
+    duplicate-definition guard that made it safe to drop the retired
+    ``source.count(...) == 1`` scan -- whoever weakens it owes a replacement.
+
+    #1649 residuals 1 and 2, closed here:
+
+    * **Residual 2 (was "five of eighteen constants carry a value pin").**  CLOSED.  All
+      EIGHTEEN are pinned by the single table ``_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES``,
+      asserted by one loop below on the container KIND as well as the value (an
+      equal-membered ``set`` copy of a ``frozenset`` is exactly what ``==`` cannot see;
+      a nested swap inside the two table constants remains a declared bound, argued at
+      the assertion), and that table's KEY SET is held equal to
+      ``_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS``, so a nineteenth constant cannot
+      arrive with a consumer set and no value.  A same-kind reflective rebind or a
+      duplicate assignment of ANY module-level constant is now red.  (The five that used
+      to be asserted inline here were folded into that table, values unchanged: a pin the
+      loop executes cannot fall out of step with the key-set equality that guards it.)
+    * **Residual 1 (same-kind reflective rebind of a ``function``/``class`` name).**
+      CLOSED for the plain shapes, by the ``__module__`` + ``__qualname__`` pins: a
+      wrapper ``def`` defined outside this module body, a subclass swap of the admitted
+      class, and a ``functools.partial`` are each red (measured, #1649 task 5.5).
+      DECLARED BOUND: identity attributes are forgeable.  ``functools.wraps``,
+      ``functools.lru_cache`` and -- since Python 3.10 -- ``staticmethod`` COPY both
+      attributes onto the wrapper, so a rebind wearing the original's identity still
+      passes.  That is not a fixable gap by attribute comparison: it is the very property
+      that keeps an ordinary ``lru_cache`` decoration of an existing helper from
+      false-redding, and the two observations are identical.
+
+    Residuals 3, 4 and 5 remain DECLARED SCALE LIMITS, not defects, and are not closed
+    here: (3) the function clause pins CALLABILITY rather than ``FunctionType`` -- argued
+    in ``_runtime_binding_kind``, and the identity pins above narrow but do not remove its
+    cost; (4) the behavioural guard's two axes are bounded scales -- ``OUT_OF_MEMORY`` and
+    ``POLICY_BLOCKED`` sit off the code axis on purpose, and the classifier matrix's
+    distinguishable signals are set by axis WIDTH, not cell count; (5) a function-local
+    refusal literal on the raw-manifest or model-package leg has no module-level constant
+    to inventory.  Each has a measured reason not to widen, and widening any of them
+    charges every legitimate change for a hypothetical one.
     """
 
     consumers, bound_kinds = _module_level_constant_consumers(
@@ -27720,40 +27913,68 @@ def test_scheduler_state_failure_holds_no_second_permanent_code_refusal_list() -
     observed_kinds = {name: _runtime_binding_kind(module_namespace[name]) for name in declared_kinds}
     assert observed_kinds == declared_kinds
 
-    # Both arms are per-remedy tables over the SAME two rows (#1313 round-1
-    # V1-C1); the ``changed_model_package`` row is the #1161 list verbatim on both
-    # arms, which is what keeps the refresh channel at zero semantic change.
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODE_TABLE == {
-        "raw_input_reingestion": frozenset(
-            {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
-        ),
-        "changed_model_package": frozenset({"OUT_OF_MEMORY"}),
-    }
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIER_TABLE == {
-        "raw_input_reingestion": frozenset({"resource_configuration", "policy_blocked"}),
-        "changed_model_package": frozenset({"resource_configuration"}),
-    }
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CODES == frozenset(
-        {"OUT_OF_MEMORY", "POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}
-    )
-    assert scheduler_state_failure_module._REMEDY_NON_CAUSAL_CLASSIFIERS == frozenset(
-        {"resource_configuration", "policy_blocked"}
-    )
-    # The fifth, added by #1418: the one constant in this change's own subject family (a
-    # permanence refusal source) that carried no value pin.  A REFLECTIVE rebind of an
-    # already-inventoried constant to a same-kind value -- ``setattr(sys.modules[__name__],
-    # "_DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS", <wider set>)``, or the ``globals()[...]``
-    # spelling -- names the constant only as a STRING, so it adds no ``ast.Name`` to any
-    # consumer set, no stray name and no kind mismatch.  It was measured to flip the
-    # ``code_recorded=False`` verdict with every other assertion here green; only a value
-    # assertion sees it.  (The ``global`` spelling is a different shape and is already red
-    # via the mapping, since a Store-context ``ast.Name`` is attributed as a consumer.)
-    # Declared residual: that shape stays open on the module's other thirteen module-level
-    # constants, which carry no value pin here.  Five is what #1418's subject family owes;
-    # pinning all eighteen is friction this requirement does not buy.
-    assert scheduler_state_failure_module._DOWNSTREAM_PLACEHOLDER_REFUSAL_CLASSIFIERS == frozenset(
-        {"malformed_input", "policy_blocked", "resource_configuration"}
-    )
+    # #1649 residual 1: the kind clause above is satisfied by ANY callable, so a
+    # same-kind reflective rebind of a `def` name -- `setattr(sys.modules[__name__],
+    # "_remedy_permits_permanent_failure", <wrapper defined elsewhere>)` -- moves no
+    # name, changes no consumer set and observes `function` all the same.  Identity
+    # closes the plain shape: a function defined outside this module body carries
+    # another `__module__`, and one defined under another name carries another
+    # `__qualname__`.  The same clause reds a subclass swap of the admitted class and a
+    # `functools.partial` (whose `__qualname__` is absent entirely).
+    #
+    # Declared bound, and it is the SAME property that keeps the callability rule from
+    # false-redding: `functools.wraps`, `functools.lru_cache` and (since 3.10)
+    # `staticmethod` COPY `__module__` and `__qualname__` onto the wrapper, so a rebind
+    # that forges identity still passes.  Attribute comparison cannot separate "an
+    # ordinary decoration of the real helper" from "a forgery wearing its name"; the
+    # two are the same observation.  Measured, not assumed (#1649 task 5.5).
+    for name, kind in sorted(declared_kinds.items()):
+        if kind not in {"function", "class"}:
+            continue
+        value = module_namespace[name]
+        assert getattr(value, "__module__", None) == scheduler_state_failure_module.__name__, (
+            f"{name} is declared as a {kind} of {scheduler_state_failure_module.__name__} but its "
+            f"runtime object reports __module__={getattr(value, '__module__', None)!r} -- a "
+            "same-kind reflective rebind to an object defined outside this module body."
+        )
+        assert getattr(value, "__qualname__", None) == name, (
+            f"{name} is declared as a {kind} at this module's top level but its runtime object "
+            f"reports __qualname__={getattr(value, '__qualname__', None)!r} -- a same-kind "
+            "reflective rebind to another definition."
+        )
+
+    # #1649 residual 2: the value pin for EVERY one of the module's eighteen module-level
+    # constants, executed from one table, so the same-kind reflective rebind and the
+    # duplicate-assignment shape are closed on all of them rather than on the five #1418's
+    # subject family owed.  Each entry's argument lives beside it in the table above.
+    for name, expected_value in sorted(_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES.items()):
+        actual_value = getattr(scheduler_state_failure_module, name)
+        # The container KIND first, because `==` alone cannot see it: `set(frozenset({...}))`
+        # compares EQUAL to the frozenset it copies, so a rebind of `_NON_REGULAR_OBJECT_KINDS`
+        # (or of any other frozen refusal set) to a mutable twin would pass the value pin below
+        # while dropping the immutability that keeps a caller from widening a refusal set in
+        # place.  The claim above is that a same-kind reflective rebind of ANY constant is red;
+        # without this assertion that claim would be false for the kind-changing shape.
+        # DECLARED BOUND: this compares the TOP-LEVEL type only.  Inside the two table
+        # constants (`_REMEDY_NON_CAUSAL_CLASSIFIER_TABLE`, `_REMEDY_NON_CAUSAL_CODE_TABLE`) a
+        # nested `frozenset` -> `set` swap is still seen by `==` alone, i.e. not at all.
+        assert type(actual_value) is type(expected_value), (
+            f"{name} is pinned as a {type(expected_value).__name__} but the module now holds a "
+            f"{type(actual_value).__name__}. An equal-membered container of another kind is not "
+            "the same constant -- a frozenset rebound to a set is mutable in place. If the kind "
+            "change is deliberate, update _SCHEDULER_STATE_FAILURE_CONSTANT_VALUES in the same "
+            "change; if it is not, a refusal source was rebound or assigned a second time."
+        )
+        assert actual_value == expected_value, (
+            f"{name} no longer holds its pinned value. If the change is legitimate, update "
+            "_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES in the same change; if it is "
+            "not, a refusal source was rebound or assigned a second time."
+        )
+
+    # No nineteenth constant can arrive carrying a consumer set but no value pin: the
+    # consumer mapping above is the module's complete constant inventory, and this
+    # equality makes the value table move with it in both directions.
+    assert set(_SCHEDULER_STATE_FAILURE_CONSTANT_VALUES) == set(_SCHEDULER_STATE_FAILURE_CONSTANT_CONSUMERS)
 
 
 #: A module body using every admitted statement form at once -- all eight of them:
@@ -27914,9 +28135,12 @@ def test_module_level_constant_subject_refuses_star_import() -> None:
       a constant.  ``setattr(sys.modules[__name__], "_remedy_permits_permanent_failure",
       <wrapper>)`` keeps the observed kind ``function``; replacing the admitted
       ``_ForcingSidecarProvenance`` with a subclass whose attribute carries the refusal
-      keeps it ``class``.  Only the constant leg has a backstop, the constant-VALUE
-      assertions above, and only for the five constants they name.  The ``function`` leg
-      widened with the callability rule argued in ``_runtime_binding_kind``.
+      keeps it ``class``.  Both plain shapes are CLOSED since #1649: the constant leg by
+      value assertions on all eighteen module-level constants, the function and class legs
+      by the identity assertions (``__module__`` + ``__qualname__``) above.  What is left
+      is the forged-identity rebind (``functools.wraps`` / ``lru_cache`` /
+      ``staticmethod``), which is the identity pin's declared bound and the price of the
+      callability rule argued in ``_runtime_binding_kind``.
     * an install onto an IMPORT-bound name: ``from json import dumps as _PERMANENT_CODE_REFUSAL``
       consumed in the remedy leg, then ``global``-rebound to a ``frozenset`` by a
       module-level call.  Its declared kind is ``import``, and the kind comparison exempts
@@ -46466,7 +46690,7 @@ def test_scheduler_run_once_drives_accepted_submit_to_state_save_on_same_journal
                 object_store_root=chain_object_root,
                 object_store_prefix="s3://nhms",
                 poll_interval_seconds=0,
-                job_timeout_seconds=5,
+                job_timeout_seconds=120,  # #1613
                 source_id=source_id,
                 terminal_stage=terminal_stage,
                 reconcile_slurm_user="scheduler-user",
@@ -48429,7 +48653,7 @@ def test_identity_blocked_release_unwedges_pipeline_already_active(
                     object_store_root=tmp_path / "chain-object-store",
                     object_store_prefix="s3://nhms",
                     poll_interval_seconds=0,
-                    job_timeout_seconds=5,
+                    job_timeout_seconds=120,  # #1613
                     source_id="gfs",
                 ),
                 repository=repository,

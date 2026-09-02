@@ -157,6 +157,95 @@ def _iter_call_argument_strings(call: ast.Call) -> list[str]:
     return strings
 
 
+#: The complete set of admitted `valid_time` bound spellings for a guarded DELETE
+#: (#1642).  A guarded DELETE must carry BOTH — the lower bound `valid_time >=` and
+#: the upper bound `valid_time <=` — in the SAME string literal.
+#:
+#: This is the whole allowlist, and the half-open upper bound `valid_time <` is
+#: deliberately NOT in it: the guard certifies a window closed on both ends
+#: (`check_batch_targets_uncompressed(valid_time_min, valid_time_max)`), so a
+#: half-open DELETE targets a different row set than the one that was inspected —
+#: exactly the "guard window narrower than the DELETE's target set" hole this
+#: invariant exists to refuse.  A writer that legitimately needs another spelling
+#: widens this set IN THE SAME CHANGE with a recorded reason.
+_ADMITTED_VALID_TIME_LOWER_BOUND = "valid_time >="
+_ADMITTED_VALID_TIME_UPPER_BOUND = "valid_time <="
+
+
+def _missing_valid_time_bounds(text: str) -> list[str]:
+    """The admitted bound spellings absent from ``text`` — the ONE window predicate.
+
+    This is the single place in this file that inspects a literal for the two
+    admitted spellings.  Both consumers go through it: the repository scan
+    (:func:`test_every_guarded_delete_literal_carries_the_certified_valid_time_window`,
+    which also prints the returned list in its failure message) and the boolean
+    spelling :func:`_delete_literal_is_valid_time_bounded`, which the synthetic
+    parametrized cases pin.  Keeping it to one implementation is what makes that
+    pin bite on the scan: two parallel bodies could drift, and gutting the one
+    the scan consumed would leave the pin green.
+
+    Python concatenates adjacent string literals at parse time, so the two
+    two-part writers (``workers/forcing_producer/store.py``,
+    ``packages/common/forcing_domain_handoff_apply.py``) and the triple-quoted
+    one (``workers/output_parser/parser.py``) all present as ONE
+    ``ast.Constant`` — the predicate can therefore be a plain substring pair on
+    a single literal, with no cross-node reassembly.
+
+    Note what "refused" falls out of for free: `valid_time <` alone never
+    contains `valid_time <=`, so the half-open form fails the upper-bound test
+    without a separate rule.  A literal carrying `valid_time <= %s` obviously
+    also contains the substring `valid_time <`, which is why the predicate tests
+    for the ADMITTED spellings rather than scanning for refused ones.
+    """
+
+    return [
+        bound
+        for bound in (_ADMITTED_VALID_TIME_LOWER_BOUND, _ADMITTED_VALID_TIME_UPPER_BOUND)
+        if bound not in text
+    ]
+
+
+def _delete_literal_is_valid_time_bounded(text: str) -> bool:
+    """True iff a DELETE literal carries both admitted `valid_time` bounds.
+
+    A boolean view of :func:`_missing_valid_time_bounds`, not a second
+    implementation — see that function for the admitted spellings and why the
+    predicate reads them off a single ``ast.Constant``.
+    """
+
+    return not _missing_valid_time_bounds(text)
+
+
+def _guarded_delete_literals(tree: ast.AST, schema: str, table: str) -> list[tuple[str, str]]:
+    """Every ``(enclosing function name, literal)`` that DELETEs from ``schema.table``.
+
+    Covers exactly the sites :func:`_delete_site_has_guard_in_same_function`
+    governs — a string literal passed as a call argument (J4) — and attributes
+    each to its INNERMOST enclosing function, so a locally-defined
+    ``pre_write_cursor_hook`` is named as itself rather than as its enclosing
+    writer.  A DELETE outside any function is reported under
+    ``"<module level>"`` rather than skipped: an unbounded module-level DELETE
+    is still a hole.
+    """
+
+    needle = f"DELETE FROM {schema}.{table}"
+    hits: list[tuple[str, str]] = []
+
+    def _descend(node: ast.AST, owner: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            child_owner = (
+                child.name if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else owner
+            )
+            if isinstance(child, ast.Call):
+                for value in _iter_call_argument_strings(child):
+                    if needle in value:
+                        hits.append((child_owner, value))
+            _descend(child, child_owner)
+
+    _descend(tree, "<module level>")
+    return hits
+
+
 def _module_contains_delete_from(tree: ast.AST, schema: str, table: str) -> bool:
     """Return True if ``tree`` contains ``DELETE FROM {schema}.{table}`` as a Call arg.
 
@@ -322,6 +411,144 @@ def test_every_guarded_hypertable_has_a_guarded_delete_site(
             "not import it from packages.common.timescale_write_guard. "
             "Divergent per-path implementations are forbidden (design D5)."
         )
+
+
+# ---------------------------------------------------------------------------
+# #1642 — Every guarded DELETE carries the window its guard certified
+# ---------------------------------------------------------------------------
+
+
+#: Synthetic literals pinning the window predicate independently of the
+#: repository's current writers, in the style of ``_UNADMITTED_MODULE_LEVEL_FORMS``
+#: in ``tests/test_production_scheduler.py``.  Without these, gutting the predicate
+#: — ``_missing_valid_time_bounds`` returning ``[]`` for everything — would keep the
+#: repository scan green forever: the scan can only ever observe source that already
+#: passes, so a predicate that admits everything looks exactly like a repository with
+#: no holes.  These cases are the only thing that can tell the two apart, and they can
+#: only do it because ``_delete_literal_is_valid_time_bounded`` is a boolean view of
+#: the SAME function the scan consumes rather than a second implementation of the rule.
+_VALID_TIME_WINDOW_PREDICATE_CASES: tuple[tuple[str, str, bool], ...] = (
+    (
+        "bounded_one_line",
+        "DELETE FROM met.forcing_station_timeseries "
+        "WHERE forcing_version_id = %s AND valid_time >= %s AND valid_time <= %s",
+        True,
+    ),
+    (
+        "bounded_multi_line_indented",
+        """
+                DELETE FROM hydro.river_timeseries
+                WHERE run_key = %s
+                  AND valid_time >= %s
+                  AND valid_time <= %s
+                """,
+        True,
+    ),
+    (
+        "bounded_named_parameters",
+        "DELETE FROM hydro.river_timeseries WHERE valid_time >= %(valid_time_min)s "
+        "AND valid_time <= %(valid_time_max)s",
+        True,
+    ),
+    (
+        "unbounded",
+        "DELETE FROM hydro.river_timeseries WHERE run_key = %s",
+        False,
+    ),
+    (
+        "lower_bound_only",
+        "DELETE FROM hydro.river_timeseries WHERE run_key = %s AND valid_time >= %s",
+        False,
+    ),
+    (
+        "upper_bound_only",
+        "DELETE FROM hydro.river_timeseries WHERE run_key = %s AND valid_time <= %s",
+        False,
+    ),
+    (
+        "half_open_upper_bound",
+        "DELETE FROM hydro.river_timeseries WHERE valid_time >= %s AND valid_time < %s",
+        False,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [(literal, expected) for _, literal, expected in _VALID_TIME_WINDOW_PREDICATE_CASES],
+    ids=[case_id for case_id, _, _ in _VALID_TIME_WINDOW_PREDICATE_CASES],
+)
+def test_valid_time_window_predicate_admits_only_the_closed_window_spellings(
+    literal: str, expected: bool
+) -> None:
+    """#1642: pin the window predicate on synthetic literals, both directions.
+
+    The bounded forms pass across line breaks, indentation and parameter style,
+    so reformatting a writer cannot false-red the scan.  All four unbounded
+    shapes fail — including ``half_open_upper_bound``, which is the one a
+    reasonable author writes by accident: the guard's certified window is closed
+    on both ends, so ``valid_time <`` targets a different row set than the one
+    ``check_batch_targets_uncompressed`` inspected.
+
+    ``_delete_literal_is_valid_time_bounded`` and ``_missing_valid_time_bounds``
+    are one implementation under two names, so this pin is a pin ON THE SCAN:
+    the negative cases below go red when the rule the repository scan applies is
+    weakened, not merely when a decorative twin is.
+    """
+
+    assert _delete_literal_is_valid_time_bounded(literal) is expected
+
+
+def test_every_guarded_delete_literal_carries_the_certified_valid_time_window() -> None:
+    """#1642: presence of the guard call is not the same claim as a bounded DELETE.
+
+    ``test_every_guarded_hypertable_has_a_guarded_delete_site`` above asserts the
+    guard is CALLED next to the DELETE; it says nothing about the window the
+    DELETE actually targets.  A writer that calls the guard for
+    ``[valid_time_min, valid_time_max]`` and then DELETEs the lineage unbounded
+    passes that test while destroying rows the guard never inspected — and an
+    unbounded DELETE is rejected outright by TimescaleDB once any chunk of the
+    hypertable is compressed.  This test closes that gap structurally.
+
+    ``packages/common/compressed_chunk_cold_probe/shell.py`` carries the
+    half-open form but sits on ``_INTENTIONALLY_UNWIRED_MODULES`` and therefore
+    never reaches ``_wire_site_hits()``; the admitted-spelling set is NOT widened
+    for it.
+    """
+
+    scanned = 0
+    for hypertable, modules in sorted(_wire_site_hits().items()):
+        schema, table = hypertable
+        for module_path in sorted(modules):
+            tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+            literals = _guarded_delete_literals(tree, schema, table)
+            assert literals, (
+                f"{module_path.relative_to(REPO_ROOT)} is a wire-site hit for "
+                f"{schema}.{table} but no DELETE literal could be re-located inside "
+                "it — the scan and this predicate have drifted apart."
+            )
+            for function_name, literal in literals:
+                scanned += 1
+                missing = _missing_valid_time_bounds(literal)
+                assert not missing, (
+                    f"{module_path.relative_to(REPO_ROOT)}::{function_name} DELETEs "
+                    f"from {schema}.{table} without {' and '.join(missing)} in the same "
+                    "SQL literal. The guard certifies a window closed on BOTH ends "
+                    "(check_batch_targets_uncompressed(valid_time_min, valid_time_max)), "
+                    "so the DELETE literal must carry both bounds -- this predicate checks "
+                    "their PRESENCE, not that they name the guard's own window. Admitted "
+                    f"spellings are exactly {_ADMITTED_VALID_TIME_LOWER_BOUND!r} and "
+                    f"{_ADMITTED_VALID_TIME_UPPER_BOUND!r}; a half-open 'valid_time <' "
+                    "is refused. Bound the DELETE, or widen the admitted set in this "
+                    "file in the same change with a recorded reason.\n"
+                    f"literal: {literal!r}"
+                )
+    assert scanned >= 3, (
+        f"Only {scanned} guarded DELETE literal(s) reached the window predicate; at least "
+        "the three writers known at authoring time must reach it. This is a FLOOR, not a "
+        "count -- more literals are expected as writers are added. A vacuous scan would "
+        "make this invariant unfalsifiable."
+    )
 
 
 # ---------------------------------------------------------------------------
