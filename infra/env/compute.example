@@ -55,6 +55,8 @@ NHMS_SCHEDULER_REGISTRY_MANIFEST=/scratch/frd_muziyao/nhms-production/object-sto
 NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
 NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/canonical-readiness/index-last.json
 NHMS_SCHEDULER_JOURNAL_BACKEND=file
+# Must be a realpath (`readlink -f` equals this value): every component a real
+# directory, none a symlink, else FILE_JOURNAL_INVALID_ROOT at start (#1943, 8.10).
 NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/journal
 NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
 NHMS_SCHEDULER_STATE_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/state-index/index-last.json

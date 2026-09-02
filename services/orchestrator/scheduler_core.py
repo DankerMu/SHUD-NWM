@@ -14,6 +14,18 @@ from services.orchestrator import scheduler_lineage as _scheduler_lineage
 # initialized and the attribute does not exist yet (#1194 review finding).
 _CUTOVER_DECLARATION_UNLOADED = _generation.CUTOVER_DECLARATION_UNLOADED
 
+# #1943: sentinel meaning "this db-free pass is preflight-blocked, build NO
+# active repository".  ``from_env``'s two blocked branches used to pass
+# ``active_repository=None``, which ``__init__`` reads as "not supplied" and
+# answers by calling the db-free repository factory — so a blocked pass
+# (missing / unsafe / malformed root) still constructed a repository from the
+# very value the preflight had just rejected.  That was harmless while the
+# factory was a bare constructor; with the #1943 root verification in it, the
+# blocked lane would raise instead of returning its redacted blocker (#1627).
+# The sentinel keeps ``active_repository=None`` semantics untouched for every
+# other caller.
+_DB_FREE_REPOSITORY_BLOCKED = object()
+
 
 def _db_free_file_registry_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.ModelRegistryReader:
     from services.orchestrator.scheduler_file_providers import FileSchedulerModelRegistry
@@ -45,8 +57,17 @@ def _db_free_orchestration_repository_from_config(
     config: _scheduler.ProductionSchedulerConfig,
 ) -> _scheduler.ActiveCandidateRepository:
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+    from services.orchestrator.journal_root_authority import verify_journal_root_authority
 
-    return FileOrchestrationJournalRepository(str(config.scheduler_journal_root))
+    # #1943: the configured root is verified as a chain of real directories
+    # BEFORE the repository exists.  A symlinked ancestor passes the db-free
+    # preflight (which only judges the leaf and its direct parent) and then
+    # makes every hardened read a blocked row; refusing here turns that into a
+    # typed start-time failure that names the remedy.
+    verified_root = verify_journal_root_authority(
+        config.scheduler_journal_root, setting="NHMS_SCHEDULER_JOURNAL_ROOT"
+    )
+    return FileOrchestrationJournalRepository(str(verified_root))
 
 
 def _db_free_state_manager_from_config(config: _scheduler.ProductionSchedulerConfig) -> _scheduler.StateManager:
@@ -82,7 +103,7 @@ class ProductionScheduler:
         *,
         registry: _scheduler.ModelRegistryReader | None = None,
         adapters: _scheduler.Mapping[str, _scheduler.CycleDiscoveryAdapter] | None = None,
-        active_repository: _scheduler.ActiveCandidateRepository | None = None,
+        active_repository: _scheduler.ActiveCandidateRepository | None | object = None,
         canonical_readiness_provider: _scheduler.CanonicalReadinessProvider
         | None
         | object = _scheduler._CANONICAL_READINESS_PROVIDER_UNSET,
@@ -105,7 +126,11 @@ class ProductionScheduler:
         else:
             self.registry = registry if registry is not None else _scheduler.PsycopgModelRegistryStore.from_env()
             self.adapters = dict(adapters if adapters is not None else _scheduler._default_adapters())
-        if active_repository is not None:
+        if active_repository is _DB_FREE_REPOSITORY_BLOCKED:
+            # Preflight-blocked db-free pass: no repository, and in particular
+            # no journal-root verification of a value the preflight rejected.
+            self.active_repository = None
+        elif active_repository is not None:
             self.active_repository = active_repository
         elif db_free_required:
             self.active_repository = _db_free_orchestration_repository_from_config(self.config)
@@ -165,7 +190,7 @@ class ProductionScheduler:
                     config=config,
                     registry=_scheduler._BlockedModelRegistry(),
                     adapters={},
-                    active_repository=None,
+                    active_repository=_DB_FREE_REPOSITORY_BLOCKED,
                     canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
                         reason="db_free_runtime_root_preflight_blocked",
                         dependency="canonical_readiness_provider",
@@ -177,7 +202,7 @@ class ProductionScheduler:
                     config=config,
                     registry=_scheduler._BlockedModelRegistry(),
                     adapters={},
-                    active_repository=None,
+                    active_repository=_DB_FREE_REPOSITORY_BLOCKED,
                     canonical_readiness_provider=_scheduler._UnavailableCanonicalReadinessProvider(
                         reason="db_free_runtime_preflight_blocked",
                         dependency="canonical_readiness_provider",

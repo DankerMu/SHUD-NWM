@@ -112,6 +112,8 @@ NHMS_SCHEDULER_REGISTRY_MANIFEST=<trusted-registry-manifest>
 NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
 NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=<trusted-readiness-index>
 NHMS_SCHEDULER_JOURNAL_BACKEND=file
+# Must be a realpath (`readlink -f` equals this value): every component a real
+# directory, none a symlink, else FILE_JOURNAL_INVALID_ROOT at start (#1943, 8.10).
 NHMS_SCHEDULER_JOURNAL_ROOT=<node-22-writable-journal-root>
 NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
 NHMS_SCHEDULER_STATE_INDEX=<trusted-state-index>

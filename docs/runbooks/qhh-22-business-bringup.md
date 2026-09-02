@@ -372,6 +372,11 @@ systemctl --user enable --now nhms-scheduler-evidence-retention.timer
      `reconcile-inventory-migration-v1.json`。若首次迁移中断，marker 不落盘，重启会继续；稳态 pass 不再扫描
      全量 `pipeline-jobs/`、cycle journal 或 `pipeline-jobs/by-cycle/` candidate 历史。
 
+     若某个 `reconcile-inventory/<job_id>.json` anchor 对应的 flat direct 文件已不存在，整轮 reconcile
+     扫描会中止（零 cohort 恢复，每个 pass 复现）。判别与恢复见
+     [`current-production-ops.md`](current-production-ops.md) §8.11「#1760 scope gate 与既存分叉 job_id 行」；
+     该 §8.11 的前置条件（journal root 必须是 realpath）见同文件 §8.10。
+
      **禁止直接回退到 pre-inventory writer。** 支持的回滚必须先停 timer/service，并用当前版本争用生产
      scheduler file lease、写 preparation receipt 和 rollback fence；命令失败时不得切换代码：
 

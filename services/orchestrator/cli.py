@@ -24,6 +24,12 @@ from .file_orchestration_migration import (
     prepare_file_journal_rollback,
     write_migration_receipt,
 )
+from .journal_scope_census import (
+    CENSUS_JOB_ID_SCOPE_COMMAND,
+    add_argparse_census_subparser,
+    register_click_census_command,
+    run_argparse_census_command,
+)
 from .operator_released_reservation_recovery import (
     RELEASED_RESERVATION_RECOVERY_COMMAND,
     add_argparse_recovery_subparser,
@@ -658,6 +664,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
 
     register_click_recovery_command(cli)
     register_click_demote_command(cli)
+    register_click_census_command(cli)
 
     @cli.command("plan-production")
     @click.option(
@@ -800,6 +807,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     rollforward_parser.add_argument("--lock-ttl-seconds", default=60, type=int)
     add_argparse_recovery_subparser(subparsers)
     add_argparse_demote_subparser(subparsers)
+    add_argparse_census_subparser(subparsers)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
@@ -917,6 +925,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         return run_argparse_recovery_command(args)
     if args.command == "demote-reserved-job":
         return run_argparse_demote_command(args)
+    if args.command == CENSUS_JOB_ID_SCOPE_COMMAND:
+        return run_argparse_census_command(args)
     if args.command == "plan-production":
         try:
             payload = _plan_production(

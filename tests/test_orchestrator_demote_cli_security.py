@@ -22,6 +22,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalError,
     FileOrchestrationJournalRepository,
 )
+from services.orchestrator.journal_root_authority import JOURNAL_ROOT_INVALID_MESSAGE
 from tests.orchestrator_demote_reserved_job_helpers import (
     JOB_ID,
     PATH_SECRET_CHECKED_BY,
@@ -834,9 +835,12 @@ def test_cli_demote_hostile_loop_root_fails_typed_exit_1_no_traceback(
     assert captured.out.strip() == ""
     assert "Traceback" not in captured.err
     assert "operator_reserved_demotion" not in captured.err
-    assert captured.err.strip() == (
-        "FILE_JOURNAL_INVALID_ROOT: journal root failed safe filesystem verification"
-    )
+    # #1943: the message is the ONE shared constant of the journal-root
+    # authority seam, imported rather than retyped so a future wording change
+    # cannot let the two lanes drift apart.  Strengthened from the old bare
+    # "failed safe filesystem verification": it now names the real-directory
+    # rule and the `readlink -f` remedy (recorded deviation).
+    assert captured.err.strip() == f"FILE_JOURNAL_INVALID_ROOT: {JOURNAL_ROOT_INVALID_MESSAGE}"
     # The loop root was never used as an authority: zero journal bytes written.
     assert not (loop_a / "journal").exists()
     assert not (loop_b / "journal").exists()
